@@ -1,0 +1,1 @@
+PR creation is now the only bootstrap coordination action.

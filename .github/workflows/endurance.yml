@@ -2,7 +2,27 @@ name: Endurance
 
 on:
   pull_request:
+    paths:
+      - 'src/autosport/endurance.py'
+      - 'src/autosport/providers.py'
+      - 'src/autosport/ingestion.py'
+      - 'src/autosport/ingestion_health.py'
+      - 'src/autosport/market_bus.py'
+      - 'src/autosport/storage.py'
+      - 'src/autosport/replay.py'
+      - 'src/autosport/paper.py'
+      - 'src/autosport/settlement.py'
+      - 'src/autosport/domain.py'
+      - 'src/autosport/integrity.py'
+      - 'src/autosport/cli.py'
+      - 'tests/test_endurance.py'
+      - 'pyproject.toml'
+      - '.github/workflows/endurance.yml'
   workflow_dispatch:
+
+concurrency:
+  group: endurance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   endurance:

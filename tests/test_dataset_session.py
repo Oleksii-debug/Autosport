@@ -5,6 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from autosport.dataset import load_dataset
+from autosport.integrity import sha256_file
 from autosport.session import AutosportSession
 
 
@@ -19,6 +20,10 @@ class DatasetSessionTests(unittest.TestCase):
             self.assertEqual(len(result.settled_ticket_ids), 1)
             self.assertEqual(result.balance, Decimal("10031.00"))
             self.assertEqual(result.evaluation.net_profit, Decimal("31.00"))
+            summary = json.loads(Path(result.result_path).read_text(encoding="utf-8"))
+            self.assertEqual(summary["schema_version"], 2)
+            self.assertEqual(summary["paper_book_sha256"], sha256_file(session.book_path))
+            self.assertFalse(summary["real_money_execution"])
             session.close()
             restored = AutosportSession(tmp, "1")
             self.assertEqual(restored.book.balance, Decimal("10031.00"))

@@ -1,0 +1,1 @@
+Bootstrap prose is frozen. Open PR and qualify CI.

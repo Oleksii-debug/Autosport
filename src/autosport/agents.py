@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Protocol
 
+from .decision_ledger import DecisionRecord, JsonlDecisionLedger
 from .domain import MarketEvent, TicketLeg
 from .paper import PaperBook
 
@@ -13,7 +16,17 @@ class AgentContext:
     paper_book: PaperBook
     latest_quotes: dict[str, MarketEvent] = field(default_factory=dict)
     event_count: int = 0
+    replay_run_id: str = "unbound"
+    decision_ledger: JsonlDecisionLedger | None = None
     notes: list[str] = field(default_factory=list)
+
+    def market_context_hash(self) -> str:
+        projection = {
+            key: value.to_dict()
+            for key, value in sorted(self.latest_quotes.items())
+        }
+        canonical = json.dumps(projection, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class Agent(Protocol):
@@ -26,7 +39,7 @@ class MarketMirrorAgent:
     name = "market-mirror"
 
     def on_market_event(self, event: MarketEvent, context: AgentContext) -> None:
-        context.latest_quotes[event.selection_id] = event
+        context.latest_quotes[event.quote_key] = event
         context.event_count += 1
 
 
@@ -43,16 +56,25 @@ class PaperBaselineAgent:
         signal_id = str(event.metadata.get("paper_signal_id", ""))
         if not signal_id or signal_id in self._used_signals:
             return
-        if event.metadata.get("paper_signal") is not True:
+        if event.metadata.get("paper_signal") is not True or self.stake > context.paper_book.balance:
             return
-        if self.stake > context.paper_book.balance:
-            return
-        context.paper_book.open_ticket(
+        ticket = context.paper_book.open_ticket(
             [TicketLeg(event.event_id, event.market_id, event.selection_id, event.decimal_odds)],
             self.stake,
             reason=f"fixture baseline signal {signal_id}",
             placed_at=event.observed_ts,
         )
+        if context.decision_ledger:
+            context.decision_ledger.append(
+                DecisionRecord(
+                    replay_run_id=context.replay_run_id,
+                    agent=self.name,
+                    observed_ts=event.observed_ts,
+                    action="OPEN_PAPER_TICKET",
+                    payload={"ticket_id": ticket.ticket_id, "stake": str(ticket.stake), "quote_key": event.quote_key},
+                    context_hash=context.market_context_hash(),
+                )
+            )
         self._used_signals.add(signal_id)
 
 

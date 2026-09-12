@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-from .domain import MarketEvent
+from .domain import MarketEvent, utc_now_iso
 
 
 class FutureLeakageError(RuntimeError):
@@ -28,10 +31,20 @@ class ReplayLeakageFirewall:
         self._unlocked = True
 
 
+@dataclass(frozen=True, slots=True)
+class ReplayRun:
+    run_id: str
+    dataset_hash: str
+    event_count: int
+    started_at: str
+    completed_at: str
+
+
 class ReplayEngine:
     def __init__(self, events: Iterable[MarketEvent], firewall: ReplayLeakageFirewall | None = None) -> None:
-        self.events = sorted(events, key=lambda e: (e.observed_ts, e.sequence))
+        self.events = sorted(events, key=lambda e: (e.observed_ts, e.sequence, e.dedupe_key))
         self.firewall = firewall or ReplayLeakageFirewall()
+        self.dataset_hash = _dataset_hash(self.events)
 
     @classmethod
     def from_jsonl(cls, path: str | Path, firewall: ReplayLeakageFirewall | None = None) -> "ReplayEngine":
@@ -42,8 +55,14 @@ class ReplayEngine:
                     events.append(MarketEvent.from_dict(json.loads(line)))
         return cls(events, firewall)
 
-    def run(self, on_event: Callable[[MarketEvent], None], speed: float = 0.0) -> int:
+    def run(
+        self,
+        on_event: Callable[[MarketEvent], None],
+        speed: float = 0.0,
+        run_id: str | None = None,
+    ) -> ReplayRun:
         previous: float | None = None
+        started = utc_now_iso()
         count = 0
         for event in self.events:
             if speed > 0:
@@ -54,7 +73,22 @@ class ReplayEngine:
             on_event(event)
             count += 1
         self.firewall.unlock()
-        return count
+        return ReplayRun(
+            run_id=run_id or str(uuid.uuid4()),
+            dataset_hash=self.dataset_hash,
+            event_count=count,
+            started_at=started,
+            completed_at=utc_now_iso(),
+        )
+
+
+def _dataset_hash(events: list[MarketEvent]) -> str:
+    digest = hashlib.sha256()
+    for event in events:
+        canonical = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest.update(canonical.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def _iso_seconds(value: str) -> float:

@@ -27,9 +27,12 @@ def run_replay(path: Path, bankroll: str) -> int:
     context = AgentContext(book)
     orchestrator = AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent()], context)
     engine = ReplayEngine.from_jsonl(path)
-    count = engine.run(orchestrator.on_market_event)
+    run = engine.run(orchestrator.on_market_event)
+    context.replay_run_id = run.run_id
     report = PortfolioEngine().analyse(list(book.tickets.values()))
-    print(f"events={count}")
+    print(f"run_id={run.run_id}")
+    print(f"dataset_hash={run.dataset_hash}")
+    print(f"events={run.event_count}")
     print(f"virtual_balance={book.balance}")
     print(f"open_tickets={len(book.tickets)}")
     print(f"scenario_mode={report.mode} worst={report.worst_case} best={report.best_case}")
@@ -45,8 +48,8 @@ def run_demo() -> int:
     book = PaperBook("10000")
     context = AgentContext(book)
     orchestrator = AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent("50")], context)
-    ReplayEngine(events).run(orchestrator.on_market_event)
-    print(f"Processed {context.event_count} market events; virtual balance={book.balance}; tickets={len(book.tickets)}")
+    run = ReplayEngine(events).run(orchestrator.on_market_event)
+    print(f"run={run.run_id} dataset={run.dataset_hash[:12]} events={context.event_count} balance={book.balance} tickets={len(book.tickets)}")
     return 0
 
 

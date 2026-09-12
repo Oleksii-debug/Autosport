@@ -42,8 +42,12 @@ class MarketEvent:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
+    def quote_key(self) -> str:
+        return f"{self.event_id}|{self.market_id}|{self.selection_id}"
+
+    @property
     def dedupe_key(self) -> str:
-        return f"{self.source_id}:{self.sequence}"
+        return f"{self.source_id}|{self.event_id}|{self.market_id}|{self.selection_id}|{self.sequence}"
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "MarketEvent":
@@ -87,6 +91,10 @@ class TicketLeg:
     market_id: str
     selection_id: str
     locked_odds: Decimal
+
+    @property
+    def quote_key(self) -> str:
+        return f"{self.event_id}|{self.market_id}|{self.selection_id}"
 
 
 @dataclass(slots=True)

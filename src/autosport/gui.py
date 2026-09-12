@@ -41,7 +41,8 @@ class AutosportApp(tk.Tk):
         self.bind("<Control-r>", lambda _event: self.run_replay())
 
     def _bank_text(self) -> str:
-        return f"Віртуальний банк: {self.book.balance} | Відкрито tickets: {sum(t.status.value == 'open' for t in self.book.tickets.values())}"
+        open_count = sum(t.status.value == "open" for t in self.book.tickets.values())
+        return f"Віртуальний банк: {self.book.balance} | Відкрито tickets: {open_count}"
 
     def load_replay(self) -> None:
         selected = filedialog.askopenfilename(title="Вибрати replay JSONL", filetypes=[("JSON Lines", "*.jsonl"), ("All files", "*.*")])
@@ -55,15 +56,18 @@ class AutosportApp(tk.Tk):
             return
         try:
             engine = ReplayEngine.from_jsonl(self.replay_path)
-            count = engine.run(self._on_event, speed=0)
-            self.status.set(f"Replay завершено. Оброблено {count} market events без доступу агентів до майбутнього результату.")
+            run = engine.run(self._on_event, speed=0)
+            self.context.replay_run_id = run.run_id
+            self.status.set(
+                f"Replay завершено: {run.event_count} events; dataset {run.dataset_hash[:12]}. Майбутній результат був sealed до завершення."
+            )
             self.bank.set(self._bank_text())
         except Exception as exc:
             messagebox.showerror("Автоспорт", str(exc))
 
     def _on_event(self, event) -> None:
         self.orchestrator.on_market_event(event)
-        self.log.insert("end", f"{event.observed_ts} | {event.event_id} | {event.selection_id} | {event.decimal_odds}\n")
+        self.log.insert("end", f"{event.observed_ts} | {event.event_id} | {event.market_id} | {event.selection_id} | {event.decimal_odds}\n")
         self.log.see("end")
         self.update_idletasks()
 

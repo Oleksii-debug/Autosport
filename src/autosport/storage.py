@@ -49,47 +49,56 @@ class SQLiteMarketStore:
         )
         self.connection.commit()
 
-    def append(self, event: MarketEvent) -> bool:
-        return self.append_many([event]) == 1
+    def _insert_one(self, event: MarketEvent) -> bool:
+        payload = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        cursor = self.connection.execute(
+            """INSERT OR IGNORE INTO market_events
+               (dedupe_key,quote_key,event_id,market_id,selection_id,decimal_odds,observed_ts,source_id,sequence,payload_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                event.dedupe_key,
+                event.quote_key,
+                event.event_id,
+                event.market_id,
+                event.selection_id,
+                str(event.decimal_odds),
+                event.observed_ts,
+                event.source_id,
+                event.sequence,
+                payload,
+            ),
+        )
+        if cursor.rowcount == 0:
+            return False
+        previous = self.connection.execute(
+            "SELECT observed_ts, sequence FROM current_quotes WHERE quote_key=?",
+            (event.quote_key,),
+        ).fetchone()
+        if previous is None or (event.observed_ts, event.sequence) >= (previous[0], previous[1]):
+            self.connection.execute(
+                """INSERT INTO current_quotes(quote_key,observed_ts,sequence,payload_json)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(quote_key) DO UPDATE SET
+                   observed_ts=excluded.observed_ts, sequence=excluded.sequence, payload_json=excluded.payload_json""",
+                (event.quote_key, event.observed_ts, event.sequence, payload),
+            )
+        return True
 
-    def append_many(self, events: Iterable[MarketEvent]) -> int:
-        inserted = 0
+    def append(self, event: MarketEvent) -> bool:
+        with self.connection:
+            return self._insert_one(event)
+
+    def append_batch_accepted(self, events: Iterable[MarketEvent]) -> list[MarketEvent]:
+        """Insert one normalized batch in one transaction and return only newly accepted events in input order."""
+        accepted: list[MarketEvent] = []
         with self.connection:
             for event in events:
-                payload = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                cursor = self.connection.execute(
-                    """INSERT OR IGNORE INTO market_events
-                       (dedupe_key,quote_key,event_id,market_id,selection_id,decimal_odds,observed_ts,source_id,sequence,payload_json)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        event.dedupe_key,
-                        event.quote_key,
-                        event.event_id,
-                        event.market_id,
-                        event.selection_id,
-                        str(event.decimal_odds),
-                        event.observed_ts,
-                        event.source_id,
-                        event.sequence,
-                        payload,
-                    ),
-                )
-                if cursor.rowcount == 0:
-                    continue
-                inserted += 1
-                previous = self.connection.execute(
-                    "SELECT observed_ts, sequence FROM current_quotes WHERE quote_key=?",
-                    (event.quote_key,),
-                ).fetchone()
-                if previous is None or (event.observed_ts, event.sequence) >= (previous[0], previous[1]):
-                    self.connection.execute(
-                        """INSERT INTO current_quotes(quote_key,observed_ts,sequence,payload_json)
-                           VALUES (?,?,?,?)
-                           ON CONFLICT(quote_key) DO UPDATE SET
-                           observed_ts=excluded.observed_ts, sequence=excluded.sequence, payload_json=excluded.payload_json""",
-                        (event.quote_key, event.observed_ts, event.sequence, payload),
-                    )
-        return inserted
+                if self._insert_one(event):
+                    accepted.append(event)
+        return accepted
+
+    def append_many(self, events: Iterable[MarketEvent]) -> int:
+        return len(self.append_batch_accepted(events))
 
     def events(self, event_id: str | None = None) -> list[MarketEvent]:
         if event_id is None:

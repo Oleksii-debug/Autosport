@@ -1,0 +1,1 @@
+Canonical bootstrap PR line: `work/whole-product-bootstrap-clean-20260912`. The earlier `work/whole-product-bootstrap-20260912` line contains later coordination-note noise and is superseded for integration. Do not merge the noisy lineage.

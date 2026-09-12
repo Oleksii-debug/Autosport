@@ -60,6 +60,10 @@ class IngestionEngine:
             batch = provider.read_batch(max_items=max_items)
             if batch.source_id != provider.source_id:
                 raise ValueError("provider returned mismatched source_id")
+            if len(batch.quotes) > max_items:
+                raise ValueError(
+                    f"provider returned {len(batch.quotes)} quotes above requested batch bound {max_items}"
+                )
             flags = set(batch.quality_flags)
             previous_source_ts = None
             if self.health_store is not None:

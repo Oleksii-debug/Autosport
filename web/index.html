@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Автоспорт</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; line-height: 1.45; }
+    body { margin: 0; padding: 0 1rem 2rem; max-width: 76rem; }
+    nav ul { display: flex; flex-wrap: wrap; gap: .8rem; padding-left: 1.2rem; }
+    section { margin-block: 1.4rem; }
+    .metric-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: .7rem; padding: 0; list-style: none; }
+    .metric-list li { border: 1px solid currentColor; padding: .7rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid currentColor; padding: .45rem; text-align: left; vertical-align: top; }
+    button, select, input { font: inherit; }
+    .actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+    #announcement { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Автоспорт</h1>
+    <p id="product-summary">Багатоагентна лабораторія спортивного ринку, причинного replay та паперових стратегій. Усі основні дані на цій сторінці є звичайним видимим текстом, який можна виділяти й копіювати.</p>
+    <nav aria-label="Основна навігація">
+      <ul>
+        <li><a href="#experiment">Експеримент</a></li>
+        <li><a href="#markets">Матчі та коефіцієнти</a></li>
+        <li><a href="#paperbook">Віртуальний банк</a></li>
+        <li><a href="#portfolio">Портфель</a></li>
+        <li><a href="#agents">Агенти</a></li>
+        <li><a href="#diagnostics">Діагностика</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main>
+    <section id="experiment" aria-labelledby="experiment-title">
+      <h2 id="experiment-title">Експеримент</h2>
+      <p id="experiment-status">Режим: локальний демонстраційний replay. Стан: готовий до завантаження тестових подій.</p>
+      <div class="actions">
+        <button id="load-demo" type="button">Завантажити демонстраційні події</button>
+        <button id="next-event" type="button" disabled>Наступна подія</button>
+      </div>
+    </section>
+
+    <section id="markets" aria-labelledby="markets-title">
+      <h2 id="markets-title">Матчі та коефіцієнти</h2>
+      <p id="market-summary">Активних selections: 0. Останніх оновлень ще немає.</p>
+      <table aria-describedby="market-summary">
+        <caption>Поточний нормалізований стан ринку</caption>
+        <thead><tr><th scope="col">Матч</th><th scope="col">Ринок</th><th scope="col">Вибір</th><th scope="col">Коефіцієнт</th><th scope="col">Час</th></tr></thead>
+        <tbody id="market-rows"><tr><td colspan="5">Дані ще не завантажено.</td></tr></tbody>
+      </table>
+    </section>
+
+    <section id="paperbook" aria-labelledby="paperbook-title">
+      <h2 id="paperbook-title">Віртуальний банк</h2>
+      <ul class="metric-list">
+        <li><strong>Початковий банк:</strong> <span id="initial-bankroll">10 000 UAH</span></li>
+        <li><strong>Доступно:</strong> <span id="cash">10 000 UAH</span></li>
+        <li><strong>Відкритий stake:</strong> <span id="open-stake">0 UAH</span></li>
+      </ul>
+      <h3>Віртуальні tickets</h3>
+      <p id="ticket-summary">Відкритих tickets поки немає.</p>
+    </section>
+
+    <section id="portfolio" aria-labelledby="portfolio-title">
+      <h2 id="portfolio-title">Портфель і сценарії</h2>
+      <p id="portfolio-summary">Portfolio Engine ще не підключений у цьому bootstrap slice. Тут надалі залишатимуться видимими й копійованими worst-case, best-case, expected P&amp;L, exposure, drawdown і risk metrics.</p>
+    </section>
+
+    <section id="agents" aria-labelledby="agents-title">
+      <h2 id="agents-title">Агенти</h2>
+      <p id="agent-summary">Агентний runtime ще не підключений. Planned roles: research, forecast, ticket construction, portfolio/risk, critic та learning/evaluation.</p>
+    </section>
+
+    <section id="diagnostics" aria-labelledby="diagnostics-title">
+      <h2 id="diagnostics-title">Діагностика</h2>
+      <p id="diagnostic-text">UI contract: keyboard/NVDA-first; primary speech text is visible, selectable and copyable; Ctrl+C та Ctrl+A не перехоплюються застосунком.</p>
+    </section>
+  </main>
+
+  <div id="announcement" role="status" aria-live="polite" aria-atomic="true"></div>
+  <script src="app.js"></script>
+</body>
+</html>

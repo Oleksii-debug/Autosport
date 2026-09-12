@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import uuid
 from decimal import Decimal
 from pathlib import Path
 
@@ -24,11 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_replay(path: Path, bankroll: str) -> int:
     book = PaperBook(Decimal(bankroll))
-    context = AgentContext(book)
+    run_id = str(uuid.uuid4())
+    context = AgentContext(book, replay_run_id=run_id)
     orchestrator = AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent()], context)
     engine = ReplayEngine.from_jsonl(path)
-    run = engine.run(orchestrator.on_market_event)
-    context.replay_run_id = run.run_id
+    run = engine.run(orchestrator.on_market_event, run_id=run_id)
     report = PortfolioEngine().analyse(list(book.tickets.values()))
     print(f"run_id={run.run_id}")
     print(f"dataset_hash={run.dataset_hash}")
@@ -46,9 +47,10 @@ def run_demo() -> int:
         MarketEvent.from_dict({"event_id":"tt-001","market_id":"winner","selection_id":"alice","decimal_odds":"2.25","observed_ts":"2026-09-12T10:00:02+00:00","source_id":"demo","sequence":3,"market_type":"winner"}),
     ]
     book = PaperBook("10000")
-    context = AgentContext(book)
+    run_id = "demo-run"
+    context = AgentContext(book, replay_run_id=run_id)
     orchestrator = AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent("50")], context)
-    run = ReplayEngine(events).run(orchestrator.on_market_event)
+    run = ReplayEngine(events).run(orchestrator.on_market_event, run_id=run_id)
     print(f"run={run.run_id} dataset={run.dataset_hash[:12]} events={context.event_count} balance={book.balance} tickets={len(book.tickets)}")
     return 0
 

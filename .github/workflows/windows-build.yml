@@ -8,11 +8,14 @@ on:
       - 'examples/**'
       - 'pyproject.toml'
       - 'WINDOWS_START_HERE.txt'
-      - 'scripts/build_windows.ps1'
+      - 'scripts/**'
+      - '.gitattributes'
       - '.github/workflows/windows-build.yml'
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      AUTOSPORT_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,5 +26,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Autosport-V1-Windows-prehuman
-          path: dist/Autosport-V1-windows-x64.zip
+          path: |
+            dist/Autosport-V1-windows-x64.zip
+            dist/packaged-diagnostic.json
           if-no-files-found: error

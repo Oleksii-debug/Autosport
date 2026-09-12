@@ -13,6 +13,7 @@ from .evaluation import EvaluationSummary, evaluate
 from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
 from .replay import ReplayEngine, ReplayRun
+from .run_registry import RunRegistry
 from .settlement import SettlementEngine
 from .storage import SQLiteMarketStore
 
@@ -24,26 +25,42 @@ class SessionResult:
     balance: Decimal
     evaluation: EvaluationSummary
     portfolio: PortfolioReport
+    experiment_key: str
+    result_path: str
 
 
 class AutosportSession:
     """One end-to-end V1 runtime: replay -> agents -> paper book -> settlement -> evaluation -> recovery."""
 
-    def __init__(self, workspace: str | Path, initial_bankroll: Decimal | str = "10000") -> None:
+    def __init__(
+        self,
+        workspace: str | Path,
+        initial_bankroll: Decimal | str = "10000",
+        strategy_id: str = "baseline-v1",
+    ) -> None:
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
+        self.strategy_id = strategy_id
         self.store = SQLiteMarketStore(self.workspace / "market.db")
         self.book_path = self.workspace / "paper_book.json"
         self.book = PaperBook.load(self.book_path) if self.book_path.exists() else PaperBook(initial_bankroll)
         self.ledger = JsonlDecisionLedger(self.workspace / "decisions.jsonl")
+        self.registry = RunRegistry(self.workspace / "run_registry.json")
         self.portfolio_engine = PortfolioEngine()
 
     def _runtime(self, run_id: str) -> AgentOrchestrator:
         context = AgentContext(self.book, replay_run_id=run_id, decision_ledger=self.ledger)
         return AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent("50")], context)
 
-    def run_dataset(self, dataset: ReplayDataset, speed: float = 0.0) -> SessionResult:
+    def run_dataset(self, dataset: ReplayDataset, speed: float = 0.0, allow_repeat: bool = False) -> SessionResult:
         run_id = str(uuid.uuid4())
+        experiment_key = self.registry.begin(
+            dataset.market_sha256,
+            dataset.results_sha256,
+            self.strategy_id,
+            run_id,
+            allow_repeat=allow_repeat,
+        )
         orchestrator = self._runtime(run_id)
         engine = ReplayEngine(dataset.load_market_events())
 
@@ -52,21 +69,32 @@ class AutosportSession:
             orchestrator.on_market_event(event)
 
         replay = engine.run(consume, speed=speed, run_id=run_id)
-        # Sealed result bytes are opened only after strategy event delivery is complete.
         settlement = SettlementEngine()
         settlement.record(dataset.load_results_after_replay())
         settled = tuple(settlement.settle_ready(self.book))
         self.book.save(self.book_path)
         evaluation = evaluate(self.book)
         portfolio = self.portfolio_engine.analyse(list(self.book.tickets.values()))
-        result = SessionResult(replay, settled, self.book.balance, evaluation, portfolio)
-        self._write_run_summary(dataset, result)
+        destination = self.workspace / f"run-{replay.run_id}.json"
+        result = SessionResult(
+            replay,
+            settled,
+            self.book.balance,
+            evaluation,
+            portfolio,
+            experiment_key,
+            str(destination),
+        )
+        self._write_run_summary(dataset, result, destination)
+        self.registry.complete(experiment_key, str(destination))
         return result
 
-    def _write_run_summary(self, dataset: ReplayDataset, result: SessionResult) -> None:
+    def _write_run_summary(self, dataset: ReplayDataset, result: SessionResult, destination: Path) -> None:
         payload = {
             "dataset_name": dataset.name,
             "sport": dataset.sport,
+            "strategy_id": self.strategy_id,
+            "experiment_key": result.experiment_key,
             "market_sha256": dataset.market_sha256,
             "sealed_results_sha256": dataset.results_sha256,
             "run_id": result.replay.run_id,
@@ -78,8 +106,7 @@ class AutosportSession:
             "portfolio": {key: str(value) if isinstance(value, Decimal) else value for key, value in asdict(result.portfolio).items()},
             "real_money_execution": False,
         }
-        destination = self.workspace / f"run-{result.replay.run_id}.json"
-        destination.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        destination.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     def close(self) -> None:
         self.book.save(self.book_path)

@@ -1,0 +1,1 @@
+Current bootstrap is implementation-bearing, not documentation-only: code exists under `src/autosport`, `web`, `tests`, and `.github/workflows`. Next work begins by qualifying/integrating that code and then adding Portfolio/Exposure functionality.

@@ -1,0 +1,1 @@
+Integration target is the clean bootstrap branch only; the noisy predecessor is superseded and must not be merged.

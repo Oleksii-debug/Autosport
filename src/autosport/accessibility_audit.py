@@ -13,8 +13,16 @@ _REQUIRED_PATTERNS = {
     AUTOMATION_IDS["choose_dataset"]: {"INVOKE"},
     AUTOMATION_IDS["run_replay"]: {"INVOKE"},
     AUTOMATION_IDS["replay_speed"]: {"VALUE"},
+    AUTOMATION_IDS["live_mode"]: {"VALUE"},
+    AUTOMATION_IDS["live_refresh"]: {"INVOKE"},
     AUTOMATION_IDS["tickets"]: set(),
     AUTOMATION_IDS["log"]: {"VALUE"},
+    AUTOMATION_IDS["live_quotes"]: set(),
+}
+
+_ROW_CONTROLS = {
+    AUTOMATION_IDS["tickets"],
+    AUTOMATION_IDS["live_quotes"],
 }
 
 _BLOCKING_GAPS = {
@@ -68,6 +76,8 @@ def summarize_description(description: Any) -> dict[str, Any]:
             failures.append(
                 f"automation_id={automation_id}: missing UIA patterns={','.join(missing_patterns)}"
             )
+        if int(automation_id) in _ROW_CONTROLS and not widget.answers_rows:
+            failures.append(f"automation_id={automation_id}: list rows are not exposed through UIA")
 
     missing_ids = sorted(expected_ids - set(controls))
     for automation_id in missing_ids:

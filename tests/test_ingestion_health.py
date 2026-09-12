@@ -119,7 +119,7 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(health.get("source").status, "degraded")
             store.close()
 
-    def test_source_time_regression_is_detected_across_polls(self):
+    def test_source_time_regression_is_detected_without_lowering_high_water_mark(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, store, health = self._engine(tmp)
             provider = StaticProvider(
@@ -136,6 +136,7 @@ class IngestionHealthTests(unittest.TestCase):
             state = health.get("source")
             self.assertEqual(state.poll_count, 2)
             self.assertEqual(state.status, "degraded")
+            self.assertEqual(state.latest_source_ts, "2026-09-12T11:59:50+00:00")
             store.close()
 
     def test_provider_failure_is_persisted_and_rethrown(self):

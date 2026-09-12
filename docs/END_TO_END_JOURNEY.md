@@ -1,0 +1,3 @@
+# End-to-end product journey
+
+Launch packaged Autosport -> choose/create experiment -> select historical replay or permitted live-observation source -> see normalized matches/markets as visible copyable text -> set virtual bankroll/strategy -> start agents/replay -> causal events update current market state -> candidate paper tickets are evaluated against whole portfolio -> accepted paper tickets enter ledger -> event/result settlement updates bankroll -> evaluation/learning records explain performance -> pause/close/restart -> experiment resumes without future leakage or duplicate settlement -> export/review reproducible experiment evidence. This journey, not module count, defines product completion.

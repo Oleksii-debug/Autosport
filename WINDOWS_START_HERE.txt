@@ -1,0 +1,13 @@
+АВТОСПОРТ — V1 WINDOWS PAPER LAB
+
+1. Запустіть Autosport.exe.
+2. Кнопка «Вибрати dataset» відкриває папку replay dataset, що містить manifest.json, market.jsonl і окремий sealed results.json.
+3. Після перевірки SHA натисніть «Запустити paper replay».
+4. За замовчуванням використовується подієвий режим — максимально швидке відтворення без штучного очікування між котируваннями.
+5. Ctrl+O — вибрати dataset; Ctrl+R — запустити replay; F6 — перейти до списку paper tickets.
+6. Віртуальний банк, рішення, history та run summaries зберігаються у локальному Autosport workspace і відновлюються після перезапуску.
+
+Це paper/replay лабораторія. Вона не виконує реальні грошові ставки і не має механізму керування букмекерським рахунком.
+
+HUMAN_TESTED=false
+NVDA_VERIFIED=false

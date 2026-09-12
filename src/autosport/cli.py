@@ -13,7 +13,9 @@ from .domain import MarketEvent
 from .paper import PaperBook
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .portfolio import PortfolioEngine
+from .recovery import reconcile_late_crashes
 from .replay import ReplayEngine
+from .run_registry import ReconciliationError
 from .session import AutosportSession, ObservationResult
 
 
@@ -36,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
     observe.add_argument("--public-preview", action="store_true", help="use provider public preview without an API key")
     observe.add_argument("--max-items", type=int, default=250, help="hard maximum quotes requested from the provider")
     observe.add_argument("--show", type=int, default=50, help="maximum current quote lines to print")
+    repair = sub.add_parser("repair-workspace", help="reconcile only late-crashed runs with durable hash-matched completion evidence")
+    repair.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
     sub.add_parser("gui", help="launch Windows-oriented GUI")
     return parser
 
@@ -94,6 +98,23 @@ def run_observe_table_tennis(
     return 0
 
 
+def run_repair_workspace(workspace: Path) -> int:
+    try:
+        report = reconcile_late_crashes(workspace)
+    except ReconciliationError as exc:
+        print(f"repair=FAIL_CLOSED error={exc}")
+        return 3
+    print(
+        f"repair=OK reconciled={len(report.reconciled_keys)} "
+        f"unresolved_without_summary={len(report.unresolved_without_summary)}"
+    )
+    for key in report.reconciled_keys:
+        print(f"RECONCILED {key}")
+    for key in report.unresolved_without_summary:
+        print(f"UNRESOLVED_NO_DURABLE_SUMMARY {key}")
+    return 4 if report.unresolved_without_summary else 0
+
+
 def _print_observation(result: ObservationResult, show: int) -> None:
     flags = ",".join(result.stats.quality_flags) if result.stats.quality_flags else "none"
     print(
@@ -143,6 +164,8 @@ def main(argv: list[str] | None = None) -> int:
             max_items=args.max_items,
             show=args.show,
         )
+    if args.command == "repair-workspace":
+        return run_repair_workspace(args.workspace)
     if args.command == "gui":
         from .gui import main as gui_main
         return gui_main()

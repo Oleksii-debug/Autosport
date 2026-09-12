@@ -1,0 +1,3 @@
+# Replay dataset manifests hash exact bytes. Keep dataset text byte-stable on every checkout.
+*.json text eol=lf
+*.jsonl text eol=lf

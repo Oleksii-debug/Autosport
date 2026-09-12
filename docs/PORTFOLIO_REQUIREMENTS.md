@@ -1,0 +1,3 @@
+# Portfolio engine requirements
+
+The portfolio engine is the mathematical source of truth for open paper positions. It maps unresolved outcome variables to ticket legs/tickets and computes scenario-dependent payout/P&L without relying on an LLM's memory. Required capabilities include exact small-case enumeration oracle, dependency indexing, incremental invalidation, dominance pruning hooks, solver adapter boundary, approximate sampling boundary, and explicit provenance for every worst/best/expected result. A non-negative worst-case claim requires exact/formally bounded coverage of the declared scenario universe.

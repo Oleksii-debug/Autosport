@@ -107,9 +107,14 @@ class ParlayApiTableTennisProvider:
         quotes: list[ProviderQuote] = []
         for event in events:
             for quote in self._event_quotes(event, observed_ts, response.status_code):
-                quotes.append(quote)
                 if len(quotes) >= max_items:
-                    return ProviderBatch(self.source_id, tuple(quotes), cursor=observed_ts)
+                    return ProviderBatch(
+                        self.source_id,
+                        tuple(quotes),
+                        cursor=observed_ts,
+                        quality_flags=("TRUNCATED_BATCH",),
+                    )
+                quotes.append(quote)
         return ProviderBatch(self.source_id, tuple(quotes), cursor=observed_ts)
 
     def _fetch(self) -> HttpJsonResponse:

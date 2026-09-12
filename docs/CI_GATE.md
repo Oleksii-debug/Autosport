@@ -1,0 +1,1 @@
+Exact-head CI gate is mandatory before bootstrap integration; queued/running is not green, and green from an older SHA does not transfer.

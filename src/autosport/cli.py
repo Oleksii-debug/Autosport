@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import argparse
+import os
 import uuid
 from decimal import Decimal
 from pathlib import Path
+from typing import Callable
 
 from .agents import AgentContext, AgentOrchestrator, MarketMirrorAgent, PaperBaselineAgent
 from .dataset import load_dataset
 from .domain import MarketEvent
 from .paper import PaperBook
+from .parlayapi_provider import ParlayApiTableTennisProvider
 from .portfolio import PortfolioEngine
 from .replay import ReplayEngine
-from .session import AutosportSession
+from .session import AutosportSession, ObservationResult
+
+
+ProviderFactory = Callable[..., ParlayApiTableTennisProvider]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
     dataset.add_argument("path", type=Path)
     dataset.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
     dataset.add_argument("--bankroll", default="10000")
+    observe = sub.add_parser("observe-table-tennis", help="fetch one read-only table-tennis market snapshot")
+    observe.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
+    observe.add_argument("--public-preview", action="store_true", help="use provider public preview without an API key")
+    observe.add_argument("--max-items", type=int, default=250, help="hard maximum quotes requested from the provider")
+    observe.add_argument("--show", type=int, default=50, help="maximum current quote lines to print")
     sub.add_parser("gui", help="launch Windows-oriented GUI")
     return parser
 
@@ -57,6 +68,52 @@ def run_dataset(path: Path, workspace: Path, bankroll: str) -> int:
     return 0
 
 
+def run_observe_table_tennis(
+    workspace: Path,
+    *,
+    public_preview: bool,
+    max_items: int,
+    show: int,
+    provider_factory: ProviderFactory = ParlayApiTableTennisProvider,
+) -> int:
+    if show < 0:
+        raise ValueError("show must be non-negative")
+    api_key = None if public_preview else os.environ.get("AUTOSPORT_PARLAYAPI_KEY")
+    if not public_preview and not api_key:
+        print(
+            "AUTOSPORT_PARLAYAPI_KEY is not set. Set it in the environment or use --public-preview.",
+        )
+        return 2
+    provider = provider_factory(api_key, public_preview=public_preview)
+    session = AutosportSession(workspace)
+    try:
+        result = session.observe_provider_once(provider, max_items=max_items)
+        _print_observation(result, show)
+    finally:
+        session.close()
+    return 0
+
+
+def _print_observation(result: ObservationResult, show: int) -> None:
+    flags = ",".join(result.stats.quality_flags) if result.stats.quality_flags else "none"
+    print(
+        f"source={result.stats.source_id} health={result.health.status} "
+        f"received={result.stats.received} accepted={result.stats.accepted} "
+        f"rejected={result.stats.rejected} flags={flags}"
+    )
+    print(
+        f"current_quotes={len(result.current_quotes)} "
+        f"latest_source_ts={result.health.latest_source_ts or '-'} cursor={result.health.last_cursor or '-'}"
+    )
+    for event in result.current_quotes[:show]:
+        print(
+            f"{event.event_id} | {event.market_type.value} | {event.market_id} | "
+            f"{event.selection_id} | odds={event.decimal_odds} | source_ts={event.source_ts or '-'}"
+        )
+    if len(result.current_quotes) > show:
+        print(f"... {len(result.current_quotes) - show} more current quotes not printed")
+
+
 def run_demo() -> int:
     events = [
         MarketEvent.from_dict({"event_id":"tt-001","market_id":"winner","selection_id":"alice","decimal_odds":"1.80","observed_ts":"2026-09-12T10:00:00+00:00","source_id":"demo","sequence":1,"market_type":"winner","metadata":{"paper_signal":True,"paper_signal_id":"demo-1"}}),
@@ -79,6 +136,13 @@ def main(argv: list[str] | None = None) -> int:
         return run_replay(args.path, args.bankroll)
     if args.command == "dataset":
         return run_dataset(args.path, args.workspace, args.bankroll)
+    if args.command == "observe-table-tennis":
+        return run_observe_table_tennis(
+            args.workspace,
+            public_preview=args.public_preview,
+            max_items=args.max_items,
+            show=args.show,
+        )
     if args.command == "gui":
         from .gui import main as gui_main
         return gui_main()

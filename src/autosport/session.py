@@ -9,9 +9,14 @@ from pathlib import Path
 from .agents import AgentContext, AgentOrchestrator, MarketMirrorAgent, PaperBaselineAgent
 from .dataset import ReplayDataset
 from .decision_ledger import JsonlDecisionLedger
+from .domain import MarketEvent
 from .evaluation import EvaluationSummary, evaluate
+from .ingestion import IngestionEngine, IngestionStats
+from .ingestion_health import IngestionPolicy, SourceHealthState, SourceHealthStore
+from .market_bus import MarketEventBus
 from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
+from .providers import MarketProvider
 from .replay import ReplayEngine, ReplayRun
 from .run_registry import RunRegistry
 from .settlement import SettlementEngine
@@ -29,8 +34,15 @@ class SessionResult:
     result_path: str
 
 
+@dataclass(frozen=True, slots=True)
+class ObservationResult:
+    stats: IngestionStats
+    health: SourceHealthState
+    current_quotes: tuple[MarketEvent, ...]
+
+
 class AutosportSession:
-    """One end-to-end V1 runtime: replay -> agents -> paper book -> settlement -> evaluation -> recovery."""
+    """V1 runtime for causal replay, paper simulation and read-only market observation."""
 
     def __init__(
         self,
@@ -42,6 +54,7 @@ class AutosportSession:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.strategy_id = strategy_id
         self.store = SQLiteMarketStore(self.workspace / "market.db")
+        self.source_health = SourceHealthStore(self.workspace / "source_health.json")
         self.book_path = self.workspace / "paper_book.json"
         self.book = PaperBook.load(self.book_path) if self.book_path.exists() else PaperBook(initial_bankroll)
         self.ledger = JsonlDecisionLedger(self.workspace / "decisions.jsonl")
@@ -51,6 +64,28 @@ class AutosportSession:
     def _runtime(self, run_id: str) -> AgentOrchestrator:
         context = AgentContext(self.book, replay_run_id=run_id, decision_ledger=self.ledger)
         return AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent("50")], context)
+
+    def observe_provider_once(
+        self,
+        provider: MarketProvider,
+        *,
+        max_items: int = 1000,
+        policy: IngestionPolicy | None = None,
+    ) -> ObservationResult:
+        """Acquire one bounded read-only provider snapshot into the canonical Market Store."""
+        engine = IngestionEngine(
+            MarketEventBus(self.store),
+            policy=policy,
+            health_store=self.source_health,
+        )
+        stats = engine.poll_once(provider, max_items=max_items)
+        current = tuple(
+            sorted(
+                (event for event in self.store.current().values() if event.source_id == provider.source_id),
+                key=lambda event: (event.event_id, event.market_id, event.selection_id),
+            )
+        )
+        return ObservationResult(stats, self.source_health.get(provider.source_id), current)
 
     def run_dataset(self, dataset: ReplayDataset, speed: float = 0.0, allow_repeat: bool = False) -> SessionResult:
         run_id = str(uuid.uuid4())

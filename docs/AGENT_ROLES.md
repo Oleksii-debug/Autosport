@@ -1,0 +1,3 @@
+# Initial agent roles
+
+Research/Participant Analyst gathers structured evidence about players/teams/matches; Forecast Agent produces probabilities with provenance/calibration version; Ticket Constructor proposes paper candidates; Portfolio/Risk Agent evaluates whole-book effects mathematically; Critic challenges assumptions/data quality/correlation/leakage; Learning/Evaluation compares decisions after settlement. These are roles, not separate databases. The coordinator may create/cancel tasks and assign models, but canonical market history, ledger and portfolio truth remain shared deterministic services.

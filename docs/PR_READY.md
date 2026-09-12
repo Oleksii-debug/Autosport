@@ -1,0 +1,1 @@
+Clean bootstrap line is PR-ready. No further bootstrap mutations should precede CI qualification.

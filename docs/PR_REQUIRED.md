@@ -1,0 +1,1 @@
+The next repository mutation must be PR/CI/integration or executable implementation, not bootstrap prose.

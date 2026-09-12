@@ -1,13 +1,18 @@
-АВТОСПОРТ — V1 WINDOWS PAPER LAB
+АВТОСПОРТ — V1 WINDOWS PAPER / MARKET LAB
 
 1. Запустіть Autosport.exe.
-2. Кнопка «Вибрати dataset» відкриває папку replay dataset, що містить manifest.json, market.jsonl і окремий sealed results.json.
+2. Для historical replay кнопка «Вибрати dataset» відкриває папку replay dataset, що містить manifest.json, market.jsonl і окремий sealed results.json.
 3. Після перевірки SHA натисніть «Запустити paper replay».
-4. За замовчуванням використовується подієвий режим — максимально швидке відтворення без штучного очікування між котируваннями.
-5. Ctrl+O — вибрати dataset; Ctrl+R — запустити replay; F6 — перейти до списку paper tickets.
-6. Віртуальний банк, рішення, history та run summaries зберігаються у локальному Autosport workspace і відновлюються після перезапуску.
+4. За замовчуванням replay використовує подієвий режим — максимально швидке causal відтворення без штучного очікування між котируваннями.
+5. Для read-only live observation виберіть режим «Public preview — без ключа» або «API key з environment» і натисніть «Оновити live snapshot».
+6. Authenticated live режим читає ключ тільки зі змінної середовища AUTOSPORT_PARLAYAPI_KEY. Ключ не вводиться в інтерфейс і не зберігається у workspace.
+7. Live acquisition виконується в окремому worker thread; клавіатурна навігація та screen-reader UI не повинні блокуватися очікуванням мережі.
+8. Ctrl+O — вибрати dataset; Ctrl+R — запустити replay; Ctrl+L — оновити live snapshot; F6 — paper tickets; F7 — live quotes.
+9. Віртуальний банк, рішення, market history, source health та run summaries зберігаються у локальному Autosport workspace і відновлюються після перезапуску.
 
-Це paper/replay лабораторія. Вона не виконує реальні грошові ставки і не має механізму керування букмекерським рахунком.
+Live observation є read-only. Paper/replay функції використовують лише віртуальний банк. Програма не виконує реальні грошові ставки і не має механізму керування букмекерським рахунком, поповнення або виведення коштів.
 
+REAL_MONEY_EXECUTION=false
 HUMAN_TESTED=false
 NVDA_VERIFIED=false
+V1_READY=false

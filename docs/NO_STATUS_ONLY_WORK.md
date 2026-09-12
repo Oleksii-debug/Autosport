@@ -1,0 +1,1 @@
+Status-only/planning-only work does not advance Autosport after bootstrap. Implement, test, benchmark, integrate or package.

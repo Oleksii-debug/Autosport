@@ -1,80 +1,113 @@
 from __future__ import annotations
 
 import tkinter as tk
-import uuid
-from decimal import Decimal
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from .agents import AgentContext, AgentOrchestrator, MarketMirrorAgent, PaperBaselineAgent
-from .paper import PaperBook
-from .portfolio import PortfolioEngine
-from .replay import ReplayEngine
+from .dataset import load_dataset
+from .paths import default_workspace
+from .session import AutosportSession
+from .ui_model import result_summary, ticket_lines
+
+
+_SPEEDS = {"Подієвий — максимально швидко": 0.0, "1× реальний час": 1.0, "10×": 10.0, "100×": 100.0}
 
 
 class AutosportApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Автоспорт — V1 Paper Lab")
-        self.geometry("820x560")
-        self.book = PaperBook(Decimal("10000"))
-        self.context = AgentContext(self.book)
-        self.orchestrator = AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent()], self.context)
-        self.replay_path: Path | None = None
-        self.status = tk.StringVar(value="Готово. Завантажте історичний JSONL replay.")
+        self.title("Автоспорт — V1 Windows Paper Lab")
+        self.geometry("900x640")
+        self.minsize(700, 500)
+        self.dataset_path: Path | None = None
+        self.session = AutosportSession(default_workspace(), "10000")
+        self.status = tk.StringVar(value="Готово. Виберіть папку replay dataset.")
         self.bank = tk.StringVar(value=self._bank_text())
-        self.portfolio = tk.StringVar(value="Портфель: ще немає відкритих paper tickets.")
+        self.dataset_text = tk.StringVar(value="Dataset не вибраний.")
+        self.speed_text = tk.StringVar(value="Подієвий — максимально швидко")
         self._build()
+        self.protocol("WM_DELETE_WINDOW", self.close_app)
 
     def _build(self) -> None:
         frame = ttk.Frame(self, padding=16)
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Автоспорт — V1 Paper Lab", font=("Segoe UI", 16, "bold")).pack(anchor="w")
-        ttk.Label(frame, textvariable=self.bank).pack(anchor="w", pady=(12, 4))
-        ttk.Label(frame, textvariable=self.portfolio).pack(anchor="w", pady=(0, 6))
-        ttk.Label(frame, textvariable=self.status, wraplength=760).pack(anchor="w", pady=(0, 12))
-        buttons = ttk.Frame(frame)
-        buttons.pack(fill="x")
-        ttk.Button(buttons, text="Завантажити replay JSONL", command=self.load_replay).pack(side="left", padx=(0, 8))
-        ttk.Button(buttons, text="Запустити replay", command=self.run_replay).pack(side="left", padx=(0, 8))
-        ttk.Button(buttons, text="Очистити журнал", command=lambda: self.log.delete("1.0", "end")).pack(side="left")
-        ttk.Label(frame, text="Журнал подій").pack(anchor="w", pady=(16, 4))
-        self.log = tk.Text(frame, height=18, wrap="word", takefocus=True)
+        ttk.Label(frame, text="Автоспорт — V1 Windows Paper Lab", font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        ttk.Label(frame, textvariable=self.bank, wraplength=840).pack(anchor="w", pady=(12, 4))
+        ttk.Label(frame, textvariable=self.dataset_text, wraplength=840).pack(anchor="w", pady=(0, 4))
+        ttk.Label(frame, textvariable=self.status, wraplength=840).pack(anchor="w", pady=(0, 12))
+
+        controls = ttk.Frame(frame)
+        controls.pack(fill="x")
+        ttk.Button(controls, text="Вибрати dataset", command=self.choose_dataset).pack(side="left", padx=(0, 8))
+        ttk.Button(controls, text="Запустити paper replay", command=self.run_dataset).pack(side="left", padx=(0, 8))
+        ttk.Label(controls, text="Швидкість:").pack(side="left", padx=(8, 4))
+        speed = ttk.Combobox(controls, textvariable=self.speed_text, values=list(_SPEEDS), state="readonly", width=28)
+        speed.pack(side="left")
+
+        ttk.Label(frame, text="Paper tickets і результати").pack(anchor="w", pady=(16, 4))
+        self.tickets = tk.Listbox(frame, height=9, takefocus=True)
+        self.tickets.pack(fill="x")
+        ttk.Label(frame, text="Журнал").pack(anchor="w", pady=(16, 4))
+        self.log = tk.Text(frame, height=13, wrap="word", takefocus=True)
         self.log.pack(fill="both", expand=True)
-        self.bind("<Control-o>", lambda _event: self.load_replay())
-        self.bind("<Control-r>", lambda _event: self.run_replay())
+
+        self.bind("<Control-o>", lambda _event: self.choose_dataset())
+        self.bind("<Control-r>", lambda _event: self.run_dataset())
+        self.bind("<F6>", lambda _event: self.tickets.focus_set())
+        self._refresh_tickets()
 
     def _bank_text(self) -> str:
-        open_count = sum(ticket.status.value == "open" for ticket in self.book.tickets.values())
-        return f"Віртуальний банк: {self.book.balance} | Відкрито tickets: {open_count} | committed: {self.book.committed_stake}"
+        return (
+            f"Віртуальний банк: {self.session.book.balance}; "
+            f"committed: {self.session.book.committed_stake}; "
+            f"workspace: {self.session.workspace}"
+        )
 
-    def load_replay(self) -> None:
-        selected = filedialog.askopenfilename(title="Вибрати replay JSONL", filetypes=[("JSON Lines", "*.jsonl"), ("All files", "*.*")])
-        if selected:
-            self.replay_path = Path(selected)
-            self.status.set(f"Завантажено: {self.replay_path.name}")
-
-    def run_replay(self) -> None:
-        if not self.replay_path:
-            messagebox.showinfo("Автоспорт", "Спочатку виберіть replay JSONL.")
+    def choose_dataset(self) -> None:
+        selected = filedialog.askdirectory(title="Вибрати папку Autosport replay dataset")
+        if not selected:
             return
         try:
-            engine = ReplayEngine.from_jsonl(self.replay_path)
-            run_id = str(uuid.uuid4())
-            self.context.replay_run_id = run_id
-            run = engine.run(self._on_event, speed=0, run_id=run_id)
-            report = PortfolioEngine().analyse(list(self.book.tickets.values()))
-            self.status.set(f"Replay завершено: {run.event_count} events; dataset {run.dataset_hash[:12]}; future result sealed до завершення.")
+            dataset = load_dataset(selected)
+        except Exception as exc:
+            messagebox.showerror("Автоспорт", f"Dataset відхилено: {exc}")
+            return
+        self.dataset_path = Path(selected)
+        self.dataset_text.set(
+            f"Dataset: {dataset.name}; sport={dataset.sport}; market SHA={dataset.market_sha256[:12]}; sealed results SHA={dataset.results_sha256[:12]}"
+        )
+        self.status.set("Dataset перевірено. Можна запускати replay.")
+
+    def run_dataset(self) -> None:
+        if not self.dataset_path:
+            messagebox.showinfo("Автоспорт", "Спочатку виберіть dataset.")
+            return
+        try:
+            dataset = load_dataset(self.dataset_path)
+            speed = _SPEEDS[self.speed_text.get()]
+            self.status.set("Replay виконується. Strategy agents не мають доступу до sealed results.")
+            self.update_idletasks()
+            result = self.session.run_dataset(dataset, speed=speed)
+            summary = result_summary(result)
+            self.status.set(summary)
+            self.log.insert("end", summary + "\n")
+            self.log.see("end")
             self.bank.set(self._bank_text())
-            self.portfolio.set(f"Портфель: {report.mode}; scenarios={report.scenario_count}; worst={report.worst_case}; best={report.best_case}; mean={report.mean_case}")
+            self._refresh_tickets()
         except Exception as exc:
             messagebox.showerror("Автоспорт", str(exc))
+            self.status.set("Replay завершився помилкою; стан збережено fail-safe настільки, наскільки дозволив завершений transaction boundary.")
 
-    def _on_event(self, event) -> None:
-        self.orchestrator.on_market_event(event)
-        self.log.insert("end", f"{event.observed_ts} | {event.event_id} | {event.market_id} | {event.selection_id} | {event.decimal_odds}\n")
-        self.log.see("end")
-        self.update_idletasks()
+    def _refresh_tickets(self) -> None:
+        self.tickets.delete(0, "end")
+        for line in ticket_lines(self.session):
+            self.tickets.insert("end", line)
+
+    def close_app(self) -> None:
+        try:
+            self.session.close()
+        finally:
+            self.destroy()
 
 
 def main() -> int:

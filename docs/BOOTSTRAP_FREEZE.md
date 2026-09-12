@@ -1,0 +1,1 @@
+Bootstrap planning is frozen. Future work must move executable product state unless a concrete implementation blocker requires a narrowly scoped design decision.

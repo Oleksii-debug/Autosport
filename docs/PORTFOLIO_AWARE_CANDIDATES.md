@@ -1,0 +1,59 @@
+# Portfolio-aware candidate optimization
+
+Autosport separates bounded candidate generation from final portfolio-aware paper research ranking.
+
+`BeamParlayCandidateSearch` is a combinatorial screening mechanism. Its `independent_probability` and `expected_profit_per_unit` assume independent candidate-leg probabilities and are not treated as proof of portfolio safety, correlation, or profitability.
+
+`PortfolioAwareCandidateOptimizer` takes generated candidates, the current open paper tickets, a supplied canonical `ScenarioGroup` space and a hypothetical paper stake. It creates an in-memory synthetic `PaperTicket` for each candidate without mutating `PaperBook`, then compares the whole-portfolio scenario surface before and after the candidate.
+
+## Marginal portfolio metrics
+
+For each candidate the evaluator records:
+
+- base scenario report;
+- with-candidate scenario report;
+- observed worst-case change;
+- conservative-floor change;
+- observed best-case change;
+- conservative-ceiling change;
+- expected-case change when both reports have an expected value;
+- exact/proven flags inherited from both scenario analyses;
+- existing open paper tickets that share one or more scenario groups with the candidate;
+- standalone expected profit only as a final screening/tie-break signal.
+
+The important distinction is between candidate P/L and change to the portfolio risk surface. A candidate can have the same standalone expected value as another candidate but materially improve or worsen the portfolio's worst-case exposure because of existing positions.
+
+## Exact vs approximate truth
+
+`observed_worst_case_change` is called proven only when both the base portfolio and the with-candidate portfolio have `worst_proven=true` from `ScenarioSearchEngine`.
+
+When either minimum is unproven, the optimizer does **not** rank the observed minimum as an exact floor. Its risk component falls back to `conservative_floor_change`, and `ranking_risk_truth` is `conservative-floor-change`.
+
+The same distinction is preserved for best-case extrema. Expected-case change retains the scenario engine's expected-value mode; sampled independent-group expectation remains sampled/assumption-bound and is not relabeled exact.
+
+## Scenario-space validation
+
+Final portfolio-aware evaluation requires explicit `ScenarioGroup` definitions. It fails closed when:
+
+- an existing open ticket leg is missing from the scenario space;
+- a candidate quote is missing from the scenario space;
+- a quote appears in multiple scenario groups;
+- one candidate contains two mutually exclusive outcomes from the same scenario group;
+- a candidate quote key cannot be parsed as canonical `event|market|selection`;
+- a candidate's declared event id disagrees with its quote key.
+
+The optimizer never invents correlation structure or assumes that missing scenario relationships are independent.
+
+## Ranking order
+
+Candidates are ranked deterministically by:
+
+1. whether worst-case change is proven;
+2. exact worst-case change, or conservative-floor change when not proven;
+3. availability and value of expected-case change;
+4. smaller existing dependency footprint as a tie-break;
+5. standalone independent-probability expected profit only as the final tie-break.
+
+This is a paper-research ranking surface. It does not open a ticket, bypass `PaperRiskPolicy`, execute a bookmaker action, or claim that a positive expected value is profitable in live trading.
+
+`REAL_MONEY_EXECUTION=false` remains invariant.

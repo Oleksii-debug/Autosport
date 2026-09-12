@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .session import SessionResult
+from .session import ObservationResult, SessionResult
 
 
 def result_summary(result: SessionResult) -> str:
@@ -20,3 +20,24 @@ def ticket_lines(session) -> list[str]:
             f"{ticket.status.value.upper()} | stake {ticket.stake} | odds {ticket.combined_odds} | payout {ticket.payout} | {legs}"
         )
     return lines or ["Paper tickets ще відсутні."]
+
+
+def observation_summary(result: ObservationResult) -> str:
+    flags = ", ".join(result.stats.quality_flags) if result.stats.quality_flags else "немає"
+    return (
+        f"Live snapshot: source={result.stats.source_id}; health={result.health.status}; "
+        f"received={result.stats.received}; accepted={result.stats.accepted}; "
+        f"rejected={result.stats.rejected}; current={len(result.current_quotes)}; "
+        f"quality flags={flags}."
+    )
+
+
+def observation_quote_lines(result: ObservationResult) -> list[str]:
+    lines = [
+        (
+            f"{event.event_id} | {event.market_type.value} | {event.market_id} | "
+            f"{event.selection_id} | odds {event.decimal_odds} | source time {event.source_ts or 'невідомий'}"
+        )
+        for event in result.current_quotes
+    ]
+    return lines or ["Live quotes ще відсутні."]

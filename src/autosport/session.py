@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import uuid
 from dataclasses import asdict, dataclass
 from decimal import Decimal
@@ -13,6 +12,7 @@ from .domain import MarketEvent
 from .evaluation import EvaluationSummary, evaluate
 from .ingestion import IngestionEngine, IngestionStats
 from .ingestion_health import IngestionPolicy, SourceHealthState, SourceHealthStore
+from .integrity import atomic_write_json, sha256_file
 from .market_bus import MarketEventBus
 from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
@@ -108,6 +108,7 @@ class AutosportSession:
         settlement.record(dataset.load_results_after_replay())
         settled = tuple(settlement.settle_ready(self.book))
         self.book.save(self.book_path)
+        paper_book_sha256 = sha256_file(self.book_path)
         evaluation = evaluate(self.book)
         portfolio = self.portfolio_engine.analyse(list(self.book.tickets.values()))
         destination = self.workspace / f"run-{replay.run_id}.json"
@@ -120,12 +121,19 @@ class AutosportSession:
             experiment_key,
             str(destination),
         )
-        self._write_run_summary(dataset, result, destination)
+        self._write_run_summary(dataset, result, destination, paper_book_sha256)
         self.registry.complete(experiment_key, str(destination))
         return result
 
-    def _write_run_summary(self, dataset: ReplayDataset, result: SessionResult, destination: Path) -> None:
+    def _write_run_summary(
+        self,
+        dataset: ReplayDataset,
+        result: SessionResult,
+        destination: Path,
+        paper_book_sha256: str,
+    ) -> None:
         payload = {
+            "schema_version": 2,
             "dataset_name": dataset.name,
             "sport": dataset.sport,
             "strategy_id": self.strategy_id,
@@ -137,11 +145,12 @@ class AutosportSession:
             "replay_dataset_hash": result.replay.dataset_hash,
             "settled_ticket_ids": list(result.settled_ticket_ids),
             "balance": str(result.balance),
+            "paper_book_sha256": paper_book_sha256,
             "evaluation": {key: str(value) if isinstance(value, Decimal) else value for key, value in asdict(result.evaluation).items()},
             "portfolio": {key: str(value) if isinstance(value, Decimal) else value for key, value in asdict(result.portfolio).items()},
             "real_money_execution": False,
         }
-        destination.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        atomic_write_json(destination, payload)
 
     def close(self) -> None:
         self.book.save(self.book_path)

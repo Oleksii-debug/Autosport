@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import tkinter as tk
+import uuid
 from decimal import Decimal
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .agents import AgentContext, AgentOrchestrator, MarketMirrorAgent, PaperBaselineAgent
 from .paper import PaperBook
+from .portfolio import PortfolioEngine
 from .replay import ReplayEngine
 
 
@@ -14,21 +16,23 @@ class AutosportApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Автоспорт — V1 Paper Lab")
-        self.geometry("760x520")
+        self.geometry("820x560")
         self.book = PaperBook(Decimal("10000"))
         self.context = AgentContext(self.book)
         self.orchestrator = AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent()], self.context)
         self.replay_path: Path | None = None
         self.status = tk.StringVar(value="Готово. Завантажте історичний JSONL replay.")
         self.bank = tk.StringVar(value=self._bank_text())
+        self.portfolio = tk.StringVar(value="Портфель: ще немає відкритих paper tickets.")
         self._build()
 
     def _build(self) -> None:
         frame = ttk.Frame(self, padding=16)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="Автоспорт — V1 Paper Lab", font=("Segoe UI", 16, "bold")).pack(anchor="w")
-        ttk.Label(frame, textvariable=self.bank).pack(anchor="w", pady=(12, 6))
-        ttk.Label(frame, textvariable=self.status, wraplength=700).pack(anchor="w", pady=(0, 12))
+        ttk.Label(frame, textvariable=self.bank).pack(anchor="w", pady=(12, 4))
+        ttk.Label(frame, textvariable=self.portfolio).pack(anchor="w", pady=(0, 6))
+        ttk.Label(frame, textvariable=self.status, wraplength=760).pack(anchor="w", pady=(0, 12))
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x")
         ttk.Button(buttons, text="Завантажити replay JSONL", command=self.load_replay).pack(side="left", padx=(0, 8))
@@ -41,8 +45,8 @@ class AutosportApp(tk.Tk):
         self.bind("<Control-r>", lambda _event: self.run_replay())
 
     def _bank_text(self) -> str:
-        open_count = sum(t.status.value == "open" for t in self.book.tickets.values())
-        return f"Віртуальний банк: {self.book.balance} | Відкрито tickets: {open_count}"
+        open_count = sum(ticket.status.value == "open" for ticket in self.book.tickets.values())
+        return f"Віртуальний банк: {self.book.balance} | Відкрито tickets: {open_count} | committed: {self.book.committed_stake}"
 
     def load_replay(self) -> None:
         selected = filedialog.askopenfilename(title="Вибрати replay JSONL", filetypes=[("JSON Lines", "*.jsonl"), ("All files", "*.*")])
@@ -56,12 +60,13 @@ class AutosportApp(tk.Tk):
             return
         try:
             engine = ReplayEngine.from_jsonl(self.replay_path)
-            run = engine.run(self._on_event, speed=0)
-            self.context.replay_run_id = run.run_id
-            self.status.set(
-                f"Replay завершено: {run.event_count} events; dataset {run.dataset_hash[:12]}. Майбутній результат був sealed до завершення."
-            )
+            run_id = str(uuid.uuid4())
+            self.context.replay_run_id = run_id
+            run = engine.run(self._on_event, speed=0, run_id=run_id)
+            report = PortfolioEngine().analyse(list(self.book.tickets.values()))
+            self.status.set(f"Replay завершено: {run.event_count} events; dataset {run.dataset_hash[:12]}; future result sealed до завершення.")
             self.bank.set(self._bank_text())
+            self.portfolio.set(f"Портфель: {report.mode}; scenarios={report.scenario_count}; worst={report.worst_case}; best={report.best_case}; mean={report.mean_case}")
         except Exception as exc:
             messagebox.showerror("Автоспорт", str(exc))
 

@@ -18,7 +18,7 @@ class PortfolioReport:
 
 
 class PortfolioEngine:
-    """Scenario P&L engine with exact enumeration when bounded and deterministic sampling otherwise."""
+    """Scenario P&L engine using canonical quote keys, exact enumeration when bounded, deterministic sampling otherwise."""
 
     def __init__(self, max_exact_states: int = 100_000, sample_count: int = 20_000, seed: int = 7) -> None:
         self.max_exact_states = max_exact_states
@@ -26,39 +26,38 @@ class PortfolioEngine:
         self.seed = seed
 
     @staticmethod
-    def affected_tickets(tickets: list[PaperTicket], selection_id: str) -> list[str]:
-        return [
-            ticket.ticket_id
-            for ticket in tickets
-            if ticket.status is TicketStatus.OPEN and any(leg.selection_id == selection_id for leg in ticket.legs)
-        ]
+    def affected_tickets(tickets: list[PaperTicket], quote_key: str) -> list[str]:
+        return [ticket.ticket_id for ticket in tickets if ticket.status is TicketStatus.OPEN and any(leg.quote_key == quote_key for leg in ticket.legs)]
 
     @staticmethod
-    def scenario_profit(tickets: list[PaperTicket], winning_selection_ids: set[str]) -> Decimal:
+    def scenario_profit(tickets: list[PaperTicket], winning_quote_keys: set[str]) -> Decimal:
         total = Decimal("0")
         for ticket in tickets:
             if ticket.status is not TicketStatus.OPEN:
                 continue
-            if all(leg.selection_id in winning_selection_ids for leg in ticket.legs):
+            if all(leg.quote_key in winning_quote_keys for leg in ticket.legs):
                 total += ticket.stake * ticket.combined_odds - ticket.stake
             else:
                 total -= ticket.stake
         return total
 
-    def analyse(
-        self,
-        tickets: list[PaperTicket],
-        exclusive_groups: list[set[str]] | None = None,
-    ) -> PortfolioReport:
-        open_tickets = [t for t in tickets if t.status is TicketStatus.OPEN]
+    def analyse(self, tickets: list[PaperTicket], exclusive_groups: list[set[str]] | None = None) -> PortfolioReport:
+        open_tickets = [ticket for ticket in tickets if ticket.status is TicketStatus.OPEN]
         if not open_tickets:
             zero = Decimal("0")
             return PortfolioReport("exact", 1, zero, zero, zero)
-        all_selections = {leg.selection_id for t in open_tickets for leg in t.legs}
         groups = [set(group) for group in (exclusive_groups or [])]
+        seen: set[str] = set()
+        for group in groups:
+            if seen.intersection(group):
+                raise ValueError("exclusive groups must be disjoint")
+            seen.update(group)
+        all_keys = {leg.quote_key for ticket in open_tickets for leg in ticket.legs}
         grouped = set().union(*groups) if groups else set()
-        ungrouped = sorted(all_selections - grouped)
-        state_count = (2 ** len(ungrouped))
+        if not grouped.issubset(all_keys):
+            raise ValueError("exclusive group contains quote not present in portfolio")
+        ungrouped = sorted(all_keys - grouped)
+        state_count = 2 ** len(ungrouped)
         for group in groups:
             state_count *= max(1, len(group))
         if state_count <= self.max_exact_states:
@@ -67,13 +66,7 @@ class PortfolioEngine:
         else:
             profits = list(self._sample_profits(open_tickets, groups, ungrouped))
             mode = "approximate"
-        return PortfolioReport(
-            mode=mode,
-            scenario_count=len(profits),
-            worst_case=min(profits),
-            best_case=max(profits),
-            mean_case=sum(profits, Decimal("0")) / Decimal(len(profits)),
-        )
+        return PortfolioReport(mode, len(profits), min(profits), max(profits), sum(profits, Decimal("0")) / Decimal(len(profits)))
 
     def _exact_profits(self, tickets, groups, ungrouped):
         group_choices = [sorted(group) for group in groups]
@@ -82,9 +75,7 @@ class PortfolioEngine:
             base = set(selected_group_outcomes)
             for mask in range(2 ** len(ungrouped)):
                 winners = set(base)
-                for idx, selection in enumerate(ungrouped):
-                    if mask & (1 << idx):
-                        winners.add(selection)
+                winners.update(selection for index, selection in enumerate(ungrouped) if mask & (1 << index))
                 yield self.scenario_profit(tickets, winners)
 
     def _sample_profits(self, tickets, groups, ungrouped):

@@ -66,6 +66,19 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(provider.calls, 0)
             store.close()
 
+    def test_provider_cannot_return_more_than_requested_batch_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            provider = StaticProvider(
+                "source",
+                [ProviderBatch("source", (self._quote(None, 1, "a"), self._quote(None, 2, "b")))],
+            )
+            with self.assertRaisesRegex(ValueError, "above requested batch bound"):
+                engine.poll_once(provider, max_items=1)
+            self.assertEqual(len(store.events()), 0)
+            self.assertEqual(health.get("source").status, "failed")
+            store.close()
+
     def test_success_persists_health_counters_and_provider_gap_flag(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, store, health = self._engine(tmp)

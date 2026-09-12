@@ -1,6 +1,6 @@
 # Read-only table-tennis observation
 
-Autosport can acquire one bounded table-tennis odds snapshot without a replay dataset and persist it through the same canonical Market Store used by downstream research.
+Autosport can acquire a bounded table-tennis odds snapshot without a replay dataset and persist it through the same canonical Market Store used by downstream research.
 
 This path is observation-only. It has no bookmaker account, wager placement, funding, withdrawal or real-money execution capability.
 
@@ -47,6 +47,29 @@ Useful bounded controls:
 
 The textual output includes source id, health state, received/accepted/rejected counts, quality flags, current quote count, latest source timestamp, cursor and a bounded set of current quote lines.
 
-## Windows GUI boundary
+## Windows GUI live snapshot
 
-This change intentionally does not call live HTTP acquisition synchronously from the Tk main thread. A later GUI live-observation slice must use a worker/message boundary so a slow provider cannot freeze keyboard navigation or screen-reader interaction.
+The Windows GUI exposes one manual read-only refresh at a time. The mode is explicitly selected as either:
+
+- `Public preview — без ключа`;
+- `API key з environment`.
+
+Authenticated mode reads only `AUTOSPORT_PARLAYAPI_KEY` from the process environment. No secret entry field exists in the GUI.
+
+`OneShotObservationWorker` performs acquisition on a daemon worker thread. That worker never calls Tk. `observe_workspace_once()` opens its own short-lived SQLite WAL connection and SourceHealthStore, performs the bounded snapshot, closes the market connection and returns an immutable result through a thread-safe queue.
+
+The Tk main thread polls the queue with `after()`, then updates accessible status text and the live quote Listbox. The refresh control stays disabled until the terminal worker message is consumed, preventing overlapping manual snapshots from one GUI instance.
+
+Keyboard navigation:
+
+- `Ctrl+L` — start one live refresh;
+- `F7` — focus the live quote list;
+- existing replay shortcuts remain unchanged.
+
+The packaged accessibility audit treats live mode, live refresh and live quote list as critical controls. It requires the mode Value pattern, refresh Invoke pattern and exposed UIA rows for the live Listbox. This remains an in-process machine prerequisite only; it does not change `HUMAN_TESTED=false` or `NVDA_VERIFIED=false`.
+
+## Thread and persistence boundary
+
+The GUI's long-lived `AutosportSession` owns a SQLite connection created on the Tk thread. That connection is never passed to the worker. The worker uses separate short-lived store connections to the same WAL-backed workspace, avoiding cross-thread sqlite3 use.
+
+The worker path does not instantiate or save PaperBook. A live snapshot cannot create tickets or modify virtual bankroll.

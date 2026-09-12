@@ -1,0 +1,1 @@
+Do not add more bootstrap prose. Open PR, qualify CI, then implement portfolio/persistence/provider work.

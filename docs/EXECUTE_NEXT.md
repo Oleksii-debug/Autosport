@@ -1,0 +1,1 @@
+Next action: open/qualify bootstrap PR, then implement Portfolio/Exposure exact oracle and dependency graph. No more bootstrap planning.

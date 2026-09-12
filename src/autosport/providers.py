@@ -27,6 +27,13 @@ class ProviderBatch:
     source_id: str
     quotes: tuple[ProviderQuote, ...]
     cursor: str | None = None
+    quality_flags: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if not self.source_id:
+            raise ValueError("source_id required")
+        if len(set(self.quality_flags)) != len(self.quality_flags):
+            raise ValueError("duplicate provider batch quality flag")
 
 
 class MarketProvider(Protocol):
@@ -61,10 +68,16 @@ class CanonicalNormalizer:
 class InMemoryProvider:
     """Deterministic provider used for fixtures, replay bridges and provider-contract tests."""
 
-    def __init__(self, source_id: str, quotes: list[ProviderQuote]) -> None:
+    def __init__(
+        self,
+        source_id: str,
+        quotes: list[ProviderQuote],
+        quality_flags: tuple[str, ...] = (),
+    ) -> None:
         self.source_id = source_id
         self._quotes = list(quotes)
         self._offset = 0
+        self.quality_flags = quality_flags
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         if max_items <= 0:
@@ -72,4 +85,4 @@ class InMemoryProvider:
         items = self._quotes[self._offset : self._offset + max_items]
         self._offset += len(items)
         cursor = str(self._offset)
-        return ProviderBatch(self.source_id, tuple(items), cursor)
+        return ProviderBatch(self.source_id, tuple(items), cursor, self.quality_flags)

@@ -10,6 +10,9 @@ from autosport.providers import InMemoryProvider, ProviderQuote
 from autosport.ui_model import observation_quote_lines, observation_summary
 
 
+_RECEIVE_TIME = "2026-09-12T20:00:02+00:00"
+
+
 class LiveObservationTests(unittest.TestCase):
     @staticmethod
     def _provider() -> InMemoryProvider:
@@ -38,6 +41,15 @@ class LiveObservationTests(unittest.TestCase):
         )
 
     @staticmethod
+    def _observe(workspace: str | Path):
+        return observe_workspace_once(
+            workspace,
+            LiveObservationTests._provider(),
+            max_items=10,
+            clock=lambda: _RECEIVE_TIME,
+        )
+
+    @staticmethod
     def _wait_for_message(worker: OneShotObservationWorker, timeout: float = 2.0):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -49,7 +61,7 @@ class LiveObservationTests(unittest.TestCase):
 
     def test_workspace_observer_uses_short_lived_market_and_health_stores_only(self):
         with tempfile.TemporaryDirectory() as tmp:
-            result = observe_workspace_once(tmp, self._provider(), max_items=10)
+            result = self._observe(tmp)
             self.assertEqual(result.stats.accepted, 2)
             self.assertEqual(result.health.status, "healthy")
             self.assertEqual(len(result.current_quotes), 2)
@@ -66,7 +78,7 @@ class LiveObservationTests(unittest.TestCase):
             entered.set()
             release.wait(timeout=2)
             with tempfile.TemporaryDirectory() as tmp:
-                return observe_workspace_once(tmp, self._provider(), max_items=10)
+                return self._observe(tmp)
 
         self.assertTrue(worker.start(slow_task))
         self.assertTrue(entered.wait(timeout=1))
@@ -88,7 +100,7 @@ class LiveObservationTests(unittest.TestCase):
 
     def test_presentation_is_deterministic_text_for_screen_reader_surface(self):
         with tempfile.TemporaryDirectory() as tmp:
-            result = observe_workspace_once(tmp, self._provider(), max_items=10)
+            result = self._observe(tmp)
             summary = observation_summary(result)
             lines = observation_quote_lines(result)
             self.assertIn("health=healthy", summary)

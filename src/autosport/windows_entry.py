@@ -11,6 +11,12 @@ def main(argv: list[str] | None = None) -> int:
         from autosport.diagnostic import run_machine_diagnostic
 
         return run_machine_diagnostic(args[1])
+    if args and args[0] == "--accessibility-audit-output":
+        if len(args) != 2:
+            return 2
+        from autosport.accessibility_audit import run_accessibility_audit
+
+        return run_accessibility_audit(args[1])
     from autosport.gui import main as gui_main
 
     return gui_main()

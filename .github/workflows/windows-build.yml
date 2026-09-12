@@ -29,4 +29,5 @@ jobs:
           path: |
             dist/Autosport-V1-windows-x64.zip
             dist/packaged-diagnostic.json
+            dist/accessibility-audit.json
           if-no-files-found: error

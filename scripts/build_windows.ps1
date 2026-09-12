@@ -13,6 +13,14 @@ if ($process.ExitCode -ne 0) { throw "Packaged Autosport.exe diagnostic exited $
 $diagnostic = Get-Content $diag -Raw | ConvertFrom-Json
 if ($diagnostic.status -ne 'PASS') { throw 'Packaged Autosport.exe diagnostic did not PASS' }
 
+$a11y = Join-Path $PWD 'dist/accessibility-audit.json'
+if (Test-Path $a11y) { Remove-Item -Force $a11y }
+$a11yProcess = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--accessibility-audit-output', $a11y -Wait -PassThru
+if ($a11yProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe accessibility audit exited $($a11yProcess.ExitCode)" }
+$accessibility = Get-Content $a11y -Raw | ConvertFrom-Json
+if ($accessibility.status -ne 'PASS') { throw 'Packaged accessibility audit did not PASS' }
+if ($accessibility.nvda_verified -ne $false) { throw 'Machine accessibility audit must not claim NVDA verification' }
+
 $sourceSha = $env:AUTOSPORT_SOURCE_SHA
 if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
 python scripts/package_windows.py `

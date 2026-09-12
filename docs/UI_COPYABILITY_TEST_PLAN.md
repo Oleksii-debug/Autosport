@@ -1,0 +1,3 @@
+# UI copyability test plan
+
+Static bootstrap gate: semantic main/headings/table present; no global `user-select:none`; no JS `preventDefault` shortcut interception; primary market/portfolio containers are ordinary visible DOM. Next browser gate: render representative dynamic market/ticket/portfolio text, select it using browser Selection API and keyboard-equivalent range, call normal copy path/Clipboard where test environment permits, and assert copied text matches visible text. Regression fixture must also prove an `aria-live` notification is duplicate-only while persistent text remains in the document. Final human gate: owner selects/copies the same text with keyboard/NVDA in packaged Windows build.

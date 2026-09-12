@@ -15,6 +15,7 @@ from .storage import SQLiteMarketStore
 
 
 ObservationTask = Callable[[], ObservationResult]
+Clock = Callable[[], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +79,7 @@ def observe_workspace_once(
     *,
     max_items: int = 250,
     policy: IngestionPolicy | None = None,
+    clock: Clock | None = None,
 ) -> ObservationResult:
     """Thread-safe workspace observation using short-lived store connections and no PaperBook."""
 
@@ -90,6 +92,7 @@ def observe_workspace_once(
             MarketEventBus(store),
             policy=policy,
             health_store=health_store,
+            clock=clock,
         )
         stats = engine.poll_once(provider, max_items=max_items)
         current = tuple(

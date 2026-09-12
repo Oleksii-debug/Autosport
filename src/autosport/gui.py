@@ -4,6 +4,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import tk_uia
+
 from .dataset import load_dataset
 from .paths import default_workspace
 from .session import AutosportSession
@@ -11,6 +13,14 @@ from .ui_model import result_summary, ticket_lines
 
 
 _SPEEDS = {"Подієвий — максимально швидко": 0.0, "1× реальний час": 1.0, "10×": 10.0, "100×": 100.0}
+
+AUTOMATION_IDS = {
+    "choose_dataset": 101,
+    "run_replay": 102,
+    "replay_speed": 103,
+    "tickets": 201,
+    "log": 202,
+}
 
 
 class AutosportApp(tk.Tk):
@@ -26,6 +36,8 @@ class AutosportApp(tk.Tk):
         self.dataset_text = tk.StringVar(value="Dataset не вибраний.")
         self.speed_text = tk.StringVar(value="Подієвий — максимально швидко")
         self._build()
+        self.update_idletasks()
+        self._configure_accessibility()
         self.protocol("WM_DELETE_WINDOW", self.close_app)
 
     def _build(self) -> None:
@@ -38,16 +50,28 @@ class AutosportApp(tk.Tk):
 
         controls = ttk.Frame(frame)
         controls.pack(fill="x")
-        ttk.Button(controls, text="Вибрати dataset", command=self.choose_dataset).pack(side="left", padx=(0, 8))
-        ttk.Button(controls, text="Запустити paper replay", command=self.run_dataset).pack(side="left", padx=(0, 8))
-        ttk.Label(controls, text="Швидкість:").pack(side="left", padx=(8, 4))
-        speed = ttk.Combobox(controls, textvariable=self.speed_text, values=list(_SPEEDS), state="readonly", width=28)
-        speed.pack(side="left")
+        self.choose_button = ttk.Button(controls, text="Вибрати dataset", command=self.choose_dataset)
+        self.choose_button.pack(side="left", padx=(0, 8))
+        self.run_button = ttk.Button(controls, text="Запустити paper replay", command=self.run_dataset)
+        self.run_button.pack(side="left", padx=(0, 8))
+        self.speed_label = ttk.Label(controls, text="Швидкість:")
+        self.speed_label.pack(side="left", padx=(8, 4))
+        self.speed = ttk.Combobox(
+            controls,
+            textvariable=self.speed_text,
+            values=list(_SPEEDS),
+            state="readonly",
+            width=28,
+            takefocus=True,
+        )
+        self.speed.pack(side="left")
 
-        ttk.Label(frame, text="Paper tickets і результати").pack(anchor="w", pady=(16, 4))
+        self.tickets_label = ttk.Label(frame, text="Paper tickets і результати")
+        self.tickets_label.pack(anchor="w", pady=(16, 4))
         self.tickets = tk.Listbox(frame, height=9, takefocus=True)
         self.tickets.pack(fill="x")
-        ttk.Label(frame, text="Журнал").pack(anchor="w", pady=(16, 4))
+        self.log_label = ttk.Label(frame, text="Журнал")
+        self.log_label.pack(anchor="w", pady=(16, 4))
         self.log = tk.Text(frame, height=13, wrap="word", takefocus=True)
         self.log.pack(fill="both", expand=True)
 
@@ -55,6 +79,20 @@ class AutosportApp(tk.Tk):
         self.bind("<Control-r>", lambda _event: self.run_dataset())
         self.bind("<F6>", lambda _event: self.tickets.focus_set())
         self._refresh_tickets()
+
+    def _configure_accessibility(self) -> None:
+        self.accessibility_strategy = tk_uia.enable(self)
+        controls = (
+            (self.choose_button, "Вибрати replay dataset", "Відкриває вибір папки replay dataset. Гаряча клавіша Control+O.", AUTOMATION_IDS["choose_dataset"]),
+            (self.run_button, "Запустити paper replay", "Запускає causal paper replay для вибраного dataset. Гаряча клавіша Control+R.", AUTOMATION_IDS["run_replay"]),
+            (self.speed, "Швидкість replay", "Вибір подієвого, 1×, 10× або 100× режиму replay.", AUTOMATION_IDS["replay_speed"]),
+            (self.tickets, "Paper tickets і результати", "Список віртуальних tickets та їх поточних результатів. F6 переводить сюди фокус.", AUTOMATION_IDS["tickets"]),
+            (self.log, "Журнал виконання", "Текстовий журнал replay, settlement та evaluation.", AUTOMATION_IDS["log"]),
+        )
+        for widget, name, description, automation_id in controls:
+            tk_uia.set_acc_name(widget, name)
+            tk_uia.set_acc_description(widget, description)
+            tk_uia.set_automation_id(widget, automation_id)
 
     def _bank_text(self) -> str:
         return (

@@ -1,0 +1,28 @@
+name: Autosport Core CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run deterministic core tests
+        shell: bash
+        run: PYTHONPATH=src python -m unittest discover -s tests -v
+      - name: Compile Python package
+        run: python -m compileall -q src tests

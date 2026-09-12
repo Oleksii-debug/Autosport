@@ -10,6 +10,7 @@ from typing import Callable
 from .agents import AgentContext, AgentOrchestrator, MarketMirrorAgent, PaperBaselineAgent
 from .dataset import load_dataset
 from .domain import MarketEvent
+from .endurance import EnduranceConfig, run_endurance
 from .paper import PaperBook
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .portfolio import PortfolioEngine
@@ -40,6 +41,14 @@ def build_parser() -> argparse.ArgumentParser:
     observe.add_argument("--show", type=int, default=50, help="maximum current quote lines to print")
     repair = sub.add_parser("repair-workspace", help="reconcile only late-crashed runs with durable hash-matched completion evidence")
     repair.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
+    endurance = sub.add_parser("endurance", help="run deterministic bounded ingestion/replay/restart/settlement stress checks")
+    endurance.add_argument("--workspace", type=Path, default=Path(".autosport-endurance"))
+    endurance.add_argument("--events", type=int, default=20_000)
+    endurance.add_argument("--quote-keys", type=int, default=200)
+    endurance.add_argument("--batch-size", type=int, default=500)
+    endurance.add_argument("--restart-cycles", type=int, default=3)
+    endurance.add_argument("--tickets", type=int, default=50)
+    endurance.add_argument("--output", type=Path, default=None)
     sub.add_parser("gui", help="launch Windows-oriented GUI")
     return parser
 
@@ -115,6 +124,42 @@ def run_repair_workspace(workspace: Path) -> int:
     return 4 if report.unresolved_without_summary else 0
 
 
+def run_endurance_command(
+    workspace: Path,
+    *,
+    events: int,
+    quote_keys: int,
+    batch_size: int,
+    restart_cycles: int,
+    tickets: int,
+    output: Path | None,
+) -> int:
+    config = EnduranceConfig(
+        event_count=events,
+        quote_keys=quote_keys,
+        batch_size=batch_size,
+        restart_cycles=restart_cycles,
+        paper_tickets=tickets,
+    )
+    destination = output or (workspace / "endurance-report.json")
+    report = run_endurance(workspace, config, output_path=destination)
+    print(
+        f"endurance={report.status} events={report.history_events} current={report.current_quotes} "
+        f"duplicate_accepted={report.accepted_duplicate_pass} restarts={len(report.restart_hashes)} "
+        f"reingest_hash_match={report.independent_reingest_hash_match}"
+    )
+    print(
+        f"ingest_seconds={report.ingest_elapsed_seconds:.6f} "
+        f"accepted_events_per_second={report.accepted_events_per_second:.2f} "
+        f"peak_traced_memory_bytes={report.peak_traced_memory_bytes}"
+    )
+    print(f"invariant_fingerprint={report.stable_invariant_fingerprint}")
+    print(f"report={destination}")
+    for failure in report.failures:
+        print(f"FAIL {failure}")
+    return 0 if report.status == "PASS" else 5
+
+
 def _print_observation(result: ObservationResult, show: int) -> None:
     flags = ",".join(result.stats.quality_flags) if result.stats.quality_flags else "none"
     print(
@@ -166,6 +211,16 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "repair-workspace":
         return run_repair_workspace(args.workspace)
+    if args.command == "endurance":
+        return run_endurance_command(
+            args.workspace,
+            events=args.events,
+            quote_keys=args.quote_keys,
+            batch_size=args.batch_size,
+            restart_cycles=args.restart_cycles,
+            tickets=args.tickets,
+            output=args.output,
+        )
     if args.command == "gui":
         from .gui import main as gui_main
         return gui_main()

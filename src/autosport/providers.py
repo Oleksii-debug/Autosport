@@ -60,6 +60,7 @@ class CanonicalNormalizer:
             market_type=quote.market_type,
             status=quote.status,
             source_ts=quote.source_ts,
+            ingest_ts=quote.observed_ts,
             score_state=quote.score_state,
             metadata=dict(quote.metadata),
         )

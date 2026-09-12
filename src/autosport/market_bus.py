@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from .domain import MarketEvent
 from .storage import SQLiteMarketStore
@@ -17,14 +17,19 @@ class MarketEventBus:
         self.subscribers.append(callback)
 
     def publish(self, event: MarketEvent) -> bool:
-        if not self.store.append(event):
+        accepted = self.store.append_batch_accepted([event])
+        if not accepted:
             return False
-        for callback in tuple(self.subscribers):
-            callback(event)
+        self._notify(accepted)
         return True
 
-    def publish_many(self, events: list[MarketEvent]) -> int:
-        accepted = 0
+    def publish_many(self, events: Iterable[MarketEvent]) -> int:
+        accepted = self.store.append_batch_accepted(events)
+        self._notify(accepted)
+        return len(accepted)
+
+    def _notify(self, events: Iterable[MarketEvent]) -> None:
+        subscribers = tuple(self.subscribers)
         for event in events:
-            accepted += int(self.publish(event))
-        return accepted
+            for callback in subscribers:
+                callback(event)

@@ -12,6 +12,7 @@ from .agents import AgentContext, AgentOrchestrator, MarketMirrorAgent, PaperBas
 from .dataset import load_dataset
 from .domain import MarketEvent
 from .endurance import EnduranceConfig, run_endurance
+from .evaluation_bundle import WalkForwardBundle, evaluate_walk_forward_bundle
 from .integrity import atomic_write_json
 from .paper import PaperBook
 from .parlayapi_provider import (
@@ -57,6 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("strategies", help="list canonical replay strategies and their runtime agents")
     verify = sub.add_parser("verify-dataset", help="verify sealed hashes and historical corpus governance without replay")
     verify.add_argument("path", type=Path)
+    walk_forward = sub.add_parser(
+        "walk-forward-evaluate",
+        help="strict complete-cohort temporal evaluation of typed pre-outcome forecasts",
+    )
+    walk_forward.add_argument("path", type=Path, help="walk-forward evaluation bundle JSON")
+    walk_forward.add_argument("--output", type=Path, default=None, help="optional machine report JSON path")
     observe = sub.add_parser("observe-table-tennis", help="fetch one read-only table-tennis market snapshot")
     observe.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
     observe.add_argument("--public-preview", action="store_true", help="use provider public preview without an API key")
@@ -169,6 +176,22 @@ def run_verify_dataset(path: Path) -> int:
         f"acquired_at={governance.acquired_at} imported_at={governance.imported_at} "
         f"outcome_reveal_after={governance.outcome_reveal_after}"
     )
+    return 0
+
+
+def run_walk_forward_evaluate(path: Path, output: Path | None = None) -> int:
+    bundle = WalkForwardBundle.from_path(path)
+    report = evaluate_walk_forward_bundle(bundle)
+    destination = output or path.with_name(path.stem + "-walk-forward-report.json")
+    atomic_write_json(destination, report)
+    print(
+        f"walk_forward=OK windows={report['window_count']} "
+        f"evaluated_forecasts={report['evaluated_forecast_count']} "
+        f"mode={report['evaluation_mode']}"
+    )
+    print(f"source_sha256={report['source_sha256']}")
+    print("profitability_claim=false real_money_execution=false")
+    print(f"report={destination}")
     return 0
 
 
@@ -369,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_strategies()
     if args.command == "verify-dataset":
         return run_verify_dataset(args.path)
+    if args.command == "walk-forward-evaluate":
+        return run_walk_forward_evaluate(args.path, args.output)
     if args.command == "observe-table-tennis":
         return run_observe_table_tennis(
             args.workspace,

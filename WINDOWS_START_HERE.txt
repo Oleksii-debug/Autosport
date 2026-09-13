@@ -25,6 +25,10 @@ STRATEGY COMPARISON
 
 18. Для fail-closed порівняння двох або більше completed strategy run summaries на тому самому sealed dataset відкрийте PowerShell у папці програми та виконайте: .\Autosport-Data.exe compare-strategies <run-summary-1.json> <run-summary-2.json> --baseline-strategy baseline-v1 --output strategy-comparison.json. Команда приймає лише сумісні canonical run summaries і записує machine-readable report; observed paper ordering не є доказом profitability, predictive superiority або out-of-sample переваги.
 
+WALK-FORWARD EVALUATION
+
+19. Для strict complete-cohort temporal evaluation використовуйте той самий portable tool: .\Autosport-Data.exe walk-forward-evaluate <walk-forward-bundle.json> --output walk-forward-report.json. Команда маршрутизується у canonical Autosport evaluator і fail-closed відхиляє невалідний evaluation bundle. Наявність або успішний machine report сама по собі не доводить lawful historical coverage, licensing/retention, profitability чи predictive superiority; ці твердження потребують відповідного bound evidence.
+
 Live observation є read-only. Paper/replay функції використовують лише віртуальний банк. Програма не виконує реальні грошові ставки і не має механізму керування букмекерським рахунком, поповнення або виведення коштів.
 
 Machine accessibility/keyboard audits є prerequisite evidence і не означають physical NVDA speech verification.

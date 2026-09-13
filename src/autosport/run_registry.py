@@ -41,22 +41,46 @@ class RunRegistry:
         strategy_id: str,
         run_id: str,
         allow_repeat: bool = False,
+        *,
+        base_paper_book_sha256: str | None = None,
+        base_decision_ledger_sha256: str | None = None,
     ) -> str:
+        if (base_paper_book_sha256 is None) != (base_decision_ledger_sha256 is None):
+            raise ValueError("base transaction hashes must be supplied together")
+        for value in (base_paper_book_sha256, base_decision_ledger_sha256):
+            if value is not None and (not isinstance(value, str) or len(value) != 64):
+                raise ValueError("base transaction hashes must be SHA-256 hex strings")
+
         state = self._read()
         base_identity = self.experiment_identity(market_sha256, results_sha256, strategy_id)
-        existing = [item for item in state["runs"].values() if item.get("base_identity") == base_identity]
-        unresolved = [item for item in existing if item.get("status") == "in_progress"]
+        existing_pairs = [
+            (key, item)
+            for key, item in state["runs"].items()
+            if item.get("base_identity") == base_identity
+        ]
+        unresolved = [
+            item
+            for item in state["runs"].values()
+            if item.get("status") == "in_progress"
+        ]
         if unresolved:
             raise UnresolvedExperimentError(
-                "An earlier run of this dataset/strategy is unresolved; use a new workspace or repair the unresolved run before replaying."
+                "Workspace has an unresolved economic run; repair it before starting another paper experiment."
             )
-        completed = [item for item in existing if item.get("status") == "completed"]
+        completed = [item for _key, item in existing_pairs if item.get("status") == "completed"]
         if completed and not allow_repeat:
             raise RepeatedExperimentError(
                 "This dataset/strategy already completed in this workspace. Explicit allow_repeat is required for another experiment."
             )
-        key = base_identity if not completed else f"{base_identity}:repeat:{run_id}"
-        state["runs"][key] = {
+
+        if not existing_pairs:
+            key = base_identity
+        elif completed:
+            key = f"{base_identity}:repeat:{run_id}"
+        else:
+            key = f"{base_identity}:retry:{run_id}"
+
+        entry = {
             "base_identity": base_identity,
             "run_id": run_id,
             "market_sha256": market_sha256,
@@ -64,10 +88,21 @@ class RunRegistry:
             "strategy_id": strategy_id,
             "status": "in_progress",
         }
+        if base_paper_book_sha256 is not None:
+            entry["base_paper_book_sha256"] = base_paper_book_sha256
+            entry["base_decision_ledger_sha256"] = base_decision_ledger_sha256
+        state["runs"][key] = entry
         self._write(state)
         return key
 
-    def complete(self, key: str, result_path: str | None = None) -> None:
+    def complete(
+        self,
+        key: str,
+        result_path: str | None = None,
+        *,
+        paper_book_sha256: str | None = None,
+        decision_ledger_sha256: str | None = None,
+    ) -> None:
         state = self._read()
         item = state["runs"].get(key)
         if item is None:
@@ -76,6 +111,36 @@ class RunRegistry:
             raise ValueError("run is not in progress")
         item["status"] = "completed"
         item["result_path"] = result_path
+        if paper_book_sha256 is not None:
+            item["paper_book_sha256"] = paper_book_sha256
+        if decision_ledger_sha256 is not None:
+            item["decision_ledger_sha256"] = decision_ledger_sha256
+        self._write(state)
+
+    def abort_uncommitted(
+        self,
+        key: str,
+        *,
+        reason: str,
+        paper_book_sha256: str,
+        decision_ledger_sha256: str,
+    ) -> None:
+        state = self._read()
+        item = state["runs"].get(key)
+        if item is None:
+            raise KeyError(key)
+        if item.get("status") != "in_progress":
+            raise ReconciliationError("only an in-progress run can be aborted")
+        expected_book = item.get("base_paper_book_sha256")
+        expected_ledger = item.get("base_decision_ledger_sha256")
+        if not isinstance(expected_book, str) or not isinstance(expected_ledger, str):
+            raise ReconciliationError("registry lacks base hashes required for safe uncommitted abort")
+        if paper_book_sha256 != expected_book or decision_ledger_sha256 != expected_ledger:
+            raise ReconciliationError("canonical economic state does not match the recorded transaction base")
+        item["status"] = "aborted"
+        item["abort_reason"] = reason
+        item["paper_book_sha256"] = paper_book_sha256
+        item["decision_ledger_sha256"] = decision_ledger_sha256
         self._write(state)
 
     def in_progress(self) -> tuple[tuple[str, dict], ...]:
@@ -98,7 +163,7 @@ class RunRegistry:
         result_path: str | Path,
         paper_book_path: str | Path,
     ) -> None:
-        """Complete only a late-crashed run whose durable summary and current PaperBook prove the same commit."""
+        """Complete only a run whose durable summary and current PaperBook prove the same commit."""
 
         state = self._read()
         item = state["runs"].get(key)
@@ -154,6 +219,14 @@ class RunRegistry:
         if actual_book_hash != declared_book_hash:
             raise ReconciliationError("current PaperBook SHA-256 does not match completed run summary")
 
+        declared_ledger_hash = summary.get("decision_ledger_sha256")
+        if declared_ledger_hash is not None:
+            ledger_path = workspace / "decisions.jsonl"
+            if not isinstance(declared_ledger_hash, str) or len(declared_ledger_hash) != 64:
+                raise ReconciliationError("run summary Decision Ledger SHA-256 evidence is invalid")
+            if not ledger_path.is_file() or sha256_file(ledger_path) != declared_ledger_hash:
+                raise ReconciliationError("current Decision Ledger SHA-256 does not match completed run summary")
+
         base_identity = self.experiment_identity(
             str(item.get("market_sha256")),
             str(item.get("results_sha256")),
@@ -166,6 +239,8 @@ class RunRegistry:
         item["result_path"] = str(result)
         item["reconciled_from_summary"] = True
         item["paper_book_sha256"] = actual_book_hash
+        if declared_ledger_hash is not None:
+            item["decision_ledger_sha256"] = declared_ledger_hash
         self._write(state)
 
     def _read(self) -> dict:

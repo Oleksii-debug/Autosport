@@ -12,13 +12,14 @@ from .domain import MarketEvent
 from .evaluation import EvaluationSummary, evaluate
 from .ingestion import IngestionEngine, IngestionStats
 from .ingestion_health import IngestionPolicy, SourceHealthState, SourceHealthStore
-from .integrity import atomic_write_json, sha256_file
+from .integrity import ensure_durable_file, sha256_file
 from .market_bus import MarketEventBus
 from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
 from .providers import MarketProvider
 from .replay import ReplayEngine, ReplayRun
-from .run_registry import RunRegistry
+from .run_registry import RunRegistry, UnresolvedExperimentError
+from .run_transaction import RunTransaction
 from .settlement import SettlementEngine
 from .storage import SQLiteMarketStore
 
@@ -61,8 +62,18 @@ class AutosportSession:
         self.registry = RunRegistry(self.workspace / "run_registry.json")
         self.portfolio_engine = PortfolioEngine()
 
-    def _runtime(self, run_id: str) -> AgentOrchestrator:
-        context = AgentContext(self.book, replay_run_id=run_id, decision_ledger=self.ledger)
+    def _runtime(
+        self,
+        run_id: str,
+        *,
+        book: PaperBook | None = None,
+        ledger: JsonlDecisionLedger | None = None,
+    ) -> AgentOrchestrator:
+        context = AgentContext(
+            book or self.book,
+            replay_run_id=run_id,
+            decision_ledger=ledger or self.ledger,
+        )
         return AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent("50")], context)
 
     def observe_provider_once(
@@ -88,6 +99,10 @@ class AutosportSession:
         return ObservationResult(stats, self.source_health.get(provider.source_id), current)
 
     def run_dataset(self, dataset: ReplayDataset, speed: float = 0.0, allow_repeat: bool = False) -> SessionResult:
+        self._ensure_canonical_economic_base()
+        base_book_hash = sha256_file(self.book_path)
+        base_ledger_hash = sha256_file(self.ledger.path)
+
         run_id = str(uuid.uuid4())
         experiment_key = self.registry.begin(
             dataset.market_sha256,
@@ -95,8 +110,23 @@ class AutosportSession:
             self.strategy_id,
             run_id,
             allow_repeat=allow_repeat,
+            base_paper_book_sha256=base_book_hash,
+            base_decision_ledger_sha256=base_ledger_hash,
         )
-        orchestrator = self._runtime(run_id)
+        transaction = RunTransaction.start(
+            self.workspace,
+            run_id=run_id,
+            experiment_key=experiment_key,
+            market_sha256=dataset.market_sha256,
+            results_sha256=dataset.results_sha256,
+            strategy_id=self.strategy_id,
+            base_paper_book_sha256=base_book_hash,
+            base_decision_ledger_sha256=base_ledger_hash,
+        )
+
+        working_book = PaperBook.load(self.book_path)
+        staged_ledger = JsonlDecisionLedger(transaction.run_ledger_path)
+        orchestrator = self._runtime(run_id, book=working_book, ledger=staged_ledger)
         engine = ReplayEngine(dataset.load_market_events())
 
         def consume(event) -> None:
@@ -106,33 +136,49 @@ class AutosportSession:
         replay = engine.run(consume, speed=speed, run_id=run_id)
         settlement = SettlementEngine()
         settlement.record(dataset.load_results_after_replay())
-        settled = tuple(settlement.settle_ready(self.book))
-        self.book.save(self.book_path)
-        paper_book_sha256 = sha256_file(self.book_path)
-        evaluation = evaluate(self.book)
-        portfolio = self.portfolio_engine.analyse(list(self.book.tickets.values()))
+        settled = tuple(settlement.settle_ready(working_book))
+        evaluation = evaluate(working_book)
+        portfolio = self.portfolio_engine.analyse(list(working_book.tickets.values()))
         destination = self.workspace / f"run-{replay.run_id}.json"
         result = SessionResult(
             replay,
             settled,
-            self.book.balance,
+            working_book.balance,
             evaluation,
             portfolio,
             experiment_key,
             str(destination),
         )
-        self._write_run_summary(dataset, result, destination, paper_book_sha256)
-        self.registry.complete(experiment_key, str(destination))
+
+        transaction.stage_outputs(working_book, self.ledger.path)
+        summary = transaction.precommit(self._run_summary_payload(dataset, result))
+        transaction.commit()
+
+        # From this point canonical PaperBook is NEW. Keep in-memory state aligned
+        # before touching the registry so finally/close can never rewrite OLD state.
+        self.book = working_book
+        self.registry.complete(
+            experiment_key,
+            str(destination),
+            paper_book_sha256=str(summary["paper_book_sha256"]),
+            decision_ledger_sha256=str(summary["decision_ledger_sha256"]),
+        )
         return result
 
-    def _write_run_summary(
+    def _ensure_canonical_economic_base(self) -> None:
+        if self.registry.in_progress():
+            raise UnresolvedExperimentError(
+                "Workspace has an unresolved economic run; repair it before starting another paper experiment."
+            )
+        self.book.save(self.book_path)
+        ensure_durable_file(self.ledger.path)
+
+    def _run_summary_payload(
         self,
         dataset: ReplayDataset,
         result: SessionResult,
-        destination: Path,
-        paper_book_sha256: str,
-    ) -> None:
-        payload = {
+    ) -> dict:
+        return {
             "schema_version": 2,
             "dataset_name": dataset.name,
             "sport": dataset.sport,
@@ -145,13 +191,22 @@ class AutosportSession:
             "replay_dataset_hash": result.replay.dataset_hash,
             "settled_ticket_ids": list(result.settled_ticket_ids),
             "balance": str(result.balance),
-            "paper_book_sha256": paper_book_sha256,
-            "evaluation": {key: str(value) if isinstance(value, Decimal) else value for key, value in asdict(result.evaluation).items()},
-            "portfolio": {key: str(value) if isinstance(value, Decimal) else value for key, value in asdict(result.portfolio).items()},
+            "evaluation": {
+                key: str(value) if isinstance(value, Decimal) else value
+                for key, value in asdict(result.evaluation).items()
+            },
+            "portfolio": {
+                key: str(value) if isinstance(value, Decimal) else value
+                for key, value in asdict(result.portfolio).items()
+            },
             "real_money_execution": False,
         }
-        atomic_write_json(destination, payload)
 
     def close(self) -> None:
-        self.book.save(self.book_path)
-        self.store.close()
+        try:
+            # Never let teardown overwrite a partially committed transaction with
+            # stale in-memory state. Recovery owns any unresolved economic commit.
+            if not self.registry.in_progress():
+                self.book.save(self.book_path)
+        finally:
+            self.store.close()

@@ -10,6 +10,17 @@ from typing import Any
 from .domain import MarketEvent, MarketType
 
 
+_FORBIDDEN_HISTORICAL_METADATA_KEYS = frozenset(
+    {
+        "outcome",
+        "result",
+        "final_score",
+        "final_result",
+        "settlement_result",
+    }
+)
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -48,6 +59,20 @@ def _resolve_member(root: Path, value: str, *, field: str) -> Path:
     if not candidate.is_file():
         raise ValueError(f"{field} does not exist: {value}")
     return candidate
+
+
+def _contains_forbidden_historical_metadata(value: Any) -> bool:
+    """Reject future/outcome facts anywhere inside strategy-visible metadata."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if str(key).lower() in _FORBIDDEN_HISTORICAL_METADATA_KEYS:
+                return True
+            if _contains_forbidden_historical_metadata(child):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(_contains_forbidden_historical_metadata(child) for child in value)
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,13 +210,6 @@ def _validate_historical_payloads(
     quote_keys: set[str] = set()
     dedupe_keys: set[str] = set()
     event_count = 0
-    forbidden_metadata_keys = {
-        "outcome",
-        "result",
-        "final_score",
-        "final_result",
-        "settlement_result",
-    }
 
     with market_path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -220,8 +238,7 @@ def _validate_historical_payloads(
                 raise ValueError(f"market line {line_number} ingest_ts is before observed_ts")
             if observed_ts < coverage_start or observed_ts > coverage_end:
                 raise ValueError(f"market line {line_number} observed_ts is outside declared coverage")
-            metadata_keys = {str(key).lower() for key in event.metadata}
-            if metadata_keys & forbidden_metadata_keys:
+            if _contains_forbidden_historical_metadata(event.metadata):
                 raise ValueError(f"market line {line_number} contains future/outcome metadata")
             if event.dedupe_key in dedupe_keys:
                 raise ValueError(f"market line {line_number} duplicates canonical source event identity")

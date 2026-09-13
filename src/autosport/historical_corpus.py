@@ -13,6 +13,7 @@ from typing import Any, Iterable, Sequence
 
 from .dataset import load_dataset
 from .domain import MarketEvent
+from .historical_governance import verify_governance_authority_binding
 from .integrity import atomic_write_json
 from .parlayapi_provider import ParlayApiTableTennisProvider
 
@@ -110,8 +111,9 @@ def _text(raw: dict[str, Any], key: str, *, context: str) -> str:
     return value.strip()
 
 
-def _governance_proof(path: Path) -> dict[str, Any]:
-    payload = _read_bytes(path, context="governance proof")
+def _governance_proof(path: Path, *, payload: bytes | None = None) -> dict[str, Any]:
+    if payload is None:
+        payload = _read_bytes(path, context="governance proof")
     raw = _json_object_bytes(payload, path=path, context="governance proof")
     if int(raw.get("schema_version", 0)) != 1:
         raise ValueError("governance proof schema_version must be 1")
@@ -131,6 +133,15 @@ def _governance_proof(path: Path) -> dict[str, Any]:
     retention_basis = _text(raw, "retention_basis", context="governance proof")
     retention_expires_at = _text(raw, "retention_expires_at", context="governance proof")
     _timestamp(retention_expires_at, field="governance proof.retention_expires_at")
+    authorization_valid_through = _text(
+        raw,
+        "authorization_valid_through",
+        context="governance proof",
+    )
+    _timestamp(
+        authorization_valid_through,
+        field="governance proof.authorization_valid_through",
+    )
     extension_raw = raw.get("retention_extension_authority_reference")
     retention_extension_authority_reference: str | None = None
     if extension_raw is not None:
@@ -161,6 +172,7 @@ def _governance_proof(path: Path) -> dict[str, Any]:
         "terms_reference": terms_reference,
         "retention_basis": retention_basis,
         "retention_expires_at": retention_expires_at,
+        "authorization_valid_through": authorization_valid_through,
         "retention_extension_authority_reference": retention_extension_authority_reference,
         "authority_reference": authority_reference,
         "verified_at": verified_at,
@@ -442,7 +454,10 @@ def assemble_historical_corpus(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     proof_path = Path(governance_proof_path)
-    proof = _governance_proof(proof_path)
+    binding = verify_governance_authority_binding(proof_path)
+    proof = _governance_proof(proof_path, payload=binding.governance_proof_bytes)
+    if proof["_artifact_sha256"] != binding.governance_proof_sha256:
+        raise ValueError("governance proof parsed bytes do not match verified authority binding")
     imported_dt = _timestamp(imported_at, field="imported_at")
     governance_verified_dt = _timestamp(
         proof["verified_at"],
@@ -450,6 +465,12 @@ def assemble_historical_corpus(
     )
     if imported_dt < governance_verified_dt:
         raise ValueError("imported_at must not precede governance proof verification")
+    authorization_valid_through_dt = _timestamp(
+        proof["authorization_valid_through"],
+        field="governance proof.authorization_valid_through",
+    )
+    if imported_dt > authorization_valid_through_dt:
+        raise ValueError("imported_at exceeds governance proof.authorization_valid_through")
     reveal_dt = _timestamp(outcome_reveal_after, field="outcome_reveal_after")
 
     events: list[tuple[MarketEvent, dict[str, Any]]] = []
@@ -496,13 +517,9 @@ def assemble_historical_corpus(
             }
         )
 
-    governance_proof_sha256 = proof.get("_artifact_sha256")
-    if (
-        not isinstance(governance_proof_sha256, str)
-        or len(governance_proof_sha256) != 64
-        or any(character not in "0123456789abcdef" for character in governance_proof_sha256)
-    ):
-        raise ValueError("governance proof artifact digest was not preserved from its verified byte snapshot")
+    governance_proof_sha256 = binding.governance_proof_sha256
+    if proof["_artifact_sha256"] != governance_proof_sha256:
+        raise ValueError("governance proof artifact digest changed after authority verification")
 
     earliest_capture_dt, _ = min(captures, key=lambda item: item[0])
     latest_capture_dt, latest_capture = max(captures, key=lambda item: item[0])
@@ -601,6 +618,23 @@ def assemble_historical_corpus(
         market_destination = staging / "market.jsonl"
         results_destination = staging / "results.json"
         manifest_path = staging / "manifest.json"
+        governance_proof_destination = staging / "governance-proof.json"
+        authority_record_destination = staging / binding.authority_record_file
+        if authority_record_destination.name in {
+            market_destination.name,
+            results_destination.name,
+            manifest_path.name,
+            governance_proof_destination.name,
+        }:
+            raise ValueError("governance authority artifact file collides with reserved corpus member")
+
+        governance_proof_destination.write_bytes(binding.governance_proof_bytes)
+        authority_record_destination.write_bytes(binding.authority_record_bytes)
+        if _sha256(governance_proof_destination) != binding.governance_proof_sha256:
+            raise ValueError("persisted governance proof does not match verified digest")
+        if _sha256(authority_record_destination) != binding.authority_record_sha256:
+            raise ValueError("persisted governance authority record does not match verified digest")
+
         _write_jsonl(market_destination, (raw for _, raw in events))
         atomic_write_json(results_destination, results)
         market_sha = _sha256(market_destination)
@@ -611,6 +645,7 @@ def assemble_historical_corpus(
             "terms_reference": proof["terms_reference"],
             "retention_basis": proof["retention_basis"],
             "retention_expires_at": proof["retention_expires_at"],
+            "authorization_valid_through": proof["authorization_valid_through"],
             "retention_extension_authority_reference": proof[
                 "retention_extension_authority_reference"
             ],
@@ -633,11 +668,15 @@ def assemble_historical_corpus(
                 "snapshots": evidence_rows,
                 "point_in_time_snapshot_contains_odds": True,
                 "historical_window_market_coverage_verified": False,
+                "governance_proof_file": governance_proof_destination.name,
                 "governance_proof_sha256": governance_proof_sha256,
+                "authority_record_file": binding.authority_record_file,
+                "authority_record_sha256": binding.authority_record_sha256,
                 "licensing_or_retention_verified": True,
                 "rights_source_ids": list(proof["source_ids"]),
                 "authority_reference": proof["authority_reference"],
                 "retention_expires_at": proof["retention_expires_at"],
+                "authorization_valid_through": proof["authorization_valid_through"],
                 "retention_extension_authority_reference": proof[
                     "retention_extension_authority_reference"
                 ],

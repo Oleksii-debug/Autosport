@@ -23,6 +23,35 @@ def _event_order_key(event: MarketEvent) -> tuple[datetime, int, str]:
     return (_observed_instant(event.observed_ts), event.sequence, event.dedupe_key)
 
 
+def _canonical_payload(event: MarketEvent) -> str:
+    return json.dumps(
+        event.to_dict(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _source_payload_from_raw(raw: object) -> str:
+    if not isinstance(raw, dict):
+        raise ValueError("stored market event payload must be a JSON object")
+    normalized = dict(raw)
+    # Local receipt/observation clocks may advance when the same provider
+    # sequence is polled again. They are not source-snapshot identity.
+    normalized.pop("observed_ts", None)
+    normalized.pop("ingest_ts", None)
+    return json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _source_payload(event: MarketEvent) -> str:
+    return _source_payload_from_raw(event.to_dict())
+
+
 class SQLiteMarketStore:
     """Crash-safe append-only normalized market history plus current quote projection."""
 
@@ -81,7 +110,7 @@ class SQLiteMarketStore:
             self.connection.execute("DELETE FROM current_quotes")
             for quote_key in sorted(latest):
                 event = latest[quote_key][1]
-                payload = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                payload = _canonical_payload(event)
                 self.connection.execute(
                     "INSERT INTO current_quotes(quote_key,observed_ts,sequence,payload_json) VALUES (?,?,?,?)",
                     (quote_key, event.observed_ts, event.sequence, payload),
@@ -94,11 +123,12 @@ class SQLiteMarketStore:
 
     def _insert_one(self, event: MarketEvent) -> bool:
         incoming_key = _event_order_key(event)
-        payload = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        payload = _canonical_payload(event)
         cursor = self.connection.execute(
-            """INSERT OR IGNORE INTO market_events
+            """INSERT INTO market_events
                (dedupe_key,quote_key,event_id,market_id,selection_id,decimal_odds,observed_ts,source_id,sequence,payload_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(dedupe_key) DO NOTHING""",
             (
                 event.dedupe_key,
                 event.quote_key,
@@ -113,6 +143,18 @@ class SQLiteMarketStore:
             ),
         )
         if cursor.rowcount == 0:
+            existing = self.connection.execute(
+                "SELECT payload_json FROM market_events WHERE dedupe_key=?",
+                (event.dedupe_key,),
+            ).fetchone()
+            if existing is None:
+                raise RuntimeError("market event dedupe conflict row disappeared")
+            existing_raw = json.loads(existing[0])
+            if _source_payload_from_raw(existing_raw) != _source_payload(event):
+                raise ValueError(
+                    "conflicting duplicate market event identity: "
+                    f"{event.dedupe_key}"
+                )
             return False
         previous = self.connection.execute(
             "SELECT payload_json FROM current_quotes WHERE quote_key=?",

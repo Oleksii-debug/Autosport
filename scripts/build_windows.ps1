@@ -210,39 +210,72 @@ if ($freshWalkForwardEvidence.real_money_execution -ne $false) { throw 'Fresh-ex
 
 $freshDiag = Join-Path $PWD 'dist/fresh-extraction-diagnostic.json'
 if (Test-Path $freshDiag) { Remove-Item -Force $freshDiag }
-$freshProcess = Start-Process -FilePath $extractedExe -ArgumentList '--diagnostic-output', $freshDiag -Wait -PassThru
-if ($freshProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe diagnostic exited $($freshProcess.ExitCode)" }
+$freshDiagProcess = Start-Process -FilePath $extractedExe -ArgumentList '--diagnostic-output', $freshDiag -Wait -PassThru
+if ($freshDiagProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe diagnostic exited $($freshDiagProcess.ExitCode)" }
 $freshDiagnostic = Get-Content $freshDiag -Raw | ConvertFrom-Json
 if ($freshDiagnostic.status -ne 'PASS') { throw 'Fresh-extracted Autosport.exe diagnostic did not PASS' }
-if ($freshDiagnostic.real_money_execution -ne $false) { throw 'Fresh extraction diagnostic must preserve REAL_MONEY_EXECUTION=false' }
+if ($freshDiagnostic.real_money_execution -ne $false -or $freshDiagnostic.human_tested -ne $false -or $freshDiagnostic.nvda_verified -ne $false) {
+  throw 'Fresh-extracted diagnostic violated release truth labels'
+}
 
 $freshA11y = Join-Path $PWD 'dist/fresh-extraction-accessibility-audit.json'
 if (Test-Path $freshA11y) { Remove-Item -Force $freshA11y }
 $freshA11yProcess = Start-Process -FilePath $extractedExe -ArgumentList '--accessibility-audit-output', $freshA11y -Wait -PassThru
-if ($freshA11yProcess.ExitCode -ne 0) { throw "Fresh-extracted accessibility audit exited $($freshA11yProcess.ExitCode)" }
+if ($freshA11yProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe accessibility audit exited $($freshA11yProcess.ExitCode)" }
 $freshAccessibility = Get-Content $freshA11y -Raw | ConvertFrom-Json
 if ($freshAccessibility.status -ne 'PASS') { throw 'Fresh-extracted accessibility audit did not PASS' }
-if ($freshAccessibility.nvda_verified -ne $false) { throw 'Fresh extraction accessibility audit must not claim NVDA verification' }
+if ($freshAccessibility.real_money_execution -ne $false -or $freshAccessibility.human_tested -ne $false -or $freshAccessibility.nvda_verified -ne $false) {
+  throw 'Fresh-extracted accessibility audit violated release truth labels'
+}
 
 $freshKeyboard = Join-Path $PWD 'dist/fresh-extraction-keyboard-audit.json'
 if (Test-Path $freshKeyboard) { Remove-Item -Force $freshKeyboard }
 $freshKeyboardProcess = Start-Process -FilePath $extractedExe -ArgumentList '--keyboard-audit-output', $freshKeyboard -Wait -PassThru
-if ($freshKeyboardProcess.ExitCode -ne 0) { throw "Fresh-extracted keyboard audit exited $($freshKeyboardProcess.ExitCode)" }
+if ($freshKeyboardProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe keyboard audit exited $($freshKeyboardProcess.ExitCode)" }
 $freshKeyboardEvidence = Get-Content $freshKeyboard -Raw | ConvertFrom-Json
 if ($freshKeyboardEvidence.status -ne 'PASS') { throw 'Fresh-extracted keyboard audit did not PASS' }
-if ($freshKeyboardEvidence.human_tested -ne $false -or $freshKeyboardEvidence.nvda_verified -ne $false) {
-  throw 'Fresh extraction keyboard audit violated release truth labels'
+if ($freshKeyboardEvidence.real_money_execution -ne $false -or $freshKeyboardEvidence.human_tested -ne $false -or $freshKeyboardEvidence.nvda_verified -ne $false) {
+  throw 'Fresh-extracted keyboard audit violated release truth labels'
 }
 
 $freshRestartRecovery = Join-Path $PWD 'dist/fresh-extraction-restart-recovery-audit.json'
 if (Test-Path $freshRestartRecovery) { Remove-Item -Force $freshRestartRecovery }
 $freshRestartRecoveryProcess = Start-Process -FilePath $extractedExe -ArgumentList '--restart-recovery-audit-output', $freshRestartRecovery -Wait -PassThru
-if ($freshRestartRecoveryProcess.ExitCode -ne 0) { throw "Fresh-extracted restart/recovery audit exited $($freshRestartRecoveryProcess.ExitCode)" }
+if ($freshRestartRecoveryProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe restart/recovery audit exited $($freshRestartRecoveryProcess.ExitCode)" }
 $freshRestartRecoveryEvidence = Get-Content $freshRestartRecovery -Raw | ConvertFrom-Json
 if ($freshRestartRecoveryEvidence.status -ne 'PASS') { throw 'Fresh-extracted restart/recovery audit did not PASS' }
 if ($freshRestartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Fresh-extracted restart audit did not prove persistent session reopen' }
 if ($freshRestartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Fresh-extracted recovery audit did not prove transaction recovery' }
 if ($freshRestartRecoveryEvidence.recovery_disposition -ne 'aborted_uncommitted') { throw 'Fresh-extracted recovery audit disposition is not fail-closed' }
 if ($freshRestartRecoveryEvidence.real_money_execution -ne $false -or $freshRestartRecoveryEvidence.human_tested -ne $false -or $freshRestartRecoveryEvidence.nvda_verified -ne $false) {
-  throw 'Fresh-extracted restart/recovery audit violated release truth labels'
+  throw 'Machine restart/recovery audit violated release truth labels'
 }
+
+$freshEvidence = [ordered]@{
+  status = 'PASS'
+  source_sha = $sourceSha
+  package_sha256 = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+  autosport_exe_sha256 = $extractedExeSha
+  autosport_data_exe_sha256 = $extractedDataExeSha
+  portable_historical_data_tools = $true
+  package_verification_status = 'PASS'
+  extracted_strategy_comparison_entry_status = 'PASS'
+  extracted_walk_forward_evaluation_entry_status = 'PASS'
+  extracted_walk_forward_evaluation_execution_status = 'PASS'
+  extracted_walk_forward_sample_real_historical_proof = $false
+  extracted_data_tool_help_status = 'PASS'
+  extracted_data_tool_acquire_help_status = 'PASS'
+  extracted_data_tool_build_corpus_help_status = 'PASS'
+  extracted_data_tool_bundle_corpus_help_status = 'PASS'
+  extracted_data_tool_verify_dataset_status = 'PASS'
+  extracted_diagnostic_status = $freshDiagnostic.status
+  extracted_accessibility_status = $freshAccessibility.status
+  extracted_keyboard_status = $freshKeyboardEvidence.status
+  extracted_restart_recovery_status = $freshRestartRecoveryEvidence.status
+  extracted_session_restart_status = $freshRestartRecoveryEvidence.session_restart_status
+  extracted_transaction_recovery_status = $freshRestartRecoveryEvidence.transaction_recovery_status
+  real_money_execution = $false
+  human_tested = $false
+  nvda_verified = $false
+}
+$freshEvidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $PWD 'dist/fresh-extraction-verification.json') -Encoding utf8

@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -155,6 +156,45 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
                     session.run_dataset(dataset)
                 self.assertEqual(RunRegistry(Path(tmp) / "run_registry.json").in_progress(), ())
                 self.assertFalse((Path(tmp) / "paper_book.json").exists())
+            finally:
+                session.close()
+
+    def test_non_executable_price_fails_before_registry_or_book_mutation(self):
+        dataset = load_dataset(Path("examples/tt_demo"))
+        plan = ResearchStrategyPlan.from_dict(self._plan_dict())
+        events = dataset.load_market_events()
+        trigger_key = plan.instructions[0].trigger_quote_key
+        guarded_events = [
+            replace(
+                event,
+                metadata={**event.metadata, "execution_quote_verified": False},
+            )
+            if event.quote_key == trigger_key and event.observed_ts == plan.instructions[0].decision_ts
+            else event
+            for event in events
+        ]
+
+        class GuardedDataset:
+            def load_market_events(self):
+                return guarded_events
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = AutosportSession(
+                tmp,
+                "1000",
+                strategy_id=RESEARCH_STRATEGY_ID,
+                research_plan=plan,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "research candidate quote is not verified executable price evidence",
+                ):
+                    session.run_dataset(GuardedDataset())
+                self.assertEqual(RunRegistry(Path(tmp) / "run_registry.json").in_progress(), ())
+                self.assertFalse((Path(tmp) / "paper_book.json").exists())
+                self.assertEqual(session.book.balance, Decimal("1000"))
+                self.assertEqual(session.book.tickets, {})
             finally:
                 session.close()
 

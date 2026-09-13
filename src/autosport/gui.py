@@ -11,6 +11,7 @@ from .dataset import load_dataset
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .paths import default_workspace
+from .recovery import reconcile_late_crashes
 from .replay_worker import (
     OneShotReplayWorker,
     run_workspace_dataset_once,
@@ -60,6 +61,7 @@ AUTOMATION_IDS = {
     "live_refresh": 105,
     "strategy": 106,
     "research_plan": 107,
+    "repair_workspace": 108,
     "tickets": 201,
     "log": 202,
     "live_quotes": 203,
@@ -142,6 +144,12 @@ class AutosportApp(tk.Tk):
         self.choose_button.pack(side="left", padx=(0, 8))
         self.run_button = ttk.Button(controls, text="Запустити paper replay", command=self.run_dataset)
         self.run_button.pack(side="left", padx=(0, 8))
+        self.repair_button = ttk.Button(
+            controls,
+            text="Відновити workspace",
+            command=self.repair_workspace,
+        )
+        self.repair_button.pack(side="left", padx=(0, 8))
         self.speed_label = ttk.Label(controls, text="Швидкість:")
         self.speed_label.pack(side="left", padx=(8, 4))
         self.speed = ttk.Combobox(
@@ -196,6 +204,7 @@ class AutosportApp(tk.Tk):
 
         self.bind("<Control-o>", lambda _event: self.choose_dataset())
         self.bind("<Control-r>", lambda _event: self.run_dataset())
+        self.bind("<Control-Shift-R>", lambda _event: self.repair_workspace())
         self.bind("<Control-l>", lambda _event: self.refresh_live_snapshot())
         self.bind("<F6>", lambda _event: self.tickets.focus_set())
         self.bind("<F7>", lambda _event: self.live_quotes.focus_set())
@@ -209,6 +218,7 @@ class AutosportApp(tk.Tk):
             (self.research_plan_button, "Вибрати research plan", "Вибирає та валідовує typed causal research-plan JSON для research-replay-v1.", AUTOMATION_IDS["research_plan"]),
             (self.choose_button, "Вибрати replay dataset", "Відкриває вибір папки replay dataset. Гаряча клавіша Control+O.", AUTOMATION_IDS["choose_dataset"]),
             (self.run_button, "Запустити paper replay", "Запускає causal paper replay для вибраного dataset і canonical strategy. Гаряча клавіша Control+R.", AUTOMATION_IDS["run_replay"]),
+            (self.repair_button, "Відновити workspace", "Запускає fail-closed crash recovery для workspace вибраної canonical strategy. Гаряча клавіша Control+Shift+R.", AUTOMATION_IDS["repair_workspace"]),
             (self.speed, "Швидкість replay", "Вибір подієвого, 1×, 10×, 100× або 1000× режиму replay.", AUTOMATION_IDS["replay_speed"]),
             (self.live_mode, "Режим live observation", "Public preview без ключа або authenticated API key з environment.", AUTOMATION_IDS["live_mode"]),
             (self.live_refresh_button, "Оновити live snapshot", "Запускає один read-only table-tennis snapshot у worker thread. Гаряча клавіша Control+L.", AUTOMATION_IDS["live_refresh"]),
@@ -404,6 +414,7 @@ class AutosportApp(tk.Tk):
             self.research_plan_button.state(["disabled"])
             self.choose_button.state(["disabled"])
             self.run_button.state(["disabled"])
+            self.repair_button.state(["disabled"])
             self.speed.configure(state="disabled")
             self.live_mode.configure(state="disabled")
             self.live_refresh_button.state(["disabled"])
@@ -412,9 +423,82 @@ class AutosportApp(tk.Tk):
         self.research_plan_button.state(["!disabled"])
         self.choose_button.state(["!disabled"])
         self.run_button.state(["!disabled"])
+        self.repair_button.state(["!disabled"])
         self.speed.configure(state="readonly")
         self.live_mode.configure(state="readonly")
         self.live_refresh_button.state(["!disabled"])
+
+    def repair_workspace(self) -> None:
+        if self._closing:
+            return
+        if self.replay_worker.busy:
+            self.status.set("Recovery заблоковано: economic replay ще виконується.")
+            return
+        if self.live_worker.busy:
+            self.status.set("Recovery заблоковано: live snapshot ще виконується.")
+            return
+        try:
+            strategy_id, research_plan = self._selected_replay_configuration()
+            replay_workspace = workspace_for_strategy(self.workspace, strategy_id, research_plan)
+        except Exception as exc:
+            messagebox.showerror("Автоспорт", f"Recovery configuration відхилено: {exc}")
+            self.status.set("Recovery не запущено: canonical strategy configuration не пройшла fail-closed validation.")
+            return
+
+        self._active_workspace = replay_workspace
+        self._active_strategy_id = strategy_id
+        self._active_research_plan = research_plan
+        if self.session is not None:
+            self.session.close()
+            self.session = None
+
+        try:
+            report = reconcile_late_crashes(replay_workspace)
+            self.session = self._open_session(strategy_id, research_plan)
+        except Exception as exc:
+            reopen_error: Exception | None = None
+            if self.session is None:
+                try:
+                    self.session = self._open_session(strategy_id, research_plan)
+                except Exception as reopen_exc:
+                    reopen_error = reopen_exc
+            self.bank.set(self._bank_text())
+            if self.session is not None:
+                self._refresh_tickets()
+            else:
+                self.tickets.delete(0, "end")
+                self.tickets.insert("end", "Workspace recovery не завершено; session state недоступний.")
+            detail = f"Workspace recovery відхилено fail-closed: {exc}"
+            if reopen_error is not None:
+                detail += f"; session reopen також відхилено: {reopen_error}"
+            self.status.set("Workspace recovery не завершено; новий economic replay не запускайте до усунення причини.")
+            self._append_log(detail)
+            messagebox.showerror("Автоспорт", detail)
+            return
+
+        self.bank.set(self._bank_text())
+        self._refresh_tickets()
+        summary = (
+            "Workspace recovery: "
+            f"reconciled={len(report.reconciled_keys)}; "
+            f"aborted_uncommitted={len(report.aborted_uncommitted_keys)}; "
+            f"unresolved={len(report.unresolved_without_summary)}; "
+            f"workspace={replay_workspace}"
+        )
+        self._append_log(summary)
+        if report.unresolved_without_summary:
+            self.status.set(
+                summary
+                + ". Є unresolved legacy run без достатнього summary proof; economic replay лишається fail-closed для конфліктного experiment."
+            )
+            messagebox.showwarning(
+                "Автоспорт",
+                "Recovery завершив перевірку, але залишив unresolved run без достатнього доказу completion. "
+                "Не обходьте цей стан через allow-repeat.",
+            )
+            return
+        self.status.set(summary + ". Workspace готовий до наступного перевіреного paper replay.")
+        messagebox.showinfo("Автоспорт", "Workspace recovery завершено без unresolved runs.")
 
     def run_dataset(self) -> None:
         if not self.dataset_path:
@@ -501,7 +585,7 @@ class AutosportApp(tk.Tk):
             ])
             self.status.set(
                 "Replay завершився помилкою; UI знову доступний. Якщо workspace має unresolved transaction, "
-                "виконайте repair-workspace перед наступним economic run."
+                "натисніть «Відновити workspace» або Control+Shift+R перед наступним economic run."
             )
             messagebox.showerror("Автоспорт", text)
             return

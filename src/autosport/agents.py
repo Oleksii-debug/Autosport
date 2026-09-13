@@ -56,6 +56,8 @@ class PaperBaselineAgent:
         signal_id = str(event.metadata.get("paper_signal_id", ""))
         if not signal_id or signal_id in self._used_signals:
             return
+        if event.status != "open":
+            return
         if event.metadata.get("paper_signal") is not True or self.stake > context.paper_book.balance:
             return
         ticket = context.paper_book.open_ticket(

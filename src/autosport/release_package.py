@@ -24,6 +24,7 @@ _WINDOWS_RESERVED_NAMES = {
     "lpt³",
 }
 _WINDOWS_INVALID_CHARS = frozenset('<>:"\\|?*')
+_WINDOWS_MAX_COMPONENT_UTF16_UNITS = 255
 
 
 def sha256_file(path: str | Path) -> str:
@@ -251,6 +252,8 @@ def _validate_windows_member(name: str) -> tuple[str, str]:
             raise ValueError(f"release package contains Windows trailing space or dot: {name}")
         if any(ord(character) < 32 or character in _WINDOWS_INVALID_CHARS for character in component):
             raise ValueError(f"release package contains Windows-invalid path character: {name}")
+        if len(component.encode("utf-16-le")) // 2 > _WINDOWS_MAX_COMPONENT_UTF16_UNITS:
+            raise ValueError(f"release package contains overlong Windows path component: {name}")
         device_stem = component.split(".", 1)[0].casefold()
         if device_stem in _WINDOWS_RESERVED_NAMES:
             raise ValueError(f"release package contains reserved Windows device name: {name}")

@@ -38,12 +38,71 @@ function Test-Pattern {
     return $Element.TryGetCurrentPattern($pattern, [ref]$patternObject)
 }
 
+function Get-ProcessFamilyIds {
+    param([int]$RootProcessId)
+
+    $seen = New-Object 'System.Collections.Generic.HashSet[int]'
+    $pending = New-Object 'System.Collections.Generic.Queue[int]'
+    $pending.Enqueue($RootProcessId)
+    while ($pending.Count -gt 0) {
+        $currentId = $pending.Dequeue()
+        if (-not $seen.Add($currentId)) { continue }
+        $children = @(
+            Get-CimInstance Win32_Process -Filter "ParentProcessId = $currentId" -ErrorAction SilentlyContinue
+        )
+        foreach ($child in $children) {
+            $pending.Enqueue([int]$child.ProcessId)
+        }
+    }
+    return @($seen | ForEach-Object { [int]$_ })
+}
+
+function Find-UiaRootForProcessFamily {
+    param([int[]]$ProcessIds)
+
+    foreach ($candidateId in $ProcessIds) {
+        try {
+            $candidateProcess = Get-Process -Id $candidateId -ErrorAction Stop
+            $candidateProcess.Refresh()
+            if ($candidateProcess.MainWindowHandle -ne 0) {
+                $element = [System.Windows.Automation.AutomationElement]::FromHandle(
+                    $candidateProcess.MainWindowHandle
+                )
+                if ($null -ne $element) { return $element }
+            }
+        } catch {
+            # A bootstrap/child process can turn over while the one-file app starts.
+        }
+    }
+
+    # MainWindowHandle belongs to the PyInstaller GUI child, not necessarily the
+    # launcher returned by Start-Process. Fall back to the desktop UIA tree so a
+    # valid child window is still externally discoverable by its real process ID.
+    try {
+        $desktop = [System.Windows.Automation.AutomationElement]::RootElement
+        $windows = $desktop.FindAll(
+            [System.Windows.Automation.TreeScope]::Children,
+            [System.Windows.Automation.Condition]::TrueCondition
+        )
+        foreach ($window in $windows) {
+            if ($ProcessIds -contains [int]$window.Current.ProcessId) {
+                return $window
+            }
+        }
+    } catch {
+        # UIA can lag process creation briefly; the bounded caller retries.
+    }
+    return $null
+}
+
 $report = [ordered]@{
     status = 'FAIL'
     source = 'external_windows_uia_client'
     evidence_scope = 'external System.Windows.Automation client against the fresh-extracted packaged Autosport.exe; not NVDA speech or physical-human proof'
-    root_name = $null
+    launcher_process_id = $null
     process_id = $null
+    process_family_ids = @()
+    root_name = $null
     descendant_count = 0
     controls = @()
     failures = @()
@@ -53,6 +112,8 @@ $report = [ordered]@{
 }
 
 $process = $null
+$lastFamilyIds = @()
+$uiaRoot = $null
 try {
     $exePath = (Resolve-Path -LiteralPath $Exe).Path
     $outputPath = [System.IO.Path]::GetFullPath($Output)
@@ -62,37 +123,26 @@ try {
     }
 
     $process = Start-Process -FilePath $exePath -PassThru
-    $report.process_id = $process.Id
+    $report.launcher_process_id = $process.Id
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $root = $null
     while ([DateTime]::UtcNow -lt $deadline) {
-        if ($process.HasExited) {
-            throw "Autosport.exe exited before an externally inspectable main window appeared (exit=$($process.ExitCode))"
-        }
-        $process.Refresh()
-        if ($process.MainWindowHandle -ne 0) {
-            try {
-                $candidate = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
-                if ($null -ne $candidate) {
-                    $root = $candidate
-                    break
-                }
-            } catch {
-                # UIA provider can lag the HWND briefly after Tk creates it.
-            }
-        }
+        $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
+        $uiaRoot = Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds
+        if ($null -ne $uiaRoot) { break }
         Start-Sleep -Milliseconds 250
     }
-    if ($null -eq $root) {
-        throw "Timed out waiting for an externally inspectable Autosport main window"
+    if ($null -eq $uiaRoot) {
+        throw "Timed out waiting for an externally inspectable Autosport main window across packaged process family"
     }
 
-    $report.root_name = $root.Current.Name
+    $report.process_family_ids = @($lastFamilyIds | Sort-Object -Unique)
+    $report.process_id = [int]$uiaRoot.Current.ProcessId
+    $report.root_name = [string]$uiaRoot.Current.Name
     if ([string]::IsNullOrWhiteSpace($report.root_name)) {
         $report.failures += 'main window has no external UIA Name'
     }
 
-    $descendants = $root.FindAll(
+    $descendants = $uiaRoot.FindAll(
         [System.Windows.Automation.TreeScope]::Descendants,
         [System.Windows.Automation.Condition]::TrueCondition
     )
@@ -103,7 +153,7 @@ try {
             [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
             [string]$spec.automation_id
         )
-        $element = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $idCondition)
+        $element = $uiaRoot.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $idCondition)
         if ($null -eq $element) {
             $report.failures += "automation_id=$($spec.automation_id): not found by external UIA client"
             continue
@@ -152,14 +202,23 @@ try {
 } finally {
     if ($null -ne $process) {
         try {
-            if (-not $process.HasExited) {
-                $null = $process.CloseMainWindow()
-                if (-not $process.WaitForExit(3000)) {
-                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-                }
-            }
+            $cleanupIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id | Sort-Object -Unique -Descending)
         } catch {
-            try { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue } catch {}
+            $cleanupIds = @($lastFamilyIds | Sort-Object -Unique -Descending)
+        }
+        foreach ($cleanupId in $cleanupIds) {
+            try {
+                $candidate = Get-Process -Id $cleanupId -ErrorAction Stop
+                if (-not $candidate.HasExited) {
+                    if ($candidate.MainWindowHandle -ne 0) {
+                        $null = $candidate.CloseMainWindow()
+                        $null = $candidate.WaitForExit(2000)
+                    }
+                    if (-not $candidate.HasExited) {
+                        Stop-Process -Id $cleanupId -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            } catch {}
         }
     }
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Output -Encoding utf8
@@ -169,5 +228,5 @@ if ($report.status -ne 'PASS') {
     Write-Host ($report | ConvertTo-Json -Depth 8)
     exit 1
 }
-Write-Host "external_uia_audit=PASS controls=$($report.controls.Count) descendants=$($report.descendant_count)"
+Write-Host "external_uia_audit=PASS controls=$($report.controls.Count) descendants=$($report.descendant_count) process=$($report.process_id)"
 exit 0

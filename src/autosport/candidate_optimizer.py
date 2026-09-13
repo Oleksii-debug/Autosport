@@ -156,6 +156,7 @@ def _candidate_ticket(
         raise ValueError("candidate requires at least one leg")
     ticket_legs: list[TicketLeg] = []
     touched_groups: set[int] = set()
+    used_event_ids: set[str] = set()
     recomputed_odds = Decimal("1")
     recomputed_probability = Decimal("1")
     for leg in candidate.legs:
@@ -164,7 +165,13 @@ def _candidate_ticket(
         group_index = quote_to_group[leg.quote_key]
         if group_index in touched_groups:
             raise ValueError("candidate contains mutually exclusive outcomes from one scenario group")
+        if leg.event_id in used_event_ids:
+            raise ValueError(
+                "candidate contains multiple legs from one event; "
+                "canonical research candidates require event isolation"
+            )
         touched_groups.add(group_index)
+        used_event_ids.add(leg.event_id)
         if leg.probability < 0 or leg.probability > 1:
             raise ValueError("candidate leg probability must be between 0 and 1")
         ticket_leg = _ticket_leg_from_candidate(leg)

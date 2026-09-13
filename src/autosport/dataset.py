@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ _FORBIDDEN_HISTORICAL_METADATA_KEYS = frozenset(
     }
 )
 _ALLOWED_HISTORICAL_OUTCOMES = frozenset({"win", "loss", "void"})
+_PARLAY_TERMS_REFERENCE = "https://parlay-api.com/terms"
 
 
 def _sha256(path: Path) -> str:
@@ -48,6 +49,11 @@ def _parse_timestamp(value: str, *, field: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field} must include an explicit timezone")
     return parsed
+
+
+def _retention_now() -> datetime:
+    """Return the wall-clock retention boundary; tests patch this private oracle."""
+    return datetime.now(timezone.utc)
 
 
 def _resolve_member(root: Path, value: str, *, field: str) -> Path:
@@ -92,6 +98,27 @@ class DatasetGovernance:
     source_ids: tuple[str, ...]
     market_types: tuple[str, ...]
     outcome_reveal_after: str
+    retention_expires_at: str | None = None
+
+
+def _assert_governance_retention_current(
+    governance: DatasetGovernance | None,
+    retention_as_of: str | None = None,
+) -> None:
+    if governance is None or governance.retention_expires_at is None:
+        return
+    expires = _parse_timestamp(
+        governance.retention_expires_at,
+        field="governance.retention_expires_at",
+    )
+    if retention_as_of is None:
+        as_of = _retention_now()
+    else:
+        as_of = _parse_timestamp(retention_as_of, field="retention_as_of")
+    if as_of > expires:
+        raise ValueError(
+            "historical dataset retention window expired; governed market/results access is fail-closed"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +134,11 @@ class ReplayDataset:
     governance: DatasetGovernance | None = None
     import_identity: str | None = None
 
+    def _assert_retention_current(self, retention_as_of: str | None = None) -> None:
+        _assert_governance_retention_current(self.governance, retention_as_of)
+
     def load_market_events(self) -> list[MarketEvent]:
+        self._assert_retention_current()
         events: list[MarketEvent] = []
         with self.market_path.open("r", encoding="utf-8") as handle:
             for line in handle:
@@ -116,6 +147,7 @@ class ReplayDataset:
         return events
 
     def load_results_after_replay(self) -> dict[str, str]:
+        self._assert_retention_current()
         raw = json.loads(self.results_path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("results payload must be an object")
@@ -145,6 +177,23 @@ def _load_governance(raw: dict[str, Any]) -> DatasetGovernance:
     imported_dt = _parse_timestamp(imported_at, field="governance.imported_at")
     if imported_dt < acquired_dt:
         raise ValueError("governance.imported_at must not precede acquired_at")
+
+    retention_expires_raw = governance.get("retention_expires_at")
+    retention_expires_at: str | None = None
+    if retention_expires_raw is not None:
+        if not isinstance(retention_expires_raw, str) or not retention_expires_raw.strip():
+            raise ValueError("governance.retention_expires_at must be a non-empty ISO-8601 timestamp")
+        retention_expires_at = retention_expires_raw.strip()
+        retention_expires_dt = _parse_timestamp(
+            retention_expires_at,
+            field="governance.retention_expires_at",
+        )
+        if retention_expires_dt < acquired_dt:
+            raise ValueError("governance.retention_expires_at must not precede acquired_at")
+        if imported_dt > retention_expires_dt:
+            raise ValueError("governance.imported_at exceeds retention_expires_at")
+    if terms_reference.rstrip("/") == _PARLAY_TERMS_REFERENCE and retention_expires_at is None:
+        raise ValueError("ParlayAPI historical governance requires structured retention_expires_at")
 
     coverage = governance.get("coverage")
     if not isinstance(coverage, dict):
@@ -201,6 +250,7 @@ def _load_governance(raw: dict[str, Any]) -> DatasetGovernance:
         source_ids=source_ids,
         market_types=market_types,
         outcome_reveal_after=outcome_reveal_after,
+        retention_expires_at=retention_expires_at,
     )
 
 
@@ -331,6 +381,16 @@ def load_dataset(root: str | Path) -> ReplayDataset:
     if schema_version not in {1, 2}:
         raise ValueError("unsupported dataset schema")
 
+    governance: DatasetGovernance | None = None
+    if schema_version == 2:
+        if str(raw.get("dataset_kind", "")) != "historical":
+            raise ValueError("schema v2 requires dataset_kind=historical")
+        governance = _load_governance(raw)
+        # Retention is a byte-access boundary, not merely a replay API boundary.
+        # Manifest governance is parsed first, then an expired governed corpus is
+        # rejected before market/results members are resolved, hashed or parsed.
+        _assert_governance_retention_current(governance)
+
     market_path = _resolve_member(root, str(raw["market_file"]), field="market_file")
     results_path = _resolve_member(root, str(raw["results_file"]), field="results_file")
     if market_path == results_path:
@@ -345,12 +405,9 @@ def load_dataset(root: str | Path) -> ReplayDataset:
     if actual_results != expected_results:
         raise ValueError("sealed results hash mismatch")
 
-    governance: DatasetGovernance | None = None
     import_identity: str | None = None
     if schema_version == 2:
-        if str(raw.get("dataset_kind", "")) != "historical":
-            raise ValueError("schema v2 requires dataset_kind=historical")
-        governance = _load_governance(raw)
+        assert governance is not None
         _validate_historical_payloads(market_path, results_path, governance)
         import_identity = _import_identity(
             raw=raw,

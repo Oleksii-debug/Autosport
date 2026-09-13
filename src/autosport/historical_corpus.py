@@ -7,7 +7,7 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -23,6 +23,8 @@ _OUTCOME_PROVENANCE_KIND = "historical_outcome_provenance"
 _ALLOWED_REDISTRIBUTION = {"prohibited", "internal_only", "permitted"}
 _REDISTRIBUTION_RANK = {"prohibited": 0, "internal_only": 1, "permitted": 2}
 _ALLOWED_OUTCOMES = {"win", "loss", "void"}
+_PARLAY_TERMS_REFERENCE = "https://parlay-api.com/terms"
+_PARLAY_STANDARD_RETENTION_CEILING = timedelta(days=90)
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +129,16 @@ def _governance_proof(path: Path) -> dict[str, Any]:
         raise ValueError("governance proof.source_ids must contain unique non-empty strings")
     terms_reference = _text(raw, "terms_reference", context="governance proof")
     retention_basis = _text(raw, "retention_basis", context="governance proof")
+    retention_expires_at = _text(raw, "retention_expires_at", context="governance proof")
+    _timestamp(retention_expires_at, field="governance proof.retention_expires_at")
+    extension_raw = raw.get("retention_extension_authority_reference")
+    retention_extension_authority_reference: str | None = None
+    if extension_raw is not None:
+        if not isinstance(extension_raw, str) or not extension_raw.strip():
+            raise ValueError(
+                "governance proof.retention_extension_authority_reference must be a non-empty string when present"
+            )
+        retention_extension_authority_reference = extension_raw.strip()
     authority_reference = _text(raw, "authority_reference", context="governance proof")
     verified_at = _text(raw, "verified_at", context="governance proof")
     _timestamp(verified_at, field="governance proof.verified_at")
@@ -148,6 +160,8 @@ def _governance_proof(path: Path) -> dict[str, Any]:
         "source_ids": source_ids,
         "terms_reference": terms_reference,
         "retention_basis": retention_basis,
+        "retention_expires_at": retention_expires_at,
+        "retention_extension_authority_reference": retention_extension_authority_reference,
         "authority_reference": authority_reference,
         "verified_at": verified_at,
         "redistribution_policy": policy,
@@ -324,8 +338,6 @@ def _snapshot(
         raise ValueError("snapshot evidence must prove has_data=true")
     if evidence.get("point_in_time_snapshot_contains_odds") is not True:
         raise ValueError("snapshot evidence must prove point_in_time_snapshot_contains_odds=true")
-    # A single provider response is intentionally narrow evidence after #55. Never
-    # convert it into a historical-window coverage claim during corpus assembly.
     if evidence.get("point_in_time_odds_market_coverage_verified") is not False:
         raise ValueError("snapshot evidence must keep point_in_time_odds_market_coverage_verified=false")
     if evidence.get("historical_window_market_coverage_verified") is not False:
@@ -492,9 +504,29 @@ def assemble_historical_corpus(
     ):
         raise ValueError("governance proof artifact digest was not preserved from its verified byte snapshot")
 
+    earliest_capture_dt, _ = min(captures, key=lambda item: item[0])
     latest_capture_dt, latest_capture = max(captures, key=lambda item: item[0])
     if imported_dt < latest_capture_dt:
         raise ValueError("imported_at must not precede completion of snapshot acquisition")
+
+    retention_expires_dt = _timestamp(
+        proof["retention_expires_at"],
+        field="governance proof.retention_expires_at",
+    )
+    if retention_expires_dt < latest_capture_dt:
+        raise ValueError("governance proof.retention_expires_at must not precede snapshot capture")
+    if imported_dt > retention_expires_dt:
+        raise ValueError("imported_at exceeds governance proof.retention_expires_at")
+    if proof["terms_reference"].rstrip("/") == _PARLAY_TERMS_REFERENCE:
+        standard_ceiling = earliest_capture_dt + _PARLAY_STANDARD_RETENTION_CEILING
+        if (
+            retention_expires_dt > standard_ceiling
+            and proof["retention_extension_authority_reference"] is None
+        ):
+            raise ValueError(
+                "ParlayAPI retention beyond 90 days from earliest capture requires "
+                "retention_extension_authority_reference"
+            )
 
     events.sort(
         key=lambda item: (
@@ -545,11 +577,6 @@ def assemble_historical_corpus(
             raise ValueError(
                 "sealed results outcome_reveal_after conflicts with requested causal reveal boundary"
             )
-    # The canonical assembled package content-binds the causal reveal instant and
-    # independently sourced outcome provenance into sealed results. The declared
-    # source-record digest and its normalized outcome labels are verified against an
-    # external sibling artifact before assembly; that source artifact is deliberately
-    # not redistributed.
     results = {
         **results,
         "outcome_provenance": outcome_provenance,
@@ -583,6 +610,10 @@ def assemble_historical_corpus(
             "source_identity": proof["source_identity"],
             "terms_reference": proof["terms_reference"],
             "retention_basis": proof["retention_basis"],
+            "retention_expires_at": proof["retention_expires_at"],
+            "retention_extension_authority_reference": proof[
+                "retention_extension_authority_reference"
+            ],
             "redistribution_policy": effective_redistribution_policy,
             "acquired_at": latest_capture,
             "imported_at": imported_at,
@@ -606,6 +637,10 @@ def assemble_historical_corpus(
                 "licensing_or_retention_verified": True,
                 "rights_source_ids": list(proof["source_ids"]),
                 "authority_reference": proof["authority_reference"],
+                "retention_expires_at": proof["retention_expires_at"],
+                "retention_extension_authority_reference": proof[
+                    "retention_extension_authority_reference"
+                ],
                 "verified_at": proof["verified_at"],
                 "redistribution_verified": proof["redistribution_verified"],
             },

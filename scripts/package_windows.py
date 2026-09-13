@@ -16,6 +16,7 @@ def main() -> int:
     parser.add_argument("--accessibility-audit", type=Path, required=True)
     parser.add_argument("--keyboard-audit", type=Path, required=True)
     parser.add_argument("--restart-recovery-audit", type=Path, required=True)
+    parser.add_argument("--product-journey-audit", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--verification-output", type=Path)
@@ -28,6 +29,7 @@ def main() -> int:
         args.accessibility_audit,
         args.keyboard_audit,
         args.restart_recovery_audit,
+        args.product_journey_audit,
         args.output,
         args.source_sha,
     )

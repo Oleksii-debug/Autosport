@@ -29,6 +29,16 @@ def main(argv: list[str] | None = None) -> int:
         from autosport.restart_recovery_audit import run_restart_recovery_audit
 
         return run_restart_recovery_audit(args[1])
+    if args and args[0] == "--product-journey-audit-output":
+        if (
+            len(args) != 6
+            or args[2] != "--dataset-root"
+            or args[4] != "--research-plan"
+        ):
+            return 2
+        from autosport.product_journey_audit import run_product_journey_audit
+
+        return run_product_journey_audit(args[1], args[3], args[5])
     from autosport.gui import main as gui_main
 
     return gui_main()

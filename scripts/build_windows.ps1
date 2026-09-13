@@ -44,6 +44,24 @@ if ($restartRecoveryEvidence.real_money_execution -ne $false -or $restartRecover
   throw 'Machine restart/recovery audit violated release truth labels'
 }
 
+$productJourney = Join-Path $PWD 'dist/product-journey-audit.json'
+if (Test-Path $productJourney) { Remove-Item -Force $productJourney }
+$demoDataset = Join-Path $PWD 'examples/tt_demo'
+$demoPlan = Join-Path $demoDataset 'research_plan.json'
+$productJourneyProcess = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--product-journey-audit-output', $productJourney, '--dataset-root', $demoDataset, '--research-plan', $demoPlan -Wait -PassThru
+if ($productJourneyProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe product journey audit exited $($productJourneyProcess.ExitCode)" }
+$productJourneyEvidence = Get-Content $productJourney -Raw | ConvertFrom-Json
+if ($productJourneyEvidence.status -ne 'PASS') { throw 'Packaged product journey audit did not PASS' }
+if ($productJourneyEvidence.canonical_strategy_id -ne 'research-replay-v1') { throw 'Packaged product journey did not exercise research-replay-v1' }
+if ($productJourneyEvidence.transaction_terminal -ne $true) { throw 'Packaged product journey did not reach terminal transaction state' }
+if ($productJourneyEvidence.settled_ticket_count -ne 1) { throw 'Packaged product journey did not settle the deterministic demo ticket' }
+if ($productJourneyEvidence.profitability_claim -ne $false -or $productJourneyEvidence.real_historical_point_in_time_market_coverage_verified -ne $false) {
+  throw 'Packaged product journey violated sample/research truth labels'
+}
+if ($productJourneyEvidence.real_money_execution -ne $false -or $productJourneyEvidence.human_tested -ne $false -or $productJourneyEvidence.nvda_verified -ne $false) {
+  throw 'Packaged product journey violated release truth labels'
+}
+
 $sourceSha = $env:AUTOSPORT_SOURCE_SHA
 if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
 $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
@@ -56,6 +74,7 @@ python scripts/package_windows.py `
   --accessibility-audit $a11y `
   --keyboard-audit $keyboard `
   --restart-recovery-audit $restartRecovery `
+  --product-journey-audit $productJourney `
   --output $package `
   --source-sha $sourceSha `
   --verification-output $packageVerification
@@ -122,6 +141,24 @@ if ($freshRestartRecoveryEvidence.real_money_execution -ne $false -or $freshRest
   throw 'Fresh-extracted restart/recovery audit violated release truth labels'
 }
 
+$freshProductJourney = Join-Path $PWD 'dist/fresh-extraction-product-journey-audit.json'
+if (Test-Path $freshProductJourney) { Remove-Item -Force $freshProductJourney }
+$extractedDataset = Join-Path $packageRoot 'examples/tt_demo'
+$extractedPlan = Join-Path $extractedDataset 'research_plan.json'
+$freshProductJourneyProcess = Start-Process -FilePath $extractedExe -ArgumentList '--product-journey-audit-output', $freshProductJourney, '--dataset-root', $extractedDataset, '--research-plan', $extractedPlan -Wait -PassThru
+if ($freshProductJourneyProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe product journey audit exited $($freshProductJourneyProcess.ExitCode)" }
+$freshProductJourneyEvidence = Get-Content $freshProductJourney -Raw | ConvertFrom-Json
+if ($freshProductJourneyEvidence.status -ne 'PASS') { throw 'Fresh-extracted product journey audit did not PASS' }
+if ($freshProductJourneyEvidence.canonical_strategy_id -ne 'research-replay-v1') { throw 'Fresh-extracted product journey did not exercise research-replay-v1' }
+if ($freshProductJourneyEvidence.transaction_terminal -ne $true) { throw 'Fresh-extracted product journey did not reach terminal transaction state' }
+if ($freshProductJourneyEvidence.settled_ticket_count -ne 1) { throw 'Fresh-extracted product journey did not settle the deterministic demo ticket' }
+if ($freshProductJourneyEvidence.profitability_claim -ne $false -or $freshProductJourneyEvidence.real_historical_point_in_time_market_coverage_verified -ne $false) {
+  throw 'Fresh-extracted product journey violated sample/research truth labels'
+}
+if ($freshProductJourneyEvidence.real_money_execution -ne $false -or $freshProductJourneyEvidence.human_tested -ne $false -or $freshProductJourneyEvidence.nvda_verified -ne $false) {
+  throw 'Fresh-extracted product journey violated release truth labels'
+}
+
 $freshEvidence = [ordered]@{
   status = 'PASS'
   source_sha = $sourceSha
@@ -134,6 +171,10 @@ $freshEvidence = [ordered]@{
   extracted_restart_recovery_status = $freshRestartRecoveryEvidence.status
   extracted_session_restart_status = $freshRestartRecoveryEvidence.session_restart_status
   extracted_transaction_recovery_status = $freshRestartRecoveryEvidence.transaction_recovery_status
+  extracted_product_journey_status = $freshProductJourneyEvidence.status
+  extracted_product_journey_strategy = $freshProductJourneyEvidence.canonical_strategy_id
+  real_historical_point_in_time_market_coverage_verified = $false
+  profitability_claim = $false
   real_money_execution = $false
   human_tested = $false
   nvda_verified = $false

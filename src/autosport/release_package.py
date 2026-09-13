@@ -31,6 +31,7 @@ def build_windows_package(
     accessibility_path: str | Path,
     keyboard_path: str | Path,
     restart_recovery_path: str | Path,
+    product_journey_path: str | Path,
     output_zip: str | Path,
     source_sha: str,
 ) -> tuple[Path, str]:
@@ -41,6 +42,7 @@ def build_windows_package(
     accessibility_path = Path(accessibility_path)
     keyboard_path = Path(keyboard_path)
     restart_recovery_path = Path(restart_recovery_path)
+    product_journey_path = Path(product_journey_path)
     output_zip = Path(output_zip)
     package_dir = output_zip.parent / "Autosport-V1"
     if package_dir.exists():
@@ -52,6 +54,7 @@ def build_windows_package(
     shutil.copy2(accessibility_path, package_dir / "accessibility-audit.json")
     shutil.copy2(keyboard_path, package_dir / "keyboard-audit.json")
     shutil.copy2(restart_recovery_path, package_dir / "restart-recovery-audit.json")
+    shutil.copy2(product_journey_path, package_dir / "product-journey-audit.json")
     shutil.copytree(example_dir, package_dir / "examples" / example_dir.name)
 
     build_info = {
@@ -121,6 +124,7 @@ def verify_windows_package(
         "accessibility-audit.json",
         "keyboard-audit.json",
         "restart-recovery-audit.json",
+        "product-journey-audit.json",
         "BUILD_INFO.json",
         "PACKAGE_MANIFEST.json",
         "SHA256SUMS.txt",
@@ -174,11 +178,16 @@ def verify_windows_package(
         members["restart-recovery-audit.json"],
         "restart-recovery-audit.json",
     )
+    product_journey = _decode_json_object(
+        members["product-journey-audit.json"],
+        "product-journey-audit.json",
+    )
     for label, payload in (
         ("packaged-diagnostic.json", diagnostic),
         ("accessibility-audit.json", accessibility),
         ("keyboard-audit.json", keyboard),
         ("restart-recovery-audit.json", restart_recovery),
+        ("product-journey-audit.json", product_journey),
     ):
         if payload.get("status") != "PASS":
             raise ValueError(f"{label} does not record PASS")
@@ -191,12 +200,28 @@ def verify_windows_package(
     if restart_recovery.get("recovery_disposition") != "aborted_uncommitted":
         raise ValueError("restart-recovery-audit.json recovery disposition is not fail-closed")
 
+    if product_journey.get("canonical_strategy_id") != "research-replay-v1":
+        raise ValueError("product-journey-audit.json did not exercise research-replay-v1")
+    if product_journey.get("transaction_terminal") is not True:
+        raise ValueError("product-journey-audit.json did not reach a terminal economic transaction")
+    if product_journey.get("profitability_claim") is not False:
+        raise ValueError("product-journey-audit.json must record profitability_claim=false")
+    if product_journey.get("real_historical_point_in_time_market_coverage_verified") is not False:
+        raise ValueError(
+            "product-journey-audit.json must not promote the shipped sample to real historical market proof"
+        )
+    if not isinstance(product_journey.get("event_count"), int) or product_journey["event_count"] <= 0:
+        raise ValueError("product-journey-audit.json does not prove replay event consumption")
+    if product_journey.get("settled_ticket_count") != 1:
+        raise ValueError("product-journey-audit.json does not prove the deterministic settled paper ticket")
+
     return {
         "status": "PASS",
         "source_sha": expected_source_sha,
         "package_sha256": sha256_file(package_zip),
         "autosport_exe_sha256": exe_sha,
         "file_count": len(members),
+        "product_journey_status": "PASS",
         "real_money_execution": False,
         "human_tested": False,
         "nvda_verified": False,

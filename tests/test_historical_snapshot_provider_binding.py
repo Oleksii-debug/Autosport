@@ -9,7 +9,13 @@ from autosport.parlayapi_provider import ParlayApiTableTennisProvider
 
 
 class HistoricalSnapshotProviderBindingTests(unittest.TestCase):
-    def _write_pair(self, root: Path, *, source_id: str) -> tuple[Path, Path]:
+    def _write_pair(
+        self,
+        root: Path,
+        *,
+        source_id: str,
+        provider: str = "parlayapi",
+    ) -> tuple[Path, Path]:
         market_path = root / "snapshot.jsonl"
         evidence_path = root / "snapshot.evidence.json"
 
@@ -35,7 +41,7 @@ class HistoricalSnapshotProviderBindingTests(unittest.TestCase):
         evidence = {
             "schema_version": 1,
             "kind": "parlayapi_point_in_time_historical_snapshot",
-            "provider": "parlayapi",
+            "provider": provider,
             "sport_key": "table_tennis",
             "requested_at": "2026-01-01T10:00:30+00:00",
             "snapshot_at": "2026-01-01T10:00:20+00:00",
@@ -87,6 +93,21 @@ class HistoricalSnapshotProviderBindingTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "provider.*source_id"):
+                _snapshot(
+                    market_path,
+                    evidence_path,
+                    expected_terms_reference="https://parlay-api.com/terms",
+                )
+
+    def test_snapshot_evidence_rejects_renamed_provider_with_matching_row_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            market_path, evidence_path = self._write_pair(
+                Path(tmp),
+                source_id="evil:table_tennis",
+                provider="evil",
+            )
+
+            with self.assertRaisesRegex(ValueError, "provider must be parlayapi"):
                 _snapshot(
                     market_path,
                     evidence_path,

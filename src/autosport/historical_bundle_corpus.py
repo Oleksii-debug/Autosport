@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +80,47 @@ def _digest(raw: dict[str, Any], key: str, *, context: str) -> str:
 def _false(raw: dict[str, Any], key: str, *, context: str) -> None:
     if raw.get(key) is not False:
         raise ValueError(f"{context}.{key} must remain false")
+
+
+def _canonical_date(value: Any, *, field: str) -> date:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be canonical YYYY-MM-DD")
+    text = value.strip()
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be canonical YYYY-MM-DD") from exc
+    if parsed.isoformat() != text:
+        raise ValueError(f"{field} must be canonical YYYY-MM-DD")
+    return parsed
+
+
+def _utc_date_from_timestamp(value: Any, *, field: str) -> date:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be an ISO-8601 timestamp with timezone")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO-8601 timestamp with timezone") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be an ISO-8601 timestamp with timezone")
+    return parsed.astimezone(timezone.utc).date()
+
+
+def _provider_date(value: Any, *, field: str) -> date:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be an ISO date or timestamp")
+    text = value.strip()
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"{field} must be an ISO date or timestamp") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"{field} timestamp must include timezone")
+        return parsed.date()
 
 
 def _member(root: Path, value: Any, *, field: str) -> Path:
@@ -159,6 +201,12 @@ def verify_acquisition_bundle(
     requested_from_entries = [item.get("requested_at") for item in snapshots]
     if requested_scope != requested_from_entries:
         raise ValueError("acquisition bundle request_scope timestamps do not match snapshot entries")
+    if not isinstance(requested_scope, list) or not requested_scope:
+        raise ValueError("acquisition bundle requested_snapshot_timestamps must be a non-empty list")
+    requested_dates = [
+        _utc_date_from_timestamp(value, field=f"acquisition bundle.requested_snapshot_timestamps[{index}]")
+        for index, value in enumerate(requested_scope, start=1)
+    ]
 
     match_results = bundle.get("match_results")
     if not isinstance(match_results, dict):
@@ -170,6 +218,167 @@ def verify_acquisition_bundle(
         raise ValueError("acquisition bundle match-result date does not match request scope")
     if result_scope.get("priced_only") is not match_results.get("priced_only"):
         raise ValueError("acquisition bundle match-result priced_only does not match request scope")
+    result_date = _canonical_date(
+        result_scope.get("date"),
+        field="acquisition bundle.request_scope.match_results.date",
+    )
+
+    coverage_scope = request_scope.get("coverage_preflight")
+    if not isinstance(coverage_scope, dict):
+        raise ValueError("acquisition bundle.request_scope.coverage_preflight must be an object")
+    coverage_evidence = match_results.get("coverage_preflight")
+    if not isinstance(coverage_evidence, dict):
+        raise ValueError("acquisition bundle.match_results.coverage_preflight must be an object")
+
+    coverage_from_text = _text(
+        coverage_scope,
+        "date_from",
+        context="acquisition bundle.request_scope.coverage_preflight",
+    )
+    coverage_to_text = _text(
+        coverage_scope,
+        "date_to",
+        context="acquisition bundle.request_scope.coverage_preflight",
+    )
+    coverage_from = _canonical_date(
+        coverage_from_text,
+        field="acquisition bundle.request_scope.coverage_preflight.date_from",
+    )
+    coverage_to = _canonical_date(
+        coverage_to_text,
+        field="acquisition bundle.request_scope.coverage_preflight.date_to",
+    )
+    if coverage_to < coverage_from:
+        raise ValueError("acquisition bundle coverage preflight date_to must not precede date_from")
+    expected_dates = [*requested_dates, result_date]
+    if coverage_from != min(expected_dates) or coverage_to != max(expected_dates):
+        raise ValueError("acquisition bundle coverage preflight window does not match acquisition request dates")
+
+    evidence_from_text = _text(
+        coverage_evidence,
+        "date_from",
+        context="acquisition bundle.match_results.coverage_preflight",
+    )
+    evidence_to_text = _text(
+        coverage_evidence,
+        "date_to",
+        context="acquisition bundle.match_results.coverage_preflight",
+    )
+    evidence_from = _canonical_date(
+        evidence_from_text,
+        field="acquisition bundle.match_results.coverage_preflight.date_from",
+    )
+    evidence_to = _canonical_date(
+        evidence_to_text,
+        field="acquisition bundle.match_results.coverage_preflight.date_to",
+    )
+    if evidence_from != coverage_from or evidence_to != coverage_to:
+        raise ValueError("acquisition bundle coverage preflight window does not match request scope")
+
+    _utc_date_from_timestamp(
+        _text(coverage_evidence, "observed_at", context="acquisition bundle.match_results.coverage_preflight"),
+        field="acquisition bundle.match_results.coverage_preflight.observed_at",
+    )
+    entitlement_from_text = _text(
+        coverage_evidence,
+        "historical_window_from",
+        context="acquisition bundle.match_results.coverage_preflight",
+    )
+    entitlement_from = _provider_date(
+        entitlement_from_text,
+        field="acquisition bundle.match_results.coverage_preflight.historical_window_from",
+    )
+    if coverage_from < entitlement_from:
+        raise ValueError("acquisition bundle coverage preflight request predates entitlement window")
+
+    api_version = coverage_evidence.get("api_version")
+    if api_version is not None and (not isinstance(api_version, str) or not api_version.strip()):
+        raise ValueError(
+            "acquisition bundle.match_results.coverage_preflight.api_version must be null or a non-empty string"
+        )
+    _digest(
+        coverage_evidence,
+        "response_sha256",
+        context="acquisition bundle.match_results.coverage_preflight",
+    )
+    historical_window_hours = coverage_evidence.get("historical_window_hours")
+    if (
+        not isinstance(historical_window_hours, int)
+        or isinstance(historical_window_hours, bool)
+        or historical_window_hours <= 0
+    ):
+        raise ValueError(
+            "acquisition bundle.match_results.coverage_preflight.historical_window_hours must be a positive integer"
+        )
+    sources = coverage_evidence.get("sources")
+    if not isinstance(sources, list) or not sources or not all(isinstance(item, dict) for item in sources):
+        raise ValueError("acquisition bundle.match_results.coverage_preflight.sources must be a non-empty list of objects")
+    source_count = coverage_evidence.get("source_count")
+    if (
+        not isinstance(source_count, int)
+        or isinstance(source_count, bool)
+        or source_count != len(sources)
+    ):
+        raise ValueError("acquisition bundle coverage preflight source_count does not match sources")
+    total_rows = coverage_evidence.get("total_rows")
+    total_priced_rows = coverage_evidence.get("total_priced_rows")
+    if not isinstance(total_rows, int) or isinstance(total_rows, bool) or total_rows <= 0:
+        raise ValueError("acquisition bundle coverage preflight total_rows must be a positive integer")
+    if (
+        not isinstance(total_priced_rows, int)
+        or isinstance(total_priced_rows, bool)
+        or total_priced_rows < 0
+        or total_priced_rows > total_rows
+    ):
+        raise ValueError("acquisition bundle coverage preflight total_priced_rows is invalid")
+    summed_rows = 0
+    summed_priced_rows = 0
+    seen_sources: set[str] = set()
+    for index, source in enumerate(sources, start=1):
+        context = f"acquisition bundle.match_results.coverage_preflight.sources[{index}]"
+        source_name = _text(source, "source", context=context)
+        if source_name in seen_sources:
+            raise ValueError("acquisition bundle coverage preflight source identities must be unique")
+        seen_sources.add(source_name)
+        rows = source.get("rows")
+        priced_rows = source.get("priced_rows")
+        if not isinstance(rows, int) or isinstance(rows, bool) or rows <= 0:
+            raise ValueError(f"{context}.rows must be a positive integer")
+        if (
+            not isinstance(priced_rows, int)
+            or isinstance(priced_rows, bool)
+            or priced_rows < 0
+            or priced_rows > rows
+        ):
+            raise ValueError(f"{context}.priced_rows must be between zero and rows")
+        first_date = _canonical_date(
+            source.get("first_date"),
+            field=f"{context}.first_date",
+        )
+        last_date = _canonical_date(
+            source.get("last_date"),
+            field=f"{context}.last_date",
+        )
+        if last_date < first_date:
+            raise ValueError("acquisition bundle coverage source last_date must not precede first_date")
+        if first_date < coverage_from or last_date > coverage_to:
+            raise ValueError("acquisition bundle coverage source dates fall outside requested window")
+        summed_rows += rows
+        summed_priced_rows += priced_rows
+    if summed_rows != total_rows:
+        raise ValueError("acquisition bundle coverage preflight total_rows does not match sources")
+    if summed_priced_rows != total_priced_rows:
+        raise ValueError("acquisition bundle coverage preflight total_priced_rows does not match sources")
+    for field in (
+        "historical_window_market_coverage_verified",
+        "licensing_or_retention_verified",
+        "redistribution_verified",
+    ):
+        _false(
+            coverage_evidence,
+            field,
+            context="acquisition bundle.match_results.coverage_preflight",
+        )
 
     evidence_identity = _digest(bundle, "evidence_identity", context="acquisition bundle")
     identity_payload = {

@@ -37,6 +37,17 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         self.assertEqual(restored.committed_stake, book.committed_stake)
         self.assertEqual(set(restored.tickets), set(book.tickets))
 
+    def test_open_ticket_rejects_duplicate_quote_key_without_mutating_bankroll(self):
+        book = PaperBook("100")
+        first = TicketLeg("e", "m", "a", locked_odds=Decimal("2"))
+        duplicate = TicketLeg("e", "m", "a", locked_odds=Decimal("3"))
+
+        with self.assertRaisesRegex(ValueError, "duplicate quote_key"):
+            book.open_ticket((leg for leg in [first, duplicate]), "10")
+
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+
     def test_load_rejects_balance_not_explained_by_ticket_economics(self):
         path = self._snapshot(
             {
@@ -73,6 +84,33 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(ValueError, "duplicate ticket_id"):
+            PaperBook.load(path)
+
+    def test_load_rejects_duplicate_quote_key_legs(self):
+        leg = {
+            "event_id": "e",
+            "market_id": "m",
+            "selection_id": "a",
+            "locked_odds": "2",
+        }
+        path = self._snapshot(
+            {
+                "initial_bankroll": "100",
+                "balance": "90",
+                "tickets": [
+                    {
+                        "ticket_id": "duplicate-leg",
+                        "stake": "10",
+                        "placed_at": "2026-01-01T00:00:00+00:00",
+                        "status": "open",
+                        "payout": "0",
+                        "strategy_reason": "test",
+                        "legs": [leg, dict(leg)],
+                    }
+                ],
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate quote_key"):
             PaperBook.load(path)
 
     def test_load_rejects_impossible_status_payout(self):

@@ -9,7 +9,7 @@
 7. Для read-only live observation виберіть режим «Public preview — без ключа» або «API key з environment» і натисніть «Оновити live snapshot».
 8. Authenticated live режим читає ключ тільки зі змінної середовища AUTOSPORT_PARLAYAPI_KEY. Ключ не вводиться в інтерфейс і не зберігається у workspace.
 9. Live acquisition і economic replay виконуються поза Tk/UIA thread; клавіатурна навігація та screen-reader UI не повинні блокуватися очікуванням мережі або replay.
-10. Ctrl+O — вибрати dataset; Ctrl+R — запустити replay; Ctrl+L — оновити live snapshot; F6 — paper tickets; F7 — live quotes. Strategy combobox і кнопка research plan входять у Tab traversal та мають UIA names/descriptions.
+10. Ctrl+O — вибрати dataset; Ctrl+R — запустити replay; Ctrl+L — оновити live snapshot; F6 — paper tickets; F7 — live quotes; F8 — «Evaluation і portfolio evidence». Strategy combobox, кнопка research plan і evaluation list входять у keyboard/UIA product path; evaluation surface має стабільний UIA AutomationId 204.
 11. Віртуальний банк, рішення, market history, source health та run summaries зберігаються у локальному Autosport workspace і відновлюються після перезапуску. Economic history різних strategy/plan identities ізольована у strategy-specific workspaces.
 
 PORTABLE DATA / RESEARCH TOOLS
@@ -34,6 +34,15 @@ CRASH / ECONOMIC WORKSPACE RECOVERY
 20. Якщо Autosport після аварійного завершення повідомляє про unresolved economic transaction, не видаляйте paper_book.json, decisions.jsonl, run_registry.json або transaction files вручну. Закрийте Autosport.exe, відкрийте PowerShell у папці програми та запустіть canonical fail-closed recovery для відповідного workspace: .\Autosport-Data.exe repair-workspace --workspace "<повний шлях до workspace>".
 21. Для baseline-v1 типовий workspace показується безпосередньо в рядку «Віртуальний банк» GUI. Для інших strategy/plan identities використовуйте саме strategy-specific workspace, який GUI також показує під час replay. Команда recovery не запускається паралельно з active economic writer.
 22. repair-workspace не «позначає run успішним» за припущенням. Вона завершує або відхиляє лише той стан, який може бути доведений canonical transaction/base hashes; неоднозначний стан залишається unresolved і повертає ненульовий exit code. Після успішного repair перезапустіть Autosport.exe і повторно відкрийте той самий strategy/plan context.
+
+PHYSICAL NVDA ACCEPTANCE — ВИКОНУЄТЬСЯ ЛЮДИНОЮ
+
+23. Увімкніть NVDA на фізичній Windows-машині, запустіть саме fresh-extracted Autosport.exe з candidate ZIP і не використовуйте machine accessibility audit як заміну цій перевірці.
+24. Пройдіть інтерфейс клавішею Tab без миші. NVDA має зрозуміло оголошувати назви та стан основних елементів: dataset, strategy, research plan, запуск replay, live mode/snapshot, paper tickets, live quotes, status/log та evaluation/portfolio evidence. Фокус не повинен губитися або потрапляти у недоступний цикл.
+25. Перевірте клавіатурні переходи: Ctrl+O, Ctrl+R, Ctrl+L, F6, F7 і F8. F8 має переводити фокус на «Evaluation і portfolio evidence»; після успішного replay список має містити читабельні NVDA рядки з terminal paper/evaluation evidence.
+26. Перевірте fail-closed помилки: спроба replay без валідного dataset/research plan має залишати програму керованою з клавіатури, а повідомлення про помилку має бути доступним для читання NVDA. Не підтверджуйте acceptance, якщо помилка існує лише візуально або фокус стає недоступним.
+27. Перезапустіть Autosport.exe і перевірте відновлення того самого strategy/plan context та локального paper state. Якщо є unresolved transaction, виконайте repair-workspace за пунктами 20–22 і повторіть запуск.
+28. Лише після фактичного проходження пунктів 23–27 на фізичній Windows + NVDA можна окремо зафіксувати HUMAN_TESTED/NVDA_VERIFIED як людське evidence. Сам факт green CI, UIA PASS, створеного ZIP або цієї інструкції НЕ змінює ці прапорці.
 
 Live observation є read-only. Paper/replay функції використовують лише віртуальний банк. Програма не виконує реальні грошові ставки і не має механізму керування букмекерським рахунком, поповнення або виведення коштів.
 

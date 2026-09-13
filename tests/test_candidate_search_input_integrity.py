@@ -64,6 +64,28 @@ class CandidateSearchInputIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate candidate quote_key"):
             self.search.search([first, second], minimum_legs=1)
 
+    def test_tied_economics_are_canonical_before_narrow_beam_truncation(self) -> None:
+        search = BeamParlayCandidateSearch(beam_width=1, max_legs=2, result_limit=5)
+        a = self._leg(
+            quote_key="a|winner|x",
+            event_id="a",
+            odds=Decimal("2"),
+            probability=Decimal("0.5"),
+        )
+        b = self._leg(
+            quote_key="b|winner|x",
+            event_id="b",
+            odds=Decimal("2"),
+            probability=Decimal("0.5"),
+        )
+
+        forward = search.search([a, b], minimum_legs=2)
+        reverse = search.search([b, a], minimum_legs=2)
+
+        self.assertEqual(forward, reverse)
+        self.assertEqual(len(forward), 1)
+        self.assertEqual(tuple(leg.quote_key for leg in forward[0].legs), ("a|winner|x", "b|winner|x"))
+
     def test_valid_inputs_still_generate_deterministic_finite_candidates(self) -> None:
         legs = [
             self._leg(),

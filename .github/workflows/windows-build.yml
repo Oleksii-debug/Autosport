@@ -36,4 +36,8 @@ jobs:
             dist/Autosport-V1-windows-x64.zip
             dist/packaged-diagnostic.json
             dist/accessibility-audit.json
+            dist/package-verification.json
+            dist/fresh-extraction-diagnostic.json
+            dist/fresh-extraction-accessibility-audit.json
+            dist/fresh-extraction-verification.json
           if-no-files-found: error

@@ -261,6 +261,10 @@ def _validate_market_binding(
         event = latest_quotes.get(leg.quote_key)
         if event is None:
             raise ValueError(f"research candidate quote absent from replay state: {leg.quote_key}")
+        if event.status != "open":
+            raise ValueError(
+                f"research candidate quote is not open market state: {leg.quote_key}"
+            )
         if event.metadata.get("execution_quote_verified") is False:
             raise ValueError(
                 f"research candidate quote is not verified executable price evidence: {leg.quote_key}"

@@ -71,7 +71,12 @@ class ResearchEvidence:
                 "market_snapshot_hash",
                 _validate_sha256(self.market_snapshot_hash, "market_snapshot_hash"),
             )
-        flags = tuple(str(flag) for flag in self.quality_flags)
+        flags = tuple(self.quality_flags)
+        if any(
+            not isinstance(flag, str) or not flag.strip() or flag != flag.strip()
+            for flag in flags
+        ):
+            raise ValueError("evidence quality flags must be non-empty canonical strings")
         if len(flags) != len(set(flags)):
             raise ValueError("duplicate evidence quality flag")
         object.__setattr__(self, "quality_flags", flags)

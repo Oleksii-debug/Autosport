@@ -419,8 +419,13 @@ def _evidence_from_dict(raw: Any) -> ResearchEvidence:
     quality_flags_raw = raw.get("quality_flags", [])
     if not isinstance(quality_flags_raw, list):
         raise ValueError("ResearchEvidence quality_flags must be a JSON array")
-    if any(not isinstance(item, str) or not item.strip() for item in quality_flags_raw):
-        raise ValueError("ResearchEvidence quality_flags must contain non-empty strings")
+    if any(
+        not isinstance(item, str) or not item.strip() or item != item.strip()
+        for item in quality_flags_raw
+    ):
+        raise ValueError(
+            "ResearchEvidence quality_flags must contain non-empty canonical strings"
+        )
     return ResearchEvidence(
         evidence_id=str(raw["evidence_id"]),
         quote_key=str(raw["quote_key"]),

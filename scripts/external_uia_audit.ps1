@@ -11,16 +11,16 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 
 $expected = @(
-    [ordered]@{ key = 'choose_dataset'; automation_id = '101'; name = 'Вибрати replay dataset'; required_pattern = 'Invoke' },
-    [ordered]@{ key = 'run_replay'; automation_id = '102'; name = 'Запустити paper replay'; required_pattern = 'Invoke' },
-    [ordered]@{ key = 'replay_speed'; automation_id = '103'; name = 'Швидкість replay'; required_pattern = 'Value' },
-    [ordered]@{ key = 'live_mode'; automation_id = '104'; name = 'Режим live observation'; required_pattern = 'Value' },
-    [ordered]@{ key = 'live_refresh'; automation_id = '105'; name = 'Оновити live snapshot'; required_pattern = 'Invoke' },
-    [ordered]@{ key = 'strategy'; automation_id = '106'; name = 'Стратегія replay'; required_pattern = 'Value' },
-    [ordered]@{ key = 'research_plan'; automation_id = '107'; name = 'Вибрати research plan'; required_pattern = 'Invoke' },
-    [ordered]@{ key = 'tickets'; automation_id = '201'; name = 'Paper tickets і результати'; required_pattern = $null },
-    [ordered]@{ key = 'log'; automation_id = '202'; name = 'Журнал виконання'; required_pattern = 'Value' },
-    [ordered]@{ key = 'live_quotes'; automation_id = '203'; name = 'Live quotes'; required_pattern = $null }
+    [ordered]@{ key = 'choose_dataset'; automation_id = '101'; name = 'Вибрати replay dataset'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
+    [ordered]@{ key = 'run_replay'; automation_id = '102'; name = 'Запустити paper replay'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
+    [ordered]@{ key = 'replay_speed'; automation_id = '103'; name = 'Швидкість replay'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
+    [ordered]@{ key = 'live_mode'; automation_id = '104'; name = 'Режим live observation'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
+    [ordered]@{ key = 'live_refresh'; automation_id = '105'; name = 'Оновити live snapshot'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
+    [ordered]@{ key = 'strategy'; automation_id = '106'; name = 'Стратегія replay'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
+    [ordered]@{ key = 'research_plan'; automation_id = '107'; name = 'Вибрати research plan'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
+    [ordered]@{ key = 'tickets'; automation_id = '201'; name = 'Paper tickets і результати'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
+    [ordered]@{ key = 'log'; automation_id = '202'; name = 'Журнал виконання'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
+    [ordered]@{ key = 'live_quotes'; automation_id = '203'; name = 'Live quotes'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true }
 )
 
 function Test-Pattern {
@@ -36,6 +36,29 @@ function Test-Pattern {
     }
     $patternObject = $null
     return $Element.TryGetCurrentPattern($pattern, [ref]$patternObject)
+}
+
+function Get-NamedListItemCount {
+    param([System.Windows.Automation.AutomationElement]$Element)
+
+    $count = 0
+    $descendants = $Element.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition
+    )
+    foreach ($item in $descendants) {
+        try {
+            $typeName = [string]$item.Current.ControlType.ProgrammaticName
+            $itemName = [string]$item.Current.Name
+            if ($typeName -eq 'ControlType.ListItem' -and -not [string]::IsNullOrWhiteSpace($itemName)) {
+                $count += 1
+            }
+        } catch {
+            # A fragment can disappear while the provider refreshes; missing rows
+            # are caught by the zero-count fail-closed check below.
+        }
+    }
+    return $count
 }
 
 function Get-ProcessFamilyIds {
@@ -98,7 +121,7 @@ function Find-UiaRootForProcessFamily {
 $report = [ordered]@{
     status = 'FAIL'
     source = 'external_windows_uia_client'
-    evidence_scope = 'external System.Windows.Automation client against the fresh-extracted packaged Autosport.exe; not NVDA speech or physical-human proof'
+    evidence_scope = 'external System.Windows.Automation client against the fresh-extracted packaged Autosport.exe; list keyboard focus is separately gated by the same fresh-extracted EXE keyboard audit; not NVDA speech or physical-human proof'
     launcher_process_id = $null
     process_id = $null
     process_family_ids = @()
@@ -164,24 +187,38 @@ try {
         $focusable = [bool]$element.Current.IsKeyboardFocusable
         $enabled = [bool]$element.Current.IsEnabled
         $patternOk = Test-Pattern -Element $element -PatternName $spec.required_pattern
+        $namedRowCount = 0
+        if ([bool]$spec.require_named_rows) {
+            $namedRowCount = Get-NamedListItemCount -Element $element
+        }
         $record = [ordered]@{
             key = $spec.key
             automation_id = [string]$element.Current.AutomationId
             expected_name = $spec.name
             name = $currentName
             control_type = $controlType
+            expected_control_type = $spec.expected_control_type
             keyboard_focusable = $focusable
+            keyboard_focus_required_by_external_gate = [bool]$spec.require_external_focus
+            keyboard_focus_gate_owner = if ([bool]$spec.require_external_focus) { 'external_uia_property' } else { 'fresh_extraction_keyboard_audit' }
             enabled = $enabled
             required_pattern = $spec.required_pattern
             required_pattern_available = $patternOk
+            named_list_item_count = $namedRowCount
         }
         $report.controls += $record
 
         if ($currentName -ne $spec.name) {
             $report.failures += "automation_id=$($spec.automation_id): external UIA Name mismatch expected='$($spec.name)' actual='$currentName'"
         }
-        if (-not $focusable) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$spec.expected_control_type) -and $controlType -ne [string]$spec.expected_control_type) {
+            $report.failures += "automation_id=$($spec.automation_id): external UIA ControlType mismatch expected='$($spec.expected_control_type)' actual='$controlType'"
+        }
+        if ([bool]$spec.require_external_focus -and -not $focusable) {
             $report.failures += "automation_id=$($spec.automation_id): not externally keyboard-focusable"
+        }
+        if ([bool]$spec.require_named_rows -and $namedRowCount -lt 1) {
+            $report.failures += "automation_id=$($spec.automation_id): no externally exposed named ListItem rows"
         }
         if (-not $enabled) {
             $report.failures += "automation_id=$($spec.automation_id): externally disabled at startup"

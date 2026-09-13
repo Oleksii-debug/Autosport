@@ -140,6 +140,12 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
             finally:
                 session.close()
 
+    def test_scalar_quality_flags_fail_closed_before_policy_review(self):
+        raw = self._plan_dict()
+        raw["decisions"][0]["evidence"][0]["quality_flags"] = "GAP_DETECTED"
+        with self.assertRaisesRegex(ValueError, "quality_flags must be a JSON array"):
+            ResearchStrategyPlan.from_dict(raw)
+
     def test_stale_candidate_odds_fail_before_registry_or_book_mutation(self):
         dataset = load_dataset(Path("examples/tt_demo"))
         plan = ResearchStrategyPlan.from_dict(self._plan_dict(odds="1.80"))

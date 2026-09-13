@@ -32,6 +32,7 @@ class AccessibilityAuditTests(unittest.TestCase):
                 self._widget(AUTOMATION_IDS["research_plan"], "Вибрати research plan", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["choose_dataset"], "Вибрати replay dataset", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["run_replay"], "Запустити paper replay", patterns=("INVOKE",)),
+                self._widget(AUTOMATION_IDS["repair_workspace"], "Відновити workspace", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["replay_speed"], "Швидкість replay", role="COMBOBOX", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_mode"], "Режим live observation", role="COMBOBOX", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_refresh"], "Оновити live snapshot", patterns=("INVOKE",)),
@@ -67,7 +68,7 @@ class AccessibilityAuditTests(unittest.TestCase):
     def test_critical_contract_passes_with_names_roles_patterns_and_rows(self):
         report = summarize_description(self._passing_description())
         self.assertEqual(report["status"], "PASS")
-        self.assertEqual(len(report["critical_controls"]), 11)
+        self.assertEqual(len(report["critical_controls"]), 12)
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
 

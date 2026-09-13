@@ -6,12 +6,14 @@ from typing import Any
 
 import tk_uia
 
-from .gui import AUTOMATION_IDS, AutosportApp
+from .gui import AUTOMATION_IDS
+from .windows_gui import WindowsAutosportApp
 
 
 _REQUIRED_PATTERNS = {
     AUTOMATION_IDS["choose_dataset"]: {"INVOKE"},
     AUTOMATION_IDS["run_replay"]: {"INVOKE"},
+    AUTOMATION_IDS["repair_workspace"]: {"INVOKE"},
     AUTOMATION_IDS["replay_speed"]: {"VALUE"},
     AUTOMATION_IDS["live_mode"]: {"VALUE"},
     AUTOMATION_IDS["live_refresh"]: {"INVOKE"},
@@ -98,7 +100,7 @@ def summarize_description(description: Any) -> dict[str, Any]:
         "failures": failures,
         "provider_trouble": provider_trouble,
         "providers_stood_down_because": description.providers_stood_down_because,
-        "evidence_scope": "in-process tk-uia annotation/provider audit; not external UIA client or NVDA speech proof",
+        "evidence_scope": "in-process tk-uia annotation/provider audit of the packaged Windows GUI class; not external UIA client or NVDA speech proof",
         "human_tested": False,
         "nvda_verified": False,
         "real_money_execution": False,
@@ -108,9 +110,9 @@ def summarize_description(description: Any) -> dict[str, Any]:
 def run_accessibility_audit(output_path: str | Path) -> int:
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    app: AutosportApp | None = None
+    app: WindowsAutosportApp | None = None
     try:
-        app = AutosportApp()
+        app = WindowsAutosportApp()
         app.update_idletasks()
         app.update()
         report = summarize_description(tk_uia.describe(app))

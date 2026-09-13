@@ -8,6 +8,7 @@ class KeyboardAuditTests(unittest.TestCase):
         bindings = {
             "<Control-o>": True,
             "<Control-r>": True,
+            "<Control-Shift-R>": True,
             "<Control-l>": True,
             "<F6>": True,
             "<F7>": True,
@@ -19,6 +20,7 @@ class KeyboardAuditTests(unittest.TestCase):
             "research_plan",
             "choose_dataset",
             "run_replay",
+            "repair_workspace",
             "replay_speed",
             "live_mode",
             "live_refresh",

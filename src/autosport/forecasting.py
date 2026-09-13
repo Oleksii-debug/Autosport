@@ -14,6 +14,7 @@ from typing import Any, Iterable
 
 _FORBIDDEN_FUTURE_KEYS = {"final_result", "result", "winner", "settled_outcome", "future_quote"}
 _ALLOWED_SPLITS = {"validation", "holdout"}
+_SHA256_HEX = frozenset("0123456789abcdef")
 
 
 def parse_iso_timestamp(value: str) -> datetime:
@@ -35,6 +36,14 @@ def _contains_forbidden(value: Any) -> bool:
     if isinstance(value, (list, tuple)):
         return any(_contains_forbidden(child) for child in value)
     return False
+
+
+def _canonical_sha256(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a canonical SHA-256 digest")
+    if len(value) != 64 or any(character not in _SHA256_HEX for character in value):
+        raise ValueError(f"{field_name} must be a canonical lowercase SHA-256 digest")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,8 +84,21 @@ class ForecastRecord:
             raise ValueError("input cutoff cannot be after forecast generation")
         if _contains_forbidden(self.provenance):
             raise ValueError("forecast provenance must not contain future-result fields")
-        if len(set(self.evidence_hashes)) != len(self.evidence_hashes):
+        if not isinstance(self.evidence_hashes, (tuple, list)):
+            raise ValueError("evidence_hashes must be an ordered collection of SHA-256 digests")
+        evidence_hashes = tuple(
+            _canonical_sha256(value, field_name="evidence hash")
+            for value in self.evidence_hashes
+        )
+        if len(set(evidence_hashes)) != len(evidence_hashes):
             raise ValueError("duplicate evidence hashes")
+        object.__setattr__(self, "evidence_hashes", evidence_hashes)
+        if self.market_snapshot_hash is not None:
+            object.__setattr__(
+                self,
+                "market_snapshot_hash",
+                _canonical_sha256(self.market_snapshot_hash, field_name="market_snapshot_hash"),
+            )
 
     @property
     def as_of_ts(self) -> str:

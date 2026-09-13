@@ -18,6 +18,7 @@ from .recovery import reconcile_late_crashes
 from .replay import ReplayEngine
 from .run_registry import ReconciliationError
 from .session import AutosportSession, ObservationResult
+from .strategies import available_strategies
 
 
 ProviderFactory = Callable[..., ParlayApiTableTennisProvider]
@@ -34,6 +35,13 @@ def build_parser() -> argparse.ArgumentParser:
     dataset.add_argument("path", type=Path)
     dataset.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
     dataset.add_argument("--bankroll", default="10000")
+    dataset.add_argument(
+        "--strategy",
+        default="baseline-v1",
+        choices=tuple(spec.strategy_id for spec in available_strategies()),
+        help="canonical strategy implementation to execute and bind into experiment evidence",
+    )
+    sub.add_parser("strategies", help="list canonical replay strategies and their runtime agents")
     verify = sub.add_parser("verify-dataset", help="verify sealed hashes and historical corpus governance without replay")
     verify.add_argument("path", type=Path)
     observe = sub.add_parser("observe-table-tennis", help="fetch one read-only table-tennis market snapshot")
@@ -68,12 +76,13 @@ def run_replay(path: Path, bankroll: str) -> int:
     return 0
 
 
-def run_dataset(path: Path, workspace: Path, bankroll: str) -> int:
+def run_dataset(path: Path, workspace: Path, bankroll: str, strategy_id: str = "baseline-v1") -> int:
     dataset = load_dataset(path)
-    session = AutosportSession(workspace, bankroll)
+    session = AutosportSession(workspace, bankroll, strategy_id=strategy_id)
     try:
         result = session.run_dataset(dataset)
         print(f"run_id={result.replay.run_id}")
+        print(f"strategy_id={session.strategy_id}")
         print(f"events={result.replay.event_count}")
         print(f"balance={result.balance}")
         print(f"net_profit={result.evaluation.net_profit}")
@@ -82,6 +91,15 @@ def run_dataset(path: Path, workspace: Path, bankroll: str) -> int:
             print(f"historical_import_identity={dataset.import_identity}")
     finally:
         session.close()
+    return 0
+
+
+def run_strategies() -> int:
+    for spec in available_strategies():
+        print(
+            f"{spec.strategy_id} | agents={','.join(spec.agent_names)} | "
+            f"opens_paper_tickets={str(spec.opens_paper_tickets).lower()} | {spec.label}"
+        )
     return 0
 
 
@@ -233,7 +251,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "replay":
         return run_replay(args.path, args.bankroll)
     if args.command == "dataset":
-        return run_dataset(args.path, args.workspace, args.bankroll)
+        return run_dataset(args.path, args.workspace, args.bankroll, args.strategy)
+    if args.command == "strategies":
+        return run_strategies()
     if args.command == "verify-dataset":
         return run_verify_dataset(args.path)
     if args.command == "observe-table-tennis":

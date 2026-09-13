@@ -71,6 +71,8 @@ class ResearchEvidence:
                 "market_snapshot_hash",
                 _validate_sha256(self.market_snapshot_hash, "market_snapshot_hash"),
             )
+        if not isinstance(self.quality_flags, (tuple, list)):
+            raise ValueError("evidence quality flags must be a tuple or list")
         flags = tuple(self.quality_flags)
         if any(
             not isinstance(flag, str) or not flag.strip() or flag != flag.strip()

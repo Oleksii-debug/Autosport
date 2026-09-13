@@ -260,7 +260,14 @@ class AutosportSession:
                 f"({', '.join(foreign_strategy_ids)}). Use a separate workspace per strategy/plan "
                 "so PaperBook, decision-ledger, portfolio and evaluation evidence cannot be mixed."
             )
-        self.book.save(self.book_path)
+        # Session construction happens outside WorkspaceEconomicLock. Another process
+        # or session may therefore have committed a newer canonical PaperBook while
+        # this instance was waiting for the lock. Refresh under the lock instead of
+        # writing a stale in-memory snapshot over newer economic state.
+        if self.book_path.exists():
+            self.book = PaperBook.load(self.book_path)
+        else:
+            self.book.save(self.book_path)
         ensure_durable_file(self.ledger.path)
 
     def _run_summary_payload(
@@ -308,10 +315,8 @@ class AutosportSession:
         }
 
     def close(self) -> None:
-        try:
-            # Never let teardown overwrite a partially committed transaction with
-            # stale in-memory state. Recovery owns any unresolved economic commit.
-            if not self.registry.in_progress():
-                self.book.save(self.book_path)
-        finally:
-            self.store.close()
+        # Canonical PaperBook persistence is owned by the workspace-locked run
+        # transaction path. Teardown must never write an unlocked in-memory snapshot:
+        # this session may have been constructed before another process committed a
+        # newer canonical book, and saving here would silently roll that commit back.
+        self.store.close()

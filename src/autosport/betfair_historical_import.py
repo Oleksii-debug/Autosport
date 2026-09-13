@@ -172,19 +172,32 @@ def import_betfair_historical(
     source_hashes = tuple(_sha256_path(path) for path in source_paths)
     if len(set(source_hashes)) != len(source_hashes):
         raise ValueError("duplicate Betfair historical input content is not allowed")
-    source_identity = f"betfair-historical-files:{_canonical_hash(sorted(source_hashes))}"
+    source_files = [
+        {
+            "ordinal": ordinal,
+            "sha256": digest,
+            "byte_size": path.stat().st_size,
+        }
+        for ordinal, (path, digest) in enumerate(zip(source_paths, source_hashes), start=1)
+    ]
+    source_identity = f"betfair-historical-files:{_canonical_hash(source_files)}"
 
     definitions: dict[str, dict[str, Any]] = {}
     runner_names: dict[str, dict[str, str]] = {}
     final_statuses: dict[str, dict[str, str]] = {}
     settlement_ts: dict[str, str] = {}
     last_publish_ts: dict[str, str] = {}
+    market_source_path: dict[str, Path] = {}
     events: list[dict[str, Any]] = []
+    source_event_ordinal = 0
+    max_source_publish_ts: str | None = None
 
     for path, line_number, message in _iter_messages(source_paths):
         if message.get("op") != "mcm":
             continue
         observed = _timestamp_from_epoch_ms(message.get("pt"))
+        if max_source_publish_ts is None or _as_datetime(observed) > _as_datetime(max_source_publish_ts):
+            max_source_publish_ts = observed
         changes = message.get("mc")
         if not isinstance(changes, list):
             raise ValueError(f"{path}: line {line_number} mcm.mc must be a list")
@@ -195,6 +208,13 @@ def import_betfair_historical(
             market_id = str(change.get("id") or "").strip()
             if not market_id:
                 raise ValueError(f"{path}: line {line_number} market change id is required")
+
+            previous_source = market_source_path.get(market_id)
+            if previous_source is not None and previous_source != path:
+                raise ValueError(
+                    f"Betfair market {market_id} spans multiple input files; cross-file source order is ambiguous"
+                )
+            market_source_path[market_id] = path
 
             previous_ts = last_publish_ts.get(market_id)
             if previous_ts is not None and _as_datetime(observed) < _as_datetime(previous_ts):
@@ -248,8 +268,12 @@ def import_betfair_historical(
                     f"eventTypeId={_TABLE_TENNIS_EVENT_TYPE_ID}"
                 )
 
-            if str(definition.get("status") or "").upper() == "CLOSED":
+            market_status = str(definition.get("status") or "").upper()
+            if market_status == "CLOSED":
                 # Settlement facts stay outside strategy-visible market rows.
+                continue
+            if market_status != "OPEN":
+                # SUSPENDED/unknown states are not rewritten as tradable/open history.
                 continue
 
             runner_changes = change.get("rc")
@@ -258,7 +282,11 @@ def import_betfair_historical(
             if not isinstance(runner_changes, list):
                 raise ValueError(f"{path}: line {line_number} rc must be a list")
             names = runner_names.get(market_id, {})
-            event_id = str(definition.get("eventId") or market_id)
+            event_id = str(definition.get("eventId") or "").strip()
+            if not event_id:
+                raise ValueError(
+                    f"{path}: line {line_number} supported Betfair market requires source eventId"
+                )
             event_name = str(definition.get("eventName") or "").strip()
             for runner_change in runner_changes:
                 if not isinstance(runner_change, dict) or runner_change.get("id") is None:
@@ -278,6 +306,7 @@ def import_betfair_historical(
                 selection_name = names.get(selection_id)
                 if selection_name:
                     metadata["selection_name"] = selection_name
+                source_event_ordinal += 1
                 events.append(
                     {
                         "event_id": event_id,
@@ -292,11 +321,18 @@ def import_betfair_historical(
                         "ingest_ts": imported,
                         "score_state": None,
                         "metadata": metadata,
+                        "_source_event_ordinal": source_event_ordinal,
                     }
                 )
 
     if not events:
         raise ValueError("Betfair inputs produced no supported historical market quotes")
+    if max_source_publish_ts is None:
+        raise ValueError("Betfair inputs contain no MarketChangeMessage publish timestamps")
+    if _as_datetime(acquired) < _as_datetime(max_source_publish_ts):
+        raise ValueError(
+            "acquired_at must not precede the latest source publish time present in the supplied files"
+        )
 
     semantic_keys: set[tuple[str, str, str, str]] = set()
     for event in events:
@@ -310,16 +346,12 @@ def import_betfair_historical(
             raise ValueError("Betfair historical inputs contain duplicate market quote changes")
         semantic_keys.add(semantic_key)
 
-    events.sort(
-        key=lambda item: (
-            item["observed_ts"],
-            item["market_id"],
-            item["selection_id"],
-            item["decimal_odds"],
-        )
-    )
+    # Replay orders by observed_ts then sequence. Sequence therefore preserves the exact
+    # provider source order for ties instead of introducing a price-based causal rewrite.
+    events.sort(key=lambda item: (item["observed_ts"], item["_source_event_ordinal"]))
     for sequence, event in enumerate(events, start=1):
         event["sequence"] = sequence
+        event.pop("_source_event_ordinal", None)
 
     observed_market_ids = {str(event["market_id"]) for event in events}
     missing_settlements = sorted(observed_market_ids.difference(settlement_ts))
@@ -378,6 +410,7 @@ def import_betfair_historical(
 
         governance = {
             "source_identity": source_identity,
+            "source_files": source_files,
             "terms_reference": terms,
             "retention_basis": retention,
             "redistribution_policy": policy,

@@ -398,6 +398,12 @@ def assemble_historical_corpus(
     proof_path = Path(governance_proof_path)
     proof = _governance_proof(proof_path)
     imported_dt = _timestamp(imported_at, field="imported_at")
+    governance_verified_dt = _timestamp(
+        proof["verified_at"],
+        field="governance proof.verified_at",
+    )
+    if imported_dt < governance_verified_dt:
+        raise ValueError("imported_at must not precede governance proof verification")
     reveal_dt = _timestamp(outcome_reveal_after, field="outcome_reveal_after")
 
     events: list[tuple[MarketEvent, dict[str, Any]]] = []

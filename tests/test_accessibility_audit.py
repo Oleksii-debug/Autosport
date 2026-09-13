@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from autosport.accessibility_audit import summarize_description
-from autosport.gui import AUTOMATION_IDS
+from autosport.gui import AUTOMATION_IDS, _SPEEDS
 
 
 class _Named:
@@ -39,6 +39,18 @@ class AccessibilityAuditTests(unittest.TestCase):
             ),
             provider_trouble=(),
             providers_stood_down_because=None,
+        )
+
+    def test_v1_replay_speed_contract_includes_event_jump_and_1000x(self):
+        self.assertEqual(
+            _SPEEDS,
+            {
+                "Подієвий — максимально швидко": 0.0,
+                "1× реальний час": 1.0,
+                "10×": 10.0,
+                "100×": 100.0,
+                "1000×": 1000.0,
+            },
         )
 
     def test_critical_contract_passes_with_names_roles_patterns_and_rows(self):

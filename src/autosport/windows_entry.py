@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         from autosport.research_demo_audit import run_research_demo_audit
 
         return run_research_demo_audit(args[1], args[2])
-    from autosport.gui import main as gui_main
+    from autosport.windows_gui import main as gui_main
 
     return gui_main()
 

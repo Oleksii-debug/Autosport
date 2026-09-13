@@ -184,11 +184,22 @@ class ResearchStrategyPlan:
                 event.dedupe_key,
             ),
         )
+        first_observed_quote_times: dict[str, Any] = {}
+        for event in ordered:
+            first_observed_quote_times.setdefault(
+                event.quote_key,
+                parse_iso_timestamp(event.observed_ts),
+            )
         for event in ordered:
             latest[event.quote_key] = event
             instruction = by_trigger.get((event.observed_ts, event.quote_key))
             if instruction is None:
                 continue
+            _validate_scenario_future_identity(
+                instruction.groups,
+                first_observed_quote_times,
+                parse_iso_timestamp(instruction.decision_ts),
+            )
             _validate_market_binding(instruction, latest)
             processed.add(instruction.decision_id)
         missing = [
@@ -314,6 +325,23 @@ def _validate_market_binding(
         forecast = forecasts[leg.quote_key]
         if forecast.market_snapshot_hash != snapshot_hash:
             raise ValueError(f"ForecastRecord snapshot hash does not match replay state: {leg.quote_key}")
+
+
+def _validate_scenario_future_identity(
+    groups: tuple[ScenarioGroup, ...],
+    first_observed_quote_times: dict[str, Any],
+    decision_time,
+) -> None:
+    """Reject exact replay identities that were not yet knowable at decision time."""
+
+    for group in groups:
+        for outcome in group.outcomes:
+            first_observed = first_observed_quote_times.get(outcome.quote_key)
+            if first_observed is not None and first_observed > decision_time:
+                raise ValueError(
+                    "research scenario outcome identity first appears after decision: "
+                    f"{outcome.quote_key}"
+                )
 
 
 def _validate_scenario_space_binding(

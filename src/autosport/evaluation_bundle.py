@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from .dataset import ReplayDataset, load_dataset
+from .forecast_origin import (
+    ForecastOriginBinding,
+    load_forecast_origin_binding,
+    verify_forecast_origin_binding,
+)
 from .forecasting import (
     ForecastOutcomeFact,
     ForecastRecord,
@@ -24,6 +29,7 @@ class WalkForwardBundle:
     bins: int
     source_sha256: str
     governed_dataset: ReplayDataset | None = None
+    forecast_origin_binding: ForecastOriginBinding | None = None
     bundle_schema_version: int = 1
 
     @classmethod
@@ -37,12 +43,16 @@ class WalkForwardBundle:
         canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         governed_dataset = None
+        forecast_origin_binding = None
         if isinstance(raw, dict) and raw.get("schema_version") == 2:
             governed_dataset = _load_declared_governed_dataset(raw, source)
+            if raw.get("forecast_origin") is not None:
+                forecast_origin_binding = load_forecast_origin_binding(raw["forecast_origin"], source)
         return cls.from_dict(
             raw,
             source_sha256=digest,
             governed_dataset=governed_dataset,
+            forecast_origin_binding=forecast_origin_binding,
         )
 
     @classmethod
@@ -52,14 +62,18 @@ class WalkForwardBundle:
         *,
         source_sha256: str | None = None,
         governed_dataset: ReplayDataset | None = None,
+        forecast_origin_binding: ForecastOriginBinding | None = None,
     ) -> "WalkForwardBundle":
         if not isinstance(raw, dict):
             raise ValueError("walk-forward bundle root must be an object")
         schema_version = raw.get("schema_version")
         if schema_version not in {1, 2}:
             raise ValueError("walk-forward bundle schema_version must be 1 or 2")
-        if schema_version == 1 and raw.get("dataset") is not None:
-            raise ValueError("walk-forward schema_version 1 must not declare governed dataset identity")
+        if schema_version == 1:
+            if raw.get("dataset") is not None:
+                raise ValueError("walk-forward schema_version 1 must not declare governed dataset identity")
+            if raw.get("forecast_origin") is not None:
+                raise ValueError("walk-forward schema_version 1 must not declare forecast origin evidence")
         if schema_version == 2:
             declaration = raw.get("dataset")
             if not isinstance(declaration, dict):
@@ -69,6 +83,10 @@ class WalkForwardBundle:
                     "walk-forward schema_version 2 requires verified governed dataset context"
                 )
             _validate_declared_dataset_identity(declaration, governed_dataset)
+            if raw.get("forecast_origin") is not None and forecast_origin_binding is None:
+                raise ValueError(
+                    "walk-forward forecast_origin declaration requires verified local origin artifacts"
+                )
 
         forecast_values = raw.get("forecasts")
         outcome_values = raw.get("outcomes")
@@ -98,6 +116,7 @@ class WalkForwardBundle:
             bins,
             source_sha256.lower(),
             governed_dataset=governed_dataset,
+            forecast_origin_binding=forecast_origin_binding,
             bundle_schema_version=int(schema_version),
         )
 
@@ -110,9 +129,11 @@ def evaluate_walk_forward_bundle(bundle: WalkForwardBundle) -> dict[str, Any]:
     metrics, so incomplete cohorts fail closed instead of shrinking the sample.
 
     Schema-v2 bundles additionally bind the cohort to a locally verified,
-    governed historical ReplayDataset. The binding verifies exact dataset
-    hashes/import identity, quote membership, sealed binary outcomes, reveal
-    time, and evaluation-window coverage before metrics are produced.
+    governed historical ReplayDataset. Optional forecast-origin evidence can
+    bind each evaluated ForecastRecord to canonical research decision-ledger
+    artifacts and a durable run summary. Local timestamps are checked for
+    internal ordering but cannot independently prove physical pre-outcome write
+    time without an immutable external timestamp/anchor.
     """
 
     outcome_by_id = {fact.forecast_id: fact for fact in bundle.outcomes}
@@ -136,6 +157,17 @@ def evaluate_walk_forward_bundle(bundle: WalkForwardBundle) -> dict[str, Any]:
         )
 
     governed_evidence = _validate_governed_dataset_cohort(bundle)
+    origin_evidence = None
+    if bundle.forecast_origin_binding is not None:
+        if bundle.governed_dataset is None:
+            raise ValueError("forecast origin proof requires governed historical dataset binding")
+        origin_evidence = verify_forecast_origin_binding(
+            bundle.forecast_origin_binding,
+            bundle.governed_dataset,
+            bundle.forecasts,
+            evaluated_ids,
+        )
+
     summaries = evaluate_walk_forward(
         bundle.forecasts,
         bundle.outcomes,
@@ -147,15 +179,20 @@ def evaluate_walk_forward_bundle(bundle: WalkForwardBundle) -> dict[str, Any]:
         raise ValueError("walk-forward evaluator did not account for the complete evaluation cohort")
 
     governed = governed_evidence is not None
+    origin_bound = origin_evidence is not None
     report: dict[str, Any] = {
         "schema_version": 1,
         "kind": "strict_walk_forward_forecast_evaluation",
         "source_sha256": bundle.source_sha256,
         "input_bundle_schema_version": bundle.bundle_schema_version,
         "evaluation_mode": (
-            "governed-historical-complete-cohort-causal-walk-forward"
-            if governed
-            else "complete-cohort-causal-walk-forward"
+            "governed-historical-canonical-origin-bound-complete-cohort-causal-walk-forward"
+            if origin_bound
+            else (
+                "governed-historical-complete-cohort-causal-walk-forward"
+                if governed
+                else "complete-cohort-causal-walk-forward"
+            )
         ),
         "input_forecast_count": len(bundle.forecasts),
         "input_outcome_count": len(bundle.outcomes),
@@ -169,6 +206,10 @@ def evaluate_walk_forward_bundle(bundle: WalkForwardBundle) -> dict[str, Any]:
             "sealed_outcomes_bound_to_forecasts": governed,
             "outcome_reveal_boundary_verified": governed,
             "temporal_timestamp_constraints_verified": governed,
+            "canonical_forecast_origin_verified": origin_bound,
+            "declared_record_time_before_reveal_verified": origin_bound,
+            "independent_time_anchor_verified": False,
+            "pre_outcome_ledger_write_verified": False,
             "temporal_holdout_protocol_verified": False,
             "historical_window_market_coverage_verified": False,
             "licensing_retention_verified": False,
@@ -181,6 +222,8 @@ def evaluate_walk_forward_bundle(bundle: WalkForwardBundle) -> dict[str, Any]:
     }
     if governed_evidence is not None:
         report["dataset"] = governed_evidence
+    if origin_evidence is not None:
+        report["forecast_origin"] = origin_evidence
     return report
 
 

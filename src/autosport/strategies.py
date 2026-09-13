@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .agents import Agent, MarketMirrorAgent, PaperBaselineAgent
+from .research_strategy import (
+    RESEARCH_STRATEGY_ID,
+    ResearchReplayAgent,
+    ResearchStrategyPlan,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,9 +20,16 @@ class StrategySpec:
     description: str
     agent_names: tuple[str, ...]
     opens_paper_tickets: bool
+    requires_research_plan: bool = False
 
 
-StrategyFactory = Callable[[], list[Agent]]
+StrategyFactory = Callable[[ResearchStrategyPlan | None], list[Agent]]
+
+
+def _build_research_strategy(plan: ResearchStrategyPlan | None) -> list[Agent]:
+    if plan is None:
+        raise ValueError("research-replay-v1 requires a research strategy plan")
+    return [MarketMirrorAgent(), ResearchReplayAgent(plan)]
 
 
 _STRATEGIES: dict[str, tuple[StrategySpec, StrategyFactory]] = {
@@ -32,7 +44,7 @@ _STRATEGIES: dict[str, tuple[StrategySpec, StrategyFactory]] = {
             agent_names=("market-mirror", "paper-baseline"),
             opens_paper_tickets=True,
         ),
-        lambda: [MarketMirrorAgent(), PaperBaselineAgent("50")],
+        lambda _plan: [MarketMirrorAgent(), PaperBaselineAgent("50")],
     ),
     "observe-only-v1": (
         StrategySpec(
@@ -45,7 +57,21 @@ _STRATEGIES: dict[str, tuple[StrategySpec, StrategyFactory]] = {
             agent_names=("market-mirror",),
             opens_paper_tickets=False,
         ),
-        lambda: [MarketMirrorAgent()],
+        lambda _plan: [MarketMirrorAgent()],
+    ),
+    RESEARCH_STRATEGY_ID: (
+        StrategySpec(
+            strategy_id=RESEARCH_STRATEGY_ID,
+            label="Typed research replay",
+            description=(
+                "Deterministic paper-only research path binding causal replay quotes to typed "
+                "evidence, ForecastRecord, critic, portfolio impact and PaperRiskPolicy."
+            ),
+            agent_names=("market-mirror", "research-replay-pipeline"),
+            opens_paper_tickets=True,
+            requires_research_plan=True,
+        ),
+        _build_research_strategy,
     ),
 }
 
@@ -62,8 +88,32 @@ def strategy_spec(strategy_id: str) -> StrategySpec:
         raise ValueError(f"unknown strategy_id {strategy_id!r}; available: {choices}") from exc
 
 
-def build_strategy_agents(strategy_id: str) -> list[Agent]:
-    # Resolve through the canonical registry first so an arbitrary label can never
-    # masquerade as a different runtime implementation in experiment evidence.
-    strategy_spec(strategy_id)
-    return _STRATEGIES[strategy_id][1]()
+def validate_strategy_configuration(
+    strategy_id: str,
+    research_plan: ResearchStrategyPlan | None,
+) -> StrategySpec:
+    spec = strategy_spec(strategy_id)
+    if spec.requires_research_plan and research_plan is None:
+        raise ValueError(f"{strategy_id} requires --research-plan")
+    if not spec.requires_research_plan and research_plan is not None:
+        raise ValueError(f"{strategy_id} does not accept a research strategy plan")
+    return spec
+
+
+def experiment_strategy_id(
+    strategy_id: str,
+    research_plan: ResearchStrategyPlan | None,
+) -> str:
+    spec = validate_strategy_configuration(strategy_id, research_plan)
+    if research_plan is None:
+        return spec.strategy_id
+    return research_plan.experiment_strategy_id
+
+
+def build_strategy_agents(
+    strategy_id: str,
+    *,
+    research_plan: ResearchStrategyPlan | None = None,
+) -> list[Agent]:
+    spec = validate_strategy_configuration(strategy_id, research_plan)
+    return _STRATEGIES[spec.strategy_id][1](research_plan)

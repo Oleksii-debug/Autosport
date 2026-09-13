@@ -9,9 +9,13 @@ from autosport.strategies import available_strategies, build_strategy_agents, st
 class StrategyRuntimeTests(unittest.TestCase):
     def test_registry_identity_matches_fresh_runtime_agents(self):
         for spec in available_strategies():
+            self.assertEqual(strategy_spec(spec.strategy_id), spec)
+            if spec.requires_research_plan:
+                with self.assertRaisesRegex(ValueError, "requires --research-plan"):
+                    build_strategy_agents(spec.strategy_id)
+                continue
             agents = build_strategy_agents(spec.strategy_id)
             self.assertEqual(tuple(agent.name for agent in agents), spec.agent_names)
-            self.assertEqual(strategy_spec(spec.strategy_id), spec)
 
     def test_dataset_cli_rejects_noncanonical_strategy(self):
         parser = build_parser()
@@ -27,7 +31,9 @@ class StrategyRuntimeTests(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("baseline-v1 | agents=market-mirror,paper-baseline", text)
         self.assertIn("observe-only-v1 | agents=market-mirror", text)
+        self.assertIn("research-replay-v1 | agents=market-mirror,research-replay-pipeline", text)
         self.assertIn("opens_paper_tickets=false", text)
+        self.assertIn("requires_research_plan=true", text)
 
 
 if __name__ == "__main__":

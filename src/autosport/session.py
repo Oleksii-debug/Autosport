@@ -18,11 +18,17 @@ from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
 from .providers import MarketProvider
 from .replay import ReplayEngine, ReplayRun
-from .run_registry import RunRegistry, UnresolvedExperimentError
+from .research_strategy import ResearchStrategyPlan
+from .run_registry import MixedStrategyWorkspaceError, RunRegistry, UnresolvedExperimentError
 from .run_transaction import RunTransaction
 from .settlement import SettlementEngine
 from .storage import SQLiteMarketStore
-from .strategies import StrategySpec, build_strategy_agents, strategy_spec
+from .strategies import (
+    StrategySpec,
+    build_strategy_agents,
+    experiment_strategy_id,
+    validate_strategy_configuration,
+)
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -52,14 +58,15 @@ class AutosportSession:
         workspace: str | Path,
         initial_bankroll: Decimal | str = "10000",
         strategy_id: str = "baseline-v1",
+        research_plan: ResearchStrategyPlan | None = None,
     ) -> None:
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
-        # Bind the experiment identity to an actual runtime implementation now,
-        # before durable state is opened. Arbitrary labels must never appear in
-        # evaluation evidence for a different strategy implementation.
-        self.strategy: StrategySpec = strategy_spec(strategy_id)
-        self.strategy_id = self.strategy.strategy_id
+        # Bind experiment identity to an actual runtime implementation and, for
+        # research replay, the exact canonical plan hash before durable state opens.
+        self.strategy: StrategySpec = validate_strategy_configuration(strategy_id, research_plan)
+        self.research_plan = research_plan
+        self.strategy_id = experiment_strategy_id(strategy_id, research_plan)
         self.store = SQLiteMarketStore(self.workspace / "market.db")
         self.source_health = SourceHealthStore(self.workspace / "source_health.json")
         self.book_path = self.workspace / "paper_book.json"
@@ -80,7 +87,13 @@ class AutosportSession:
             replay_run_id=run_id,
             decision_ledger=ledger or self.ledger,
         )
-        return AgentOrchestrator(build_strategy_agents(self.strategy_id), context)
+        return AgentOrchestrator(
+            build_strategy_agents(
+                self.strategy.strategy_id,
+                research_plan=self.research_plan,
+            ),
+            context,
+        )
 
     def observe_provider_once(
         self,
@@ -106,6 +119,10 @@ class AutosportSession:
 
     def run_dataset(self, dataset: ReplayDataset, speed: float = 0.0, allow_repeat: bool = False) -> SessionResult:
         with WorkspaceEconomicLock(self.workspace):
+            # Research-plan market binding is deterministic from the sealed causal
+            # stream, so reject a stale/forged plan before registry/PaperBook mutation.
+            if self.research_plan is not None:
+                self.research_plan.preflight(dataset.load_market_events())
             return self._run_dataset_locked(dataset, speed=speed, allow_repeat=allow_repeat)
 
     def _run_dataset_locked(
@@ -150,6 +167,9 @@ class AutosportSession:
             orchestrator.on_market_event(event)
 
         replay = engine.run(consume, speed=speed, run_id=run_id)
+        # Fail closed on any planned causal decision that did not execute before
+        # loading sealed outcome facts into settlement.
+        orchestrator.finalize_replay()
         settlement = SettlementEngine()
         settlement.record(dataset.load_results_after_replay())
         settled = tuple(settlement.settle_ready(working_book))
@@ -186,6 +206,16 @@ class AutosportSession:
             raise UnresolvedExperimentError(
                 "Workspace has an unresolved economic run; repair it before starting another paper experiment."
             )
+        prior_strategy_ids = self.registry.strategy_ids()
+        foreign_strategy_ids = tuple(
+            value for value in prior_strategy_ids if value != self.strategy_id
+        )
+        if foreign_strategy_ids:
+            raise MixedStrategyWorkspaceError(
+                "Workspace already contains economic runs for another strategy identity "
+                f"({', '.join(foreign_strategy_ids)}). Use a separate workspace per strategy/plan "
+                "so PaperBook, decision-ledger, portfolio and evaluation evidence cannot be mixed."
+            )
         self.book.save(self.book_path)
         ensure_durable_file(self.ledger.path)
 
@@ -203,10 +233,14 @@ class AutosportSession:
             "dataset_governance": asdict(dataset.governance) if dataset.governance is not None else None,
             "strategy_id": self.strategy_id,
             "strategy_runtime": {
-                "strategy_id": self.strategy.strategy_id,
+                "strategy_id": self.strategy_id,
+                "canonical_strategy_id": self.strategy.strategy_id,
                 "label": self.strategy.label,
                 "agent_names": list(self.strategy.agent_names),
                 "opens_paper_tickets": self.strategy.opens_paper_tickets,
+                "research_plan_sha256": (
+                    self.research_plan.source_sha256 if self.research_plan is not None else None
+                ),
             },
             "experiment_key": result.experiment_key,
             "market_sha256": dataset.market_sha256,

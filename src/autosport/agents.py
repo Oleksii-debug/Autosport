@@ -86,3 +86,11 @@ class AgentOrchestrator:
     def on_market_event(self, event: MarketEvent) -> None:
         for agent in self.agents:
             agent.on_market_event(event, self.context)
+
+    def finalize_replay(self) -> None:
+        """Allow causal agents to fail closed on unconsumed replay-time work before outcomes unlock."""
+
+        for agent in self.agents:
+            finalize = getattr(agent, "finalize_replay", None)
+            if finalize is not None:
+                finalize(self.context)

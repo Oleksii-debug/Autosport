@@ -20,8 +20,8 @@ Usage:
 Commands:
   acquire                    Capture immutable authenticated historical odds + match/result evidence.
   import-betfair-historical Import user-supplied local Betfair Historical Data stream files into the canonical governed table-tennis dataset format; source files are never redistributed by this command.
-  build-corpus               Assemble selected snapshots, sealed outcomes, and rights proof into a governed corpus.
-  build-corpus-from-bundle   Verify an acquisition bundle and reuse the canonical governed corpus assembler.
+  build-corpus               Assemble selected snapshots, sealed outcomes, and checksum-bound rights/retention evidence into a governed corpus.
+  build-corpus-from-bundle   Verify an acquisition bundle and reuse the same checksum-bound governance gate and canonical corpus assembler.
   verify-dataset             Verify sealed hashes and historical governance without replay.
   walk-forward-evaluate      Run the canonical strict causal walk-forward evaluator and emit machine-readable evidence.
   compare-strategies         Compare compatible completed paper strategy runs on the same sealed replay identity.
@@ -31,12 +31,15 @@ Commands:
 
 Truth boundaries remain fail closed: credentials, lawful retention/licensing, real sealed outcomes,
 coverage, profitability or predictive superiority, human testing, and NVDA verification are never
-inferred by this wrapper. Local source-data rights remain the user's responsibility and are recorded,
-not independently certified, by import commands. Recovery never fabricates completion: an ambiguous
-workspace remains unresolved unless canonical transaction/base hashes prove the disposition. NVDA
-evidence validation checks a human-supplied record against independently obtained source/package
-trust anchors and exact candidate identity; it never proves that a physical test happened and never
-changes BUILD_INFO human/NVDA truth labels.
+inferred by this wrapper. Corpus build commands reject a bare self-declared rights proof: the proof
+must name a direct sibling authority-evidence record, bind its SHA-256, and exactly match its rights,
+retention, source and redistribution claims. That checksum binding proves provenance/integrity only;
+it is not an independent legal opinion and cannot create rights that the evidence does not actually
+grant. Local source-data rights remain the user's responsibility. Recovery never fabricates
+completion: an ambiguous workspace remains unresolved unless canonical transaction/base hashes prove
+the disposition. NVDA evidence validation checks a human-supplied record against independently
+obtained source/package trust anchors and exact candidate identity; it never proves that a physical
+test happened and never changes BUILD_INFO human/NVDA truth labels.
 """
 
 
@@ -56,11 +59,11 @@ def main(argv: list[str] | None = None) -> int:
 
         return betfair_import_main(forwarded)
     if command == "build-corpus":
-        from autosport.historical_corpus import main as corpus_main
+        from autosport.historical_governance import corpus_main
 
         return corpus_main(forwarded)
     if command == "build-corpus-from-bundle":
-        from autosport.historical_bundle_corpus import main as bundle_corpus_main
+        from autosport.historical_governance import bundle_corpus_main
 
         return bundle_corpus_main(forwarded)
     if command == "verify-dataset":

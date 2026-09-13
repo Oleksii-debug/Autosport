@@ -7,9 +7,6 @@ python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
 python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
 
-$strategyComparisonProcess = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList 'compare-strategies', '--help' -Wait -PassThru
-if ($strategyComparisonProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe strategy comparison entry exited $($strategyComparisonProcess.ExitCode)" }
-
 $diag = Join-Path $PWD 'dist/packaged-diagnostic.json'
 if (Test-Path $diag) { Remove-Item -Force $diag }
 $process = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--diagnostic-output', $diag -Wait -PassThru
@@ -52,6 +49,8 @@ $dataExe = Join-Path $PWD 'dist/Autosport-Data.exe'
 if (-not (Test-Path $dataExe -PathType Leaf)) { throw 'Packaged build is missing Autosport-Data.exe' }
 & $dataExe --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe help exited $LASTEXITCODE" }
+& $dataExe compare-strategies --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe compare-strategies --help exited $LASTEXITCODE" }
 & $dataExe acquire --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe acquire --help exited $LASTEXITCODE" }
 & $dataExe build-corpus --help | Out-Null
@@ -102,11 +101,10 @@ $extractedDataExeSha = (Get-FileHash -LiteralPath $extractedDataExe -Algorithm S
 if ($extractedExeSha -ne $buildInfo.autosport_exe_sha256) { throw 'Fresh extraction Autosport.exe hash mismatch' }
 if ($extractedDataExeSha -ne $buildInfo.autosport_data_exe_sha256) { throw 'Fresh extraction Autosport-Data.exe hash mismatch' }
 
-$freshStrategyComparisonProcess = Start-Process -FilePath $extractedExe -ArgumentList 'compare-strategies', '--help' -Wait -PassThru
-if ($freshStrategyComparisonProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe strategy comparison entry exited $($freshStrategyComparisonProcess.ExitCode)" }
-
 & $extractedDataExe --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe help exited $LASTEXITCODE" }
+& $extractedDataExe compare-strategies --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe compare-strategies --help exited $LASTEXITCODE" }
 & $extractedDataExe acquire --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe acquire --help exited $LASTEXITCODE" }
 & $extractedDataExe build-corpus --help | Out-Null

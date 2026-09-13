@@ -60,8 +60,8 @@ def capture_historical_snapshot(
     timestamp is substituted for historical market time.
 
     This creates canonical market rows plus machine evidence only. It deliberately
-    does not fabricate results, settlement outcomes, licensing proof, or a replay-
-    ready schema-v2 dataset manifest.
+    does not fabricate results, settlement outcomes, licensing proof, historical
+    window coverage, or a replay-ready schema-v2 dataset manifest.
     """
 
     if provider.public_preview or not provider.api_key:
@@ -156,7 +156,9 @@ def capture_historical_snapshot(
             "fallback": "provider_historical_snapshot_timestamp",
             "wall_clock_used_as_historical_market_time": False,
         },
-        "point_in_time_odds_market_coverage_verified": bool(events),
+        "point_in_time_snapshot_contains_odds": bool(events),
+        "point_in_time_odds_market_coverage_verified": False,
+        "historical_window_market_coverage_verified": False,
         "sealed_outcomes_present": False,
         "replay_corpus_ready": False,
         "terms_reference": TERMS_REFERENCE,
@@ -298,7 +300,9 @@ def main(argv: list[str] | None = None) -> int:
         f"snapshot_at={report.snapshot_at} fallback_source_times={report.snapshot_timestamp_fallback_count}"
     )
     print(
-        "point_in_time_odds_market_coverage_verified=" + str(report.has_data).lower()
+        "point_in_time_snapshot_contains_odds=" + str(report.has_data).lower()
+        + " point_in_time_odds_market_coverage_verified=false"
+        + " historical_window_market_coverage_verified=false"
         + " sealed_outcomes_present=false replay_corpus_ready=false"
     )
     print("licensing_or_retention_verified=false real_money_execution=false")

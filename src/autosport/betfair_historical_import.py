@@ -174,7 +174,6 @@ def _available_back_metadata(
     metadata = _base_metadata(definition, names, selection_id)
     bet_delay = _bet_delay_seconds(definition, path=path, line_number=line_number)
     cache_verified = bool(quote.cache_verified)
-    paper_eligible = cache_verified and bet_delay == 0
     if not cache_verified:
         eligibility_reason = "available-to-back ladder cache was not initialized by a provider image"
     elif bet_delay is None:
@@ -182,7 +181,9 @@ def _available_back_metadata(
     elif bet_delay > 0:
         eligibility_reason = "positive Betfair betDelay is not simulated by this paper fill model"
     else:
-        eligibility_reason = "observed available-to-back capacity with zero Betfair betDelay"
+        eligibility_reason = (
+            "observed Betfair available size unit is not canonically bound to the paper stake unit"
+        )
 
     metadata.update(
         {
@@ -191,9 +192,10 @@ def _available_back_metadata(
             "betfair_ladder_kind": quote.ladder_kind,
             "execution_quote_verified": cache_verified,
             "actual_fill_verified": False,
-            "paper_fill_eligible": paper_eligible,
+            "paper_fill_eligible": False,
             "paper_fill_eligibility_reason": eligibility_reason,
-            "paper_fill_capacity_verified": cache_verified,
+            "paper_fill_capacity_verified": False,
+            "paper_fill_capacity_unit_bound": False,
             "paper_fill_available_size": str(quote.available_size),
             "paper_fill_size_unit": "betfair_historical_stream_size_unit",
             "betfair_bet_delay_seconds": bet_delay,
@@ -221,10 +223,10 @@ def import_betfair_historical(
 
     This adapter never downloads Betfair data, never republishes source files, and never
     upgrades user-supplied rights metadata into a licensing/retention verification claim.
-    BASIC last-traded prices remain observational only.  ADVANCED/PRO available-to-back
-    ladders may support paper economics only when a provider image initialized the local
-    cache, observed size covers the paper stake, and Betfair betDelay is explicitly zero.
-    No historical quote is treated as proof that a real order actually filled.
+    BASIC last-traded prices remain observational only. ADVANCED/PRO available-to-back
+    ladders preserve observed executable quote and size provenance, but source ladder size
+    does not authorize paper economics until Autosport has a canonical, provenance-bound
+    paper stake unit. No historical quote is treated as proof that a real order filled.
     """
 
     source_paths = tuple(Path(item) for item in inputs)
@@ -461,6 +463,7 @@ def import_betfair_historical(
                                     "marketDefinition status/betDelay changed; prior quote is invalid until a fresh runner price update"
                                 ),
                                 "paper_fill_capacity_verified": False,
+                                "paper_fill_capacity_unit_bound": False,
                                 "betfair_market_status": market_status or "UNKNOWN",
                                 "betfair_bet_delay_seconds": current_bet_delay,
                                 "market_definition_transition": True,
@@ -476,7 +479,7 @@ def import_betfair_historical(
                             odds=last_visible_price[key],
                             observed=observed,
                             canonical_market_type=canonical_market_type,
-                            status="unavailable",
+                            status=(market_status.lower() if market_status else "unknown"),
                             metadata=metadata,
                         )
 
@@ -553,6 +556,7 @@ def import_betfair_historical(
                                 "paper_fill_eligible": False,
                                 "paper_fill_eligibility_reason": "available-to-back ladder has no verified best quote",
                                 "paper_fill_capacity_verified": False,
+                                "paper_fill_capacity_unit_bound": False,
                             }
                         )
                         append_event(
@@ -563,7 +567,7 @@ def import_betfair_historical(
                             odds=previous_price,
                             observed=observed,
                             canonical_market_type=canonical_market_type,
-                            status="unavailable",
+                            status="open",
                             metadata=metadata,
                         )
                         available_back_emitted = True
@@ -706,7 +710,9 @@ def import_betfair_historical(
                 "provider_fields": sorted(available_back_fields | ({"rc[].ltp"} if ltp_emitted else set())),
                 "available_to_back_quote_verified_per_event": True,
                 "available_to_back_cache_requires_provider_image": True,
-                "paper_fill_capacity_enforced": True,
+                "paper_fill_capacity_enforced": False,
+                "paper_fill_capacity_unit_bound": False,
+                "paper_fill_capacity_authorizes_economics": False,
                 "positive_or_unknown_bet_delay_paper_fill_allowed": False,
                 "actual_fill_verified": False,
                 "last_traded_price_execution_quote_verified": False,
@@ -839,7 +845,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"market_sha256={report.market_sha256}")
     print(f"sealed_results_sha256={report.results_sha256}")
     print(f"source_identity={report.source_identity}")
-    print("price_truth=ltp_observational available_back_requires_provider_image_capacity_and_zero_bet_delay actual_fill_verified=false")
+    print("price_truth=available_back_observed quote_verified_requires_provider_image paper_capacity_unit_bound=false actual_fill_verified=false")
     print("licensing_retention_verified=false redistribution_verified=false")
     print("real_money_execution=false human_tested=false nvda_verified=false")
     print(f"dataset={report.root}")

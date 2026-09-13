@@ -9,6 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .data_tool_package import verify_portable_data_tool
+from .release_package import verify_windows_package
+
 _SCHEMA_VERSION = 1
 _KIND = "physical_nvda_acceptance"
 _BUILD_INFO_MEMBER = "Autosport-V1/BUILD_INFO.json"
@@ -21,10 +24,6 @@ _REQUIRED_CHECKS = (
     ("research_missing_plan_error", "Research replay without a plan fails closed with an NVDA-accessible reason."),
     ("restart_persistence", "Restart returns to the same economic context without silent state loss/substitution."),
 )
-
-
-def _sha256_bytes(payload: bytes) -> str:
-    return hashlib.sha256(payload).hexdigest()
 
 
 def sha256_file(path: str | Path) -> str:
@@ -51,11 +50,6 @@ def _load_candidate_identity(release_zip: str | Path) -> dict[str, str]:
             raise ValueError("release BUILD_INFO.json is not valid UTF-8 JSON") from exc
         if not isinstance(build_info, dict):
             raise ValueError("release BUILD_INFO.json must contain an object")
-        if build_info.get("product") != "Autosport":
-            raise ValueError("release BUILD_INFO product identity mismatch")
-        for key in ("real_money_execution", "human_tested", "nvda_verified"):
-            if build_info.get(key) is not False:
-                raise ValueError(f"release BUILD_INFO must preserve {key}=false")
         source_sha = build_info.get("source_sha")
         exe_sha = build_info.get("autosport_exe_sha256")
         if not isinstance(source_sha, str) or not source_sha:
@@ -66,9 +60,9 @@ def _load_candidate_identity(release_zip: str | Path) -> dict[str, str]:
             int(exe_sha, 16)
         except ValueError as exc:
             raise ValueError("release BUILD_INFO autosport_exe_sha256 is not hexadecimal") from exc
-        actual_exe_sha = _sha256_bytes(archive.read(_EXE_MEMBER))
-        if actual_exe_sha != exe_sha.lower():
-            raise ValueError("release Autosport.exe hash does not match BUILD_INFO")
+
+    verify_windows_package(release_zip, expected_source_sha=source_sha)
+    verify_portable_data_tool(release_zip)
     return {
         "package_sha256": package_sha,
         "source_sha": source_sha,

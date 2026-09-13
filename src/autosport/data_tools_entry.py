@@ -14,6 +14,8 @@ Usage:
   Autosport-Data.exe walk-forward-evaluate <bundle.json> [--output report.json]
   Autosport-Data.exe compare-strategies <run-summary> <run-summary> [...] [strategy-comparison arguments]
   Autosport-Data.exe repair-workspace [--workspace <workspace-path>]
+  Autosport-Data.exe nvda-evidence-template --release-zip <zip> --output <evidence.json>
+  Autosport-Data.exe verify-nvda-evidence --release-zip <zip> --evidence <evidence.json> [--output <report.json>]
 
 Commands:
   acquire                    Capture immutable authenticated historical odds + match/result evidence.
@@ -24,12 +26,16 @@ Commands:
   walk-forward-evaluate      Run the canonical strict causal walk-forward evaluator and emit machine-readable evidence.
   compare-strategies         Compare compatible completed paper strategy runs on the same sealed replay identity.
   repair-workspace           Reconcile a late-crashed economic run using the canonical fail-closed recovery path.
+  nvda-evidence-template     Create a physical NVDA test record bound to one exact packaged release candidate.
+  verify-nvda-evidence      Fail closed if human-supplied NVDA evidence drifts from the exact release ZIP or required checks.
 
 Truth boundaries remain fail closed: credentials, lawful retention/licensing, real sealed outcomes,
 coverage, profitability or predictive superiority, human testing, and NVDA verification are never
 inferred by this wrapper. Local source-data rights remain the user's responsibility and are recorded,
 not independently certified, by import commands. Recovery never fabricates completion: an ambiguous
-workspace remains unresolved unless canonical transaction/base hashes prove the disposition.
+workspace remains unresolved unless canonical transaction/base hashes prove the disposition. NVDA
+evidence validation checks a human-supplied record and exact candidate identity; it never proves that
+a physical test happened and never changes BUILD_INFO human/NVDA truth labels.
 """
 
 
@@ -72,6 +78,14 @@ def main(argv: list[str] | None = None) -> int:
         from autosport.cli import main as cli_main
 
         return cli_main(["repair-workspace", *forwarded])
+    if command == "nvda-evidence-template":
+        from autosport.nvda_acceptance import template_main
+
+        return template_main(forwarded)
+    if command == "verify-nvda-evidence":
+        from autosport.nvda_acceptance import verify_main
+
+        return verify_main(forwarded)
 
     print(f"Autosport-Data: unknown command {command!r}\n")
     print(_USAGE)

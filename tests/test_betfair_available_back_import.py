@@ -163,6 +163,66 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
         self.assertIs(latest.metadata["execution_quote_verified"], True)
         self.assertIs(latest.metadata["actual_fill_verified"], False)
 
+    def test_definition_only_status_or_delay_transition_invalidates_prior_quote(self) -> None:
+        transitions = (
+            ({"status": "SUSPENDED"}, "SUSPENDED", 0),
+            ({"status": "OPEN", "betDelay": 2, "inPlay": True}, "OPEN", 2),
+        )
+        for definition_change, expected_status, expected_delay in transitions:
+            with self.subTest(definition_change=definition_change), tempfile.TemporaryDirectory() as tmp:
+                lines = _pro_stream()
+                lines.insert(
+                    2,
+                    {
+                        "op": "mcm",
+                        "pt": _epoch_ms("2026-02-10T12:10:00Z"),
+                        "mc": [
+                            {
+                                "id": "1.advanced",
+                                "marketDefinition": definition_change,
+                            }
+                        ],
+                    },
+                )
+                _output, events = self._import(Path(tmp), lines)
+
+                invalidations = [
+                    event for event in events if event.observed_ts == "2026-02-10T12:10:00Z"
+                ]
+                self.assertEqual(len(invalidations), 1)
+                event = invalidations[0]
+                self.assertEqual(event.status, "unavailable")
+                self.assertEqual(event.decimal_odds, Decimal("1.85"))
+                self.assertEqual(
+                    event.metadata["price_semantics"],
+                    "betfair_market_definition_state_transition",
+                )
+                self.assertEqual(event.metadata["provider_price_field"], "rc[].atb")
+                self.assertEqual(event.metadata["betfair_market_status"], expected_status)
+                self.assertEqual(event.metadata["betfair_bet_delay_seconds"], expected_delay)
+                self.assertIs(event.metadata["execution_quote_verified"], False)
+                self.assertIs(event.metadata["paper_fill_eligible"], False)
+                self.assertIs(event.metadata["paper_fill_capacity_verified"], False)
+                self.assertIn("not a verified executable quote", paper_quote_rejection_reason(event, "10"))
+
+                # A paper strategy seeing this state after a later replay trigger cannot
+                # consume the stale quote as an executable offer.
+                book = PaperBook("10000")
+                agent = PaperValueAgent(
+                    {
+                        event.quote_key: Forecast(
+                            quote_key=event.quote_key,
+                            probability=Decimal("0.90"),
+                            model_id="definition-transition-test",
+                            as_of_ts=event.observed_ts,
+                        )
+                    },
+                    stake="10",
+                    minimum_expected_profit_per_unit="0",
+                )
+                agent.on_market_event(event, AgentContext(paper_book=book))
+                self.assertEqual(book.tickets, {})
+
     def test_positive_bet_delay_preserves_quote_but_blocks_paper_fill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _output, events = self._import(Path(tmp), _pro_stream(bet_delay=2))

@@ -121,14 +121,19 @@ class ResearchDatasetStrategyTests(unittest.TestCase):
 
             summary = json.loads(Path(result.result_path).read_text(encoding="utf-8"))
             self.assertEqual(summary["strategy_id"], "research-v1")
+            self.assertEqual(
+                summary["strategy_runtime"]["agent_names"],
+                ["market-mirror", "research-v1"],
+            )
+            self.assertTrue(summary["strategy_runtime"]["opens_paper_tickets"])
             self.assertFalse(summary["real_money_execution"])
 
     def test_unknown_dataset_strategy_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(ValueError, "unsupported dataset strategy"):
+            with self.assertRaisesRegex(ValueError, "unknown strategy_id"):
                 AutosportSession(Path(tmp) / "workspace", strategy_id="not-a-strategy")
 
-    def test_research_v1_requires_complete_current_scenario_surface(self):
+    def test_research_v1_requires_complete_current_scenario_surface_without_stranding_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dataset_root = root / "dataset"
@@ -148,10 +153,15 @@ class ResearchDatasetStrategyTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "at least two current outcomes"):
                     session.run_dataset(dataset)
                 self.assertEqual(len(session.book.tickets), 0)
+                self.assertEqual(session.registry.in_progress(), ())
             finally:
                 session.close()
 
             self.assertFalse((root / "workspace" / "decisions.jsonl").read_text(encoding="utf-8"))
+            registry = json.loads((root / "workspace" / "run_registry.json").read_text(encoding="utf-8"))
+            entries = list(registry["runs"].values())
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["status"], "aborted")
 
 
 if __name__ == "__main__":

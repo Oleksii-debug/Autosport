@@ -6,6 +6,7 @@ from pathlib import Path
 from .integrity import sha256_file
 from .run_registry import ReconciliationError, RunRegistry
 from .run_transaction import RunTransaction, RunTransactionError
+from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,13 +17,23 @@ class RecoveryReport:
 
 
 def reconcile_late_crashes(workspace: str | Path) -> RecoveryReport:
-    """Recover transaction-aware runs and retain legacy hash-proven late-crash repair."""
+    """Recover transaction-aware runs while excluding any active economic writer."""
 
     root = Path(workspace)
     registry_path = root / "run_registry.json"
     if not registry_path.is_file():
         return RecoveryReport((), (), ())
 
+    try:
+        with WorkspaceEconomicLock(root):
+            return _reconcile_late_crashes_locked(root, registry_path)
+    except WorkspaceEconomicLockError as exc:
+        raise ReconciliationError(
+            "workspace has an active economic writer; recovery cannot run concurrently"
+        ) from exc
+
+
+def _reconcile_late_crashes_locked(root: Path, registry_path: Path) -> RecoveryReport:
     registry = RunRegistry(registry_path)
     paper_book_path = root / "paper_book.json"
     decision_ledger_path = root / "decisions.jsonl"

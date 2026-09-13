@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
@@ -32,6 +33,40 @@ class HttpJsonResponse:
     headers: Mapping[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class HistoricalCoverageSource:
+    source: str
+    rows: int
+    first_date: str
+    last_date: str
+    priced_rows: int
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalCoverageReport:
+    sport_key: str
+    date_from: str
+    date_to: str
+    historical_window_hours: int
+    historical_window_from: str
+    observed_at: str
+    response_sha256: str
+    sources: tuple[HistoricalCoverageSource, ...]
+    api_version: str | None = None
+
+    @property
+    def total_rows(self) -> int:
+        return sum(item.rows for item in self.sources)
+
+    @property
+    def total_priced_rows(self) -> int:
+        return sum(item.priced_rows for item in self.sources)
+
+    @property
+    def has_data(self) -> bool:
+        return bool(self.sources)
+
+
 Transport = Callable[[str, Mapping[str, str], float], HttpJsonResponse]
 Clock = Callable[[], str]
 Sleeper = Callable[[float], None]
@@ -58,6 +93,7 @@ class ParlayApiTableTennisProvider:
     """Read-only table-tennis odds adapter. No bookmaker account or wager execution capability exists here."""
 
     source_id = "parlayapi:table_tennis"
+    sport_key = "table_tennis"
 
     def __init__(
         self,
@@ -117,8 +153,103 @@ class ParlayApiTableTennisProvider:
                 quotes.append(quote)
         return ProviderBatch(self.source_id, tuple(quotes), cursor=observed_ts)
 
+    def historical_coverage(self, date_from: str, date_to: str) -> HistoricalCoverageReport:
+        """Verify the authenticated key's requested historical window and actual source coverage.
+
+        The provider documents this endpoint as a one-credit preflight. A successful
+        response proves only runtime access/coverage facts for the requested window;
+        it does not prove a storage, retention, or redistribution licence.
+        """
+
+        if self.public_preview or not self.api_key:
+            raise ValueError("historical coverage requires an authenticated API key")
+        requested_from = _parse_iso_date(date_from, field="date_from")
+        requested_to = _parse_iso_date(date_to, field="date_to")
+        if requested_to < requested_from:
+            raise ValueError("date_to must not precede date_from")
+
+        query = urlencode({"dateFrom": date_from, "dateTo": date_to})
+        url = f"{self.base_url}/v1/historical/sports/{self.sport_key}/coverage?{query}"
+        observed_at = self.clock()
+        response = self._request(url)
+        window_hours_raw = _header(response.headers, "x-historical-window-hours")
+        window_from_raw = _header(response.headers, "x-historical-window-from")
+        if window_hours_raw is None or window_from_raw is None:
+            raise ProviderPayloadError("historical coverage response is missing entitlement-window headers")
+        try:
+            window_hours = int(window_hours_raw)
+        except ValueError as exc:
+            raise ProviderPayloadError("x-historical-window-hours must be an integer") from exc
+        if window_hours <= 0:
+            raise ProviderPayloadError("x-historical-window-hours must be positive")
+        entitlement_from = _parse_provider_date(window_from_raw, field="x-historical-window-from")
+        if requested_from < entitlement_from:
+            raise ProviderPayloadError("historical response contradicts its entitlement-window header")
+
+        payload = response.payload
+        if not isinstance(payload, dict):
+            raise ProviderPayloadError("historical coverage response must be an object")
+        if str(payload.get("sport_key", "")) != self.sport_key:
+            raise ProviderPayloadError("historical coverage response sport_key mismatch")
+        window = payload.get("window")
+        if not isinstance(window, dict):
+            raise ProviderPayloadError("historical coverage response requires window object")
+        if str(window.get("date_from", "")) != date_from or str(window.get("date_to", "")) != date_to:
+            raise ProviderPayloadError("historical coverage response window mismatch")
+        by_source = payload.get("by_source")
+        if not isinstance(by_source, dict):
+            raise ProviderPayloadError("historical coverage response requires by_source object")
+
+        sources: list[HistoricalCoverageSource] = []
+        for source, raw in sorted(by_source.items(), key=lambda item: str(item[0])):
+            source_name = str(source).strip()
+            if not source_name or not isinstance(raw, dict):
+                raise ProviderPayloadError("historical coverage source entries must be named objects")
+            rows = _nonnegative_int(raw.get("rows"), field=f"by_source.{source_name}.rows")
+            priced_rows = _nonnegative_int(
+                raw.get("priced_rows"),
+                field=f"by_source.{source_name}.priced_rows",
+            )
+            if rows == 0:
+                raise ProviderPayloadError("historical coverage must omit sources with zero rows")
+            if priced_rows > rows:
+                raise ProviderPayloadError("historical priced_rows must not exceed rows")
+            first_date_raw = str(raw.get("first_date", "")).strip()
+            last_date_raw = str(raw.get("last_date", "")).strip()
+            first_date = _parse_iso_date(first_date_raw, field=f"by_source.{source_name}.first_date")
+            last_date = _parse_iso_date(last_date_raw, field=f"by_source.{source_name}.last_date")
+            if last_date < first_date:
+                raise ProviderPayloadError("historical source last_date must not precede first_date")
+            if first_date < requested_from or last_date > requested_to:
+                raise ProviderPayloadError("historical source dates fall outside requested window")
+            sources.append(
+                HistoricalCoverageSource(
+                    source=source_name,
+                    rows=rows,
+                    first_date=first_date_raw,
+                    last_date=last_date_raw,
+                    priced_rows=priced_rows,
+                )
+            )
+
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        api_version = _header(response.headers, "x-api-version")
+        return HistoricalCoverageReport(
+            sport_key=self.sport_key,
+            date_from=date_from,
+            date_to=date_to,
+            historical_window_hours=window_hours,
+            historical_window_from=window_from_raw,
+            observed_at=observed_at,
+            response_sha256=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            sources=tuple(sources),
+            api_version=api_version,
+        )
+
     def _fetch(self) -> HttpJsonResponse:
-        url = self._url()
+        return self._request(self._url())
+
+    def _request(self, url: str) -> HttpJsonResponse:
         headers = {"Accept": "application/json", "User-Agent": "Autosport/0.1 read-only-market-observer"}
         if self.api_key:
             headers["X-API-Key"] = self.api_key
@@ -291,3 +422,40 @@ def _parse_retry_after(value: str | None) -> float | None:
         return max(0.0, float(value))
     except ValueError:
         return None
+
+
+def _header(headers: Mapping[str, str], name: str) -> str | None:
+    target = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == target and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _parse_iso_date(value: str, *, field: str) -> date:
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ProviderPayloadError(f"{field} must be YYYY-MM-DD") from exc
+    if parsed.isoformat() != value:
+        raise ProviderPayloadError(f"{field} must be canonical YYYY-MM-DD")
+    return parsed
+
+
+def _parse_provider_date(value: str, *, field: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ProviderPayloadError(f"{field} must be an ISO date or timestamp") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ProviderPayloadError(f"{field} timestamp must include timezone")
+        return parsed.date()
+
+
+def _nonnegative_int(value: Any, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ProviderPayloadError(f"{field} must be a non-negative integer")
+    return value

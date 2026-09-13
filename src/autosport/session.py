@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal
 from pathlib import Path
 
-from .agents import AgentContext, AgentOrchestrator, MarketMirrorAgent, PaperBaselineAgent
+from .agents import AgentContext, AgentOrchestrator
 from .dataset import ReplayDataset
 from .decision_ledger import JsonlDecisionLedger
 from .domain import MarketEvent
@@ -18,14 +18,12 @@ from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
 from .providers import MarketProvider
 from .replay import ReplayEngine, ReplayRun
-from .research_strategy import ResearchSignalAgent
 from .run_registry import RunRegistry, UnresolvedExperimentError
 from .run_transaction import RunTransaction
 from .settlement import SettlementEngine
 from .storage import SQLiteMarketStore
-
-
-SUPPORTED_DATASET_STRATEGIES = ("baseline-v1", "research-v1")
+from .strategies import StrategySpec, build_strategy_agents, strategy_spec
+from .workspace_lock import WorkspaceEconomicLock
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,14 +53,13 @@ class AutosportSession:
         initial_bankroll: Decimal | str = "10000",
         strategy_id: str = "baseline-v1",
     ) -> None:
-        if strategy_id not in SUPPORTED_DATASET_STRATEGIES:
-            raise ValueError(
-                "unsupported dataset strategy: "
-                f"{strategy_id}; choose one of {', '.join(SUPPORTED_DATASET_STRATEGIES)}"
-            )
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
-        self.strategy_id = strategy_id
+        # Bind the experiment identity to an actual runtime implementation now,
+        # before durable state is opened. Arbitrary labels must never appear in
+        # evaluation evidence for a different strategy implementation.
+        self.strategy: StrategySpec = strategy_spec(strategy_id)
+        self.strategy_id = self.strategy.strategy_id
         self.store = SQLiteMarketStore(self.workspace / "market.db")
         self.source_health = SourceHealthStore(self.workspace / "source_health.json")
         self.book_path = self.workspace / "paper_book.json"
@@ -83,14 +80,7 @@ class AutosportSession:
             replay_run_id=run_id,
             decision_ledger=ledger or self.ledger,
         )
-        agents = [MarketMirrorAgent()]
-        if self.strategy_id == "baseline-v1":
-            agents.append(PaperBaselineAgent("50"))
-        elif self.strategy_id == "research-v1":
-            agents.append(ResearchSignalAgent())
-        else:  # constructor validates this; keep runtime fail-closed if state is corrupted.
-            raise ValueError(f"unsupported dataset strategy: {self.strategy_id}")
-        return AgentOrchestrator(agents, context)
+        return AgentOrchestrator(build_strategy_agents(self.strategy_id), context)
 
     def observe_provider_once(
         self,
@@ -115,6 +105,16 @@ class AutosportSession:
         return ObservationResult(stats, self.source_health.get(provider.source_id), current)
 
     def run_dataset(self, dataset: ReplayDataset, speed: float = 0.0, allow_repeat: bool = False) -> SessionResult:
+        with WorkspaceEconomicLock(self.workspace):
+            return self._run_dataset_locked(dataset, speed=speed, allow_repeat=allow_repeat)
+
+    def _run_dataset_locked(
+        self,
+        dataset: ReplayDataset,
+        *,
+        speed: float = 0.0,
+        allow_repeat: bool = False,
+    ) -> SessionResult:
         self._ensure_canonical_economic_base()
         base_book_hash = sha256_file(self.book_path)
         base_ledger_hash = sha256_file(self.ledger.path)
@@ -129,44 +129,80 @@ class AutosportSession:
             base_paper_book_sha256=base_book_hash,
             base_decision_ledger_sha256=base_ledger_hash,
         )
-        transaction = RunTransaction.start(
-            self.workspace,
-            run_id=run_id,
-            experiment_key=experiment_key,
-            market_sha256=dataset.market_sha256,
-            results_sha256=dataset.results_sha256,
-            strategy_id=self.strategy_id,
-            base_paper_book_sha256=base_book_hash,
-            base_decision_ledger_sha256=base_ledger_hash,
-        )
+        try:
+            transaction = RunTransaction.start(
+                self.workspace,
+                run_id=run_id,
+                experiment_key=experiment_key,
+                market_sha256=dataset.market_sha256,
+                results_sha256=dataset.results_sha256,
+                strategy_id=self.strategy_id,
+                base_paper_book_sha256=base_book_hash,
+                base_decision_ledger_sha256=base_ledger_hash,
+            )
+        except Exception:
+            # No transaction manifest exists yet and canonical economic state is
+            # still BASE. Do not turn an ordinary start failure into a workspace
+            # that falsely requires crash recovery.
+            self.registry.abort_uncommitted(
+                experiment_key,
+                reason="transaction start failed before a durable manifest existed",
+                paper_book_sha256=sha256_file(self.book_path),
+                decision_ledger_sha256=sha256_file(self.ledger.path),
+            )
+            raise
 
-        working_book = PaperBook.load(self.book_path)
-        staged_ledger = JsonlDecisionLedger(transaction.run_ledger_path)
-        orchestrator = self._runtime(run_id, book=working_book, ledger=staged_ledger)
-        engine = ReplayEngine(dataset.load_market_events())
+        try:
+            working_book = PaperBook.load(self.book_path)
+            staged_ledger = JsonlDecisionLedger(transaction.run_ledger_path)
+            orchestrator = self._runtime(run_id, book=working_book, ledger=staged_ledger)
+            engine = ReplayEngine(dataset.load_market_events())
 
-        def consume(event) -> None:
-            self.store.append(event)
-            orchestrator.on_market_event(event)
+            def consume(event) -> None:
+                self.store.append(event)
+                orchestrator.on_market_event(event)
 
-        replay = engine.run(consume, speed=speed, run_id=run_id)
-        settlement = SettlementEngine()
-        settlement.record(dataset.load_results_after_replay())
-        settled = tuple(settlement.settle_ready(working_book))
-        evaluation = evaluate(working_book)
-        portfolio = self.portfolio_engine.analyse(list(working_book.tickets.values()))
-        destination = self.workspace / f"run-{replay.run_id}.json"
-        result = SessionResult(
-            replay,
-            settled,
-            working_book.balance,
-            evaluation,
-            portfolio,
-            experiment_key,
-            str(destination),
-        )
+            replay = engine.run(consume, speed=speed, run_id=run_id)
+            settlement = SettlementEngine()
+            settlement.record(dataset.load_results_after_replay())
+            settled = tuple(settlement.settle_ready(working_book))
+            evaluation = evaluate(working_book)
+            portfolio = self.portfolio_engine.analyse(list(working_book.tickets.values()))
+            destination = self.workspace / f"run-{replay.run_id}.json"
+            result = SessionResult(
+                replay,
+                settled,
+                working_book.balance,
+                evaluation,
+                portfolio,
+                experiment_key,
+                str(destination),
+            )
 
-        transaction.stage_outputs(working_book, self.ledger.path)
+            transaction.stage_outputs(working_book, self.ledger.path)
+        except Exception:
+            # Strategy validation/research rejection is not a crash. While the
+            # transaction is still in staging, recovery can prove canonical
+            # PaperBook/Ledger remain BASE and record an explicit aborted retry.
+            recovery = RunTransaction.recover(
+                self.workspace,
+                run_id=run_id,
+                registry_item=self.registry.get(experiment_key),
+                experiment_key=experiment_key,
+            )
+            if recovery.disposition != "aborted_uncommitted":
+                raise RuntimeError("staging failure unexpectedly crossed the durable precommit boundary")
+            self.registry.abort_uncommitted(
+                experiment_key,
+                reason="dataset strategy/replay failed before durable precommit; canonical economic state remained BASE",
+                paper_book_sha256=sha256_file(self.book_path),
+                decision_ledger_sha256=sha256_file(self.ledger.path),
+            )
+            raise
+
+        # After durable precommit begins, failures deliberately remain unresolved:
+        # recovery owns deciding whether BASE or NEW is canonical and must never
+        # downgrade an uncertain commit into a normal strategy rejection.
         summary = transaction.precommit(self._run_summary_payload(dataset, result))
         transaction.commit()
 
@@ -179,6 +215,7 @@ class AutosportSession:
             paper_book_sha256=str(summary["paper_book_sha256"]),
             decision_ledger_sha256=str(summary["decision_ledger_sha256"]),
         )
+        transaction.mark_registry_completed()
         return result
 
     def _ensure_canonical_economic_base(self) -> None:
@@ -202,6 +239,12 @@ class AutosportSession:
             "historical_import_identity": dataset.import_identity,
             "dataset_governance": asdict(dataset.governance) if dataset.governance is not None else None,
             "strategy_id": self.strategy_id,
+            "strategy_runtime": {
+                "strategy_id": self.strategy.strategy_id,
+                "label": self.strategy.label,
+                "agent_names": list(self.strategy.agent_names),
+                "opens_paper_tickets": self.strategy.opens_paper_tickets,
+            },
             "experiment_key": result.experiment_key,
             "market_sha256": dataset.market_sha256,
             "sealed_results_sha256": dataset.results_sha256,

@@ -10,6 +10,20 @@ from typing import Any
 from .domain import MarketEvent, MarketType
 
 
+_FORBIDDEN_HISTORICAL_METADATA_KEYS = frozenset(
+    {
+        "outcome",
+        "result",
+        "winner",
+        "final_score",
+        "final_result",
+        "settlement_result",
+        "settled_outcome",
+        "future_quote",
+    }
+)
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -50,6 +64,20 @@ def _resolve_member(root: Path, value: str, *, field: str) -> Path:
     return candidate
 
 
+def _contains_forbidden_historical_metadata(value: Any) -> bool:
+    """Reject future/outcome facts anywhere inside strategy-visible metadata."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if str(key).lower() in _FORBIDDEN_HISTORICAL_METADATA_KEYS:
+                return True
+            if _contains_forbidden_historical_metadata(child):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(_contains_forbidden_historical_metadata(child) for child in value)
+    return False
+
+
 @dataclass(frozen=True, slots=True)
 class DatasetGovernance:
     source_identity: str
@@ -88,6 +116,8 @@ class ReplayDataset:
 
     def load_results_after_replay(self) -> dict[str, str]:
         raw = json.loads(self.results_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("results payload must be an object")
         if int(raw.get("schema_version", 0)) != 1:
             raise ValueError("unsupported results schema")
         outcomes = raw.get("quote_outcomes")
@@ -185,13 +215,6 @@ def _validate_historical_payloads(
     quote_keys: set[str] = set()
     dedupe_keys: set[str] = set()
     event_count = 0
-    forbidden_metadata_keys = {
-        "outcome",
-        "result",
-        "final_score",
-        "final_result",
-        "settlement_result",
-    }
 
     with market_path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -204,6 +227,12 @@ def _validate_historical_payloads(
                 raise ValueError(f"market line {line_number} is not valid JSON") from exc
             if not isinstance(raw_event, dict):
                 raise ValueError(f"market line {line_number} must be a JSON object")
+            for timestamp_field in ("source_ts", "observed_ts", "ingest_ts"):
+                timestamp_value = raw_event.get(timestamp_field)
+                if not isinstance(timestamp_value, str) or not timestamp_value.strip():
+                    raise ValueError(
+                        f"market line {line_number} requires explicit {timestamp_field} for historical governance"
+                    )
             event = MarketEvent.from_dict(raw_event)
             if event.source_id not in source_ids:
                 raise ValueError(f"market line {line_number} source_id is outside declared coverage")
@@ -220,8 +249,7 @@ def _validate_historical_payloads(
                 raise ValueError(f"market line {line_number} ingest_ts is before observed_ts")
             if observed_ts < coverage_start or observed_ts > coverage_end:
                 raise ValueError(f"market line {line_number} observed_ts is outside declared coverage")
-            metadata_keys = {str(key).lower() for key in event.metadata}
-            if metadata_keys & forbidden_metadata_keys:
+            if _contains_forbidden_historical_metadata(event.metadata):
                 raise ValueError(f"market line {line_number} contains future/outcome metadata")
             if event.dedupe_key in dedupe_keys:
                 raise ValueError(f"market line {line_number} duplicates canonical source event identity")
@@ -232,6 +260,8 @@ def _validate_historical_payloads(
         raise ValueError("historical market corpus must contain at least one event")
 
     results_raw = json.loads(results_path.read_text(encoding="utf-8"))
+    if not isinstance(results_raw, dict):
+        raise ValueError("results payload must be an object")
     if int(results_raw.get("schema_version", 0)) != 1:
         raise ValueError("unsupported results schema")
     outcomes = results_raw.get("quote_outcomes")
@@ -266,6 +296,8 @@ def load_dataset(root: str | Path) -> ReplayDataset:
     root = Path(root)
     manifest_path = root / "manifest.json"
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("dataset manifest must be an object")
     schema_version = int(raw.get("schema_version", 0))
     if schema_version not in {1, 2}:
         raise ValueError("unsupported dataset schema")

@@ -273,15 +273,22 @@ class ForecastOriginBindingTests(unittest.TestCase):
             self.assertFalse(report["truth"]["licensing_retention_verified"])
             self.assertFalse(report["truth"]["profitability_claim"])
 
-    def test_declared_post_reveal_record_time_fails_closed(self):
+    def test_retrospective_wall_clock_after_reveal_preserves_origin_without_time_overclaim(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dataset = _write_dataset(root / "dataset")
             raw = _bundle_raw(dataset)
-            _write_origin(root, dataset, raw, second_recorded_at="2026-04-01T00:00:00+00:00")
+            _write_origin(root, dataset, raw, second_recorded_at="2026-09-13T04:49:23+00:00")
 
-            with self.assertRaisesRegex(ValueError, "at or after outcome reveal"):
-                evaluate_walk_forward_bundle(WalkForwardBundle.from_path(_write_bundle(root, raw)))
+            report = evaluate_walk_forward_bundle(WalkForwardBundle.from_path(_write_bundle(root, raw)))
+
+            self.assertTrue(report["truth"]["canonical_forecast_origin_verified"])
+            self.assertFalse(report["truth"]["declared_record_time_before_reveal_verified"])
+            self.assertFalse(report["truth"]["independent_time_anchor_verified"])
+            self.assertFalse(report["truth"]["pre_outcome_ledger_write_verified"])
+            self.assertFalse(report["truth"]["temporal_holdout_protocol_verified"])
+            self.assertEqual(report["forecast_origin"]["status"], "CANONICAL_BINDING_VERIFIED")
+            self.assertFalse(report["forecast_origin"]["declared_record_time_before_reveal_verified"])
 
     def test_forged_forecast_hash_in_valid_ledger_envelope_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

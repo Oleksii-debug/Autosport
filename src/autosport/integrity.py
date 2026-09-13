@@ -15,6 +15,17 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def ensure_durable_file(path: str | Path) -> None:
+    """Create an empty file when absent and fsync its current bytes without rewriting existing content."""
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    mode = "ab" if destination.exists() else "wb"
+    with destination.open(mode) as handle:
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)

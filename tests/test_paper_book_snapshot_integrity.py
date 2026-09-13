@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from autosport.domain import TicketLeg
@@ -22,8 +23,8 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
 
     def test_round_trip_preserves_valid_open_and_settled_state(self):
         book = PaperBook("100")
-        won_leg = TicketLeg("e1", "m", "a", locked_odds=__import__("decimal").Decimal("2"))
-        open_leg = TicketLeg("e2", "m", "b", locked_odds=__import__("decimal").Decimal("1.5"))
+        won_leg = TicketLeg("e1", "m", "a", locked_odds=Decimal("2"))
+        open_leg = TicketLeg("e2", "m", "b", locked_odds=Decimal("1.5"))
         won = book.open_ticket([won_leg], "10")
         book.settle(won.ticket_id, {won_leg.quote_key})
         book.open_ticket([open_leg], "5")

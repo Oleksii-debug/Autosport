@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .domain import MarketEvent, MarketType
+from .outcome_provenance import validate_outcome_provenance
 
 
 _FORBIDDEN_HISTORICAL_METADATA_KEYS = frozenset(
@@ -285,6 +286,11 @@ def _validate_historical_payloads(
     outcomes = results_raw.get("quote_outcomes")
     if not isinstance(outcomes, dict):
         raise ValueError("quote_outcomes must be an object")
+    validate_outcome_provenance(
+        results_raw,
+        outcome_reveal_after=results_reveal_after,
+        dataset_imported_at=governance.imported_at,
+    )
     outcome_keys = {str(key) for key in outcomes}
     missing_outcomes = sorted(quote_keys - outcome_keys)
     if missing_outcomes:

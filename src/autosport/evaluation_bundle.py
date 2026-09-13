@@ -168,8 +168,8 @@ def evaluate_walk_forward_bundle(bundle: WalkForwardBundle) -> dict[str, Any]:
             "sealed_dataset_identity_verified": governed,
             "sealed_outcomes_bound_to_forecasts": governed,
             "outcome_reveal_boundary_verified": governed,
-            "temporal_holdout_protocol_verified": governed
-            and all(window.split == "holdout" for window in bundle.windows),
+            "temporal_timestamp_constraints_verified": governed,
+            "temporal_holdout_protocol_verified": False,
             "historical_window_market_coverage_verified": False,
             "licensing_retention_verified": False,
             "profitability_claim": False,

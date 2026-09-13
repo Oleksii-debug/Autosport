@@ -85,6 +85,22 @@ jobs:
           if ($freshEvidence.real_money_execution -ne $false -or $freshEvidence.human_tested -ne $false -or $freshEvidence.nvda_verified -ne $false) {
             throw 'Fresh-extracted research demo audit violated release truth labels'
           }
+      - name: External UIA fresh-extraction gate
+        shell: pwsh
+        run: |
+          $evidence = Join-Path $PWD 'dist/fresh-extraction-external-uia-audit.json'
+          ./scripts/external_uia_audit.ps1 `
+            -Exe (Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport.exe') `
+            -Output $evidence
+          $external = Get-Content $evidence -Raw | ConvertFrom-Json
+          if ($external.status -ne 'PASS') { throw 'External UIA fresh-extraction audit did not PASS' }
+          if ($external.real_money_execution -ne $false -or $external.human_tested -ne $false -or $external.nvda_verified -ne $false) {
+            throw 'External UIA audit violated release truth labels'
+          }
+          $verificationPath = Join-Path $PWD 'dist/fresh-extraction-verification.json'
+          $verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
+          $verification | Add-Member -NotePropertyName extracted_external_uia_status -NotePropertyValue $external.status -Force
+          $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
       - uses: actions/upload-artifact@v4
         with:
           name: Autosport-V1-Windows-prehuman
@@ -101,5 +117,6 @@ jobs:
             dist/fresh-extraction-keyboard-audit.json
             dist/fresh-extraction-restart-recovery-audit.json
             dist/fresh-extraction-research-demo-audit.json
+            dist/fresh-extraction-external-uia-audit.json
             dist/fresh-extraction-verification.json
           if-no-files-found: error

@@ -14,6 +14,7 @@ from typing import Any, Iterable, Sequence
 from .dataset import load_dataset
 from .domain import MarketEvent
 from .integrity import atomic_write_json
+from .parlayapi_provider import ParlayApiTableTennisProvider
 
 
 _SNAPSHOT_KIND = "parlayapi_point_in_time_historical_snapshot"
@@ -131,9 +132,19 @@ def _snapshot(
         raise ValueError("snapshot evidence schema_version must be 1")
     if evidence.get("kind") != _SNAPSHOT_KIND:
         raise ValueError(f"snapshot evidence kind must be {_SNAPSHOT_KIND}")
+    provider = _text(evidence, "provider", context="snapshot evidence")
+    if provider != "parlayapi":
+        raise ValueError("snapshot evidence provider must be parlayapi")
     sport_key = _text(evidence, "sport_key", context="snapshot evidence")
-    if sport_key != "table_tennis":
-        raise ValueError("snapshot evidence sport_key must be table_tennis")
+    if sport_key != ParlayApiTableTennisProvider.sport_key:
+        raise ValueError(
+            f"snapshot evidence sport_key must be {ParlayApiTableTennisProvider.sport_key}"
+        )
+    canonical_source_id = _text(evidence, "canonical_source_id", context="snapshot evidence")
+    if canonical_source_id != ParlayApiTableTennisProvider.source_id:
+        raise ValueError(
+            "snapshot evidence canonical_source_id does not match ParlayAPI table-tennis producer contract"
+        )
     if evidence.get("has_data") is not True:
         raise ValueError("snapshot evidence must prove has_data=true")
     if evidence.get("point_in_time_snapshot_contains_odds") is not True:
@@ -152,8 +163,6 @@ def _snapshot(
         raise ValueError("snapshot evidence must keep real_money_execution=false")
     if evidence.get("terms_reference") != expected_terms_reference:
         raise ValueError("snapshot evidence terms_reference does not match governance proof")
-    provider = _text(evidence, "provider", context="snapshot evidence")
-    canonical_source_id = f"{provider}:{sport_key}"
 
     expected_sha = _text(evidence, "market_sha256", context="snapshot evidence")
     if _sha256(market_path) != expected_sha:
@@ -183,7 +192,7 @@ def _snapshot(
                 raise ValueError(f"snapshot market line {line_number} must be an object")
             event = MarketEvent.from_dict(raw)
             if event.source_id != canonical_source_id:
-                raise ValueError("snapshot evidence provider/sport does not match captured market source_id")
+                raise ValueError("snapshot canonical_source_id does not match captured market source_id")
             if event.source_ts is None or not event.ingest_ts:
                 raise ValueError("historical snapshot rows require explicit source_ts and ingest_ts")
             source_dt = _timestamp(event.source_ts, field="historical snapshot source_ts")

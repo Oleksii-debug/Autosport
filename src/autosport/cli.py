@@ -335,7 +335,9 @@ def run_historical_snapshot(
         f"snapshot_at={report.snapshot_at} fallback_source_times={report.snapshot_timestamp_fallback_count}"
     )
     print(
-        "point_in_time_odds_market_coverage_verified=" + str(report.has_data).lower()
+        "point_in_time_snapshot_contains_odds=" + str(report.has_data).lower()
+        + " point_in_time_odds_market_coverage_verified=false"
+        + " historical_window_market_coverage_verified=false"
         + " sealed_outcomes_present=false replay_corpus_ready=false"
     )
     print("licensing_or_retention_verified=false real_money_execution=false")

@@ -168,7 +168,11 @@ def verify_governance_authority_binding(
     for bound_field in _BOUND_FIELDS:
         if bound_field == "source_ids":
             continue
-        if proof.get(bound_field) != authority.get(bound_field):
+        if (bound_field in proof) != (bound_field in authority):
+            raise ValueError(
+                f"governance proof.{bound_field} presence does not match authority evidence artifact"
+            )
+        if bound_field in proof and proof[bound_field] != authority[bound_field]:
             raise ValueError(
                 f"governance proof.{bound_field} does not match authority evidence artifact"
             )

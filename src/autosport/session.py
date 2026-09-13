@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal
 from pathlib import Path
 
-from .agents import AgentContext, AgentOrchestrator, MarketMirrorAgent, PaperBaselineAgent
+from .agents import AgentContext, AgentOrchestrator
 from .dataset import ReplayDataset
 from .decision_ledger import JsonlDecisionLedger
 from .domain import MarketEvent
@@ -22,6 +22,7 @@ from .run_registry import RunRegistry, UnresolvedExperimentError
 from .run_transaction import RunTransaction
 from .settlement import SettlementEngine
 from .storage import SQLiteMarketStore
+from .strategies import StrategySpec, build_strategy_agents, strategy_spec
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +54,11 @@ class AutosportSession:
     ) -> None:
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
-        self.strategy_id = strategy_id
+        # Bind the experiment identity to an actual runtime implementation now,
+        # before durable state is opened. Arbitrary labels must never appear in
+        # evaluation evidence for a different strategy implementation.
+        self.strategy: StrategySpec = strategy_spec(strategy_id)
+        self.strategy_id = self.strategy.strategy_id
         self.store = SQLiteMarketStore(self.workspace / "market.db")
         self.source_health = SourceHealthStore(self.workspace / "source_health.json")
         self.book_path = self.workspace / "paper_book.json"
@@ -74,7 +79,7 @@ class AutosportSession:
             replay_run_id=run_id,
             decision_ledger=ledger or self.ledger,
         )
-        return AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent("50")], context)
+        return AgentOrchestrator(build_strategy_agents(self.strategy_id), context)
 
     def observe_provider_once(
         self,
@@ -186,6 +191,12 @@ class AutosportSession:
             "historical_import_identity": dataset.import_identity,
             "dataset_governance": asdict(dataset.governance) if dataset.governance is not None else None,
             "strategy_id": self.strategy_id,
+            "strategy_runtime": {
+                "strategy_id": self.strategy.strategy_id,
+                "label": self.strategy.label,
+                "agent_names": list(self.strategy.agent_names),
+                "opens_paper_tickets": self.strategy.opens_paper_tickets,
+            },
             "experiment_key": result.experiment_key,
             "market_sha256": dataset.market_sha256,
             "sealed_results_sha256": dataset.results_sha256,

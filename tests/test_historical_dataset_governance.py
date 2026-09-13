@@ -120,6 +120,14 @@ class HistoricalDatasetGovernanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "source_ts is after observed_ts"):
                 load_dataset(root)
 
+    def test_historical_event_requires_explicit_ingest_timestamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = _base_event()
+            event.pop("ingest_ts")
+            root = _write_dataset(Path(tmp), event=event)
+            with self.assertRaisesRegex(ValueError, "requires explicit ingest_ts"):
+                load_dataset(root)
+
     def test_outcome_reveal_before_market_coverage_end_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             governance = _base_governance()

@@ -392,6 +392,11 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
 def _forecast_from_dict(raw: Any) -> ForecastRecord:
     if not isinstance(raw, dict):
         raise ValueError("ForecastRecord entry must be an object")
+    evidence_hashes_raw = raw.get("evidence_hashes", [])
+    if not isinstance(evidence_hashes_raw, list):
+        raise ValueError("ForecastRecord evidence_hashes must be a JSON array")
+    if any(not isinstance(item, str) for item in evidence_hashes_raw):
+        raise ValueError("ForecastRecord evidence_hashes must contain strings")
     return ForecastRecord(
         quote_key=str(raw["quote_key"]),
         probability=Decimal(str(raw["probability"])),
@@ -402,9 +407,9 @@ def _forecast_from_dict(raw: Any) -> ForecastRecord:
         input_cutoff_ts=str(raw["input_cutoff_ts"]),
         generated_at=str(raw["generated_at"]),
         uncertainty=Decimal(str(raw.get("uncertainty", "0"))),
-        evidence_hashes=tuple(str(item) for item in raw.get("evidence_hashes", ())),
+        evidence_hashes=tuple(evidence_hashes_raw),
         market_snapshot_hash=(
-            str(raw["market_snapshot_hash"])
+            raw["market_snapshot_hash"]
             if raw.get("market_snapshot_hash") is not None
             else None
         ),

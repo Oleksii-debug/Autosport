@@ -226,6 +226,16 @@ def import_betfair_historical(
                 if not isinstance(market_definition, dict):
                     raise ValueError(f"{path}: line {line_number} marketDefinition must be an object")
                 prior = definitions.get(market_id, {})
+                for field in ("eventId", "eventTypeId", "marketType"):
+                    if field not in market_definition or field not in prior:
+                        continue
+                    previous_value = str(prior.get(field) or "").strip()
+                    declared_value = str(market_definition.get(field) or "").strip()
+                    if previous_value and declared_value != previous_value:
+                        raise ValueError(
+                            f"{path}: line {line_number} marketDefinition {field} changed "
+                            f"for Betfair market {market_id}"
+                        )
                 merged = {**prior, **market_definition}
                 definitions[market_id] = merged
                 names = runner_names.setdefault(market_id, {})

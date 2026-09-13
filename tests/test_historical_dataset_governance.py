@@ -168,6 +168,14 @@ class HistoricalDatasetGovernanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "future/outcome metadata"):
                 load_dataset(root)
 
+    def test_winner_alias_nested_in_metadata_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = _base_event()
+            event["metadata"] = {"research_signal": {"features": {"winner": "alice"}}}
+            root = _write_dataset(Path(tmp), event=event)
+            with self.assertRaisesRegex(ValueError, "future/outcome metadata"):
+                load_dataset(root)
+
     def test_manifest_path_escape_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _write_dataset(Path(tmp))

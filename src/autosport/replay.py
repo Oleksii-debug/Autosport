@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -42,7 +43,10 @@ class ReplayRun:
 
 class ReplayEngine:
     def __init__(self, events: Iterable[MarketEvent], firewall: ReplayLeakageFirewall | None = None) -> None:
-        self.events = sorted(events, key=lambda e: (e.observed_ts, e.sequence, e.dedupe_key))
+        self.events = sorted(
+            events,
+            key=lambda e: (_iso_datetime(e.observed_ts), e.sequence, e.dedupe_key),
+        )
         self.firewall = firewall or ReplayLeakageFirewall()
         self.dataset_hash = _dataset_hash(self.events)
 
@@ -91,7 +95,15 @@ def _dataset_hash(events: list[MarketEvent]) -> str:
     return digest.hexdigest()
 
 
-def _iso_seconds(value: str) -> float:
-    from datetime import datetime
+def _iso_datetime(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"invalid replay observed_ts: {value}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("replay observed_ts must include timezone")
+    return parsed
 
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+def _iso_seconds(value: str) -> float:
+    return _iso_datetime(value).timestamp()

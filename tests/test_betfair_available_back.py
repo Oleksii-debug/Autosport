@@ -78,6 +78,7 @@ class BetfairAvailableBackBookTests(unittest.TestCase):
         bad_changes = (
             {"atb": [[2.0, float("nan")]]},
             {"atb": [[float("inf"), 1.0]]},
+            {"atb": [[1.0, 1.0]]},
             {"batb": [[-1, 2.0, 1.0]]},
             {"batb": [[0, 1.0, 1.0]]},
             {"atb": [[2.0, -1.0]]},

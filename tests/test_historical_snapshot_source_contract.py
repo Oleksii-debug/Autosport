@@ -5,27 +5,31 @@ import unittest
 from pathlib import Path
 
 from autosport.historical_corpus import _snapshot
+from autosport.parlayapi_provider import ParlayApiTableTennisProvider
 
 
-class HistoricalSnapshotProviderBindingTests(unittest.TestCase):
-    def test_snapshot_evidence_provider_must_bind_every_market_row_source_id(self):
+class HistoricalSnapshotSourceContractTests(unittest.TestCase):
+    def test_provider_family_evidence_accepts_canonical_table_tennis_source_id(self):
+        self.assertEqual(ParlayApiTableTennisProvider.source_id, "parlayapi:table_tennis")
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             market_path = root / "snapshot.jsonl"
             evidence_path = root / "snapshot.evidence.json"
 
             event = {
-                "event_id": "tt-provider-binding",
+                "event_id": "tt-source-contract",
                 "market_id": "winner",
                 "selection_id": "alice",
                 "decimal_odds": "1.80",
                 "observed_ts": "2026-01-01T10:00:01+00:00",
-                "source_id": "forged-provider",
+                "source_id": ParlayApiTableTennisProvider.source_id,
                 "sequence": 1,
                 "market_type": "winner",
                 "source_ts": "2026-01-01T10:00:00+00:00",
                 "ingest_ts": "2026-01-02T00:00:00+00:00",
                 "metadata": {
+                    "provider": "parlayapi",
                     "bookmaker_key": "book-a",
                     "source_time_semantics": "provider_quote_last_update",
                 },
@@ -62,12 +66,15 @@ class HistoricalSnapshotProviderBindingTests(unittest.TestCase):
             }
             evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "provider.*source_id"):
-                _snapshot(
-                    market_path,
-                    evidence_path,
-                    expected_terms_reference="https://parlay-api.com/terms",
-                )
+            rows, loaded_evidence = _snapshot(
+                market_path,
+                evidence_path,
+                expected_terms_reference="https://parlay-api.com/terms",
+            )
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][0].source_id, ParlayApiTableTennisProvider.source_id)
+            self.assertEqual(loaded_evidence["provider"], "parlayapi")
 
 
 if __name__ == "__main__":

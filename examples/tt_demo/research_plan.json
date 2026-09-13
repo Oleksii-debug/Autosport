@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "strategy_id": "research-replay-v1",
+  "decisions": [
+    {
+      "decision_id": "research-demo-1",
+      "trigger_quote_key": "tt-demo-1|winner|player-b",
+      "decision_ts": "2026-09-12T10:00:01+00:00",
+      "stake": "10",
+      "candidate": {
+        "legs": [
+          {
+            "quote_key": "tt-demo-1|winner|player-b",
+            "decimal_odds": "1.74",
+            "probability": "0.60"
+          }
+        ]
+      },
+      "scenario_groups": [
+        {
+          "group_id": "tt-demo-1-winner",
+          "outcomes": [
+            {
+              "quote_key": "tt-demo-1|winner|player-a",
+              "probability": "0.40"
+            },
+            {
+              "quote_key": "tt-demo-1|winner|player-b",
+              "probability": "0.60"
+            }
+          ]
+        }
+      ],
+      "forecasts": [
+        {
+          "forecast_id": "forecast-demo-b",
+          "quote_key": "tt-demo-1|winner|player-b",
+          "probability": "0.60",
+          "model_id": "typed-demo-model",
+          "model_version": "1.0.0",
+          "strategy_version": "research-replay-v1",
+          "model_training_cutoff_ts": "2026-09-12T09:00:00+00:00",
+          "input_cutoff_ts": "2026-09-12T10:00:01+00:00",
+          "generated_at": "2026-09-12T10:00:01+00:00",
+          "uncertainty": "0.10",
+          "evidence_hashes": [
+            "c37c2c87c6c3ca584bce93956348efbe96fa22bc44f22d697d82666227e6776f"
+          ],
+          "market_snapshot_hash": "9cf322dc2b69b3d314a9b45d492af908a74f5c8cbdc2f1c3cc17456cf27cbc73",
+          "provenance": {
+            "source": "packaged-tt-demo-plan",
+            "purpose": "deterministic-paper-replay-example"
+          }
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "evidence-demo-b",
+          "quote_key": "tt-demo-1|winner|player-b",
+          "source_id": "fixture",
+          "observed_at": "2026-09-12T10:00:01+00:00",
+          "available_at": "2026-09-12T10:00:01+00:00",
+          "decimal_odds": "1.74",
+          "content_sha256": "c37c2c87c6c3ca584bce93956348efbe96fa22bc44f22d697d82666227e6776f",
+          "quality_flags": [],
+          "market_snapshot_hash": "9cf322dc2b69b3d314a9b45d492af908a74f5c8cbdc2f1c3cc17456cf27cbc73"
+        }
+      ]
+    }
+  ]
+}

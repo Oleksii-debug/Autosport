@@ -31,6 +31,49 @@ jobs:
           python-version: '3.12'
       - shell: pwsh
         run: ./scripts/build_windows.ps1
+      - name: Prove packaged workspace recovery reachability
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $packagedDataExe = Join-Path $PWD 'dist/Autosport-Data.exe'
+          $freshDataExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
+          if (-not (Test-Path $packagedDataExe -PathType Leaf)) { throw 'Packaged recovery smoke is missing Autosport-Data.exe' }
+          if (-not (Test-Path $freshDataExe -PathType Leaf)) { throw 'Fresh-extracted recovery smoke is missing Autosport-Data.exe' }
+
+          $packagedWorkspace = Join-Path $PWD 'dist/repair-workspace-packaged-smoke'
+          $freshWorkspace = Join-Path $PWD 'dist/repair-workspace-fresh-smoke'
+          foreach ($workspace in @($packagedWorkspace, $freshWorkspace)) {
+            if (Test-Path $workspace) { Remove-Item -Recurse -Force $workspace }
+            New-Item -ItemType Directory -Path $workspace | Out-Null
+          }
+
+          $packagedOutput = (& $packagedDataExe repair-workspace --workspace $packagedWorkspace 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe repair-workspace exited $LASTEXITCODE" }
+          if ($packagedOutput -notmatch 'repair=OK') { throw 'Packaged repair-workspace did not report canonical repair=OK' }
+
+          $freshOutput = (& $freshDataExe repair-workspace --workspace $freshWorkspace 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe repair-workspace exited $LASTEXITCODE" }
+          if ($freshOutput -notmatch 'repair=OK') { throw 'Fresh-extracted repair-workspace did not report canonical repair=OK' }
+
+          $evidence = [ordered]@{
+            status = 'PASS'
+            source_sha = $env:AUTOSPORT_SOURCE_SHA
+            packaged_repair_workspace_status = 'PASS'
+            fresh_extracted_repair_workspace_status = 'PASS'
+            canonical_output = 'repair=OK'
+            empty_isolated_workspace_reachability_only = $true
+            real_money_execution = $false
+            human_tested = $false
+            nvda_verified = $false
+          }
+          $evidencePath = Join-Path $PWD 'dist/repair-workspace-package-smoke.json'
+          $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $evidencePath -Encoding utf8
+
+          $verificationPath = Join-Path $PWD 'dist/fresh-extraction-verification.json'
+          $verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
+          $verification | Add-Member -NotePropertyName extracted_repair_workspace_status -NotePropertyValue 'PASS' -Force
+          $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
       - name: Execute packaged walk-forward evaluation
         shell: pwsh
         run: ./scripts/walk_forward_package_smoke.ps1
@@ -121,6 +164,7 @@ jobs:
             dist/keyboard-audit.json
             dist/restart-recovery-audit.json
             dist/research-demo-audit.json
+            dist/repair-workspace-package-smoke.json
             dist/walk-forward-package-smoke.json
             dist/walk-forward-package-smoke-dataset
             dist/walk-forward-package-smoke-report.json

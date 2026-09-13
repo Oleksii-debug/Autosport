@@ -38,7 +38,14 @@ class BeamParlayCandidateSearch:
         if minimum_legs < 1 or minimum_legs > self.max_legs:
             raise ValueError("invalid minimum_legs")
         self._validate_input_legs(legs)
-        ordered = sorted(legs, key=lambda leg: (leg.paper_value_per_unit, leg.probability), reverse=True)
+        ordered = sorted(
+            legs,
+            key=lambda leg: (
+                -leg.paper_value_per_unit,
+                -leg.probability,
+                leg.quote_key,
+            ),
+        )
         beam: list[tuple[CandidateLeg, ...]] = [tuple()]
         results: list[ParlayCandidate] = []
         for _depth in range(1, self.max_legs + 1):

@@ -347,14 +347,20 @@ def _validate_scenario_future_identity(
                     "research scenario outcome identity first appears after decision: "
                     f"{outcome.quote_key}"
                 )
-            parts = outcome.quote_key.split("|", 2)
-            if len(parts) != 3:
-                continue
-            first_market_observed = first_observed_market_times.get((parts[0], parts[1]))
-            if first_market_observed is not None and first_market_observed > decision_time:
+            future_market_matches = sorted(
+                (
+                    (event_id, market_id)
+                    for (event_id, market_id), first_market_observed in first_observed_market_times.items()
+                    if first_market_observed > decision_time
+                    and outcome.quote_key.startswith(f"{event_id}|{market_id}|")
+                ),
+                key=lambda item: (item[0], item[1]),
+            )
+            if future_market_matches:
+                event_id, market_id = future_market_matches[0]
                 raise ValueError(
                     "research scenario market identity first appears after decision: "
-                    f"{parts[0]}|{parts[1]}"
+                    f"{event_id}|{market_id}"
                 )
 
 

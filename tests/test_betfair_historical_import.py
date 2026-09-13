@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bz2
+import hashlib
 import json
 import tempfile
 import unittest
@@ -15,6 +16,10 @@ from autosport.dataset import load_dataset
 def _epoch_ms(value: str) -> int:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return int(parsed.timestamp() * 1000)
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _market_definition(*, status: str, event_type_id: str = "2593174") -> dict:
@@ -106,6 +111,8 @@ class BetfairHistoricalImportTests(unittest.TestCase):
             source = root / "market.bz2"
             output = root / "dataset"
             _write_bz2(source, _stream_lines())
+            source_sha256 = _sha256(source)
+            source_size = source.stat().st_size
 
             report = import_betfair_historical(
                 [source],
@@ -158,6 +165,84 @@ class BetfairHistoricalImportTests(unittest.TestCase):
             {"manifest.json", "market.jsonl", "results.json"},
         )
         self.assertEqual(manifest["import_identity"], report.import_identity)
+        self.assertEqual(
+            manifest["governance"]["source_files"],
+            [{"ordinal": 1, "sha256": source_sha256, "byte_size": source_size}],
+        )
+
+    def test_same_publish_time_preserves_provider_source_order_for_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "same-pt.bz2"
+            output = root / "dataset"
+            lines = _stream_lines()
+            lines.insert(
+                1,
+                {
+                    "op": "mcm",
+                    "pt": _epoch_ms("2026-02-10T12:00:00Z"),
+                    "mc": [
+                        {
+                            "id": "1.234567890",
+                            "rc": [{"id": 101, "ltp": 1.7}],
+                        }
+                    ],
+                },
+            )
+            _write_bz2(source, lines)
+
+            import_betfair_historical(
+                [source],
+                output,
+                acquired_at="2026-02-10T13:30:00Z",
+                imported_at="2026-02-10T14:00:00Z",
+                terms_reference="test-rights",
+                retention_basis="test-retention",
+            )
+            events = load_dataset(output).load_market_events()
+
+        same_pt = [
+            event
+            for event in events
+            if event.selection_id == "101" and event.observed_ts == "2026-02-10T12:00:00Z"
+        ]
+        self.assertEqual([event.decimal_odds for event in same_pt], [Decimal("1.8"), Decimal("1.7")])
+        self.assertEqual([event.sequence for event in same_pt], sorted(event.sequence for event in same_pt))
+
+    def test_acquired_at_before_latest_source_publish_time_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "backdated-acquisition.bz2"
+            _write_bz2(source, _stream_lines())
+
+            with self.assertRaisesRegex(ValueError, "acquired_at must not precede the latest source publish time"):
+                import_betfair_historical(
+                    [source],
+                    root / "dataset",
+                    acquired_at="2026-02-10T12:59:59Z",
+                    imported_at="2026-02-10T14:00:00Z",
+                    terms_reference="test-rights",
+                    retention_basis="test-retention",
+                )
+
+    def test_market_spanning_input_files_fails_closed_when_order_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first.bz2"
+            second = root / "second.bz2"
+            lines = _stream_lines()
+            _write_bz2(first, [lines[0]])
+            _write_bz2(second, lines[1:])
+
+            with self.assertRaisesRegex(ValueError, "cross-file source order is ambiguous"):
+                import_betfair_historical(
+                    [first, second],
+                    root / "dataset",
+                    acquired_at="2026-02-10T13:30:00Z",
+                    imported_at="2026-02-10T14:00:00Z",
+                    terms_reference="test-rights",
+                    retention_basis="test-retention",
+                )
 
     def test_missing_final_settlement_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

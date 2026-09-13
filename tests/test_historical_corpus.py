@@ -6,6 +6,7 @@ from pathlib import Path
 
 from autosport.dataset import load_dataset
 from autosport.historical_corpus import assemble_historical_corpus
+from autosport.parlayapi_provider import ParlayApiTableTennisProvider
 
 
 def _sha256(path: Path) -> str:
@@ -26,7 +27,7 @@ def _write_snapshot(
         "selection_id": "alice",
         "decimal_odds": "1.80",
         "observed_ts": observed,
-        "source_id": "parlayapi",
+        "source_id": ParlayApiTableTennisProvider.source_id,
         "sequence": 1,
         "market_type": "winner",
         "source_ts": "2026-01-01T10:00:00+00:00",
@@ -91,7 +92,7 @@ def _write_governance(root: Path, **overrides) -> Path:
         "schema_version": 1,
         "kind": "historical_corpus_governance_proof",
         "source_identity": "parlayapi:account-entitlement-2026-01",
-        "source_ids": ["parlayapi"],
+        "source_ids": [ParlayApiTableTennisProvider.source_id],
         "terms_reference": "https://parlay-api.com/terms",
         "retention_basis": "verified internal research retention authority through 2026-04-01",
         "redistribution_policy": "internal_only",
@@ -136,7 +137,7 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
             self.assertTrue(acquisition["point_in_time_snapshot_contains_odds"])
             self.assertFalse(acquisition["historical_window_market_coverage_verified"])
             self.assertTrue(acquisition["licensing_or_retention_verified"])
-            self.assertEqual(acquisition["rights_source_ids"], ["parlayapi"])
+            self.assertEqual(acquisition["rights_source_ids"], [ParlayApiTableTennisProvider.source_id])
             self.assertEqual(acquisition["governance_proof_sha256"], _sha256(proof))
             self.assertEqual(manifest["import_identity"], dataset.import_identity)
 

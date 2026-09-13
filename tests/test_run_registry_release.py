@@ -28,6 +28,20 @@ class RunRegistryReleaseTests(unittest.TestCase):
             with self.assertRaises(UnresolvedExperimentError):
                 registry.begin("a" * 64, "b" * 64, "strategy", "run-2")
 
+    def test_unknown_persisted_status_fails_closed_before_silent_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "registry.json"
+            registry = RunRegistry(path)
+            key = registry.begin("a" * 64, "b" * 64, "strategy", "run-1")
+            registry.complete(key)
+
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["runs"][key]["status"] = "complete"
+            path.write_text(json.dumps(raw) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "invalid status"):
+                registry.begin("a" * 64, "b" * 64, "strategy", "run-2")
+
     def test_deterministic_package_ignores_source_mtimes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

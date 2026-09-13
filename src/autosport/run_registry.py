@@ -262,6 +262,11 @@ class RunRegistry:
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         if raw.get("schema_version") != 1 or not isinstance(raw.get("runs"), dict):
             raise ValueError("invalid run registry")
+        for item in raw["runs"].values():
+            if not isinstance(item, dict):
+                raise ValueError("run registry contains an invalid run entry")
+            if item.get("status") not in {"in_progress", "completed", "aborted"}:
+                raise ValueError("run registry contains an invalid status")
         return raw
 
     def _write(self, raw: dict) -> None:

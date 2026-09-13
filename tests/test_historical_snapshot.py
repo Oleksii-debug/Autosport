@@ -93,7 +93,9 @@ class HistoricalSnapshotTests(unittest.TestCase):
             self.assertEqual(row["ingest_ts"], "2026-09-13T02:00:00+00:00")
             self.assertEqual(row["metadata"]["source_time_semantics"], "provider_historical_snapshot_timestamp")
             self.assertFalse(row["metadata"]["provider_quote_last_update_present"])
-        self.assertTrue(evidence["point_in_time_odds_market_coverage_verified"])
+        self.assertTrue(evidence["point_in_time_snapshot_contains_odds"])
+        self.assertFalse(evidence["point_in_time_odds_market_coverage_verified"])
+        self.assertFalse(evidence["historical_window_market_coverage_verified"])
         self.assertFalse(evidence["sealed_outcomes_present"])
         self.assertFalse(evidence["replay_corpus_ready"])
         self.assertFalse(evidence["licensing_or_retention_verified"])
@@ -176,7 +178,9 @@ class HistoricalSnapshotTests(unittest.TestCase):
 
         self.assertFalse(report.has_data)
         self.assertFalse(evidence["has_data"])
+        self.assertFalse(evidence["point_in_time_snapshot_contains_odds"])
         self.assertFalse(evidence["point_in_time_odds_market_coverage_verified"])
+        self.assertFalse(evidence["historical_window_market_coverage_verified"])
         self.assertFalse(evidence["replay_corpus_ready"])
 
 

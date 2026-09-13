@@ -281,6 +281,71 @@ class HistoricalBundleCorpusTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "total_rows does not match sources"):
                 verify_acquisition_bundle(root, expected_bundle_sha256=resealed_sha)
 
+    def test_rejects_resealed_coverage_window_not_derived_from_acquisition_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root, _, bundle = self._bundle(Path(temp))
+            request_scope = bundle["request_scope"]
+            match_results = bundle["match_results"]
+            assert isinstance(request_scope, dict)
+            assert isinstance(match_results, dict)
+            coverage_scope = request_scope["coverage_preflight"]
+            coverage_evidence = match_results["coverage_preflight"]
+            assert isinstance(coverage_scope, dict)
+            assert isinstance(coverage_evidence, dict)
+            coverage_scope["date_from"] = "2026-09-02"
+            coverage_scope["date_to"] = "2026-09-02"
+            coverage_evidence["date_from"] = "2026-09-02"
+            coverage_evidence["date_to"] = "2026-09-02"
+            sources = coverage_evidence["sources"]
+            assert isinstance(sources, list) and isinstance(sources[0], dict)
+            sources[0]["first_date"] = "2026-09-02"
+            sources[0]["last_date"] = "2026-09-02"
+            resealed_sha = _reseal_bundle(root, bundle)
+            with self.assertRaisesRegex(ValueError, "window does not match acquisition request dates"):
+                verify_acquisition_bundle(root, expected_bundle_sha256=resealed_sha)
+
+    def test_rejects_resealed_zero_row_coverage_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root, _, bundle = self._bundle(Path(temp))
+            match_results = bundle["match_results"]
+            assert isinstance(match_results, dict)
+            coverage = match_results["coverage_preflight"]
+            assert isinstance(coverage, dict)
+            sources = coverage["sources"]
+            assert isinstance(sources, list) and isinstance(sources[0], dict)
+            sources[0]["rows"] = 0
+            sources[0]["priced_rows"] = 0
+            resealed_sha = _reseal_bundle(root, bundle)
+            with self.assertRaisesRegex(ValueError, "rows must be a positive integer"):
+                verify_acquisition_bundle(root, expected_bundle_sha256=resealed_sha)
+
+    def test_rejects_resealed_coverage_source_dates_outside_requested_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root, _, bundle = self._bundle(Path(temp))
+            match_results = bundle["match_results"]
+            assert isinstance(match_results, dict)
+            coverage = match_results["coverage_preflight"]
+            assert isinstance(coverage, dict)
+            sources = coverage["sources"]
+            assert isinstance(sources, list) and isinstance(sources[0], dict)
+            sources[0]["first_date"] = "2026-09-02"
+            sources[0]["last_date"] = "2026-09-02"
+            resealed_sha = _reseal_bundle(root, bundle)
+            with self.assertRaisesRegex(ValueError, "source dates fall outside requested window"):
+                verify_acquisition_bundle(root, expected_bundle_sha256=resealed_sha)
+
+    def test_rejects_resealed_coverage_request_before_entitlement_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root, _, bundle = self._bundle(Path(temp))
+            match_results = bundle["match_results"]
+            assert isinstance(match_results, dict)
+            coverage = match_results["coverage_preflight"]
+            assert isinstance(coverage, dict)
+            coverage["historical_window_from"] = "2026-09-02T00:00:00Z"
+            resealed_sha = _reseal_bundle(root, bundle)
+            with self.assertRaisesRegex(ValueError, "request predates entitlement window"):
+                verify_acquisition_bundle(root, expected_bundle_sha256=resealed_sha)
+
     def test_rejects_tampered_snapshot_even_when_bundle_file_hash_is_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root, bundle_sha, _ = self._bundle(Path(temp))

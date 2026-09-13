@@ -11,7 +11,12 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _write_historical_dataset(root: Path, outcomes: dict[str, object]) -> Path:
+def _write_historical_dataset(
+    root: Path,
+    outcomes: dict[str, object],
+    *,
+    result_reveal_after: str | None = "2026-01-01T10:02:00+00:00",
+) -> Path:
     event = {
         "event_id": "tt-001",
         "market_id": "winner",
@@ -28,12 +33,14 @@ def _write_historical_dataset(root: Path, outcomes: dict[str, object]) -> Path:
     market_path = root / "market.jsonl"
     results_path = root / "results.json"
     market_path.write_text(json.dumps(event, sort_keys=True) + "\n", encoding="utf-8")
+    results_payload: dict[str, object] = {
+        "schema_version": 1,
+        "quote_outcomes": outcomes,
+    }
+    if result_reveal_after is not None:
+        results_payload["outcome_reveal_after"] = result_reveal_after
     results_path.write_text(
-        json.dumps(
-            {"schema_version": 1, "quote_outcomes": outcomes},
-            sort_keys=True,
-        )
-        + "\n",
+        json.dumps(results_payload, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     manifest = {
@@ -83,6 +90,26 @@ class HistoricalDatasetOutcomeTests(unittest.TestCase):
                 dataset.load_results_after_replay(),
                 {"tt-001|winner|alice": "win"},
             )
+
+    def test_missing_result_reveal_binding_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _write_historical_dataset(
+                Path(tmp),
+                {"tt-001|winner|alice": "win"},
+                result_reveal_after=None,
+            )
+            with self.assertRaisesRegex(ValueError, "outcome_reveal_after"):
+                load_dataset(root)
+
+    def test_result_reveal_mismatch_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _write_historical_dataset(
+                Path(tmp),
+                {"tt-001|winner|alice": "win"},
+                result_reveal_after="2026-01-01T10:03:00+00:00",
+            )
+            with self.assertRaisesRegex(ValueError, "must match governance"):
+                load_dataset(root)
 
     def test_missing_quote_outcome_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

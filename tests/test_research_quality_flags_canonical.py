@@ -1,7 +1,7 @@
 import unittest
 from decimal import Decimal
 
-from autosport.research_pipeline import ResearchEvidence
+from autosport.research_pipeline import ResearchDecisionPolicy, ResearchEvidence
 from autosport.research_strategy import _evidence_from_dict
 
 
@@ -55,6 +55,22 @@ class ResearchQualityFlagCanonicalityTests(unittest.TestCase):
     def test_typed_evidence_accepts_canonical_list_and_normalizes_to_tuple(self):
         evidence = self._typed_evidence(["GAP_DETECTED"])
         self.assertEqual(evidence.quality_flags, ("GAP_DETECTED",))
+
+    def test_policy_rejects_scalar_blocked_quality_flags_before_character_split(self):
+        with self.assertRaises(ValueError):
+            ResearchDecisionPolicy(blocked_quality_flags="GAP_DETECTED")
+
+    def test_policy_rejects_non_string_blocked_quality_flag_without_coercion(self):
+        with self.assertRaises(ValueError):
+            ResearchDecisionPolicy(blocked_quality_flags=(123,))
+
+    def test_policy_rejects_padded_blocked_quality_flag(self):
+        with self.assertRaises(ValueError):
+            ResearchDecisionPolicy(blocked_quality_flags=(" GAP_DETECTED ",))
+
+    def test_policy_preserves_canonical_frozenset_contract(self):
+        policy = ResearchDecisionPolicy(blocked_quality_flags=frozenset({"GAP_DETECTED"}))
+        self.assertEqual(policy.blocked_quality_flags, frozenset({"GAP_DETECTED"}))
 
 
 if __name__ == "__main__":

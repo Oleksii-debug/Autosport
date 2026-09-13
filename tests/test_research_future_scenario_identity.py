@@ -38,6 +38,75 @@ class ResearchFutureScenarioIdentityTests(unittest.TestCase):
         ):
             plan.preflight([*events, future])
 
+    def test_future_market_identity_with_unseen_selection_fails_preflight(self) -> None:
+        dataset = load_dataset(Path("examples/tt_demo"))
+        events = dataset.load_market_events()
+        future = replace(
+            events[-1],
+            event_id=events[0].event_id,
+            market_id="future-market-1",
+            selection_id="future-player",
+            observed_ts="2026-09-12T10:00:02+00:00",
+            sequence=999,
+        )
+        plan = self._plan_with_extra_outcome(
+            f"{future.event_id}|{future.market_id}|synthetic-selection"
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "research scenario market identity first appears after decision",
+        ):
+            plan.preflight([*events, future])
+
+    def test_future_market_identity_with_delimiter_in_event_id_fails_preflight(self) -> None:
+        dataset = load_dataset(Path("examples/tt_demo"))
+        events = dataset.load_market_events()
+        known_event = replace(
+            events[0],
+            event_id="tt|future-market-2",
+            market_id="known-market",
+            selection_id="known-player",
+        )
+        future = replace(
+            events[-1],
+            event_id=known_event.event_id,
+            market_id="future-market",
+            selection_id="future-player",
+            observed_ts="2026-09-12T10:00:02+00:00",
+            sequence=1000,
+        )
+        plan = self._plan_with_extra_outcome(
+            f"{future.event_id}|{future.market_id}|synthetic-selection"
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "research scenario market identity first appears after decision",
+        ):
+            plan.preflight([*events, known_event, future])
+
+    def test_future_event_identity_with_unseen_market_fails_preflight(self) -> None:
+        dataset = load_dataset(Path("examples/tt_demo"))
+        events = dataset.load_market_events()
+        future = replace(
+            events[-1],
+            event_id="tt-future-event-prefix",
+            market_id="future-observed-market",
+            selection_id="future-player",
+            observed_ts="2026-09-12T10:00:02+00:00",
+            sequence=1001,
+        )
+        plan = self._plan_with_extra_outcome(
+            f"{future.event_id}|synthetic-market|synthetic-selection"
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "research scenario event identity first appears after decision",
+        ):
+            plan.preflight([*events, future])
+
     def test_never_observed_synthetic_placeholder_remains_allowed(self) -> None:
         dataset = load_dataset(Path("examples/tt_demo"))
         events = dataset.load_market_events()

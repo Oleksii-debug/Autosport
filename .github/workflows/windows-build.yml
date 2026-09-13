@@ -31,6 +31,9 @@ jobs:
           python-version: '3.12'
       - shell: pwsh
         run: ./scripts/build_windows.ps1
+      - name: Execute packaged NVDA evidence contract
+        shell: pwsh
+        run: ./scripts/nvda_evidence_package_smoke.ps1
       - name: Prove packaged workspace recovery reachability
         shell: pwsh
         run: |
@@ -184,4 +187,7 @@ jobs:
             dist/fresh-extraction-walk-forward-origin-package-smoke-report.json
             dist/fresh-extraction-external-uia-audit.json
             dist/fresh-extraction-verification.json
+            dist/nvda-evidence-package-smoke.json
+            dist/nvda-evidence-packaged-template.json
+            dist/nvda-evidence-fresh-extracted-template.json
           if-no-files-found: error

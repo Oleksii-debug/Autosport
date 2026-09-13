@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .gui import AUTOMATION_IDS, AutosportApp
+from .gui import AUTOMATION_IDS
+from .windows_gui import WindowsAutosportApp
 
 
 _ACTION_BINDINGS = {
@@ -68,7 +69,7 @@ def summarize_keyboard_contract(
         },
         "failures": failures,
         "evidence_scope": (
-            "in-process packaged Tk keyboard contract: action shortcuts are bound, "
+            "in-process packaged Windows GUI keyboard contract: action shortcuts are bound, "
             "F6/F7/F8 focus shortcuts are executed, and critical controls are reachable "
             "through Tk tab traversal; not physical keyboard or NVDA speech proof"
         ),
@@ -78,7 +79,7 @@ def summarize_keyboard_contract(
     }
 
 
-def _critical_widgets(app: AutosportApp) -> dict[str, Any]:
+def _critical_widgets(app: WindowsAutosportApp) -> dict[str, Any]:
     return {
         "strategy": app.strategy,
         "research_plan": app.research_plan_button,
@@ -95,7 +96,7 @@ def _critical_widgets(app: AutosportApp) -> dict[str, Any]:
     }
 
 
-def _tab_reachable_controls(app: AutosportApp) -> list[str]:
+def _tab_reachable_controls(app: WindowsAutosportApp) -> list[str]:
     controls = _critical_widgets(app)
     names_by_widget = {widget: name for name, widget in controls.items()}
     start = app.strategy
@@ -116,14 +117,14 @@ def _tab_reachable_controls(app: AutosportApp) -> list[str]:
     return reachable
 
 
-def _binding_presence(app: AutosportApp) -> dict[str, bool]:
+def _binding_presence(app: WindowsAutosportApp) -> dict[str, bool]:
     return {
         sequence: bool(str(app.bind(sequence) or "").strip())
         for sequence in (*_ACTION_BINDINGS, *_FOCUS_BINDINGS)
     }
 
 
-def _execute_focus_shortcuts(app: AutosportApp) -> dict[str, bool]:
+def _execute_focus_shortcuts(app: WindowsAutosportApp) -> dict[str, bool]:
     controls = _critical_widgets(app)
     results: dict[str, bool] = {}
     app.strategy.focus_set()
@@ -140,9 +141,9 @@ def _execute_focus_shortcuts(app: AutosportApp) -> dict[str, bool]:
 def run_keyboard_audit(output_path: str | Path) -> int:
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    app: AutosportApp | None = None
+    app: WindowsAutosportApp | None = None
     try:
-        app = AutosportApp()
+        app = WindowsAutosportApp()
         app.update_idletasks()
         app.update()
         report = summarize_keyboard_contract(

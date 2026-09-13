@@ -20,8 +20,13 @@ class ResearchScenarioReplayBindingTests(unittest.TestCase):
 
     def test_fabricated_scenario_outcome_fails_before_economic_mutation(self) -> None:
         raw = self._plan_dict()
-        raw["decisions"][0]["scenario_groups"][0]["outcomes"][0]["quote_key"] = (
-            "tt-demo-1|winner|fabricated"
+        outcomes = raw["decisions"][0]["scenario_groups"][0]["outcomes"]
+        outcomes[0]["probability"] = "0.20"
+        outcomes.append(
+            {
+                "quote_key": "tt-demo-1|winner|fabricated",
+                "probability": "0.20",
+            }
         )
         plan = ResearchStrategyPlan.from_dict(raw)
         dataset = load_dataset(Path("examples/tt_demo"))

@@ -9,6 +9,15 @@ from typing import Any
 
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PACKAGE_PREFIX = "Autosport-V1/"
+_WINDOWS_RESERVED_NAMES = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+}
+_WINDOWS_INVALID_CHARS = frozenset('<>:"\\|?*')
 
 
 def sha256_file(path: str | Path) -> str:
@@ -105,13 +114,16 @@ def verify_windows_package(
         if len(names) != len(set(names)):
             raise ValueError("release package contains duplicate member names")
         members: dict[str, bytes] = {}
+        windows_keys: dict[str, str] = {}
         for name in names:
-            pure = PurePosixPath(name)
-            if pure.is_absolute() or ".." in pure.parts or not name.startswith(_PACKAGE_PREFIX):
-                raise ValueError(f"release package contains unsafe member: {name}")
-            relative = name[len(_PACKAGE_PREFIX):]
-            if not relative:
-                raise ValueError("release package contains an empty member name")
+            relative, windows_key = _validate_windows_member(name)
+            previous = windows_keys.get(windows_key)
+            if previous is not None:
+                raise ValueError(
+                    "release package contains Windows path collision: "
+                    f"{previous} vs {name}"
+                )
+            windows_keys[windows_key] = name
             members[relative] = archive.read(name)
 
     required = {
@@ -201,6 +213,37 @@ def verify_windows_package(
         "human_tested": False,
         "nvda_verified": False,
     }
+
+
+def _validate_windows_member(name: str) -> tuple[str, str]:
+    """Return canonical relative/member key or reject a path unsafe for Windows extraction."""
+
+    if "\\" in name:
+        raise ValueError(f"release package contains Windows backslash member: {name}")
+    pure = PurePosixPath(name)
+    if pure.is_absolute() or ".." in pure.parts or not name.startswith(_PACKAGE_PREFIX):
+        raise ValueError(f"release package contains unsafe member: {name}")
+    relative = name[len(_PACKAGE_PREFIX):]
+    if not relative:
+        raise ValueError("release package contains an empty member name")
+    relative_path = PurePosixPath(relative)
+    canonical = "/".join(relative_path.parts)
+    if relative != canonical or not relative_path.parts:
+        raise ValueError(f"release package contains non-canonical member path: {name}")
+
+    normalized_parts: list[str] = []
+    for component in relative_path.parts:
+        if component in {"", ".", ".."}:
+            raise ValueError(f"release package contains unsafe Windows path component: {name}")
+        if component[-1] in {" ", "."}:
+            raise ValueError(f"release package contains Windows trailing space or dot: {name}")
+        if any(ord(character) < 32 or character in _WINDOWS_INVALID_CHARS for character in component):
+            raise ValueError(f"release package contains Windows-invalid path character: {name}")
+        device_stem = component.split(".", 1)[0].casefold()
+        if device_stem in _WINDOWS_RESERVED_NAMES:
+            raise ValueError(f"release package contains reserved Windows device name: {name}")
+        normalized_parts.append(component.casefold())
+    return relative, "/".join(normalized_parts)
 
 
 def _decode_json_object(payload: bytes, label: str) -> dict[str, Any]:

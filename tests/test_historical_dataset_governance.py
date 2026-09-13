@@ -142,6 +142,40 @@ class HistoricalDatasetGovernanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "future/outcome metadata"):
                 load_dataset(root)
 
+    def test_nested_future_outcome_metadata_in_market_stream_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = _base_event()
+            event["metadata"] = {
+                "research_signal": {
+                    "model": "candidate-v1",
+                    "sealed_context": {"final_result": "alice"},
+                }
+            }
+            root = _write_dataset(Path(tmp), event=event)
+            with self.assertRaisesRegex(ValueError, "future/outcome metadata"):
+                load_dataset(root)
+
+    def test_future_outcome_metadata_nested_in_list_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = _base_event()
+            event["metadata"] = {
+                "research_signal": [
+                    {"feature": "recent-form"},
+                    {"settlement_result": "win"},
+                ]
+            }
+            root = _write_dataset(Path(tmp), event=event)
+            with self.assertRaisesRegex(ValueError, "future/outcome metadata"):
+                load_dataset(root)
+
+    def test_winner_alias_nested_in_metadata_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = _base_event()
+            event["metadata"] = {"research_signal": {"features": {"winner": "alice"}}}
+            root = _write_dataset(Path(tmp), event=event)
+            with self.assertRaisesRegex(ValueError, "future/outcome metadata"):
+                load_dataset(root)
+
     def test_manifest_path_escape_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _write_dataset(Path(tmp))

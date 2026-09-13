@@ -13,6 +13,7 @@ from .dataset import load_dataset
 from .domain import MarketEvent
 from .endurance import EnduranceConfig, run_endurance
 from .evaluation_bundle import WalkForwardBundle, evaluate_walk_forward_bundle
+from .historical_snapshot import capture_historical_snapshot
 from .integrity import atomic_write_json
 from .paper import PaperBook
 from .parlayapi_provider import (
@@ -77,6 +78,20 @@ def build_parser() -> argparse.ArgumentParser:
     coverage.add_argument("--to", dest="date_to", required=True, help="requested end date YYYY-MM-DD")
     coverage.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
     coverage.add_argument("--output", type=Path, default=None, help="optional JSON evidence path")
+    snapshot = sub.add_parser(
+        "historical-snapshot",
+        help="capture one authenticated point-in-time table-tennis historical odds snapshot",
+    )
+    snapshot.add_argument("--at", required=True, help="requested historical snapshot timestamp (ISO-8601 with timezone)")
+    snapshot.add_argument(
+        "--output",
+        type=Path,
+        default=Path(".autosport-workspace/historical-snapshot.jsonl"),
+        help="canonical market-event JSONL output",
+    )
+    snapshot.add_argument("--evidence", type=Path, default=None, help="optional machine evidence JSON path")
+    snapshot.add_argument("--regions", default="us", help="comma-separated provider regions")
+    snapshot.add_argument("--markets", default="h2h,spreads,totals", help="comma-separated historical game-line markets")
     repair = sub.add_parser("repair-workspace", help="reconcile only late-crashed runs with durable hash-matched completion evidence")
     repair.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
     endurance = sub.add_parser("endurance", help="run deterministic bounded ingestion/replay/restart/settlement stress checks")
@@ -287,6 +302,48 @@ def run_historical_coverage(
     return 0 if report.has_data else 6
 
 
+def run_historical_snapshot(
+    *,
+    requested_at: str,
+    output: Path,
+    evidence: Path | None,
+    regions: str,
+    markets: str,
+    provider_factory: ProviderFactory = ParlayApiTableTennisProvider,
+) -> int:
+    api_key = os.environ.get("AUTOSPORT_PARLAYAPI_KEY")
+    if not api_key:
+        print("historical_snapshot=BLOCKED reason=AUTOSPORT_PARLAYAPI_KEY_not_set")
+        return 2
+    region_values = tuple(value.strip() for value in regions.split(",") if value.strip())
+    market_values = tuple(value.strip() for value in markets.split(",") if value.strip())
+    try:
+        provider = provider_factory(api_key, regions=region_values, markets=market_values)
+        report = capture_historical_snapshot(
+            provider,
+            requested_at=requested_at,
+            output_path=output,
+            evidence_path=evidence,
+        )
+    except (ProviderTransportError, ProviderPayloadError, ValueError, OSError) as exc:
+        print(f"historical_snapshot=FAIL_CLOSED error={exc}")
+        return 3
+
+    status = "DATA_AVAILABLE" if report.has_data else "NO_DATA"
+    print(
+        f"historical_snapshot={status} quotes={report.quote_count} "
+        f"snapshot_at={report.snapshot_at} fallback_source_times={report.snapshot_timestamp_fallback_count}"
+    )
+    print(
+        "point_in_time_odds_market_coverage_verified=" + str(report.has_data).lower()
+        + " sealed_outcomes_present=false replay_corpus_ready=false"
+    )
+    print("licensing_or_retention_verified=false real_money_execution=false")
+    print(f"market={report.output_path}")
+    print(f"evidence={report.evidence_path}")
+    return 0 if report.has_data else 6
+
+
 def run_repair_workspace(workspace: Path) -> int:
     try:
         report = reconcile_late_crashes(workspace)
@@ -407,6 +464,14 @@ def main(argv: list[str] | None = None) -> int:
             date_from=args.date_from,
             date_to=args.date_to,
             output=args.output,
+        )
+    if args.command == "historical-snapshot":
+        return run_historical_snapshot(
+            requested_at=args.at,
+            output=args.output,
+            evidence=args.evidence,
+            regions=args.regions,
+            markets=args.markets,
         )
     if args.command == "repair-workspace":
         return run_repair_workspace(args.workspace)

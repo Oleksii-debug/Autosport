@@ -20,7 +20,13 @@ from .ui_model import (
 )
 
 
-_SPEEDS = {"Подієвий — максимально швидко": 0.0, "1× реальний час": 1.0, "10×": 10.0, "100×": 100.0}
+_SPEEDS = {
+    "Подієвий — максимально швидко": 0.0,
+    "1× реальний час": 1.0,
+    "10×": 10.0,
+    "100×": 100.0,
+    "1000×": 1000.0,
+}
 _LIVE_MODES = {
     "Public preview — без ключа": True,
     "API key з environment": False,
@@ -132,7 +138,7 @@ class AutosportApp(tk.Tk):
         controls = (
             (self.choose_button, "Вибрати replay dataset", "Відкриває вибір папки replay dataset. Гаряча клавіша Control+O.", AUTOMATION_IDS["choose_dataset"]),
             (self.run_button, "Запустити paper replay", "Запускає causal paper replay для вибраного dataset. Гаряча клавіша Control+R.", AUTOMATION_IDS["run_replay"]),
-            (self.speed, "Швидкість replay", "Вибір подієвого, 1×, 10× або 100× режиму replay.", AUTOMATION_IDS["replay_speed"]),
+            (self.speed, "Швидкість replay", "Вибір подієвого, 1×, 10×, 100× або 1000× режиму replay.", AUTOMATION_IDS["replay_speed"]),
             (self.live_mode, "Режим live observation", "Public preview без ключа або authenticated API key з environment.", AUTOMATION_IDS["live_mode"]),
             (self.live_refresh_button, "Оновити live snapshot", "Запускає один read-only table-tennis snapshot у worker thread. Гаряча клавіша Control+L.", AUTOMATION_IDS["live_refresh"]),
             (self.live_quotes, "Live quotes", "Поточні read-only quotes останнього snapshot. F7 переводить сюди фокус.", AUTOMATION_IDS["live_quotes"]),

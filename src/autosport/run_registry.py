@@ -8,6 +8,17 @@ from pathlib import Path
 from .integrity import sha256_file
 
 
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def _is_canonical_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in _HEX_DIGITS for character in value)
+    )
+
+
 class RepeatedExperimentError(RuntimeError):
     pass
 
@@ -60,6 +71,8 @@ class RunRegistry:
         base_paper_book_sha256: str | None = None,
         base_decision_ledger_sha256: str | None = None,
     ) -> str:
+        if not _is_canonical_sha256(market_sha256) or not _is_canonical_sha256(results_sha256):
+            raise ValueError("dataset hashes must be canonical SHA-256 hex strings")
         if (base_paper_book_sha256 is None) != (base_decision_ledger_sha256 is None):
             raise ValueError("base transaction hashes must be supplied together")
         for value in (base_paper_book_sha256, base_decision_ledger_sha256):
@@ -262,11 +275,38 @@ class RunRegistry:
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         if raw.get("schema_version") != 1 or not isinstance(raw.get("runs"), dict):
             raise ValueError("invalid run registry")
-        for item in raw["runs"].values():
+        for key, item in raw["runs"].items():
             if not isinstance(item, dict):
                 raise ValueError("run registry contains an invalid run entry")
             if item.get("status") not in {"in_progress", "completed", "aborted"}:
                 raise ValueError("run registry contains an invalid status")
+            market_sha256 = item.get("market_sha256")
+            results_sha256 = item.get("results_sha256")
+            strategy_id = item.get("strategy_id")
+            run_id = item.get("run_id")
+            if not _is_canonical_sha256(market_sha256) or not _is_canonical_sha256(results_sha256):
+                raise ValueError("run registry contains invalid canonical SHA-256 identity fields")
+            if (
+                not isinstance(strategy_id, str)
+                or not strategy_id
+                or not isinstance(run_id, str)
+                or not run_id
+            ):
+                raise ValueError("run registry contains invalid experiment identity fields")
+            expected_base_identity = self.experiment_identity(
+                market_sha256,
+                results_sha256,
+                strategy_id,
+            )
+            if item.get("base_identity") != expected_base_identity:
+                raise ValueError("run registry contains an inconsistent base identity")
+            expected_keys = {
+                expected_base_identity,
+                f"{expected_base_identity}:repeat:{run_id}",
+                f"{expected_base_identity}:retry:{run_id}",
+            }
+            if key not in expected_keys:
+                raise ValueError("run registry contains an inconsistent experiment key")
         return raw
 
     def _write(self, raw: dict) -> None:

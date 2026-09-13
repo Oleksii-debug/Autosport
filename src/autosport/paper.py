@@ -13,7 +13,11 @@ class PaperBook:
     """Virtual bankroll and auditable paper tickets. No real-money execution path exists."""
 
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
-        self.initial_bankroll = Decimal(str(initial_bankroll))
+        initial = Decimal(str(initial_bankroll))
+        self._require_finite(initial, "initial_bankroll")
+        if initial <= 0:
+            raise ValueError("initial virtual bankroll must be positive")
+        self.initial_bankroll = initial
         self.balance = self.initial_bankroll
         self.tickets: dict[str, PaperTicket] = {}
 
@@ -23,6 +27,7 @@ class PaperBook:
 
     def open_ticket(self, legs, stake, reason: str = "", placed_at: str | None = None) -> PaperTicket:
         amount = Decimal(str(stake))
+        self._require_finite(amount, "stake")
         if amount <= 0:
             raise ValueError("stake must be positive")
         if amount > self.balance:
@@ -33,8 +38,10 @@ class PaperBook:
         quote_keys = [leg.quote_key for leg in ticket_legs]
         if len(quote_keys) != len(set(quote_keys)):
             raise ValueError("ticket contains duplicate quote_key leg")
-        if any(leg.locked_odds <= 1 for leg in ticket_legs):
-            raise ValueError("decimal odds must be greater than 1")
+        for leg in ticket_legs:
+            self._require_finite(leg.locked_odds, "locked_odds")
+            if leg.locked_odds <= 1:
+                raise ValueError("decimal odds must be greater than 1")
         ticket = PaperTicket(
             ticket_id=str(uuid.uuid4()), stake=amount, legs=ticket_legs, placed_at=placed_at or utc_now_iso(), strategy_reason=reason
         )

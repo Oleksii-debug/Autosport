@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ _FORBIDDEN_HISTORICAL_METADATA_KEYS = frozenset(
 )
 _ALLOWED_HISTORICAL_OUTCOMES = frozenset({"win", "loss", "void"})
 _PARLAY_TERMS_REFERENCE = "https://parlay-api.com/terms"
+_PARLAY_STANDARD_RETENTION_CEILING = timedelta(days=90)
 
 
 def _sha256(path: Path) -> str:
@@ -99,6 +100,7 @@ class DatasetGovernance:
     market_types: tuple[str, ...]
     outcome_reveal_after: str
     retention_expires_at: str | None = None
+    retention_extension_authority_reference: str | None = None
 
 
 def _assert_governance_retention_current(
@@ -159,6 +161,59 @@ class ReplayDataset:
         return {str(key): str(value) for key, value in outcomes.items()}
 
 
+def _parlay_retention_capture_start(
+    governance: dict[str, Any],
+    *,
+    acquired_dt: datetime,
+    retention_expires_at: str,
+    retention_extension_authority_reference: str | None,
+) -> datetime:
+    acquisition_evidence = governance.get("acquisition_evidence")
+    if not isinstance(acquisition_evidence, dict):
+        raise ValueError(
+            "ParlayAPI historical governance requires acquisition_evidence with snapshot captured_at provenance"
+        )
+
+    evidence_expiry = acquisition_evidence.get("retention_expires_at")
+    if evidence_expiry != retention_expires_at:
+        raise ValueError(
+            "governance.acquisition_evidence.retention_expires_at must match governance.retention_expires_at"
+        )
+    evidence_extension = acquisition_evidence.get("retention_extension_authority_reference")
+    if evidence_extension != retention_extension_authority_reference:
+        raise ValueError(
+            "governance.acquisition_evidence.retention_extension_authority_reference must match "
+            "governance.retention_extension_authority_reference"
+        )
+
+    snapshots = acquisition_evidence.get("snapshots")
+    if not isinstance(snapshots, list) or not snapshots:
+        raise ValueError(
+            "ParlayAPI historical governance requires non-empty acquisition_evidence.snapshots"
+        )
+    captured: list[datetime] = []
+    for index, snapshot in enumerate(snapshots):
+        if not isinstance(snapshot, dict):
+            raise ValueError(
+                f"governance.acquisition_evidence.snapshots[{index}] must be an object"
+            )
+        captured_at = _require_string(
+            snapshot,
+            "captured_at",
+            context=f"governance.acquisition_evidence.snapshots[{index}]",
+        )
+        captured_dt = _parse_timestamp(
+            captured_at,
+            field=f"governance.acquisition_evidence.snapshots[{index}].captured_at",
+        )
+        if captured_dt > acquired_dt:
+            raise ValueError(
+                "governance.acquisition_evidence snapshot captured_at must not be after acquired_at"
+            )
+        captured.append(captured_dt)
+    return min(captured)
+
+
 def _load_governance(raw: dict[str, Any]) -> DatasetGovernance:
     governance = raw.get("governance")
     if not isinstance(governance, dict):
@@ -178,8 +233,18 @@ def _load_governance(raw: dict[str, Any]) -> DatasetGovernance:
     if imported_dt < acquired_dt:
         raise ValueError("governance.imported_at must not precede acquired_at")
 
+    extension_raw = governance.get("retention_extension_authority_reference")
+    retention_extension_authority_reference: str | None = None
+    if extension_raw is not None:
+        if not isinstance(extension_raw, str) or not extension_raw.strip():
+            raise ValueError(
+                "governance.retention_extension_authority_reference must be a non-empty string when present"
+            )
+        retention_extension_authority_reference = extension_raw.strip()
+
     retention_expires_raw = governance.get("retention_expires_at")
     retention_expires_at: str | None = None
+    retention_expires_dt: datetime | None = None
     if retention_expires_raw is not None:
         if not isinstance(retention_expires_raw, str) or not retention_expires_raw.strip():
             raise ValueError("governance.retention_expires_at must be a non-empty ISO-8601 timestamp")
@@ -192,8 +257,27 @@ def _load_governance(raw: dict[str, Any]) -> DatasetGovernance:
             raise ValueError("governance.retention_expires_at must not precede acquired_at")
         if imported_dt > retention_expires_dt:
             raise ValueError("governance.imported_at exceeds retention_expires_at")
-    if terms_reference.rstrip("/") == _PARLAY_TERMS_REFERENCE and retention_expires_at is None:
+
+    is_parlay = terms_reference.rstrip("/") == _PARLAY_TERMS_REFERENCE
+    if is_parlay and retention_expires_at is None:
         raise ValueError("ParlayAPI historical governance requires structured retention_expires_at")
+    if is_parlay:
+        assert retention_expires_at is not None
+        assert retention_expires_dt is not None
+        earliest_capture_dt = _parlay_retention_capture_start(
+            governance,
+            acquired_dt=acquired_dt,
+            retention_expires_at=retention_expires_at,
+            retention_extension_authority_reference=retention_extension_authority_reference,
+        )
+        if (
+            retention_expires_dt > earliest_capture_dt + _PARLAY_STANDARD_RETENTION_CEILING
+            and retention_extension_authority_reference is None
+        ):
+            raise ValueError(
+                "ParlayAPI retention beyond 90 days from earliest governed capture requires "
+                "retention_extension_authority_reference"
+            )
 
     coverage = governance.get("coverage")
     if not isinstance(coverage, dict):
@@ -251,6 +335,7 @@ def _load_governance(raw: dict[str, Any]) -> DatasetGovernance:
         market_types=market_types,
         outcome_reveal_after=outcome_reveal_after,
         retention_expires_at=retention_expires_at,
+        retention_extension_authority_reference=retention_extension_authority_reference,
     )
 
 

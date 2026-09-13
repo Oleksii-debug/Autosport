@@ -19,7 +19,7 @@ from .portfolio import PortfolioEngine, PortfolioReport
 from .providers import MarketProvider
 from .replay import ReplayEngine, ReplayRun
 from .research_strategy import ResearchStrategyPlan
-from .run_registry import RunRegistry, UnresolvedExperimentError
+from .run_registry import MixedStrategyWorkspaceError, RunRegistry, UnresolvedExperimentError
 from .run_transaction import RunTransaction
 from .settlement import SettlementEngine
 from .storage import SQLiteMarketStore
@@ -205,6 +205,16 @@ class AutosportSession:
         if self.registry.in_progress():
             raise UnresolvedExperimentError(
                 "Workspace has an unresolved economic run; repair it before starting another paper experiment."
+            )
+        prior_strategy_ids = self.registry.strategy_ids()
+        foreign_strategy_ids = tuple(
+            value for value in prior_strategy_ids if value != self.strategy_id
+        )
+        if foreign_strategy_ids:
+            raise MixedStrategyWorkspaceError(
+                "Workspace already contains economic runs for another strategy identity "
+                f"({', '.join(foreign_strategy_ids)}). Use a separate workspace per strategy/plan "
+                "so PaperBook, decision-ledger, portfolio and evaluation evidence cannot be mixed."
             )
         self.book.save(self.book_path)
         ensure_durable_file(self.ledger.path)

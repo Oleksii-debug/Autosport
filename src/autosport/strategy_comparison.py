@@ -30,6 +30,7 @@ class StrategyRunEvidence:
     research_plan_sha256: str | None
     initial_bankroll: Decimal
     final_balance: Decimal
+    committed_stake: Decimal
     settled_stake: Decimal
     net_profit: Decimal
     roi: Decimal
@@ -101,12 +102,18 @@ def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
 
     initial_bankroll = _required_decimal(evaluation, "initial_bankroll", source)
     final_balance = _required_decimal(evaluation, "final_balance", source)
+    committed_stake = _required_decimal(evaluation, "committed_stake", source, minimum=Decimal("0"))
     settled_stake = _required_decimal(evaluation, "settled_stake", source, minimum=Decimal("0"))
     net_profit = _required_decimal(evaluation, "net_profit", source)
     roi = _required_decimal(evaluation, "roi", source)
     canonical_balance = _required_decimal(payload, "balance", source)
     if canonical_balance != final_balance:
         raise ValueError(f"{source}: evaluation.final_balance does not match canonical run balance")
+    expected_profit = final_balance + committed_stake - initial_bankroll
+    if net_profit != expected_profit:
+        raise ValueError(
+            f"{source}: evaluation.net_profit does not match final_balance + committed_stake - initial_bankroll"
+        )
     expected_roi = (net_profit / settled_stake) if settled_stake else Decimal("0")
     if roi != expected_roi:
         raise ValueError(f"{source}: evaluation.roi does not match net_profit / settled_stake")
@@ -128,6 +135,7 @@ def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
         research_plan_sha256=research_plan_sha256,
         initial_bankroll=initial_bankroll,
         final_balance=final_balance,
+        committed_stake=committed_stake,
         settled_stake=settled_stake,
         net_profit=net_profit,
         roi=roi,
@@ -185,6 +193,7 @@ def compare_strategy_runs(
                 "evaluation": {
                     "initial_bankroll": str(item.initial_bankroll),
                     "final_balance": str(item.final_balance),
+                    "committed_stake": str(item.committed_stake),
                     "settled_stake": str(item.settled_stake),
                     "net_profit": str(item.net_profit),
                     "roi": str(item.roi),

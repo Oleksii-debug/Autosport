@@ -71,6 +71,16 @@ class ReplayWorkerTests(unittest.TestCase):
             self.assertTrue(Path(temp, "paper_book.json").is_file())
             self.assertTrue(Path(message.result.result_path).is_file())
 
+    def test_research_strategy_fails_closed_without_typed_plan(self):
+        dataset = Path(__file__).resolve().parents[1] / "examples" / "tt_demo"
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, "requires --research-plan"):
+                run_workspace_dataset_once(
+                    temp,
+                    dataset,
+                    strategy_id="research-replay-v1",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

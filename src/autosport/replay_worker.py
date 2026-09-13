@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from .dataset import load_dataset
+from .research_strategy import ResearchStrategyPlan
 from .session import AutosportSession, SessionResult
 
 
@@ -78,11 +79,17 @@ def run_workspace_dataset_once(
     initial_bankroll: str = "10000",
     speed: float = 0.0,
     strategy_id: str = "baseline-v1",
+    research_plan: ResearchStrategyPlan | None = None,
 ) -> SessionResult:
     """Own all replay-session resources on the calling worker thread."""
 
     dataset = load_dataset(dataset_path)
-    session = AutosportSession(workspace, initial_bankroll, strategy_id=strategy_id)
+    session = AutosportSession(
+        workspace,
+        initial_bankroll,
+        strategy_id=strategy_id,
+        research_plan=research_plan,
+    )
     try:
         return session.run_dataset(dataset, speed=speed)
     finally:

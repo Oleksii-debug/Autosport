@@ -15,6 +15,8 @@ _REQUIRED_PATTERNS = {
     AUTOMATION_IDS["replay_speed"]: {"VALUE"},
     AUTOMATION_IDS["live_mode"]: {"VALUE"},
     AUTOMATION_IDS["live_refresh"]: {"INVOKE"},
+    AUTOMATION_IDS["strategy"]: {"VALUE"},
+    AUTOMATION_IDS["research_plan"]: {"INVOKE"},
     AUTOMATION_IDS["tickets"]: set(),
     AUTOMATION_IDS["log"]: {"VALUE"},
     AUTOMATION_IDS["live_quotes"]: set(),

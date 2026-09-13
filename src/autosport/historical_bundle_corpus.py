@@ -192,7 +192,11 @@ def verify_acquisition_bundle(
         "historical_window_from",
         context="acquisition bundle.match_results.coverage_preflight",
     )
-    _text(coverage_evidence, "api_version", context="acquisition bundle.match_results.coverage_preflight")
+    api_version = coverage_evidence.get("api_version")
+    if api_version is not None and (not isinstance(api_version, str) or not api_version.strip()):
+        raise ValueError(
+            "acquisition bundle.match_results.coverage_preflight.api_version must be null or a non-empty string"
+        )
     _digest(
         coverage_evidence,
         "response_sha256",

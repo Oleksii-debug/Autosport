@@ -90,11 +90,9 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
             report = capture_historical_acquisition_bundle(
                 self._provider(transport),
                 requested_at=("2026-09-12T10:03:00Z", "2026-09-12T10:08:00Z"),
-                results_date_from="2026-09-10",
-                results_date_to="2026-09-12",
+                results_date="2026-09-10",
                 output_dir=root,
-                result_sources=("source-b", "source-a", "source-a"),
-                result_limit=500,
+                results_priced_only=True,
             )
             bundle_path = root / "bundle.json"
             bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
@@ -108,8 +106,12 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                 report.bundle_sha256,
                 hashlib.sha256(bundle_path.read_bytes()).hexdigest(),
             )
-            self.assertEqual(bundle["request_scope"]["match_results"]["sources"], ["source-a", "source-b"])
-            self.assertEqual(bundle["request_scope"]["match_results"]["limit"], 500)
+            self.assertEqual(
+                bundle["request_scope"]["match_results"],
+                {"date": "2026-09-10", "priced_only": True},
+            )
+            self.assertEqual(bundle["match_results"]["requested_date"], "2026-09-10")
+            self.assertTrue(bundle["match_results"]["priced_only"])
             self.assertFalse(bundle["provider_result_schema_parsed"])
             self.assertFalse(bundle["sealed_quote_outcomes_derived"])
             self.assertFalse(bundle["point_in_time_odds_market_coverage_verified"])
@@ -137,8 +139,10 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
         self.assertTrue(all(headers["X-API-Key"] == "unit-test-key" for headers in transport.headers))
         match_url = next(url for url in transport.urls if urlparse(url).path.endswith("/matches"))
         match_query = parse_qs(urlparse(match_url).query)
-        self.assertEqual(match_query["sources"], ["source-a,source-b"])
-        self.assertEqual(match_query["limit"], ["500"])
+        self.assertEqual(set(match_query), {"date", "pricedOnly"})
+        self.assertEqual(match_query["date"], ["2026-09-10"])
+        self.assertEqual(match_query["pricedOnly"], ["true"])
+        self.assertNotIn("unit-test-key", match_url)
 
     def test_equivalent_duplicate_snapshot_instants_fail_before_network(self) -> None:
         transport = _Transport()
@@ -147,8 +151,7 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                 capture_historical_acquisition_bundle(
                     self._provider(transport),
                     requested_at=("2026-09-12T10:03:00Z", "2026-09-12T12:03:00+02:00"),
-                    results_date_from="2026-09-10",
-                    results_date_to="2026-09-12",
+                    results_date="2026-09-10",
                     output_dir=Path(tmp) / "acquisition",
                 )
         self.assertEqual(transport.urls, [])
@@ -161,8 +164,7 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                 capture_historical_acquisition_bundle(
                     self._provider(transport),
                     requested_at=("2026-09-12T10:03:00Z",),
-                    results_date_from="2026-09-10",
-                    results_date_to="2026-09-12",
+                    results_date="2026-09-10",
                     output_dir=root,
                 )
             self.assertFalse(root.exists())
@@ -179,8 +181,7 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                 capture_historical_acquisition_bundle(
                     self._provider(transport),
                     requested_at=("2026-09-12T10:03:00Z",),
-                    results_date_from="2026-09-10",
-                    results_date_to="2026-09-12",
+                    results_date="2026-09-10",
                     output_dir=root,
                 )
             self.assertEqual(marker.read_text(encoding="utf-8"), "keep")

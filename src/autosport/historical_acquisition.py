@@ -56,32 +56,31 @@ def capture_historical_acquisition_bundle(
     provider: ParlayApiTableTennisProvider,
     *,
     requested_at: Sequence[str],
-    results_date_from: str,
-    results_date_to: str,
+    results_date: str,
     output_dir: str | Path,
-    result_sources: tuple[str, ...] = (),
-    result_limit: int = 1000,
+    results_priced_only: bool = False,
 ) -> HistoricalAcquisitionBundle:
-    """Capture selected historical odds snapshots and match/result evidence atomically.
+    """Atomically capture selected historical odds snapshots and match/result evidence.
 
     The bundle binds exactly what was requested and exactly what the provider returned.
-    It is acquisition evidence only. It deliberately does not promote selected
-    snapshots to complete point-in-time/window market coverage, does not interpret
-    the provider's untyped result rows into settlement outcomes, and does not assert
-    licensing/retention authority or replay-corpus readiness.
+    It is acquisition evidence only. Selected snapshots are not promoted to complete
+    point-in-time/window coverage, opaque provider result rows are not interpreted as
+    sealed settlement outcomes, and no licensing/retention or replay-readiness claim
+    is made.
     """
 
     if provider.public_preview or not provider.api_key:
         raise ValueError("historical acquisition bundle requires an authenticated API key")
     if not requested_at:
         raise ValueError("at least one requested historical snapshot timestamp is required")
+    if not isinstance(results_priced_only, bool):
+        raise ValueError("results_priced_only must be boolean")
 
     canonical_requests = tuple(
         sorted(_canonical_timestamp(value, field="requested_at") for value in requested_at)
     )
     if len(set(canonical_requests)) != len(canonical_requests):
         raise ValueError("requested historical snapshot timestamps must be unique instants")
-    normalized_sources = tuple(sorted({value.strip() for value in result_sources if value.strip()}))
 
     output = Path(output_dir)
     if output.exists():
@@ -95,12 +94,8 @@ def capture_historical_acquisition_bundle(
         "markets": list(provider.markets),
         "requested_snapshot_timestamps": list(canonical_requests),
         "match_results": {
-            "date_from": results_date_from,
-            "date_to": results_date_to,
-            "sources": list(normalized_sources),
-            "priced_only": False,
-            "include_raw": False,
-            "limit": result_limit,
+            "date": results_date,
+            "priced_only": results_priced_only,
         },
     }
     request_identity = _canonical_hash(request_scope)
@@ -146,16 +141,14 @@ def capture_historical_acquisition_bundle(
         result_evidence_path = staging / result_evidence_relative
         result_report = capture_historical_matches(
             provider,
-            date_from=results_date_from,
-            date_to=results_date_to,
+            requested_date=results_date,
             output_path=result_path,
             evidence_path=result_evidence_path,
-            sources=normalized_sources,
-            limit=result_limit,
+            priced_only=results_priced_only,
         )
         result_entry = {
-            "date_from": result_report.date_from,
-            "date_to": result_report.date_to,
+            "requested_date": result_report.requested_date,
+            "priced_only": result_report.priced_only,
             "captured_at": result_report.captured_at,
             "capture_file": result_relative.as_posix(),
             "evidence_file": result_evidence_relative.as_posix(),
@@ -226,16 +219,18 @@ def build_parser() -> argparse.ArgumentParser:
         dest="requested_at",
         help="requested point-in-time snapshot timestamp; repeat for each selected instant",
     )
-    parser.add_argument("--results-from", required=True, help="match/result archive start date, YYYY-MM-DD")
-    parser.add_argument("--results-to", required=True, help="match/result archive end date, YYYY-MM-DD")
+    parser.add_argument("--results-date", required=True, help="documented match/result archive date, YYYY-MM-DD")
+    parser.add_argument(
+        "--results-priced-only",
+        action="store_true",
+        help="request match rows with real odds where supported; this does not prove market coverage",
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path(".autosport-workspace/historical-acquisition"),
         help="new immutable acquisition-bundle directory",
     )
-    parser.add_argument("--sources", default="", help="optional comma-separated result source filter")
-    parser.add_argument("--result-limit", type=int, default=1000, help="result archive row limit, 1..5000")
     parser.add_argument("--regions", default="us", help="comma-separated historical odds regions")
     parser.add_argument("--markets", default="h2h,spreads,totals", help="comma-separated historical odds markets")
     return parser
@@ -249,17 +244,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     regions = tuple(value.strip() for value in args.regions.split(",") if value.strip())
     markets = tuple(value.strip() for value in args.markets.split(",") if value.strip())
-    sources = tuple(value.strip() for value in args.sources.split(",") if value.strip())
     try:
         provider = ParlayApiTableTennisProvider(api_key, regions=regions, markets=markets)
         report = capture_historical_acquisition_bundle(
             provider,
             requested_at=args.requested_at,
-            results_date_from=args.results_from,
-            results_date_to=args.results_to,
+            results_date=args.results_date,
             output_dir=args.output_dir,
-            result_sources=sources,
-            result_limit=args.result_limit,
+            results_priced_only=args.results_priced_only,
         )
     except (ProviderTransportError, ProviderPayloadError, ValueError, OSError) as exc:
         print(f"historical_acquisition=FAIL_CLOSED error={exc}")
@@ -277,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         "point_in_time_odds_market_coverage_verified=false "
         "historical_window_market_coverage_verified=false replay_corpus_ready=false"
     )
-    print("licensing_or_retention_verified=false real_money_execution=false")
+    print("licensing_or_retention_verified=false redistribution_verified=false real_money_execution=false")
     print(f"bundle={report.root}")
     return 0
 

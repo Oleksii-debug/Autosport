@@ -29,6 +29,7 @@ def build_windows_package(
     example_dir: str | Path,
     diagnostic_path: str | Path,
     accessibility_path: str | Path,
+    keyboard_path: str | Path,
     output_zip: str | Path,
     source_sha: str,
 ) -> tuple[Path, str]:
@@ -37,6 +38,7 @@ def build_windows_package(
     example_dir = Path(example_dir)
     diagnostic_path = Path(diagnostic_path)
     accessibility_path = Path(accessibility_path)
+    keyboard_path = Path(keyboard_path)
     output_zip = Path(output_zip)
     package_dir = output_zip.parent / "Autosport-V1"
     if package_dir.exists():
@@ -46,6 +48,7 @@ def build_windows_package(
     shutil.copy2(start_file, package_dir / "WINDOWS_START_HERE.txt")
     shutil.copy2(diagnostic_path, package_dir / "packaged-diagnostic.json")
     shutil.copy2(accessibility_path, package_dir / "accessibility-audit.json")
+    shutil.copy2(keyboard_path, package_dir / "keyboard-audit.json")
     shutil.copytree(example_dir, package_dir / "examples" / example_dir.name)
 
     build_info = {
@@ -113,6 +116,7 @@ def verify_windows_package(
         "WINDOWS_START_HERE.txt",
         "packaged-diagnostic.json",
         "accessibility-audit.json",
+        "keyboard-audit.json",
         "BUILD_INFO.json",
         "PACKAGE_MANIFEST.json",
         "SHA256SUMS.txt",
@@ -161,9 +165,11 @@ def verify_windows_package(
 
     diagnostic = _decode_json_object(members["packaged-diagnostic.json"], "packaged-diagnostic.json")
     accessibility = _decode_json_object(members["accessibility-audit.json"], "accessibility-audit.json")
+    keyboard = _decode_json_object(members["keyboard-audit.json"], "keyboard-audit.json")
     for label, payload in (
         ("packaged-diagnostic.json", diagnostic),
         ("accessibility-audit.json", accessibility),
+        ("keyboard-audit.json", keyboard),
     ):
         if payload.get("status") != "PASS":
             raise ValueError(f"{label} does not record PASS")

@@ -17,6 +17,12 @@ def main(argv: list[str] | None = None) -> int:
         from autosport.accessibility_audit import run_accessibility_audit
 
         return run_accessibility_audit(args[1])
+    if args and args[0] == "--keyboard-audit-output":
+        if len(args) != 2:
+            return 2
+        from autosport.keyboard_audit import run_keyboard_audit
+
+        return run_keyboard_audit(args[1])
     from autosport.gui import main as gui_main
 
     return gui_main()

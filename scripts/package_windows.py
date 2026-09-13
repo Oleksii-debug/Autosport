@@ -14,6 +14,7 @@ def main() -> int:
     parser.add_argument("--example-dir", type=Path, required=True)
     parser.add_argument("--diagnostic", type=Path, required=True)
     parser.add_argument("--accessibility-audit", type=Path, required=True)
+    parser.add_argument("--keyboard-audit", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--verification-output", type=Path)
@@ -24,6 +25,7 @@ def main() -> int:
         args.example_dir,
         args.diagnostic,
         args.accessibility_audit,
+        args.keyboard_audit,
         args.output,
         args.source_sha,
     )

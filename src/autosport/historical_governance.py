@@ -108,8 +108,17 @@ def _direct_sibling(root: Path, value: str, *, field: str) -> Path:
 def _normalized_source_ids(raw: Any, *, context: str) -> tuple[str, ...]:
     if not isinstance(raw, list) or not raw:
         raise ValueError(f"{context}.source_ids must be a non-empty list")
-    values = tuple(sorted(str(value).strip() for value in raw))
-    if any(not value for value in values) or len(set(values)) != len(values):
+    if any(
+        not isinstance(value, str)
+        or not value.strip()
+        or value != value.strip()
+        for value in raw
+    ):
+        raise ValueError(
+            f"{context}.source_ids must contain canonical non-empty strings without surrounding whitespace"
+        )
+    values = tuple(sorted(raw))
+    if len(set(values)) != len(values):
         raise ValueError(f"{context}.source_ids must contain unique non-empty strings")
     return values
 

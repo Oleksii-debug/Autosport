@@ -37,6 +37,7 @@ class BeamParlayCandidateSearch:
     def search(self, legs: list[CandidateLeg], minimum_legs: int = 2) -> list[ParlayCandidate]:
         if minimum_legs < 1 or minimum_legs > self.max_legs:
             raise ValueError("invalid minimum_legs")
+        self._validate_input_legs(legs)
         ordered = sorted(legs, key=lambda leg: (leg.paper_value_per_unit, leg.probability), reverse=True)
         beam: list[tuple[CandidateLeg, ...]] = [tuple()]
         results: list[ParlayCandidate] = []
@@ -65,6 +66,39 @@ class BeamParlayCandidateSearch:
             if len(unique) >= self.result_limit:
                 break
         return list(unique.values())
+
+    @staticmethod
+    def _validate_input_legs(legs: list[CandidateLeg]) -> None:
+        seen_quote_keys: set[str] = set()
+        for index, leg in enumerate(legs):
+            if not isinstance(leg, CandidateLeg):
+                raise ValueError(f"candidate leg {index} must be a CandidateLeg")
+            if not isinstance(leg.quote_key, str) or not leg.quote_key or leg.quote_key != leg.quote_key.strip():
+                raise ValueError(f"candidate leg {index} quote_key must be a non-empty canonical string")
+            parts = leg.quote_key.split("|")
+            if len(parts) != 3 or any(not part or part != part.strip() for part in parts):
+                raise ValueError(
+                    f"candidate leg {index} quote_key must use canonical event|market|selection identity"
+                )
+            if not isinstance(leg.event_id, str) or not leg.event_id or leg.event_id != leg.event_id.strip():
+                raise ValueError(f"candidate leg {index} event_id must be a non-empty canonical string")
+            if parts[0] != leg.event_id:
+                raise ValueError(f"candidate leg {index} event_id does not match quote_key")
+            if not isinstance(leg.decimal_odds, Decimal):
+                raise ValueError(f"candidate leg {index} decimal_odds must be Decimal")
+            if not leg.decimal_odds.is_finite():
+                raise ValueError(f"candidate leg {index} decimal_odds must be finite")
+            if leg.decimal_odds <= 1:
+                raise ValueError(f"candidate leg {index} decimal_odds must be greater than 1")
+            if not isinstance(leg.probability, Decimal):
+                raise ValueError(f"candidate leg {index} probability must be Decimal")
+            if not leg.probability.is_finite():
+                raise ValueError(f"candidate leg {index} probability must be finite")
+            if leg.probability < 0 or leg.probability > 1:
+                raise ValueError(f"candidate leg {index} probability must be between 0 and 1")
+            if leg.quote_key in seen_quote_keys:
+                raise ValueError(f"duplicate candidate quote_key: {leg.quote_key}")
+            seen_quote_keys.add(leg.quote_key)
 
     @staticmethod
     def _to_candidate(legs: tuple[CandidateLeg, ...]) -> ParlayCandidate:

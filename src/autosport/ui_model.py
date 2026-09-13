@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+from .price_truth import classify_market_price_truth, market_price_truth_from_run_summary
 from .session import ObservationResult, SessionResult
 
 
@@ -9,6 +13,36 @@ def result_summary(result: SessionResult) -> str:
         f"balance={result.balance}; net={result.evaluation.net_profit}; "
         f"settled={len(result.settled_ticket_ids)}; portfolio={result.portfolio.mode}; "
         f"worst={result.portfolio.worst_case}; best={result.portfolio.best_case}."
+    )
+
+
+def _market_price_truth_line(result: SessionResult) -> str:
+    truth = classify_market_price_truth(())
+    try:
+        payload = json.loads(Path(result.result_path).read_text(encoding="utf-8"))
+    except OSError:
+        payload = None
+    except json.JSONDecodeError as exc:
+        return f"Price truth | ERROR — run summary JSON is invalid: {exc.msg}."
+
+    if payload is not None:
+        if not isinstance(payload, dict):
+            return "Price truth | ERROR — run summary root is not an object."
+        try:
+            truth = market_price_truth_from_run_summary(payload)
+        except ValueError as exc:
+            return f"Price truth | ERROR — invalid explicit run truth: {exc}."
+
+    executable = str(truth.executable_quote_verified).lower()
+    fill_fidelity = str(truth.paper_fill_fidelity_verified).lower()
+    if "last_traded" in truth.price_semantics:
+        return (
+            "Price truth | Betfair last-traded/last-matched observation; "
+            f"executable quote verified={executable}; paper fill fidelity verified={fill_fidelity}."
+        )
+    return (
+        f"Price truth | {truth.price_semantics}; executable quote verified={executable}; "
+        f"paper fill fidelity verified={fill_fidelity}."
     )
 
 
@@ -38,6 +72,7 @@ def evaluation_lines(result: SessionResult) -> list[str]:
             f"Portfolio | {mode_truth} | scenarios {portfolio.scenario_count} | "
             f"worst {portfolio.worst_case} | best {portfolio.best_case} | mean {portfolio.mean_case}"
         ),
+        _market_price_truth_line(result),
         "Truth | paper simulation only; ця evaluation не є доказом майбутньої profitability.",
     ]
 

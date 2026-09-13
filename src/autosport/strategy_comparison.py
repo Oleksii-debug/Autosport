@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .integrity import atomic_write_json
+from .price_truth import market_price_truth_from_run_summary
 from .run_transaction import RunTransaction
 
 
@@ -28,6 +29,9 @@ class StrategyRunEvidence:
     strategy_id: str
     canonical_strategy_id: str
     research_plan_sha256: str | None
+    price_semantics: str
+    executable_quote_verified: bool
+    paper_fill_fidelity_verified: bool
     initial_bankroll: Decimal
     final_balance: Decimal
     committed_stake: Decimal
@@ -49,6 +53,9 @@ class StrategyRunEvidence:
             self.historical_import_identity,
             self.replay_dataset_hash,
             self.event_count,
+            self.price_semantics,
+            self.executable_quote_verified,
+            self.paper_fill_fidelity_verified,
             self.initial_bankroll,
         )
 
@@ -95,6 +102,7 @@ def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
     )
     if dataset_schema_version >= 2 and historical_import_identity is None:
         raise ValueError(f"{source}: governed historical dataset lacks historical_import_identity")
+    price_truth = market_price_truth_from_run_summary(payload)
 
     evaluation = payload.get("evaluation")
     if not isinstance(evaluation, dict):
@@ -133,6 +141,9 @@ def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
         strategy_id=strategy_id,
         canonical_strategy_id=canonical_strategy_id,
         research_plan_sha256=research_plan_sha256,
+        price_semantics=price_truth.price_semantics,
+        executable_quote_verified=price_truth.executable_quote_verified,
+        paper_fill_fidelity_verified=price_truth.paper_fill_fidelity_verified,
         initial_bankroll=initial_bankroll,
         final_balance=final_balance,
         committed_stake=committed_stake,
@@ -158,7 +169,7 @@ def compare_strategy_runs(
     mismatched = [item.strategy_id for item in evidence[1:] if item.comparison_identity != first.comparison_identity]
     if mismatched:
         raise ValueError(
-            "strategy comparison requires identical sealed dataset, replay identity, event count, and initial bankroll; "
+            "strategy comparison requires identical sealed dataset, replay identity, event count, price truth, and initial bankroll; "
             "mismatch=" + ",".join(sorted(mismatched))
         )
 
@@ -223,6 +234,11 @@ def compare_strategy_runs(
             "replay_dataset_hash": first.replay_dataset_hash,
             "event_count": first.event_count,
             "initial_bankroll": str(first.initial_bankroll),
+            "market_price_truth": {
+                "price_semantics": first.price_semantics,
+                "executable_quote_verified": first.executable_quote_verified,
+                "paper_fill_fidelity_verified": first.paper_fill_fidelity_verified,
+            },
         },
         "baseline_strategy_id": baseline_strategy_id,
         "strategies": entries,
@@ -232,6 +248,8 @@ def compare_strategy_runs(
             "governed_historical_import": first.historical_import_identity is not None,
             "real_historical_market_coverage_verified": False,
             "licensing_retention_verified": False,
+            "executable_quote_verified": first.executable_quote_verified,
+            "paper_fill_fidelity_verified": first.paper_fill_fidelity_verified,
             "profitability_claim": False,
             "predictive_superiority_claim": False,
             "out_of_sample_claim": False,
@@ -266,7 +284,12 @@ def main(argv: list[str] | None = None) -> int:
         f"strategy_comparison=OK strategies={len(report['strategies'])} "
         f"baseline={report['baseline_strategy_id']} scope={report['comparison_scope']}"
     )
-    print("profitability_claim=false predictive_superiority_claim=false real_money_execution=false")
+    print(
+        "profitability_claim=false predictive_superiority_claim=false "
+        f"executable_quote_verified={str(report['truth']['executable_quote_verified']).lower()} "
+        f"paper_fill_fidelity_verified={str(report['truth']['paper_fill_fidelity_verified']).lower()} "
+        "real_money_execution=false"
+    )
     print(f"report={args.output}")
     return 0
 

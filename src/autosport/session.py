@@ -16,6 +16,7 @@ from .integrity import ensure_durable_file, sha256_file
 from .market_bus import MarketEventBus
 from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
+from .price_truth import market_price_truth_from_events
 from .providers import MarketProvider
 from .replay import ReplayEngine, ReplayRun
 from .research_strategy import ResearchStrategyPlan
@@ -267,6 +268,7 @@ class AutosportSession:
         dataset: ReplayDataset,
         result: SessionResult,
     ) -> dict:
+        market_price_truth = market_price_truth_from_events(dataset.load_market_events())
         return {
             "schema_version": 2,
             "dataset_name": dataset.name,
@@ -274,6 +276,7 @@ class AutosportSession:
             "dataset_schema_version": dataset.schema_version,
             "historical_import_identity": dataset.import_identity,
             "dataset_governance": asdict(dataset.governance) if dataset.governance is not None else None,
+            "market_price_truth": market_price_truth.to_dict(),
             "strategy_id": self.strategy_id,
             "strategy_runtime": {
                 "strategy_id": self.strategy_id,

@@ -10,7 +10,7 @@ class AvailableBackQuote:
     """One reconstructed observed Betfair available-to-back quote.
 
     `cache_verified` means the local ladder state was initialized by a provider image and
-    then updated only by compatible deltas.  It is evidence that the quote was present in
+    then updated only by compatible deltas. It is evidence that the quote was present in
     the historical order book, not evidence that a real order would have filled.
     """
 
@@ -30,8 +30,8 @@ class AvailableBackUpdate:
 class BetfairAvailableBackBook:
     """Stateful decoder for Stream API `atb` (PRO) and `batb` (ADVANCED) deltas.
 
-    The two encodings are intentionally not mixed between provider images.  `atb` is
-    keyed by price; `batb` is keyed by display level.  A market image must initialize
+    The two encodings are intentionally not mixed between provider images. `atb` is
+    keyed by price; `batb` is keyed by display level. A market image must initialize
     the cache before a reconstructed quote is considered verified.
     """
 
@@ -60,7 +60,16 @@ class BetfairAvailableBackBook:
         if has_atb and has_batb:
             raise ValueError("runner change contains both atb and batb ladder encodings")
         if not has_atb and not has_batb:
-            return AvailableBackUpdate(False, self.current_quote())
+            current = self.current_quote()
+            # The ladder cache remains provider state until a ladder delta/image changes it.
+            # If the provider emits only a new LTP while that cache exists, surface the
+            # persisted available quote at the new publish time. Otherwise replay would
+            # incorrectly downgrade latest state from order-book evidence to observational
+            # LTP merely because the unchanged ladder was omitted from this delta.
+            return AvailableBackUpdate(
+                current is not None and runner_change.get("ltp") is not None,
+                current,
+            )
 
         mode = "atb" if has_atb else "batb"
         if self._mode is not None and self._mode != mode:
@@ -91,8 +100,8 @@ class BetfairAvailableBackBook:
                 cache_verified=self._initialized,
             )
         if self._mode == "batb":
-            # ADVANCED data is level-keyed.  Level 0 is the provider's best available
-            # back.  If level 0 is absent we fail closed instead of promoting a deeper
+            # ADVANCED data is level-keyed. Level 0 is the provider's best available
+            # back. If level 0 is absent we fail closed instead of promoting a deeper
             # level to best price ourselves.
             best = self._batb.get(0)
             if best is None:
@@ -127,7 +136,7 @@ class BetfairAvailableBackBook:
                 raise ValueError(f"batb[{index}].level must be a non-negative integer")
             size = _decimal_number(row[2], field=f"batb[{index}].size", non_negative=True)
             if size == 0:
-                # Betfair removal deltas may carry a zero/sentinel price.  The level is
+                # Betfair removal deltas may carry a zero/sentinel price. The level is
                 # the identity for batb, so no price assertion is needed for removal.
                 self._batb.pop(level_raw, None)
                 continue

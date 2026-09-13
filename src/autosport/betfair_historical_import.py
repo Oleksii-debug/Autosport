@@ -501,6 +501,13 @@ def import_betfair_historical(
                         roster.add(selection_id)
                         if runner.get("name") is not None:
                             names[selection_id] = str(runner["name"])
+                    previous_roster = declared_runner_ids.get(market_id, set())
+                    for removed_selection_id in previous_roster.difference(roster):
+                        removed_key = (market_id, removed_selection_id)
+                        available_books.pop(removed_key, None)
+                        last_visible_price.pop(removed_key, None)
+                        last_visible_metadata.pop(removed_key, None)
+                        names.pop(removed_selection_id, None)
                     declared_runner_ids[market_id] = roster
 
                 closed = str(merged.get("status") or "").upper() == "CLOSED"
@@ -555,8 +562,11 @@ def import_betfair_historical(
                         raise ValueError(
                             f"{path}: line {line_number} supported Betfair market requires source eventId"
                         )
+                    current_roster = declared_runner_ids.get(market_id, set())
                     visible_keys = sorted(
-                        key for key in last_visible_price if key[0] == market_id
+                        key
+                        for key in last_visible_price
+                        if key[0] == market_id and key[1] in current_roster
                     )
                     for key in visible_keys:
                         _market_id, selection_id = key

@@ -416,6 +416,11 @@ def _forecast_from_dict(raw: Any) -> ForecastRecord:
 def _evidence_from_dict(raw: Any) -> ResearchEvidence:
     if not isinstance(raw, dict):
         raise ValueError("ResearchEvidence entry must be an object")
+    quality_flags_raw = raw.get("quality_flags", [])
+    if not isinstance(quality_flags_raw, list):
+        raise ValueError("ResearchEvidence quality_flags must be a JSON array")
+    if any(not isinstance(item, str) or not item.strip() for item in quality_flags_raw):
+        raise ValueError("ResearchEvidence quality_flags must contain non-empty strings")
     return ResearchEvidence(
         evidence_id=str(raw["evidence_id"]),
         quote_key=str(raw["quote_key"]),
@@ -424,7 +429,7 @@ def _evidence_from_dict(raw: Any) -> ResearchEvidence:
         available_at=str(raw["available_at"]),
         decimal_odds=Decimal(str(raw["decimal_odds"])),
         content_sha256=str(raw["content_sha256"]),
-        quality_flags=tuple(str(item) for item in raw.get("quality_flags", ())),
+        quality_flags=tuple(quality_flags_raw),
         market_snapshot_hash=(
             str(raw["market_snapshot_hash"])
             if raw.get("market_snapshot_hash") is not None

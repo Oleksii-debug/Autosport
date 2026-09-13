@@ -46,11 +46,11 @@ def verify_forecast_origin_binding(
 
     Each evaluated forecast must appear by canonical id + hash in a research
     pipeline decision whose ledger prefix hash is committed by a matching durable
-    run summary for the exact governed dataset. ``recorded_at`` is checked for
-    internal temporal consistency, but it is still data stored inside the local
-    artifact. Therefore this function does *not* claim an independently verified
-    physical pre-outcome write time. Such a claim requires an immutable external
-    timestamp/anchor that cannot be backdated together with the local files.
+    run summary for the exact governed dataset. ``recorded_at`` is a local
+    wall-clock field and is reported separately from causal replay time. A
+    retrospective replay may therefore be canonically origin-bound even when its
+    ledger was physically written after the historical outcome reveal. Physical
+    pre-outcome write claims still require an immutable external timestamp/anchor.
     """
 
     governance = dataset.governance
@@ -77,6 +77,7 @@ def verify_forecast_origin_binding(
     reveal_after = parse_iso_timestamp(governance.outcome_reveal_after)
     matched: dict[str, set[str]] = {forecast_id: set() for forecast_id in evaluated_forecast_ids}
     latest_recorded_at: str | None = None
+    all_declared_record_times_before_reveal = True
 
     for summary in summaries:
         run_id = summary["run_id"]
@@ -96,8 +97,6 @@ def verify_forecast_origin_binding(
             if not isinstance(recorded_at_value, str):
                 raise ValueError("research decision record lacks recorded_at")
             recorded_at = parse_iso_timestamp(recorded_at_value)
-            if recorded_at >= reveal_after:
-                raise ValueError("research decision declared recorded_at is at or after outcome reveal")
             observed_value = record.get("observed_ts")
             if not isinstance(observed_value, str):
                 raise ValueError("research decision record lacks observed_ts")
@@ -122,6 +121,8 @@ def verify_forecast_origin_binding(
                 if parse_iso_timestamp(forecast.input_cutoff_ts) > observed_at:
                     raise ValueError("forecast input cutoff is after its canonical decision time")
                 matched[forecast.forecast_id].add(run_id)
+                if recorded_at >= reveal_after:
+                    all_declared_record_times_before_reveal = False
                 if latest_recorded_at is None or parse_iso_timestamp(latest_recorded_at) < recorded_at:
                     latest_recorded_at = recorded_at_value
 
@@ -140,7 +141,7 @@ def verify_forecast_origin_binding(
         "latest_declared_recorded_at": latest_recorded_at,
         "outcome_reveal_after": governance.outcome_reveal_after,
         "canonical_forecast_origin_verified": True,
-        "declared_record_time_before_reveal_verified": True,
+        "declared_record_time_before_reveal_verified": all_declared_record_times_before_reveal,
         "pre_outcome_ledger_write_verified": False,
         "independent_time_anchor_verified": False,
         "real_money_execution": False,

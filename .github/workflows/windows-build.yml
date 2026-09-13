@@ -31,6 +31,9 @@ jobs:
           python-version: '3.12'
       - shell: pwsh
         run: ./scripts/build_windows.ps1
+      - name: Execute packaged walk-forward evaluation
+        shell: pwsh
+        run: ./scripts/walk_forward_package_smoke.ps1
       - name: Audit packaged research demo path
         shell: pwsh
         run: |
@@ -118,12 +121,15 @@ jobs:
             dist/keyboard-audit.json
             dist/restart-recovery-audit.json
             dist/research-demo-audit.json
+            dist/walk-forward-package-smoke.json
+            dist/walk-forward-package-smoke-report.json
             dist/package-verification.json
             dist/fresh-extraction-diagnostic.json
             dist/fresh-extraction-accessibility-audit.json
             dist/fresh-extraction-keyboard-audit.json
             dist/fresh-extraction-restart-recovery-audit.json
             dist/fresh-extraction-research-demo-audit.json
+            dist/fresh-extraction-walk-forward-package-smoke-report.json
             dist/fresh-extraction-external-uia-audit.json
             dist/fresh-extraction-verification.json
           if-no-files-found: error

@@ -1,23 +1,22 @@
 from __future__ import annotations
 
-import importlib
-import tomllib
+import importlib.metadata
 import unittest
-from pathlib import Path
 
 
 class PackagingEntrypointTests(unittest.TestCase):
     def test_historical_acquisition_cli_is_installed_and_resolvable(self) -> None:
-        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
-        with pyproject.open("rb") as stream:
-            metadata = tomllib.load(stream)
-
-        target = metadata["project"]["scripts"].get("autosport-acquire-historical-evidence")
-        self.assertEqual(target, "autosport.historical_acquisition:main")
-
-        module_name, attribute = target.split(":", 1)
-        entrypoint = getattr(importlib.import_module(module_name), attribute)
-        self.assertTrue(callable(entrypoint))
+        scripts = {
+            entry.name: entry
+            for entry in importlib.metadata.entry_points(group="console_scripts")
+            if entry.dist is not None and entry.dist.metadata.get("Name") == "autosport-lab"
+        }
+        self.assertIn("autosport-acquire-historical-evidence", scripts)
+        entry = scripts["autosport-acquire-historical-evidence"]
+        self.assertEqual(entry.value, "autosport.historical_acquisition:main")
+        loaded = entry.load()
+        self.assertEqual(loaded.__module__, "autosport.historical_acquisition")
+        self.assertEqual(loaded.__name__, "main")
 
 
 if __name__ == "__main__":

@@ -30,16 +30,19 @@ class _FailIfCalledPipeline:
 
     def decide_and_open(self, **_kwargs):
         self.called = True
-        raise AssertionError("economic research pipeline must not run for a non-open market")
+        raise AssertionError("economic research pipeline must not run for an ineligible market state")
 
 
-def _non_open_plan(status: str):
+def _state_plan(status: str, *, metadata_updates: dict | None = None):
     dataset = load_dataset(Path("examples/tt_demo"))
     base_event = sorted(
         dataset.load_market_events(),
         key=lambda item: (item.observed_ts, item.sequence, item.dedupe_key),
     )[0]
-    event = replace(base_event, status=status)
+    metadata = dict(base_event.metadata)
+    if metadata_updates:
+        metadata.update(metadata_updates)
+    event = replace(base_event, status=status, metadata=metadata)
     latest = {event.quote_key: event}
     snapshot_hash = research_market_snapshot_hash(latest, [event.quote_key])
     evidence_hash = market_event_evidence_hash(event)
@@ -98,12 +101,12 @@ def _non_open_plan(status: str):
 
 class ResearchMarketStatusTruthTests(unittest.TestCase):
     def test_preflight_rejects_suspended_candidate(self) -> None:
-        event, _latest, plan = _non_open_plan("suspended")
+        event, _latest, plan = _state_plan("suspended")
         with self.assertRaisesRegex(ValueError, "not open market state"):
             plan.preflight([event])
 
     def test_runtime_rejects_suspended_candidate_before_economic_mutation(self) -> None:
-        event, latest, plan = _non_open_plan("suspended")
+        event, latest, plan = _state_plan("suspended")
         pipeline = _FailIfCalledPipeline()
         agent = ResearchReplayAgent(plan, pipeline=pipeline)
 
@@ -125,8 +128,20 @@ class ResearchMarketStatusTruthTests(unittest.TestCase):
             self.assertEqual(book.tickets, {})
             self.assertFalse(ledger_path.exists())
 
-    def test_runtime_rejects_importer_unavailable_state_before_economic_mutation(self) -> None:
-        event, latest, plan = _non_open_plan("unavailable")
+    def test_runtime_rejects_open_definition_transition_without_fresh_executable_quote(self) -> None:
+        event, latest, plan = _state_plan(
+            "open",
+            metadata_updates={
+                "price_semantics": "betfair_market_definition_state_transition",
+                "execution_quote_verified": False,
+                "paper_fill_eligible": False,
+                "paper_fill_capacity_verified": False,
+                "paper_fill_capacity_unit_bound": False,
+                "betfair_market_status": "OPEN",
+                "betfair_bet_delay_seconds": 2,
+                "market_definition_transition": True,
+            },
+        )
         pipeline = _FailIfCalledPipeline()
         agent = ResearchReplayAgent(plan, pipeline=pipeline)
 
@@ -136,11 +151,11 @@ class ResearchMarketStatusTruthTests(unittest.TestCase):
             context = AgentContext(
                 paper_book=book,
                 latest_quotes=latest,
-                replay_run_id="unavailable-market-test",
+                replay_run_id="definition-transition-test",
                 decision_ledger=JsonlDecisionLedger(ledger_path),
             )
 
-            with self.assertRaisesRegex(ValueError, "not open market state"):
+            with self.assertRaisesRegex(ValueError, "not verified executable price evidence"):
                 agent.on_market_event(event, context)
 
             self.assertFalse(pipeline.called)

@@ -57,6 +57,34 @@ SAMPLE_EVENT = {
 }
 
 
+COVERAGE_PAYLOAD = {
+    "sport_key": "table_tennis",
+    "window": {"date_from": "2026-09-01", "date_to": "2026-09-12"},
+    "by_source": {
+        "bovada": {
+            "rows": 100,
+            "first_date": "2026-09-01",
+            "last_date": "2026-09-12",
+            "priced_rows": 94,
+        },
+        "pinnacle": {
+            "rows": 25,
+            "first_date": "2026-09-05",
+            "last_date": "2026-09-11",
+            "priced_rows": 25,
+        },
+    },
+    "_note": "coverage evidence only",
+}
+
+
+COVERAGE_HEADERS = {
+    "X-Historical-Window-Hours": "720",
+    "x-historical-window-from": "2026-08-14T00:00:00Z",
+    "X-API-Version": "3.2.0",
+}
+
+
 class ParlayApiProviderTests(unittest.TestCase):
     def test_authenticated_snapshot_maps_to_typed_provider_quotes_without_key_in_url(self):
         calls = []
@@ -151,6 +179,107 @@ class ParlayApiProviderTests(unittest.TestCase):
         )
         with self.assertRaises(ProviderPayloadError):
             provider.read_batch()
+
+    def test_historical_coverage_verifies_exact_window_and_never_puts_key_in_url(self):
+        calls = []
+
+        def transport(url, headers, timeout):
+            calls.append((url, dict(headers), timeout))
+            return HttpJsonResponse(COVERAGE_PAYLOAD, 200, COVERAGE_HEADERS)
+
+        provider = ParlayApiTableTennisProvider(
+            "historical-secret",
+            transport=transport,
+            clock=lambda: "2026-09-13T01:00:00+00:00",
+        )
+        report = provider.historical_coverage("2026-09-01", "2026-09-12")
+        self.assertIn("/v1/historical/sports/table_tennis/coverage?", calls[0][0])
+        self.assertIn("dateFrom=2026-09-01", calls[0][0])
+        self.assertIn("dateTo=2026-09-12", calls[0][0])
+        self.assertNotIn("historical-secret", calls[0][0])
+        self.assertEqual(calls[0][1]["X-API-Key"], "historical-secret")
+        self.assertEqual(report.historical_window_hours, 720)
+        self.assertEqual(report.historical_window_from, "2026-08-14T00:00:00Z")
+        self.assertEqual(report.api_version, "3.2.0")
+        self.assertEqual(report.total_rows, 125)
+        self.assertEqual(report.total_priced_rows, 119)
+        self.assertTrue(report.has_data)
+        self.assertEqual([item.source for item in report.sources], ["bovada", "pinnacle"])
+        self.assertEqual(len(report.response_sha256), 64)
+
+    def test_historical_coverage_empty_by_source_is_truthful_no_data_not_successful_corpus(self):
+        payload = {
+            "sport_key": "table_tennis",
+            "window": {"date_from": "2026-09-01", "date_to": "2026-09-12"},
+            "by_source": {},
+        }
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=lambda *_: HttpJsonResponse(payload, 200, COVERAGE_HEADERS),
+            clock=lambda: "2026-09-13T01:00:00+00:00",
+        )
+        report = provider.historical_coverage("2026-09-01", "2026-09-12")
+        self.assertFalse(report.has_data)
+        self.assertEqual(report.total_rows, 0)
+        self.assertEqual(report.total_priced_rows, 0)
+
+    def test_historical_coverage_requires_entitlement_headers(self):
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=lambda *_: HttpJsonResponse(COVERAGE_PAYLOAD, 200, {}),
+            clock=lambda: "2026-09-13T01:00:00+00:00",
+        )
+        with self.assertRaisesRegex(ProviderPayloadError, "entitlement-window headers"):
+            provider.historical_coverage("2026-09-01", "2026-09-12")
+
+    def test_historical_coverage_rejects_provider_window_mismatch(self):
+        payload = dict(COVERAGE_PAYLOAD)
+        payload["window"] = {"date_from": "2026-09-02", "date_to": "2026-09-12"}
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=lambda *_: HttpJsonResponse(payload, 200, COVERAGE_HEADERS),
+            clock=lambda: "2026-09-13T01:00:00+00:00",
+        )
+        with self.assertRaisesRegex(ProviderPayloadError, "window mismatch"):
+            provider.historical_coverage("2026-09-01", "2026-09-12")
+
+    def test_historical_coverage_rejects_request_older_than_entitlement_header(self):
+        headers = dict(COVERAGE_HEADERS)
+        headers["x-historical-window-from"] = "2026-09-05T00:00:00Z"
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=lambda *_: HttpJsonResponse(COVERAGE_PAYLOAD, 200, headers),
+            clock=lambda: "2026-09-13T01:00:00+00:00",
+        )
+        with self.assertRaisesRegex(ProviderPayloadError, "contradicts"):
+            provider.historical_coverage("2026-09-01", "2026-09-12")
+
+    def test_historical_coverage_rejects_impossible_priced_row_count(self):
+        payload = dict(COVERAGE_PAYLOAD)
+        payload["by_source"] = {
+            "bovada": {
+                "rows": 10,
+                "first_date": "2026-09-01",
+                "last_date": "2026-09-12",
+                "priced_rows": 11,
+            }
+        }
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=lambda *_: HttpJsonResponse(payload, 200, COVERAGE_HEADERS),
+            clock=lambda: "2026-09-13T01:00:00+00:00",
+        )
+        with self.assertRaisesRegex(ProviderPayloadError, "priced_rows"):
+            provider.historical_coverage("2026-09-01", "2026-09-12")
+
+    def test_historical_coverage_rejects_public_preview_and_bad_date_order(self):
+        preview = ParlayApiTableTennisProvider(public_preview=True, transport=lambda *_: None)
+        with self.assertRaisesRegex(ValueError, "authenticated API key"):
+            preview.historical_coverage("2026-09-01", "2026-09-12")
+
+        provider = ParlayApiTableTennisProvider("key", transport=lambda *_: None)
+        with self.assertRaisesRegex(ValueError, "must not precede"):
+            provider.historical_coverage("2026-09-12", "2026-09-01")
 
 
 if __name__ == "__main__":

@@ -20,6 +20,10 @@ class ReconciliationError(RuntimeError):
     pass
 
 
+class MixedStrategyWorkspaceError(RuntimeError):
+    pass
+
+
 class RunRegistry:
     """Fail-closed experiment ledger preventing accidental replay duplication after restart/crash."""
 
@@ -33,6 +37,17 @@ class RunRegistry:
     def experiment_identity(market_sha256: str, results_sha256: str, strategy_id: str) -> str:
         canonical = f"{market_sha256}|{results_sha256}|{strategy_id}".encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
+
+    def strategy_ids(self) -> tuple[str, ...]:
+        """Return strategy identities already bound to economic runs in this workspace."""
+        state = self._read()
+        values: set[str] = set()
+        for item in state["runs"].values():
+            strategy_id = item.get("strategy_id")
+            if not isinstance(strategy_id, str) or not strategy_id:
+                raise ValueError("run registry contains an invalid strategy_id")
+            values.add(strategy_id)
+        return tuple(sorted(values))
 
     def begin(
         self,

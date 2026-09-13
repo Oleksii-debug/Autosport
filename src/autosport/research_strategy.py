@@ -261,6 +261,7 @@ def _validate_market_binding(
     latest_quotes: dict[str, MarketEvent],
 ) -> None:
     decision_time = parse_iso_timestamp(instruction.decision_ts)
+    _validate_scenario_space_binding(instruction.groups, latest_quotes, decision_time)
     candidate_keys = tuple(leg.quote_key for leg in instruction.candidate.legs)
     snapshot_hash = research_market_snapshot_hash(latest_quotes, candidate_keys)
     forecasts = instruction.forecasts_by_quote
@@ -313,6 +314,59 @@ def _validate_market_binding(
         forecast = forecasts[leg.quote_key]
         if forecast.market_snapshot_hash != snapshot_hash:
             raise ValueError(f"ForecastRecord snapshot hash does not match replay state: {leg.quote_key}")
+
+
+def _validate_scenario_space_binding(
+    groups: tuple[ScenarioGroup, ...],
+    latest_quotes: dict[str, MarketEvent],
+    decision_time,
+) -> None:
+    """Bind observed replay-market outcomes without banning abstract complement scenarios."""
+
+    for group in groups:
+        outcome_keys = {outcome.quote_key for outcome in group.outcomes}
+        observed_outcomes: list[MarketEvent] = []
+        for quote_key in sorted(outcome_keys):
+            event = latest_quotes.get(quote_key)
+            if event is None:
+                continue
+            if parse_iso_timestamp(event.observed_ts) > decision_time:
+                raise ValueError(
+                    f"research scenario outcome is from the future: {quote_key}"
+                )
+            observed_outcomes.append(event)
+
+        if not observed_outcomes:
+            continue
+
+        market_identities = {
+            (event.event_id, event.market_id) for event in observed_outcomes
+        }
+        if len(market_identities) != 1:
+            raise ValueError(
+                f"research scenario group must bind one replay event/market: {group.group_id}"
+            )
+        event_id, market_id = next(iter(market_identities))
+        replay_market_keys = {
+            event.quote_key
+            for event in latest_quotes.values()
+            if event.event_id == event_id
+            and event.market_id == market_id
+            and parse_iso_timestamp(event.observed_ts) <= decision_time
+        }
+        missing = sorted(replay_market_keys - outcome_keys)
+        if missing:
+            raise ValueError(
+                "research scenario group is not complete for replay market "
+                f"{event_id}|{market_id}: missing={','.join(missing)}"
+            )
+
+        for quote_key in sorted(outcome_keys - replay_market_keys):
+            parts = quote_key.split("|", 2)
+            if len(parts) == 3 and parts[0] == event_id and parts[1] == market_id:
+                raise ValueError(
+                    f"research scenario outcome absent from replay state: {quote_key}"
+                )
 
 
 def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:

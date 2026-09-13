@@ -72,23 +72,42 @@ def _write_snapshot(root: Path) -> tuple[Path, Path]:
 
 
 def _write_governance(root: Path) -> Path:
+    authority = root / "governance-authority.json"
+    bound = {
+        "source_identity": "parlayapi:account-entitlement-test",
+        "source_ids": [ParlayApiTableTennisProvider.source_id],
+        "terms_reference": "https://parlay-api.com/terms",
+        "retention_basis": "verified fixture extension through 2026-12-31",
+        "retention_expires_at": "2026-12-31T00:00:00+00:00",
+        "authorization_valid_through": "2026-12-31T00:00:00+00:00",
+        "retention_extension_authority_reference": "fixture-extension-authority",
+        "redistribution_policy": "internal_only",
+        "licensing_or_retention_verified": True,
+        "redistribution_verified": False,
+        "authority_reference": "fixture-authority",
+        "verified_at": "2026-01-02T00:01:00+00:00",
+    }
+    authority_payload = {
+        "schema_version": 1,
+        "kind": "historical_corpus_governance_authority_record",
+        **bound,
+        "evidence_reference": "test-only read-once governance authority",
+        "verification_method": "deterministic test fixture",
+        "recorded_by": "test-suite",
+    }
+    authority.write_text(
+        json.dumps(authority_payload, sort_keys=True),
+        encoding="utf-8",
+    )
     path = root / "governance-proof.json"
     path.write_text(
         json.dumps(
             {
                 "schema_version": 1,
                 "kind": "historical_corpus_governance_proof",
-                "source_identity": "parlayapi:account-entitlement-test",
-                "source_ids": [ParlayApiTableTennisProvider.source_id],
-                "terms_reference": "https://parlay-api.com/terms",
-                "retention_basis": "verified fixture extension through 2026-12-31",
-                "retention_expires_at": "2026-12-31T00:00:00+00:00",
-                "retention_extension_authority_reference": "fixture-extension-authority",
-                "redistribution_policy": "internal_only",
-                "licensing_or_retention_verified": True,
-                "redistribution_verified": False,
-                "authority_reference": "fixture-authority",
-                "verified_at": "2026-01-02T00:01:00+00:00",
+                **bound,
+                "authority_record_file": authority.name,
+                "authority_record_sha256": _digest(authority.read_bytes()),
             },
             sort_keys=True,
         ),
@@ -174,8 +193,8 @@ class HistoricalCorpusArtifactReadOnceTests(unittest.TestCase):
 
             real_governance = corpus._governance_proof
 
-            def verify_then_replace(path: Path) -> dict:
-                parsed = real_governance(path)
+            def verify_then_replace(path: Path, *, payload: bytes | None = None) -> dict:
+                parsed = real_governance(path, payload=payload)
                 proof.write_text(json.dumps(replacement, sort_keys=True), encoding="utf-8")
                 return parsed
 

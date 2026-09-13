@@ -24,6 +24,7 @@ class HistoricalGovernanceAuthorityTests(unittest.TestCase):
             "terms_reference": "provider-terms:2026-09-01",
             "retention_basis": "paid archive access retained for internal research",
             "retention_expires_at": "2026-12-12T06:00:00Z",
+            "authorization_valid_through": "2026-12-12T06:00:00Z",
             "retention_extension_authority_reference": "provider-consent:test-456",
             "authority_reference": "entitlement-record:test-123",
             "verified_at": "2026-09-13T06:00:00Z",
@@ -48,6 +49,7 @@ class HistoricalGovernanceAuthorityTests(unittest.TestCase):
             "terms_reference": authority["terms_reference"],
             "retention_basis": authority["retention_basis"],
             "retention_expires_at": authority["retention_expires_at"],
+            "authorization_valid_through": authority["authorization_valid_through"],
             "retention_extension_authority_reference": authority[
                 "retention_extension_authority_reference"
             ],

@@ -124,15 +124,13 @@ def _write_results(
 
 
 def _write_governance(root: Path, **overrides) -> Path:
-    path = root / "governance-proof.json"
-    payload = {
-        "schema_version": 1,
-        "kind": "historical_corpus_governance_proof",
+    claims = {
         "source_identity": "parlayapi:account-entitlement-2026-01",
         "source_ids": [ParlayApiTableTennisProvider.source_id],
         "terms_reference": "https://parlay-api.com/terms",
         "retention_basis": "verified fixture extension through 2026-12-31",
         "retention_expires_at": "2026-12-31T00:00:00+00:00",
+        "authorization_valid_through": "2026-12-31T00:00:00+00:00",
         "retention_extension_authority_reference": "test-extension-authority-record",
         "redistribution_policy": "internal_only",
         "licensing_or_retention_verified": True,
@@ -140,7 +138,32 @@ def _write_governance(root: Path, **overrides) -> Path:
         "authority_reference": "non-secret-entitlement-record-2026-01",
         "verified_at": "2026-01-02T00:01:00+00:00",
     }
-    payload.update(overrides)
+    claims.update(overrides)
+
+    authority = root / "governance-authority.json"
+    authority.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "historical_corpus_governance_authority_record",
+                **claims,
+                "evidence_reference": "test-only corpus governance authority",
+                "verification_method": "deterministic test fixture",
+                "recorded_by": "test-suite",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    path = root / "governance-proof.json"
+    payload = {
+        "schema_version": 1,
+        "kind": "historical_corpus_governance_proof",
+        **claims,
+        "authority_record_file": authority.name,
+        "authority_record_sha256": _sha256(authority),
+    }
     path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     return path
 

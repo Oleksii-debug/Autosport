@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -13,13 +14,77 @@ def _acquisition_evidence(
     *,
     captured_at: str,
     retention_expires_at: str,
+    authorization_valid_through: str | None = None,
     extension: str | None = None,
 ) -> dict:
     return {
         "snapshots": [{"captured_at": captured_at}],
         "retention_expires_at": retention_expires_at,
+        "authorization_valid_through": authorization_valid_through or retention_expires_at,
         "retention_extension_authority_reference": extension,
     }
+
+
+def _bind_governance_authority(root: Path, governance: dict) -> None:
+    authority_reference = "fixture-authority-record"
+    authority = {
+        "schema_version": 1,
+        "kind": "historical_corpus_governance_authority_record",
+        "source_identity": governance["source_identity"],
+        "source_ids": governance["coverage"]["source_ids"],
+        "terms_reference": governance["terms_reference"],
+        "retention_basis": governance["retention_basis"],
+        "retention_expires_at": governance["retention_expires_at"],
+        "authorization_valid_through": governance["authorization_valid_through"],
+        "authority_reference": authority_reference,
+        "verified_at": "2026-01-02T00:00:00+00:00",
+        "redistribution_policy": governance["redistribution_policy"],
+        "redistribution_verified": False,
+        "licensing_or_retention_verified": True,
+        "evidence_reference": "test-only authorization authority fixture",
+        "verification_method": "deterministic test fixture",
+        "recorded_by": "test-suite",
+    }
+    extension = governance.get("retention_extension_authority_reference")
+    if extension is not None:
+        authority["retention_extension_authority_reference"] = extension
+
+    authority_path = root / "governance-authority.json"
+    authority_path.write_text(json.dumps(authority, sort_keys=True), encoding="utf-8")
+
+    proof = {
+        "schema_version": 1,
+        "kind": "historical_corpus_governance_proof",
+        "source_identity": authority["source_identity"],
+        "source_ids": authority["source_ids"],
+        "terms_reference": authority["terms_reference"],
+        "retention_basis": authority["retention_basis"],
+        "retention_expires_at": authority["retention_expires_at"],
+        "authorization_valid_through": authority["authorization_valid_through"],
+        "authority_reference": authority_reference,
+        "verified_at": authority["verified_at"],
+        "redistribution_policy": authority["redistribution_policy"],
+        "redistribution_verified": False,
+        "licensing_or_retention_verified": True,
+        "authority_record_file": authority_path.name,
+        "authority_record_sha256": hashlib.sha256(authority_path.read_bytes()).hexdigest(),
+    }
+    if extension is not None:
+        proof["retention_extension_authority_reference"] = extension
+
+    proof_path = root / "governance-proof.json"
+    proof_path.write_text(json.dumps(proof, sort_keys=True), encoding="utf-8")
+
+    acquisition_evidence = governance["acquisition_evidence"]
+    acquisition_evidence.update(
+        {
+            "governance_proof_file": proof_path.name,
+            "governance_proof_sha256": hashlib.sha256(proof_path.read_bytes()).hexdigest(),
+            "authority_record_file": authority_path.name,
+            "authority_record_sha256": hashlib.sha256(authority_path.read_bytes()).hexdigest(),
+            "authority_reference": authority_reference,
+        }
+    )
 
 
 class HistoricalRetentionAccessTests(unittest.TestCase):
@@ -41,6 +106,7 @@ class HistoricalRetentionAccessTests(unittest.TestCase):
                     "terms_reference": "https://parlay-api.com/terms",
                     "retention_basis": "fixture authority through 2026-01-03",
                     "retention_expires_at": expires,
+                    "authorization_valid_through": expires,
                     "redistribution_policy": "internal_only",
                     "acquired_at": "2026-01-02T00:00:00+00:00",
                     "imported_at": "2026-01-02T00:01:00+00:00",
@@ -60,6 +126,7 @@ class HistoricalRetentionAccessTests(unittest.TestCase):
                     ),
                 },
             }
+            _bind_governance_authority(root, manifest["governance"])
             (root / "manifest.json").write_text(
                 json.dumps(manifest, sort_keys=True),
                 encoding="utf-8",
@@ -129,6 +196,7 @@ class HistoricalRetentionAccessTests(unittest.TestCase):
                     "terms_reference": "https://parlay-api.com/terms",
                     "retention_basis": "unextended fixture claim",
                     "retention_expires_at": expires,
+                    "authorization_valid_through": expires,
                     "redistribution_policy": "internal_only",
                     "acquired_at": "2026-01-02T00:00:00+00:00",
                     "imported_at": "2026-01-02T00:01:00+00:00",
@@ -148,6 +216,7 @@ class HistoricalRetentionAccessTests(unittest.TestCase):
                     ),
                 },
             }
+            _bind_governance_authority(root, manifest["governance"])
             (root / "manifest.json").write_text(
                 json.dumps(manifest, sort_keys=True),
                 encoding="utf-8",
@@ -178,6 +247,7 @@ class HistoricalRetentionAccessTests(unittest.TestCase):
                     "terms_reference": "https://parlay-api.com/terms",
                     "retention_basis": "fixture claim",
                     "retention_expires_at": expires,
+                    "authorization_valid_through": expires,
                     "redistribution_policy": "internal_only",
                     "acquired_at": "2026-01-02T00:00:00+00:00",
                     "imported_at": "2026-01-02T00:01:00+00:00",
@@ -219,6 +289,7 @@ class HistoricalRetentionAccessTests(unittest.TestCase):
                     "terms_reference": "https://parlay-api.com/terms",
                     "retention_basis": "fixture extension claim",
                     "retention_expires_at": expires,
+                    "authorization_valid_through": expires,
                     "retention_extension_authority_reference": "authority:top-level",
                     "redistribution_policy": "internal_only",
                     "acquired_at": "2026-01-02T00:00:00+00:00",

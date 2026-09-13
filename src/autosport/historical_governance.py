@@ -6,18 +6,22 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 
 _AUTHORITY_RECORD_KIND = "historical_corpus_governance_authority_record"
 _GOVERNANCE_PROOF_KIND = "historical_corpus_governance_proof"
+_PARLAY_SOURCE_PREFIX = "parlayapi:"
+_PARLAY_TERMS_REFERENCE = "https://parlay-api.com/terms"
 _BOUND_FIELDS = (
     "source_identity",
     "source_ids",
     "terms_reference",
     "retention_basis",
     "retention_expires_at",
+    "authorization_valid_through",
     "retention_extension_authority_reference",
     "authority_reference",
     "verified_at",
@@ -67,6 +71,17 @@ def _text(raw: dict[str, Any], key: str, *, context: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{context}.{key} must be a non-empty string")
     return value.strip()
+
+
+def _timestamp(raw: dict[str, Any], key: str, *, context: str) -> datetime:
+    value = _text(raw, key, context=context)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{context}.{key} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{context}.{key} must include an explicit timezone")
+    return parsed
 
 
 def _digest(raw: dict[str, Any], key: str, *, context: str) -> str:
@@ -175,6 +190,34 @@ def verify_governance_authority_binding(
         if bound_field in proof and proof[bound_field] != authority[bound_field]:
             raise ValueError(
                 f"governance proof.{bound_field} does not match authority evidence artifact"
+            )
+
+    proof_source_identity = _text(proof, "source_identity", context="governance proof")
+    proof_terms_reference = _text(proof, "terms_reference", context="governance proof")
+    is_parlay = (
+        proof_source_identity.startswith(_PARLAY_SOURCE_PREFIX)
+        or any(source_id.startswith(_PARLAY_SOURCE_PREFIX) for source_id in proof_source_ids)
+        or proof_terms_reference.rstrip("/") == _PARLAY_TERMS_REFERENCE
+    )
+    if is_parlay:
+        authorization_valid_through = _timestamp(
+            proof,
+            "authorization_valid_through",
+            context="governance proof",
+        )
+        retention_expires_at = _timestamp(
+            proof,
+            "retention_expires_at",
+            context="governance proof",
+        )
+        verified_at = _timestamp(proof, "verified_at", context="governance proof")
+        if authorization_valid_through < verified_at:
+            raise ValueError(
+                "governance proof.authorization_valid_through must not precede verified_at"
+            )
+        if authorization_valid_through < retention_expires_at:
+            raise ValueError(
+                "governance proof.authorization_valid_through must not precede retention_expires_at"
             )
 
     evidence_reference = _text(

@@ -43,6 +43,17 @@ def _require_string(raw: dict[str, Any], key: str, *, context: str) -> str:
     return value.strip()
 
 
+def _require_digest(raw: dict[str, Any], key: str, *, context: str) -> str:
+    value = _require_string(raw, key, context=context)
+    if (
+        len(value) != 64
+        or value != value.lower()
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{context}.{key} must be a canonical lowercase SHA-256 hex digest")
+    return value
+
+
 def _parse_timestamp(value: str, *, field: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -54,7 +65,7 @@ def _parse_timestamp(value: str, *, field: str) -> datetime:
 
 
 def _retention_now() -> datetime:
-    """Return the wall-clock retention boundary; tests patch this private oracle."""
+    """Return the wall-clock access boundary; tests patch this private oracle."""
     return datetime.now(timezone.utc)
 
 
@@ -71,6 +82,13 @@ def _resolve_member(root: Path, value: str, *, field: str) -> Path:
     if not candidate.is_file():
         raise ValueError(f"{field} does not exist: {value}")
     return candidate
+
+
+def _resolve_governance_artifact(root: Path, value: str, *, field: str) -> Path:
+    relative = Path(value)
+    if relative.is_absolute() or len(relative.parts) != 1 or value in {".", ".."}:
+        raise ValueError(f"{field} must name one direct sibling governance artifact")
+    return _resolve_member(root, value, field=field)
 
 
 def _contains_forbidden_historical_metadata(value: Any) -> bool:
@@ -101,6 +119,7 @@ class DatasetGovernance:
     market_types: tuple[str, ...]
     outcome_reveal_after: str
     retention_expires_at: str | None = None
+    authorization_valid_through: str | None = None
     retention_extension_authority_reference: str | None = None
 
 
@@ -108,19 +127,39 @@ def _assert_governance_retention_current(
     governance: DatasetGovernance | None,
     retention_as_of: str | None = None,
 ) -> None:
-    if governance is None or governance.retention_expires_at is None:
+    if governance is None:
         return
-    expires = _parse_timestamp(
-        governance.retention_expires_at,
-        field="governance.retention_expires_at",
-    )
+    boundaries: list[tuple[str, datetime]] = []
+    if governance.retention_expires_at is not None:
+        boundaries.append(
+            (
+                "retention",
+                _parse_timestamp(
+                    governance.retention_expires_at,
+                    field="governance.retention_expires_at",
+                ),
+            )
+        )
+    if governance.authorization_valid_through is not None:
+        boundaries.append(
+            (
+                "authorization",
+                _parse_timestamp(
+                    governance.authorization_valid_through,
+                    field="governance.authorization_valid_through",
+                ),
+            )
+        )
+    if not boundaries:
+        return
     if retention_as_of is None:
         as_of = _retention_now()
     else:
         as_of = _parse_timestamp(retention_as_of, field="retention_as_of")
+    boundary_name, expires = min(boundaries, key=lambda item: item[1])
     if as_of > expires:
         raise ValueError(
-            "historical dataset retention window expired; governed market/results access is fail-closed"
+            f"historical dataset {boundary_name} window expired; governed market/results access is fail-closed"
         )
 
 
@@ -167,6 +206,7 @@ def _parlay_retention_capture_start(
     *,
     acquired_dt: datetime,
     retention_expires_at: str,
+    authorization_valid_through: str,
     retention_extension_authority_reference: str | None,
 ) -> datetime:
     acquisition_evidence = governance.get("acquisition_evidence")
@@ -179,6 +219,12 @@ def _parlay_retention_capture_start(
     if evidence_expiry != retention_expires_at:
         raise ValueError(
             "governance.acquisition_evidence.retention_expires_at must match governance.retention_expires_at"
+        )
+    evidence_authorization = acquisition_evidence.get("authorization_valid_through")
+    if evidence_authorization != authorization_valid_through:
+        raise ValueError(
+            "governance.acquisition_evidence.authorization_valid_through must match "
+            "governance.authorization_valid_through"
         )
     evidence_extension = acquisition_evidence.get("retention_extension_authority_reference")
     if evidence_extension != retention_extension_authority_reference:
@@ -215,7 +261,110 @@ def _parlay_retention_capture_start(
     return min(captured)
 
 
-def _load_governance(raw: dict[str, Any]) -> DatasetGovernance:
+def _verify_parlay_governance_authority(
+    root: Path,
+    governance: dict[str, Any],
+    *,
+    source_identity: str,
+    source_ids: tuple[str, ...],
+    terms_reference: str,
+    retention_basis: str,
+    retention_expires_at: str,
+    authorization_valid_through: str,
+    retention_extension_authority_reference: str | None,
+) -> None:
+    acquisition_evidence = governance.get("acquisition_evidence")
+    if not isinstance(acquisition_evidence, dict):
+        raise ValueError("ParlayAPI historical governance requires acquisition_evidence")
+
+    proof_file = _require_string(
+        acquisition_evidence,
+        "governance_proof_file",
+        context="governance.acquisition_evidence",
+    )
+    expected_proof_sha = _require_digest(
+        acquisition_evidence,
+        "governance_proof_sha256",
+        context="governance.acquisition_evidence",
+    )
+    authority_file = _require_string(
+        acquisition_evidence,
+        "authority_record_file",
+        context="governance.acquisition_evidence",
+    )
+    expected_authority_sha = _require_digest(
+        acquisition_evidence,
+        "authority_record_sha256",
+        context="governance.acquisition_evidence",
+    )
+    proof_path = _resolve_governance_artifact(
+        root,
+        proof_file,
+        field="governance.acquisition_evidence.governance_proof_file",
+    )
+    _resolve_governance_artifact(
+        root,
+        authority_file,
+        field="governance.acquisition_evidence.authority_record_file",
+    )
+
+    from .historical_governance import verify_governance_authority_binding
+
+    binding = verify_governance_authority_binding(proof_path)
+    if binding.governance_proof_sha256 != expected_proof_sha:
+        raise ValueError(
+            "governance.acquisition_evidence.governance_proof_sha256 does not match verified proof artifact"
+        )
+    if binding.authority_record_file != authority_file:
+        raise ValueError(
+            "governance.acquisition_evidence.authority_record_file does not match verified proof binding"
+        )
+    if binding.authority_record_sha256 != expected_authority_sha:
+        raise ValueError(
+            "governance.acquisition_evidence.authority_record_sha256 does not match verified authority artifact"
+        )
+
+    try:
+        proof = json.loads(binding.governance_proof_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("verified governance proof bytes are not valid UTF-8 JSON") from exc
+    if not isinstance(proof, dict):
+        raise ValueError("verified governance proof must be a JSON object")
+
+    exact_claims = {
+        "source_identity": source_identity,
+        "terms_reference": terms_reference,
+        "retention_basis": retention_basis,
+        "retention_expires_at": retention_expires_at,
+        "authorization_valid_through": authorization_valid_through,
+        "retention_extension_authority_reference": retention_extension_authority_reference,
+    }
+    for field, expected in exact_claims.items():
+        actual = proof.get(field)
+        if actual != expected:
+            raise ValueError(
+                f"governance.{field} does not match exact SHA-bound governance authority proof"
+            )
+    proof_source_ids = proof.get("source_ids")
+    if not isinstance(proof_source_ids, list):
+        raise ValueError("verified governance proof.source_ids must be a list")
+    normalized_proof_source_ids = tuple(sorted(str(value).strip() for value in proof_source_ids))
+    if normalized_proof_source_ids != tuple(sorted(source_ids)):
+        raise ValueError(
+            "governance.coverage.source_ids do not match exact SHA-bound governance authority proof"
+        )
+    authority_reference = _require_string(
+        acquisition_evidence,
+        "authority_reference",
+        context="governance.acquisition_evidence",
+    )
+    if proof.get("authority_reference") != authority_reference:
+        raise ValueError(
+            "governance.acquisition_evidence.authority_reference does not match exact SHA-bound governance proof"
+        )
+
+
+def _load_governance(raw: dict[str, Any], *, root: Path) -> DatasetGovernance:
     governance = raw.get("governance")
     if not isinstance(governance, dict):
         raise ValueError("schema v2 historical dataset requires governance object")
@@ -264,26 +413,21 @@ def _load_governance(raw: dict[str, Any]) -> DatasetGovernance:
         if imported_dt > retention_expires_dt:
             raise ValueError("governance.imported_at exceeds retention_expires_at")
 
-    is_parlay = terms_reference.rstrip("/") == _PARLAY_TERMS_REFERENCE
-    if is_parlay and retention_expires_at is None:
-        raise ValueError("ParlayAPI historical governance requires structured retention_expires_at")
-    if is_parlay:
-        assert retention_expires_at is not None
-        assert retention_expires_dt is not None
-        earliest_capture_dt = _parlay_retention_capture_start(
-            governance,
-            acquired_dt=acquired_dt,
-            retention_expires_at=retention_expires_at,
-            retention_extension_authority_reference=retention_extension_authority_reference,
-        )
-        if (
-            retention_expires_dt > earliest_capture_dt + _PARLAY_STANDARD_RETENTION_CEILING
-            and retention_extension_authority_reference is None
-        ):
+    authorization_raw = governance.get("authorization_valid_through")
+    authorization_valid_through: str | None = None
+    authorization_valid_through_dt: datetime | None = None
+    if authorization_raw is not None:
+        if not isinstance(authorization_raw, str) or not authorization_raw.strip():
             raise ValueError(
-                "ParlayAPI retention beyond 90 days from earliest governed capture requires "
-                "retention_extension_authority_reference"
+                "governance.authorization_valid_through must be a non-empty ISO-8601 timestamp"
             )
+        authorization_valid_through = authorization_raw.strip()
+        authorization_valid_through_dt = _parse_timestamp(
+            authorization_valid_through,
+            field="governance.authorization_valid_through",
+        )
+        if imported_dt > authorization_valid_through_dt:
+            raise ValueError("governance.imported_at exceeds authorization_valid_through")
 
     coverage = governance.get("coverage")
     if not isinstance(coverage, dict):
@@ -306,6 +450,45 @@ def _load_governance(raw: dict[str, Any]) -> DatasetGovernance:
         and terms_reference.rstrip("/") != _PARLAY_TERMS_REFERENCE
     ):
         raise ValueError("ParlayAPI historical governance must use canonical terms_reference")
+
+    is_parlay = (
+        source_identity.startswith(_PARLAY_SOURCE_PREFIX)
+        or any(source_id.startswith(_PARLAY_SOURCE_PREFIX) for source_id in source_ids)
+        or terms_reference.rstrip("/") == _PARLAY_TERMS_REFERENCE
+    )
+    if is_parlay:
+        if retention_expires_at is None or retention_expires_dt is None:
+            raise ValueError("ParlayAPI historical governance requires structured retention_expires_at")
+        if authorization_valid_through is None or authorization_valid_through_dt is None:
+            raise ValueError(
+                "ParlayAPI historical governance requires structured authorization_valid_through"
+            )
+        earliest_capture_dt = _parlay_retention_capture_start(
+            governance,
+            acquired_dt=acquired_dt,
+            retention_expires_at=retention_expires_at,
+            authorization_valid_through=authorization_valid_through,
+            retention_extension_authority_reference=retention_extension_authority_reference,
+        )
+        _verify_parlay_governance_authority(
+            root,
+            governance,
+            source_identity=source_identity,
+            source_ids=source_ids,
+            terms_reference=terms_reference,
+            retention_basis=retention_basis,
+            retention_expires_at=retention_expires_at,
+            authorization_valid_through=authorization_valid_through,
+            retention_extension_authority_reference=retention_extension_authority_reference,
+        )
+        if (
+            retention_expires_dt > earliest_capture_dt + _PARLAY_STANDARD_RETENTION_CEILING
+            and retention_extension_authority_reference is None
+        ):
+            raise ValueError(
+                "ParlayAPI retention beyond 90 days from earliest governed capture requires "
+                "retention_extension_authority_reference"
+            )
 
     market_types_raw = coverage.get("market_types")
     if not isinstance(market_types_raw, list) or not market_types_raw:
@@ -346,6 +529,7 @@ def _load_governance(raw: dict[str, Any]) -> DatasetGovernance:
         market_types=market_types,
         outcome_reveal_after=outcome_reveal_after,
         retention_expires_at=retention_expires_at,
+        authorization_valid_through=authorization_valid_through,
         retention_extension_authority_reference=retention_extension_authority_reference,
     )
 
@@ -481,10 +665,10 @@ def load_dataset(root: str | Path) -> ReplayDataset:
     if schema_version == 2:
         if str(raw.get("dataset_kind", "")) != "historical":
             raise ValueError("schema v2 requires dataset_kind=historical")
-        governance = _load_governance(raw)
-        # Retention is a byte-access boundary, not merely a replay API boundary.
-        # Manifest governance is parsed first, then an expired governed corpus is
-        # rejected before market/results members are resolved, hashed or parsed.
+        governance = _load_governance(raw, root=root)
+        # Retention and authorization are byte-access boundaries, not merely replay API boundaries.
+        # Governance authority is verified first, then an expired governed corpus is rejected
+        # before market/results members are resolved, hashed or parsed.
         _assert_governance_retention_current(governance)
 
     market_path = _resolve_member(root, str(raw["market_file"]), field="market_file")

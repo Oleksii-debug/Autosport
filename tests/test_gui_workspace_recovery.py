@@ -124,6 +124,30 @@ class GuiWorkspaceRecoveryTests(unittest.TestCase):
             self.assertNotEqual(task_threads[0], caller_thread)
             self.assertFalse(worker.busy)
 
+    def test_recovery_worker_thread_start_failure_rolls_back_busy_and_allows_retry(self) -> None:
+        worker = OneShotRecoveryWorker()
+        with patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")):
+            self.assertFalse(worker.start(lambda: self.fail("task must not run when thread start fails")))
+
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertTrue(worker.start(lambda: recover_workspace_once(root)))
+            thread = worker._thread
+            self.assertIsNotNone(thread)
+            assert thread is not None
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+            message = worker.poll()
+            self.assertIsNotNone(message)
+            assert message is not None
+            self.assertIsNone(message.error)
+            self.assertIsNotNone(message.result)
+            self.assertFalse(worker.busy)
+
     def test_gui_recovery_uses_selected_research_plan_workspace_and_terminal_view(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

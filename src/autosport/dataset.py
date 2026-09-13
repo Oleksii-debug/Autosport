@@ -14,9 +14,12 @@ _FORBIDDEN_HISTORICAL_METADATA_KEYS = frozenset(
     {
         "outcome",
         "result",
+        "winner",
         "final_score",
         "final_result",
         "settlement_result",
+        "settled_outcome",
+        "future_quote",
     }
 )
 

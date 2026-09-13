@@ -77,7 +77,7 @@ def _text(raw: dict[str, Any], key: str, *, context: str) -> str:
     return value.strip()
 
 
-def _governance_proof(path: Path) -> dict[str, Any]:
+def _governance_proof(path: Path, *, imported_dt: datetime) -> dict[str, Any]:
     raw = _json_object(path, context="governance proof")
     if int(raw.get("schema_version", 0)) != 1:
         raise ValueError("governance proof schema_version must be 1")
@@ -97,7 +97,9 @@ def _governance_proof(path: Path) -> dict[str, Any]:
     retention_basis = _text(raw, "retention_basis", context="governance proof")
     authority_reference = _text(raw, "authority_reference", context="governance proof")
     verified_at = _text(raw, "verified_at", context="governance proof")
-    _timestamp(verified_at, field="governance proof.verified_at")
+    verified_dt = _timestamp(verified_at, field="governance proof.verified_at")
+    if imported_dt < verified_dt:
+        raise ValueError("imported_at must not precede governance proof verification")
 
     policy = _text(raw, "redistribution_policy", context="governance proof")
     if policy not in _ALLOWED_REDISTRIBUTION:
@@ -126,7 +128,7 @@ def _governance_proof(path: Path) -> dict[str, Any]:
 def _outcome_provenance(
     results: dict[str, Any],
     *,
-    source_root: Path,
+    results_path: Path,
     reveal_dt: datetime,
     imported_dt: datetime,
 ) -> dict[str, Any]:
@@ -159,6 +161,10 @@ def _outcome_provenance(
         raise ValueError(
             "sealed results outcome_provenance.source_record_file must name one direct sibling artifact"
         )
+    if relative_source_record.name == results_path.name:
+        raise ValueError(
+            "sealed results outcome provenance source record must be separate from sealed results"
+        )
     source_record_sha256 = _text(
         raw,
         "source_record_sha256",
@@ -170,7 +176,7 @@ def _outcome_provenance(
         raise ValueError(
             "sealed results outcome_provenance.source_record_sha256 must be a 64-character SHA-256 hex digest"
         )
-    source_record_path = source_root / relative_source_record
+    source_record_path = results_path.parent / relative_source_record
     try:
         actual_source_record_sha256 = _sha256(source_record_path)
     except OSError as exc:
@@ -366,9 +372,9 @@ def assemble_historical_corpus(
         raise ValueError("output_dir already exists; historical corpus assembly never overwrites")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    proof_path = Path(governance_proof_path)
-    proof = _governance_proof(proof_path)
     imported_dt = _timestamp(imported_at, field="imported_at")
+    proof_path = Path(governance_proof_path)
+    proof = _governance_proof(proof_path, imported_dt=imported_dt)
     reveal_dt = _timestamp(outcome_reveal_after, field="outcome_reveal_after")
 
     events: list[tuple[MarketEvent, dict[str, Any]]] = []
@@ -435,7 +441,7 @@ def assemble_historical_corpus(
         raise ValueError("sealed results schema_version must be 1")
     outcome_provenance = _outcome_provenance(
         results,
-        source_root=results_path_obj.parent,
+        results_path=results_path_obj,
         reveal_dt=reveal_dt,
         imported_dt=imported_dt,
     )

@@ -171,6 +171,103 @@ def verify_acquisition_bundle(
     if result_scope.get("priced_only") is not match_results.get("priced_only"):
         raise ValueError("acquisition bundle match-result priced_only does not match request scope")
 
+    coverage_scope = request_scope.get("coverage_preflight")
+    if not isinstance(coverage_scope, dict):
+        raise ValueError("acquisition bundle.request_scope.coverage_preflight must be an object")
+    coverage_evidence = match_results.get("coverage_preflight")
+    if not isinstance(coverage_evidence, dict):
+        raise ValueError("acquisition bundle.match_results.coverage_preflight must be an object")
+    for field in ("date_from", "date_to"):
+        scoped = _text(coverage_scope, field, context="acquisition bundle.request_scope.coverage_preflight")
+        evidenced = _text(
+            coverage_evidence,
+            field,
+            context="acquisition bundle.match_results.coverage_preflight",
+        )
+        if scoped != evidenced:
+            raise ValueError(f"acquisition bundle coverage preflight {field} does not match request scope")
+    _text(coverage_evidence, "observed_at", context="acquisition bundle.match_results.coverage_preflight")
+    _text(
+        coverage_evidence,
+        "historical_window_from",
+        context="acquisition bundle.match_results.coverage_preflight",
+    )
+    _text(coverage_evidence, "api_version", context="acquisition bundle.match_results.coverage_preflight")
+    _digest(
+        coverage_evidence,
+        "response_sha256",
+        context="acquisition bundle.match_results.coverage_preflight",
+    )
+    historical_window_hours = coverage_evidence.get("historical_window_hours")
+    if (
+        not isinstance(historical_window_hours, int)
+        or isinstance(historical_window_hours, bool)
+        or historical_window_hours <= 0
+    ):
+        raise ValueError(
+            "acquisition bundle.match_results.coverage_preflight.historical_window_hours must be a positive integer"
+        )
+    sources = coverage_evidence.get("sources")
+    if not isinstance(sources, list) or not sources or not all(isinstance(item, dict) for item in sources):
+        raise ValueError("acquisition bundle.match_results.coverage_preflight.sources must be a non-empty list of objects")
+    source_count = coverage_evidence.get("source_count")
+    if (
+        not isinstance(source_count, int)
+        or isinstance(source_count, bool)
+        or source_count != len(sources)
+    ):
+        raise ValueError("acquisition bundle coverage preflight source_count does not match sources")
+    total_rows = coverage_evidence.get("total_rows")
+    total_priced_rows = coverage_evidence.get("total_priced_rows")
+    if not isinstance(total_rows, int) or isinstance(total_rows, bool) or total_rows <= 0:
+        raise ValueError("acquisition bundle coverage preflight total_rows must be a positive integer")
+    if (
+        not isinstance(total_priced_rows, int)
+        or isinstance(total_priced_rows, bool)
+        or total_priced_rows < 0
+        or total_priced_rows > total_rows
+    ):
+        raise ValueError("acquisition bundle coverage preflight total_priced_rows is invalid")
+    summed_rows = 0
+    summed_priced_rows = 0
+    seen_sources: set[str] = set()
+    for index, source in enumerate(sources, start=1):
+        context = f"acquisition bundle.match_results.coverage_preflight.sources[{index}]"
+        source_name = _text(source, "source", context=context)
+        if source_name in seen_sources:
+            raise ValueError("acquisition bundle coverage preflight source identities must be unique")
+        seen_sources.add(source_name)
+        rows = source.get("rows")
+        priced_rows = source.get("priced_rows")
+        if not isinstance(rows, int) or isinstance(rows, bool) or rows < 0:
+            raise ValueError(f"{context}.rows must be a non-negative integer")
+        if (
+            not isinstance(priced_rows, int)
+            or isinstance(priced_rows, bool)
+            or priced_rows < 0
+            or priced_rows > rows
+        ):
+            raise ValueError(f"{context}.priced_rows must be between zero and rows")
+        if rows > 0:
+            _text(source, "first_date", context=context)
+            _text(source, "last_date", context=context)
+        summed_rows += rows
+        summed_priced_rows += priced_rows
+    if summed_rows != total_rows:
+        raise ValueError("acquisition bundle coverage preflight total_rows does not match sources")
+    if summed_priced_rows != total_priced_rows:
+        raise ValueError("acquisition bundle coverage preflight total_priced_rows does not match sources")
+    for field in (
+        "historical_window_market_coverage_verified",
+        "licensing_or_retention_verified",
+        "redistribution_verified",
+    ):
+        _false(
+            coverage_evidence,
+            field,
+            context="acquisition bundle.match_results.coverage_preflight",
+        )
+
     evidence_identity = _digest(bundle, "evidence_identity", context="acquisition bundle")
     identity_payload = {
         "schema_version": 1,

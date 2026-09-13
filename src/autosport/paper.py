@@ -88,14 +88,66 @@ class PaperBook:
             os.fsync(handle.fileno())
         os.replace(temporary, destination)
 
+    @staticmethod
+    def _require_finite(value: Decimal, label: str) -> None:
+        if not value.is_finite():
+            raise ValueError(f"PaperBook snapshot contains non-finite {label}")
+
+    @classmethod
+    def _validate_loaded_state(cls, book: "PaperBook") -> None:
+        cls._require_finite(book.initial_bankroll, "initial_bankroll")
+        cls._require_finite(book.balance, "balance")
+        if book.initial_bankroll <= 0:
+            raise ValueError("PaperBook snapshot initial_bankroll must be positive")
+        if book.balance < 0:
+            raise ValueError("PaperBook snapshot balance cannot be negative")
+
+        expected_balance = book.initial_bankroll
+        for ticket in book.tickets.values():
+            cls._require_finite(ticket.stake, f"stake for ticket {ticket.ticket_id}")
+            cls._require_finite(ticket.payout, f"payout for ticket {ticket.ticket_id}")
+            if ticket.stake <= 0:
+                raise ValueError("PaperBook snapshot ticket stake must be positive")
+            if ticket.payout < 0:
+                raise ValueError("PaperBook snapshot ticket payout cannot be negative")
+            if not ticket.legs:
+                raise ValueError("PaperBook snapshot ticket requires at least one leg")
+            for leg in ticket.legs:
+                cls._require_finite(leg.locked_odds, f"locked_odds for ticket {ticket.ticket_id}")
+                if leg.locked_odds <= 1:
+                    raise ValueError("PaperBook snapshot decimal odds must be greater than 1")
+
+            if ticket.status in {TicketStatus.OPEN, TicketStatus.LOST} and ticket.payout != 0:
+                raise ValueError("PaperBook snapshot open/lost ticket payout must be zero")
+            if ticket.status is TicketStatus.VOID and ticket.payout != ticket.stake:
+                raise ValueError("PaperBook snapshot void ticket payout must equal stake")
+            if ticket.status is TicketStatus.WON and ticket.payout <= ticket.stake:
+                raise ValueError("PaperBook snapshot won ticket payout must exceed stake")
+
+            expected_balance -= ticket.stake
+            if ticket.status is not TicketStatus.OPEN:
+                expected_balance += ticket.payout
+
+        if expected_balance != book.balance:
+            raise ValueError(
+                "PaperBook snapshot balance is inconsistent with ticket stakes and settled payouts"
+            )
+
     @classmethod
     def load(cls, path: str | Path) -> "PaperBook":
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
         book = cls(raw["initial_bankroll"])
         book.balance = Decimal(raw["balance"])
+        seen_ticket_ids: set[str] = set()
         for item in raw["tickets"]:
+            ticket_id = item["ticket_id"]
+            if not isinstance(ticket_id, str) or not ticket_id:
+                raise ValueError("PaperBook snapshot ticket_id must be a non-empty string")
+            if ticket_id in seen_ticket_ids:
+                raise ValueError("PaperBook snapshot contains duplicate ticket_id")
+            seen_ticket_ids.add(ticket_id)
             ticket = PaperTicket(
-                ticket_id=item["ticket_id"],
+                ticket_id=ticket_id,
                 stake=Decimal(item["stake"]),
                 legs=tuple(
                     TicketLeg(leg["event_id"], leg["market_id"], leg["selection_id"], Decimal(leg["locked_odds"])) for leg in item["legs"]
@@ -106,4 +158,5 @@ class PaperBook:
                 strategy_reason=item.get("strategy_reason", ""),
             )
             book.tickets[ticket.ticket_id] = ticket
+        cls._validate_loaded_state(book)
         return book

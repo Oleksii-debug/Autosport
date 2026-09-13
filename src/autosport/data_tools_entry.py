@@ -7,6 +7,7 @@ _USAGE = """Autosport-Data — portable Windows historical-data tools + research
 
 Usage:
   Autosport-Data.exe acquire [autosport-acquire-historical-evidence arguments]
+  Autosport-Data.exe import-betfair-historical <local-file> [...] [import arguments]
   Autosport-Data.exe build-corpus [autosport-build-historical-corpus arguments]
   Autosport-Data.exe build-corpus-from-bundle [bundle-adapter arguments]
   Autosport-Data.exe verify-dataset <dataset-path>
@@ -14,16 +15,18 @@ Usage:
   Autosport-Data.exe compare-strategies <run-summary> <run-summary> [...] [strategy-comparison arguments]
 
 Commands:
-  acquire                   Capture immutable authenticated historical odds + match/result evidence.
-  build-corpus              Assemble selected snapshots, sealed outcomes, and rights proof into a governed corpus.
-  build-corpus-from-bundle  Verify an acquisition bundle and reuse the canonical governed corpus assembler.
-  verify-dataset            Verify sealed hashes and historical governance without replay.
-  walk-forward-evaluate     Run the canonical strict causal walk-forward evaluator and emit machine-readable evidence.
-  compare-strategies        Compare compatible completed paper strategy runs on the same sealed replay identity.
+  acquire                    Capture immutable authenticated historical odds + match/result evidence.
+  import-betfair-historical Import user-supplied local Betfair Historical Data stream files into the canonical governed table-tennis dataset format; source files are never redistributed by this command.
+  build-corpus               Assemble selected snapshots, sealed outcomes, and rights proof into a governed corpus.
+  build-corpus-from-bundle   Verify an acquisition bundle and reuse the canonical governed corpus assembler.
+  verify-dataset             Verify sealed hashes and historical governance without replay.
+  walk-forward-evaluate      Run the canonical strict causal walk-forward evaluator and emit machine-readable evidence.
+  compare-strategies         Compare compatible completed paper strategy runs on the same sealed replay identity.
 
 Truth boundaries remain fail closed: credentials, lawful retention/licensing, real sealed outcomes,
 coverage, profitability or predictive superiority, human testing, and NVDA verification are never
-inferred by this wrapper.
+inferred by this wrapper. Local source-data rights remain the user's responsibility and are recorded,
+not independently certified, by import commands.
 """
 
 
@@ -38,6 +41,10 @@ def main(argv: list[str] | None = None) -> int:
         from autosport.historical_acquisition import main as acquisition_main
 
         return acquisition_main(forwarded)
+    if command == "import-betfair-historical":
+        from autosport.betfair_historical_import import main as betfair_import_main
+
+        return betfair_import_main(forwarded)
     if command == "build-corpus":
         from autosport.historical_corpus import main as corpus_main
 

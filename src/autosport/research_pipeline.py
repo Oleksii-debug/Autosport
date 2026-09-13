@@ -105,10 +105,20 @@ class ResearchDecisionPolicy:
         object.__setattr__(self, "max_forecast_uncertainty", uncertainty)
         if self.minimum_evidence_per_leg < 1:
             raise ValueError("minimum_evidence_per_leg must be positive")
+        if not isinstance(self.blocked_quality_flags, (frozenset, set, tuple, list)):
+            raise ValueError("blocked_quality_flags must be an explicit collection")
+        blocked_quality_flags = tuple(self.blocked_quality_flags)
+        if any(
+            not isinstance(flag, str) or not flag.strip() or flag != flag.strip()
+            for flag in blocked_quality_flags
+        ):
+            raise ValueError(
+                "blocked_quality_flags must contain non-empty canonical strings"
+            )
         object.__setattr__(
             self,
             "blocked_quality_flags",
-            frozenset(str(flag) for flag in self.blocked_quality_flags),
+            frozenset(blocked_quality_flags),
         )
         if self.minimum_ranking_risk_change is not None:
             object.__setattr__(

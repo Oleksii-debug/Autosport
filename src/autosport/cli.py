@@ -17,7 +17,7 @@ from .portfolio import PortfolioEngine
 from .recovery import reconcile_late_crashes
 from .replay import ReplayEngine
 from .run_registry import ReconciliationError
-from .session import AutosportSession, ObservationResult
+from .session import AutosportSession, ObservationResult, SUPPORTED_DATASET_STRATEGIES
 
 
 ProviderFactory = Callable[..., ParlayApiTableTennisProvider]
@@ -34,6 +34,12 @@ def build_parser() -> argparse.ArgumentParser:
     dataset.add_argument("path", type=Path)
     dataset.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
     dataset.add_argument("--bankroll", default="10000")
+    dataset.add_argument(
+        "--strategy",
+        choices=SUPPORTED_DATASET_STRATEGIES,
+        default="baseline-v1",
+        help="paper-only replay strategy; research-v1 consumes explicit causal research_signal metadata",
+    )
     verify = sub.add_parser("verify-dataset", help="verify sealed hashes and historical corpus governance without replay")
     verify.add_argument("path", type=Path)
     observe = sub.add_parser("observe-table-tennis", help="fetch one read-only table-tennis market snapshot")
@@ -68,12 +74,13 @@ def run_replay(path: Path, bankroll: str) -> int:
     return 0
 
 
-def run_dataset(path: Path, workspace: Path, bankroll: str) -> int:
+def run_dataset(path: Path, workspace: Path, bankroll: str, strategy: str = "baseline-v1") -> int:
     dataset = load_dataset(path)
-    session = AutosportSession(workspace, bankroll)
+    session = AutosportSession(workspace, bankroll, strategy_id=strategy)
     try:
         result = session.run_dataset(dataset)
         print(f"run_id={result.replay.run_id}")
+        print(f"strategy={strategy}")
         print(f"events={result.replay.event_count}")
         print(f"balance={result.balance}")
         print(f"net_profit={result.evaluation.net_profit}")
@@ -233,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "replay":
         return run_replay(args.path, args.bankroll)
     if args.command == "dataset":
-        return run_dataset(args.path, args.workspace, args.bankroll)
+        return run_dataset(args.path, args.workspace, args.bankroll, args.strategy)
     if args.command == "verify-dataset":
         return run_verify_dataset(args.path)
     if args.command == "observe-table-tennis":

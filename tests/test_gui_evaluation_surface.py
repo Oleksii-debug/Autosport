@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import inspect
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 from autosport.gui import AUTOMATION_IDS, AutosportApp
 from autosport.ui_model import evaluation_lines
 
 
-def _result(*, mode: str):
+def _result(*, mode: str, result_path: Path):
     return SimpleNamespace(
         replay=SimpleNamespace(run_id="12345678-abcd", event_count=17),
         settled_ticket_ids=("t1", "t2"),
@@ -30,11 +31,12 @@ def _result(*, mode: str):
             best_case=Decimal("30"),
             mean_case=Decimal("5"),
         ),
+        result_path=result_path,
     )
 
 
-def test_evaluation_lines_publish_terminal_paper_metrics_and_truth_boundary():
-    lines = evaluation_lines(_result(mode="exact"))
+def test_evaluation_lines_publish_terminal_paper_metrics_and_truth_boundary(tmp_path: Path):
+    lines = evaluation_lines(_result(mode="exact", result_path=tmp_path / "missing-run-summary.json"))
 
     assert lines[0] == "Replay 12345678 | events 17 | settled tickets 2"
     assert "initial 10000" in lines[1]
@@ -46,15 +48,20 @@ def test_evaluation_lines_publish_terminal_paper_metrics_and_truth_boundary():
     assert "lost 1" in lines[2]
     assert "exact — усі релевантні сценарії цього portfolio report перебрано" in lines[3]
     assert "scenarios 4" in lines[3]
-    assert "не є доказом майбутньої profitability" in lines[4]
+    assert "executable quote verified=false" in lines[4]
+    assert "paper fill fidelity verified=false" in lines[4]
+    assert "не є доказом майбутньої profitability" in lines[5]
 
 
-def test_approximate_portfolio_never_presents_sampled_bounds_as_guarantees():
-    lines = evaluation_lines(_result(mode="approximate"))
+def test_approximate_portfolio_never_presents_sampled_bounds_as_guarantees(tmp_path: Path):
+    lines = evaluation_lines(_result(mode="approximate", result_path=tmp_path / "missing-run-summary.json"))
 
     assert "approximate — сценарії sampled" in lines[3]
     assert "гарантії worst/best не заявляються" in lines[3]
     assert "scenarios 20000" in lines[3]
+    assert "executable quote verified=false" in lines[4]
+    assert "paper fill fidelity verified=false" in lines[4]
+    assert "не є доказом майбутньої profitability" in lines[5]
 
 
 def test_gui_wires_evaluation_to_keyboard_uia_and_terminal_result_without_tk_startup():

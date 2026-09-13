@@ -89,6 +89,24 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         self.assertIn(preflight, workflow)
         self.assertLess(workflow.index(preflight), workflow.index(build))
 
+    def test_ci_workflow_qualifies_exact_candidate_not_synthetic_merge_ref(self) -> None:
+        workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        exact_ref = "ref: ${{ github.event.pull_request.head.sha || github.sha }}"
+        unix_preflight = (
+            'python scripts/verify_source_checkout.py --source-sha "$AUTOSPORT_SOURCE_SHA"'
+        )
+        windows_preflight = (
+            "python scripts/verify_source_checkout.py --source-sha $env:AUTOSPORT_SOURCE_SHA"
+        )
+        install = "python -m pip install -e '.[test]'"
+        self.assertIn("AUTOSPORT_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}", workflow)
+        self.assertIn(exact_ref, workflow)
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn(unix_preflight, workflow)
+        self.assertIn(windows_preflight, workflow)
+        self.assertLess(workflow.index(unix_preflight), workflow.index(install))
+        self.assertLess(workflow.index(windows_preflight), workflow.index(install))
+
 
 if __name__ == "__main__":
     unittest.main()

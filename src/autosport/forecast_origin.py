@@ -120,6 +120,8 @@ def verify_forecast_origin_binding(
                     raise ValueError("forecast was generated after its canonical decision time")
                 if parse_iso_timestamp(forecast.input_cutoff_ts) > observed_at:
                     raise ValueError("forecast input cutoff is after its canonical decision time")
+                if recorded_at < observed_at:
+                    raise ValueError("research decision recorded_at is before its canonical decision time")
                 matched[forecast.forecast_id].add(run_id)
                 if recorded_at >= reveal_after:
                     all_declared_record_times_before_reveal = False

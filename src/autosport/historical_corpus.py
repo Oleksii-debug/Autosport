@@ -19,6 +19,7 @@ from .integrity import atomic_write_json
 _SNAPSHOT_KIND = "parlayapi_point_in_time_historical_snapshot"
 _GOVERNANCE_KIND = "historical_corpus_governance_proof"
 _ALLOWED_REDISTRIBUTION = {"prohibited", "internal_only", "permitted"}
+_ALLOWED_OUTCOMES = {"win", "loss", "void"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +84,12 @@ def _governance_proof(path: Path) -> dict[str, Any]:
         raise ValueError("governance proof must explicitly set licensing_or_retention_verified=true")
 
     source_identity = _text(raw, "source_identity", context="governance proof")
+    source_ids_raw = raw.get("source_ids")
+    if not isinstance(source_ids_raw, list) or not source_ids_raw:
+        raise ValueError("governance proof.source_ids must be a non-empty list")
+    source_ids = tuple(sorted(str(value).strip() for value in source_ids_raw))
+    if any(not value for value in source_ids) or len(set(source_ids)) != len(source_ids):
+        raise ValueError("governance proof.source_ids must contain unique non-empty strings")
     terms_reference = _text(raw, "terms_reference", context="governance proof")
     retention_basis = _text(raw, "retention_basis", context="governance proof")
     authority_reference = _text(raw, "authority_reference", context="governance proof")
@@ -103,6 +110,7 @@ def _governance_proof(path: Path) -> dict[str, Any]:
     return {
         **raw,
         "source_identity": source_identity,
+        "source_ids": source_ids,
         "terms_reference": terms_reference,
         "retention_basis": retention_basis,
         "authority_reference": authority_reference,
@@ -280,13 +288,31 @@ def assemble_historical_corpus(
     if reveal_dt < _timestamp(coverage_end, field="coverage end"):
         raise ValueError("outcome_reveal_after must be at or after observed market coverage end")
     source_ids = tuple(sorted({event.source_id for event, _ in events}))
+    if source_ids != proof["source_ids"]:
+        raise ValueError("governance proof.source_ids do not match historical snapshot source_ids")
     market_types = tuple(sorted({event.market_type.value for event, _ in events}))
 
     results = _json_object(Path(results_path), context="sealed results")
     if int(results.get("schema_version", 0)) != 1:
         raise ValueError("sealed results schema_version must be 1")
-    if not isinstance(results.get("quote_outcomes"), dict):
+    outcomes = results.get("quote_outcomes")
+    if not isinstance(outcomes, dict):
         raise ValueError("sealed results quote_outcomes must be an object")
+    quote_keys = {event.quote_key for event, _ in events}
+    outcome_keys = {str(key) for key in outcomes}
+    missing_outcomes = sorted(quote_keys - outcome_keys)
+    if missing_outcomes:
+        raise ValueError("sealed results are missing quote outcomes for historical market corpus")
+    unknown_outcomes = sorted(outcome_keys - quote_keys)
+    if unknown_outcomes:
+        raise ValueError("sealed results reference quote keys absent from historical market corpus")
+    invalid_outcomes = sorted(
+        str(key)
+        for key, value in outcomes.items()
+        if not isinstance(value, str) or value not in _ALLOWED_OUTCOMES
+    )
+    if invalid_outcomes:
+        raise ValueError("sealed results contain unsupported outcome; allowed values are win, loss, void")
 
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.build-", dir=str(output.parent)))
     try:
@@ -323,6 +349,7 @@ def assemble_historical_corpus(
                 "historical_window_market_coverage_verified": False,
                 "governance_proof_sha256": _sha256(proof_path),
                 "licensing_or_retention_verified": True,
+                "rights_source_ids": list(proof["source_ids"]),
                 "authority_reference": proof["authority_reference"],
                 "verified_at": proof["verified_at"],
                 "redistribution_verified": proof["redistribution_verified"],

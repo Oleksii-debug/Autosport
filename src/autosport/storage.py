@@ -2,10 +2,25 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 from .domain import MarketEvent
+
+
+def _observed_instant(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("observed_ts must be valid ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("observed_ts must be timezone-aware ISO-8601")
+    return parsed
+
+
+def _event_order_key(event: MarketEvent) -> tuple[datetime, int, str]:
+    return (_observed_instant(event.observed_ts), event.sequence, event.dedupe_key)
 
 
 class SQLiteMarketStore:
@@ -17,6 +32,7 @@ class SQLiteMarketStore:
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=FULL")
         self._init_schema()
+        self._rebuild_current_quotes()
 
     def _init_schema(self) -> None:
         self.connection.executescript(
@@ -49,7 +65,29 @@ class SQLiteMarketStore:
         )
         self.connection.commit()
 
+    def _rebuild_current_quotes(self) -> None:
+        """Repair the persisted current projection using physical time, including legacy DBs."""
+        latest: dict[str, tuple[tuple[datetime, int, str], MarketEvent]] = {}
+        rows = self.connection.execute("SELECT payload_json FROM market_events").fetchall()
+        for (payload_json,) in rows:
+            event = MarketEvent.from_dict(json.loads(payload_json))
+            order_key = _event_order_key(event)
+            previous = latest.get(event.quote_key)
+            if previous is None or order_key > previous[0]:
+                latest[event.quote_key] = (order_key, event)
+
+        with self.connection:
+            self.connection.execute("DELETE FROM current_quotes")
+            for quote_key in sorted(latest):
+                event = latest[quote_key][1]
+                payload = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                self.connection.execute(
+                    "INSERT INTO current_quotes(quote_key,observed_ts,sequence,payload_json) VALUES (?,?,?,?)",
+                    (quote_key, event.observed_ts, event.sequence, payload),
+                )
+
     def _insert_one(self, event: MarketEvent) -> bool:
+        incoming_key = _event_order_key(event)
         payload = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         cursor = self.connection.execute(
             """INSERT OR IGNORE INTO market_events
@@ -71,10 +109,11 @@ class SQLiteMarketStore:
         if cursor.rowcount == 0:
             return False
         previous = self.connection.execute(
-            "SELECT observed_ts, sequence FROM current_quotes WHERE quote_key=?",
+            "SELECT payload_json FROM current_quotes WHERE quote_key=?",
             (event.quote_key,),
         ).fetchone()
-        if previous is None or (event.observed_ts, event.sequence) >= (previous[0], previous[1]):
+        previous_event = MarketEvent.from_dict(json.loads(previous[0])) if previous is not None else None
+        if previous_event is None or incoming_key > _event_order_key(previous_event):
             self.connection.execute(
                 """INSERT INTO current_quotes(quote_key,observed_ts,sequence,payload_json)
                    VALUES (?,?,?,?)
@@ -102,19 +141,25 @@ class SQLiteMarketStore:
 
     def events(self, event_id: str | None = None) -> list[MarketEvent]:
         if event_id is None:
-            rows = self.connection.execute(
-                "SELECT payload_json FROM market_events ORDER BY observed_ts, sequence, dedupe_key"
-            ).fetchall()
+            rows = self.connection.execute("SELECT payload_json FROM market_events").fetchall()
         else:
             rows = self.connection.execute(
-                "SELECT payload_json FROM market_events WHERE event_id=? ORDER BY observed_ts, sequence, dedupe_key",
+                "SELECT payload_json FROM market_events WHERE event_id=?",
                 (event_id,),
             ).fetchall()
-        return [MarketEvent.from_dict(json.loads(row[0])) for row in rows]
+        events = [MarketEvent.from_dict(json.loads(row[0])) for row in rows]
+        return sorted(events, key=_event_order_key)
 
     def current(self) -> dict[str, MarketEvent]:
         rows = self.connection.execute("SELECT quote_key,payload_json FROM current_quotes").fetchall()
-        return {row[0]: MarketEvent.from_dict(json.loads(row[1])) for row in rows}
+        current: dict[str, MarketEvent] = {}
+        for quote_key, payload_json in rows:
+            event = MarketEvent.from_dict(json.loads(payload_json))
+            _event_order_key(event)
+            if event.quote_key != quote_key:
+                raise ValueError("current quote projection identity mismatch")
+            current[quote_key] = event
+        return current
 
     def close(self) -> None:
         self.connection.close()

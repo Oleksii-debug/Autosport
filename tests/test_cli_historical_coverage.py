@@ -30,7 +30,7 @@ class HistoricalCoverageCliTests(unittest.TestCase):
     def setUp(self) -> None:
         _FakeProvider.seen_key = None
 
-    def test_data_available_writes_machine_evidence_without_secret(self):
+    def test_data_available_writes_machine_evidence_without_secret_or_odds_overclaim(self):
         _FakeProvider.report = HistoricalCoverageReport(
             sport_key="table_tennis",
             date_from="2026-09-01",
@@ -70,11 +70,19 @@ class HistoricalCoverageCliTests(unittest.TestCase):
             payload = json.loads(evidence_path.read_text(encoding="utf-8"))
             self.assertTrue(payload["requested_window_access_verified"])
             self.assertTrue(payload["has_data"])
+            self.assertEqual(payload["coverage_surface"], "historical_matches")
+            self.assertEqual(
+                payload["priced_rows_meaning"],
+                "match_rows_with_real_odds_not_point_in_time_market_coverage",
+            )
+            self.assertFalse(payload["point_in_time_odds_market_coverage_verified"])
             self.assertFalse(payload["licensing_or_retention_verified"])
             self.assertFalse(payload["real_money_execution"])
             self.assertEqual(payload["total_priced_rows"], 94)
             self.assertNotIn("never-write-this-key", evidence_path.read_text(encoding="utf-8"))
             self.assertIn("historical_coverage=DATA_AVAILABLE", output.getvalue())
+            self.assertIn("coverage_surface=historical_matches", output.getvalue())
+            self.assertIn("point_in_time_odds_market_coverage_verified=false", output.getvalue())
 
     def test_no_data_is_persisted_but_returns_nonzero(self):
         _FakeProvider.report = HistoricalCoverageReport(
@@ -103,6 +111,7 @@ class HistoricalCoverageCliTests(unittest.TestCase):
             payload = json.loads((Path(tmp) / "historical-coverage.json").read_text(encoding="utf-8"))
             self.assertFalse(payload["has_data"])
             self.assertEqual(payload["sources"], [])
+            self.assertFalse(payload["point_in_time_odds_market_coverage_verified"])
 
     def test_missing_key_blocks_before_provider_construction(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):

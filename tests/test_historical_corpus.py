@@ -131,7 +131,9 @@ def _write_governance(root: Path, **overrides) -> Path:
         "source_identity": "parlayapi:account-entitlement-2026-01",
         "source_ids": [ParlayApiTableTennisProvider.source_id],
         "terms_reference": "https://parlay-api.com/terms",
-        "retention_basis": "verified internal research retention authority through 2026-04-01",
+        "retention_basis": "verified fixture extension through 2026-12-31",
+        "retention_expires_at": "2026-12-31T00:00:00+00:00",
+        "retention_extension_authority_reference": "test-extension-authority-record",
         "redistribution_policy": "internal_only",
         "licensing_or_retention_verified": True,
         "redistribution_verified": False,
@@ -172,6 +174,14 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
             self.assertEqual(dataset.import_identity, build.import_identity)
             self.assertEqual(build.snapshot_count, 2)
             self.assertEqual(build.event_count, 2)
+            self.assertEqual(
+                manifest["governance"]["retention_expires_at"],
+                "2026-12-31T00:00:00+00:00",
+            )
+            self.assertEqual(
+                manifest["governance"]["retention_extension_authority_reference"],
+                "test-extension-authority-record",
+            )
             self.assertEqual(acquisition["scope"], "selected_point_in_time_snapshots_only")
             self.assertTrue(acquisition["point_in_time_snapshot_contains_odds"])
             self.assertFalse(acquisition["historical_window_market_coverage_verified"])
@@ -197,6 +207,70 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
                 outcome_evidence["quote_outcomes_sha256"],
             )
             self.assertEqual(manifest["import_identity"], dataset.import_identity)
+
+    def test_missing_retention_expiry_fails_closed_before_snapshot_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            proof = _write_governance(root)
+            payload = json.loads(proof.read_text(encoding="utf-8"))
+            del payload["retention_expires_at"]
+            proof.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            output = root / "corpus"
+            with self.assertRaisesRegex(ValueError, "retention_expires_at"):
+                assemble_historical_corpus(
+                    [snapshot],
+                    results_path=_write_results(root, "tt-a"),
+                    governance_proof_path=proof,
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
+
+    def test_retention_beyond_standard_ceiling_requires_extension_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            output = root / "corpus"
+            proof = _write_governance(
+                root,
+                retention_extension_authority_reference=None,
+            )
+            with self.assertRaisesRegex(ValueError, "beyond 90 days"):
+                assemble_historical_corpus(
+                    [snapshot],
+                    results_path=_write_results(root, "tt-a"),
+                    governance_proof_path=proof,
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
+
+    def test_import_after_retention_expiry_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            output = root / "corpus"
+            proof = _write_governance(
+                root,
+                retention_expires_at="2026-01-02T00:04:00+00:00",
+                retention_extension_authority_reference=None,
+            )
+            with self.assertRaisesRegex(ValueError, "imported_at exceeds"):
+                assemble_historical_corpus(
+                    [snapshot],
+                    results_path=_write_results(root, "tt-a"),
+                    governance_proof_path=proof,
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
 
     def test_unverified_retention_rights_fail_closed_before_output(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -205,10 +205,19 @@ def verify_governance_authority_binding(
             "authorization_valid_through",
             context="governance proof",
         )
+        retention_expires_at = _timestamp(
+            proof,
+            "retention_expires_at",
+            context="governance proof",
+        )
         verified_at = _timestamp(proof, "verified_at", context="governance proof")
         if authorization_valid_through < verified_at:
             raise ValueError(
                 "governance proof.authorization_valid_through must not precede verified_at"
+            )
+        if authorization_valid_through < retention_expires_at:
+            raise ValueError(
+                "governance proof.authorization_valid_through must not precede retention_expires_at"
             )
 
     evidence_reference = _text(

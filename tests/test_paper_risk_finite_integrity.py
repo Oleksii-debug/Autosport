@@ -37,6 +37,38 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, f"{field_name} must be a finite decimal"):
                         PaperRiskPolicy(**values)
 
+    def test_policy_fraction_outside_unit_interval_is_rejected(self) -> None:
+        defaults = {
+            "max_ticket_fraction": Decimal("0.02"),
+            "max_committed_fraction": Decimal("0.20"),
+            "minimum_cash_reserve_fraction": Decimal("0.20"),
+        }
+        for field_name in defaults:
+            for value in (Decimal("-0.01"), Decimal("1.01")):
+                with self.subTest(field_name=field_name, value=str(value)):
+                    values = dict(defaults)
+                    values[field_name] = value
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        f"{field_name} must be between 0 and 1 inclusive",
+                    ):
+                        PaperRiskPolicy(**values)
+
+    def test_policy_fraction_unit_interval_boundaries_are_valid(self) -> None:
+        zero_policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("0"),
+            max_committed_fraction=Decimal("0"),
+            minimum_cash_reserve_fraction=Decimal("0"),
+        )
+        self.assertFalse(zero_policy.evaluate(PaperBook("100"), "1").allowed)
+
+        one_policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("1"),
+            max_committed_fraction=Decimal("1"),
+            minimum_cash_reserve_fraction=Decimal("1"),
+        )
+        self.assertFalse(one_policy.evaluate(PaperBook("100"), "1").allowed)
+
     def test_string_policy_fractions_normalize_and_finite_control_remains_allowed(self) -> None:
         policy = PaperRiskPolicy(
             max_ticket_fraction="0.50",

@@ -48,6 +48,32 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _read_bytes(path: Path, *, context: str) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"{context} is not readable: {path}") from exc
+
+
+def _json_object_bytes(
+    payload: bytes,
+    *,
+    path: Path,
+    context: str,
+) -> dict[str, Any]:
+    try:
+        raw = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{context} is not readable valid JSON: {path}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"{context} must be a JSON object")
+    return raw
+
+
 def _canonical_json_sha256(value: Any) -> str:
     payload = json.dumps(
         value,
@@ -71,13 +97,8 @@ def _timestamp(value: Any, *, field: str) -> datetime:
 
 
 def _json_object(path: Path, *, context: str) -> dict[str, Any]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"{context} is not readable valid JSON: {path}") from exc
-    if not isinstance(raw, dict):
-        raise ValueError(f"{context} must be a JSON object")
-    return raw
+    payload = _read_bytes(path, context=context)
+    return _json_object_bytes(payload, path=path, context=context)
 
 
 def _text(raw: dict[str, Any], key: str, *, context: str) -> str:
@@ -88,7 +109,8 @@ def _text(raw: dict[str, Any], key: str, *, context: str) -> str:
 
 
 def _governance_proof(path: Path) -> dict[str, Any]:
-    raw = _json_object(path, context="governance proof")
+    payload = _read_bytes(path, context="governance proof")
+    raw = _json_object_bytes(payload, path=path, context="governance proof")
     if int(raw.get("schema_version", 0)) != 1:
         raise ValueError("governance proof schema_version must be 1")
     if raw.get("kind") != _GOVERNANCE_KIND:
@@ -130,6 +152,7 @@ def _governance_proof(path: Path) -> dict[str, Any]:
         "verified_at": verified_at,
         "redistribution_policy": policy,
         "redistribution_verified": redistribution_verified,
+        "_artifact_sha256": _sha256_bytes(payload),
     }
 
 
@@ -181,19 +204,19 @@ def _outcome_provenance(
             "sealed results outcome_provenance.source_record_sha256 must be a 64-character SHA-256 hex digest"
         )
     source_record_path = source_root / relative_source_record
-    try:
-        actual_source_record_sha256 = _sha256(source_record_path)
-    except OSError as exc:
-        raise ValueError(
-            "sealed results outcome provenance source record is not readable"
-        ) from exc
+    source_record_bytes = _read_bytes(
+        source_record_path,
+        context="sealed results outcome provenance source record",
+    )
+    actual_source_record_sha256 = _sha256_bytes(source_record_bytes)
     if actual_source_record_sha256 != source_record_sha256:
         raise ValueError(
             "sealed results outcome_provenance.source_record_sha256 does not match source record artifact"
         )
 
-    source_record = _json_object(
-        source_record_path,
+    source_record = _json_object_bytes(
+        source_record_bytes,
+        path=source_record_path,
         context="sealed outcome source record",
     )
     source_record_outcomes = source_record.get("quote_outcomes")
@@ -283,7 +306,13 @@ def _snapshot(
     *,
     expected_terms_reference: str,
 ) -> tuple[list[tuple[MarketEvent, dict[str, Any]]], dict[str, Any]]:
-    evidence = _json_object(evidence_path, context="snapshot evidence")
+    evidence_bytes = _read_bytes(evidence_path, context="snapshot evidence")
+    evidence = _json_object_bytes(
+        evidence_bytes,
+        path=evidence_path,
+        context="snapshot evidence",
+    )
+    evidence["_artifact_sha256"] = _sha256_bytes(evidence_bytes)
     if int(evidence.get("schema_version", 0)) != 1:
         raise ValueError("snapshot evidence schema_version must be 1")
     if evidence.get("kind") != _SNAPSHOT_KIND:
@@ -315,7 +344,8 @@ def _snapshot(
     canonical_source_id = ParlayApiTableTennisProvider.source_id
 
     expected_sha = _text(evidence, "market_sha256", context="snapshot evidence")
-    if _sha256(market_path) != expected_sha:
+    market_bytes = _read_bytes(market_path, context="snapshot market")
+    if _sha256_bytes(market_bytes) != expected_sha:
         raise ValueError("snapshot market_sha256 does not match captured market file")
 
     requested_at = _text(evidence, "requested_at", context="snapshot evidence")
@@ -331,32 +361,36 @@ def _snapshot(
     if captured_dt < snapshot_dt:
         raise ValueError("snapshot evidence captured_at is before snapshot_at")
 
+    try:
+        market_text = market_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"snapshot market is not readable UTF-8: {market_path}") from exc
+
     rows: list[tuple[MarketEvent, dict[str, Any]]] = []
-    with market_path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            if not line.strip():
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"snapshot market line {line_number} is not valid JSON") from exc
-            if not isinstance(raw, dict):
-                raise ValueError(f"snapshot market line {line_number} must be an object")
-            event = MarketEvent.from_dict(raw)
-            if event.source_id != canonical_source_id:
-                raise ValueError("snapshot evidence provider/sport does not match captured market source_id")
-            if event.source_ts is None or not event.ingest_ts:
-                raise ValueError("historical snapshot rows require explicit source_ts and ingest_ts")
-            source_dt = _timestamp(event.source_ts, field="historical snapshot source_ts")
-            observed_dt = _timestamp(event.observed_ts, field="historical snapshot observed_ts")
-            ingest_dt = _timestamp(event.ingest_ts, field="historical snapshot ingest_ts")
-            if source_dt > observed_dt:
-                raise ValueError("historical snapshot source_ts is after observed_ts")
-            if observed_dt > snapshot_dt:
-                raise ValueError("historical snapshot observed_ts is after snapshot boundary")
-            if ingest_dt < observed_dt:
-                raise ValueError("historical snapshot ingest_ts is before observed_ts")
-            rows.append((event, raw))
+    for line_number, line in enumerate(market_text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"snapshot market line {line_number} is not valid JSON") from exc
+        if not isinstance(raw, dict):
+            raise ValueError(f"snapshot market line {line_number} must be an object")
+        event = MarketEvent.from_dict(raw)
+        if event.source_id != canonical_source_id:
+            raise ValueError("snapshot evidence provider/sport does not match captured market source_id")
+        if event.source_ts is None or not event.ingest_ts:
+            raise ValueError("historical snapshot rows require explicit source_ts and ingest_ts")
+        source_dt = _timestamp(event.source_ts, field="historical snapshot source_ts")
+        observed_dt = _timestamp(event.observed_ts, field="historical snapshot observed_ts")
+        ingest_dt = _timestamp(event.ingest_ts, field="historical snapshot ingest_ts")
+        if source_dt > observed_dt:
+            raise ValueError("historical snapshot source_ts is after observed_ts")
+        if observed_dt > snapshot_dt:
+            raise ValueError("historical snapshot observed_ts is after snapshot boundary")
+        if ingest_dt < observed_dt:
+            raise ValueError("historical snapshot ingest_ts is before observed_ts")
+        rows.append((event, raw))
 
     quote_count = evidence.get("quote_count")
     if not isinstance(quote_count, int) or quote_count != len(rows):
@@ -419,6 +453,15 @@ def assemble_historical_corpus(
             evidence_path,
             expected_terms_reference=proof["terms_reference"],
         )
+        evidence_sha256 = evidence.get("_artifact_sha256")
+        if (
+            not isinstance(evidence_sha256, str)
+            or len(evidence_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in evidence_sha256)
+        ):
+            raise ValueError(
+                "snapshot evidence artifact digest was not preserved from its verified byte snapshot"
+            )
         for event, raw in rows:
             if event.dedupe_key in seen_dedupe:
                 raise ValueError("historical snapshots contain duplicate canonical source event identity")
@@ -428,7 +471,7 @@ def assemble_historical_corpus(
         captures.append((_timestamp(captured_at, field="snapshot captured_at"), captured_at))
         evidence_rows.append(
             {
-                "evidence_sha256": _sha256(evidence_path),
+                "evidence_sha256": evidence_sha256,
                 "market_sha256": str(evidence["market_sha256"]),
                 "response_sha256": str(evidence.get("response_sha256", "")),
                 "requested_at": str(evidence["requested_at"]),
@@ -440,6 +483,14 @@ def assemble_historical_corpus(
                 ),
             }
         )
+
+    governance_proof_sha256 = proof.get("_artifact_sha256")
+    if (
+        not isinstance(governance_proof_sha256, str)
+        or len(governance_proof_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in governance_proof_sha256)
+    ):
+        raise ValueError("governance proof artifact digest was not preserved from its verified byte snapshot")
 
     latest_capture_dt, latest_capture = max(captures, key=lambda item: item[0])
     if imported_dt < latest_capture_dt:
@@ -551,7 +602,7 @@ def assemble_historical_corpus(
                 "snapshots": evidence_rows,
                 "point_in_time_snapshot_contains_odds": True,
                 "historical_window_market_coverage_verified": False,
-                "governance_proof_sha256": _sha256(proof_path),
+                "governance_proof_sha256": governance_proof_sha256,
                 "licensing_or_retention_verified": True,
                 "rights_source_ids": list(proof["source_ids"]),
                 "authority_reference": proof["authority_reference"],

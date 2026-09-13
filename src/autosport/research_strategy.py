@@ -11,6 +11,7 @@ from .agents import AgentContext
 from .candidate_search import CandidateLeg, ParlayCandidate
 from .domain import MarketEvent
 from .forecasting import ForecastRecord, parse_iso_timestamp
+from .price_truth import paper_quote_rejection_reason
 from .research_pipeline import ResearchDecisionPipeline, ResearchEvidence
 from .scenario_search import ScenarioGroup, ScenarioOutcome
 
@@ -268,6 +269,11 @@ def _validate_market_binding(
         if event.metadata.get("execution_quote_verified") is False:
             raise ValueError(
                 f"research candidate quote is not verified executable price evidence: {leg.quote_key}"
+            )
+        rejection = paper_quote_rejection_reason(event, instruction.stake)
+        if rejection is not None:
+            raise ValueError(
+                f"research candidate quote cannot support paper fill: {leg.quote_key}: {rejection}"
             )
         if parse_iso_timestamp(event.observed_ts) > decision_time:
             raise ValueError(f"research candidate quote is from the future: {leg.quote_key}")

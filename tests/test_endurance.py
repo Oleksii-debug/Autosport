@@ -23,6 +23,15 @@ class EnduranceTests(unittest.TestCase):
         self.assertEqual(event.ingest_ts, quote.observed_ts)
         self.assertEqual(event.source_ts, quote.source_ts)
 
+    def test_v1_endurance_gate_covers_thousands_of_active_selections(self):
+        workflow_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "endurance.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        marker = "--quote-keys "
+        self.assertIn(marker, workflow)
+        quote_keys = int(workflow.split(marker, 1)[1].split()[0])
+        self.assertGreaterEqual(quote_keys, 2_000)
+        self.assertIn("os: [ubuntu-latest, windows-latest]", workflow)
+
     def test_small_endurance_run_proves_idempotency_restart_and_cross_workspace_determinism(self):
         config = EnduranceConfig(
             event_count=1_200,

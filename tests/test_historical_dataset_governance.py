@@ -64,6 +64,7 @@ def _write_dataset(
         json.dumps(
             {
                 "schema_version": 1,
+                "outcome_reveal_after": governance["causality"]["outcome_reveal_after"],
                 "quote_outcomes": {"tt-001|winner|alice": "win"},
             },
             sort_keys=True,

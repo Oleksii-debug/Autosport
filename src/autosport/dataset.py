@@ -265,6 +265,23 @@ def _validate_historical_payloads(
         raise ValueError("results payload must be an object")
     if int(results_raw.get("schema_version", 0)) != 1:
         raise ValueError("unsupported results schema")
+    results_reveal_after = _require_string(
+        results_raw,
+        "outcome_reveal_after",
+        context="sealed results",
+    )
+    results_reveal_dt = _parse_timestamp(
+        results_reveal_after,
+        field="sealed results.outcome_reveal_after",
+    )
+    governance_reveal_dt = _parse_timestamp(
+        governance.outcome_reveal_after,
+        field="governance.causality.outcome_reveal_after",
+    )
+    if results_reveal_dt != governance_reveal_dt:
+        raise ValueError(
+            "sealed results outcome_reveal_after must match governance.causality.outcome_reveal_after"
+        )
     outcomes = results_raw.get("quote_outcomes")
     if not isinstance(outcomes, dict):
         raise ValueError("quote_outcomes must be an object")

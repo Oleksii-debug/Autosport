@@ -488,12 +488,12 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
 
     forecasts_raw = raw.get("forecasts")
     if not isinstance(forecasts_raw, list) or not forecasts_raw:
-        raise ValueError("research strategy plan forecasts must be a non-empty list")
+        raise ValueError("research decision forecasts must be a non-empty list")
     forecasts = tuple(_forecast_from_dict(item) for item in forecasts_raw)
 
     evidence_raw = raw.get("evidence")
     if not isinstance(evidence_raw, list) or not evidence_raw:
-        raise ValueError("research strategy plan evidence must be a non-empty list")
+        raise ValueError("research decision evidence must be a non-empty list")
     evidence = tuple(_evidence_from_dict(item) for item in evidence_raw)
     return ResearchReplayInstruction(
         decision_id=str(raw["decision_id"]),

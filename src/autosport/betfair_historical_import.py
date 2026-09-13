@@ -746,7 +746,8 @@ def import_betfair_historical(
             },
             "price_semantics": price_semantics,
             "availability_semantics": {
-                "strategy_visible_market_status": "OPEN_ONLY",
+                "strategy_visible_market_status": "OPEN_QUOTES_PLUS_EXPLICIT_SOURCE_STATE_TRANSITIONS",
+                "definition_state_transitions_preserved": True,
                 "suspended_or_non_open_intervals_preserved": False,
                 "complete_availability_history_verified": False,
             },

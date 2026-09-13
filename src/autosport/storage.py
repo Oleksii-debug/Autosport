@@ -66,17 +66,18 @@ class SQLiteMarketStore:
         self.connection.commit()
 
     def _rebuild_current_quotes(self) -> None:
-        """Repair the persisted current projection using physical time, including legacy DBs."""
+        """Repair current projection from one write-locked physical-time history snapshot."""
         latest: dict[str, tuple[tuple[datetime, int, str], MarketEvent]] = {}
-        rows = self.connection.execute("SELECT payload_json FROM market_events").fetchall()
-        for (payload_json,) in rows:
-            event = MarketEvent.from_dict(json.loads(payload_json))
-            order_key = _event_order_key(event)
-            previous = latest.get(event.quote_key)
-            if previous is None or order_key > previous[0]:
-                latest[event.quote_key] = (order_key, event)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.connection.execute("SELECT payload_json FROM market_events").fetchall()
+            for (payload_json,) in rows:
+                event = MarketEvent.from_dict(json.loads(payload_json))
+                order_key = _event_order_key(event)
+                previous = latest.get(event.quote_key)
+                if previous is None or order_key > previous[0]:
+                    latest[event.quote_key] = (order_key, event)
 
-        with self.connection:
             self.connection.execute("DELETE FROM current_quotes")
             for quote_key in sorted(latest):
                 event = latest[quote_key][1]
@@ -85,6 +86,11 @@ class SQLiteMarketStore:
                     "INSERT INTO current_quotes(quote_key,observed_ts,sequence,payload_json) VALUES (?,?,?,?)",
                     (quote_key, event.observed_ts, event.sequence, payload),
                 )
+        except Exception:
+            self.connection.rollback()
+            raise
+        else:
+            self.connection.commit()
 
     def _insert_one(self, event: MarketEvent) -> bool:
         incoming_key = _event_order_key(event)

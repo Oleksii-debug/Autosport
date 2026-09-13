@@ -1,8 +1,10 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.domain import MarketEvent
 from autosport.storage import SQLiteMarketStore
@@ -72,6 +74,24 @@ class StoragePhysicalTimeTests(unittest.TestCase):
             reopened = SQLiteMarketStore(path)
             self.assertEqual(reopened.current()[earlier.quote_key].decimal_odds, Decimal("2.0"))
             reopened.close()
+
+    def test_rebuild_takes_write_transaction_before_history_snapshot(self):
+        original_connect = sqlite3.connect
+
+        class SnapshotCheckingConnection(sqlite3.Connection):
+            def execute(self, sql, parameters=()):
+                if sql.strip() == "SELECT payload_json FROM market_events" and not self.in_transaction:
+                    raise AssertionError("current projection rebuild must lock writers before reading history")
+                return super().execute(sql, parameters)
+
+        def checked_connect(*args, **kwargs):
+            kwargs["factory"] = SnapshotCheckingConnection
+            return original_connect(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("autosport.storage.sqlite3.connect", side_effect=checked_connect):
+                store = SQLiteMarketStore(Path(tmp) / "market.db")
+                store.close()
 
     def test_naive_timestamp_fails_closed_before_persistence(self):
         naive = self._event(

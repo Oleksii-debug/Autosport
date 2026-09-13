@@ -99,6 +99,7 @@ class HistoricalSnapshotTests(unittest.TestCase):
         self.assertFalse(evidence["sealed_outcomes_present"])
         self.assertFalse(evidence["replay_corpus_ready"])
         self.assertFalse(evidence["licensing_or_retention_verified"])
+        self.assertFalse(evidence["redistribution_verified"])
         self.assertFalse(evidence["real_money_execution"])
         serialized = json.dumps(evidence) + json.dumps(rows)
         self.assertNotIn("secret-key-must-not-leak", serialized)

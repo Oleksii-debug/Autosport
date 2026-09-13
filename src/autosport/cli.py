@@ -180,6 +180,9 @@ def run_historical_coverage(
         "sport_key": report.sport_key,
         "date_from": report.date_from,
         "date_to": report.date_to,
+        "coverage_surface": "historical_matches",
+        "priced_rows_meaning": "match_rows_with_real_odds_not_point_in_time_market_coverage",
+        "point_in_time_odds_market_coverage_verified": False,
         "requested_window_access_verified": True,
         "historical_window_hours": report.historical_window_hours,
         "historical_window_from": report.historical_window_from,
@@ -198,6 +201,10 @@ def run_historical_coverage(
     print(
         f"historical_coverage={status} access_verified=true has_data={str(report.has_data).lower()} "
         f"rows={report.total_rows} priced_rows={report.total_priced_rows}"
+    )
+    print(
+        "coverage_surface=historical_matches "
+        "point_in_time_odds_market_coverage_verified=false"
     )
     print(
         f"entitlement_window_hours={report.historical_window_hours} "

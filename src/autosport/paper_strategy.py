@@ -7,6 +7,7 @@ from .agents import AgentContext
 from .decision_ledger import DecisionRecord
 from .domain import MarketEvent, TicketLeg
 from .forecasting import ForecastRecord, parse_iso_timestamp
+from .price_truth import paper_quote_rejection_reason
 from .probability import paper_value
 from .risk import PaperRiskPolicy
 
@@ -45,10 +46,10 @@ class PaperValueAgent:
     def on_market_event(self, event: MarketEvent, context: AgentContext) -> None:
         if event.quote_key in self._acted or event.status != "open":
             return
-        # Some historical providers expose observational prices rather than executable
-        # back/lay availability.  An explicit negative execution-truth assertion must
-        # therefore fail closed before virtual fill economics are calculated.
-        if event.metadata.get("execution_quote_verified") is False:
+        # Provider truth is binding.  Observational prices, positive-delay exchange
+        # quotes, incomplete ladder caches, or quotes whose observed capacity is below
+        # the configured paper stake must fail closed before virtual economics.
+        if paper_quote_rejection_reason(event, self.stake) is not None:
             return
         forecast = self.forecasts.get(event.quote_key)
         if forecast is None:

@@ -4,6 +4,7 @@ import bz2
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -94,7 +95,7 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
         )
         return output, load_dataset(output).load_market_events()
 
-    def test_pro_atb_image_and_deltas_become_capacity_bound_paper_quotes(self) -> None:
+    def test_pro_atb_preserves_quote_and_size_but_unbound_units_block_paper_economics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output, events = self._import(Path(tmp), _pro_stream())
             manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
@@ -104,35 +105,61 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
         self.assertEqual(events[0].metadata["provider_price_field"], "rc[].atb")
         self.assertIs(events[0].metadata["execution_quote_verified"], True)
         self.assertIs(events[0].metadata["actual_fill_verified"], False)
-        self.assertIs(events[0].metadata["paper_fill_eligible"], True)
+        self.assertIs(events[0].metadata["paper_fill_eligible"], False)
+        self.assertIs(events[0].metadata["paper_fill_capacity_verified"], False)
+        self.assertIs(events[0].metadata["paper_fill_capacity_unit_bound"], False)
         self.assertEqual(events[0].metadata["paper_fill_available_size"], "40.0")
         self.assertEqual(events[1].metadata["paper_fill_available_size"], "60.0")
-        self.assertIs(manifest["governance"]["price_semantics"]["actual_fill_verified"], False)
-        self.assertIs(manifest["governance"]["price_semantics"]["paper_fill_capacity_enforced"], True)
+        self.assertIn(
+            "not canonically bound",
+            events[0].metadata["paper_fill_eligibility_reason"],
+        )
+        price_truth = manifest["governance"]["price_semantics"]
+        self.assertIs(price_truth["actual_fill_verified"], False)
+        self.assertIs(price_truth["paper_fill_capacity_enforced"], False)
+        self.assertIs(price_truth["paper_fill_capacity_unit_bound"], False)
+        self.assertIs(price_truth["paper_fill_capacity_authorizes_economics"], False)
 
-        # Stake 50 cannot use the first 40-unit quote, but can use the later 60-unit quote.
-        # Keep the bankroll large enough that the canonical 2% per-ticket risk cap is not
-        # the reason for rejection; this test isolates observed quote-capacity semantics.
         book = PaperBook("10000")
         agent = PaperValueAgent(
             {
                 events[0].quote_key: Forecast(
                     quote_key=events[0].quote_key,
                     probability=Decimal("0.90"),
-                    model_id="capacity-test",
+                    model_id="unit-boundary-test",
                     as_of_ts=events[0].observed_ts,
                 )
             },
-            stake="50",
+            stake="1",
             minimum_expected_profit_per_unit="0",
         )
         context = AgentContext(paper_book=book)
         agent.on_market_event(events[0], context)
-        self.assertEqual(book.tickets, {})
         agent.on_market_event(events[1], context)
-        self.assertEqual(len(book.tickets), 1)
-        ticket = next(iter(book.tickets.values()))
-        self.assertEqual(ticket.legs[0].locked_odds, Decimal("1.85"))
+        self.assertEqual(book.tickets, {})
+
+    def test_explicit_capacity_flag_cannot_bypass_missing_canonical_stake_unit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _output, events = self._import(Path(tmp), _pro_stream())
+
+        event = events[0]
+        for provider_unit in ("betfair_historical_stream_size_unit", "mismatched-provider-unit"):
+            with self.subTest(provider_unit=provider_unit):
+                metadata = dict(event.metadata)
+                metadata.update(
+                    {
+                        "execution_quote_verified": True,
+                        "paper_fill_eligible": True,
+                        "paper_fill_capacity_verified": True,
+                        "paper_fill_capacity_unit_bound": False,
+                        "paper_fill_size_unit": provider_unit,
+                    }
+                )
+                forged = replace(event, metadata=metadata)
+                self.assertIn(
+                    "not canonically bound",
+                    paper_quote_rejection_reason(forged, "1"),
+                )
 
     def test_ltp_only_delta_keeps_persisted_available_back_as_latest_replay_state(self) -> None:
         lines = _pro_stream()
@@ -161,14 +188,15 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
         self.assertEqual(latest.metadata["paper_fill_available_size"], "60.0")
         self.assertEqual(latest.metadata["betfair_last_traded_price"], "1.83")
         self.assertIs(latest.metadata["execution_quote_verified"], True)
+        self.assertIs(latest.metadata["paper_fill_eligible"], False)
         self.assertIs(latest.metadata["actual_fill_verified"], False)
 
     def test_definition_only_status_or_delay_transition_invalidates_prior_quote(self) -> None:
         transitions = (
-            ({"status": "SUSPENDED"}, "SUSPENDED", 0),
-            ({"status": "OPEN", "betDelay": 2, "inPlay": True}, "OPEN", 2),
+            ({"status": "SUSPENDED"}, "suspended", "SUSPENDED", 0),
+            ({"status": "OPEN", "betDelay": 2, "inPlay": True}, "open", "OPEN", 2),
         )
-        for definition_change, expected_status, expected_delay in transitions:
+        for definition_change, event_status, source_status, expected_delay in transitions:
             with self.subTest(definition_change=definition_change), tempfile.TemporaryDirectory() as tmp:
                 lines = _pro_stream()
                 lines.insert(
@@ -191,22 +219,19 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(invalidations), 1)
                 event = invalidations[0]
-                self.assertEqual(event.status, "unavailable")
+                self.assertEqual(event.status, event_status)
                 self.assertEqual(event.decimal_odds, Decimal("1.85"))
                 self.assertEqual(
                     event.metadata["price_semantics"],
                     "betfair_market_definition_state_transition",
                 )
                 self.assertEqual(event.metadata["provider_price_field"], "rc[].atb")
-                self.assertEqual(event.metadata["betfair_market_status"], expected_status)
+                self.assertEqual(event.metadata["betfair_market_status"], source_status)
                 self.assertEqual(event.metadata["betfair_bet_delay_seconds"], expected_delay)
                 self.assertIs(event.metadata["execution_quote_verified"], False)
                 self.assertIs(event.metadata["paper_fill_eligible"], False)
                 self.assertIs(event.metadata["paper_fill_capacity_verified"], False)
-                self.assertIn("not a verified executable quote", paper_quote_rejection_reason(event, "10"))
 
-                # A paper strategy seeing this state after a later replay trigger cannot
-                # consume the stale quote as an executable offer.
                 book = PaperBook("10000")
                 agent = PaperValueAgent(
                     {
@@ -222,6 +247,35 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
                 )
                 agent.on_market_event(event, AgentContext(paper_book=book))
                 self.assertEqual(book.tickets, {})
+
+    def test_open_market_quote_removal_preserves_market_status_and_marks_quote_unavailable(self) -> None:
+        lines = _pro_stream()
+        lines.insert(
+            2,
+            {
+                "op": "mcm",
+                "pt": _epoch_ms("2026-02-10T12:10:00Z"),
+                "mc": [
+                    {
+                        "id": "1.advanced",
+                        "rc": [{"id": 101, "atb": [[1.85, 0], [1.8, 0]]}],
+                    }
+                ],
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _output, events = self._import(Path(tmp), lines)
+
+        removed = [event for event in events if event.observed_ts == "2026-02-10T12:10:00Z"]
+        self.assertEqual(len(removed), 1)
+        event = removed[0]
+        self.assertEqual(event.status, "open")
+        self.assertEqual(event.decimal_odds, Decimal("1.85"))
+        self.assertEqual(event.metadata["price_semantics"], "betfair_available_to_back_unavailable")
+        self.assertIs(event.metadata["execution_quote_verified"], False)
+        self.assertIs(event.metadata["paper_fill_eligible"], False)
+        self.assertIn("not a verified executable quote", paper_quote_rejection_reason(event, "1"))
 
     def test_positive_bet_delay_preserves_quote_but_blocks_paper_fill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -257,6 +311,7 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
         self.assertEqual([event.decimal_odds for event in events], [Decimal("2.1"), Decimal("2.04")])
         self.assertEqual(events[0].metadata["provider_price_field"], "rc[].batb")
         self.assertEqual(events[0].metadata["betfair_ladder_kind"], "best_three_level_ladder")
+        self.assertIs(events[0].metadata["paper_fill_eligible"], False)
 
 
 if __name__ == "__main__":

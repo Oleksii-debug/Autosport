@@ -139,6 +139,7 @@ def capture_historical_snapshot(
         "kind": "parlayapi_point_in_time_historical_snapshot",
         "provider": "parlayapi",
         "sport_key": provider.sport_key,
+        "canonical_source_id": provider.source_id,
         "requested_at": requested_at,
         "snapshot_at": snapshot_at,
         "captured_at": captured_at,

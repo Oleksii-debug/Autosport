@@ -30,6 +30,7 @@ def build_windows_package(
     diagnostic_path: str | Path,
     accessibility_path: str | Path,
     keyboard_path: str | Path,
+    restart_recovery_path: str | Path,
     output_zip: str | Path,
     source_sha: str,
 ) -> tuple[Path, str]:
@@ -39,6 +40,7 @@ def build_windows_package(
     diagnostic_path = Path(diagnostic_path)
     accessibility_path = Path(accessibility_path)
     keyboard_path = Path(keyboard_path)
+    restart_recovery_path = Path(restart_recovery_path)
     output_zip = Path(output_zip)
     package_dir = output_zip.parent / "Autosport-V1"
     if package_dir.exists():
@@ -49,6 +51,7 @@ def build_windows_package(
     shutil.copy2(diagnostic_path, package_dir / "packaged-diagnostic.json")
     shutil.copy2(accessibility_path, package_dir / "accessibility-audit.json")
     shutil.copy2(keyboard_path, package_dir / "keyboard-audit.json")
+    shutil.copy2(restart_recovery_path, package_dir / "restart-recovery-audit.json")
     shutil.copytree(example_dir, package_dir / "examples" / example_dir.name)
 
     build_info = {
@@ -117,6 +120,7 @@ def verify_windows_package(
         "packaged-diagnostic.json",
         "accessibility-audit.json",
         "keyboard-audit.json",
+        "restart-recovery-audit.json",
         "BUILD_INFO.json",
         "PACKAGE_MANIFEST.json",
         "SHA256SUMS.txt",
@@ -166,14 +170,26 @@ def verify_windows_package(
     diagnostic = _decode_json_object(members["packaged-diagnostic.json"], "packaged-diagnostic.json")
     accessibility = _decode_json_object(members["accessibility-audit.json"], "accessibility-audit.json")
     keyboard = _decode_json_object(members["keyboard-audit.json"], "keyboard-audit.json")
+    restart_recovery = _decode_json_object(
+        members["restart-recovery-audit.json"],
+        "restart-recovery-audit.json",
+    )
     for label, payload in (
         ("packaged-diagnostic.json", diagnostic),
         ("accessibility-audit.json", accessibility),
         ("keyboard-audit.json", keyboard),
+        ("restart-recovery-audit.json", restart_recovery),
     ):
         if payload.get("status") != "PASS":
             raise ValueError(f"{label} does not record PASS")
         _require_false_truth_labels(payload, label)
+
+    if restart_recovery.get("session_restart_status") != "PASS":
+        raise ValueError("restart-recovery-audit.json does not prove session restart PASS")
+    if restart_recovery.get("transaction_recovery_status") != "PASS":
+        raise ValueError("restart-recovery-audit.json does not prove transaction recovery PASS")
+    if restart_recovery.get("recovery_disposition") != "aborted_uncommitted":
+        raise ValueError("restart-recovery-audit.json recovery disposition is not fail-closed")
 
     return {
         "status": "PASS",

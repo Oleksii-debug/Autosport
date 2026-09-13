@@ -31,6 +31,19 @@ if ($keyboardEvidence.human_tested -ne $false -or $keyboardEvidence.nvda_verifie
   throw 'Machine keyboard audit must not claim physical human/NVDA verification'
 }
 
+$restartRecovery = Join-Path $PWD 'dist/restart-recovery-audit.json'
+if (Test-Path $restartRecovery) { Remove-Item -Force $restartRecovery }
+$restartRecoveryProcess = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--restart-recovery-audit-output', $restartRecovery -Wait -PassThru
+if ($restartRecoveryProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe restart/recovery audit exited $($restartRecoveryProcess.ExitCode)" }
+$restartRecoveryEvidence = Get-Content $restartRecovery -Raw | ConvertFrom-Json
+if ($restartRecoveryEvidence.status -ne 'PASS') { throw 'Packaged restart/recovery audit did not PASS' }
+if ($restartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Packaged restart audit did not prove persistent session reopen' }
+if ($restartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Packaged recovery audit did not prove transaction recovery' }
+if ($restartRecoveryEvidence.recovery_disposition -ne 'aborted_uncommitted') { throw 'Packaged recovery audit disposition is not fail-closed' }
+if ($restartRecoveryEvidence.real_money_execution -ne $false -or $restartRecoveryEvidence.human_tested -ne $false -or $restartRecoveryEvidence.nvda_verified -ne $false) {
+  throw 'Machine restart/recovery audit violated release truth labels'
+}
+
 $sourceSha = $env:AUTOSPORT_SOURCE_SHA
 if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
 $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
@@ -42,6 +55,7 @@ python scripts/package_windows.py `
   --diagnostic $diag `
   --accessibility-audit $a11y `
   --keyboard-audit $keyboard `
+  --restart-recovery-audit $restartRecovery `
   --output $package `
   --source-sha $sourceSha `
   --verification-output $packageVerification
@@ -95,6 +109,19 @@ if ($freshKeyboardEvidence.real_money_execution -ne $false -or $freshKeyboardEvi
   throw 'Fresh-extracted keyboard audit violated release truth labels'
 }
 
+$freshRestartRecovery = Join-Path $PWD 'dist/fresh-extraction-restart-recovery-audit.json'
+if (Test-Path $freshRestartRecovery) { Remove-Item -Force $freshRestartRecovery }
+$freshRestartRecoveryProcess = Start-Process -FilePath $extractedExe -ArgumentList '--restart-recovery-audit-output', $freshRestartRecovery -Wait -PassThru
+if ($freshRestartRecoveryProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe restart/recovery audit exited $($freshRestartRecoveryProcess.ExitCode)" }
+$freshRestartRecoveryEvidence = Get-Content $freshRestartRecovery -Raw | ConvertFrom-Json
+if ($freshRestartRecoveryEvidence.status -ne 'PASS') { throw 'Fresh-extracted restart/recovery audit did not PASS' }
+if ($freshRestartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Fresh-extracted restart audit did not prove persistent session reopen' }
+if ($freshRestartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Fresh-extracted recovery audit did not prove transaction recovery' }
+if ($freshRestartRecoveryEvidence.recovery_disposition -ne 'aborted_uncommitted') { throw 'Fresh-extracted recovery audit disposition is not fail-closed' }
+if ($freshRestartRecoveryEvidence.real_money_execution -ne $false -or $freshRestartRecoveryEvidence.human_tested -ne $false -or $freshRestartRecoveryEvidence.nvda_verified -ne $false) {
+  throw 'Fresh-extracted restart/recovery audit violated release truth labels'
+}
+
 $freshEvidence = [ordered]@{
   status = 'PASS'
   source_sha = $sourceSha
@@ -104,6 +131,9 @@ $freshEvidence = [ordered]@{
   extracted_diagnostic_status = $freshDiagnostic.status
   extracted_accessibility_status = $freshAccessibility.status
   extracted_keyboard_status = $freshKeyboardEvidence.status
+  extracted_restart_recovery_status = $freshRestartRecoveryEvidence.status
+  extracted_session_restart_status = $freshRestartRecoveryEvidence.session_restart_status
+  extracted_transaction_recovery_status = $freshRestartRecoveryEvidence.transaction_recovery_status
   real_money_execution = $false
   human_tested = $false
   nvda_verified = $false

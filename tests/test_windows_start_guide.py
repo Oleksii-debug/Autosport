@@ -16,17 +16,20 @@ class WindowsStartGuideTests(unittest.TestCase):
         guide = Path("WINDOWS_START_HERE.txt").read_text(encoding="utf-8")
 
         self.assertIn("PHYSICAL WINDOWS 11 + NVDA ACCEPTANCE — HUMAN-ONLY RELEASE GATE", guide)
-        self.assertIn("SHA-256 зовнішнього release ZIP", guide)
+        self.assertIn("незалежного GitHub Actions/control record", guide)
+        self.assertIn("опублікований SHA-256 release ZIP", guide)
         self.assertIn("`source_sha`", guide)
         self.assertIn("`autosport_exe_sha256`", guide)
         self.assertIn("fresh extraction", guide)
+        self.assertIn("--expected-source-sha", guide)
+        self.assertIn("--expected-package-sha256", guide)
         self.assertIn("Windows edition/build", guide)
         self.assertIn("NVDA version", guide)
         self.assertIn("PASS/FAIL для пунктів 24–29", guide)
         self.assertIn("HUMAN_TESTED=false", guide)
         self.assertIn("NVDA_VERIFIED=false", guide)
         self.assertIn("V1_READY=false", guide)
-        self.assertIn("build pipeline не може сам собі приписати human proof", guide)
+        self.assertIn("build pipeline або ZIP не можуть самі собі приписати human proof", guide)
 
 
 if __name__ == "__main__":

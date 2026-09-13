@@ -71,8 +71,15 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
                 archive.writestr(f"Autosport-V1/{relative}", payload)
         return package
 
+    @staticmethod
+    def _anchors(package: Path, *, source_sha: str = "a" * 40) -> dict[str, str]:
+        return {
+            "expected_source_sha": source_sha,
+            "expected_package_sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
+        }
+
     def _completed_evidence(self, package: Path) -> dict:
-        evidence = create_template(package)
+        evidence = create_template(package, **self._anchors(package))
         evidence["environment"]["windows_edition_build"] = "Windows 11 24H2 test-build"
         evidence["environment"]["nvda_version"] = "2026.1 test"
         evidence["tested_at"] = "2026-09-13T07:50:00+02:00"
@@ -85,15 +92,36 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
     def test_template_is_bound_to_exact_candidate_and_preserves_false_truth_labels(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             package = self._release_zip(Path(directory))
-            evidence = create_template(package)
+            evidence = create_template(package, **self._anchors(package))
 
             self.assertEqual(evidence["candidate"]["package_sha256"], hashlib.sha256(package.read_bytes()).hexdigest())
             self.assertEqual(evidence["candidate"]["source_sha"], "a" * 40)
+            self.assertIn("Anchor provenance/independence is not machine-proven", evidence["attestation_scope"])
             self.assertEqual(len(evidence["checks"]), 6)
             self.assertTrue(all(check["status"] == "PENDING" for check in evidence["checks"]))
             self.assertFalse(evidence["human_tested"])
             self.assertFalse(evidence["nvda_verified"])
             self.assertFalse(evidence["v1_ready"])
+
+    def test_self_consistent_package_with_wrong_external_source_anchor_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = self._release_zip(Path(directory), source_sha="b" * 40)
+            with self.assertRaisesRegex(ValueError, "supplied expected source SHA"):
+                create_template(
+                    package,
+                    expected_source_sha="a" * 40,
+                    expected_package_sha256=hashlib.sha256(package.read_bytes()).hexdigest(),
+                )
+
+    def test_self_consistent_package_with_wrong_external_package_anchor_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = self._release_zip(Path(directory))
+            with self.assertRaisesRegex(ValueError, "supplied expected package SHA-256"):
+                create_template(
+                    package,
+                    expected_source_sha="a" * 40,
+                    expected_package_sha256="0" * 64,
+                )
 
     def test_legacy_two_member_fake_release_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -117,22 +145,22 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
                 )
 
             with self.assertRaisesRegex(ValueError, "release package is missing required files"):
-                create_template(package)
+                create_template(package, **self._anchors(package))
 
     def test_completed_human_record_validates_identity_without_machine_nvda_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             package = self._release_zip(root)
             evidence_path = root / "nvda-evidence.json"
-            evidence_path.write_text(
-                json.dumps(self._completed_evidence(package)),
-                encoding="utf-8",
-            )
+            evidence_path.write_text(json.dumps(self._completed_evidence(package)), encoding="utf-8")
 
-            result = validate_evidence(package, evidence_path)
+            result = validate_evidence(package, evidence_path, **self._anchors(package))
 
             self.assertEqual(result["status"], "PASS")
             self.assertTrue(result["candidate_identity_verified"])
+            self.assertTrue(result["source_anchor_match_verified"])
+            self.assertTrue(result["package_anchor_match_verified"])
+            self.assertFalse(result["anchor_provenance_machine_verified"])
             self.assertFalse(result["machine_verified_physical_execution"])
             self.assertTrue(result["requires_owner_release_decision"])
             self.assertFalse(result["human_tested"])
@@ -149,7 +177,7 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
             evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "package_sha256 does not match release ZIP"):
-                validate_evidence(package, evidence_path)
+                validate_evidence(package, evidence_path, **self._anchors(package))
 
     def test_missing_required_check_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -161,7 +189,7 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
             evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "check set mismatch"):
-                validate_evidence(package, evidence_path)
+                validate_evidence(package, evidence_path, **self._anchors(package))
 
     def test_failed_check_requires_notes_and_returns_non_acceptance_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -173,10 +201,11 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
             evidence_path = root / "nvda-evidence.json"
             evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
 
-            result = validate_evidence(package, evidence_path)
+            result = validate_evidence(package, evidence_path, **self._anchors(package))
 
             self.assertEqual(result["status"], "FAIL")
             self.assertEqual(result["failed_checks"], ["window_initial_focus"])
+            self.assertFalse(result["anchor_provenance_machine_verified"])
             self.assertFalse(result["nvda_verified"])
 
     def test_fail_check_without_defect_notes_is_rejected(self) -> None:
@@ -190,12 +219,13 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
             evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "requires defect notes"):
-                validate_evidence(package, evidence_path)
+                validate_evidence(package, evidence_path, **self._anchors(package))
 
     def test_portable_dispatch_generates_and_validates_same_candidate_record(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             package = self._release_zip(root)
+            anchors = self._anchors(package)
             evidence_path = root / "nvda-evidence.json"
             validation_path = root / "nvda-validation.json"
 
@@ -203,10 +233,10 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
                 data_tools_main(
                     [
                         "nvda-evidence-template",
-                        "--release-zip",
-                        str(package),
-                        "--output",
-                        str(evidence_path),
+                        "--release-zip", str(package),
+                        "--expected-source-sha", anchors["expected_source_sha"],
+                        "--expected-package-sha256", anchors["expected_package_sha256"],
+                        "--output", str(evidence_path),
                     ]
                 ),
                 0,
@@ -223,18 +253,20 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
                 data_tools_main(
                     [
                         "verify-nvda-evidence",
-                        "--release-zip",
-                        str(package),
-                        "--evidence",
-                        str(evidence_path),
-                        "--output",
-                        str(validation_path),
+                        "--release-zip", str(package),
+                        "--expected-source-sha", anchors["expected_source_sha"],
+                        "--expected-package-sha256", anchors["expected_package_sha256"],
+                        "--evidence", str(evidence_path),
+                        "--output", str(validation_path),
                     ]
                 ),
                 0,
             )
             validation = json.loads(validation_path.read_text(encoding="utf-8"))
             self.assertEqual(validation["status"], "PASS")
+            self.assertTrue(validation["source_anchor_match_verified"])
+            self.assertTrue(validation["package_anchor_match_verified"])
+            self.assertFalse(validation["anchor_provenance_machine_verified"])
             self.assertFalse(validation["machine_verified_physical_execution"])
             self.assertFalse(validation["nvda_verified"])
 
@@ -244,13 +276,20 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
             package = self._release_zip(root)
             output = root / "nvda-evidence.json"
 
-            write_template(package, output)
+            write_template(package, output, **self._anchors(package))
             self.assertTrue(output.is_file())
             self.assertEqual(data_tools_main(["--help"]), 0)
 
             usage = Path("src/autosport/data_tools_entry.py").read_text(encoding="utf-8")
             self.assertIn("nvda-evidence-template", usage)
             self.assertIn("verify-nvda-evidence", usage)
+            self.assertIn("--expected-source-sha", usage)
+            self.assertIn("--expected-package-sha256", usage)
+
+            guide = Path("WINDOWS_START_HERE.txt").read_text(encoding="utf-8")
+            self.assertIn("--expected-source-sha", guide)
+            self.assertIn("--expected-package-sha256", guide)
+            self.assertIn("не можуть самі собі приписати human proof", guide)
 
 
 if __name__ == "__main__":

@@ -69,8 +69,29 @@ def _write_snapshot(
     return market, evidence
 
 
-def _write_results(root: Path, *event_ids: str) -> Path:
+def _write_results(
+    root: Path,
+    *event_ids: str,
+    provenance_overrides: dict | None = None,
+) -> Path:
     path = root / "sealed-results.json"
+    provenance = {
+        "schema_version": 1,
+        "kind": "historical_outcome_provenance",
+        "source_identity": "official-results:test-fixture",
+        "source_record_sha256": "2" * 64,
+        "terms_reference": "https://example.test/results-terms",
+        "retention_basis": "verified internal research retention for test outcome record",
+        "authority_reference": "test-outcome-authority-record",
+        "available_at": "2026-01-01T11:00:00+00:00",
+        "acquired_at": "2026-01-02T00:02:00+00:00",
+        "verified_at": "2026-01-02T00:03:00+00:00",
+        "licensing_or_retention_verified": True,
+        "redistribution_policy": "internal_only",
+        "redistribution_verified": False,
+    }
+    if provenance_overrides:
+        provenance.update(provenance_overrides)
     path.write_text(
         json.dumps(
             {
@@ -78,6 +99,7 @@ def _write_results(root: Path, *event_ids: str) -> Path:
                 "quote_outcomes": {
                     f"{event_id}|winner|alice": "win" for event_id in event_ids
                 },
+                "outcome_provenance": provenance,
             },
             sort_keys=True,
         ),
@@ -128,7 +150,9 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
 
             dataset = load_dataset(output)
             manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+            sealed = json.loads((output / "results.json").read_text(encoding="utf-8"))
             acquisition = manifest["governance"]["acquisition_evidence"]
+            outcome_evidence = manifest["governance"]["outcome_evidence"]
             self.assertEqual(dataset.schema_version, 2)
             self.assertEqual(dataset.import_identity, build.import_identity)
             self.assertEqual(build.snapshot_count, 2)
@@ -139,6 +163,13 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
             self.assertTrue(acquisition["licensing_or_retention_verified"])
             self.assertEqual(acquisition["rights_source_ids"], [ParlayApiTableTennisProvider.source_id])
             self.assertEqual(acquisition["governance_proof_sha256"], _sha256(proof))
+            self.assertEqual(outcome_evidence["source_record_sha256"], "2" * 64)
+            self.assertEqual(outcome_evidence["available_at"], "2026-01-01T11:00:00+00:00")
+            self.assertTrue(outcome_evidence["licensing_or_retention_verified"])
+            self.assertEqual(
+                sealed["outcome_provenance"]["source_identity"],
+                "official-results:test-fixture",
+            )
             self.assertEqual(manifest["import_identity"], dataset.import_identity)
 
     def test_unverified_retention_rights_fail_closed_before_output(self):
@@ -324,6 +355,118 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
                     outcome_reveal_after="2026-01-01T11:00:00+00:00",
                     imported_at="2026-01-02T00:05:00+00:00",
                 )
+
+    def test_missing_outcome_provenance_fails_closed_before_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            results = _write_results(root, "tt-a")
+            payload = json.loads(results.read_text(encoding="utf-8"))
+            del payload["outcome_provenance"]
+            results.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            output = root / "corpus"
+            with self.assertRaisesRegex(ValueError, "outcome_provenance must be an object"):
+                assemble_historical_corpus(
+                    [snapshot],
+                    results_path=results,
+                    governance_proof_path=_write_governance(root),
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
+
+    def test_outcome_availability_after_reveal_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            results = _write_results(
+                root,
+                "tt-a",
+                provenance_overrides={"available_at": "2026-01-01T12:00:00+00:00"},
+            )
+            output = root / "corpus"
+            with self.assertRaisesRegex(ValueError, "must not precede sealed outcome source availability"):
+                assemble_historical_corpus(
+                    [snapshot],
+                    results_path=results,
+                    governance_proof_path=_write_governance(root),
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
+
+    def test_import_before_outcome_acquisition_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            results = _write_results(
+                root,
+                "tt-a",
+                provenance_overrides={
+                    "acquired_at": "2026-01-02T00:06:00+00:00",
+                    "verified_at": "2026-01-02T00:06:00+00:00",
+                },
+            )
+            output = root / "corpus"
+            with self.assertRaisesRegex(ValueError, "imported_at must not precede sealed outcome acquisition"):
+                assemble_historical_corpus(
+                    [snapshot],
+                    results_path=results,
+                    governance_proof_path=_write_governance(root),
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
+
+    def test_invalid_outcome_source_checksum_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            results = _write_results(
+                root,
+                "tt-a",
+                provenance_overrides={"source_record_sha256": "not-a-sha"},
+            )
+            output = root / "corpus"
+            with self.assertRaisesRegex(ValueError, "64-character SHA-256"):
+                assemble_historical_corpus(
+                    [snapshot],
+                    results_path=results,
+                    governance_proof_path=_write_governance(root),
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
+
+    def test_effective_redistribution_policy_is_most_restrictive_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            output = root / "corpus"
+            build = assemble_historical_corpus(
+                [snapshot],
+                results_path=_write_results(root, "tt-a"),
+                governance_proof_path=_write_governance(
+                    root,
+                    redistribution_policy="permitted",
+                    redistribution_verified=True,
+                ),
+                output_dir=output,
+                name="conservative-rights",
+                outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                imported_at="2026-01-02T00:05:00+00:00",
+            )
+            manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(build.redistribution_policy, "internal_only")
+            self.assertEqual(manifest["governance"]["redistribution_policy"], "internal_only")
 
 
 if __name__ == "__main__":

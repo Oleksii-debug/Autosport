@@ -107,6 +107,10 @@ def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
     canonical_balance = _required_decimal(payload, "balance", source)
     if canonical_balance != final_balance:
         raise ValueError(f"{source}: evaluation.final_balance does not match canonical run balance")
+    if final_balance != initial_bankroll + net_profit:
+        raise ValueError(
+            f"{source}: evaluation.final_balance does not match initial_bankroll + net_profit"
+        )
     expected_roi = (net_profit / settled_stake) if settled_stake else Decimal("0")
     if roi != expected_roi:
         raise ValueError(f"{source}: evaluation.roi does not match net_profit / settled_stake")

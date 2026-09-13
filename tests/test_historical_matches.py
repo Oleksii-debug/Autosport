@@ -37,7 +37,7 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
 
-    def test_capture_is_opaque_and_keeps_truth_boundaries(self) -> None:
+    def test_capture_uses_only_documented_query_and_keeps_truth_boundaries(self) -> None:
         payload = [{"provider_defined_id": "match-1", "has_odds": False, "opaque": {"value": 1}}]
         transport = _Transport(payload)
         with tempfile.TemporaryDirectory() as temp:
@@ -45,18 +45,17 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
             evidence_path = Path(temp) / "matches.evidence.json"
             report = capture_historical_matches(
                 self._provider(transport),
-                date_from="2026-09-10",
-                date_to="2026-09-12",
+                requested_date="2026-09-10",
                 output_path=output,
                 evidence_path=evidence_path,
-                sources=("source-b", "source-a", "source-a"),
-                limit=500,
             )
             capture = json.loads(output.read_text(encoding="utf-8"))
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
 
         self.assertEqual(capture["payload"], payload)
-        self.assertEqual(capture["request"]["sources"], ["source-a", "source-b"])
+        self.assertEqual(capture["request"], {"date": "2026-09-10", "priced_only": False})
+        self.assertEqual(evidence["requested_date"], "2026-09-10")
+        self.assertFalse(evidence["priced_only"])
         self.assertEqual(evidence["capture_sha256"], report.capture_sha256)
         self.assertEqual(evidence["coverage_hint"], "source=test-source")
         self.assertFalse(evidence["provider_result_schema_parsed"])
@@ -70,12 +69,22 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
         parsed = urlparse(transport.urls[0])
         self.assertEqual(parsed.path, "/v1/historical/sports/table_tennis/matches")
         query = parse_qs(parsed.query)
-        self.assertEqual(query["dateFrom"], ["2026-09-10"])
-        self.assertEqual(query["dateTo"], ["2026-09-12"])
+        self.assertEqual(set(query), {"date", "pricedOnly"})
+        self.assertEqual(query["date"], ["2026-09-10"])
         self.assertEqual(query["pricedOnly"], ["false"])
-        self.assertEqual(query["includeRaw"], ["false"])
-        self.assertEqual(query["sources"], ["source-a,source-b"])
-        self.assertEqual(query["limit"], ["500"])
+        self.assertNotIn("unit-test-key", transport.urls[0])
+
+    def test_priced_only_maps_to_documented_boolean_parameter(self) -> None:
+        transport = _Transport([])
+        with tempfile.TemporaryDirectory() as temp:
+            capture_historical_matches(
+                self._provider(transport),
+                requested_date="2026-09-10",
+                priced_only=True,
+                output_path=Path(temp) / "matches.json",
+            )
+        query = parse_qs(urlparse(transport.urls[0]).query)
+        self.assertEqual(query, {"date": ["2026-09-10"], "pricedOnly": ["true"]})
 
     def test_missing_entitlement_headers_fail_closed_before_output(self) -> None:
         transport = _Transport([], headers={"x-api-version": "test"})
@@ -84,13 +93,12 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(ProviderPayloadError, "missing entitlement-window headers"):
                 capture_historical_matches(
                     self._provider(transport),
-                    date_from="2026-09-10",
-                    date_to="2026-09-12",
+                    requested_date="2026-09-10",
                     output_path=output,
                 )
             self.assertFalse(output.exists())
 
-    def test_out_of_entitlement_range_fails_closed(self) -> None:
+    def test_out_of_entitlement_date_fails_closed(self) -> None:
         transport = _Transport([], headers={
             "x-historical-window-hours": "48",
             "x-historical-window-from": "2026-09-11T00:00:00Z",
@@ -100,20 +108,30 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(ProviderPayloadError, "contradicts its entitlement-window header"):
                 capture_historical_matches(
                     self._provider(transport),
-                    date_from="2026-09-10",
-                    date_to="2026-09-12",
+                    requested_date="2026-09-10",
                     output_path=output,
                 )
             self.assertFalse(output.exists())
 
-    def test_invalid_range_fails_before_network(self) -> None:
+    def test_invalid_date_fails_before_network(self) -> None:
         transport = _Transport([])
         with tempfile.TemporaryDirectory() as temp:
-            with self.assertRaisesRegex(ValueError, "date_to must not precede date_from"):
+            with self.assertRaisesRegex(ValueError, "requested_date must be YYYY-MM-DD"):
                 capture_historical_matches(
                     self._provider(transport),
-                    date_from="2026-09-12",
-                    date_to="2026-09-10",
+                    requested_date="2026-09-40",
+                    output_path=Path(temp) / "matches.json",
+                )
+        self.assertEqual(transport.urls, [])
+
+    def test_non_boolean_priced_only_fails_before_network(self) -> None:
+        transport = _Transport([])
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, "priced_only must be boolean"):
+                capture_historical_matches(
+                    self._provider(transport),
+                    requested_date="2026-09-10",
+                    priced_only=1,  # type: ignore[arg-type]
                     output_path=Path(temp) / "matches.json",
                 )
         self.assertEqual(transport.urls, [])
@@ -125,8 +143,7 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(ProviderPayloadError, "JSON object or array"):
                 capture_historical_matches(
                     self._provider(transport),
-                    date_from="2026-09-10",
-                    date_to="2026-09-12",
+                    requested_date="2026-09-10",
                     output_path=output,
                 )
             self.assertFalse(output.exists())

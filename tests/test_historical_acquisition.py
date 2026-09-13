@@ -45,15 +45,44 @@ def _snapshot_payload() -> dict[str, object]:
 
 
 class _Transport:
-    def __init__(self, *, fail_matches: bool = False) -> None:
+    def __init__(self, *, fail_matches: bool = False, empty_coverage: bool = False) -> None:
         self.fail_matches = fail_matches
+        self.empty_coverage = empty_coverage
         self.urls: list[str] = []
         self.headers: list[dict[str, str]] = []
 
     def __call__(self, url: str, headers: dict[str, str], timeout: float) -> HttpJsonResponse:
         self.urls.append(url)
         self.headers.append(dict(headers))
-        path = urlparse(url).path
+        parsed = urlparse(url)
+        path = parsed.path
+        if path.endswith("/coverage"):
+            query = parse_qs(parsed.query)
+            date_from = query["dateFrom"][0]
+            date_to = query["dateTo"][0]
+            by_source = {}
+            if not self.empty_coverage:
+                by_source = {
+                    "test-source": {
+                        "rows": 3,
+                        "first_date": date_from,
+                        "last_date": date_to,
+                        "priced_rows": 2,
+                    }
+                }
+            return HttpJsonResponse(
+                {
+                    "sport_key": "table_tennis",
+                    "window": {"date_from": date_from, "date_to": date_to},
+                    "by_source": by_source,
+                },
+                200,
+                {
+                    "x-api-version": "test",
+                    "x-historical-window-hours": "168",
+                    "x-historical-window-from": "2026-09-06T00:00:00Z",
+                },
+            )
         if path.endswith("/odds"):
             return HttpJsonResponse(_snapshot_payload(), 200, {"x-api-version": "test"})
         if path.endswith("/matches"):
@@ -83,7 +112,7 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
 
-    def test_bundle_binds_exact_files_without_promoting_truth(self) -> None:
+    def test_bundle_preflights_and_binds_exact_files_without_promoting_truth(self) -> None:
         transport = _Transport()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "acquisition"
@@ -107,11 +136,24 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                 hashlib.sha256(bundle_path.read_bytes()).hexdigest(),
             )
             self.assertEqual(
+                bundle["request_scope"]["coverage_preflight"],
+                {"date_from": "2026-09-10", "date_to": "2026-09-12"},
+            )
+            self.assertEqual(
                 bundle["request_scope"]["match_results"],
                 {"date": "2026-09-10", "priced_only": True},
             )
             self.assertEqual(bundle["match_results"]["requested_date"], "2026-09-10")
             self.assertTrue(bundle["match_results"]["priced_only"])
+            coverage = bundle["match_results"]["coverage_preflight"]
+            self.assertEqual(coverage["date_from"], "2026-09-10")
+            self.assertEqual(coverage["date_to"], "2026-09-12")
+            self.assertEqual(coverage["source_count"], 1)
+            self.assertEqual(coverage["total_rows"], 3)
+            self.assertEqual(coverage["total_priced_rows"], 2)
+            self.assertFalse(coverage["historical_window_market_coverage_verified"])
+            self.assertFalse(coverage["licensing_or_retention_verified"])
+            self.assertFalse(coverage["redistribution_verified"])
             self.assertFalse(bundle["provider_result_schema_parsed"])
             self.assertFalse(bundle["sealed_quote_outcomes_derived"])
             self.assertFalse(bundle["point_in_time_odds_market_coverage_verified"])
@@ -135,8 +177,12 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(result_capture.read_bytes()).hexdigest(), result_entry["capture_sha256"])
             self.assertEqual(hashlib.sha256(result_evidence.read_bytes()).hexdigest(), result_entry["evidence_sha256"])
 
-        self.assertEqual(len(transport.urls), 3)
+        self.assertEqual(len(transport.urls), 4)
         self.assertTrue(all(headers["X-API-Key"] == "unit-test-key" for headers in transport.headers))
+        self.assertTrue(urlparse(transport.urls[0]).path.endswith("/coverage"))
+        coverage_query = parse_qs(urlparse(transport.urls[0]).query)
+        self.assertEqual(coverage_query["dateFrom"], ["2026-09-10"])
+        self.assertEqual(coverage_query["dateTo"], ["2026-09-12"])
         match_url = next(url for url in transport.urls if urlparse(url).path.endswith("/matches"))
         match_query = parse_qs(urlparse(match_url).query)
         self.assertEqual(set(match_query), {"date", "pricedOnly"})
@@ -155,6 +201,21 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                     output_dir=Path(tmp) / "acquisition",
                 )
         self.assertEqual(transport.urls, [])
+
+    def test_empty_coverage_fails_before_snapshot_calls_and_leaves_no_bundle(self) -> None:
+        transport = _Transport(empty_coverage=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with self.assertRaisesRegex(ProviderPayloadError, "coverage preflight returned no source rows"):
+                capture_historical_acquisition_bundle(
+                    self._provider(transport),
+                    requested_at=("2026-09-12T10:03:00Z",),
+                    results_date="2026-09-10",
+                    output_dir=root,
+                )
+            self.assertFalse(root.exists())
+        self.assertEqual(len(transport.urls), 1)
+        self.assertTrue(urlparse(transport.urls[0]).path.endswith("/coverage"))
 
     def test_match_evidence_failure_leaves_no_partial_final_bundle(self) -> None:
         transport = _Transport(fail_matches=True)

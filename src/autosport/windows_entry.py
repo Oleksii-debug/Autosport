@@ -5,10 +5,6 @@ import sys
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    if args and args[0] == "compare-strategies":
-        from autosport.strategy_comparison import main as strategy_comparison_main
-
-        return strategy_comparison_main(args[1:])
     if args and args[0] == "--diagnostic-output":
         if len(args) != 2:
             return 2

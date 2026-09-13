@@ -30,6 +30,7 @@ class StrategyRunEvidence:
     research_plan_sha256: str | None
     initial_bankroll: Decimal
     final_balance: Decimal
+    committed_stake: Decimal
     settled_stake: Decimal
     net_profit: Decimal
     roi: Decimal
@@ -74,6 +75,8 @@ def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
     run_id = _required_text(payload, "run_id", source)
     if payload.get("transaction_run_id") != run_id:
         raise ValueError(f"{source}: transaction_run_id does not match run_id")
+    _required_hash(payload, "paper_book_sha256", source)
+    _required_hash(payload, "decision_ledger_sha256", source)
 
     runtime = payload.get("strategy_runtime")
     if not isinstance(runtime, dict):
@@ -97,6 +100,24 @@ def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
     if not isinstance(evaluation, dict):
         raise ValueError(f"{source}: evaluation must be an object")
 
+    initial_bankroll = _required_decimal(evaluation, "initial_bankroll", source)
+    final_balance = _required_decimal(evaluation, "final_balance", source)
+    committed_stake = _required_decimal(evaluation, "committed_stake", source, minimum=Decimal("0"))
+    settled_stake = _required_decimal(evaluation, "settled_stake", source, minimum=Decimal("0"))
+    net_profit = _required_decimal(evaluation, "net_profit", source)
+    roi = _required_decimal(evaluation, "roi", source)
+    canonical_balance = _required_decimal(payload, "balance", source)
+    if canonical_balance != final_balance:
+        raise ValueError(f"{source}: evaluation.final_balance does not match canonical run balance")
+    expected_profit = final_balance + committed_stake - initial_bankroll
+    if net_profit != expected_profit:
+        raise ValueError(
+            f"{source}: evaluation.net_profit does not match final_balance + committed_stake - initial_bankroll"
+        )
+    expected_roi = (net_profit / settled_stake) if settled_stake else Decimal("0")
+    if roi != expected_roi:
+        raise ValueError(f"{source}: evaluation.roi does not match net_profit / settled_stake")
+
     return StrategyRunEvidence(
         source_path=str(source),
         source_sha256=hashlib.sha256(raw_bytes).hexdigest(),
@@ -112,11 +133,12 @@ def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
         strategy_id=strategy_id,
         canonical_strategy_id=canonical_strategy_id,
         research_plan_sha256=research_plan_sha256,
-        initial_bankroll=_required_decimal(evaluation, "initial_bankroll", source),
-        final_balance=_required_decimal(evaluation, "final_balance", source),
-        settled_stake=_required_decimal(evaluation, "settled_stake", source, minimum=Decimal("0")),
-        net_profit=_required_decimal(evaluation, "net_profit", source),
-        roi=_required_decimal(evaluation, "roi", source),
+        initial_bankroll=initial_bankroll,
+        final_balance=final_balance,
+        committed_stake=committed_stake,
+        settled_stake=settled_stake,
+        net_profit=net_profit,
+        roi=roi,
         won=_required_int(evaluation, "won", source, minimum=0),
         lost=_required_int(evaluation, "lost", source, minimum=0),
         void=_required_int(evaluation, "void", source, minimum=0),
@@ -171,6 +193,7 @@ def compare_strategy_runs(
                 "evaluation": {
                     "initial_bankroll": str(item.initial_bankroll),
                     "final_balance": str(item.final_balance),
+                    "committed_stake": str(item.committed_stake),
                     "settled_stake": str(item.settled_stake),
                     "net_profit": str(item.net_profit),
                     "roi": str(item.roi),

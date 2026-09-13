@@ -29,6 +29,12 @@ STRATEGY COMPARISON
 
 19. Для fail-closed порівняння двох або більше completed strategy run summaries на тому самому sealed dataset відкрийте PowerShell у папці програми та виконайте: .\Autosport-Data.exe compare-strategies <run-summary-1.json> <run-summary-2.json> --baseline-strategy baseline-v1 --output strategy-comparison.json. Команда приймає лише сумісні canonical run summaries і записує machine-readable report; observed paper ordering не є доказом profitability, predictive superiority або out-of-sample переваги.
 
+CRASH / ECONOMIC WORKSPACE RECOVERY
+
+20. Якщо Autosport після аварійного завершення повідомляє про unresolved economic transaction, не видаляйте paper_book.json, decisions.jsonl, run_registry.json або transaction files вручну. Закрийте Autosport.exe, відкрийте PowerShell у папці програми та запустіть canonical fail-closed recovery для відповідного workspace: .\Autosport-Data.exe repair-workspace --workspace "<повний шлях до workspace>".
+21. Для baseline-v1 типовий workspace показується безпосередньо в рядку «Віртуальний банк» GUI. Для інших strategy/plan identities використовуйте саме strategy-specific workspace, який GUI також показує під час replay. Команда recovery не запускається паралельно з active economic writer.
+22. repair-workspace не «позначає run успішним» за припущенням. Вона завершує або відхиляє лише той стан, який може бути доведений canonical transaction/base hashes; неоднозначний стан залишається unresolved і повертає ненульовий exit code. Після успішного repair перезапустіть Autosport.exe і повторно відкрийте той самий strategy/plan context.
+
 Live observation є read-only. Paper/replay функції використовують лише віртуальний банк. Програма не виконує реальні грошові ставки і не має механізму керування букмекерським рахунком, поповнення або виведення коштів.
 
 Machine accessibility/keyboard audits є prerequisite evidence і не означають physical NVDA speech verification.

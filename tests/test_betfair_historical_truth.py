@@ -102,7 +102,8 @@ class BetfairHistoricalTruthTests(unittest.TestCase):
         self.assertEqual(
             manifest["governance"]["availability_semantics"],
             {
-                "strategy_visible_market_status": "OPEN_ONLY",
+                "strategy_visible_market_status": "OPEN_QUOTES_PLUS_EXPLICIT_SOURCE_STATE_TRANSITIONS",
+                "definition_state_transitions_preserved": True,
                 "suspended_or_non_open_intervals_preserved": False,
                 "complete_availability_history_verified": False,
             },

@@ -262,7 +262,7 @@ class RunRegistry:
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         if raw.get("schema_version") != 1 or not isinstance(raw.get("runs"), dict):
             raise ValueError("invalid run registry")
-        for item in raw["runs"].values():
+        for key, item in raw["runs"].items():
             if not isinstance(item, dict):
                 raise ValueError("run registry contains an invalid run entry")
             if item.get("status") not in {"in_progress", "completed", "aborted"}:
@@ -289,6 +289,13 @@ class RunRegistry:
             )
             if item.get("base_identity") != expected_base_identity:
                 raise ValueError("run registry contains an inconsistent base identity")
+            expected_keys = {
+                expected_base_identity,
+                f"{expected_base_identity}:repeat:{run_id}",
+                f"{expected_base_identity}:retry:{run_id}",
+            }
+            if key not in expected_keys:
+                raise ValueError("run registry contains an inconsistent experiment key")
         return raw
 
     def _write(self, raw: dict) -> None:

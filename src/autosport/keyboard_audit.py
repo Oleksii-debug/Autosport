@@ -10,6 +10,7 @@ from .gui import AUTOMATION_IDS, AutosportApp
 _ACTION_BINDINGS = {
     "<Control-o>": "choose_dataset",
     "<Control-r>": "run_replay",
+    "<Control-Shift-R>": "repair_workspace",
     "<Control-l>": "live_refresh",
 }
 _FOCUS_BINDINGS = {
@@ -22,6 +23,7 @@ _FOCUSABLE_CONTROLS = (
     "research_plan",
     "choose_dataset",
     "run_replay",
+    "repair_workspace",
     "replay_speed",
     "live_mode",
     "live_refresh",
@@ -82,6 +84,7 @@ def _critical_widgets(app: AutosportApp) -> dict[str, Any]:
         "research_plan": app.research_plan_button,
         "choose_dataset": app.choose_button,
         "run_replay": app.run_button,
+        "repair_workspace": app.repair_button,
         "replay_speed": app.speed,
         "live_mode": app.live_mode,
         "live_refresh": app.live_refresh_button,

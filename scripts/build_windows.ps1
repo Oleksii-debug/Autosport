@@ -23,10 +23,67 @@ if ($accessibility.nvda_verified -ne $false) { throw 'Machine accessibility audi
 
 $sourceSha = $env:AUTOSPORT_SOURCE_SHA
 if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
+$package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
+$packageVerification = Join-Path $PWD 'dist/package-verification.json'
 python scripts/package_windows.py `
   --exe dist/Autosport.exe `
   --start-file WINDOWS_START_HERE.txt `
   --example-dir examples/tt_demo `
   --diagnostic $diag `
-  --output dist/Autosport-V1-windows-x64.zip `
-  --source-sha $sourceSha
+  --accessibility-audit $a11y `
+  --output $package `
+  --source-sha $sourceSha `
+  --verification-output $packageVerification
+
+# Binding release gate: verify the artifact after a clean extraction, not only the
+# pre-package executable. This catches archive/path/packaging defects that a
+# successful dist/Autosport.exe smoke test cannot prove away.
+$extractRoot = Join-Path $PWD '.build-fresh-extraction'
+if (Test-Path $extractRoot) { Remove-Item -Recurse -Force $extractRoot }
+New-Item -ItemType Directory -Path $extractRoot | Out-Null
+Expand-Archive -LiteralPath $package -DestinationPath $extractRoot -Force
+$packageRoot = Join-Path $extractRoot 'Autosport-V1'
+$extractedExe = Join-Path $packageRoot 'Autosport.exe'
+if (-not (Test-Path $extractedExe -PathType Leaf)) { throw 'Fresh extraction is missing Autosport.exe' }
+
+$buildInfo = Get-Content (Join-Path $packageRoot 'BUILD_INFO.json') -Raw | ConvertFrom-Json
+if ($buildInfo.source_sha -ne $sourceSha) { throw 'Fresh extraction BUILD_INFO source_sha mismatch' }
+if ($buildInfo.real_money_execution -ne $false) { throw 'Fresh extraction must preserve REAL_MONEY_EXECUTION=false' }
+if ($buildInfo.human_tested -ne $false) { throw 'Machine build must not claim HUMAN_TESTED' }
+if ($buildInfo.nvda_verified -ne $false) { throw 'Machine build must not claim NVDA_VERIFIED' }
+$extractedExeSha = (Get-FileHash -LiteralPath $extractedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($extractedExeSha -ne $buildInfo.autosport_exe_sha256) { throw 'Fresh extraction Autosport.exe hash mismatch' }
+
+$freshDiag = Join-Path $PWD 'dist/fresh-extraction-diagnostic.json'
+if (Test-Path $freshDiag) { Remove-Item -Force $freshDiag }
+$freshDiagProcess = Start-Process -FilePath $extractedExe -ArgumentList '--diagnostic-output', $freshDiag -Wait -PassThru
+if ($freshDiagProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe diagnostic exited $($freshDiagProcess.ExitCode)" }
+$freshDiagnostic = Get-Content $freshDiag -Raw | ConvertFrom-Json
+if ($freshDiagnostic.status -ne 'PASS') { throw 'Fresh-extracted Autosport.exe diagnostic did not PASS' }
+if ($freshDiagnostic.real_money_execution -ne $false -or $freshDiagnostic.human_tested -ne $false -or $freshDiagnostic.nvda_verified -ne $false) {
+  throw 'Fresh-extracted diagnostic violated release truth labels'
+}
+
+$freshA11y = Join-Path $PWD 'dist/fresh-extraction-accessibility-audit.json'
+if (Test-Path $freshA11y) { Remove-Item -Force $freshA11y }
+$freshA11yProcess = Start-Process -FilePath $extractedExe -ArgumentList '--accessibility-audit-output', $freshA11y -Wait -PassThru
+if ($freshA11yProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe accessibility audit exited $($freshA11yProcess.ExitCode)" }
+$freshAccessibility = Get-Content $freshA11y -Raw | ConvertFrom-Json
+if ($freshAccessibility.status -ne 'PASS') { throw 'Fresh-extracted accessibility audit did not PASS' }
+if ($freshAccessibility.real_money_execution -ne $false -or $freshAccessibility.human_tested -ne $false -or $freshAccessibility.nvda_verified -ne $false) {
+  throw 'Fresh-extracted accessibility audit violated release truth labels'
+}
+
+$freshEvidence = [ordered]@{
+  status = 'PASS'
+  source_sha = $sourceSha
+  package_sha256 = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+  autosport_exe_sha256 = $extractedExeSha
+  package_verification_status = 'PASS'
+  extracted_diagnostic_status = $freshDiagnostic.status
+  extracted_accessibility_status = $freshAccessibility.status
+  real_money_execution = $false
+  human_tested = $false
+  nvda_verified = $false
+}
+$freshEvidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $PWD 'dist/fresh-extraction-verification.json') -Encoding utf8

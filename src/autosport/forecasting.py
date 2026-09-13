@@ -71,6 +71,10 @@ class ForecastRecord:
         object.__setattr__(self, "uncertainty", uncertainty)
         if not self.quote_key or not self.model_id or not self.model_version or not self.strategy_version:
             raise ValueError("forecast identities must not be empty")
+        if not probability.is_finite():
+            raise ValueError("probability must be finite")
+        if not uncertainty.is_finite():
+            raise ValueError("uncertainty must be finite")
         if probability < 0 or probability > 1:
             raise ValueError("probability must be between 0 and 1")
         if uncertainty < 0 or uncertainty > 1:

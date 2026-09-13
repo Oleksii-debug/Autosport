@@ -111,7 +111,9 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
         self.assertIs(manifest["governance"]["price_semantics"]["paper_fill_capacity_enforced"], True)
 
         # Stake 50 cannot use the first 40-unit quote, but can use the later 60-unit quote.
-        book = PaperBook("1000")
+        # Keep the bankroll large enough that the canonical 2% per-ticket risk cap is not
+        # the reason for rejection; this test isolates observed quote-capacity semantics.
+        book = PaperBook("10000")
         agent = PaperValueAgent(
             {
                 events[0].quote_key: Forecast(

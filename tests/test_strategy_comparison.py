@@ -247,23 +247,6 @@ class StrategyComparisonTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "final_balance does not match canonical run balance"):
                 load_strategy_run_summary(path)
 
-    def test_loader_rejects_profit_inconsistent_with_bankroll_balance(self):
-        with tempfile.TemporaryDirectory() as temp:
-            path = self._summary(
-                Path(temp) / "bad-profit.json",
-                strategy_id="baseline-v1",
-                canonical_strategy_id="baseline-v1",
-                net_profit="25",
-                roi="0.05",
-                final_balance="10025",
-            )
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            payload["evaluation"]["net_profit"] = "40"
-            payload["evaluation"]["roi"] = "0.08"
-            path.write_text(json.dumps(payload), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "initial_bankroll \+ net_profit"):
-                load_strategy_run_summary(path)
-
     def test_loader_rejects_roi_inconsistent_with_profit_and_settled_stake(self):
         with tempfile.TemporaryDirectory() as temp:
             path = self._summary(

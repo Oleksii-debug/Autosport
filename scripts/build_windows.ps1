@@ -49,6 +49,8 @@ $dataExe = Join-Path $PWD 'dist/Autosport-Data.exe'
 if (-not (Test-Path $dataExe -PathType Leaf)) { throw 'Packaged build is missing Autosport-Data.exe' }
 & $dataExe --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe help exited $LASTEXITCODE" }
+& $dataExe compare-strategies --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe compare-strategies --help exited $LASTEXITCODE" }
 & $dataExe acquire --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe acquire --help exited $LASTEXITCODE" }
 & $dataExe build-corpus --help | Out-Null
@@ -101,6 +103,8 @@ if ($extractedDataExeSha -ne $buildInfo.autosport_data_exe_sha256) { throw 'Fres
 
 & $extractedDataExe --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe help exited $LASTEXITCODE" }
+& $extractedDataExe compare-strategies --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe compare-strategies --help exited $LASTEXITCODE" }
 & $extractedDataExe acquire --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe acquire --help exited $LASTEXITCODE" }
 & $extractedDataExe build-corpus --help | Out-Null
@@ -161,6 +165,7 @@ $freshEvidence = [ordered]@{
   autosport_data_exe_sha256 = $extractedDataExeSha
   portable_historical_data_tools = $true
   package_verification_status = 'PASS'
+  extracted_strategy_comparison_entry_status = 'PASS'
   extracted_data_tool_help_status = 'PASS'
   extracted_data_tool_acquire_help_status = 'PASS'
   extracted_data_tool_build_corpus_help_status = 'PASS'

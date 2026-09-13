@@ -48,6 +48,19 @@ class WindowsReleaseArchivePathTruthTests(unittest.TestCase):
             "reserved Windows device name",
         )
 
+    def test_reserved_superscript_device_members_fail_closed(self) -> None:
+        for stem in ("COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³"):
+            with self.subTest(stem=stem, form="bare"):
+                self._assert_rejected(
+                    [f"Autosport-V1/examples/{stem}"],
+                    "reserved Windows device name",
+                )
+            with self.subTest(stem=stem, form="extension"):
+                self._assert_rejected(
+                    [f"Autosport-V1/examples/{stem}.json"],
+                    "reserved Windows device name",
+                )
+
     def test_windows_invalid_character_member_fails_closed(self) -> None:
         self._assert_rejected(
             ["Autosport-V1/examples/market:stream.jsonl"],

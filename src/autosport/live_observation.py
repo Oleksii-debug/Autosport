@@ -33,6 +33,7 @@ class OneShotObservationWorker:
 
     The worker is deliberately non-daemon. A live observation mutates durable market/source-health
     state, so interpreter shutdown must not kill it in the middle of that persistence boundary.
+    This is a durability invariant, not merely a thread-lifecycle implementation detail.
     """
 
     def __init__(self) -> None:

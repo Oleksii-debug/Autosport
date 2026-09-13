@@ -36,6 +36,7 @@ class AccessibilityAuditTests(unittest.TestCase):
                 self._widget(AUTOMATION_IDS["live_mode"], "Режим live observation", role="COMBOBOX", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_refresh"], "Оновити live snapshot", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["tickets"], "Paper tickets і результати", role="LIST", answers_rows=True),
+                self._widget(AUTOMATION_IDS["evaluation"], "Evaluation і portfolio evidence", role="LIST", answers_rows=True),
                 self._widget(AUTOMATION_IDS["log"], "Журнал виконання", role="EDIT", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_quotes"], "Live quotes", role="LIST", answers_rows=True),
             ),
@@ -66,7 +67,7 @@ class AccessibilityAuditTests(unittest.TestCase):
     def test_critical_contract_passes_with_names_roles_patterns_and_rows(self):
         report = summarize_description(self._passing_description())
         self.assertEqual(report["status"], "PASS")
-        self.assertEqual(len(report["critical_controls"]), 10)
+        self.assertEqual(len(report["critical_controls"]), 11)
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
 
@@ -103,10 +104,10 @@ class AccessibilityAuditTests(unittest.TestCase):
         description = self._passing_description()
         widgets = list(description.widgets)
         index = next(
-            i for i, item in enumerate(widgets) if item.automation_id == AUTOMATION_IDS["live_quotes"]
+            i for i, item in enumerate(widgets) if item.automation_id == AUTOMATION_IDS["evaluation"]
         )
         widgets[index] = self._widget(
-            AUTOMATION_IDS["live_quotes"], "Live quotes", role="LIST", answers_rows=False
+            AUTOMATION_IDS["evaluation"], "Evaluation і portfolio evidence", role="LIST", answers_rows=False
         )
         report = summarize_description(SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)}))
         self.assertEqual(report["status"], "FAIL")

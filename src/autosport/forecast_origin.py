@@ -1,0 +1,256 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
+
+from .dataset import ReplayDataset
+from .forecasting import ForecastRecord, parse_iso_timestamp
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastOriginBinding:
+    """Local durable artifacts used to prove canonical pre-outcome forecast origin."""
+
+    decision_ledger_path: Path
+    run_summary_paths: tuple[Path, ...]
+
+
+def load_forecast_origin_binding(raw: Any, bundle_path: str | Path) -> ForecastOriginBinding:
+    if not isinstance(raw, dict):
+        raise ValueError("walk-forward forecast_origin must be an object")
+    source = Path(bundle_path)
+    parent = source.parent.resolve()
+    ledger = _resolve_relative_file(parent, raw.get("decision_ledger_path"), "decision_ledger_path")
+    summary_values = raw.get("run_summary_paths")
+    if not isinstance(summary_values, list) or not summary_values:
+        raise ValueError("walk-forward forecast_origin.run_summary_paths must be a non-empty list")
+    summaries = tuple(
+        _resolve_relative_file(parent, value, f"run_summary_paths[{index}]")
+        for index, value in enumerate(summary_values)
+    )
+    if len(set(summaries)) != len(summaries):
+        raise ValueError("walk-forward forecast_origin contains duplicate run summary paths")
+    return ForecastOriginBinding(ledger, summaries)
+
+
+def verify_forecast_origin_binding(
+    binding: ForecastOriginBinding,
+    dataset: ReplayDataset,
+    forecasts: Iterable[ForecastRecord],
+    evaluated_forecast_ids: set[str],
+) -> dict[str, Any]:
+    """Bind evaluated forecasts to canonical research-ledger records written before reveal.
+
+    This is deliberately stricter than trusting ForecastRecord timestamps. Each
+    evaluated forecast must appear by canonical id + hash in a research pipeline
+    decision whose ledger prefix hash is committed by a matching durable run
+    summary for the exact governed dataset. The DecisionRecord's wall-clock
+    ``recorded_at`` must precede the sealed dataset reveal boundary.
+    """
+
+    governance = dataset.governance
+    if dataset.schema_version != 2 or governance is None or dataset.import_identity is None:
+        raise ValueError("forecast origin proof requires a governed historical schema-v2 dataset")
+    if not evaluated_forecast_ids:
+        raise ValueError("forecast origin proof requires at least one evaluated forecast")
+
+    by_id = {record.forecast_id: record for record in forecasts}
+    unknown = sorted(evaluated_forecast_ids.difference(by_id))
+    if unknown:
+        raise ValueError("forecast origin proof references unknown evaluated forecasts: " + ",".join(unknown))
+
+    summaries = [_load_summary(path, dataset) for path in binding.run_summary_paths]
+    expected_prefix_hashes = {item["decision_ledger_sha256"] for item in summaries}
+    prefixes = _validated_ledger_prefixes(binding.decision_ledger_path, expected_prefix_hashes)
+    missing_prefixes = sorted(expected_prefix_hashes.difference(prefixes))
+    if missing_prefixes:
+        raise ValueError("canonical decision ledger does not contain a run-summary committed prefix")
+
+    reveal_after = parse_iso_timestamp(governance.outcome_reveal_after)
+    matched: dict[str, set[str]] = {forecast_id: set() for forecast_id in evaluated_forecast_ids}
+    latest_recorded_at: str | None = None
+
+    for summary in summaries:
+        run_id = summary["run_id"]
+        records = prefixes[summary["decision_ledger_sha256"]]
+        for envelope in records:
+            record = envelope["record"]
+            if record.get("replay_run_id") != run_id:
+                continue
+            if record.get("agent") != "research-decision-pipeline":
+                continue
+            if record.get("action") not in {
+                "OPEN_PAPER_RESEARCH_TICKET",
+                "REJECT_PAPER_RESEARCH_CANDIDATE",
+            }:
+                continue
+            recorded_at_value = record.get("recorded_at")
+            if not isinstance(recorded_at_value, str):
+                raise ValueError("research decision record lacks recorded_at")
+            recorded_at = parse_iso_timestamp(recorded_at_value)
+            if recorded_at >= reveal_after:
+                raise ValueError("research decision record was durably written at or after outcome reveal")
+            observed_value = record.get("observed_ts")
+            if not isinstance(observed_value, str):
+                raise ValueError("research decision record lacks observed_ts")
+            observed_at = parse_iso_timestamp(observed_value)
+            payload = record.get("payload")
+            if not isinstance(payload, dict) or payload.get("real_money_execution") is not False:
+                raise ValueError("research decision payload violates paper-only truth boundary")
+            forecast_values = payload.get("forecasts")
+            if not isinstance(forecast_values, list):
+                raise ValueError("research decision payload lacks forecasts list")
+
+            for audit in forecast_values:
+                if not isinstance(audit, dict):
+                    raise ValueError("research decision forecast audit entry must be an object")
+                forecast_id = audit.get("forecast_id")
+                if forecast_id not in evaluated_forecast_ids:
+                    continue
+                forecast = by_id[str(forecast_id)]
+                _verify_forecast_audit(audit, forecast)
+                if parse_iso_timestamp(forecast.generated_at) > observed_at:
+                    raise ValueError("forecast was generated after its canonical decision time")
+                if parse_iso_timestamp(forecast.input_cutoff_ts) > observed_at:
+                    raise ValueError("forecast input cutoff is after its canonical decision time")
+                matched[forecast.forecast_id].add(run_id)
+                if latest_recorded_at is None or parse_iso_timestamp(latest_recorded_at) < recorded_at:
+                    latest_recorded_at = recorded_at_value
+
+    missing = sorted(forecast_id for forecast_id, run_ids in matched.items() if not run_ids)
+    if missing:
+        raise ValueError(
+            "evaluated forecasts lack canonical pre-outcome decision-ledger origin: " + ",".join(missing)
+        )
+
+    return {
+        "status": "VERIFIED",
+        "decision_ledger_path": str(binding.decision_ledger_path),
+        "decision_ledger_sha256": hashlib.sha256(binding.decision_ledger_path.read_bytes()).hexdigest(),
+        "run_ids": sorted({run_id for run_ids in matched.values() for run_id in run_ids}),
+        "run_summary_count": len(summaries),
+        "evaluated_forecast_count": len(evaluated_forecast_ids),
+        "latest_verified_recorded_at": latest_recorded_at,
+        "outcome_reveal_after": governance.outcome_reveal_after,
+        "canonical_forecast_origin_verified": True,
+        "pre_outcome_ledger_write_verified": True,
+        "real_money_execution": False,
+    }
+
+
+def _resolve_relative_file(parent: Path, value: Any, label: str) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"walk-forward forecast_origin.{label} must be a non-empty relative path")
+    relative = Path(value.strip())
+    if relative.is_absolute():
+        raise ValueError(f"walk-forward forecast_origin.{label} must be relative to the bundle")
+    candidate = (parent / relative).resolve()
+    try:
+        candidate.relative_to(parent)
+    except ValueError as exc:
+        raise ValueError(f"walk-forward forecast_origin.{label} escapes the bundle directory") from exc
+    if not candidate.is_file():
+        raise ValueError(f"walk-forward forecast_origin.{label} does not exist")
+    return candidate
+
+
+def _load_summary(path: Path, dataset: ReplayDataset) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"forecast origin run summary is unreadable or invalid JSON: {path}") from exc
+    if not isinstance(raw, dict) or raw.get("schema_version") != 2:
+        raise ValueError("forecast origin run summary must use schema_version 2")
+    run_id = _required_text(raw, "run_id", "forecast origin run summary")
+    if raw.get("transaction_run_id") != run_id:
+        raise ValueError("forecast origin run summary transaction_run_id mismatch")
+    if raw.get("real_money_execution") is not False:
+        raise ValueError("forecast origin run summary violates REAL_MONEY_EXECUTION=false")
+    if raw.get("dataset_schema_version") != 2:
+        raise ValueError("forecast origin run summary is not bound to governed dataset schema v2")
+    if raw.get("historical_import_identity") != dataset.import_identity:
+        raise ValueError("forecast origin run summary historical import identity mismatch")
+    if raw.get("market_sha256") != dataset.market_sha256:
+        raise ValueError("forecast origin run summary market SHA mismatch")
+    if raw.get("sealed_results_sha256") != dataset.results_sha256:
+        raise ValueError("forecast origin run summary sealed results SHA mismatch")
+    runtime = raw.get("strategy_runtime")
+    if not isinstance(runtime, dict) or runtime.get("canonical_strategy_id") != "research-replay-v1":
+        raise ValueError("forecast origin run summary is not a canonical research replay run")
+    return {
+        "run_id": run_id,
+        "decision_ledger_sha256": _required_sha256(raw, "decision_ledger_sha256", "forecast origin run summary"),
+    }
+
+
+def _validated_ledger_prefixes(path: Path, expected_hashes: set[str]) -> dict[str, list[dict[str, Any]]]:
+    hasher = hashlib.sha256()
+    records: list[dict[str, Any]] = []
+    found: dict[str, list[dict[str, Any]]] = {}
+    try:
+        with path.open("rb") as handle:
+            for raw_line in handle:
+                hasher.update(raw_line)
+                if not raw_line.endswith(b"\n"):
+                    raise ValueError("canonical decision ledger contains a non-terminated line")
+                try:
+                    envelope = json.loads(raw_line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError("canonical decision ledger contains invalid UTF-8 JSON") from exc
+                _validate_envelope(envelope)
+                records.append(envelope)
+                digest = hasher.hexdigest()
+                if digest in expected_hashes:
+                    found[digest] = list(records)
+    except OSError as exc:
+        raise ValueError("canonical decision ledger is unreadable") from exc
+    return found
+
+
+def _validate_envelope(envelope: Any) -> None:
+    if not isinstance(envelope, dict) or set(envelope) != {"record", "sha256"}:
+        raise ValueError("canonical decision ledger envelope shape is invalid")
+    record = envelope.get("record")
+    if not isinstance(record, dict):
+        raise ValueError("canonical decision ledger record must be an object")
+    canonical = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if envelope.get("sha256") != expected:
+        raise ValueError("canonical decision ledger record SHA mismatch")
+
+
+def _verify_forecast_audit(audit: dict[str, Any], forecast: ForecastRecord) -> None:
+    expected = {
+        "quote_key": forecast.quote_key,
+        "forecast_id": forecast.forecast_id,
+        "forecast_hash": forecast.canonical_hash,
+        "model_id": forecast.model_id,
+        "model_version": forecast.model_version,
+        "strategy_version": forecast.strategy_version,
+        "input_cutoff_ts": forecast.input_cutoff_ts,
+        "generated_at": forecast.generated_at,
+        "uncertainty": str(forecast.uncertainty),
+    }
+    mismatches = [key for key, value in expected.items() if audit.get(key) != value]
+    if mismatches:
+        raise ValueError("canonical decision ledger forecast audit mismatch: " + ",".join(sorted(mismatches)))
+
+
+def _required_text(raw: dict[str, Any], key: str, context: str) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{context}.{key} must be non-empty text")
+    return value.strip()
+
+
+def _required_sha256(raw: dict[str, Any], key: str, context: str) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str) or len(value) != 64:
+        raise ValueError(f"{context}.{key} must be a SHA-256 hex digest")
+    lowered = value.lower()
+    if any(char not in "0123456789abcdef" for char in lowered):
+        raise ValueError(f"{context}.{key} must be a SHA-256 hex digest")
+    return lowered

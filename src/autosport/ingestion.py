@@ -48,8 +48,8 @@ class IngestionEngine:
         self.clock = clock or _utc_now_iso
 
     def poll_once(self, provider: MarketProvider, max_items: int = 1000) -> IngestionStats:
-        if max_items <= 0:
-            raise ValueError("max_items must be positive")
+        if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:
+            raise ValueError("max_items must be a positive integer")
         if max_items > self.policy.max_batch_size:
             raise ValueError(
                 f"requested batch {max_items} exceeds backpressure limit {self.policy.max_batch_size}"

@@ -5,10 +5,32 @@ import unittest
 from pathlib import Path
 
 from autosport.dataset import load_dataset
+from autosport.outcome_provenance import canonical_outcomes_sha256
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _outcome_provenance(outcomes: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "historical_outcome_provenance",
+        "source_identity": "official-results-feed:table-tennis:2026-01-01",
+        "source_reference": "official-results-export-2026-01-01",
+        "authority_reference": "result-authority-record-2026-01",
+        "terms_reference": "result-feed-contract-2026",
+        "retention_basis": "licensed internal historical research through 2027-01-01",
+        "redistribution_policy": "internal_only",
+        "licensing_or_retention_verified": True,
+        "redistribution_verified": False,
+        "authoritative_outcomes_verified": True,
+        "acquired_at": "2026-01-01T11:00:00+00:00",
+        "verified_at": "2026-01-01T11:01:00+00:00",
+        "source_payload_sha256": "a" * 64,
+        "quote_outcomes_sha256": canonical_outcomes_sha256(outcomes),
+        "real_money_execution": False,
+    }
 
 
 def _write_historical_dataset(
@@ -36,6 +58,7 @@ def _write_historical_dataset(
     results_payload: dict[str, object] = {
         "schema_version": 1,
         "quote_outcomes": outcomes,
+        "outcome_provenance": _outcome_provenance(outcomes),
     }
     if result_reveal_after is not None:
         results_payload["outcome_reveal_after"] = result_reveal_after

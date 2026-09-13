@@ -33,14 +33,20 @@ class _FailIfCalledPipeline:
         raise AssertionError("economic research pipeline must not run for a non-open market")
 
 
-def _suspended_plan():
+def _non_open_plan(status: str = "suspended"):
     dataset = load_dataset(Path("examples/tt_demo"))
-    base_event = sorted(
+    ordered = sorted(
         dataset.load_market_events(),
         key=lambda item: (item.observed_ts, item.sequence, item.dedupe_key),
-    )[0]
-    event = replace(base_event, status="suspended")
-    latest = {event.quote_key: event}
+    )
+    base_event = ordered[0]
+    event = replace(base_event, status=status)
+    trigger = next(
+        item
+        for item in ordered
+        if item.quote_key != event.quote_key and item.observed_ts >= event.observed_ts
+    )
+    latest = {event.quote_key: event, trigger.quote_key: trigger}
     snapshot_hash = research_market_snapshot_hash(latest, [event.quote_key])
     evidence_hash = market_event_evidence_hash(event)
     probability = Decimal("0.90")
@@ -54,7 +60,7 @@ def _suspended_plan():
     forecast = ForecastRecord(
         quote_key=event.quote_key,
         probability=probability,
-        model_id="suspended-market-test",
+        model_id="non-open-market-test",
         model_version="1.0.0",
         strategy_version=RESEARCH_STRATEGY_ID,
         model_training_cutoff_ts="2020-01-01T00:00:00+00:00",
@@ -64,10 +70,10 @@ def _suspended_plan():
         evidence_hashes=(evidence_hash,),
         market_snapshot_hash=snapshot_hash,
         provenance={"source": "causal-test"},
-        forecast_id="forecast-suspended-market",
+        forecast_id=f"forecast-{status}-market",
     )
     evidence = ResearchEvidence(
-        evidence_id="evidence-suspended-market",
+        evidence_id=f"evidence-{status}-market",
         quote_key=event.quote_key,
         source_id=event.source_id,
         observed_at=event.observed_ts,
@@ -84,26 +90,26 @@ def _suspended_plan():
         ),
     )
     instruction = ResearchReplayInstruction(
-        decision_id="decision-suspended-market",
-        trigger_quote_key=event.quote_key,
-        decision_ts=event.observed_ts,
+        decision_id=f"decision-{status}-market",
+        trigger_quote_key=trigger.quote_key,
+        decision_ts=trigger.observed_ts,
         stake=Decimal("10"),
         candidate=candidate,
         groups=(group,),
         forecasts=(forecast,),
         evidence=(evidence,),
     )
-    return event, latest, ResearchStrategyPlan((instruction,), "0" * 64)
+    return event, trigger, latest, ResearchStrategyPlan((instruction,), "0" * 64)
 
 
 class ResearchMarketStatusTruthTests(unittest.TestCase):
-    def test_preflight_rejects_suspended_candidate(self) -> None:
-        event, _latest, plan = _suspended_plan()
+    def test_preflight_rejects_suspended_candidate_on_unrelated_trigger(self) -> None:
+        event, trigger, _latest, plan = _non_open_plan("suspended")
         with self.assertRaisesRegex(ValueError, "not open market state"):
-            plan.preflight([event])
+            plan.preflight([event, trigger])
 
     def test_runtime_rejects_suspended_candidate_before_economic_mutation(self) -> None:
-        event, latest, plan = _suspended_plan()
+        _event, trigger, latest, plan = _non_open_plan("suspended")
         pipeline = _FailIfCalledPipeline()
         agent = ResearchReplayAgent(plan, pipeline=pipeline)
 
@@ -118,7 +124,30 @@ class ResearchMarketStatusTruthTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "not open market state"):
-                agent.on_market_event(event, context)
+                agent.on_market_event(trigger, context)
+
+            self.assertFalse(pipeline.called)
+            self.assertEqual(book.balance, Decimal("1000"))
+            self.assertEqual(book.tickets, {})
+            self.assertFalse(ledger_path.exists())
+
+    def test_runtime_rejects_importer_unavailable_state_on_unrelated_trigger(self) -> None:
+        _event, trigger, latest, plan = _non_open_plan("unavailable")
+        pipeline = _FailIfCalledPipeline()
+        agent = ResearchReplayAgent(plan, pipeline=pipeline)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "decisions.jsonl"
+            book = PaperBook("1000")
+            context = AgentContext(
+                paper_book=book,
+                latest_quotes=latest,
+                replay_run_id="unavailable-market-test",
+                decision_ledger=JsonlDecisionLedger(ledger_path),
+            )
+
+            with self.assertRaisesRegex(ValueError, "not open market state"):
+                agent.on_market_event(trigger, context)
 
             self.assertFalse(pipeline.called)
             self.assertEqual(book.balance, Decimal("1000"))

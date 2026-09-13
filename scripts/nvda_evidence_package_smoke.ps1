@@ -14,8 +14,12 @@ foreach ($required in @($package, $packagedDataExe, $freshDataExe, $buildInfoPat
 
 $buildInfo = Get-Content $buildInfoPath -Raw | ConvertFrom-Json
 $packageSha = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+$expectedSourceSha = [string]$env:AUTOSPORT_SOURCE_SHA
+if ([string]::IsNullOrWhiteSpace($expectedSourceSha)) { throw 'AUTOSPORT_SOURCE_SHA external trust anchor is missing' }
+$expectedSourceSha = $expectedSourceSha.ToLowerInvariant()
 if ([string]::IsNullOrWhiteSpace($buildInfo.source_sha)) { throw 'BUILD_INFO source_sha is missing' }
 if ([string]::IsNullOrWhiteSpace($buildInfo.autosport_exe_sha256)) { throw 'BUILD_INFO Autosport.exe hash is missing' }
+if ([string]$buildInfo.source_sha -ne $expectedSourceSha) { throw 'BUILD_INFO source_sha does not match AUTOSPORT_SOURCE_SHA trust anchor' }
 if ($buildInfo.real_money_execution -ne $false -or $buildInfo.human_tested -ne $false -or $buildInfo.nvda_verified -ne $false) {
   throw 'Release candidate violated prehuman truth labels before NVDA evidence smoke'
 }
@@ -23,7 +27,9 @@ if ($buildInfo.real_money_execution -ne $false -or $buildInfo.human_tested -ne $
 function Test-NvdaEvidenceContract {
   param(
     [Parameter(Mandatory = $true)][string]$DataExe,
-    [Parameter(Mandatory = $true)][string]$Label
+    [Parameter(Mandatory = $true)][string]$Label,
+    [Parameter(Mandatory = $true)][string]$ExpectedSourceSha,
+    [Parameter(Mandatory = $true)][string]$ExpectedPackageSha256
   )
 
   $templatePath = Join-Path $PWD "dist/nvda-evidence-$Label-template.json"
@@ -32,7 +38,11 @@ function Test-NvdaEvidenceContract {
     if (Test-Path $path) { Remove-Item -Force $path }
   }
 
-  & $DataExe nvda-evidence-template --release-zip $package --output $templatePath | Out-Null
+  & $DataExe nvda-evidence-template `
+    --release-zip $package `
+    --expected-source-sha $ExpectedSourceSha `
+    --expected-package-sha256 $ExpectedPackageSha256 `
+    --output $templatePath | Out-Null
   if ($LASTEXITCODE -ne 0) {
     throw "$Label Autosport-Data.exe nvda-evidence-template exited $LASTEXITCODE"
   }
@@ -44,10 +54,10 @@ function Test-NvdaEvidenceContract {
   if ($template.schema_version -ne 1 -or $template.kind -ne 'physical_nvda_acceptance') {
     throw "$Label NVDA evidence template schema/kind mismatch"
   }
-  if ($template.candidate.package_sha256 -ne $packageSha) {
+  if ($template.candidate.package_sha256 -ne $ExpectedPackageSha256) {
     throw "$Label NVDA template release ZIP SHA-256 mismatch"
   }
-  if ($template.candidate.source_sha -ne $buildInfo.source_sha) {
+  if ($template.candidate.source_sha -ne $ExpectedSourceSha) {
     throw "$Label NVDA template source_sha mismatch"
   }
   if ($template.candidate.autosport_exe_sha256 -ne $buildInfo.autosport_exe_sha256) {
@@ -73,6 +83,8 @@ function Test-NvdaEvidenceContract {
   # PASS values in CI, which would fabricate physical Windows/NVDA evidence.
   $verify = Start-Process -FilePath $DataExe -ArgumentList @(
     'verify-nvda-evidence', '--release-zip', $package,
+    '--expected-source-sha', $ExpectedSourceSha,
+    '--expected-package-sha256', $ExpectedPackageSha256,
     '--evidence', $templatePath, '--output', $validationPath
   ) -Wait -PassThru
   if ($verify.ExitCode -eq 0) {
@@ -90,14 +102,24 @@ function Test-NvdaEvidenceContract {
     template_path = (Split-Path $templatePath -Leaf)
     template_sha256 = (Get-FileHash -LiteralPath $templatePath -Algorithm SHA256).Hash.ToLowerInvariant()
     candidate_identity_verified = $true
+    external_source_anchor_verified = $true
+    external_package_anchor_verified = $true
     required_checks_pending = $checks.Count
     untouched_pending_template_rejected = $true
     validator_exit_code = 2
   }
 }
 
-$packaged = Test-NvdaEvidenceContract -DataExe $packagedDataExe -Label 'packaged'
-$fresh = Test-NvdaEvidenceContract -DataExe $freshDataExe -Label 'fresh-extracted'
+$packaged = Test-NvdaEvidenceContract `
+  -DataExe $packagedDataExe `
+  -Label 'packaged' `
+  -ExpectedSourceSha $expectedSourceSha `
+  -ExpectedPackageSha256 $packageSha
+$fresh = Test-NvdaEvidenceContract `
+  -DataExe $freshDataExe `
+  -Label 'fresh-extracted' `
+  -ExpectedSourceSha $expectedSourceSha `
+  -ExpectedPackageSha256 $packageSha
 if ($packaged.template_sha256 -ne $fresh.template_sha256) {
   throw 'Packaged and fresh-extracted NVDA evidence templates are not deterministic-identical'
 }
@@ -106,9 +128,11 @@ $evidence = [ordered]@{
   schema_version = 1
   kind = 'nvda_evidence_package_smoke'
   status = 'PASS'
-  source_sha = $buildInfo.source_sha
+  source_sha = $expectedSourceSha
   release_zip_sha256 = $packageSha
   autosport_exe_sha256 = $buildInfo.autosport_exe_sha256
+  external_source_anchor_verified = $true
+  external_package_anchor_verified = $true
   packaged = $packaged
   fresh_extracted = $fresh
   machine_verified_physical_execution = $false
@@ -119,4 +143,4 @@ $evidence = [ordered]@{
 }
 $evidencePath = Join-Path $PWD 'dist/nvda-evidence-package-smoke.json'
 $evidence | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $evidencePath -Encoding utf8
-Write-Host "NVDA_EVIDENCE_PACKAGE_SMOKE=PASS package_sha256=$packageSha source_sha=$($buildInfo.source_sha)"
+Write-Host "NVDA_EVIDENCE_PACKAGE_SMOKE=PASS package_sha256=$packageSha source_sha=$expectedSourceSha"

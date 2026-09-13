@@ -14,6 +14,8 @@ class KeyboardAuditTests(unittest.TestCase):
         }
         focus = {"<F6>": True, "<F7>": True}
         reachable = [
+            "strategy",
+            "research_plan",
             "choose_dataset",
             "run_replay",
             "replay_speed",
@@ -48,10 +50,10 @@ class KeyboardAuditTests(unittest.TestCase):
 
     def test_all_critical_controls_must_be_tab_reachable(self):
         bindings, focus, reachable = self._passing()
-        reachable.remove("live_refresh")
+        reachable.remove("research_plan")
         report = summarize_keyboard_contract(bindings, focus, reachable)
         self.assertEqual(report["status"], "FAIL")
-        self.assertTrue(any("live_refresh" in item for item in report["failures"]))
+        self.assertTrue(any("research_plan" in item for item in report["failures"]))
 
 
 if __name__ == "__main__":

@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Callable
 
 from .dataset import load_dataset
+from .research_strategy import ResearchStrategyPlan
 from .session import AutosportSession, SessionResult
+from .strategies import experiment_strategy_id
 
 
 ReplayTask = Callable[[], SessionResult]
@@ -71,6 +73,26 @@ class OneShotReplayWorker:
         return message
 
 
+def workspace_for_strategy(
+    workspace_root: str | Path,
+    strategy_id: str,
+    research_plan: ResearchStrategyPlan | None = None,
+) -> Path:
+    """Resolve deterministic economic storage for one executable strategy identity.
+
+    Preserve the legacy baseline workspace so existing V1 state does not move.
+    Other strategies live below ``strategies/``. Research strategy identity already
+    includes the canonical plan hash, so different plans cannot inherit each other's
+    PaperBook, ledger or registry state.
+    """
+
+    root = Path(workspace_root)
+    identity = experiment_strategy_id(strategy_id, research_plan)
+    if identity == "baseline-v1":
+        return root
+    return root / "strategies" / identity.replace("@", "-")
+
+
 def run_workspace_dataset_once(
     workspace: str | Path,
     dataset_path: str | Path,
@@ -78,11 +100,22 @@ def run_workspace_dataset_once(
     initial_bankroll: str = "10000",
     speed: float = 0.0,
     strategy_id: str = "baseline-v1",
+    research_plan: ResearchStrategyPlan | None = None,
 ) -> SessionResult:
-    """Own all replay-session resources on the calling worker thread."""
+    """Own all replay-session resources on the calling worker thread.
+
+    ``workspace`` is the exact economic workspace chosen by the caller. Windows GUI
+    callers resolve it once with :func:`workspace_for_strategy`; keeping this helper
+    literal prevents accidental nested ``strategies/<identity>`` directories.
+    """
 
     dataset = load_dataset(dataset_path)
-    session = AutosportSession(workspace, initial_bankroll, strategy_id=strategy_id)
+    session = AutosportSession(
+        workspace,
+        initial_bankroll,
+        strategy_id=strategy_id,
+        research_plan=research_plan,
+    )
     try:
         return session.run_dataset(dataset, speed=speed)
     finally:

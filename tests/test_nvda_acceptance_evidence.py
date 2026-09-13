@@ -12,25 +12,63 @@ from autosport.nvda_acceptance import create_template, validate_evidence, write_
 
 
 class NvdaAcceptanceEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def _json_bytes(payload: dict) -> bytes:
+        return (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
     def _release_zip(self, root: Path, *, source_sha: str = "a" * 40) -> Path:
         exe = b"fake-autosport-exe-for-evidence-contract"
-        exe_sha = hashlib.sha256(exe).hexdigest()
+        data_exe = b"fake-autosport-data-exe-for-evidence-contract"
         build_info = {
             "product": "Autosport",
             "version": "test",
             "source_sha": source_sha,
-            "autosport_exe_sha256": exe_sha,
+            "autosport_exe_sha256": hashlib.sha256(exe).hexdigest(),
+            "autosport_data_exe_sha256": hashlib.sha256(data_exe).hexdigest(),
+            "portable_historical_data_tools": True,
             "real_money_execution": False,
             "human_tested": False,
             "nvda_verified": False,
         }
+        audit = {
+            "status": "PASS",
+            "real_money_execution": False,
+            "human_tested": False,
+            "nvda_verified": False,
+        }
+        restart_audit = {
+            **audit,
+            "session_restart_status": "PASS",
+            "transaction_recovery_status": "PASS",
+            "recovery_disposition": "aborted_uncommitted",
+        }
+        members: dict[str, bytes] = {
+            "Autosport.exe": exe,
+            "Autosport-Data.exe": data_exe,
+            "WINDOWS_START_HERE.txt": b"test start guide\n",
+            "packaged-diagnostic.json": self._json_bytes(audit),
+            "accessibility-audit.json": self._json_bytes(audit),
+            "keyboard-audit.json": self._json_bytes(audit),
+            "restart-recovery-audit.json": self._json_bytes(restart_audit),
+            "BUILD_INFO.json": self._json_bytes(build_info),
+        }
+        manifest_files = {
+            relative: hashlib.sha256(payload).hexdigest()
+            for relative, payload in sorted(members.items())
+        }
+        members["PACKAGE_MANIFEST.json"] = self._json_bytes(
+            {"schema_version": 1, "files": manifest_files}
+        )
+        sums = [
+            f"{hashlib.sha256(payload).hexdigest()}  {relative}"
+            for relative, payload in sorted(members.items())
+        ]
+        members["SHA256SUMS.txt"] = ("\n".join(sums) + "\n").encode("utf-8")
+
         package = root / "Autosport-V1-windows-x64.zip"
         with zipfile.ZipFile(package, "w") as archive:
-            archive.writestr("Autosport-V1/Autosport.exe", exe)
-            archive.writestr(
-                "Autosport-V1/BUILD_INFO.json",
-                json.dumps(build_info, sort_keys=True).encode("utf-8"),
-            )
+            for relative, payload in sorted(members.items()):
+                archive.writestr(f"Autosport-V1/{relative}", payload)
         return package
 
     def _completed_evidence(self, package: Path) -> dict:
@@ -56,6 +94,30 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
             self.assertFalse(evidence["human_tested"])
             self.assertFalse(evidence["nvda_verified"])
             self.assertFalse(evidence["v1_ready"])
+
+    def test_legacy_two_member_fake_release_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            exe = b"fake-autosport-exe-for-evidence-contract"
+            build_info = {
+                "product": "Autosport",
+                "version": "test",
+                "source_sha": "a" * 40,
+                "autosport_exe_sha256": hashlib.sha256(exe).hexdigest(),
+                "real_money_execution": False,
+                "human_tested": False,
+                "nvda_verified": False,
+            }
+            package = root / "legacy-fake.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("Autosport-V1/Autosport.exe", exe)
+                archive.writestr(
+                    "Autosport-V1/BUILD_INFO.json",
+                    json.dumps(build_info, sort_keys=True).encode("utf-8"),
+                )
+
+            with self.assertRaisesRegex(ValueError, "release package is missing required files"):
+                create_template(package)
 
     def test_completed_human_record_validates_identity_without_machine_nvda_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

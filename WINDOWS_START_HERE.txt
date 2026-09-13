@@ -35,6 +35,15 @@ CRASH / ECONOMIC WORKSPACE RECOVERY
 21. Для baseline-v1 типовий workspace показується безпосередньо в рядку «Віртуальний банк» GUI. Для інших strategy/plan identities використовуйте саме strategy-specific workspace, який GUI також показує під час replay. Команда recovery не запускається паралельно з active economic writer.
 22. repair-workspace не «позначає run успішним» за припущенням. Вона завершує або відхиляє лише той стан, який може бути доведений canonical transaction/base hashes; неоднозначний стан залишається unresolved і повертає ненульовий exit code. Після успішного repair перезапустіть Autosport.exe і повторно відкрийте той самий strategy/plan context.
 
+PHYSICAL WINDOWS + NVDA ACCEPTANCE — ЛЮДСЬКА ПЕРЕВІРКА
+
+23. Увімкніть NVDA на фізичній Windows-машині та запустіть саме Autosport.exe зі свіжо розпакованого candidate ZIP. Machine UIA/keyboard audit є передумовою, але не замінює цю перевірку мовлення NVDA.
+24. Пройдіть основний інтерфейс клавішею Tab без миші. NVDA має зрозуміло оголошувати dataset, strategy, research plan, запуск replay, live mode/snapshot, paper tickets, live quotes, status/log та Evaluation і portfolio evidence. Фокус не повинен губитися або потрапляти в недоступний цикл.
+25. Перевірте Ctrl+O, Ctrl+R, Ctrl+L, F6, F7 і F8. F8 має переводити фокус на Evaluation і portfolio evidence; після успішного replay його рядки мають бути читабельні NVDA.
+26. Перевірте fail-closed помилку: спроба replay без валідного dataset або обов’язкового research plan має залишити програму керованою з клавіатури, а текст помилки має бути доступний NVDA. Не приймайте candidate, якщо помилка існує лише візуально або фокус стає недоступним.
+27. Перезапустіть Autosport.exe та перевірте відновлення того самого strategy/plan context і локального paper state. Якщо є unresolved transaction, виконайте repair-workspace за пунктами 20–22, повторно запустіть Autosport.exe і переконайтеся, що стан доступний з клавіатури та NVDA.
+28. HUMAN_TESTED або NVDA_VERIFIED можна змінити на true лише після фактичного проходження пунктів 23–27 на фізичній Windows + NVDA з зафіксованим людським evidence. Green CI, UIA PASS, створений ZIP або цей checklist самі по собі не є таким evidence.
+
 Live observation є read-only. Paper/replay функції використовують лише віртуальний банк. Програма не виконує реальні грошові ставки і не має механізму керування букмекерським рахунком, поповнення або виведення коштів.
 
 Machine accessibility/keyboard audits є prerequisite evidence і не означають physical NVDA speech verification.

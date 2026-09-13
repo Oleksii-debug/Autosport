@@ -32,6 +32,7 @@ class StrategyRunEvidence:
     price_semantics: str
     executable_quote_verified: bool
     paper_fill_fidelity_verified: bool
+    price_source_ids: tuple[str, ...]
     initial_bankroll: Decimal
     final_balance: Decimal
     committed_stake: Decimal
@@ -56,6 +57,7 @@ class StrategyRunEvidence:
             self.price_semantics,
             self.executable_quote_verified,
             self.paper_fill_fidelity_verified,
+            self.price_source_ids,
             self.initial_bankroll,
         )
 
@@ -144,6 +146,7 @@ def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
         price_semantics=price_truth.price_semantics,
         executable_quote_verified=price_truth.executable_quote_verified,
         paper_fill_fidelity_verified=price_truth.paper_fill_fidelity_verified,
+        price_source_ids=price_truth.source_ids,
         initial_bankroll=initial_bankroll,
         final_balance=final_balance,
         committed_stake=committed_stake,
@@ -238,6 +241,7 @@ def compare_strategy_runs(
                 "price_semantics": first.price_semantics,
                 "executable_quote_verified": first.executable_quote_verified,
                 "paper_fill_fidelity_verified": first.paper_fill_fidelity_verified,
+                "source_ids": list(first.price_source_ids),
             },
         },
         "baseline_strategy_id": baseline_strategy_id,

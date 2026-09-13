@@ -34,9 +34,44 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def _load_candidate_identity(release_zip: str | Path) -> dict[str, str]:
+def _require_hex_digest(value: str, *, length: int, field: str) -> str:
+    if not isinstance(value, str) or len(value) != length:
+        raise ValueError(f"{field} must be a {length}-character hexadecimal digest")
+    try:
+        int(value, 16)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be hexadecimal") from exc
+    return value.lower()
+
+
+def _load_candidate_identity(
+    release_zip: str | Path,
+    *,
+    expected_source_sha: str,
+    expected_package_sha256: str,
+) -> dict[str, str]:
+    """Bind one release ZIP to caller-supplied expected source/package identities.
+
+    This proves equality to the supplied anchors. It cannot prove where those anchors came
+    from; physical-release procedure must obtain them independently from canonical control
+    evidence rather than deriving them from the ZIP under test.
+    """
+
+    expected_source_sha = _require_hex_digest(
+        expected_source_sha,
+        length=40,
+        field="expected source SHA",
+    )
+    expected_package_sha256 = _require_hex_digest(
+        expected_package_sha256,
+        length=64,
+        field="expected package SHA-256",
+    )
     release_zip = Path(release_zip)
     package_sha = sha256_file(release_zip)
+    if package_sha != expected_package_sha256:
+        raise ValueError("release ZIP SHA-256 does not match supplied expected package SHA-256")
+
     with zipfile.ZipFile(release_zip, "r") as archive:
         names = [item.filename for item in archive.infolist() if not item.is_dir()]
         if len(names) != len(set(names)):
@@ -52,26 +87,35 @@ def _load_candidate_identity(release_zip: str | Path) -> dict[str, str]:
             raise ValueError("release BUILD_INFO.json must contain an object")
         source_sha = build_info.get("source_sha")
         exe_sha = build_info.get("autosport_exe_sha256")
-        if not isinstance(source_sha, str) or not source_sha:
+        if not isinstance(source_sha, str):
             raise ValueError("release BUILD_INFO source_sha is missing")
-        if not isinstance(exe_sha, str) or len(exe_sha) != 64:
+        source_sha = _require_hex_digest(source_sha, length=40, field="release BUILD_INFO source_sha")
+        if source_sha != expected_source_sha:
+            raise ValueError("release BUILD_INFO source_sha does not match supplied expected source SHA")
+        if not isinstance(exe_sha, str):
             raise ValueError("release BUILD_INFO autosport_exe_sha256 is invalid")
-        try:
-            int(exe_sha, 16)
-        except ValueError as exc:
-            raise ValueError("release BUILD_INFO autosport_exe_sha256 is not hexadecimal") from exc
+        exe_sha = _require_hex_digest(exe_sha, length=64, field="release BUILD_INFO autosport_exe_sha256")
 
-    verify_windows_package(release_zip, expected_source_sha=source_sha)
+    verify_windows_package(release_zip, expected_source_sha=expected_source_sha)
     verify_portable_data_tool(release_zip)
     return {
         "package_sha256": package_sha,
         "source_sha": source_sha,
-        "autosport_exe_sha256": exe_sha.lower(),
+        "autosport_exe_sha256": exe_sha,
     }
 
 
-def create_template(release_zip: str | Path) -> dict[str, Any]:
-    identity = _load_candidate_identity(release_zip)
+def create_template(
+    release_zip: str | Path,
+    *,
+    expected_source_sha: str,
+    expected_package_sha256: str,
+) -> dict[str, Any]:
+    identity = _load_candidate_identity(
+        release_zip,
+        expected_source_sha=expected_source_sha,
+        expected_package_sha256=expected_package_sha256,
+    )
     return {
         "schema_version": _SCHEMA_VERSION,
         "kind": _KIND,
@@ -88,7 +132,8 @@ def create_template(release_zip: str | Path) -> dict[str, Any]:
         ],
         "attestation_scope": (
             "Human-supplied physical Windows 11 + NVDA test record. "
-            "Machine validation checks structure and exact candidate identity only."
+            "Machine validation checks exact candidate identity against caller-supplied "
+            "expected source/package anchors. Anchor provenance/independence is not machine-proven."
         ),
         "real_money_execution": False,
         "human_tested": False,
@@ -97,8 +142,18 @@ def create_template(release_zip: str | Path) -> dict[str, Any]:
     }
 
 
-def write_template(release_zip: str | Path, output: str | Path) -> dict[str, Any]:
-    payload = create_template(release_zip)
+def write_template(
+    release_zip: str | Path,
+    output: str | Path,
+    *,
+    expected_source_sha: str,
+    expected_package_sha256: str,
+) -> dict[str, Any]:
+    payload = create_template(
+        release_zip,
+        expected_source_sha=expected_source_sha,
+        expected_package_sha256=expected_package_sha256,
+    )
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
@@ -118,8 +173,18 @@ def _read_evidence(path: str | Path) -> dict[str, Any]:
     return payload
 
 
-def validate_evidence(release_zip: str | Path, evidence_path: str | Path) -> dict[str, Any]:
-    identity = _load_candidate_identity(release_zip)
+def validate_evidence(
+    release_zip: str | Path,
+    evidence_path: str | Path,
+    *,
+    expected_source_sha: str,
+    expected_package_sha256: str,
+) -> dict[str, Any]:
+    identity = _load_candidate_identity(
+        release_zip,
+        expected_source_sha=expected_source_sha,
+        expected_package_sha256=expected_package_sha256,
+    )
     evidence = _read_evidence(evidence_path)
     if evidence.get("schema_version") != _SCHEMA_VERSION or evidence.get("kind") != _KIND:
         raise ValueError("NVDA acceptance evidence schema/kind mismatch")
@@ -191,6 +256,9 @@ def validate_evidence(release_zip: str | Path, evidence_path: str | Path) -> dic
         "schema_version": _SCHEMA_VERSION,
         "kind": _KIND,
         "candidate_identity_verified": True,
+        "source_anchor_match_verified": True,
+        "package_anchor_match_verified": True,
+        "anchor_provenance_machine_verified": False,
         **identity,
         "windows_edition_build": environment["windows_edition_build"].strip(),
         "nvda_version": environment["nvda_version"].strip(),
@@ -216,18 +284,40 @@ def _write_json(path: str | Path, payload: dict[str, Any]) -> None:
     )
 
 
+def _add_trust_anchor_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--expected-source-sha",
+        required=True,
+        help="canonical 40-hex Git source SHA expected for this release; obtain independently of the release ZIP",
+    )
+    parser.add_argument(
+        "--expected-package-sha256",
+        required=True,
+        help="64-hex release ZIP SHA-256 expected for this release; obtain independently of the release ZIP",
+    )
+
+
 def template_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Create exact-candidate physical NVDA acceptance evidence template.")
     parser.add_argument("--release-zip", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    _add_trust_anchor_arguments(parser)
     args = parser.parse_args(argv)
     try:
-        payload = write_template(args.release_zip, args.output)
+        payload = write_template(
+            args.release_zip,
+            args.output,
+            expected_source_sha=args.expected_source_sha,
+            expected_package_sha256=args.expected_package_sha256,
+        )
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         print(f"NVDA_EVIDENCE_TEMPLATE_INVALID={exc}", file=sys.stderr)
         return 2
     print(f"NVDA_EVIDENCE_TEMPLATE={args.output}")
     print(f"PACKAGE_SHA256={payload['candidate']['package_sha256']}")
+    print("SOURCE_ANCHOR_MATCH_VERIFIED=true")
+    print("PACKAGE_ANCHOR_MATCH_VERIFIED=true")
+    print("ANCHOR_PROVENANCE_MACHINE_VERIFIED=false")
     print("HUMAN_TESTED=false")
     print("NVDA_VERIFIED=false")
     return 0
@@ -238,9 +328,15 @@ def verify_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-zip", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    _add_trust_anchor_arguments(parser)
     args = parser.parse_args(argv)
     try:
-        result = validate_evidence(args.release_zip, args.evidence)
+        result = validate_evidence(
+            args.release_zip,
+            args.evidence,
+            expected_source_sha=args.expected_source_sha,
+            expected_package_sha256=args.expected_package_sha256,
+        )
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         print(f"NVDA_EVIDENCE_INVALID={exc}", file=sys.stderr)
         return 2
@@ -249,6 +345,9 @@ def verify_main(argv: list[str] | None = None) -> int:
     print(f"NVDA_EVIDENCE_CHECKS={result['status']}")
     print(f"PACKAGE_SHA256={result['package_sha256']}")
     print("CANDIDATE_IDENTITY_VERIFIED=true")
+    print("SOURCE_ANCHOR_MATCH_VERIFIED=true")
+    print("PACKAGE_ANCHOR_MATCH_VERIFIED=true")
+    print("ANCHOR_PROVENANCE_MACHINE_VERIFIED=false")
     print("MACHINE_VERIFIED_PHYSICAL_EXECUTION=false")
     print("NVDA_VERIFIED=false")
     return 0 if result["status"] == "PASS" else 3

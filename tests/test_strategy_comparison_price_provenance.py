@@ -11,7 +11,14 @@ from autosport.strategy_comparison import compare_strategy_runs, load_strategy_r
 
 class StrategyComparisonPriceProvenanceTests(unittest.TestCase):
     @staticmethod
-    def _summary(path: Path, *, strategy_id: str, source_id: str, run_id: str) -> Path:
+    def _summary(
+        path: Path,
+        *,
+        strategy_id: str,
+        source_id: str,
+        run_id: str,
+        include_governance: bool = True,
+    ) -> Path:
         payload = {
             "schema_version": 2,
             "transaction_schema_version": RunTransaction.SCHEMA_VERSION,
@@ -53,32 +60,74 @@ class StrategyComparisonPriceProvenanceTests(unittest.TestCase):
             },
             "real_money_execution": False,
         }
+        if include_governance:
+            payload["dataset_governance"] = {"source_ids": [source_id]}
         path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         return path
 
-    def test_schema_v2_summaries_cannot_compare_with_unbound_price_source_provenance(self) -> None:
+    def test_schema_v2_explicit_price_truth_requires_governed_source_ids(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            first_path = self._summary(
-                root / "first.json",
+            path = self._summary(
+                Path(directory) / "run.json",
                 strategy_id="baseline-v1",
                 source_id="betfair_exchange_historical",
                 run_id="run-a",
-            )
-            second_path = self._summary(
-                root / "second.json",
-                strategy_id="observe-only-v1",
-                source_id="forged-provider",
-                run_id="run-b",
+                include_governance=False,
             )
 
             with self.assertRaisesRegex(ValueError, "requires dataset_governance.source_ids"):
-                compare_strategy_runs(
-                    (
-                        load_strategy_run_summary(first_path),
-                        load_strategy_run_summary(second_path),
-                    )
+                load_strategy_run_summary(path)
+
+    def test_two_governed_summaries_with_different_price_sources_cannot_compare(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = load_strategy_run_summary(
+                self._summary(
+                    root / "first.json",
+                    strategy_id="baseline-v1",
+                    source_id="betfair_exchange_historical",
+                    run_id="run-a",
                 )
+            )
+            second = load_strategy_run_summary(
+                self._summary(
+                    root / "second.json",
+                    strategy_id="observe-only-v1",
+                    source_id="forged-provider",
+                    run_id="run-b",
+                )
+            )
+
+            self.assertNotEqual(first.price_source_ids, second.price_source_ids)
+            with self.assertRaisesRegex(ValueError, "price truth"):
+                compare_strategy_runs((first, second))
+
+    def test_comparison_report_preserves_normalized_price_source_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = load_strategy_run_summary(
+                self._summary(
+                    root / "first.json",
+                    strategy_id="baseline-v1",
+                    source_id="betfair_exchange_historical",
+                    run_id="run-a",
+                )
+            )
+            second = load_strategy_run_summary(
+                self._summary(
+                    root / "second.json",
+                    strategy_id="observe-only-v1",
+                    source_id="betfair_exchange_historical",
+                    run_id="run-b",
+                )
+            )
+
+            report = compare_strategy_runs((first, second))
+
+        self.assertEqual(
+            report["dataset"]["market_price_truth"]["source_ids"],
+            ["betfair_exchange_historical"],
+        )
 
 
 if __name__ == "__main__":

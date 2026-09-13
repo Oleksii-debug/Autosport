@@ -134,6 +134,35 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
         ticket = next(iter(book.tickets.values()))
         self.assertEqual(ticket.legs[0].locked_odds, Decimal("1.85"))
 
+    def test_ltp_only_delta_keeps_persisted_available_back_as_latest_replay_state(self) -> None:
+        lines = _pro_stream()
+        lines.insert(
+            2,
+            {
+                "op": "mcm",
+                "pt": _epoch_ms("2026-02-10T12:10:00Z"),
+                "mc": [
+                    {
+                        "id": "1.advanced",
+                        "rc": [{"id": 101, "ltp": 1.83}],
+                    }
+                ],
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _output, events = self._import(Path(tmp), lines)
+
+        self.assertEqual(len(events), 3)
+        latest = events[-1]
+        self.assertEqual(latest.observed_ts, "2026-02-10T12:10:00Z")
+        self.assertEqual(latest.decimal_odds, Decimal("1.85"))
+        self.assertEqual(latest.metadata["price_semantics"], "betfair_available_to_back")
+        self.assertEqual(latest.metadata["paper_fill_available_size"], "60.0")
+        self.assertEqual(latest.metadata["betfair_last_traded_price"], "1.83")
+        self.assertIs(latest.metadata["execution_quote_verified"], True)
+        self.assertIs(latest.metadata["actual_fill_verified"], False)
+
     def test_positive_bet_delay_preserves_quote_but_blocks_paper_fill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _output, events = self._import(Path(tmp), _pro_stream(bet_delay=2))

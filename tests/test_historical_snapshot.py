@@ -86,6 +86,7 @@ class HistoricalSnapshotTests(unittest.TestCase):
         self.assertEqual(report.quote_count, 2)
         self.assertEqual(report.snapshot_timestamp_fallback_count, 2)
         self.assertEqual(report.bookmaker_keys, ("bovada",))
+        self.assertEqual(report.provider_market_keys, ("h2h",))
         self.assertEqual(len(rows), 2)
         for row in rows:
             self.assertEqual(row["source_ts"], "2026-09-12T10:00:00Z")
@@ -93,10 +94,16 @@ class HistoricalSnapshotTests(unittest.TestCase):
             self.assertEqual(row["ingest_ts"], "2026-09-13T02:00:00+00:00")
             self.assertEqual(row["metadata"]["source_time_semantics"], "provider_historical_snapshot_timestamp")
             self.assertFalse(row["metadata"]["provider_quote_last_update_present"])
-        self.assertTrue(evidence["point_in_time_odds_market_coverage_verified"])
+        self.assertTrue(evidence["point_in_time_snapshot_data_observed"])
+        self.assertEqual(evidence["requested_markets"], ["h2h", "spreads", "totals"])
+        self.assertEqual(evidence["observed_provider_market_keys"], ["h2h"])
+        self.assertFalse(evidence["requested_market_set_complete_verified"])
+        self.assertFalse(evidence["historical_window_coverage_verified"])
+        self.assertNotIn("point_in_time_odds_market_coverage_verified", evidence)
         self.assertFalse(evidence["sealed_outcomes_present"])
         self.assertFalse(evidence["replay_corpus_ready"])
         self.assertFalse(evidence["licensing_or_retention_verified"])
+        self.assertFalse(evidence["redistribution_verified"])
         self.assertFalse(evidence["real_money_execution"])
         serialized = json.dumps(evidence) + json.dumps(rows)
         self.assertNotIn("secret-key-must-not-leak", serialized)
@@ -159,7 +166,7 @@ class HistoricalSnapshotTests(unittest.TestCase):
                     output_path=Path(temp) / "market.jsonl",
                 )
 
-    def test_empty_snapshot_is_machine_visible_but_not_coverage_verified(self) -> None:
+    def test_empty_snapshot_is_machine_visible_but_not_completeness_verified(self) -> None:
         payload = _payload()
         payload["data"] = []
         transport = _Transport(payload)
@@ -176,7 +183,9 @@ class HistoricalSnapshotTests(unittest.TestCase):
 
         self.assertFalse(report.has_data)
         self.assertFalse(evidence["has_data"])
-        self.assertFalse(evidence["point_in_time_odds_market_coverage_verified"])
+        self.assertFalse(evidence["point_in_time_snapshot_data_observed"])
+        self.assertFalse(evidence["requested_market_set_complete_verified"])
+        self.assertFalse(evidence["historical_window_coverage_verified"])
         self.assertFalse(evidence["replay_corpus_ready"])
 
 

@@ -16,6 +16,7 @@ build = ["pyinstaller>=6.10"]
 autosport = "autosport.cli:main"
 autosport-build-historical-corpus = "autosport.historical_corpus:main"
 autosport-capture-historical-matches = "autosport.historical_matches:main"
+autosport-acquire-historical-evidence = "autosport.historical_acquisition:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -5,6 +5,7 @@ python -m unittest discover -s tests -v
 if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
 python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
+python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
 
 $diag = Join-Path $PWD 'dist/packaged-diagnostic.json'
 if (Test-Path $diag) { Remove-Item -Force $diag }
@@ -44,12 +45,26 @@ if ($restartRecoveryEvidence.real_money_execution -ne $false -or $restartRecover
   throw 'Machine restart/recovery audit violated release truth labels'
 }
 
+$dataExe = Join-Path $PWD 'dist/Autosport-Data.exe'
+if (-not (Test-Path $dataExe -PathType Leaf)) { throw 'Packaged build is missing Autosport-Data.exe' }
+& $dataExe --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe help exited $LASTEXITCODE" }
+& $dataExe acquire --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe acquire --help exited $LASTEXITCODE" }
+& $dataExe build-corpus --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe build-corpus --help exited $LASTEXITCODE" }
+& $dataExe build-corpus-from-bundle --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe build-corpus-from-bundle --help exited $LASTEXITCODE" }
+& $dataExe verify-dataset examples/tt_demo | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe verify-dataset exited $LASTEXITCODE" }
+
 $sourceSha = $env:AUTOSPORT_SOURCE_SHA
 if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
 $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
 $packageVerification = Join-Path $PWD 'dist/package-verification.json'
 python scripts/package_windows.py `
   --exe dist/Autosport.exe `
+  --data-exe dist/Autosport-Data.exe `
   --start-file WINDOWS_START_HERE.txt `
   --example-dir examples/tt_demo `
   --diagnostic $diag `
@@ -61,23 +76,39 @@ python scripts/package_windows.py `
   --verification-output $packageVerification
 
 # Binding release gate: verify the artifact after a clean extraction, not only the
-# pre-package executable. This catches archive/path/packaging defects that a
-# successful dist/Autosport.exe smoke test cannot prove away.
+# pre-package executables. This catches archive/path/packaging defects that a
+# successful dist smoke test cannot prove away.
 $extractRoot = Join-Path $PWD '.build-fresh-extraction'
 if (Test-Path $extractRoot) { Remove-Item -Recurse -Force $extractRoot }
 New-Item -ItemType Directory -Path $extractRoot | Out-Null
 Expand-Archive -LiteralPath $package -DestinationPath $extractRoot -Force
 $packageRoot = Join-Path $extractRoot 'Autosport-V1'
 $extractedExe = Join-Path $packageRoot 'Autosport.exe'
+$extractedDataExe = Join-Path $packageRoot 'Autosport-Data.exe'
 if (-not (Test-Path $extractedExe -PathType Leaf)) { throw 'Fresh extraction is missing Autosport.exe' }
+if (-not (Test-Path $extractedDataExe -PathType Leaf)) { throw 'Fresh extraction is missing Autosport-Data.exe' }
 
 $buildInfo = Get-Content (Join-Path $packageRoot 'BUILD_INFO.json') -Raw | ConvertFrom-Json
 if ($buildInfo.source_sha -ne $sourceSha) { throw 'Fresh extraction BUILD_INFO source_sha mismatch' }
 if ($buildInfo.real_money_execution -ne $false) { throw 'Fresh extraction must preserve REAL_MONEY_EXECUTION=false' }
 if ($buildInfo.human_tested -ne $false) { throw 'Machine build must not claim HUMAN_TESTED' }
 if ($buildInfo.nvda_verified -ne $false) { throw 'Machine build must not claim NVDA_VERIFIED' }
+if ($buildInfo.portable_historical_data_tools -ne $true) { throw 'Fresh extraction does not bind portable historical data tools' }
 $extractedExeSha = (Get-FileHash -LiteralPath $extractedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+$extractedDataExeSha = (Get-FileHash -LiteralPath $extractedDataExe -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($extractedExeSha -ne $buildInfo.autosport_exe_sha256) { throw 'Fresh extraction Autosport.exe hash mismatch' }
+if ($extractedDataExeSha -ne $buildInfo.autosport_data_exe_sha256) { throw 'Fresh extraction Autosport-Data.exe hash mismatch' }
+
+& $extractedDataExe --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe help exited $LASTEXITCODE" }
+& $extractedDataExe acquire --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe acquire --help exited $LASTEXITCODE" }
+& $extractedDataExe build-corpus --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe build-corpus --help exited $LASTEXITCODE" }
+& $extractedDataExe build-corpus-from-bundle --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe build-corpus-from-bundle --help exited $LASTEXITCODE" }
+& $extractedDataExe verify-dataset (Join-Path $packageRoot 'examples/tt_demo') | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe verify-dataset exited $LASTEXITCODE" }
 
 $freshDiag = Join-Path $PWD 'dist/fresh-extraction-diagnostic.json'
 if (Test-Path $freshDiag) { Remove-Item -Force $freshDiag }
@@ -127,7 +158,14 @@ $freshEvidence = [ordered]@{
   source_sha = $sourceSha
   package_sha256 = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
   autosport_exe_sha256 = $extractedExeSha
+  autosport_data_exe_sha256 = $extractedDataExeSha
+  portable_historical_data_tools = $true
   package_verification_status = 'PASS'
+  extracted_data_tool_help_status = 'PASS'
+  extracted_data_tool_acquire_help_status = 'PASS'
+  extracted_data_tool_build_corpus_help_status = 'PASS'
+  extracted_data_tool_bundle_corpus_help_status = 'PASS'
+  extracted_data_tool_verify_dataset_status = 'PASS'
   extracted_diagnostic_status = $freshDiagnostic.status
   extracted_accessibility_status = $freshAccessibility.status
   extracted_keyboard_status = $freshKeyboardEvidence.status

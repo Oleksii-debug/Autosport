@@ -24,6 +24,26 @@ class Forecast:
 ForecastLike = Forecast | ForecastRecord
 
 
+def _paper_price_is_eligible(event: MarketEvent) -> bool:
+    """Reject observational prices that are not verified executable quotes.
+
+    Historical adapters may expose observational prices for research/replay. Those
+    observations must never silently become apparent paper fills. Sources that do not
+    carry an explicit execution-truth contract keep the legacy behavior; an explicit
+    false marker always fails closed.
+    """
+
+    execution_verified = event.metadata.get("execution_quote_verified")
+    if execution_verified is False:
+        return False
+    if (
+        event.metadata.get("price_semantics") == "last_traded_price"
+        and execution_verified is not True
+    ):
+        return False
+    return True
+
+
 class PaperValueAgent:
     """Paper-only strategy agent. It can open virtual tickets but has no real-money execution capability."""
 
@@ -44,6 +64,8 @@ class PaperValueAgent:
 
     def on_market_event(self, event: MarketEvent, context: AgentContext) -> None:
         if event.quote_key in self._acted or event.status != "open":
+            return
+        if not _paper_price_is_eligible(event):
             return
         forecast = self.forecasts.get(event.quote_key)
         if forecast is None:

@@ -252,7 +252,7 @@ def verify_main(argv: list[str] | None = None) -> int:
         return 2
     if args.output is not None:
         _write_json(args.output, result)
-    print(f"NVDA_ACCEPTANCE={result['status']}")
+    print(f"NVDA_EVIDENCE_CHECKS={result['status']}")
     print(f"PACKAGE_SHA256={result['package_sha256']}")
     print("CANDIDATE_IDENTITY_VERIFIED=true")
     print("MACHINE_VERIFIED_PHYSICAL_EXECUTION=false")

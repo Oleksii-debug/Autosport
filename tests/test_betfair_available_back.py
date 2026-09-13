@@ -26,6 +26,25 @@ class BetfairAvailableBackBookTests(unittest.TestCase):
         self.assertEqual(delta.quote.available_size, Decimal("8.0"))
         self.assertTrue(delta.quote.cache_verified)
 
+    def test_ltp_only_delta_surfaces_persisted_available_quote_instead_of_downgrading_state(self) -> None:
+        book = BetfairAvailableBackBook()
+        book.apply({"atb": [[1.9, 40.0]]}, image=True)
+
+        update = book.apply({"ltp": 1.84})
+
+        self.assertTrue(update.touched)
+        self.assertEqual(update.quote.decimal_odds, Decimal("1.9"))
+        self.assertEqual(update.quote.available_size, Decimal("40.0"))
+        self.assertTrue(update.quote.cache_verified)
+
+    def test_ltp_without_reconstructed_ladder_does_not_invent_available_quote(self) -> None:
+        book = BetfairAvailableBackBook()
+
+        update = book.apply({"ltp": 1.84})
+
+        self.assertFalse(update.touched)
+        self.assertIsNone(update.quote)
+
     def test_advanced_batb_is_keyed_by_level_and_never_promotes_deeper_level(self) -> None:
         book = BetfairAvailableBackBook()
         image = book.apply(

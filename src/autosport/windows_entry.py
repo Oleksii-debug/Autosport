@@ -4,6 +4,12 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Install before importing any audit module or entering the normal GUI path.
+    # This guarantees that packaged release audits inspect the same compact
+    # layout that users receive rather than an audit-only geometry variant.
+    from autosport.windows_layout import install_compact_windows_layout
+
+    install_compact_windows_layout()
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] == "--diagnostic-output":
         if len(args) != 2:

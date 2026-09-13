@@ -11,8 +11,9 @@ class KeyboardAuditTests(unittest.TestCase):
             "<Control-l>": True,
             "<F6>": True,
             "<F7>": True,
+            "<F8>": True,
         }
-        focus = {"<F6>": True, "<F7>": True}
+        focus = {"<F6>": True, "<F7>": True, "<F8>": True}
         reachable = [
             "strategy",
             "research_plan",
@@ -23,6 +24,7 @@ class KeyboardAuditTests(unittest.TestCase):
             "live_refresh",
             "live_quotes",
             "tickets",
+            "evaluation",
             "log",
         ]
         return bindings, focus, reachable
@@ -43,17 +45,17 @@ class KeyboardAuditTests(unittest.TestCase):
 
     def test_focus_shortcut_must_reach_exact_target(self):
         bindings, focus, reachable = self._passing()
-        focus["<F7>"] = False
+        focus["<F8>"] = False
         report = summarize_keyboard_contract(bindings, focus, reachable)
         self.assertEqual(report["status"], "FAIL")
-        self.assertTrue(any("<F7>" in item for item in report["failures"]))
+        self.assertTrue(any("<F8>" in item for item in report["failures"]))
 
     def test_all_critical_controls_must_be_tab_reachable(self):
         bindings, focus, reachable = self._passing()
-        reachable.remove("research_plan")
+        reachable.remove("evaluation")
         report = summarize_keyboard_contract(bindings, focus, reachable)
         self.assertEqual(report["status"], "FAIL")
-        self.assertTrue(any("research_plan" in item for item in report["failures"]))
+        self.assertTrue(any("evaluation" in item for item in report["failures"]))
 
 
 if __name__ == "__main__":

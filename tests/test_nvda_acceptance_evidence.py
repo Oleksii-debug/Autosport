@@ -130,6 +130,52 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "requires defect notes"):
                 validate_evidence(package, evidence_path)
 
+    def test_portable_dispatch_generates_and_validates_same_candidate_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = self._release_zip(root)
+            evidence_path = root / "nvda-evidence.json"
+            validation_path = root / "nvda-validation.json"
+
+            self.assertEqual(
+                data_tools_main(
+                    [
+                        "nvda-evidence-template",
+                        "--release-zip",
+                        str(package),
+                        "--output",
+                        str(evidence_path),
+                    ]
+                ),
+                0,
+            )
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            completed = self._completed_evidence(package)
+            evidence["environment"] = completed["environment"]
+            evidence["tested_at"] = completed["tested_at"]
+            evidence["tester_label"] = completed["tester_label"]
+            evidence["checks"] = completed["checks"]
+            evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+            self.assertEqual(
+                data_tools_main(
+                    [
+                        "verify-nvda-evidence",
+                        "--release-zip",
+                        str(package),
+                        "--evidence",
+                        str(evidence_path),
+                        "--output",
+                        str(validation_path),
+                    ]
+                ),
+                0,
+            )
+            validation = json.loads(validation_path.read_text(encoding="utf-8"))
+            self.assertEqual(validation["status"], "PASS")
+            self.assertFalse(validation["machine_verified_physical_execution"])
+            self.assertFalse(validation["nvda_verified"])
+
     def test_template_writer_and_portable_usage_expose_real_product_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

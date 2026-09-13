@@ -34,6 +34,9 @@ jobs:
       - name: Execute packaged walk-forward evaluation
         shell: pwsh
         run: ./scripts/walk_forward_package_smoke.ps1
+      - name: Execute packaged retrospective forecast-origin evaluation
+        shell: pwsh
+        run: ./scripts/walk_forward_origin_package_smoke.ps1
       - name: Audit packaged research demo path
         shell: pwsh
         run: |
@@ -124,6 +127,9 @@ jobs:
             dist/walk-forward-package-smoke.json
             dist/walk-forward-package-smoke-dataset
             dist/walk-forward-package-smoke-report.json
+            dist/walk-forward-origin-package-smoke.json
+            dist/walk-forward-origin-package-smoke-workspace
+            dist/walk-forward-origin-package-smoke-report.json
             dist/package-verification.json
             dist/fresh-extraction-diagnostic.json
             dist/fresh-extraction-accessibility-audit.json
@@ -131,6 +137,7 @@ jobs:
             dist/fresh-extraction-restart-recovery-audit.json
             dist/fresh-extraction-research-demo-audit.json
             dist/fresh-extraction-walk-forward-package-smoke-report.json
+            dist/fresh-extraction-walk-forward-origin-package-smoke-report.json
             dist/fresh-extraction-external-uia-audit.json
             dist/fresh-extraction-verification.json
           if-no-files-found: error

@@ -326,6 +326,8 @@ def _snapshot(
     captured_dt = _timestamp(captured_at, field="snapshot evidence.captured_at")
     if snapshot_dt > requested_dt:
         raise ValueError("snapshot evidence snapshot_at is after requested_at")
+    if captured_dt < requested_dt:
+        raise ValueError("snapshot evidence captured_at is before requested_at")
     if captured_dt < snapshot_dt:
         raise ValueError("snapshot evidence captured_at is before snapshot_at")
 

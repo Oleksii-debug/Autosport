@@ -258,8 +258,15 @@ def import_betfair_historical(
                         if status in _SETTLED_OUTCOMES:
                             statuses[str(runner["id"])] = status
                     if statuses:
-                        final_statuses[market_id] = statuses
-                        settlement_ts[market_id] = observed
+                        previous_statuses = final_statuses.get(market_id)
+                        if previous_statuses is not None and previous_statuses != statuses:
+                            raise ValueError(
+                                f"{path}: line {line_number} final settlement changed "
+                                f"for Betfair market {market_id}"
+                            )
+                        if previous_statuses is None:
+                            final_statuses[market_id] = statuses
+                            settlement_ts[market_id] = observed
 
             definition = definitions.get(market_id)
             if definition is None:

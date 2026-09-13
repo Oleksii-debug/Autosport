@@ -151,7 +151,7 @@ class HistoricalBundleCorpusTests(unittest.TestCase):
             "historical_window_hours": 720,
             "historical_window_from": "2026-08-01T00:00:00Z",
             "response_sha256": _canonical_hash({"coverage": "provider-response"}),
-            "api_version": "test",
+            "api_version": None,
             "source_count": 1,
             "total_rows": 3,
             "total_priced_rows": 2,

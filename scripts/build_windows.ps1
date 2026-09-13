@@ -51,6 +51,8 @@ if (-not (Test-Path $dataExe -PathType Leaf)) { throw 'Packaged build is missing
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe help exited $LASTEXITCODE" }
 & $dataExe compare-strategies --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe compare-strategies --help exited $LASTEXITCODE" }
+& $dataExe walk-forward-evaluate --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe walk-forward-evaluate --help exited $LASTEXITCODE" }
 & $dataExe acquire --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe acquire --help exited $LASTEXITCODE" }
 & $dataExe build-corpus --help | Out-Null
@@ -59,6 +61,80 @@ if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe build-corpus --hel
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe build-corpus-from-bundle --help exited $LASTEXITCODE" }
 & $dataExe verify-dataset examples/tt_demo | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe verify-dataset exited $LASTEXITCODE" }
+
+# Execute the frozen evaluator, not only its help surface. This deterministic
+# schema-v1 smoke fixture is sample evidence only and must never be promoted to
+# real historical/OOS proof.
+$walkForwardBundlePath = Join-Path $PWD 'dist/walk-forward-smoke-bundle.json'
+$walkForwardReport = Join-Path $PWD 'dist/walk-forward-smoke-report.json'
+$walkForwardBundle = [ordered]@{
+  schema_version = 1
+  bins = 5
+  forecasts = @(
+    [ordered]@{
+      forecast_id = 'f-1'
+      quote_key = 'm1|winner|a'
+      probability = '0.70'
+      model_id = 'model'
+      model_version = '1'
+      strategy_version = 'research-v1'
+      model_training_cutoff_ts = '2026-01-01T00:00:00+00:00'
+      input_cutoff_ts = '2026-02-01T12:00:00+00:00'
+      generated_at = '2026-02-01T12:00:00+00:00'
+      uncertainty = '0.10'
+      evidence_hashes = @()
+      market_snapshot_hash = ('a' * 64)
+      provenance = [ordered]@{ source = 'packaged-smoke-fixture' }
+    },
+    [ordered]@{
+      forecast_id = 'f-2'
+      quote_key = 'm2|winner|b'
+      probability = '0.30'
+      model_id = 'model'
+      model_version = '2'
+      strategy_version = 'research-v2'
+      model_training_cutoff_ts = '2026-02-10T00:00:00+00:00'
+      input_cutoff_ts = '2026-03-01T12:00:00+00:00'
+      generated_at = '2026-03-01T12:00:00+00:00'
+      uncertainty = '0.20'
+      evidence_hashes = @()
+      market_snapshot_hash = ('b' * 64)
+      provenance = [ordered]@{ source = 'packaged-smoke-fixture' }
+    }
+  )
+  outcomes = @(
+    [ordered]@{ forecast_id = 'f-1'; outcome = 1; revealed_at = '2026-02-02T12:00:00+00:00' },
+    [ordered]@{ forecast_id = 'f-2'; outcome = 0; revealed_at = '2026-03-02T12:00:00+00:00' }
+  )
+  windows = @(
+    [ordered]@{
+      window_id = 'holdout-1'
+      training_end_ts = '2026-01-31T23:59:59+00:00'
+      evaluation_start_ts = '2026-02-01T00:00:00+00:00'
+      evaluation_end_ts = '2026-02-28T23:59:59+00:00'
+      split = 'holdout'
+    },
+    [ordered]@{
+      window_id = 'holdout-2'
+      training_end_ts = '2026-02-28T23:59:59+00:00'
+      evaluation_start_ts = '2026-03-01T00:00:00+00:00'
+      evaluation_end_ts = '2026-03-31T23:59:59+00:00'
+      split = 'holdout'
+    }
+  )
+}
+$walkForwardJson = $walkForwardBundle | ConvertTo-Json -Depth 8
+[System.IO.File]::WriteAllText($walkForwardBundlePath, $walkForwardJson, [System.Text.UTF8Encoding]::new($false))
+if (Test-Path $walkForwardReport) { Remove-Item -Force $walkForwardReport }
+& $dataExe walk-forward-evaluate $walkForwardBundlePath --output $walkForwardReport | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe walk-forward-evaluate exited $LASTEXITCODE" }
+$walkForwardEvidence = Get-Content $walkForwardReport -Raw | ConvertFrom-Json
+if ($walkForwardEvidence.kind -ne 'strict_walk_forward_forecast_evaluation') { throw 'Packaged walk-forward report kind mismatch' }
+if ($walkForwardEvidence.evaluated_forecast_count -ne 2) { throw 'Packaged walk-forward report forecast count mismatch' }
+if ($walkForwardEvidence.window_count -ne 2) { throw 'Packaged walk-forward report window count mismatch' }
+if ([string]::IsNullOrWhiteSpace($walkForwardEvidence.source_sha256) -or $walkForwardEvidence.source_sha256.Length -ne 64) { throw 'Packaged walk-forward report source_sha256 is invalid' }
+if ($walkForwardEvidence.profitability_claim -ne $false) { throw 'Packaged walk-forward smoke must not claim profitability' }
+if ($walkForwardEvidence.real_money_execution -ne $false) { throw 'Packaged walk-forward smoke must preserve REAL_MONEY_EXECUTION=false' }
 
 $sourceSha = $env:AUTOSPORT_SOURCE_SHA
 if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
@@ -105,6 +181,8 @@ if ($extractedDataExeSha -ne $buildInfo.autosport_data_exe_sha256) { throw 'Fres
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe help exited $LASTEXITCODE" }
 & $extractedDataExe compare-strategies --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe compare-strategies --help exited $LASTEXITCODE" }
+& $extractedDataExe walk-forward-evaluate --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe walk-forward-evaluate --help exited $LASTEXITCODE" }
 & $extractedDataExe acquire --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe acquire --help exited $LASTEXITCODE" }
 & $extractedDataExe build-corpus --help | Out-Null
@@ -113,6 +191,18 @@ if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe build-corpu
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe build-corpus-from-bundle --help exited $LASTEXITCODE" }
 & $extractedDataExe verify-dataset (Join-Path $packageRoot 'examples/tt_demo') | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe verify-dataset exited $LASTEXITCODE" }
+
+$freshWalkForwardReport = Join-Path $PWD 'dist/fresh-extraction-walk-forward-report.json'
+if (Test-Path $freshWalkForwardReport) { Remove-Item -Force $freshWalkForwardReport }
+& $extractedDataExe walk-forward-evaluate $walkForwardBundlePath --output $freshWalkForwardReport | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe walk-forward-evaluate exited $LASTEXITCODE" }
+$freshWalkForwardEvidence = Get-Content $freshWalkForwardReport -Raw | ConvertFrom-Json
+if ($freshWalkForwardEvidence.kind -ne 'strict_walk_forward_forecast_evaluation') { throw 'Fresh-extracted walk-forward report kind mismatch' }
+if ($freshWalkForwardEvidence.evaluated_forecast_count -ne 2) { throw 'Fresh-extracted walk-forward report forecast count mismatch' }
+if ($freshWalkForwardEvidence.window_count -ne 2) { throw 'Fresh-extracted walk-forward report window count mismatch' }
+if ($freshWalkForwardEvidence.source_sha256 -ne $walkForwardEvidence.source_sha256) { throw 'Fresh-extracted walk-forward report source identity mismatch' }
+if ($freshWalkForwardEvidence.profitability_claim -ne $false) { throw 'Fresh-extracted walk-forward smoke must not claim profitability' }
+if ($freshWalkForwardEvidence.real_money_execution -ne $false) { throw 'Fresh-extracted walk-forward smoke must preserve REAL_MONEY_EXECUTION=false' }
 
 $freshDiag = Join-Path $PWD 'dist/fresh-extraction-diagnostic.json'
 if (Test-Path $freshDiag) { Remove-Item -Force $freshDiag }
@@ -154,7 +244,7 @@ if ($freshRestartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Fr
 if ($freshRestartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Fresh-extracted recovery audit did not prove transaction recovery' }
 if ($freshRestartRecoveryEvidence.recovery_disposition -ne 'aborted_uncommitted') { throw 'Fresh-extracted recovery audit disposition is not fail-closed' }
 if ($freshRestartRecoveryEvidence.real_money_execution -ne $false -or $freshRestartRecoveryEvidence.human_tested -ne $false -or $freshRestartRecoveryEvidence.nvda_verified -ne $false) {
-  throw 'Fresh-extracted restart/recovery audit violated release truth labels'
+  throw 'Machine restart/recovery audit violated release truth labels'
 }
 
 $freshEvidence = [ordered]@{
@@ -166,6 +256,9 @@ $freshEvidence = [ordered]@{
   portable_historical_data_tools = $true
   package_verification_status = 'PASS'
   extracted_strategy_comparison_entry_status = 'PASS'
+  extracted_walk_forward_evaluation_entry_status = 'PASS'
+  extracted_walk_forward_evaluation_execution_status = 'PASS'
+  extracted_walk_forward_sample_real_historical_proof = $false
   extracted_data_tool_help_status = 'PASS'
   extracted_data_tool_acquire_help_status = 'PASS'
   extracted_data_tool_build_corpus_help_status = 'PASS'

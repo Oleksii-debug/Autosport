@@ -18,10 +18,14 @@ from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
 from .providers import MarketProvider
 from .replay import ReplayEngine, ReplayRun
+from .research_strategy import ResearchSignalAgent
 from .run_registry import RunRegistry, UnresolvedExperimentError
 from .run_transaction import RunTransaction
 from .settlement import SettlementEngine
 from .storage import SQLiteMarketStore
+
+
+SUPPORTED_DATASET_STRATEGIES = ("baseline-v1", "research-v1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +55,11 @@ class AutosportSession:
         initial_bankroll: Decimal | str = "10000",
         strategy_id: str = "baseline-v1",
     ) -> None:
+        if strategy_id not in SUPPORTED_DATASET_STRATEGIES:
+            raise ValueError(
+                "unsupported dataset strategy: "
+                f"{strategy_id}; choose one of {', '.join(SUPPORTED_DATASET_STRATEGIES)}"
+            )
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.strategy_id = strategy_id
@@ -74,7 +83,14 @@ class AutosportSession:
             replay_run_id=run_id,
             decision_ledger=ledger or self.ledger,
         )
-        return AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent("50")], context)
+        agents = [MarketMirrorAgent()]
+        if self.strategy_id == "baseline-v1":
+            agents.append(PaperBaselineAgent("50"))
+        elif self.strategy_id == "research-v1":
+            agents.append(ResearchSignalAgent())
+        else:  # constructor validates this; keep runtime fail-closed if state is corrupted.
+            raise ValueError(f"unsupported dataset strategy: {self.strategy_id}")
+        return AgentOrchestrator(agents, context)
 
     def observe_provider_once(
         self,

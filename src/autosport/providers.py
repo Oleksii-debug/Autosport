@@ -46,6 +46,10 @@ class CanonicalNormalizer:
     """Provider IDs are scoped under source_id so provider-specific identifiers never collide locally."""
 
     def normalize(self, source_id: str, quote: ProviderQuote) -> MarketEvent:
+        if not isinstance(quote.decimal_odds, Decimal):
+            raise TypeError("decimal odds must be Decimal")
+        if not quote.decimal_odds.is_finite():
+            raise ValueError("decimal odds must be finite")
         if quote.decimal_odds <= 1:
             raise ValueError("decimal odds must be greater than 1")
         prefix = source_id.replace("|", "_")

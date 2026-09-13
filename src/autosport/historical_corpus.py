@@ -48,6 +48,16 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _canonical_json_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _timestamp(value: Any, *, field: str) -> datetime:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty ISO-8601 timestamp")
@@ -182,6 +192,22 @@ def _outcome_provenance(
             "sealed results outcome_provenance.source_record_sha256 does not match source record artifact"
         )
 
+    source_record = _json_object(
+        source_record_path,
+        context="sealed outcome source record",
+    )
+    source_record_outcomes = source_record.get("quote_outcomes")
+    if not isinstance(source_record_outcomes, dict):
+        raise ValueError("sealed outcome source record quote_outcomes must be an object")
+    sealed_outcomes = results.get("quote_outcomes")
+    if not isinstance(sealed_outcomes, dict):
+        raise ValueError("sealed results quote_outcomes must be an object")
+    if source_record_outcomes != sealed_outcomes:
+        raise ValueError(
+            "sealed results quote_outcomes do not match hashed source record outcomes"
+        )
+    quote_outcomes_sha256 = _canonical_json_sha256(sealed_outcomes)
+
     terms_reference = _text(raw, "terms_reference", context="sealed results outcome_provenance")
     retention_basis = _text(raw, "retention_basis", context="sealed results outcome_provenance")
     authority_reference = _text(raw, "authority_reference", context="sealed results outcome_provenance")
@@ -238,6 +264,7 @@ def _outcome_provenance(
         "source_identity": source_identity,
         "source_record_file": source_record_file,
         "source_record_sha256": source_record_sha256,
+        "quote_outcomes_sha256": quote_outcomes_sha256,
         "terms_reference": terms_reference,
         "retention_basis": retention_basis,
         "authority_reference": authority_reference,
@@ -433,6 +460,16 @@ def assemble_historical_corpus(
     results = _json_object(results_path_obj, context="sealed results")
     if int(results.get("schema_version", 0)) != 1:
         raise ValueError("sealed results schema_version must be 1")
+    outcomes = results.get("quote_outcomes")
+    if not isinstance(outcomes, dict):
+        raise ValueError("sealed results quote_outcomes must be an object")
+    invalid_outcomes = sorted(
+        str(key)
+        for key, value in outcomes.items()
+        if not isinstance(value, str) or value not in _ALLOWED_OUTCOMES
+    )
+    if invalid_outcomes:
+        raise ValueError("sealed results contain unsupported outcome; allowed values are win, loss, void")
     outcome_provenance = _outcome_provenance(
         results,
         source_root=results_path_obj.parent,
@@ -451,16 +488,14 @@ def assemble_historical_corpus(
             )
     # The canonical assembled package content-binds the causal reveal instant and
     # independently sourced outcome provenance into sealed results. The declared
-    # source-record digest is verified against an external sibling artifact before
-    # assembly, but that source artifact is deliberately not redistributed.
+    # source-record digest and its normalized outcome labels are verified against an
+    # external sibling artifact before assembly; that source artifact is deliberately
+    # not redistributed.
     results = {
         **results,
         "outcome_provenance": outcome_provenance,
         "outcome_reveal_after": outcome_reveal_after,
     }
-    outcomes = results.get("quote_outcomes")
-    if not isinstance(outcomes, dict):
-        raise ValueError("sealed results quote_outcomes must be an object")
     quote_keys = {event.quote_key for event, _ in events}
     outcome_keys = {str(key) for key in outcomes}
     missing_outcomes = sorted(quote_keys - outcome_keys)
@@ -469,13 +504,6 @@ def assemble_historical_corpus(
     unknown_outcomes = sorted(outcome_keys - quote_keys)
     if unknown_outcomes:
         raise ValueError("sealed results reference quote keys absent from historical market corpus")
-    invalid_outcomes = sorted(
-        str(key)
-        for key, value in outcomes.items()
-        if not isinstance(value, str) or value not in _ALLOWED_OUTCOMES
-    )
-    if invalid_outcomes:
-        raise ValueError("sealed results contain unsupported outcome; allowed values are win, loss, void")
 
     effective_redistribution_policy = min(
         (str(proof["redistribution_policy"]), str(outcome_provenance["redistribution_policy"])),
@@ -527,6 +555,8 @@ def assemble_historical_corpus(
                 "source_record_file": outcome_provenance["source_record_file"],
                 "source_record_sha256": outcome_provenance["source_record_sha256"],
                 "source_record_checksum_verified": True,
+                "quote_outcomes_bound_to_source_record": True,
+                "quote_outcomes_sha256": outcome_provenance["quote_outcomes_sha256"],
                 "source_record_redistributed": False,
                 "terms_reference": outcome_provenance["terms_reference"],
                 "retention_basis": outcome_provenance["retention_basis"],
@@ -603,7 +633,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "separate sealed results JSON with outcome provenance naming a sibling source artifact "
-            "whose SHA-256 is verified during assembly"
+            "whose SHA-256 and normalized outcome labels are verified during assembly"
         ),
     )
     parser.add_argument(
@@ -647,7 +677,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "scope=selected_point_in_time_snapshots_only historical_window_market_coverage_verified=false "
         "licensing_or_retention_verified=true outcome_source_checksum_verified=true "
-        "profitability_claim=false real_money_execution=false"
+        "outcome_labels_source_bound=true profitability_claim=false real_money_execution=false"
     )
     print(f"dataset={result.root}")
     return 0

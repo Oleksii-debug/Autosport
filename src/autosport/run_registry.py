@@ -267,6 +267,28 @@ class RunRegistry:
                 raise ValueError("run registry contains an invalid run entry")
             if item.get("status") not in {"in_progress", "completed", "aborted"}:
                 raise ValueError("run registry contains an invalid status")
+            market_sha256 = item.get("market_sha256")
+            results_sha256 = item.get("results_sha256")
+            strategy_id = item.get("strategy_id")
+            run_id = item.get("run_id")
+            if (
+                not isinstance(market_sha256, str)
+                or not market_sha256
+                or not isinstance(results_sha256, str)
+                or not results_sha256
+                or not isinstance(strategy_id, str)
+                or not strategy_id
+                or not isinstance(run_id, str)
+                or not run_id
+            ):
+                raise ValueError("run registry contains invalid experiment identity fields")
+            expected_base_identity = self.experiment_identity(
+                market_sha256,
+                results_sha256,
+                strategy_id,
+            )
+            if item.get("base_identity") != expected_base_identity:
+                raise ValueError("run registry contains an inconsistent base identity")
         return raw
 
     def _write(self, raw: dict) -> None:

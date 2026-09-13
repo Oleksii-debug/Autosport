@@ -23,7 +23,7 @@ class DataToolsEntryTests(unittest.TestCase):
         target.assert_called_once_with(["--at", "2026-01-01T00:00:00Z"])
 
     def test_betfair_historical_import_dispatches_exact_arguments(self):
-        with patch("autosport.betfair_historical_import.main", return_value=12) as target:
+        with patch("autosport.betfair_historical_read_once.main", return_value=12) as target:
             result = data_tools_entry.main(
                 [
                     "import-betfair-historical",

@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return acquisition_main(forwarded)
     if command == "import-betfair-historical":
-        from autosport.betfair_historical_import import main as betfair_import_main
+        from autosport.betfair_historical_read_once import main as betfair_import_main
 
         return betfair_import_main(forwarded)
     if command == "build-corpus":

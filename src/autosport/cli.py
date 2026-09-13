@@ -22,6 +22,7 @@ from .parlayapi_provider import (
 from .portfolio import PortfolioEngine
 from .recovery import reconcile_late_crashes
 from .replay import ReplayEngine
+from .research_strategy import ResearchStrategyPlan
 from .run_registry import ReconciliationError
 from .session import AutosportSession, ObservationResult
 from .strategies import available_strategies
@@ -46,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="baseline-v1",
         choices=tuple(spec.strategy_id for spec in available_strategies()),
         help="canonical strategy implementation to execute and bind into experiment evidence",
+    )
+    dataset.add_argument(
+        "--research-plan",
+        type=Path,
+        default=None,
+        help="typed causal research-plan JSON required by research-replay-v1",
     )
     sub.add_parser("strategies", help="list canonical replay strategies and their runtime agents")
     verify = sub.add_parser("verify-dataset", help="verify sealed hashes and historical corpus governance without replay")
@@ -90,13 +97,32 @@ def run_replay(path: Path, bankroll: str) -> int:
     return 0
 
 
-def run_dataset(path: Path, workspace: Path, bankroll: str, strategy_id: str = "baseline-v1") -> int:
+def run_dataset(
+    path: Path,
+    workspace: Path,
+    bankroll: str,
+    strategy_id: str = "baseline-v1",
+    research_plan_path: Path | None = None,
+) -> int:
     dataset = load_dataset(path)
-    session = AutosportSession(workspace, bankroll, strategy_id=strategy_id)
+    research_plan = (
+        ResearchStrategyPlan.from_path(research_plan_path)
+        if research_plan_path is not None
+        else None
+    )
+    session = AutosportSession(
+        workspace,
+        bankroll,
+        strategy_id=strategy_id,
+        research_plan=research_plan,
+    )
     try:
         result = session.run_dataset(dataset)
         print(f"run_id={result.replay.run_id}")
         print(f"strategy_id={session.strategy_id}")
+        print(f"canonical_strategy_id={session.strategy.strategy_id}")
+        if research_plan is not None:
+            print(f"research_plan_sha256={research_plan.source_sha256}")
         print(f"events={result.replay.event_count}")
         print(f"balance={result.balance}")
         print(f"net_profit={result.evaluation.net_profit}")
@@ -112,7 +138,8 @@ def run_strategies() -> int:
     for spec in available_strategies():
         print(
             f"{spec.strategy_id} | agents={','.join(spec.agent_names)} | "
-            f"opens_paper_tickets={str(spec.opens_paper_tickets).lower()} | {spec.label}"
+            f"opens_paper_tickets={str(spec.opens_paper_tickets).lower()} | "
+            f"requires_research_plan={str(spec.requires_research_plan).lower()} | {spec.label}"
         )
     return 0
 
@@ -331,7 +358,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "replay":
         return run_replay(args.path, args.bankroll)
     if args.command == "dataset":
-        return run_dataset(args.path, args.workspace, args.bankroll, args.strategy)
+        return run_dataset(
+            args.path,
+            args.workspace,
+            args.bankroll,
+            args.strategy,
+            args.research_plan,
+        )
     if args.command == "strategies":
         return run_strategies()
     if args.command == "verify-dataset":

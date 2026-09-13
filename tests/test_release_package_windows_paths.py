@@ -5,7 +5,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from autosport.release_package import verify_windows_package
+from autosport.release_package import _validate_windows_member, verify_windows_package
 
 
 class WindowsReleaseArchivePathTruthTests(unittest.TestCase):
@@ -25,10 +25,10 @@ class WindowsReleaseArchivePathTruthTests(unittest.TestCase):
         )
 
     def test_backslash_member_fails_closed(self) -> None:
-        self._assert_rejected(
-            [r"Autosport-V1/examples\tt_demo\market.jsonl"],
-            "Windows backslash member",
-        )
+        # zipfile normalizes arcname backslashes to '/' on Windows before writing,
+        # so exercise the verifier's raw member-path contract directly here.
+        with self.assertRaisesRegex(ValueError, "Windows backslash member"):
+            _validate_windows_member(r"Autosport-V1/examples\tt_demo\market.jsonl")
 
     def test_noncanonical_member_fails_closed(self) -> None:
         self._assert_rejected(

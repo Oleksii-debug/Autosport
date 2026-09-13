@@ -81,6 +81,8 @@ def capture_historical_snapshot(
     response = provider._request(url)  # package-internal transport preserves secret/header policy and retries
     captured_at = provider.clock()
     captured_dt = _parse_timestamp(captured_at, field="captured_at")
+    if captured_dt < requested_dt:
+        raise ProviderPayloadError("capture clock is before requested_at")
 
     payload = response.payload
     if not isinstance(payload, dict):

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 
+from . import forecast_origin
+
 
 _USAGE = """Autosport-Data — portable Windows historical-data tools + research
 
@@ -11,6 +13,7 @@ Usage:
   Autosport-Data.exe build-corpus-from-bundle [bundle-adapter arguments]
   Autosport-Data.exe verify-dataset <dataset-path>
   Autosport-Data.exe walk-forward-evaluate <bundle.json> [--output report.json]
+  Autosport-Data.exe verify-forecast-origin <workspace> <run-id> [--bundle bundle.json] [--output report.json]
   Autosport-Data.exe compare-strategies <run-summary> <run-summary> [...] [strategy-comparison arguments]
 
 Commands:
@@ -19,11 +22,13 @@ Commands:
   build-corpus-from-bundle  Verify an acquisition bundle and reuse the canonical governed corpus assembler.
   verify-dataset            Verify sealed hashes and historical governance without replay.
   walk-forward-evaluate     Run the canonical strict causal walk-forward evaluator and emit machine-readable evidence.
+  verify-forecast-origin    Verify exact forecast hashes against a completed causal replay transaction/Decision Ledger.
   compare-strategies        Compare compatible completed paper strategy runs on the same sealed replay identity.
 
-Truth boundaries remain fail closed: credentials, lawful retention/licensing, real sealed outcomes,
-coverage, profitability or predictive superiority, human testing, and NVDA verification are never
-inferred by this wrapper.
+Truth boundaries remain fail closed: causal replay forecast audit evidence does not prove independent
+pre-outcome model generation or holdout/OOS performance. Credentials, lawful retention/licensing,
+real sealed outcomes, coverage, profitability or predictive superiority, human testing, and NVDA
+verification are never inferred by this wrapper.
 """
 
 
@@ -54,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
         from autosport.cli import main as cli_main
 
         return cli_main(["walk-forward-evaluate", *forwarded])
+    if command == "verify-forecast-origin":
+        return forecast_origin.main(forwarded)
     if command == "compare-strategies":
         from autosport.strategy_comparison import main as strategy_comparison_main
 

@@ -22,8 +22,15 @@ class ScenarioGroup:
     outcomes: tuple[ScenarioOutcome, ...]
 
     def __post_init__(self) -> None:
+        if not isinstance(self.group_id, str) or not self.group_id or self.group_id != self.group_id.strip():
+            raise ValueError("scenario group_id must be a non-empty canonical string")
         if len(self.outcomes) < 2:
             raise ValueError("scenario group requires at least two outcomes")
+        for item in self.outcomes:
+            if not isinstance(item, ScenarioOutcome):
+                raise ValueError("scenario group outcomes must be ScenarioOutcome values")
+            if not isinstance(item.quote_key, str) or not item.quote_key or item.quote_key != item.quote_key.strip():
+                raise ValueError("scenario outcome quote_key must be a non-empty canonical string")
         keys = [item.quote_key for item in self.outcomes]
         if len(keys) != len(set(keys)):
             raise ValueError("duplicate outcome quote_key")
@@ -31,11 +38,18 @@ class ScenarioGroup:
         if any(value is not None for value in probabilities):
             if any(value is None for value in probabilities):
                 raise ValueError("either all or no outcome probabilities must be supplied")
-            total = sum((value for value in probabilities if value is not None), Decimal("0"))
+            typed_probabilities: list[Decimal] = []
+            for value in probabilities:
+                if not isinstance(value, Decimal):
+                    raise ValueError("scenario outcome probability must be Decimal")
+                if not value.is_finite():
+                    raise ValueError("scenario outcome probability must be finite")
+                if value < 0 or value > 1:
+                    raise ValueError("invalid outcome probability")
+                typed_probabilities.append(value)
+            total = sum(typed_probabilities, Decimal("0"))
             if abs(total - Decimal("1")) > Decimal("0.000000001"):
                 raise ValueError("scenario group probabilities must sum to 1")
-            if any(value is not None and (value < 0 or value > 1) for value in probabilities):
-                raise ValueError("invalid outcome probability")
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,38 +95,71 @@ class ScenarioSearchEngine:
         sample_count: int = 50_000,
         seed: int = 17,
     ) -> None:
+        if isinstance(exact_state_limit, bool) or not isinstance(exact_state_limit, int) or exact_state_limit < 1:
+            raise ValueError("exact_state_limit must be a positive integer")
+        if isinstance(branch_node_limit, bool) or not isinstance(branch_node_limit, int) or branch_node_limit < 1:
+            raise ValueError("branch_node_limit must be a positive integer")
+        if isinstance(sample_count, bool) or not isinstance(sample_count, int) or sample_count < 1:
+            raise ValueError("sample_count must be a positive integer")
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise ValueError("seed must be an integer")
         self.exact_state_limit = exact_state_limit
         self.branch_node_limit = branch_node_limit
         self.sample_count = sample_count
         self.seed = seed
+
+    @staticmethod
+    def affected_tickets(tickets: list[PaperTicket], quote_key: str) -> list[str]:
+        return [ticket.ticket_id for ticket in tickets if ticket.status is TicketStatus.OPEN and any(leg.quote_key == quote_key for leg in ticket.legs)]
+
+    @staticmethod
+    def _group_sort_key(group: ScenarioGroup) -> tuple[tuple[str, ...], str]:
+        return tuple(sorted(outcome.quote_key for outcome in group.outcomes)), group.group_id
+
+    @staticmethod
+    def _ordered_outcomes(group: ScenarioGroup) -> tuple[ScenarioOutcome, ...]:
+        return tuple(sorted(group.outcomes, key=lambda outcome: outcome.quote_key))
+
+    @staticmethod
+    def scenario_profit(tickets: list[PaperTicket], winning_quote_keys: set[str]) -> Decimal:
+        total = Decimal("0")
+        for ticket in tickets:
+            if ticket.status is not TicketStatus.OPEN:
+                continue
+            if all(leg.quote_key in winning_quote_keys for leg in ticket.legs):
+                total += ticket.stake * ticket.combined_odds - ticket.stake
+            else:
+                total -= ticket.stake
+        return total
 
     def analyse(self, tickets: list[PaperTicket], groups: list[ScenarioGroup]) -> ScenarioSearchReport:
         open_tickets = [ticket for ticket in tickets if ticket.status is TicketStatus.OPEN]
         if not open_tickets:
             zero = Decimal("0")
             return ScenarioSearchReport("exact", 1, 1, zero, zero, zero, zero, True, True, zero, "exact")
-        mapping = self._validate_and_map(open_tickets, groups)
-        total_states = math.prod(len(group.outcomes) for group in groups)
+        canonical_groups = sorted(groups, key=self._group_sort_key)
+        mapping = self._validate_and_map(open_tickets, canonical_groups)
+        total_states = math.prod(len(group.outcomes) for group in canonical_groups)
         floor = -sum((ticket.stake for ticket in open_tickets), Decimal("0"))
         ceiling = sum((ticket.stake * ticket.combined_odds - ticket.stake for ticket in open_tickets), Decimal("0"))
         if total_states <= self.exact_state_limit:
-            profits, weighted = self._enumerate(open_tickets, groups)
+            profits, weighted = self._enumerate(open_tickets, canonical_groups)
             expected = weighted if weighted is not None else None
             return ScenarioSearchReport(
                 "exact-enumeration", total_states, total_states, min(profits), max(profits), floor, ceiling, True, True,
                 expected, "exact-independent-groups" if expected is not None else None,
             )
 
-        min_result = self._branch_bound(open_tickets, groups, mapping, minimize=True)
-        max_result = self._branch_bound(open_tickets, groups, mapping, minimize=False)
+        min_result = self._branch_bound(open_tickets, canonical_groups, mapping, minimize=True)
+        max_result = self._branch_bound(open_tickets, canonical_groups, mapping, minimize=False)
         if min_result[2] and max_result[2]:
-            expected, expected_mode = self._sample_expected(open_tickets, groups)
+            expected, expected_mode = self._sample_expected(open_tickets, canonical_groups)
             return ScenarioSearchReport(
                 "branch-and-bound-exact-extrema", total_states, min_result[1] + max_result[1], min_result[0], max_result[0],
                 floor, ceiling, True, True, expected, expected_mode,
             )
 
-        sample_worst, sample_best, expected = self._sample(open_tickets, groups)
+        sample_worst, sample_best, expected = self._sample(open_tickets, canonical_groups)
         observed_worst = min(sample_worst, min_result[0])
         observed_best = max(sample_best, max_result[0])
         return ScenarioSearchReport(
@@ -140,7 +187,7 @@ class ScenarioSearchEngine:
         profits: list[Decimal] = []
         can_weight = all(all(outcome.probability is not None for outcome in group.outcomes) for group in groups)
         expected = Decimal("0") if can_weight else None
-        for combination in itertools.product(*(group.outcomes for group in groups)):
+        for combination in itertools.product(*(self._ordered_outcomes(group) for group in groups)):
             winners = {outcome.quote_key for outcome in combination}
             profit = PortfolioEngine.scenario_profit(tickets, winners)
             profits.append(profit)
@@ -189,7 +236,10 @@ class ScenarioSearchEngine:
             touched = {mapping[leg.quote_key] for leg in ticket.legs}
             for group_index in touched:
                 impact[group_index] += potential
-        return sorted(range(len(groups)), key=lambda index: impact[index], reverse=True)
+        return sorted(
+            range(len(groups)),
+            key=lambda index: (-impact[index], self._group_sort_key(groups[index])),
+        )
 
     def _branch_bound(self, tickets, groups, mapping, minimize: bool) -> tuple[Decimal, int, bool]:
         order = self._ordered_groups(tickets, groups, mapping)
@@ -218,7 +268,7 @@ class ScenarioSearchEngine:
                 return
             group_index = order[depth]
             group = groups[group_index]
-            for outcome in group.outcomes:
+            for outcome in self._ordered_outcomes(group):
                 assignments[group_index] = outcome.quote_key
                 dfs(depth + 1)
                 if not complete:
@@ -242,13 +292,14 @@ class ScenarioSearchEngine:
         best = Decimal("-Infinity")
         can_weight = all(all(outcome.probability is not None for outcome in group.outcomes) for group in groups)
         total = Decimal("0")
+        ordered_outcomes = [self._ordered_outcomes(group) for group in groups]
         for _ in range(self.sample_count):
             winners: set[str] = set()
-            for group in groups:
+            for outcomes in ordered_outcomes:
                 if can_weight:
-                    selected = _weighted_choice(rng, group.outcomes)
+                    selected = _weighted_choice(rng, outcomes)
                 else:
-                    selected = rng.choice(group.outcomes)
+                    selected = rng.choice(outcomes)
                 winners.add(selected.quote_key)
             value = PortfolioEngine.scenario_profit(tickets, winners)
             worst = min(worst, value)

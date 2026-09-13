@@ -24,19 +24,24 @@ class ParlayCandidate:
     expected_profit_per_unit: Decimal
 
 
+def _require_positive_integer(value: int, *, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{field} must be a positive non-boolean integer")
+    return value
+
+
 class BeamParlayCandidateSearch:
     """Bounded research search that avoids brute-force enumeration of every possible parlay."""
 
     def __init__(self, beam_width: int = 250, max_legs: int = 12, result_limit: int = 100) -> None:
-        if beam_width <= 0 or max_legs <= 0 or result_limit <= 0:
-            raise ValueError("search limits must be positive")
-        self.beam_width = beam_width
-        self.max_legs = max_legs
-        self.result_limit = result_limit
+        self.beam_width = _require_positive_integer(beam_width, field="beam_width")
+        self.max_legs = _require_positive_integer(max_legs, field="max_legs")
+        self.result_limit = _require_positive_integer(result_limit, field="result_limit")
 
     def search(self, legs: list[CandidateLeg], minimum_legs: int = 2) -> list[ParlayCandidate]:
-        if minimum_legs < 1 or minimum_legs > self.max_legs:
-            raise ValueError("invalid minimum_legs")
+        minimum_legs = _require_positive_integer(minimum_legs, field="minimum_legs")
+        if minimum_legs > self.max_legs:
+            raise ValueError("minimum_legs must not exceed max_legs")
         self._validate_input_legs(legs)
         ordered = sorted(
             legs,

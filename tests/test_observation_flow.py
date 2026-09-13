@@ -55,6 +55,61 @@ class ObservationFlowTests(unittest.TestCase):
             self.assertEqual(len(reopened.book.tickets), 0)
             reopened.close()
 
+    def test_session_observation_rejects_nonfinite_provider_odds_before_persistence(self):
+        provider = InMemoryProvider(
+            "fixture:finite-boundary",
+            [
+                ProviderQuote(
+                    provider_event_id="match-1",
+                    provider_market_id="winner",
+                    provider_selection_id="valid-a",
+                    decimal_odds=Decimal("1.80"),
+                    observed_ts="2026-09-12T20:00:00+00:00",
+                    sequence=1,
+                ),
+                ProviderQuote(
+                    provider_event_id="match-1",
+                    provider_market_id="winner",
+                    provider_selection_id="nan",
+                    decimal_odds=Decimal("NaN"),
+                    observed_ts="2026-09-12T20:00:01+00:00",
+                    sequence=2,
+                ),
+                ProviderQuote(
+                    provider_event_id="match-1",
+                    provider_market_id="winner",
+                    provider_selection_id="infinity",
+                    decimal_odds=Decimal("Infinity"),
+                    observed_ts="2026-09-12T20:00:02+00:00",
+                    sequence=3,
+                ),
+                ProviderQuote(
+                    provider_event_id="match-1",
+                    provider_market_id="winner",
+                    provider_selection_id="valid-b",
+                    decimal_odds=Decimal("2.05"),
+                    observed_ts="2026-09-12T20:00:03+00:00",
+                    sequence=4,
+                ),
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = AutosportSession(tmp, "10000")
+            result = session.observe_provider_once(provider, max_items=10)
+
+            self.assertEqual(result.stats.received, 4)
+            self.assertEqual(result.stats.accepted, 2)
+            self.assertEqual(result.stats.rejected, 2)
+            persisted = session.store.events()
+            self.assertEqual([event.sequence for event in persisted], [1, 4])
+            self.assertTrue(all(event.decimal_odds.is_finite() for event in persisted))
+            self.assertEqual(
+                session.source_health.get("fixture:finite-boundary").total_rejected,
+                2,
+            )
+            session.close()
+
     def test_cli_requires_environment_key_unless_public_preview_is_explicit(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
             output = io.StringIO()

@@ -17,6 +17,43 @@ class CandidateSearchInputIntegrityTests(unittest.TestCase):
     ) -> CandidateLeg:
         return CandidateLeg(quote_key, event_id, odds, probability)
 
+    def test_runtime_limits_require_positive_non_boolean_integers(self) -> None:
+        invalid_values = (True, False, 1.5, Decimal("2"), "2", 0, -1)
+        for field in ("beam_width", "max_legs", "result_limit"):
+            for value in invalid_values:
+                kwargs = {"beam_width": 2, "max_legs": 2, "result_limit": 2}
+                kwargs[field] = value
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        rf"{field} must be a positive non-boolean integer",
+                    ):
+                        BeamParlayCandidateSearch(**kwargs)  # type: ignore[arg-type]
+
+        search = BeamParlayCandidateSearch(beam_width=1, max_legs=1, result_limit=1)
+        self.assertEqual(search.beam_width, 1)
+        self.assertEqual(search.max_legs, 1)
+        self.assertEqual(search.result_limit, 1)
+
+    def test_minimum_legs_requires_positive_non_boolean_integer_at_boundary(self) -> None:
+        invalid_values = (True, False, 1.5, Decimal("1"), "1", 0, -1)
+        for value in invalid_values:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "minimum_legs must be a positive non-boolean integer",
+                ):
+                    self.search.search([self._leg()], minimum_legs=value)  # type: ignore[arg-type]
+
+        with self.assertRaisesRegex(ValueError, "minimum_legs must not exceed max_legs"):
+            self.search.search([self._leg()], minimum_legs=4)
+
+        result = BeamParlayCandidateSearch(beam_width=1, max_legs=1, result_limit=1).search(
+            [self._leg()],
+            minimum_legs=1,
+        )
+        self.assertEqual(len(result), 1)
+
     def test_non_finite_odds_fail_before_beam_sort_or_multiplication(self) -> None:
         for value in (Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")):
             with self.subTest(value=str(value)):

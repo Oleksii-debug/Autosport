@@ -224,6 +224,17 @@ class GovernedWalkForwardBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "absent from governed historical corpus"):
                 evaluate_walk_forward_bundle(bundle)
 
+    def test_forecast_input_cutoff_before_first_quote_observation_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = _write_governed_dataset(root / "dataset")
+            raw = _raw_bundle(dataset)
+            raw["forecasts"][1]["input_cutoff_ts"] = "2026-02-20T12:00:00+00:00"
+            bundle = WalkForwardBundle.from_path(_write_bundle(root, raw))
+
+            with self.assertRaisesRegex(ValueError, "input cutoff predates"):
+                evaluate_walk_forward_bundle(bundle)
+
     def test_outcome_fact_must_match_governed_sealed_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

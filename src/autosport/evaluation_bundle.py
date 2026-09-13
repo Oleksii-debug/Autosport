@@ -180,6 +180,10 @@ def evaluate_walk_forward_bundle(bundle: WalkForwardBundle) -> dict[str, Any]:
 
     governed = governed_evidence is not None
     origin_bound = origin_evidence is not None
+    declared_record_time_before_reveal = bool(
+        origin_evidence is not None
+        and origin_evidence.get("declared_record_time_before_reveal_verified") is True
+    )
     report: dict[str, Any] = {
         "schema_version": 1,
         "kind": "strict_walk_forward_forecast_evaluation",
@@ -207,7 +211,7 @@ def evaluate_walk_forward_bundle(bundle: WalkForwardBundle) -> dict[str, Any]:
             "outcome_reveal_boundary_verified": governed,
             "temporal_timestamp_constraints_verified": governed,
             "canonical_forecast_origin_verified": origin_bound,
-            "declared_record_time_before_reveal_verified": origin_bound,
+            "declared_record_time_before_reveal_verified": declared_record_time_before_reveal,
             "independent_time_anchor_verified": False,
             "pre_outcome_ledger_write_verified": False,
             "temporal_holdout_protocol_verified": False,

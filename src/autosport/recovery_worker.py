@@ -61,13 +61,23 @@ class OneShotRecoveryWorker:
             self._busy = True
         # Recovery can mutate transaction/registry state. Do not allow interpreter
         # shutdown to kill it at an arbitrary persistence boundary.
-        self._thread = threading.Thread(
-            target=self._run,
-            args=(task,),
-            name="autosport-workspace-recovery",
-            daemon=False,
-        )
-        self._thread.start()
+        try:
+            thread = threading.Thread(
+                target=self._run,
+                args=(task,),
+                name="autosport-workspace-recovery",
+                daemon=False,
+            )
+            self._thread = thread
+            thread.start()
+        except RuntimeError:
+            # CPython reports OS/runtime inability to start a new thread as
+            # RuntimeError. No task ran, so restore the worker to an idle state;
+            # callers already treat False as a fail-closed "not started" result.
+            self._thread = None
+            with self._lock:
+                self._busy = False
+            return False
         return True
 
     def _run(self, task: RecoveryTask) -> None:

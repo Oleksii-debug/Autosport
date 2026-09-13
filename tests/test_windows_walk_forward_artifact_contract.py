@@ -13,7 +13,8 @@ class WindowsWalkForwardArtifactContractTests(unittest.TestCase):
     def test_governed_walk_forward_artifact_publishes_referenced_dataset(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("dist/walk-forward-package-smoke.json", workflow)
-        self.assertIn("dist/walk-forward-package-smoke-dataset/**", workflow)
+        self.assertIn("            dist/walk-forward-package-smoke-dataset\n", workflow)
+        self.assertNotIn("dist/walk-forward-package-smoke-dataset/**", workflow)
         self.assertIn("dist/walk-forward-package-smoke-report.json", workflow)
         self.assertIn(
             "dist/fresh-extraction-walk-forward-package-smoke-report.json",

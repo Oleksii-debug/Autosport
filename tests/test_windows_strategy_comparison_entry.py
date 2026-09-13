@@ -3,11 +3,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from autosport.windows_entry import main
+from autosport.data_tools_entry import main
 
 
-class WindowsStrategyComparisonEntryTests(unittest.TestCase):
-    def test_packaged_entry_routes_compare_strategies_to_canonical_engine(self) -> None:
+class DataToolsStrategyComparisonEntryTests(unittest.TestCase):
+    def test_console_entry_routes_compare_strategies_to_canonical_engine(self) -> None:
         argv = [
             "compare-strategies",
             "baseline-run.json",

@@ -20,6 +20,7 @@ from .parlayapi_provider import ParlayApiTableTennisProvider
 _SNAPSHOT_KIND = "parlayapi_point_in_time_historical_snapshot"
 _GOVERNANCE_KIND = "historical_corpus_governance_proof"
 _OUTCOME_PROVENANCE_KIND = "historical_outcome_provenance"
+_OUTCOME_SOURCE_RECORD_KIND = "historical_outcome_source_record"
 _ALLOWED_REDISTRIBUTION = {"prohibited", "internal_only", "permitted"}
 _REDISTRIBUTION_RANK = {"prohibited": 0, "internal_only": 1, "permitted": 2}
 _ALLOWED_OUTCOMES = {"win", "loss", "void"}
@@ -129,7 +130,7 @@ def _outcome_provenance(
     source_root: Path,
     reveal_dt: datetime,
     imported_dt: datetime,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, str]]:
     raw = results.get("outcome_provenance")
     if not isinstance(raw, dict):
         raise ValueError("sealed results outcome_provenance must be an object")
@@ -182,6 +183,37 @@ def _outcome_provenance(
             "sealed results outcome_provenance.source_record_sha256 does not match source record artifact"
         )
 
+    source_record = _json_object(
+        source_record_path,
+        context="sealed outcome source record",
+    )
+    if int(source_record.get("schema_version", 0)) != 1:
+        raise ValueError("sealed outcome source record schema_version must be 1")
+    if source_record.get("kind") != _OUTCOME_SOURCE_RECORD_KIND:
+        raise ValueError(
+            f"sealed outcome source record kind must be {_OUTCOME_SOURCE_RECORD_KIND}"
+        )
+    if source_record.get("source_identity") != source_identity:
+        raise ValueError(
+            "sealed outcome source record source_identity does not match outcome provenance"
+        )
+    source_record_outcomes_raw = source_record.get("quote_outcomes")
+    if not isinstance(source_record_outcomes_raw, dict):
+        raise ValueError("sealed outcome source record quote_outcomes must be an object")
+    if any(
+        not isinstance(key, str)
+        or not key.strip()
+        or not isinstance(value, str)
+        or value not in _ALLOWED_OUTCOMES
+        for key, value in source_record_outcomes_raw.items()
+    ):
+        raise ValueError(
+            "sealed outcome source record quote_outcomes must map non-empty quote keys to win, loss, or void"
+        )
+    source_record_outcomes = {
+        key: value for key, value in source_record_outcomes_raw.items()
+    }
+
     terms_reference = _text(raw, "terms_reference", context="sealed results outcome_provenance")
     retention_basis = _text(raw, "retention_basis", context="sealed results outcome_provenance")
     authority_reference = _text(raw, "authority_reference", context="sealed results outcome_provenance")
@@ -233,21 +265,24 @@ def _outcome_provenance(
             "sealed results outcome_provenance redistribution_policy=permitted requires redistribution_verified=true"
         )
 
-    return {
-        **raw,
-        "source_identity": source_identity,
-        "source_record_file": source_record_file,
-        "source_record_sha256": source_record_sha256,
-        "terms_reference": terms_reference,
-        "retention_basis": retention_basis,
-        "authority_reference": authority_reference,
-        "available_at": available_at,
-        "acquired_at": acquired_at,
-        "verified_at": verified_at,
-        "redistribution_policy": policy,
-        "redistribution_verified": redistribution_verified,
-        "licensing_or_retention_verified": True,
-    }
+    return (
+        {
+            **raw,
+            "source_identity": source_identity,
+            "source_record_file": source_record_file,
+            "source_record_sha256": source_record_sha256,
+            "terms_reference": terms_reference,
+            "retention_basis": retention_basis,
+            "authority_reference": authority_reference,
+            "available_at": available_at,
+            "acquired_at": acquired_at,
+            "verified_at": verified_at,
+            "redistribution_policy": policy,
+            "redistribution_verified": redistribution_verified,
+            "licensing_or_retention_verified": True,
+        },
+        source_record_outcomes,
+    )
 
 
 def _snapshot(
@@ -433,7 +468,7 @@ def assemble_historical_corpus(
     results = _json_object(results_path_obj, context="sealed results")
     if int(results.get("schema_version", 0)) != 1:
         raise ValueError("sealed results schema_version must be 1")
-    outcome_provenance = _outcome_provenance(
+    outcome_provenance, source_record_outcomes = _outcome_provenance(
         results,
         source_root=results_path_obj.parent,
         reveal_dt=reveal_dt,
@@ -476,6 +511,11 @@ def assemble_historical_corpus(
     )
     if invalid_outcomes:
         raise ValueError("sealed results contain unsupported outcome; allowed values are win, loss, void")
+    normalized_outcomes = {str(key): value for key, value in outcomes.items()}
+    if normalized_outcomes != source_record_outcomes:
+        raise ValueError(
+            "sealed results quote_outcomes do not match hashed outcome source record"
+        )
 
     effective_redistribution_policy = min(
         (str(proof["redistribution_policy"]), str(outcome_provenance["redistribution_policy"])),
@@ -527,6 +567,7 @@ def assemble_historical_corpus(
                 "source_record_file": outcome_provenance["source_record_file"],
                 "source_record_sha256": outcome_provenance["source_record_sha256"],
                 "source_record_checksum_verified": True,
+                "source_record_outcomes_verified": True,
                 "source_record_redistributed": False,
                 "terms_reference": outcome_provenance["terms_reference"],
                 "retention_basis": outcome_provenance["retention_basis"],
@@ -603,7 +644,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "separate sealed results JSON with outcome provenance naming a sibling source artifact "
-            "whose SHA-256 is verified during assembly"
+            "whose SHA-256 and normalized quote outcomes are verified during assembly"
         ),
     )
     parser.add_argument(
@@ -647,7 +688,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "scope=selected_point_in_time_snapshots_only historical_window_market_coverage_verified=false "
         "licensing_or_retention_verified=true outcome_source_checksum_verified=true "
-        "profitability_claim=false real_money_execution=false"
+        "outcome_labels_source_bound=true profitability_claim=false real_money_execution=false"
     )
     print(f"dataset={result.root}")
     return 0

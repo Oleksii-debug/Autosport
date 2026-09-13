@@ -7,7 +7,7 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -47,6 +47,15 @@ def _canonical_timestamp(value: str, *, field: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _canonical_date(value: str, *, field: str) -> date:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be YYYY-MM-DD")
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError as exc:
+        raise ValueError(f"{field} must be YYYY-MM-DD") from exc
+
+
 def _canonical_hash(value: Any) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -62,11 +71,11 @@ def capture_historical_acquisition_bundle(
 ) -> HistoricalAcquisitionBundle:
     """Atomically capture selected historical odds snapshots and match/result evidence.
 
-    The bundle binds exactly what was requested and exactly what the provider returned.
-    It is acquisition evidence only. Selected snapshots are not promoted to complete
-    point-in-time/window coverage, opaque provider result rows are not interpreted as
-    sealed settlement outcomes, and no licensing/retention or replay-readiness claim
-    is made.
+    A one-credit authenticated coverage preflight runs before the more expensive
+    point-in-time snapshot calls. Its exact request window and validated provider
+    summary are content-bound into the bundle identities. This proves only runtime
+    entitlement/source-row evidence for that request window; it does not promote the
+    selected snapshots to complete historical market coverage or derive outcomes.
     """
 
     if provider.public_preview or not provider.api_key:
@@ -81,11 +90,51 @@ def capture_historical_acquisition_bundle(
     )
     if len(set(canonical_requests)) != len(canonical_requests):
         raise ValueError("requested historical snapshot timestamps must be unique instants")
+    canonical_results_date = _canonical_date(results_date, field="results_date").isoformat()
+    requested_dates = tuple(
+        datetime.fromisoformat(value.replace("Z", "+00:00")).date() for value in canonical_requests
+    )
+    coverage_dates = (*requested_dates, date.fromisoformat(canonical_results_date))
+    coverage_from = min(coverage_dates).isoformat()
+    coverage_to = max(coverage_dates).isoformat()
 
     output = Path(output_dir)
     if output.exists():
         raise ValueError("output_dir already exists; historical acquisition bundles never overwrite")
     output.parent.mkdir(parents=True, exist_ok=True)
+
+    coverage_report = provider.historical_coverage(coverage_from, coverage_to)
+    if not coverage_report.has_data:
+        raise ProviderPayloadError("historical coverage preflight returned no source rows")
+    coverage_request = {
+        "date_from": coverage_from,
+        "date_to": coverage_to,
+    }
+    coverage_evidence = {
+        "date_from": coverage_report.date_from,
+        "date_to": coverage_report.date_to,
+        "observed_at": coverage_report.observed_at,
+        "historical_window_hours": coverage_report.historical_window_hours,
+        "historical_window_from": coverage_report.historical_window_from,
+        "response_sha256": coverage_report.response_sha256,
+        "api_version": coverage_report.api_version,
+        "source_count": len(coverage_report.sources),
+        "total_rows": coverage_report.total_rows,
+        "total_priced_rows": coverage_report.total_priced_rows,
+        "sources": [
+            {
+                "source": item.source,
+                "rows": item.rows,
+                "first_date": item.first_date,
+                "last_date": item.last_date,
+                "priced_rows": item.priced_rows,
+            }
+            for item in coverage_report.sources
+        ],
+        "historical_window_market_coverage_verified": False,
+        "licensing_or_retention_verified": False,
+        "redistribution_verified": False,
+    }
 
     request_scope = {
         "provider": "parlayapi",
@@ -93,8 +142,9 @@ def capture_historical_acquisition_bundle(
         "regions": list(provider.regions),
         "markets": list(provider.markets),
         "requested_snapshot_timestamps": list(canonical_requests),
+        "coverage_preflight": coverage_request,
         "match_results": {
-            "date": results_date,
+            "date": canonical_results_date,
             "priced_only": results_priced_only,
         },
     }
@@ -141,7 +191,7 @@ def capture_historical_acquisition_bundle(
         result_evidence_path = staging / result_evidence_relative
         result_report = capture_historical_matches(
             provider,
-            requested_date=results_date,
+            requested_date=canonical_results_date,
             output_path=result_path,
             evidence_path=result_evidence_path,
             priced_only=results_priced_only,
@@ -157,6 +207,7 @@ def capture_historical_acquisition_bundle(
             "canonical_response_sha256": result_report.canonical_response_sha256,
             "historical_window_hours": result_report.historical_window_hours,
             "historical_window_from": result_report.historical_window_from,
+            "coverage_preflight": coverage_evidence,
         }
 
         identity_payload = {
@@ -208,8 +259,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autosport-acquire-historical-evidence",
         description=(
-            "Atomically capture selected authenticated historical odds snapshots plus "
-            "opaque match/result evidence without promoting them to coverage or outcomes."
+            "Preflight authenticated historical coverage, then atomically capture selected odds snapshots plus "
+            "opaque match/result evidence without promoting them to complete coverage or outcomes."
         ),
     )
     parser.add_argument(
@@ -223,7 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--results-priced-only",
         action="store_true",
-        help="request match rows with real odds where supported; this does not prove market coverage",
+        help="request match rows with real odds where supported; this still does not prove market coverage",
     )
     parser.add_argument(
         "--output-dir",

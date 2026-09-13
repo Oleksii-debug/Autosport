@@ -176,7 +176,14 @@ class ResearchStrategyPlan:
         }
         processed: set[str] = set()
         latest: dict[str, MarketEvent] = {}
-        ordered = sorted(events, key=lambda event: (event.observed_ts, event.sequence, event.dedupe_key))
+        ordered = sorted(
+            events,
+            key=lambda event: (
+                parse_iso_timestamp(event.observed_ts),
+                event.sequence,
+                event.dedupe_key,
+            ),
+        )
         for event in ordered:
             latest[event.quote_key] = event
             instruction = by_trigger.get((event.observed_ts, event.quote_key))

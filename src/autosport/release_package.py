@@ -109,7 +109,13 @@ def verify_windows_package(
 
     package_zip = Path(package_zip)
     with zipfile.ZipFile(package_zip, "r") as archive:
-        infos = [item for item in archive.infolist() if not item.is_dir()]
+        infos = archive.infolist()
+        directory_names = [item.filename for item in infos if item.is_dir()]
+        if directory_names:
+            raise ValueError(
+                "release package contains unsupported directory entries: "
+                + ", ".join(directory_names)
+            )
         names = [item.filename for item in infos]
         if len(names) != len(set(names)):
             raise ValueError("release package contains duplicate member names")

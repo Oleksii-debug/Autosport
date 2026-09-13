@@ -101,7 +101,9 @@ class StrategyComparisonTests(unittest.TestCase):
         self.assertFalse(report["truth"]["predictive_superiority_claim"])
         self.assertFalse(report["truth"]["out_of_sample_claim"])
         self.assertFalse(report["truth"]["real_money_execution"])
-        self.assertTrue(report["truth"]["historical_proof"])
+        self.assertTrue(report["truth"]["governed_historical_import"])
+        self.assertFalse(report["truth"]["real_historical_market_coverage_verified"])
+        self.assertFalse(report["truth"]["licensing_retention_verified"])
 
     def test_mismatched_dataset_fails_closed(self):
         with tempfile.TemporaryDirectory() as temp:

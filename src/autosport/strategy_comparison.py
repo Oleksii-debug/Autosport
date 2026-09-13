@@ -202,7 +202,9 @@ def compare_strategy_runs(
         "observed_paper_order_by_net_profit": observed_order,
         "truth": {
             "paper_only": True,
-            "historical_proof": first.historical_import_identity is not None,
+            "governed_historical_import": first.historical_import_identity is not None,
+            "real_historical_market_coverage_verified": False,
+            "licensing_retention_verified": False,
             "profitability_claim": False,
             "predictive_superiority_claim": False,
             "out_of_sample_claim": False,

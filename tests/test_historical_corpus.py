@@ -91,6 +91,7 @@ def _write_governance(root: Path, **overrides) -> Path:
         "schema_version": 1,
         "kind": "historical_corpus_governance_proof",
         "source_identity": "parlayapi:account-entitlement-2026-01",
+        "source_ids": ["parlayapi"],
         "terms_reference": "https://parlay-api.com/terms",
         "retention_basis": "verified internal research retention authority through 2026-04-01",
         "redistribution_policy": "internal_only",
@@ -135,6 +136,7 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
             self.assertTrue(acquisition["point_in_time_snapshot_contains_odds"])
             self.assertFalse(acquisition["historical_window_market_coverage_verified"])
             self.assertTrue(acquisition["licensing_or_retention_verified"])
+            self.assertEqual(acquisition["rights_source_ids"], ["parlayapi"])
             self.assertEqual(acquisition["governance_proof_sha256"], _sha256(proof))
             self.assertEqual(manifest["import_identity"], dataset.import_identity)
 
@@ -150,6 +152,23 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
                     [snapshot],
                     results_path=results,
                     governance_proof_path=proof,
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
+
+    def test_governance_rights_must_bind_actual_snapshot_source_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            output = root / "corpus"
+            with self.assertRaisesRegex(ValueError, "source_ids do not match"):
+                assemble_historical_corpus(
+                    [snapshot],
+                    results_path=_write_results(root, "tt-a"),
+                    governance_proof_path=_write_governance(root, source_ids=["different-provider"]),
                     output_dir=output,
                     name="blocked",
                     outcome_reveal_after="2026-01-01T11:00:00+00:00",
@@ -211,6 +230,41 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
                     imported_at="2026-01-02T00:05:00+00:00",
                 )
 
+    def test_missing_sealed_outcomes_fail_closed_before_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            output = root / "corpus"
+            with self.assertRaisesRegex(ValueError, "missing quote outcomes"):
+                assemble_historical_corpus(
+                    [snapshot],
+                    results_path=_write_results(root),
+                    governance_proof_path=_write_governance(root),
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
+
+    def test_partial_sealed_outcomes_fail_closed_before_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = _write_snapshot(root, suffix="a")
+            second = _write_snapshot(root, suffix="b", observed="2026-01-01T10:00:02+00:00")
+            output = root / "corpus"
+            with self.assertRaisesRegex(ValueError, "missing quote outcomes"):
+                assemble_historical_corpus(
+                    [first, second],
+                    results_path=_write_results(root, "tt-a"),
+                    governance_proof_path=_write_governance(root),
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
+
     def test_unknown_sealed_outcome_fails_validation_and_leaves_no_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -219,7 +273,28 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "absent from historical market corpus"):
                 assemble_historical_corpus(
                     [snapshot],
-                    results_path=_write_results(root, "tt-unknown"),
+                    results_path=_write_results(root, "tt-a", "tt-unknown"),
+                    governance_proof_path=_write_governance(root),
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
+
+    def test_invalid_sealed_outcome_value_fails_closed_before_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            results = _write_results(root, "tt-a")
+            payload = json.loads(results.read_text(encoding="utf-8"))
+            payload["quote_outcomes"]["tt-a|winner|alice"] = "push"
+            results.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            output = root / "corpus"
+            with self.assertRaisesRegex(ValueError, "allowed values are win, loss, void"):
+                assemble_historical_corpus(
+                    [snapshot],
+                    results_path=results,
                     governance_proof_path=_write_governance(root),
                     output_dir=output,
                     name="blocked",

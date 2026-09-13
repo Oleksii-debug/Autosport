@@ -30,6 +30,28 @@ def _write_json(path: Path, value: object) -> None:
     )
 
 
+def _reseal_bundle(root: Path, bundle: dict[str, object]) -> str:
+    request_scope = bundle["request_scope"]
+    snapshots = bundle["snapshots"]
+    match_results = bundle["match_results"]
+    assert isinstance(request_scope, dict)
+    assert isinstance(snapshots, list)
+    assert isinstance(match_results, dict)
+    request_identity = _canonical_hash(request_scope)
+    bundle["request_identity"] = request_identity
+    identity_payload = {
+        "schema_version": 1,
+        "kind": "parlayapi_historical_acquisition_bundle",
+        "request_identity": request_identity,
+        "snapshots": snapshots,
+        "match_results": match_results,
+    }
+    bundle["evidence_identity"] = _canonical_hash(identity_payload)
+    bundle_path = root / "bundle.json"
+    _write_json(bundle_path, bundle)
+    return _sha(bundle_path)
+
+
 class HistoricalBundleCorpusTests(unittest.TestCase):
     def _bundle(self, root: Path) -> tuple[Path, str, dict[str, object]]:
         bundle_root = root / "acquisition"
@@ -121,6 +143,31 @@ class HistoricalBundleCorpusTests(unittest.TestCase):
             "quote_count": 1,
             "point_in_time_snapshot_contains_odds": True,
         }
+        coverage_request = {"date_from": "2026-09-01", "date_to": "2026-09-01"}
+        coverage_evidence = {
+            "date_from": "2026-09-01",
+            "date_to": "2026-09-01",
+            "observed_at": "2026-09-13T03:00:00Z",
+            "historical_window_hours": 720,
+            "historical_window_from": "2026-08-01T00:00:00Z",
+            "response_sha256": _canonical_hash({"coverage": "provider-response"}),
+            "api_version": None,
+            "source_count": 1,
+            "total_rows": 3,
+            "total_priced_rows": 2,
+            "sources": [
+                {
+                    "source": "test-source",
+                    "rows": 3,
+                    "first_date": "2026-09-01",
+                    "last_date": "2026-09-01",
+                    "priced_rows": 2,
+                }
+            ],
+            "historical_window_market_coverage_verified": False,
+            "licensing_or_retention_verified": False,
+            "redistribution_verified": False,
+        }
         result_entry = {
             "requested_date": "2026-09-01",
             "priced_only": False,
@@ -132,6 +179,7 @@ class HistoricalBundleCorpusTests(unittest.TestCase):
             "canonical_response_sha256": canonical_response_sha,
             "historical_window_hours": 720,
             "historical_window_from": "2026-08-01",
+            "coverage_preflight": coverage_evidence,
         }
         request_scope = {
             "provider": "parlayapi",
@@ -139,6 +187,7 @@ class HistoricalBundleCorpusTests(unittest.TestCase):
             "regions": ["us"],
             "markets": ["h2h", "spreads", "totals"],
             "requested_snapshot_timestamps": ["2026-09-01T12:00:00Z"],
+            "coverage_preflight": coverage_request,
             "match_results": {"date": "2026-09-01", "priced_only": False},
         }
         request_identity = _canonical_hash(request_scope)
@@ -199,6 +248,103 @@ class HistoricalBundleCorpusTests(unittest.TestCase):
             self.assertEqual(assembler.call_args.args[0], verified.snapshot_pairs)
             self.assertEqual(assembler.call_args.kwargs["results_path"], "sealed-results.json")
             self.assertEqual(assembler.call_args.kwargs["governance_proof_path"], "governance.json")
+
+    def test_rejects_resealed_bundle_without_request_coverage_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root, _, bundle = self._bundle(Path(temp))
+            request_scope = bundle["request_scope"]
+            assert isinstance(request_scope, dict)
+            request_scope.pop("coverage_preflight")
+            resealed_sha = _reseal_bundle(root, bundle)
+            with self.assertRaisesRegex(ValueError, "request_scope.coverage_preflight must be an object"):
+                verify_acquisition_bundle(root, expected_bundle_sha256=resealed_sha)
+
+    def test_rejects_resealed_bundle_without_coverage_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root, _, bundle = self._bundle(Path(temp))
+            match_results = bundle["match_results"]
+            assert isinstance(match_results, dict)
+            match_results.pop("coverage_preflight")
+            resealed_sha = _reseal_bundle(root, bundle)
+            with self.assertRaisesRegex(ValueError, "match_results.coverage_preflight must be an object"):
+                verify_acquisition_bundle(root, expected_bundle_sha256=resealed_sha)
+
+    def test_rejects_resealed_coverage_row_totals_that_do_not_match_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root, _, bundle = self._bundle(Path(temp))
+            match_results = bundle["match_results"]
+            assert isinstance(match_results, dict)
+            coverage = match_results["coverage_preflight"]
+            assert isinstance(coverage, dict)
+            coverage["total_rows"] = 4
+            resealed_sha = _reseal_bundle(root, bundle)
+            with self.assertRaisesRegex(ValueError, "total_rows does not match sources"):
+                verify_acquisition_bundle(root, expected_bundle_sha256=resealed_sha)
+
+    def test_rejects_resealed_coverage_window_not_derived_from_acquisition_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root, _, bundle = self._bundle(Path(temp))
+            request_scope = bundle["request_scope"]
+            match_results = bundle["match_results"]
+            assert isinstance(request_scope, dict)
+            assert isinstance(match_results, dict)
+            coverage_scope = request_scope["coverage_preflight"]
+            coverage_evidence = match_results["coverage_preflight"]
+            assert isinstance(coverage_scope, dict)
+            assert isinstance(coverage_evidence, dict)
+            coverage_scope["date_from"] = "2026-09-02"
+            coverage_scope["date_to"] = "2026-09-02"
+            coverage_evidence["date_from"] = "2026-09-02"
+            coverage_evidence["date_to"] = "2026-09-02"
+            sources = coverage_evidence["sources"]
+            assert isinstance(sources, list) and isinstance(sources[0], dict)
+            sources[0]["first_date"] = "2026-09-02"
+            sources[0]["last_date"] = "2026-09-02"
+            resealed_sha = _reseal_bundle(root, bundle)
+            with self.assertRaisesRegex(ValueError, "window does not match acquisition request dates"):
+                verify_acquisition_bundle(root, expected_bundle_sha256=resealed_sha)
+
+    def test_rejects_resealed_zero_row_coverage_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root, _, bundle = self._bundle(Path(temp))
+            match_results = bundle["match_results"]
+            assert isinstance(match_results, dict)
+            coverage = match_results["coverage_preflight"]
+            assert isinstance(coverage, dict)
+            sources = coverage["sources"]
+            assert isinstance(sources, list) and isinstance(sources[0], dict)
+            sources[0]["rows"] = 0
+            sources[0]["priced_rows"] = 0
+            resealed_sha = _reseal_bundle(root, bundle)
+            with self.assertRaisesRegex(ValueError, "rows must be a positive integer"):
+                verify_acquisition_bundle(root, expected_bundle_sha256=resealed_sha)
+
+    def test_rejects_resealed_coverage_source_dates_outside_requested_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root, _, bundle = self._bundle(Path(temp))
+            match_results = bundle["match_results"]
+            assert isinstance(match_results, dict)
+            coverage = match_results["coverage_preflight"]
+            assert isinstance(coverage, dict)
+            sources = coverage["sources"]
+            assert isinstance(sources, list) and isinstance(sources[0], dict)
+            sources[0]["first_date"] = "2026-09-02"
+            sources[0]["last_date"] = "2026-09-02"
+            resealed_sha = _reseal_bundle(root, bundle)
+            with self.assertRaisesRegex(ValueError, "source dates fall outside requested window"):
+                verify_acquisition_bundle(root, expected_bundle_sha256=resealed_sha)
+
+    def test_rejects_resealed_coverage_request_before_entitlement_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root, _, bundle = self._bundle(Path(temp))
+            match_results = bundle["match_results"]
+            assert isinstance(match_results, dict)
+            coverage = match_results["coverage_preflight"]
+            assert isinstance(coverage, dict)
+            coverage["historical_window_from"] = "2026-09-02T00:00:00Z"
+            resealed_sha = _reseal_bundle(root, bundle)
+            with self.assertRaisesRegex(ValueError, "request predates entitlement window"):
+                verify_acquisition_bundle(root, expected_bundle_sha256=resealed_sha)
 
     def test_rejects_tampered_snapshot_even_when_bundle_file_hash_is_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

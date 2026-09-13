@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+import queue
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+from .dataset import load_dataset
+from .session import AutosportSession, SessionResult
+
+
+ReplayTask = Callable[[], SessionResult]
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayWorkerMessage:
+    result: SessionResult | None = None
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.result is None) == (self.error is None):
+            raise ValueError("worker message must contain exactly one of result or error")
+
+
+class OneShotReplayWorker:
+    """Run one economic replay away from Tk without abandoning it on process shutdown."""
+
+    def __init__(self) -> None:
+        self._messages: queue.Queue[ReplayWorkerMessage] = queue.Queue(maxsize=1)
+        self._lock = threading.Lock()
+        self._busy = False
+        self._thread: threading.Thread | None = None
+
+    @property
+    def busy(self) -> bool:
+        with self._lock:
+            return self._busy
+
+    def start(self, task: ReplayTask) -> bool:
+        with self._lock:
+            if self._busy:
+                return False
+            self._busy = True
+        # Economic replay may be inside PRECOMMIT/promotion. A daemon thread could
+        # be killed with the process at an arbitrary point, so keep it non-daemon
+        # and let the GUI refuse close until the terminal worker message arrives.
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(task,),
+            name="autosport-paper-replay",
+            daemon=False,
+        )
+        self._thread.start()
+        return True
+
+    def _run(self, task: ReplayTask) -> None:
+        try:
+            message = ReplayWorkerMessage(result=task())
+        except Exception as exc:
+            message = ReplayWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+        self._messages.put(message)
+
+    def poll(self) -> ReplayWorkerMessage | None:
+        try:
+            message = self._messages.get_nowait()
+        except queue.Empty:
+            return None
+        with self._lock:
+            self._busy = False
+        return message
+
+
+def run_workspace_dataset_once(
+    workspace: str | Path,
+    dataset_path: str | Path,
+    *,
+    initial_bankroll: str = "10000",
+    speed: float = 0.0,
+    strategy_id: str = "baseline-v1",
+) -> SessionResult:
+    """Own all replay-session resources on the calling worker thread."""
+
+    dataset = load_dataset(dataset_path)
+    session = AutosportSession(workspace, initial_bankroll, strategy_id=strategy_id)
+    try:
+        return session.run_dataset(dataset, speed=speed)
+    finally:
+        session.close()

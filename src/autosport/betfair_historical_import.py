@@ -173,6 +173,9 @@ def import_betfair_historical(
     source_hashes = tuple(_sha256_path(path) for path in source_paths)
     if len(set(source_hashes)) != len(source_hashes):
         raise ValueError("duplicate Betfair historical input content is not allowed")
+    source_file_ordinals = {
+        path: ordinal for ordinal, path in enumerate(source_paths, start=1)
+    }
     source_files = [
         {
             "ordinal": ordinal,
@@ -325,6 +328,9 @@ def import_betfair_historical(
                 metadata = {
                     "provider": "betfair_exchange_historical",
                     "betfair_market_type": str(definition.get("marketType") or ""),
+                    "price_semantics": "betfair_last_traded_price",
+                    "provider_price_field": "rc[].ltp",
+                    "execution_quote_verified": False,
                 }
                 if event_name:
                     metadata["event_name"] = event_name
@@ -347,6 +353,7 @@ def import_betfair_historical(
                         "score_state": None,
                         "metadata": metadata,
                         "_source_event_ordinal": source_event_ordinal,
+                        "_source_file_ordinal": source_file_ordinals[path],
                     }
                 )
 
@@ -360,6 +367,7 @@ def import_betfair_historical(
         )
 
     semantic_keys: set[tuple[str, str, str, str]] = set()
+    sources_by_observed_ts: dict[str, set[int]] = {}
     for event in events:
         semantic_key = (
             str(event["market_id"]),
@@ -370,13 +378,33 @@ def import_betfair_historical(
         if semantic_key in semantic_keys:
             raise ValueError("Betfair historical inputs contain duplicate market quote changes")
         semantic_keys.add(semantic_key)
+        sources_by_observed_ts.setdefault(str(event["observed_ts"]), set()).add(
+            int(event["_source_file_ordinal"])
+        )
 
-    # Replay orders by observed_ts then sequence. Sequence therefore preserves the exact
-    # provider source order for ties instead of introducing a price-based causal rewrite.
+    ambiguous_cross_file_timestamps = sorted(
+        (
+            observed_ts
+            for observed_ts, source_ordinals in sources_by_observed_ts.items()
+            if len(source_ordinals) > 1
+        ),
+        key=_as_datetime,
+    )
+    if ambiguous_cross_file_timestamps:
+        raise ValueError(
+            "Betfair replay-visible events share publish time across input files; "
+            "cross-file source order is ambiguous: "
+            + ",".join(ambiguous_cross_file_timestamps)
+        )
+
+    # Replay orders by observed_ts then sequence. Within one source file, sequence preserves
+    # provider source order for ties. Cross-file ties fail closed above because CLI file order
+    # is not provider chronology and must never fabricate a causal replay order.
     events.sort(key=lambda item: (item["observed_ts"], item["_source_event_ordinal"]))
     for sequence, event in enumerate(events, start=1):
         event["sequence"] = sequence
         event.pop("_source_event_ordinal", None)
+        event.pop("_source_file_ordinal", None)
 
     observed_market_ids = {str(event["market_id"]) for event in events}
     missing_settlements = sorted(observed_market_ids.difference(settlement_ts))
@@ -450,6 +478,16 @@ def import_betfair_historical(
             "causality": {
                 "strategy_time_field": "observed_ts",
                 "outcome_reveal_after": outcome_reveal_after,
+            },
+            "price_semantics": {
+                "decimal_odds": "betfair_last_traded_price",
+                "provider_field": "rc[].ltp",
+                "execution_quote_verified": False,
+            },
+            "availability_semantics": {
+                "strategy_visible_market_status": "OPEN_ONLY",
+                "suspended_or_non_open_intervals_preserved": False,
+                "complete_availability_history_verified": False,
             },
         }
         identity_payload = {

@@ -34,6 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
     dataset.add_argument("path", type=Path)
     dataset.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
     dataset.add_argument("--bankroll", default="10000")
+    verify = sub.add_parser("verify-dataset", help="verify sealed hashes and historical corpus governance without replay")
+    verify.add_argument("path", type=Path)
     observe = sub.add_parser("observe-table-tennis", help="fetch one read-only table-tennis market snapshot")
     observe.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
     observe.add_argument("--public-preview", action="store_true", help="use provider public preview without an API key")
@@ -76,8 +78,38 @@ def run_dataset(path: Path, workspace: Path, bankroll: str) -> int:
         print(f"balance={result.balance}")
         print(f"net_profit={result.evaluation.net_profit}")
         print(f"settled={len(result.settled_ticket_ids)}")
+        if dataset.import_identity is not None:
+            print(f"historical_import_identity={dataset.import_identity}")
     finally:
         session.close()
+    return 0
+
+
+def run_verify_dataset(path: Path) -> int:
+    dataset = load_dataset(path)
+    print(
+        f"dataset=OK schema_version={dataset.schema_version} "
+        f"name={dataset.name} sport={dataset.sport}"
+    )
+    print(f"market_sha256={dataset.market_sha256}")
+    print(f"sealed_results_sha256={dataset.results_sha256}")
+    if dataset.governance is None:
+        print("governance=LEGACY_FIXTURE_ONLY historical_proof=false")
+        return 0
+    governance = dataset.governance
+    print(f"historical_import_identity={dataset.import_identity}")
+    print(
+        f"source_identity={governance.source_identity} "
+        f"redistribution_policy={governance.redistribution_policy}"
+    )
+    print(
+        f"coverage={governance.coverage_start_ts}..{governance.coverage_end_ts} "
+        f"sources={','.join(governance.source_ids)} markets={','.join(governance.market_types)}"
+    )
+    print(
+        f"acquired_at={governance.acquired_at} imported_at={governance.imported_at} "
+        f"outcome_reveal_after={governance.outcome_reveal_after}"
+    )
     return 0
 
 
@@ -202,6 +234,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_replay(args.path, args.bankroll)
     if args.command == "dataset":
         return run_dataset(args.path, args.workspace, args.bankroll)
+    if args.command == "verify-dataset":
+        return run_verify_dataset(args.path)
     if args.command == "observe-table-tennis":
         return run_observe_table_tennis(
             args.workspace,

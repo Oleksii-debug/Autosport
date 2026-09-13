@@ -1,0 +1,195 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+
+from autosport.data_tools_entry import main as data_tools_main
+from autosport.nvda_acceptance import create_template, validate_evidence, write_template
+
+
+class NvdaAcceptanceEvidenceTests(unittest.TestCase):
+    def _release_zip(self, root: Path, *, source_sha: str = "a" * 40) -> Path:
+        exe = b"fake-autosport-exe-for-evidence-contract"
+        exe_sha = hashlib.sha256(exe).hexdigest()
+        build_info = {
+            "product": "Autosport",
+            "version": "test",
+            "source_sha": source_sha,
+            "autosport_exe_sha256": exe_sha,
+            "real_money_execution": False,
+            "human_tested": False,
+            "nvda_verified": False,
+        }
+        package = root / "Autosport-V1-windows-x64.zip"
+        with zipfile.ZipFile(package, "w") as archive:
+            archive.writestr("Autosport-V1/Autosport.exe", exe)
+            archive.writestr(
+                "Autosport-V1/BUILD_INFO.json",
+                json.dumps(build_info, sort_keys=True).encode("utf-8"),
+            )
+        return package
+
+    def _completed_evidence(self, package: Path) -> dict:
+        evidence = create_template(package)
+        evidence["environment"]["windows_edition_build"] = "Windows 11 24H2 test-build"
+        evidence["environment"]["nvda_version"] = "2026.1 test"
+        evidence["tested_at"] = "2026-09-13T07:50:00+02:00"
+        evidence["tester_label"] = "physical-tester"
+        for check in evidence["checks"]:
+            check["status"] = "PASS"
+            check["notes"] = "Observed physically with NVDA."
+        return evidence
+
+    def test_template_is_bound_to_exact_candidate_and_preserves_false_truth_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = self._release_zip(Path(directory))
+            evidence = create_template(package)
+
+            self.assertEqual(evidence["candidate"]["package_sha256"], hashlib.sha256(package.read_bytes()).hexdigest())
+            self.assertEqual(evidence["candidate"]["source_sha"], "a" * 40)
+            self.assertEqual(len(evidence["checks"]), 6)
+            self.assertTrue(all(check["status"] == "PENDING" for check in evidence["checks"]))
+            self.assertFalse(evidence["human_tested"])
+            self.assertFalse(evidence["nvda_verified"])
+            self.assertFalse(evidence["v1_ready"])
+
+    def test_completed_human_record_validates_identity_without_machine_nvda_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = self._release_zip(root)
+            evidence_path = root / "nvda-evidence.json"
+            evidence_path.write_text(
+                json.dumps(self._completed_evidence(package)),
+                encoding="utf-8",
+            )
+
+            result = validate_evidence(package, evidence_path)
+
+            self.assertEqual(result["status"], "PASS")
+            self.assertTrue(result["candidate_identity_verified"])
+            self.assertFalse(result["machine_verified_physical_execution"])
+            self.assertTrue(result["requires_owner_release_decision"])
+            self.assertFalse(result["human_tested"])
+            self.assertFalse(result["nvda_verified"])
+            self.assertFalse(result["v1_ready"])
+
+    def test_candidate_hash_mismatch_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = self._release_zip(root)
+            evidence = self._completed_evidence(package)
+            evidence["candidate"]["package_sha256"] = "0" * 64
+            evidence_path = root / "nvda-evidence.json"
+            evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "package_sha256 does not match release ZIP"):
+                validate_evidence(package, evidence_path)
+
+    def test_missing_required_check_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = self._release_zip(root)
+            evidence = self._completed_evidence(package)
+            evidence["checks"].pop()
+            evidence_path = root / "nvda-evidence.json"
+            evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "check set mismatch"):
+                validate_evidence(package, evidence_path)
+
+    def test_failed_check_requires_notes_and_returns_non_acceptance_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = self._release_zip(root)
+            evidence = self._completed_evidence(package)
+            evidence["checks"][0]["status"] = "FAIL"
+            evidence["checks"][0]["notes"] = "Focus was not announced."
+            evidence_path = root / "nvda-evidence.json"
+            evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+            result = validate_evidence(package, evidence_path)
+
+            self.assertEqual(result["status"], "FAIL")
+            self.assertEqual(result["failed_checks"], ["window_initial_focus"])
+            self.assertFalse(result["nvda_verified"])
+
+    def test_fail_check_without_defect_notes_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = self._release_zip(root)
+            evidence = self._completed_evidence(package)
+            evidence["checks"][0]["status"] = "FAIL"
+            evidence["checks"][0]["notes"] = ""
+            evidence_path = root / "nvda-evidence.json"
+            evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "requires defect notes"):
+                validate_evidence(package, evidence_path)
+
+    def test_portable_dispatch_generates_and_validates_same_candidate_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = self._release_zip(root)
+            evidence_path = root / "nvda-evidence.json"
+            validation_path = root / "nvda-validation.json"
+
+            self.assertEqual(
+                data_tools_main(
+                    [
+                        "nvda-evidence-template",
+                        "--release-zip",
+                        str(package),
+                        "--output",
+                        str(evidence_path),
+                    ]
+                ),
+                0,
+            )
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            completed = self._completed_evidence(package)
+            evidence["environment"] = completed["environment"]
+            evidence["tested_at"] = completed["tested_at"]
+            evidence["tester_label"] = completed["tester_label"]
+            evidence["checks"] = completed["checks"]
+            evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+            self.assertEqual(
+                data_tools_main(
+                    [
+                        "verify-nvda-evidence",
+                        "--release-zip",
+                        str(package),
+                        "--evidence",
+                        str(evidence_path),
+                        "--output",
+                        str(validation_path),
+                    ]
+                ),
+                0,
+            )
+            validation = json.loads(validation_path.read_text(encoding="utf-8"))
+            self.assertEqual(validation["status"], "PASS")
+            self.assertFalse(validation["machine_verified_physical_execution"])
+            self.assertFalse(validation["nvda_verified"])
+
+    def test_template_writer_and_portable_usage_expose_real_product_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = self._release_zip(root)
+            output = root / "nvda-evidence.json"
+
+            write_template(package, output)
+            self.assertTrue(output.is_file())
+            self.assertEqual(data_tools_main(["--help"]), 0)
+
+            usage = Path("src/autosport/data_tools_entry.py").read_text(encoding="utf-8")
+            self.assertIn("nvda-evidence-template", usage)
+            self.assertIn("verify-nvda-evidence", usage)
+
+
+if __name__ == "__main__":
+    unittest.main()

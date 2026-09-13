@@ -67,6 +67,22 @@ class WindowsReleaseArchivePathTruthTests(unittest.TestCase):
             "Windows-invalid path character",
         )
 
+    def test_overlong_windows_component_fails_closed(self) -> None:
+        for component in ("a" * 256, "😀" * 128):
+            with self.subTest(component_length=len(component)):
+                self._assert_rejected(
+                    [f"Autosport-V1/examples/{component}"],
+                    "overlong Windows path component",
+                )
+
+    def test_255_utf16_unit_component_is_accepted_by_path_gate(self) -> None:
+        component = "a" * 255
+        relative, windows_key = _validate_windows_member(
+            f"Autosport-V1/examples/{component}"
+        )
+        self.assertEqual(relative, f"examples/{component}")
+        self.assertEqual(windows_key, f"examples/{component}")
+
 
 if __name__ == "__main__":
     unittest.main()

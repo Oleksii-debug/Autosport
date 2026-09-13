@@ -9,6 +9,7 @@ from typing import Callable
 from .dataset import load_dataset
 from .research_strategy import ResearchStrategyPlan
 from .session import AutosportSession, SessionResult
+from .strategies import experiment_strategy_id
 
 
 ReplayTask = Callable[[], SessionResult]
@@ -70,6 +71,26 @@ class OneShotReplayWorker:
         with self._lock:
             self._busy = False
         return message
+
+
+def workspace_for_strategy(
+    workspace_root: str | Path,
+    strategy_id: str,
+    research_plan: ResearchStrategyPlan | None = None,
+) -> Path:
+    """Resolve deterministic economic storage for one executable strategy identity.
+
+    Preserve the legacy baseline workspace so existing V1 state does not move.
+    Other strategies live below ``strategies/``. Research strategy identity already
+    includes the canonical plan hash, so different plans cannot inherit each other's
+    PaperBook, ledger or registry state.
+    """
+
+    root = Path(workspace_root)
+    identity = experiment_strategy_id(strategy_id, research_plan)
+    if identity == "baseline-v1":
+        return root
+    return root / "strategies" / identity.replace("@", "-")
 
 
 def run_workspace_dataset_once(

@@ -20,11 +20,13 @@ _REQUIRED_PATTERNS = {
     AUTOMATION_IDS["tickets"]: set(),
     AUTOMATION_IDS["log"]: {"VALUE"},
     AUTOMATION_IDS["live_quotes"]: set(),
+    AUTOMATION_IDS["evaluation"]: set(),
 }
 
 _ROW_CONTROLS = {
     AUTOMATION_IDS["tickets"],
     AUTOMATION_IDS["live_quotes"],
+    AUTOMATION_IDS["evaluation"],
 }
 
 _BLOCKING_GAPS = {

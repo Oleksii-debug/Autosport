@@ -15,6 +15,7 @@ _ACTION_BINDINGS = {
 _FOCUS_BINDINGS = {
     "<F6>": "tickets",
     "<F7>": "live_quotes",
+    "<F8>": "evaluation",
 }
 _FOCUSABLE_CONTROLS = (
     "strategy",
@@ -26,6 +27,7 @@ _FOCUSABLE_CONTROLS = (
     "live_refresh",
     "live_quotes",
     "tickets",
+    "evaluation",
     "log",
 )
 
@@ -65,7 +67,7 @@ def summarize_keyboard_contract(
         "failures": failures,
         "evidence_scope": (
             "in-process packaged Tk keyboard contract: action shortcuts are bound, "
-            "F6/F7 focus shortcuts are executed, and critical controls are reachable "
+            "F6/F7/F8 focus shortcuts are executed, and critical controls are reachable "
             "through Tk tab traversal; not physical keyboard or NVDA speech proof"
         ),
         "human_tested": False,
@@ -85,6 +87,7 @@ def _critical_widgets(app: AutosportApp) -> dict[str, Any]:
         "live_refresh": app.live_refresh_button,
         "live_quotes": app.live_quotes,
         "tickets": app.tickets,
+        "evaluation": app.evaluation,
         "log": app.log,
     }
 

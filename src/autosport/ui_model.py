@@ -12,6 +12,36 @@ def result_summary(result: SessionResult) -> str:
     )
 
 
+def evaluation_lines(result: SessionResult) -> list[str]:
+    """Human-readable evaluation and portfolio evidence for the keyboard/NVDA UI."""
+    evaluation = result.evaluation
+    portfolio = result.portfolio
+    mode_truth = (
+        "exact — усі релевантні сценарії цього portfolio report перебрано"
+        if portfolio.mode == "exact"
+        else "approximate — сценарії sampled; гарантії worst/best не заявляються"
+    )
+    return [
+        (
+            f"Replay {result.replay.run_id[:8]} | events {result.replay.event_count} | "
+            f"settled tickets {len(result.settled_ticket_ids)}"
+        ),
+        (
+            f"Bankroll | initial {evaluation.initial_bankroll} | final {evaluation.final_balance} | "
+            f"committed {evaluation.committed_stake} | settled stake {evaluation.settled_stake}"
+        ),
+        (
+            f"Evaluation | net {evaluation.net_profit} | ROI {evaluation.roi} | "
+            f"won {evaluation.won} | lost {evaluation.lost} | void {evaluation.void}"
+        ),
+        (
+            f"Portfolio | {mode_truth} | scenarios {portfolio.scenario_count} | "
+            f"worst {portfolio.worst_case} | best {portfolio.best_case} | mean {portfolio.mean_case}"
+        ),
+        "Truth | paper simulation only; ця evaluation не є доказом майбутньої profitability.",
+    ]
+
+
 def ticket_lines(session) -> list[str]:
     lines: list[str] = []
     for ticket in session.book.tickets.values():

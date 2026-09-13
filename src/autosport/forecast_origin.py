@@ -12,7 +12,7 @@ from .forecasting import ForecastRecord, parse_iso_timestamp
 
 @dataclass(frozen=True, slots=True)
 class ForecastOriginBinding:
-    """Local durable artifacts used to prove canonical pre-outcome forecast origin."""
+    """Local durable artifacts used to bind forecasts to canonical research decisions."""
 
     decision_ledger_path: Path
     run_summary_paths: tuple[Path, ...]
@@ -42,13 +42,15 @@ def verify_forecast_origin_binding(
     forecasts: Iterable[ForecastRecord],
     evaluated_forecast_ids: set[str],
 ) -> dict[str, Any]:
-    """Bind evaluated forecasts to canonical research-ledger records written before reveal.
+    """Bind evaluated forecasts to canonical local research-ledger evidence.
 
-    This is deliberately stricter than trusting ForecastRecord timestamps. Each
-    evaluated forecast must appear by canonical id + hash in a research pipeline
-    decision whose ledger prefix hash is committed by a matching durable run
-    summary for the exact governed dataset. The DecisionRecord's wall-clock
-    ``recorded_at`` must precede the sealed dataset reveal boundary.
+    Each evaluated forecast must appear by canonical id + hash in a research
+    pipeline decision whose ledger prefix hash is committed by a matching durable
+    run summary for the exact governed dataset. ``recorded_at`` is checked for
+    internal temporal consistency, but it is still data stored inside the local
+    artifact. Therefore this function does *not* claim an independently verified
+    physical pre-outcome write time. Such a claim requires an immutable external
+    timestamp/anchor that cannot be backdated together with the local files.
     """
 
     governance = dataset.governance
@@ -95,7 +97,7 @@ def verify_forecast_origin_binding(
                 raise ValueError("research decision record lacks recorded_at")
             recorded_at = parse_iso_timestamp(recorded_at_value)
             if recorded_at >= reveal_after:
-                raise ValueError("research decision record was durably written at or after outcome reveal")
+                raise ValueError("research decision declared recorded_at is at or after outcome reveal")
             observed_value = record.get("observed_ts")
             if not isinstance(observed_value, str):
                 raise ValueError("research decision record lacks observed_ts")
@@ -126,19 +128,21 @@ def verify_forecast_origin_binding(
     missing = sorted(forecast_id for forecast_id, matched_runs in matched.items() if not matched_runs)
     if missing:
         raise ValueError(
-            "evaluated forecasts lack canonical pre-outcome decision-ledger origin: " + ",".join(missing)
+            "evaluated forecasts lack canonical decision-ledger origin: " + ",".join(missing)
         )
 
     return {
-        "status": "VERIFIED",
+        "status": "CANONICAL_BINDING_VERIFIED",
         "decision_ledger_sha256": hashlib.sha256(binding.decision_ledger_path.read_bytes()).hexdigest(),
         "run_ids": sorted({run_id for matched_runs in matched.values() for run_id in matched_runs}),
         "run_summary_count": len(summaries),
         "evaluated_forecast_count": len(evaluated_forecast_ids),
-        "latest_verified_recorded_at": latest_recorded_at,
+        "latest_declared_recorded_at": latest_recorded_at,
         "outcome_reveal_after": governance.outcome_reveal_after,
         "canonical_forecast_origin_verified": True,
-        "pre_outcome_ledger_write_verified": True,
+        "declared_record_time_before_reveal_verified": True,
+        "pre_outcome_ledger_write_verified": False,
+        "independent_time_anchor_verified": False,
         "real_money_execution": False,
     }
 

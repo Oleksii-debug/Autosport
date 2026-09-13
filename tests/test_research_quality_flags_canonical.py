@@ -48,6 +48,14 @@ class ResearchQualityFlagCanonicalityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-empty canonical strings"):
             self._typed_evidence((123,))
 
+    def test_typed_evidence_rejects_scalar_string_collection(self):
+        with self.assertRaisesRegex(ValueError, "quality flags must be a tuple or list"):
+            self._typed_evidence("BAD")
+
+    def test_typed_evidence_accepts_canonical_list_and_normalizes_to_tuple(self):
+        evidence = self._typed_evidence(["GAP_DETECTED"])
+        self.assertEqual(evidence.quality_flags, ("GAP_DETECTED",))
+
 
 if __name__ == "__main__":
     unittest.main()

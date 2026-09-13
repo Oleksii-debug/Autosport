@@ -10,6 +10,7 @@ Usage:
   Autosport-Data.exe build-corpus [autosport-build-historical-corpus arguments]
   Autosport-Data.exe build-corpus-from-bundle [bundle-adapter arguments]
   Autosport-Data.exe verify-dataset <dataset-path>
+  Autosport-Data.exe walk-forward-evaluate <walk-forward-bundle.json> [--output report.json]
   Autosport-Data.exe compare-strategies <run-summary> <run-summary> [...] [strategy-comparison arguments]
 
 Commands:
@@ -17,6 +18,7 @@ Commands:
   build-corpus              Assemble selected snapshots, sealed outcomes, and rights proof into a governed corpus.
   build-corpus-from-bundle  Verify an acquisition bundle and reuse the canonical governed corpus assembler.
   verify-dataset            Verify sealed hashes and historical governance without replay.
+  walk-forward-evaluate     Run the canonical strict complete-cohort temporal forecast evaluator.
   compare-strategies        Compare compatible completed paper strategy runs on the same sealed replay identity.
 
 Truth boundaries remain fail closed: credentials, lawful retention/licensing, real sealed outcomes,
@@ -48,6 +50,10 @@ def main(argv: list[str] | None = None) -> int:
         from autosport.cli import main as cli_main
 
         return cli_main(["verify-dataset", *forwarded])
+    if command == "walk-forward-evaluate":
+        from autosport.cli import main as cli_main
+
+        return cli_main(["walk-forward-evaluate", *forwarded])
     if command == "compare-strategies":
         from autosport.strategy_comparison import main as strategy_comparison_main
 

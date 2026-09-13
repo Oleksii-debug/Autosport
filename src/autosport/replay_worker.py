@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Callable
 
 from .dataset import load_dataset
+from .research_strategy import ResearchStrategyPlan
 from .session import AutosportSession, SessionResult
+from .strategies import experiment_strategy_id
 
 
 ReplayTask = Callable[[], SessionResult]
@@ -71,6 +73,26 @@ class OneShotReplayWorker:
         return message
 
 
+def workspace_for_strategy(
+    workspace_root: str | Path,
+    strategy_id: str,
+    research_plan: ResearchStrategyPlan | None = None,
+) -> Path:
+    """Keep economic state isolated per executable strategy/plan identity.
+
+    The historic baseline keeps the legacy V1 workspace so existing user state does
+    not move. Other canonical strategies use deterministic child workspaces; typed
+    research plans include their content hash in the experiment identity, preventing
+    one plan from inheriting another plan's PaperBook/ledger economics.
+    """
+
+    root = Path(workspace_root)
+    identity = experiment_strategy_id(strategy_id, research_plan)
+    if identity == "baseline-v1":
+        return root
+    return root / "strategies" / identity.replace("@", "-")
+
+
 def run_workspace_dataset_once(
     workspace: str | Path,
     dataset_path: str | Path,
@@ -78,11 +100,17 @@ def run_workspace_dataset_once(
     initial_bankroll: str = "10000",
     speed: float = 0.0,
     strategy_id: str = "baseline-v1",
+    research_plan: ResearchStrategyPlan | None = None,
 ) -> SessionResult:
     """Own all replay-session resources on the calling worker thread."""
 
     dataset = load_dataset(dataset_path)
-    session = AutosportSession(workspace, initial_bankroll, strategy_id=strategy_id)
+    session = AutosportSession(
+        workspace,
+        initial_bankroll,
+        strategy_id=strategy_id,
+        research_plan=research_plan,
+    )
     try:
         return session.run_dataset(dataset, speed=speed)
     finally:

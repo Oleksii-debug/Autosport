@@ -5,6 +5,7 @@ import bz2
 import gzip
 import hashlib
 import json
+import math
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -311,8 +312,15 @@ def import_betfair_historical(
                 if runner_change.get("ltp") is None:
                     continue
                 odds = runner_change["ltp"]
-                if isinstance(odds, bool) or not isinstance(odds, (int, float)) or float(odds) <= 1.0:
-                    raise ValueError(f"{path}: line {line_number} ltp must be decimal odds > 1")
+                if (
+                    isinstance(odds, bool)
+                    or not isinstance(odds, (int, float))
+                    or not math.isfinite(float(odds))
+                    or float(odds) <= 1.0
+                ):
+                    raise ValueError(
+                        f"{path}: line {line_number} ltp must be finite decimal odds > 1"
+                    )
                 selection_id = str(runner_change["id"])
                 metadata = {
                     "provider": "betfair_exchange_historical",

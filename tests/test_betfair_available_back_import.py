@@ -15,6 +15,7 @@ from autosport.dataset import load_dataset
 from autosport.paper import PaperBook
 from autosport.paper_strategy import Forecast, PaperValueAgent
 from autosport.price_truth import paper_quote_rejection_reason
+from autosport.storage import SQLiteMarketStore
 
 
 def _epoch_ms(value: str) -> int:
@@ -395,6 +396,126 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
                 r"selection 999 is not declared by marketDefinition\.runners",
             ):
                 self._import(Path(tmp), lines)
+
+    def test_authoritative_runner_removal_invalidates_current_quote(self) -> None:
+        lines = _pro_stream()
+        lines[0]["mc"][0]["marketDefinition"]["runners"].append(
+            {"id": 999, "name": "Removed Runner", "status": "ACTIVE"}
+        )
+        lines[0]["mc"][0]["rc"].append({"id": 999, "atb": [[2.2, 25.0]]})
+        lines.insert(
+            1,
+            {
+                "op": "mcm",
+                "pt": _epoch_ms("2026-02-10T12:02:00Z"),
+                "mc": [
+                    {
+                        "id": "1.advanced",
+                        "marketDefinition": {
+                            "runners": [
+                                {"id": 101, "name": "Player A", "status": "ACTIVE"}
+                            ]
+                        },
+                    }
+                ],
+            },
+        )
+        lines[-1]["mc"][0]["marketDefinition"]["runners"].append(
+            {"id": 999, "name": "Removed Runner", "status": "REMOVED"}
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output, events = self._import(root, lines)
+            manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+            removed = [
+                event
+                for event in events
+                if event.selection_id == "999" and event.observed_ts == "2026-02-10T12:02:00Z"
+            ]
+            self.assertEqual(len(removed), 1)
+            event = removed[0]
+            self.assertEqual(event.metadata["price_semantics"], "betfair_runner_roster_removed")
+            self.assertIs(event.metadata["runner_roster_membership"], False)
+            self.assertIs(event.metadata["runner_removed_from_authoritative_roster"], True)
+            self.assertIs(event.metadata["execution_quote_verified"], False)
+            self.assertIs(event.metadata["paper_fill_eligible"], False)
+            self.assertIn("not a verified executable quote", paper_quote_rejection_reason(event, "1"))
+
+            store = SQLiteMarketStore(root / "projection.db")
+            try:
+                store.append_many(events)
+                current = store.current()[event.quote_key]
+            finally:
+                store.close()
+            self.assertEqual(current.observed_ts, "2026-02-10T12:02:00Z")
+            self.assertEqual(current.metadata["price_semantics"], "betfair_runner_roster_removed")
+
+        availability = manifest["governance"]["availability_semantics"]
+        self.assertIs(availability["runner_roster_removals_preserved"], True)
+        price_truth = manifest["governance"]["price_semantics"]
+        self.assertIs(price_truth["runner_roster_removal_invalidates_cached_quotes"], True)
+
+    def test_runner_readd_cannot_resurrect_pre_removal_verified_ladder(self) -> None:
+        lines = _pro_stream()
+        lines[0]["mc"][0]["marketDefinition"]["runners"].append(
+            {"id": 999, "name": "Removed Runner", "status": "ACTIVE"}
+        )
+        lines[0]["mc"][0]["rc"].append({"id": 999, "atb": [[2.2, 25.0]]})
+        lines.insert(
+            1,
+            {
+                "op": "mcm",
+                "pt": _epoch_ms("2026-02-10T12:02:00Z"),
+                "mc": [
+                    {
+                        "id": "1.advanced",
+                        "marketDefinition": {
+                            "runners": [
+                                {"id": 101, "name": "Player A", "status": "ACTIVE"}
+                            ]
+                        },
+                    }
+                ],
+            },
+        )
+        lines.insert(
+            2,
+            {
+                "op": "mcm",
+                "pt": _epoch_ms("2026-02-10T12:03:00Z"),
+                "mc": [
+                    {
+                        "id": "1.advanced",
+                        "marketDefinition": {
+                            "runners": [
+                                {"id": 101, "name": "Player A", "status": "ACTIVE"},
+                                {"id": 999, "name": "Removed Runner", "status": "ACTIVE"},
+                            ]
+                        },
+                        "rc": [{"id": 999, "atb": [[2.1, 10.0]]}],
+                    }
+                ],
+            },
+        )
+        lines[-1]["mc"][0]["marketDefinition"]["runners"].append(
+            {"id": 999, "name": "Removed Runner", "status": "REMOVED"}
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _output, events = self._import(Path(tmp), lines)
+
+        readded = [
+            event
+            for event in events
+            if event.selection_id == "999" and event.observed_ts == "2026-02-10T12:03:00Z"
+        ]
+        self.assertEqual(len(readded), 1)
+        event = readded[0]
+        self.assertEqual(event.decimal_odds, Decimal("2.1"))
+        self.assertEqual(event.metadata["paper_fill_available_size"], "10.0")
+        self.assertIs(event.metadata["execution_quote_verified"], False)
+        self.assertIs(event.metadata["paper_fill_eligible"], False)
 
     def test_explicit_malformed_runner_roster_fails_closed_before_membership_reuse(self) -> None:
         malformed_rosters = (

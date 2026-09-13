@@ -22,6 +22,19 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         )
         return completed.stdout.strip()
 
+    @staticmethod
+    def _without_github_event_environment():
+        # Keep PATH/SystemRoot intact so Windows can still resolve git.exe.
+        return patch.dict(
+            os.environ,
+            {
+                "GITHUB_EVENT_PATH": "",
+                "GITHUB_REPOSITORY": "",
+                "GITHUB_SHA": "",
+            },
+            clear=False,
+        )
+
     def _clean_repo(self, root: Path) -> str:
         self._run_git(root, "init")
         self._run_git(root, "config", "user.email", "autosport-tests@example.invalid")
@@ -36,7 +49,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source_sha = self._clean_repo(root)
-            with patch.dict(os.environ, {}, clear=True):
+            with self._without_github_event_environment():
                 verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
 
     def test_modified_tracked_build_input_fails_closed(self) -> None:
@@ -44,7 +57,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
             root = Path(temp_dir)
             source_sha = self._clean_repo(root)
             (root / "tracked.py").write_text("VALUE = 999\n", encoding="utf-8")
-            with patch.dict(os.environ, {}, clear=True):
+            with self._without_github_event_environment():
                 with self.assertRaisesRegex(ValueError, "not pristine before"):
                     verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
 
@@ -53,7 +66,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
             root = Path(temp_dir)
             source_sha = self._clean_repo(root)
             (root / "autosport.py").write_text("raise RuntimeError('shadow')\n", encoding="utf-8")
-            with patch.dict(os.environ, {}, clear=True):
+            with self._without_github_event_environment():
                 with self.assertRaisesRegex(ValueError, "not pristine before"):
                     verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
 
@@ -62,7 +75,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
             root = Path(temp_dir)
             source_sha = self._clean_repo(root)
             (root / "malicious.ignored.py").write_text("raise RuntimeError('shadow')\n", encoding="utf-8")
-            with patch.dict(os.environ, {}, clear=True):
+            with self._without_github_event_environment():
                 with self.assertRaisesRegex(ValueError, "not pristine before"):
                     verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
 

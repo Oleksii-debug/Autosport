@@ -13,6 +13,8 @@ _REQUIRED_PATTERNS = {
     AUTOMATION_IDS["choose_dataset"]: {"INVOKE"},
     AUTOMATION_IDS["run_replay"]: {"INVOKE"},
     AUTOMATION_IDS["replay_speed"]: {"VALUE"},
+    AUTOMATION_IDS["strategy"]: {"VALUE"},
+    AUTOMATION_IDS["research_plan"]: {"INVOKE"},
     AUTOMATION_IDS["live_mode"]: {"VALUE"},
     AUTOMATION_IDS["live_refresh"]: {"INVOKE"},
     AUTOMATION_IDS["tickets"]: set(),

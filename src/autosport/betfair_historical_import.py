@@ -127,12 +127,14 @@ def import_betfair_historical(
     allowed_market_types: Iterable[str] = ("MATCH_ODDS",),
     imported_at: str | None = None,
 ) -> BetfairHistoricalImportReport:
-    """Import user-supplied Betfair historical stream files into canonical schema-v2 history.
+    """Import one user-supplied Betfair historical stream into canonical schema-v2 history.
 
     This adapter never downloads Betfair data, never republishes source files, and never
     upgrades user-supplied rights metadata into a licensing/retention verification claim.
     It supports only explicitly mapped market types and requires settled runner statuses
-    for every emitted quote so outcomes remain sealed and complete.
+    for every emitted quote so outcomes remain sealed and complete. Multi-file composition
+    fails closed until cross-file provider ordering can be proven rather than inferred from
+    CLI argument order.
     """
 
     source_paths = tuple(Path(item) for item in inputs)
@@ -141,6 +143,11 @@ def import_betfair_historical(
     for path in source_paths:
         if not path.is_file():
             raise ValueError(f"Betfair historical input does not exist: {path}")
+    if len(source_paths) != 1:
+        raise ValueError(
+            "multiple Betfair historical input files are not causally composable; "
+            "cross-file source order is ambiguous"
+        )
 
     output = Path(output_dir)
     if output.exists():
@@ -325,6 +332,9 @@ def import_betfair_historical(
                 metadata = {
                     "provider": "betfair_exchange_historical",
                     "betfair_market_type": str(definition.get("marketType") or ""),
+                    "price_semantics": "last_traded_price",
+                    "execution_quote_verified": False,
+                    "paper_fill_fidelity_verified": False,
                 }
                 if event_name:
                     metadata["event_name"] = event_name
@@ -371,8 +381,8 @@ def import_betfair_historical(
             raise ValueError("Betfair historical inputs contain duplicate market quote changes")
         semantic_keys.add(semantic_key)
 
-    # Replay orders by observed_ts then sequence. Sequence therefore preserves the exact
-    # provider source order for ties instead of introducing a price-based causal rewrite.
+    # With exactly one accepted source file, source_event_ordinal is provider-file order.
+    # Multi-file composition fails closed above rather than inventing a cross-file tie order.
     events.sort(key=lambda item: (item["observed_ts"], item["_source_event_ordinal"]))
     for sequence, event in enumerate(events, start=1):
         event["sequence"] = sequence
@@ -450,6 +460,14 @@ def import_betfair_historical(
             "causality": {
                 "strategy_time_field": "observed_ts",
                 "outcome_reveal_after": outcome_reveal_after,
+                "cross_file_source_order_verified": False,
+                "multi_file_composition_supported": False,
+            },
+            "price_truth": {
+                "price_semantics": "last_traded_price",
+                "execution_quote_verified": False,
+                "paper_fill_fidelity_verified": False,
+                "complete_market_availability_history_verified": False,
             },
         }
         identity_payload = {
@@ -494,14 +512,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autosport-import-betfair-historical",
         description=(
-            "Import user-supplied Betfair Historical Data stream files into the canonical "
+            "Import one user-supplied Betfair Historical Data stream file into the canonical "
             "governed table-tennis dataset format. Source files are read locally and are not redistributed."
         ),
     )
-    parser.add_argument("inputs", nargs="+", type=Path, help="local Betfair .bz2/.gz/JSON-lines historical files")
+    parser.add_argument("inputs", nargs="+", type=Path, help="local Betfair .bz2/.gz/JSON-lines historical file")
     parser.add_argument("--output-dir", type=Path, required=True, help="new canonical dataset directory")
-    parser.add_argument("--acquired-at", required=True, help="when these source files were lawfully acquired, ISO-8601")
-    parser.add_argument("--terms-reference", required=True, help="terms/licence reference governing the local source files")
+    parser.add_argument("--acquired-at", required=True, help="when this source file was lawfully acquired, ISO-8601")
+    parser.add_argument("--terms-reference", required=True, help="terms/licence reference governing the local source file")
     parser.add_argument("--retention-basis", required=True, help="explicit basis permitting local retention/use")
     parser.add_argument(
         "--redistribution-policy",
@@ -546,6 +564,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"market_sha256={report.market_sha256}")
     print(f"sealed_results_sha256={report.results_sha256}")
     print(f"source_identity={report.source_identity}")
+    print("price_semantics=last_traded_price execution_quote_verified=false paper_fill_fidelity_verified=false")
     print("licensing_retention_verified=false redistribution_verified=false")
     print("real_money_execution=false human_tested=false nvda_verified=false")
     print(f"dataset={report.root}")

@@ -10,6 +10,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable, TextIO
 
@@ -27,6 +28,18 @@ _SETTLED_OUTCOMES = {
     "LOSER": "loss",
     "REMOVED": "void",
 }
+_CLASSIC_PRICE_BANDS = (
+    (Decimal("1.01"), Decimal("2"), Decimal("0.01")),
+    (Decimal("2"), Decimal("3"), Decimal("0.02")),
+    (Decimal("3"), Decimal("4"), Decimal("0.05")),
+    (Decimal("4"), Decimal("6"), Decimal("0.1")),
+    (Decimal("6"), Decimal("10"), Decimal("0.2")),
+    (Decimal("10"), Decimal("20"), Decimal("0.5")),
+    (Decimal("20"), Decimal("30"), Decimal("1")),
+    (Decimal("30"), Decimal("50"), Decimal("2")),
+    (Decimal("50"), Decimal("100"), Decimal("5")),
+    (Decimal("100"), Decimal("1000"), Decimal("10")),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +154,84 @@ def _bet_delay_seconds(definition: dict[str, Any], *, path: Path, line_number: i
     return int(value)
 
 
+def _execution_price_ladder_type(
+    definition: dict[str, Any], *, path: Path, line_number: int
+) -> str:
+    raw = definition.get("priceLadderDefinition")
+    if isinstance(raw, dict):
+        raw = raw.get("type")
+    ladder_type = str(raw or "").strip().upper()
+    if not ladder_type:
+        raise ValueError(
+            f"{path}: line {line_number} available-back execution evidence requires explicit marketDefinition priceLadderDefinition"
+        )
+    if ladder_type != "CLASSIC":
+        raise ValueError(
+            f"{path}: line {line_number} unsupported Betfair execution price ladder {ladder_type}; only CLASSIC is verified"
+        )
+    return ladder_type
+
+
+def _finite_decimal(value: Any) -> Decimal | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _is_classic_price(price: Decimal) -> bool:
+    for lower, upper, increment in _CLASSIC_PRICE_BANDS:
+        if lower <= price <= upper and (price - lower) % increment == 0:
+            return True
+    return False
+
+
+def _validate_execution_ladder_contract(
+    runner_change: dict[str, Any],
+    definition: dict[str, Any],
+    *,
+    path: Path,
+    line_number: int,
+) -> str | None:
+    has_atb = "atb" in runner_change
+    has_batb = "batb" in runner_change
+    if not has_atb and not has_batb:
+        return None
+
+    ladder_type = _execution_price_ladder_type(definition, path=path, line_number=line_number)
+    if has_atb and has_batb:
+        return ladder_type  # Stateful decoder emits the structural error.
+
+    field = "atb" if has_atb else "batb"
+    rows = runner_change[field]
+    if not isinstance(rows, list):
+        return ladder_type  # Stateful decoder emits the structural error.
+
+    expected_length = 2 if field == "atb" else 3
+    for index, row in enumerate(rows):
+        if not isinstance(row, list) or len(row) != expected_length:
+            continue  # Stateful decoder emits the structural error.
+        if field == "batb":
+            size = _finite_decimal(row[2])
+            if size == 0:
+                # Betfair level removals may carry a zero/sentinel price.
+                continue
+            price_raw = row[1]
+        else:
+            price_raw = row[0]
+        price = _finite_decimal(price_raw)
+        if price is None or price <= 1:
+            continue  # Stateful decoder emits the numeric/odds error.
+        if not _is_classic_price(price):
+            raise ValueError(
+                f"{path}: line {line_number} {field}[{index}].price={price} is outside the declared CLASSIC Betfair price ladder"
+            )
+    return ladder_type
+
+
 def _base_metadata(
     definition: dict[str, Any],
     names: dict[str, str],
@@ -170,6 +261,7 @@ def _available_back_metadata(
     path: Path,
     line_number: int,
     last_traded_price: float | None,
+    price_ladder_type: str,
 ) -> dict[str, Any]:
     metadata = _base_metadata(definition, names, selection_id)
     bet_delay = _bet_delay_seconds(definition, path=path, line_number=line_number)
@@ -190,6 +282,8 @@ def _available_back_metadata(
             "price_semantics": "betfair_available_to_back",
             "provider_price_field": quote.provider_price_field,
             "betfair_ladder_kind": quote.ladder_kind,
+            "betfair_price_ladder_type": price_ladder_type,
+            "execution_price_ladder_verified": True,
             "execution_quote_verified": cache_verified,
             "actual_fill_verified": False,
             "paper_fill_eligible": False,
@@ -224,8 +318,9 @@ def import_betfair_historical(
     This adapter never downloads Betfair data, never republishes source files, and never
     upgrades user-supplied rights metadata into a licensing/retention verification claim.
     BASIC last-traded prices remain observational only. ADVANCED/PRO available-to-back
-    ladders preserve observed executable quote and size provenance, but source ladder size
-    does not authorize paper economics until Autosport has a canonical, provenance-bound
+    ladders preserve observed executable quote and size provenance only when the source
+    explicitly declares a supported price-ladder contract and runner roster. Source ladder
+    size does not authorize paper economics until Autosport has a canonical, provenance-bound
     paper stake unit. No historical quote is treated as proof that a real order filled.
     """
 
@@ -276,6 +371,7 @@ def import_betfair_historical(
 
     definitions: dict[str, dict[str, Any]] = {}
     runner_names: dict[str, dict[str, str]] = {}
+    declared_runner_ids: dict[str, set[str]] = {}
     final_statuses: dict[str, dict[str, str]] = {}
     settlement_ts: dict[str, str] = {}
     last_publish_ts: dict[str, str] = {}
@@ -383,12 +479,15 @@ def import_betfair_historical(
                 names = runner_names.setdefault(market_id, {})
                 runners = market_definition.get("runners")
                 if isinstance(runners, list):
+                    roster: set[str] = set()
                     for runner in runners:
                         if not isinstance(runner, dict) or runner.get("id") is None:
                             continue
                         selection_id = str(runner["id"])
+                        roster.add(selection_id)
                         if runner.get("name") is not None:
                             names[selection_id] = str(runner["name"])
+                    declared_runner_ids[market_id] = roster
 
                 closed = str(merged.get("status") or "").upper() == "CLOSED"
                 if closed and isinstance(runners, list):
@@ -497,6 +596,11 @@ def import_betfair_historical(
             if not isinstance(runner_changes, list):
                 raise ValueError(f"{path}: line {line_number} rc must be a list")
             names = runner_names.get(market_id, {})
+            roster = declared_runner_ids.get(market_id, set())
+            if runner_changes and not roster:
+                raise ValueError(
+                    f"{path}: line {line_number} runner changes require an authoritative marketDefinition.runners roster"
+                )
             event_id = str(definition.get("eventId") or "").strip()
             if not event_id:
                 raise ValueError(f"{path}: line {line_number} supported Betfair market requires source eventId")
@@ -505,10 +609,20 @@ def import_betfair_historical(
                 if not isinstance(runner_change, dict) or runner_change.get("id") is None:
                     raise ValueError(f"{path}: line {line_number} runner change requires id")
                 selection_id = str(runner_change["id"])
+                if selection_id not in roster:
+                    raise ValueError(
+                        f"{path}: line {line_number} runner change selection {selection_id} is not declared by marketDefinition.runners for market {market_id}"
+                    )
                 ltp: float | None = None
                 if runner_change.get("ltp") is not None:
                     ltp = _validated_ltp(runner_change["ltp"], path=path, line_number=line_number)
 
+                ladder_type = _validate_execution_ladder_contract(
+                    runner_change,
+                    definition,
+                    path=path,
+                    line_number=line_number,
+                )
                 key = (market_id, selection_id)
                 book = available_books.setdefault(key, BetfairAvailableBackBook())
                 try:
@@ -519,6 +633,9 @@ def import_betfair_historical(
                 if update.touched:
                     quote = update.quote
                     if quote is not None:
+                        quote_ladder_type = ladder_type or _execution_price_ladder_type(
+                            definition, path=path, line_number=line_number
+                        )
                         metadata = _available_back_metadata(
                             quote,
                             definition=definition,
@@ -527,6 +644,7 @@ def import_betfair_historical(
                             path=path,
                             line_number=line_number,
                             last_traded_price=ltp,
+                            price_ladder_type=quote_ladder_type,
                         )
                         append_event(
                             path=path,
@@ -545,12 +663,17 @@ def import_betfair_historical(
 
                     previous_price = last_visible_price.get(key)
                     if previous_price is not None:
+                        quote_ladder_type = ladder_type or _execution_price_ladder_type(
+                            definition, path=path, line_number=line_number
+                        )
                         metadata = _base_metadata(definition, names, selection_id)
                         provider_field = "rc[].atb" if book.mode == "atb" else "rc[].batb"
                         metadata.update(
                             {
                                 "price_semantics": "betfair_available_to_back_unavailable",
                                 "provider_price_field": provider_field,
+                                "betfair_price_ladder_type": quote_ladder_type,
+                                "execution_price_ladder_verified": True,
                                 "execution_quote_verified": False,
                                 "actual_fill_verified": False,
                                 "paper_fill_eligible": False,
@@ -710,6 +833,9 @@ def import_betfair_historical(
                 "provider_fields": sorted(available_back_fields | ({"rc[].ltp"} if ltp_emitted else set())),
                 "available_to_back_quote_verified_per_event": True,
                 "available_to_back_cache_requires_provider_image": True,
+                "execution_price_ladder_contract_verified": True,
+                "supported_execution_price_ladder_types": ["CLASSIC"],
+                "runner_roster_membership_verified": True,
                 "paper_fill_capacity_enforced": False,
                 "paper_fill_capacity_unit_bound": False,
                 "paper_fill_capacity_authorizes_economics": False,
@@ -718,13 +844,21 @@ def import_betfair_historical(
                 "last_traded_price_execution_quote_verified": False,
             }
         else:
-            # Keep the schema-v2 BASIC/LTP governance contract byte-for-byte compatible
-            # with the pre-order-book importer.
+            # Keep the schema-v2 BASIC/LTP price-semantics contract byte-for-byte compatible
+            # with the pre-order-book importer. Availability semantics remain independent:
+            # explicit marketDefinition state transitions are replay-visible for BASIC too.
             price_semantics = {
                 "decimal_odds": "betfair_last_traded_price",
                 "provider_field": "rc[].ltp",
                 "execution_quote_verified": False,
             }
+
+        availability_semantics: dict[str, Any] = {
+            "strategy_visible_market_status": "OPEN_QUOTES_PLUS_EXPLICIT_SOURCE_STATE_TRANSITIONS",
+            "definition_state_transitions_preserved": True,
+            "suspended_or_non_open_intervals_preserved": False,
+            "complete_availability_history_verified": False,
+        }
 
         governance = {
             "source_identity": source_identity,
@@ -745,12 +879,7 @@ def import_betfair_historical(
                 "outcome_reveal_after": outcome_reveal_after,
             },
             "price_semantics": price_semantics,
-            "availability_semantics": {
-                "strategy_visible_market_status": "OPEN_QUOTES_PLUS_EXPLICIT_SOURCE_STATE_TRANSITIONS",
-                "definition_state_transitions_preserved": True,
-                "suspended_or_non_open_intervals_preserved": False,
-                "complete_availability_history_verified": False,
-            },
+            "availability_semantics": availability_semantics,
         }
         identity_payload = {
             "schema_version": 2,
@@ -846,7 +975,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"market_sha256={report.market_sha256}")
     print(f"sealed_results_sha256={report.results_sha256}")
     print(f"source_identity={report.source_identity}")
-    print("price_truth=available_back_observed quote_verified_requires_provider_image paper_capacity_unit_bound=false actual_fill_verified=false")
+    print("price_truth=available_back_observed quote_verified_requires_provider_image price_ladder=CLASSIC_verified runner_roster_verified=true paper_capacity_unit_bound=false actual_fill_verified=false")
     print("licensing_retention_verified=false redistribution_verified=false")
     print("real_money_execution=false human_tested=false nvda_verified=false")
     print(f"dataset={report.root}")

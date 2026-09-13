@@ -54,6 +54,32 @@ def _require_digest(raw: dict[str, Any], key: str, *, context: str) -> str:
     return value
 
 
+def _require_canonical_string_list(
+    raw: dict[str, Any],
+    key: str,
+    *,
+    context: str,
+) -> tuple[str, ...]:
+    values = raw.get(key)
+    if not isinstance(values, list) or not values:
+        raise ValueError(f"{context}.{key} must be a non-empty list")
+    if any(
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        for value in values
+    ):
+        raise ValueError(
+            f"{context}.{key} must contain unique non-empty canonical strings without surrounding whitespace"
+        )
+    normalized = tuple(values)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError(
+            f"{context}.{key} must contain unique non-empty canonical strings without surrounding whitespace"
+        )
+    return normalized
+
+
 def _parse_timestamp(value: str, *, field: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -345,11 +371,12 @@ def _verify_parlay_governance_authority(
             raise ValueError(
                 f"governance.{field} does not match exact SHA-bound governance authority proof"
             )
-    proof_source_ids = proof.get("source_ids")
-    if not isinstance(proof_source_ids, list):
-        raise ValueError("verified governance proof.source_ids must be a list")
-    normalized_proof_source_ids = tuple(sorted(str(value).strip() for value in proof_source_ids))
-    if normalized_proof_source_ids != tuple(sorted(source_ids)):
+    proof_source_ids = _require_canonical_string_list(
+        proof,
+        "source_ids",
+        context="verified governance proof",
+    )
+    if tuple(sorted(proof_source_ids)) != tuple(sorted(source_ids)):
         raise ValueError(
             "governance.coverage.source_ids do not match exact SHA-bound governance authority proof"
         )
@@ -439,12 +466,11 @@ def _load_governance(raw: dict[str, Any], *, root: Path) -> DatasetGovernance:
     if coverage_end < coverage_start:
         raise ValueError("governance.coverage.end_ts must not precede start_ts")
 
-    source_ids_raw = coverage.get("source_ids")
-    if not isinstance(source_ids_raw, list) or not source_ids_raw:
-        raise ValueError("governance.coverage.source_ids must be a non-empty list")
-    source_ids = tuple(str(value).strip() for value in source_ids_raw)
-    if any(not value for value in source_ids) or len(set(source_ids)) != len(source_ids):
-        raise ValueError("governance.coverage.source_ids must contain unique non-empty strings")
+    source_ids = _require_canonical_string_list(
+        coverage,
+        "source_ids",
+        context="governance.coverage",
+    )
     if (
         any(source_id.startswith(_PARLAY_SOURCE_PREFIX) for source_id in source_ids)
         and terms_reference.rstrip("/") != _PARLAY_TERMS_REFERENCE

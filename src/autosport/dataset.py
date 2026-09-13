@@ -346,9 +346,20 @@ def _verify_parlay_governance_authority(
                 f"governance.{field} does not match exact SHA-bound governance authority proof"
             )
     proof_source_ids = proof.get("source_ids")
-    if not isinstance(proof_source_ids, list):
-        raise ValueError("verified governance proof.source_ids must be a list")
-    normalized_proof_source_ids = tuple(sorted(str(value).strip() for value in proof_source_ids))
+    if (
+        not isinstance(proof_source_ids, list)
+        or not proof_source_ids
+        or any(
+            not isinstance(value, str)
+            or not value.strip()
+            or value != value.strip()
+            for value in proof_source_ids
+        )
+    ):
+        raise ValueError(
+            "verified governance proof.source_ids must contain canonical non-empty strings without surrounding whitespace"
+        )
+    normalized_proof_source_ids = tuple(sorted(proof_source_ids))
     if normalized_proof_source_ids != tuple(sorted(source_ids)):
         raise ValueError(
             "governance.coverage.source_ids do not match exact SHA-bound governance authority proof"
@@ -442,8 +453,17 @@ def _load_governance(raw: dict[str, Any], *, root: Path) -> DatasetGovernance:
     source_ids_raw = coverage.get("source_ids")
     if not isinstance(source_ids_raw, list) or not source_ids_raw:
         raise ValueError("governance.coverage.source_ids must be a non-empty list")
-    source_ids = tuple(str(value).strip() for value in source_ids_raw)
-    if any(not value for value in source_ids) or len(set(source_ids)) != len(source_ids):
+    if any(
+        not isinstance(value, str)
+        or not value.strip()
+        or value != value.strip()
+        for value in source_ids_raw
+    ):
+        raise ValueError(
+            "governance.coverage.source_ids must contain canonical non-empty strings without surrounding whitespace"
+        )
+    source_ids = tuple(source_ids_raw)
+    if len(set(source_ids)) != len(source_ids):
         raise ValueError("governance.coverage.source_ids must contain unique non-empty strings")
     if (
         any(source_id.startswith(_PARLAY_SOURCE_PREFIX) for source_id in source_ids)

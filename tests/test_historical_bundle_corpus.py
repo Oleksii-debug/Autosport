@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from autosport import historical_bundle_corpus as bundle_module
 from autosport.historical_bundle_corpus import (
     assemble_historical_corpus_from_bundle,
     verify_acquisition_bundle,
@@ -221,19 +222,35 @@ class HistoricalBundleCorpusTests(unittest.TestCase):
         _write_json(bundle_path, bundle)
         return bundle_root, _sha(bundle_path), bundle
 
-    def test_verifies_complete_bundle_and_forwards_exact_snapshot_pairs(self) -> None:
+    def test_verifies_complete_bundle_and_forwards_verified_snapshot_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root, bundle_sha, _ = self._bundle(Path(temp))
             verified = verify_acquisition_bundle(root, expected_bundle_sha256=bundle_sha)
             self.assertEqual(verified.bundle_sha256, bundle_sha)
             self.assertEqual(len(verified.snapshot_pairs), 1)
             self.assertTrue(verified.result_capture_path.endswith("match-results.json"))
+            original_market = Path(verified.snapshot_pairs[0][0])
+            original_evidence = Path(verified.snapshot_pairs[0][1])
+            expected_market_bytes = original_market.read_bytes()
+            expected_evidence_bytes = original_evidence.read_bytes()
 
             sentinel = object()
+            forwarded: dict[str, object] = {}
+
+            def fake_assembler(snapshot_pairs, **kwargs):
+                original_market.write_bytes(b'{"replaced_after_verification":true}\n')
+                original_evidence.write_text('{"kind":"replaced_after_verification"}', encoding="utf-8")
+                forwarded["pairs"] = snapshot_pairs
+                forwarded["market_bytes"] = Path(snapshot_pairs[0][0]).read_bytes()
+                forwarded["evidence_bytes"] = Path(snapshot_pairs[0][1]).read_bytes()
+                forwarded["results_path"] = kwargs["results_path"]
+                forwarded["governance_proof_path"] = kwargs["governance_proof_path"]
+                return sentinel
+
             with patch(
                 "autosport.historical_bundle_corpus.assemble_historical_corpus",
-                return_value=sentinel,
-            ) as assembler:
+                side_effect=fake_assembler,
+            ):
                 result = assemble_historical_corpus_from_bundle(
                     root,
                     expected_bundle_sha256=bundle_sha,
@@ -245,9 +262,37 @@ class HistoricalBundleCorpusTests(unittest.TestCase):
                     imported_at="2026-09-13T04:00:00Z",
                 )
             self.assertIs(result, sentinel)
-            self.assertEqual(assembler.call_args.args[0], verified.snapshot_pairs)
-            self.assertEqual(assembler.call_args.kwargs["results_path"], "sealed-results.json")
-            self.assertEqual(assembler.call_args.kwargs["governance_proof_path"], "governance.json")
+            self.assertEqual(forwarded["market_bytes"], expected_market_bytes)
+            self.assertEqual(forwarded["evidence_bytes"], expected_evidence_bytes)
+            self.assertEqual(forwarded["results_path"], "sealed-results.json")
+            self.assertEqual(forwarded["governance_proof_path"], "governance.json")
+            forwarded_pairs = forwarded["pairs"]
+            assert isinstance(forwarded_pairs, tuple)
+            self.assertNotEqual(forwarded_pairs, verified.snapshot_pairs)
+
+    def test_bundle_hash_and_claims_are_derived_from_one_byte_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root, bundle_sha, _ = self._bundle(Path(temp))
+            bundle_path = root / "bundle.json"
+            original_read = bundle_module._read_bytes
+            replaced = False
+
+            def read_then_replace(path: Path, *, context: str) -> bytes:
+                nonlocal replaced
+                payload = original_read(path, context=context)
+                if path.resolve() == bundle_path.resolve() and not replaced:
+                    tampered = json.loads(payload.decode("utf-8"))
+                    tampered["licensing_or_retention_verified"] = True
+                    _write_json(bundle_path, tampered)
+                    replaced = True
+                return payload
+
+            with patch.object(bundle_module, "_read_bytes", side_effect=read_then_replace):
+                verified = verify_acquisition_bundle(root, expected_bundle_sha256=bundle_sha)
+
+            self.assertTrue(replaced)
+            self.assertEqual(verified.bundle_sha256, bundle_sha)
+            self.assertTrue(json.loads(bundle_path.read_text(encoding="utf-8"))["licensing_or_retention_verified"])
 
     def test_rejects_resealed_bundle_without_request_coverage_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

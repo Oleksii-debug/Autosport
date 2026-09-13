@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from dataclasses import dataclass
+import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .historical_corpus import HistoricalCorpusBuild, assemble_historical_corpus
 
@@ -38,14 +40,22 @@ class VerifiedAcquisitionBundle:
     snapshot_pairs: tuple[tuple[str, str], ...]
     result_capture_path: str
     result_evidence_path: str
+    _snapshot_payloads: tuple[tuple[bytes, bytes], ...] = field(repr=False, compare=False)
+
+
+def _read_bytes(path: Path, *, context: str) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"{context} is not readable: {path}") from exc
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return _sha256_bytes(_read_bytes(path, context="artifact"))
 
 
 def _canonical_hash(value: Any) -> str:
@@ -53,14 +63,18 @@ def _canonical_hash(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _object(path: Path, *, context: str) -> dict[str, Any]:
+def _object_bytes(payload: bytes, *, path: Path, context: str) -> dict[str, Any]:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{context} is not readable valid JSON: {path}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"{context} must be a JSON object")
     return raw
+
+
+def _object(path: Path, *, context: str) -> dict[str, Any]:
+    return _object_bytes(_read_bytes(path, context=context), path=path, context=context)
 
 
 def _text(raw: dict[str, Any], key: str, *, context: str) -> str:
@@ -157,19 +171,20 @@ def verify_acquisition_bundle(
     bundle_path = root / "bundle.json"
     if not bundle_path.is_file():
         raise ValueError("acquisition bundle is missing bundle.json")
-    actual_bundle_sha = _sha256(bundle_path)
+    bundle_bytes = _read_bytes(bundle_path, context="acquisition bundle")
+    actual_bundle_sha = _sha256_bytes(bundle_bytes)
     if actual_bundle_sha != expected:
         raise ValueError("bundle.json SHA-256 does not match expected_bundle_sha256")
 
-    bundle = _object(bundle_path, context="acquisition bundle")
+    bundle = _object_bytes(bundle_bytes, path=bundle_path, context="acquisition bundle")
     if int(bundle.get("schema_version", 0)) != 1:
         raise ValueError("acquisition bundle schema_version must be 1")
     if bundle.get("kind") != _BUNDLE_KIND:
         raise ValueError(f"acquisition bundle kind must be {_BUNDLE_KIND}")
     if bundle.get("acquisition_scope") != "selected_point_in_time_snapshots_plus_match_result_archive":
         raise ValueError("acquisition bundle has unsupported acquisition_scope")
-    for field in _BOUNDED_FALSE_FIELDS:
-        _false(bundle, field, context="acquisition bundle")
+    for bounded_field in _BOUNDED_FALSE_FIELDS:
+        _false(bundle, bounded_field, context="acquisition bundle")
 
     request_scope = bundle.get("request_scope")
     if not isinstance(request_scope, dict):
@@ -369,14 +384,14 @@ def verify_acquisition_bundle(
         raise ValueError("acquisition bundle coverage preflight total_rows does not match sources")
     if summed_priced_rows != total_priced_rows:
         raise ValueError("acquisition bundle coverage preflight total_priced_rows does not match sources")
-    for field in (
+    for bounded_field in (
         "historical_window_market_coverage_verified",
         "licensing_or_retention_verified",
         "redistribution_verified",
     ):
         _false(
             coverage_evidence,
-            field,
+            bounded_field,
             context="acquisition bundle.match_results.coverage_preflight",
         )
 
@@ -393,6 +408,7 @@ def verify_acquisition_bundle(
 
     seen_paths: set[Path] = set()
     snapshot_pairs: list[tuple[str, str]] = []
+    snapshot_payloads: list[tuple[bytes, bytes]] = []
     for index, entry in enumerate(snapshots, start=1):
         context = f"acquisition bundle.snapshots[{index}]"
         if entry.get("point_in_time_snapshot_contains_odds") is not True:
@@ -407,12 +423,14 @@ def verify_acquisition_bundle(
         market_sha = _digest(entry, "market_sha256", context=context)
         evidence_sha = _digest(entry, "evidence_sha256", context=context)
         response_sha = _digest(entry, "provider_response_sha256", context=context)
-        if _sha256(market_path) != market_sha:
+        market_bytes = _read_bytes(market_path, context=f"{context} market")
+        evidence_bytes = _read_bytes(evidence_path, context=f"{context} evidence")
+        if _sha256_bytes(market_bytes) != market_sha:
             raise ValueError(f"{context}.market_sha256 does not match market file")
-        if _sha256(evidence_path) != evidence_sha:
+        if _sha256_bytes(evidence_bytes) != evidence_sha:
             raise ValueError(f"{context}.evidence_sha256 does not match evidence file")
 
-        evidence = _object(evidence_path, context=f"{context} evidence")
+        evidence = _object_bytes(evidence_bytes, path=evidence_path, context=f"{context} evidence")
         if int(evidence.get("schema_version", 0)) != 1 or evidence.get("kind") != _SNAPSHOT_KIND:
             raise ValueError(f"{context} evidence is not canonical historical snapshot evidence")
         if evidence.get("provider") != "parlayapi" or evidence.get("sport_key") != "table_tennis":
@@ -431,7 +449,7 @@ def verify_acquisition_bundle(
             raise ValueError(f"{context} quote_count does not match evidence")
         if evidence.get("has_data") is not True or evidence.get("point_in_time_snapshot_contains_odds") is not True:
             raise ValueError(f"{context} evidence must prove a non-empty selected snapshot")
-        for field in (
+        for bounded_field in (
             "point_in_time_odds_market_coverage_verified",
             "historical_window_market_coverage_verified",
             "sealed_outcomes_present",
@@ -442,8 +460,9 @@ def verify_acquisition_bundle(
             "human_tested",
             "nvda_verified",
         ):
-            _false(evidence, field, context=f"{context} evidence")
+            _false(evidence, bounded_field, context=f"{context} evidence")
         snapshot_pairs.append((str(market_path), str(evidence_path)))
+        snapshot_payloads.append((market_bytes, evidence_bytes))
 
     result_capture = _member(
         root,
@@ -467,12 +486,14 @@ def verify_acquisition_bundle(
     canonical_response_sha = _digest(
         match_results, "canonical_response_sha256", context="acquisition bundle.match_results"
     )
-    if _sha256(result_capture) != capture_sha:
+    result_capture_bytes = _read_bytes(result_capture, context="match-result capture")
+    result_evidence_bytes = _read_bytes(result_evidence, context="match-result evidence")
+    if _sha256_bytes(result_capture_bytes) != capture_sha:
         raise ValueError("acquisition bundle match-result capture hash does not match file")
-    if _sha256(result_evidence) != result_evidence_sha:
+    if _sha256_bytes(result_evidence_bytes) != result_evidence_sha:
         raise ValueError("acquisition bundle match-result evidence hash does not match file")
 
-    capture = _object(result_capture, context="match-result capture")
+    capture = _object_bytes(result_capture_bytes, path=result_capture, context="match-result capture")
     if int(capture.get("schema_version", 0)) != 1 or capture.get("kind") != _RESULT_CAPTURE_KIND:
         raise ValueError("match-result capture is not canonical")
     if capture.get("provider") != "parlayapi" or capture.get("sport_key") != "table_tennis":
@@ -489,7 +510,11 @@ def verify_acquisition_bundle(
     if _canonical_hash(capture.get("payload")) != canonical_response_sha:
         raise ValueError("match-result capture payload does not match canonical response hash")
 
-    result_evidence_raw = _object(result_evidence, context="match-result evidence")
+    result_evidence_raw = _object_bytes(
+        result_evidence_bytes,
+        path=result_evidence,
+        context="match-result evidence",
+    )
     if (
         int(result_evidence_raw.get("schema_version", 0)) != 1
         or result_evidence_raw.get("kind") != _RESULT_EVIDENCE_KIND
@@ -509,8 +534,8 @@ def verify_acquisition_bundle(
         raise ValueError("match-result entitlement hours do not match bundle")
     if result_evidence_raw.get("historical_window_from") != match_results.get("historical_window_from"):
         raise ValueError("match-result entitlement start does not match bundle")
-    for field in _BOUNDED_FALSE_FIELDS:
-        _false(result_evidence_raw, field, context="match-result evidence")
+    for bounded_field in _BOUNDED_FALSE_FIELDS:
+        _false(result_evidence_raw, bounded_field, context="match-result evidence")
 
     return VerifiedAcquisitionBundle(
         root=str(root),
@@ -520,7 +545,48 @@ def verify_acquisition_bundle(
         snapshot_pairs=tuple(snapshot_pairs),
         result_capture_path=str(result_capture),
         result_evidence_path=str(result_evidence),
+        _snapshot_payloads=tuple(snapshot_payloads),
     )
+
+
+@contextmanager
+def _frozen_snapshot_pairs(
+    verified: VerifiedAcquisitionBundle,
+) -> Iterator[tuple[tuple[str, str], ...]]:
+    """Materialize the already-verified snapshot bytes into a private assembly view."""
+
+    with tempfile.TemporaryDirectory(prefix="autosport-verified-bundle-") as temp:
+        root = Path(temp)
+        pairs: list[tuple[str, str]] = []
+        for index, (market_bytes, evidence_bytes) in enumerate(verified._snapshot_payloads, start=1):
+            market_path = root / f"{index:04d}-market.jsonl"
+            evidence_path = root / f"{index:04d}-evidence.json"
+            market_path.write_bytes(market_bytes)
+            evidence_path.write_bytes(evidence_bytes)
+            pairs.append((str(market_path), str(evidence_path)))
+        yield tuple(pairs)
+
+
+def _assemble_verified_bundle(
+    verified: VerifiedAcquisitionBundle,
+    *,
+    results_path: str | Path,
+    governance_proof_path: str | Path,
+    output_dir: str | Path,
+    name: str,
+    outcome_reveal_after: str,
+    imported_at: str,
+) -> HistoricalCorpusBuild:
+    with _frozen_snapshot_pairs(verified) as snapshot_pairs:
+        return assemble_historical_corpus(
+            snapshot_pairs,
+            results_path=results_path,
+            governance_proof_path=governance_proof_path,
+            output_dir=output_dir,
+            name=name,
+            outcome_reveal_after=outcome_reveal_after,
+            imported_at=imported_at,
+        )
 
 
 def assemble_historical_corpus_from_bundle(
@@ -538,8 +604,8 @@ def assemble_historical_corpus_from_bundle(
         bundle_dir,
         expected_bundle_sha256=expected_bundle_sha256,
     )
-    return assemble_historical_corpus(
-        verified.snapshot_pairs,
+    return _assemble_verified_bundle(
+        verified,
         results_path=results_path,
         governance_proof_path=governance_proof_path,
         output_dir=output_dir,
@@ -575,8 +641,8 @@ def main(argv: list[str] | None = None) -> int:
             args.bundle_dir,
             expected_bundle_sha256=args.expected_bundle_sha256,
         )
-        report = assemble_historical_corpus(
-            verified.snapshot_pairs,
+        report = _assemble_verified_bundle(
+            verified,
             results_path=args.results,
             governance_proof_path=args.governance_proof,
             output_dir=args.output_dir,

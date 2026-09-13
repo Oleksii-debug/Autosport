@@ -477,9 +477,9 @@ def import_betfair_historical(
                 merged = {**prior, **market_definition}
                 definitions[market_id] = merged
                 names = runner_names.setdefault(market_id, {})
-                roster = declared_runner_ids.setdefault(market_id, set())
                 runners = market_definition.get("runners")
                 if isinstance(runners, list):
+                    roster: set[str] = set()
                     for runner in runners:
                         if not isinstance(runner, dict) or runner.get("id") is None:
                             continue
@@ -487,6 +487,7 @@ def import_betfair_historical(
                         roster.add(selection_id)
                         if runner.get("name") is not None:
                             names[selection_id] = str(runner["name"])
+                    declared_runner_ids[market_id] = roster
 
                 closed = str(merged.get("status") or "").upper() == "CLOSED"
                 if closed and isinstance(runners, list):
@@ -843,28 +844,21 @@ def import_betfair_historical(
                 "last_traded_price_execution_quote_verified": False,
             }
         else:
-            # Keep the schema-v2 BASIC/LTP governance contract byte-for-byte compatible
-            # with the pre-order-book importer.
+            # Keep the schema-v2 BASIC/LTP price-semantics contract byte-for-byte compatible
+            # with the pre-order-book importer. Availability semantics remain independent:
+            # explicit marketDefinition state transitions are replay-visible for BASIC too.
             price_semantics = {
                 "decimal_odds": "betfair_last_traded_price",
                 "provider_field": "rc[].ltp",
                 "execution_quote_verified": False,
             }
 
-        availability_semantics: dict[str, Any]
-        if available_back_emitted:
-            availability_semantics = {
-                "strategy_visible_market_status": "OPEN_QUOTES_PLUS_EXPLICIT_SOURCE_STATE_TRANSITIONS",
-                "definition_state_transitions_preserved": True,
-                "suspended_or_non_open_intervals_preserved": False,
-                "complete_availability_history_verified": False,
-            }
-        else:
-            availability_semantics = {
-                "strategy_visible_market_status": "OPEN_ONLY",
-                "suspended_or_non_open_intervals_preserved": False,
-                "complete_availability_history_verified": False,
-            }
+        availability_semantics: dict[str, Any] = {
+            "strategy_visible_market_status": "OPEN_QUOTES_PLUS_EXPLICIT_SOURCE_STATE_TRANSITIONS",
+            "definition_state_transitions_preserved": True,
+            "suspended_or_non_open_intervals_preserved": False,
+            "complete_availability_history_verified": False,
+        }
 
         governance = {
             "source_identity": source_identity,

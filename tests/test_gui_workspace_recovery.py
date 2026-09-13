@@ -171,6 +171,11 @@ class GuiWorkspaceRecoveryTests(unittest.TestCase):
                 report=RecoveryReport((), (), ("experiment-key",)),
                 session_view=terminal.session_view,
             )
+            # A terminal worker result is only polled after repair_workspace() has
+            # closed and detached the prior Tk-owned session. Mirror that real
+            # lifecycle here so the regression exercises the worker view rather
+            # than an impossible stale UI test double.
+            app.session = None
             app._recovery_blocked_workspace = root
             app.recovery_worker.message = RecoveryWorkerMessage(result=unresolved)
 

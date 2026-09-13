@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from .paper import PaperBook
 
@@ -20,8 +20,28 @@ class PaperRiskPolicy:
     max_committed_fraction: Decimal = Decimal("0.20")
     minimum_cash_reserve_fraction: Decimal = Decimal("0.20")
 
+    def __post_init__(self) -> None:
+        for field_name in (
+            "max_ticket_fraction",
+            "max_committed_fraction",
+            "minimum_cash_reserve_fraction",
+        ):
+            raw_value = getattr(self, field_name)
+            try:
+                value = Decimal(str(raw_value))
+            except (InvalidOperation, ValueError) as exc:
+                raise ValueError(f"{field_name} must be a finite decimal") from exc
+            if not value.is_finite():
+                raise ValueError(f"{field_name} must be a finite decimal")
+            object.__setattr__(self, field_name, value)
+
     def evaluate(self, book: PaperBook, stake: Decimal | str) -> RiskDecision:
-        amount = Decimal(str(stake))
+        try:
+            amount = Decimal(str(stake))
+        except (InvalidOperation, ValueError):
+            return RiskDecision(False, "stake must be a finite decimal")
+        if not amount.is_finite():
+            return RiskDecision(False, "stake must be a finite decimal")
         if amount <= 0:
             return RiskDecision(False, "stake must be positive")
         if amount > book.initial_bankroll * self.max_ticket_fraction:

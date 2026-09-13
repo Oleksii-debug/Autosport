@@ -29,7 +29,11 @@ class ObservationWorkerMessage:
 
 
 class OneShotObservationWorker:
-    """Runs acquisition away from Tk; caller consumes the terminal message on its own thread."""
+    """Runs acquisition away from Tk; caller consumes the terminal message on its own thread.
+
+    The worker is deliberately non-daemon. A live observation mutates durable market/source-health
+    state, so interpreter shutdown must not kill it in the middle of that persistence boundary.
+    """
 
     def __init__(self) -> None:
         self._messages: queue.Queue[ObservationWorkerMessage] = queue.Queue(maxsize=1)
@@ -51,7 +55,7 @@ class OneShotObservationWorker:
             target=self._run,
             args=(task,),
             name="autosport-live-observation",
-            daemon=True,
+            daemon=False,
         )
         self._thread.start()
         return True

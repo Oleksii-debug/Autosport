@@ -47,7 +47,7 @@ jobs:
       - name: Install Autosport
         run: python -m pip install -e .
       - name: Run bounded endurance gate
-        run: python -m autosport endurance --workspace .autosport-endurance --events 20000 --quote-keys 200 --batch-size 500 --restart-cycles 3 --tickets 50 --output endurance-report.json
+        run: python -m autosport endurance --workspace .autosport-endurance --events 20000 --quote-keys 2000 --batch-size 500 --restart-cycles 3 --tickets 50 --output endurance-report.json
       - name: Upload endurance evidence
         if: always()
         uses: actions/upload-artifact@v4

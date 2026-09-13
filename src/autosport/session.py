@@ -23,6 +23,7 @@ from .run_transaction import RunTransaction
 from .settlement import SettlementEngine
 from .storage import SQLiteMarketStore
 from .strategies import StrategySpec, build_strategy_agents, strategy_spec
+from .workspace_lock import WorkspaceEconomicLock
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +105,16 @@ class AutosportSession:
         return ObservationResult(stats, self.source_health.get(provider.source_id), current)
 
     def run_dataset(self, dataset: ReplayDataset, speed: float = 0.0, allow_repeat: bool = False) -> SessionResult:
+        with WorkspaceEconomicLock(self.workspace):
+            return self._run_dataset_locked(dataset, speed=speed, allow_repeat=allow_repeat)
+
+    def _run_dataset_locked(
+        self,
+        dataset: ReplayDataset,
+        *,
+        speed: float = 0.0,
+        allow_repeat: bool = False,
+    ) -> SessionResult:
         self._ensure_canonical_economic_base()
         base_book_hash = sha256_file(self.book_path)
         base_ledger_hash = sha256_file(self.ledger.path)

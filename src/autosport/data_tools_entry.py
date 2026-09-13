@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 
 
-_USAGE = """Autosport-Data — portable Windows data/research tools
+_USAGE = """Autosport-Data — portable Windows historical-data tools + research
 
 Usage:
   Autosport-Data.exe acquire [autosport-acquire-historical-evidence arguments]

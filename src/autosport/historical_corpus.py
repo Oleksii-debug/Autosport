@@ -19,7 +19,9 @@ from .parlayapi_provider import ParlayApiTableTennisProvider
 
 _SNAPSHOT_KIND = "parlayapi_point_in_time_historical_snapshot"
 _GOVERNANCE_KIND = "historical_corpus_governance_proof"
+_OUTCOME_PROVENANCE_KIND = "historical_outcome_provenance"
 _ALLOWED_REDISTRIBUTION = {"prohibited", "internal_only", "permitted"}
+_REDISTRIBUTION_RANK = {"prohibited": 0, "internal_only": 1, "permitted": 2}
 _ALLOWED_OUTCOMES = {"win", "loss", "void"}
 
 
@@ -44,6 +46,16 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _timestamp(value: Any, *, field: str) -> datetime:
@@ -118,6 +130,150 @@ def _governance_proof(path: Path) -> dict[str, Any]:
         "verified_at": verified_at,
         "redistribution_policy": policy,
         "redistribution_verified": redistribution_verified,
+    }
+
+
+def _outcome_provenance(
+    results: dict[str, Any],
+    *,
+    source_root: Path,
+    reveal_dt: datetime,
+    imported_dt: datetime,
+) -> dict[str, Any]:
+    raw = results.get("outcome_provenance")
+    if not isinstance(raw, dict):
+        raise ValueError("sealed results outcome_provenance must be an object")
+    if int(raw.get("schema_version", 0)) != 1:
+        raise ValueError("sealed results outcome_provenance.schema_version must be 1")
+    if raw.get("kind") != _OUTCOME_PROVENANCE_KIND:
+        raise ValueError(
+            f"sealed results outcome_provenance.kind must be {_OUTCOME_PROVENANCE_KIND}"
+        )
+    if raw.get("licensing_or_retention_verified") is not True:
+        raise ValueError(
+            "sealed results outcome_provenance must explicitly set licensing_or_retention_verified=true"
+        )
+
+    source_identity = _text(raw, "source_identity", context="sealed results outcome_provenance")
+    source_record_file = _text(
+        raw,
+        "source_record_file",
+        context="sealed results outcome_provenance",
+    )
+    relative_source_record = Path(source_record_file)
+    if (
+        relative_source_record.is_absolute()
+        or len(relative_source_record.parts) != 1
+        or source_record_file in {".", ".."}
+    ):
+        raise ValueError(
+            "sealed results outcome_provenance.source_record_file must name one direct sibling artifact"
+        )
+    source_record_sha256 = _text(
+        raw,
+        "source_record_sha256",
+        context="sealed results outcome_provenance",
+    ).lower()
+    if len(source_record_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in source_record_sha256
+    ):
+        raise ValueError(
+            "sealed results outcome_provenance.source_record_sha256 must be a 64-character SHA-256 hex digest"
+        )
+    source_record_path = source_root / relative_source_record
+    try:
+        actual_source_record_sha256 = _sha256(source_record_path)
+    except OSError as exc:
+        raise ValueError(
+            "sealed results outcome provenance source record is not readable"
+        ) from exc
+    if actual_source_record_sha256 != source_record_sha256:
+        raise ValueError(
+            "sealed results outcome_provenance.source_record_sha256 does not match source record artifact"
+        )
+
+    source_record = _json_object(
+        source_record_path,
+        context="sealed outcome source record",
+    )
+    source_record_outcomes = source_record.get("quote_outcomes")
+    if not isinstance(source_record_outcomes, dict):
+        raise ValueError("sealed outcome source record quote_outcomes must be an object")
+    sealed_outcomes = results.get("quote_outcomes")
+    if not isinstance(sealed_outcomes, dict):
+        raise ValueError("sealed results quote_outcomes must be an object")
+    if source_record_outcomes != sealed_outcomes:
+        raise ValueError(
+            "sealed results quote_outcomes do not match hashed source record outcomes"
+        )
+    quote_outcomes_sha256 = _canonical_json_sha256(sealed_outcomes)
+
+    terms_reference = _text(raw, "terms_reference", context="sealed results outcome_provenance")
+    retention_basis = _text(raw, "retention_basis", context="sealed results outcome_provenance")
+    authority_reference = _text(raw, "authority_reference", context="sealed results outcome_provenance")
+
+    available_at = _text(raw, "available_at", context="sealed results outcome_provenance")
+    acquired_at = _text(raw, "acquired_at", context="sealed results outcome_provenance")
+    verified_at = _text(raw, "verified_at", context="sealed results outcome_provenance")
+    available_dt = _timestamp(
+        available_at,
+        field="sealed results outcome_provenance.available_at",
+    )
+    acquired_dt = _timestamp(
+        acquired_at,
+        field="sealed results outcome_provenance.acquired_at",
+    )
+    verified_dt = _timestamp(
+        verified_at,
+        field="sealed results outcome_provenance.verified_at",
+    )
+    if reveal_dt < available_dt:
+        raise ValueError(
+            "outcome_reveal_after must not precede sealed outcome source availability"
+        )
+    if acquired_dt < available_dt:
+        raise ValueError(
+            "sealed results outcome_provenance.acquired_at must not precede available_at"
+        )
+    if verified_dt < acquired_dt:
+        raise ValueError(
+            "sealed results outcome_provenance.verified_at must not precede acquired_at"
+        )
+    if imported_dt < acquired_dt:
+        raise ValueError("imported_at must not precede sealed outcome acquisition")
+    if imported_dt < verified_dt:
+        raise ValueError("imported_at must not precede sealed outcome provenance verification")
+
+    policy = _text(raw, "redistribution_policy", context="sealed results outcome_provenance")
+    if policy not in _ALLOWED_REDISTRIBUTION:
+        raise ValueError(
+            "sealed results outcome_provenance.redistribution_policy must be prohibited, internal_only, or permitted"
+        )
+    redistribution_verified = raw.get("redistribution_verified")
+    if not isinstance(redistribution_verified, bool):
+        raise ValueError(
+            "sealed results outcome_provenance.redistribution_verified must be boolean"
+        )
+    if policy == "permitted" and redistribution_verified is not True:
+        raise ValueError(
+            "sealed results outcome_provenance redistribution_policy=permitted requires redistribution_verified=true"
+        )
+
+    return {
+        **raw,
+        "source_identity": source_identity,
+        "source_record_file": source_record_file,
+        "source_record_sha256": source_record_sha256,
+        "quote_outcomes_sha256": quote_outcomes_sha256,
+        "terms_reference": terms_reference,
+        "retention_basis": retention_basis,
+        "authority_reference": authority_reference,
+        "available_at": available_at,
+        "acquired_at": acquired_at,
+        "verified_at": verified_at,
+        "redistribution_policy": policy,
+        "redistribution_verified": redistribution_verified,
+        "licensing_or_retention_verified": True,
     }
 
 
@@ -300,9 +456,26 @@ def assemble_historical_corpus(
         raise ValueError("governance proof.source_ids do not match historical snapshot source_ids")
     market_types = tuple(sorted({event.market_type.value for event, _ in events}))
 
-    results = _json_object(Path(results_path), context="sealed results")
+    results_path_obj = Path(results_path)
+    results = _json_object(results_path_obj, context="sealed results")
     if int(results.get("schema_version", 0)) != 1:
         raise ValueError("sealed results schema_version must be 1")
+    outcomes = results.get("quote_outcomes")
+    if not isinstance(outcomes, dict):
+        raise ValueError("sealed results quote_outcomes must be an object")
+    invalid_outcomes = sorted(
+        str(key)
+        for key, value in outcomes.items()
+        if not isinstance(value, str) or value not in _ALLOWED_OUTCOMES
+    )
+    if invalid_outcomes:
+        raise ValueError("sealed results contain unsupported outcome; allowed values are win, loss, void")
+    outcome_provenance = _outcome_provenance(
+        results,
+        source_root=results_path_obj.parent,
+        reveal_dt=reveal_dt,
+        imported_dt=imported_dt,
+    )
     declared_reveal = results.get("outcome_reveal_after")
     if declared_reveal is not None:
         declared_reveal_dt = _timestamp(
@@ -313,13 +486,16 @@ def assemble_historical_corpus(
             raise ValueError(
                 "sealed results outcome_reveal_after conflicts with requested causal reveal boundary"
             )
-    # The canonical assembled package always content-binds the causal reveal instant
-    # into the sealed-results file. results_sha256 therefore changes if this boundary
-    # changes, and the shared schema-v2 loader checks it against governance.
-    results = {**results, "outcome_reveal_after": outcome_reveal_after}
-    outcomes = results.get("quote_outcomes")
-    if not isinstance(outcomes, dict):
-        raise ValueError("sealed results quote_outcomes must be an object")
+    # The canonical assembled package content-binds the causal reveal instant and
+    # independently sourced outcome provenance into sealed results. The declared
+    # source-record digest and its normalized outcome labels are verified against an
+    # external sibling artifact before assembly; that source artifact is deliberately
+    # not redistributed.
+    results = {
+        **results,
+        "outcome_provenance": outcome_provenance,
+        "outcome_reveal_after": outcome_reveal_after,
+    }
     quote_keys = {event.quote_key for event, _ in events}
     outcome_keys = {str(key) for key in outcomes}
     missing_outcomes = sorted(quote_keys - outcome_keys)
@@ -328,13 +504,11 @@ def assemble_historical_corpus(
     unknown_outcomes = sorted(outcome_keys - quote_keys)
     if unknown_outcomes:
         raise ValueError("sealed results reference quote keys absent from historical market corpus")
-    invalid_outcomes = sorted(
-        str(key)
-        for key, value in outcomes.items()
-        if not isinstance(value, str) or value not in _ALLOWED_OUTCOMES
+
+    effective_redistribution_policy = min(
+        (str(proof["redistribution_policy"]), str(outcome_provenance["redistribution_policy"])),
+        key=lambda policy: _REDISTRIBUTION_RANK[policy],
     )
-    if invalid_outcomes:
-        raise ValueError("sealed results contain unsupported outcome; allowed values are win, loss, void")
 
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.build-", dir=str(output.parent)))
     try:
@@ -350,7 +524,7 @@ def assemble_historical_corpus(
             "source_identity": proof["source_identity"],
             "terms_reference": proof["terms_reference"],
             "retention_basis": proof["retention_basis"],
-            "redistribution_policy": proof["redistribution_policy"],
+            "redistribution_policy": effective_redistribution_policy,
             "acquired_at": latest_capture,
             "imported_at": imported_at,
             "coverage": {
@@ -375,6 +549,24 @@ def assemble_historical_corpus(
                 "authority_reference": proof["authority_reference"],
                 "verified_at": proof["verified_at"],
                 "redistribution_verified": proof["redistribution_verified"],
+            },
+            "outcome_evidence": {
+                "source_identity": outcome_provenance["source_identity"],
+                "source_record_file": outcome_provenance["source_record_file"],
+                "source_record_sha256": outcome_provenance["source_record_sha256"],
+                "source_record_checksum_verified": True,
+                "quote_outcomes_bound_to_source_record": True,
+                "quote_outcomes_sha256": outcome_provenance["quote_outcomes_sha256"],
+                "source_record_redistributed": False,
+                "terms_reference": outcome_provenance["terms_reference"],
+                "retention_basis": outcome_provenance["retention_basis"],
+                "authority_reference": outcome_provenance["authority_reference"],
+                "available_at": outcome_provenance["available_at"],
+                "acquired_at": outcome_provenance["acquired_at"],
+                "verified_at": outcome_provenance["verified_at"],
+                "licensing_or_retention_verified": True,
+                "redistribution_policy": outcome_provenance["redistribution_policy"],
+                "redistribution_verified": outcome_provenance["redistribution_verified"],
             },
         }
         manifest = {
@@ -412,7 +604,7 @@ def assemble_historical_corpus(
             coverage_end_ts=coverage_end,
             source_ids=source_ids,
             market_types=market_types,
-            redistribution_policy=str(proof["redistribution_policy"]),
+            redistribution_policy=effective_redistribution_policy,
         )
     finally:
         if staging.exists():
@@ -435,7 +627,15 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="captured market JSONL plus matching machine evidence; repeat for each snapshot",
     )
-    parser.add_argument("--results", type=Path, required=True, help="separate sealed results JSON")
+    parser.add_argument(
+        "--results",
+        type=Path,
+        required=True,
+        help=(
+            "separate sealed results JSON with outcome provenance naming a sibling source artifact "
+            "whose SHA-256 and normalized outcome labels are verified during assembly"
+        ),
+    )
     parser.add_argument(
         "--governance-proof",
         type=Path,
@@ -476,7 +676,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         "scope=selected_point_in_time_snapshots_only historical_window_market_coverage_verified=false "
-        "licensing_or_retention_verified=true profitability_claim=false real_money_execution=false"
+        "licensing_or_retention_verified=true outcome_source_checksum_verified=true "
+        "outcome_labels_source_bound=true profitability_claim=false real_money_execution=false"
     )
     print(f"dataset={result.root}")
     return 0

@@ -24,6 +24,7 @@ from .strategies import (
     validate_strategy_configuration,
 )
 from .ui_model import (
+    evaluation_lines,
     observation_quote_lines,
     observation_summary,
     result_summary,
@@ -62,6 +63,7 @@ AUTOMATION_IDS = {
     "tickets": 201,
     "log": 202,
     "live_quotes": 203,
+    "evaluation": 204,
 }
 
 
@@ -182,6 +184,11 @@ class AutosportApp(tk.Tk):
         self.tickets_label.pack(anchor="w", pady=(14, 4))
         self.tickets = tk.Listbox(frame, height=7, takefocus=True)
         self.tickets.pack(fill="x")
+        self.evaluation_label = ttk.Label(frame, text="Evaluation і portfolio evidence")
+        self.evaluation_label.pack(anchor="w", pady=(14, 4))
+        self.evaluation = tk.Listbox(frame, height=5, takefocus=True)
+        self.evaluation.pack(fill="x")
+        self._set_evaluation_lines(["Evaluation ще відсутня. Запустіть paper replay."])
         self.log_label = ttk.Label(frame, text="Журнал")
         self.log_label.pack(anchor="w", pady=(14, 4))
         self.log = tk.Text(frame, height=9, wrap="word", takefocus=True)
@@ -192,6 +199,7 @@ class AutosportApp(tk.Tk):
         self.bind("<Control-l>", lambda _event: self.refresh_live_snapshot())
         self.bind("<F6>", lambda _event: self.tickets.focus_set())
         self.bind("<F7>", lambda _event: self.live_quotes.focus_set())
+        self.bind("<F8>", lambda _event: self.evaluation.focus_set())
         self._refresh_tickets()
 
     def _configure_accessibility(self) -> None:
@@ -206,6 +214,7 @@ class AutosportApp(tk.Tk):
             (self.live_refresh_button, "Оновити live snapshot", "Запускає один read-only table-tennis snapshot у worker thread. Гаряча клавіша Control+L.", AUTOMATION_IDS["live_refresh"]),
             (self.live_quotes, "Live quotes", "Поточні read-only quotes останнього snapshot. F7 переводить сюди фокус.", AUTOMATION_IDS["live_quotes"]),
             (self.tickets, "Paper tickets і результати", "Список віртуальних tickets та їх поточних результатів. F6 переводить сюди фокус.", AUTOMATION_IDS["tickets"]),
+            (self.evaluation, "Evaluation і portfolio evidence", "Підсумок останнього terminal paper replay: bankroll, ROI, ticket outcomes і truth-labelled portfolio scenarios. F8 переводить сюди фокус.", AUTOMATION_IDS["evaluation"]),
             (self.log, "Журнал виконання", "Текстовий журнал replay, observation, settlement та evaluation.", AUTOMATION_IDS["log"]),
         )
         for widget, name, description, automation_id in controls:
@@ -380,6 +389,11 @@ class AutosportApp(tk.Tk):
         for line in lines:
             self.live_quotes.insert("end", line)
 
+    def _set_evaluation_lines(self, lines: list[str]) -> None:
+        self.evaluation.delete(0, "end")
+        for line in lines:
+            self.evaluation.insert("end", line)
+
     def _append_log(self, text: str) -> None:
         self.log.insert("end", text + "\n")
         self.log.see("end")
@@ -447,6 +461,9 @@ class AutosportApp(tk.Tk):
         self._set_replay_controls_busy(True)
         self.bank.set(self._bank_text())
         self._refresh_tickets()
+        self._set_evaluation_lines([
+            "Replay виконується; evaluation оновиться лише після terminal settlement/evaluation boundary."
+        ])
         plan_identity = (
             f"; plan={research_plan.source_sha256[:12]}…"
             if research_plan is not None
@@ -454,7 +471,7 @@ class AutosportApp(tk.Tk):
         )
         self.status.set(
             f"Replay виконується у фоновому worker; strategy={strategy_id}{plan_identity}. "
-            "Клавіатура, фокус, F6/F7 і журнал залишаються доступними; "
+            "Клавіатура, фокус, F6/F7/F8 і журнал залишаються доступними; "
             "закриття програми заблоковано до завершення economic transaction boundary."
         )
         self._append_log(
@@ -479,6 +496,9 @@ class AutosportApp(tk.Tk):
         if message.error is not None:
             text = f"Paper replay помилка: {message.error}"
             self._append_log(text)
+            self._set_evaluation_lines([
+                "Evaluation недоступна: replay не досяг terminal settlement/evaluation boundary."
+            ])
             self.status.set(
                 "Replay завершився помилкою; UI знову доступний. Якщо workspace має unresolved transaction, "
                 "виконайте repair-workspace перед наступним economic run."
@@ -488,9 +508,13 @@ class AutosportApp(tk.Tk):
 
         result = message.result
         if result is None:
+            self._set_evaluation_lines([
+                "Evaluation недоступна: worker не повернув terminal SessionResult."
+            ])
             self.status.set("Replay worker завершився без terminal result; новий run не запускайте до перевірки workspace.")
             return
         summary = result_summary(result)
+        self._set_evaluation_lines(evaluation_lines(result))
         self.status.set(summary)
         self._append_log(summary)
 

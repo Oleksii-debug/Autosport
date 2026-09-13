@@ -11,7 +11,11 @@ from .dataset import load_dataset
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .paths import default_workspace
-from .replay_worker import OneShotReplayWorker, run_workspace_dataset_once
+from .replay_worker import (
+    OneShotReplayWorker,
+    run_workspace_dataset_once,
+    workspace_for_strategy,
+)
 from .research_strategy import ResearchStrategyPlan
 from .session import AutosportSession
 from .strategies import (
@@ -78,6 +82,7 @@ class AutosportApp(tk.Tk):
         self.research_plan_path: Path | None = None
         self.research_plan: ResearchStrategyPlan | None = None
         self.workspace = default_workspace()
+        self._active_workspace = self.workspace
         self.session: AutosportSession | None = AutosportSession(self.workspace, "10000")
         self.replay_worker = OneShotReplayWorker()
         self.live_worker = OneShotObservationWorker()
@@ -279,8 +284,10 @@ class AutosportApp(tk.Tk):
         strategy_id: str = "baseline-v1",
         research_plan: ResearchStrategyPlan | None = None,
     ) -> AutosportSession:
+        workspace = workspace_for_strategy(self.workspace, strategy_id, research_plan)
+        self._active_workspace = workspace
         return AutosportSession(
-            self.workspace,
+            workspace,
             "10000",
             strategy_id=strategy_id,
             research_plan=research_plan,
@@ -288,7 +295,7 @@ class AutosportApp(tk.Tk):
 
     def _bank_text(self) -> str:
         if self.session is None:
-            return f"Віртуальний банк: оновлюється після replay; workspace: {self.workspace}"
+            return f"Віртуальний банк: оновлюється після replay; workspace: {self._active_workspace}"
         return (
             f"Віртуальний банк: {self.session.book.balance}; "
             f"committed: {self.session.book.committed_stake}; "
@@ -407,6 +414,7 @@ class AutosportApp(tk.Tk):
             return
         try:
             strategy_id, research_plan = self._selected_replay_configuration()
+            replay_workspace = workspace_for_strategy(self.workspace, strategy_id, research_plan)
         except Exception as exc:
             messagebox.showerror("Автоспорт", f"Strategy configuration відхилено: {exc}")
             self.status.set("Replay не запущено: canonical strategy configuration не пройшла fail-closed validation.")
@@ -414,13 +422,14 @@ class AutosportApp(tk.Tk):
 
         dataset_path = self.dataset_path
         speed = _SPEEDS[self.speed_text.get()]
+        self._active_workspace = replay_workspace
         if self.session is not None:
             self.session.close()
             self.session = None
 
         def task():
             return run_workspace_dataset_once(
-                self.workspace,
+                replay_workspace,
                 dataset_path,
                 initial_bankroll="10000",
                 speed=speed,
@@ -449,7 +458,7 @@ class AutosportApp(tk.Tk):
             "закриття програми заблоковано до завершення economic transaction boundary."
         )
         self._append_log(
-            f"Paper replay запущено у background worker; strategy={strategy_id}{plan_identity}; Tk/UIA thread не блокується."
+            f"Paper replay запущено у background worker; strategy={strategy_id}{plan_identity}; workspace={replay_workspace}; Tk/UIA thread не блокується."
         )
         self.after(100, self._poll_replay_worker)
 
@@ -472,8 +481,7 @@ class AutosportApp(tk.Tk):
             self._append_log(text)
             self.status.set(
                 "Replay завершився помилкою; UI знову доступний. Якщо workspace має unresolved transaction, "
-                "виконайте repair-workspace перед наступним economic run. Якщо помилка каже про іншу strategy identity, "
-                "використайте окремий workspace для кожної strategy/research-plan identity."
+                "виконайте repair-workspace перед наступним economic run."
             )
             messagebox.showerror("Автоспорт", text)
             return

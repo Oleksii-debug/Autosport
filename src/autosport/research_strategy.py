@@ -261,6 +261,10 @@ def _validate_market_binding(
         event = latest_quotes.get(leg.quote_key)
         if event is None:
             raise ValueError(f"research candidate quote absent from replay state: {leg.quote_key}")
+        if event.metadata.get("execution_quote_verified") is False:
+            raise ValueError(
+                f"research candidate quote is not verified executable price evidence: {leg.quote_key}"
+            )
         if parse_iso_timestamp(event.observed_ts) > decision_time:
             raise ValueError(f"research candidate quote is from the future: {leg.quote_key}")
         if event.decimal_odds != leg.decimal_odds:
@@ -356,7 +360,6 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
     if not isinstance(evidence_raw, list) or not evidence_raw:
         raise ValueError("research decision evidence must be a non-empty list")
     evidence = tuple(_evidence_from_dict(item) for item in evidence_raw)
-
     return ResearchReplayInstruction(
         decision_id=str(raw["decision_id"]),
         trigger_quote_key=str(raw["trigger_quote_key"]),

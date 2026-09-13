@@ -18,7 +18,7 @@ from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
 from .providers import MarketProvider
 from .replay import ReplayEngine, ReplayRun
-from .run_registry import RunRegistry, UnresolvedExperimentError
+from .run_registry import MixedStrategyWorkspaceError, RunRegistry, UnresolvedExperimentError
 from .run_transaction import RunTransaction
 from .settlement import SettlementEngine
 from .storage import SQLiteMarketStore
@@ -182,6 +182,16 @@ class AutosportSession:
         return result
 
     def _ensure_canonical_economic_base(self) -> None:
+        prior_strategy_ids = self.registry.strategy_ids()
+        foreign_strategy_ids = tuple(
+            value for value in prior_strategy_ids if value != self.strategy_id
+        )
+        if foreign_strategy_ids:
+            raise MixedStrategyWorkspaceError(
+                "Workspace already contains economic runs for another strategy "
+                f"({', '.join(foreign_strategy_ids)}). Use a separate workspace per strategy "
+                "so PaperBook, decision-ledger, portfolio and evaluation evidence cannot be mixed."
+            )
         if self.registry.in_progress():
             raise UnresolvedExperimentError(
                 "Workspace has an unresolved economic run; repair it before starting another paper experiment."

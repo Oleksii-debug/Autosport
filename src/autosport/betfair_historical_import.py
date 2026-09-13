@@ -19,6 +19,7 @@ from .integrity import atomic_write_json
 _SOURCE_ID = "betfair_exchange_historical"
 _TABLE_TENNIS_EVENT_TYPE_ID = "2593174"
 _ALLOWED_REDISTRIBUTION = {"prohibited", "internal_only", "permitted"}
+_SUPPORTED_MARKET_TYPES = {"MATCH_ODDS": "winner"}
 _SETTLED_OUTCOMES = {
     "WINNER": "win",
     "LOSER": "loss",
@@ -110,7 +111,7 @@ def _market_type(value: Any, allowed: set[str]) -> str | None:
     market_type = str(value or "").strip().upper()
     if not market_type or market_type not in allowed:
         return None
-    return "winner"
+    return _SUPPORTED_MARKET_TYPES[market_type]
 
 
 def import_betfair_historical(
@@ -129,7 +130,7 @@ def import_betfair_historical(
 
     This adapter never downloads Betfair data, never republishes source files, and never
     upgrades user-supplied rights metadata into a licensing/retention verification claim.
-    It supports only explicitly allowed market types and requires settled runner statuses
+    It supports only explicitly mapped market types and requires settled runner statuses
     for every emitted quote so outcomes remain sealed and complete.
     """
 
@@ -162,6 +163,11 @@ def import_betfair_historical(
     allowed = {str(value).strip().upper() for value in allowed_market_types if str(value).strip()}
     if not allowed:
         raise ValueError("at least one allowed Betfair market type is required")
+    unsupported_market_types = sorted(allowed.difference(_SUPPORTED_MARKET_TYPES))
+    if unsupported_market_types:
+        raise ValueError(
+            "unsupported Betfair market type(s): " + ",".join(unsupported_market_types)
+        )
 
     source_hashes = tuple(_sha256_path(path) for path in source_paths)
     if len(set(source_hashes)) != len(source_hashes):
@@ -450,7 +456,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--market-type",
         action="append",
         dest="market_types",
-        help="allowed Betfair marketType; repeat as needed (default MATCH_ODDS)",
+        choices=sorted(_SUPPORTED_MARKET_TYPES),
+        help="supported Betfair marketType; repeat as needed (default MATCH_ODDS)",
     )
     return parser
 

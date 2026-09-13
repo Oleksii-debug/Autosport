@@ -123,6 +123,7 @@ class BetfairHistoricalImportTests(unittest.TestCase):
             manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
             results = json.loads((output / "results.json").read_text(encoding="utf-8"))
             market_text = (output / "market.jsonl").read_text(encoding="utf-8")
+            output_files = set(path.name for path in output.iterdir())
 
         self.assertEqual(dataset.schema_version, 2)
         self.assertEqual(dataset.sport, "table_tennis")
@@ -153,7 +154,7 @@ class BetfairHistoricalImportTests(unittest.TestCase):
         self.assertNotIn('"1.01"', market_text)
         self.assertNotIn('"50.0"', market_text)
         self.assertEqual(
-            set(path.name for path in output.iterdir()),
+            output_files,
             {"manifest.json", "market.jsonl", "results.json"},
         )
         self.assertEqual(manifest["import_identity"], report.import_identity)

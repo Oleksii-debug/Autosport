@@ -280,6 +280,7 @@ def import_betfair_historical(
     market_source_path: dict[str, Path] = {}
     available_books: dict[tuple[str, str], BetfairAvailableBackBook] = {}
     last_visible_price: dict[tuple[str, str], str] = {}
+    last_visible_metadata: dict[tuple[str, str], dict[str, Any]] = {}
     events: list[dict[str, Any]] = []
     source_event_ordinal = 0
     max_source_publish_ts: str | None = None
@@ -319,7 +320,9 @@ def import_betfair_historical(
                 "_source_file_ordinal": source_file_ordinals[path],
             }
         )
-        last_visible_price[(market_id, selection_id)] = str(odds)
+        key = (market_id, selection_id)
+        last_visible_price[key] = str(odds)
+        last_visible_metadata[key] = dict(metadata)
 
     for path, line_number, message in _iter_messages(source_paths):
         if message.get("op") != "mcm":
@@ -356,11 +359,14 @@ def import_betfair_historical(
                     if book_market_id == market_id:
                         book.reset()
 
+            prior_definition: dict[str, Any] | None = None
             market_definition = change.get("marketDefinition")
             if market_definition is not None:
                 if not isinstance(market_definition, dict):
                     raise ValueError(f"{path}: line {line_number} marketDefinition must be an object")
                 prior = definitions.get(market_id, {})
+                if prior:
+                    prior_definition = dict(prior)
                 for field in ("eventId", "eventTypeId", "marketType"):
                     if field not in market_definition or field not in prior:
                         continue
@@ -416,12 +422,71 @@ def import_betfair_historical(
                 )
 
             market_status = str(definition.get("status") or "").upper()
+            current_bet_delay = _bet_delay_seconds(definition, path=path, line_number=line_number)
+            if prior_definition is not None:
+                prior_status = str(prior_definition.get("status") or "").upper()
+                prior_bet_delay = _bet_delay_seconds(
+                    prior_definition,
+                    path=path,
+                    line_number=line_number,
+                )
+                definition_state_changed = (
+                    prior_status != market_status or prior_bet_delay != current_bet_delay
+                )
+                if definition_state_changed:
+                    names = runner_names.get(market_id, {})
+                    event_id = str(definition.get("eventId") or "").strip()
+                    if not event_id:
+                        raise ValueError(
+                            f"{path}: line {line_number} supported Betfair market requires source eventId"
+                        )
+                    visible_keys = sorted(
+                        key for key in last_visible_price if key[0] == market_id
+                    )
+                    for key in visible_keys:
+                        _market_id, selection_id = key
+                        previous_metadata = last_visible_metadata.get(key, {})
+                        provider_field = str(
+                            previous_metadata.get("provider_price_field") or "marketDefinition"
+                        )
+                        metadata = _base_metadata(definition, names, selection_id)
+                        metadata.update(
+                            {
+                                "price_semantics": "betfair_market_definition_state_transition",
+                                "provider_price_field": provider_field,
+                                "execution_quote_verified": False,
+                                "actual_fill_verified": False,
+                                "paper_fill_eligible": False,
+                                "paper_fill_eligibility_reason": (
+                                    "marketDefinition status/betDelay changed; prior quote is invalid until a fresh runner price update"
+                                ),
+                                "paper_fill_capacity_verified": False,
+                                "betfair_market_status": market_status or "UNKNOWN",
+                                "betfair_bet_delay_seconds": current_bet_delay,
+                                "market_definition_transition": True,
+                                "prior_betfair_market_status": prior_status or "UNKNOWN",
+                                "prior_betfair_bet_delay_seconds": prior_bet_delay,
+                            }
+                        )
+                        append_event(
+                            path=path,
+                            event_id=event_id,
+                            market_id=market_id,
+                            selection_id=selection_id,
+                            odds=last_visible_price[key],
+                            observed=observed,
+                            canonical_market_type=canonical_market_type,
+                            status="unavailable",
+                            metadata=metadata,
+                        )
+
             if market_status == "CLOSED":
-                # Settlement facts stay outside strategy-visible market rows.
+                # Settlement facts stay outside strategy-visible quote rows. A definition
+                # transition above may emit only an explicit non-executable invalidation.
                 continue
             if market_status != "OPEN":
-                # Availability history remains explicitly incomplete for suspended/non-open
-                # intervals; never rewrite such intervals as tradable/open quotes.
+                # Explicit marketDefinition state transitions invalidate prior quotes above;
+                # no non-open runner update is rewritten as a tradable/open quote.
                 continue
 
             runner_changes = change.get("rc")
@@ -676,7 +741,8 @@ def import_betfair_historical(
             },
             "price_semantics": price_semantics,
             "availability_semantics": {
-                "strategy_visible_market_status": "OPEN_ONLY",
+                "strategy_visible_market_status": "OPEN_QUOTES_WITH_EXPLICIT_INELIGIBLE_TRANSITIONS",
+                "market_definition_ineligibility_transitions_preserved": True,
                 "suspended_or_non_open_intervals_preserved": False,
                 "complete_availability_history_verified": False,
             },

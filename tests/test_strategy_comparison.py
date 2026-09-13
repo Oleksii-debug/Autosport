@@ -5,6 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from autosport.dataset import load_dataset
+from autosport.run_transaction import RunTransaction
+from autosport.session import AutosportSession
 from autosport.strategy_comparison import (
     compare_strategy_runs,
     load_strategy_run_summary,
@@ -27,7 +30,7 @@ class StrategyComparisonTests(unittest.TestCase):
     ) -> Path:
         payload = {
             "schema_version": 2,
-            "transaction_schema_version": 2,
+            "transaction_schema_version": RunTransaction.SCHEMA_VERSION,
             "transaction_run_id": run_id,
             "run_id": run_id,
             "dataset_name": "licensed-table-tennis-slice",
@@ -61,6 +64,22 @@ class StrategyComparisonTests(unittest.TestCase):
         }
         path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         return path
+
+    def test_loader_accepts_real_canonical_session_summary(self):
+        dataset = load_dataset(Path(__file__).resolve().parents[1] / "examples" / "tt_demo")
+        with tempfile.TemporaryDirectory() as temp:
+            session = AutosportSession(temp, "10000")
+            try:
+                result = session.run_dataset(dataset)
+            finally:
+                session.close()
+            payload = json.loads(Path(result.result_path).read_text(encoding="utf-8"))
+            self.assertEqual(payload["transaction_schema_version"], RunTransaction.SCHEMA_VERSION)
+            evidence = load_strategy_run_summary(result.result_path)
+
+        self.assertEqual(evidence.run_id, result.replay.run_id)
+        self.assertEqual(evidence.strategy_id, "baseline-v1")
+        self.assertEqual(evidence.canonical_strategy_id, "baseline-v1")
 
     def test_same_dataset_strategies_compare_with_truth_labels(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -173,6 +192,22 @@ class StrategyComparisonTests(unittest.TestCase):
             payload["real_money_execution"] = True
             path.write_text(json.dumps(payload), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "real_money_execution"):
+                load_strategy_run_summary(path)
+
+    def test_loader_rejects_noncanonical_transaction_schema(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._summary(
+                Path(temp) / "bad-schema.json",
+                strategy_id="baseline-v1",
+                canonical_strategy_id="baseline-v1",
+                net_profit="0",
+                roi="0",
+                final_balance="10000",
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["transaction_schema_version"] = RunTransaction.SCHEMA_VERSION + 1
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "canonical transaction schema"):
                 load_strategy_run_summary(path)
 
     def test_module_cli_writes_machine_report(self):

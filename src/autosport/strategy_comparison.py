@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .integrity import atomic_write_json
+from .run_transaction import RunTransaction
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,8 +63,11 @@ def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
         raise ValueError(f"{source}: run summary root must be an object")
     if payload.get("schema_version") != 2:
         raise ValueError(f"{source}: run summary schema_version must be 2")
-    if payload.get("transaction_schema_version") != 2:
-        raise ValueError(f"{source}: durable transaction evidence is required")
+    if payload.get("transaction_schema_version") != RunTransaction.SCHEMA_VERSION:
+        raise ValueError(
+            f"{source}: durable transaction evidence must use canonical transaction schema "
+            f"{RunTransaction.SCHEMA_VERSION}"
+        )
     if payload.get("real_money_execution") is not False:
         raise ValueError(f"{source}: real_money_execution truth boundary is invalid")
 

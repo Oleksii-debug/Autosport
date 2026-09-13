@@ -17,6 +17,14 @@ def _validate_source_id(source_id: object) -> str:
     return source_id
 
 
+def _validate_provider_component(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be str")
+    if not value or value != value.strip():
+        raise ValueError(f"{name} must be non-empty and trimmed")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderQuote:
     provider_event_id: str
@@ -30,6 +38,11 @@ class ProviderQuote:
     source_ts: str | None = None
     score_state: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _validate_provider_component(self.provider_event_id, "provider_event_id")
+        _validate_provider_component(self.provider_market_id, "provider_market_id")
+        _validate_provider_component(self.provider_selection_id, "provider_selection_id")
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, TextIO
 
+from .betfair_available_back import BetfairAvailableBackBook, AvailableBackQuote
 from .dataset import load_dataset
 from .integrity import atomic_write_json
 
@@ -64,6 +65,8 @@ def _as_datetime(value: str) -> datetime:
 def _timestamp_from_epoch_ms(value: Any) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError("Betfair publish time pt must be epoch milliseconds")
+    if not math.isfinite(float(value)):
+        raise ValueError("Betfair publish time pt must be finite epoch milliseconds")
     parsed = datetime.fromtimestamp(float(value) / 1000.0, tz=timezone.utc)
     return parsed.isoformat().replace("+00:00", "Z")
 
@@ -115,6 +118,95 @@ def _market_type(value: Any, allowed: set[str]) -> str | None:
     return _SUPPORTED_MARKET_TYPES[market_type]
 
 
+def _validated_ltp(value: Any, *, path: Path, line_number: int) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) <= 1.0
+    ):
+        raise ValueError(f"{path}: line {line_number} ltp must be finite decimal odds > 1")
+    return float(value)
+
+
+def _bet_delay_seconds(definition: dict[str, Any], *, path: Path, line_number: int) -> int | None:
+    raw = definition.get("betDelay")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(float(raw)):
+        raise ValueError(f"{path}: line {line_number} marketDefinition betDelay must be a finite non-negative integer")
+    value = float(raw)
+    if value < 0 or not value.is_integer():
+        raise ValueError(f"{path}: line {line_number} marketDefinition betDelay must be a finite non-negative integer")
+    return int(value)
+
+
+def _base_metadata(
+    definition: dict[str, Any],
+    names: dict[str, str],
+    selection_id: str,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "provider": "betfair_exchange_historical",
+        "betfair_market_type": str(definition.get("marketType") or ""),
+    }
+    event_name = str(definition.get("eventName") or "").strip()
+    if event_name:
+        metadata["event_name"] = event_name
+    selection_name = names.get(selection_id)
+    if selection_name:
+        metadata["selection_name"] = selection_name
+    if isinstance(definition.get("inPlay"), bool):
+        metadata["betfair_in_play"] = bool(definition["inPlay"])
+    return metadata
+
+
+def _available_back_metadata(
+    quote: AvailableBackQuote,
+    *,
+    definition: dict[str, Any],
+    names: dict[str, str],
+    selection_id: str,
+    path: Path,
+    line_number: int,
+    last_traded_price: float | None,
+) -> dict[str, Any]:
+    metadata = _base_metadata(definition, names, selection_id)
+    bet_delay = _bet_delay_seconds(definition, path=path, line_number=line_number)
+    cache_verified = bool(quote.cache_verified)
+    if not cache_verified:
+        eligibility_reason = "available-to-back ladder cache was not initialized by a provider image"
+    elif bet_delay is None:
+        eligibility_reason = "Betfair betDelay is absent; zero-delay paper fill cannot be proven"
+    elif bet_delay > 0:
+        eligibility_reason = "positive Betfair betDelay is not simulated by this paper fill model"
+    else:
+        eligibility_reason = (
+            "observed Betfair available size unit is not canonically bound to the paper stake unit"
+        )
+
+    metadata.update(
+        {
+            "price_semantics": "betfair_available_to_back",
+            "provider_price_field": quote.provider_price_field,
+            "betfair_ladder_kind": quote.ladder_kind,
+            "execution_quote_verified": cache_verified,
+            "actual_fill_verified": False,
+            "paper_fill_eligible": False,
+            "paper_fill_eligibility_reason": eligibility_reason,
+            "paper_fill_capacity_verified": False,
+            "paper_fill_capacity_unit_bound": False,
+            "paper_fill_available_size": str(quote.available_size),
+            "paper_fill_size_unit": "betfair_historical_stream_size_unit",
+            "betfair_bet_delay_seconds": bet_delay,
+        }
+    )
+    if last_traded_price is not None:
+        metadata["betfair_last_traded_price"] = str(last_traded_price)
+        metadata["last_traded_price_execution_quote_verified"] = False
+    return metadata
+
+
 def import_betfair_historical(
     inputs: Iterable[str | Path],
     output_dir: str | Path,
@@ -131,8 +223,10 @@ def import_betfair_historical(
 
     This adapter never downloads Betfair data, never republishes source files, and never
     upgrades user-supplied rights metadata into a licensing/retention verification claim.
-    It supports only explicitly mapped market types and requires settled runner statuses
-    for every emitted quote so outcomes remain sealed and complete.
+    BASIC last-traded prices remain observational only. ADVANCED/PRO available-to-back
+    ladders preserve observed executable quote and size provenance, but source ladder size
+    does not authorize paper economics until Autosport has a canonical, provenance-bound
+    paper stake unit. No historical quote is treated as proof that a real order filled.
     """
 
     source_paths = tuple(Path(item) for item in inputs)
@@ -173,15 +267,9 @@ def import_betfair_historical(
     source_hashes = tuple(_sha256_path(path) for path in source_paths)
     if len(set(source_hashes)) != len(source_hashes):
         raise ValueError("duplicate Betfair historical input content is not allowed")
-    source_file_ordinals = {
-        path: ordinal for ordinal, path in enumerate(source_paths, start=1)
-    }
+    source_file_ordinals = {path: ordinal for ordinal, path in enumerate(source_paths, start=1)}
     source_files = [
-        {
-            "ordinal": ordinal,
-            "sha256": digest,
-            "byte_size": path.stat().st_size,
-        }
+        {"ordinal": ordinal, "sha256": digest, "byte_size": path.stat().st_size}
         for ordinal, (path, digest) in enumerate(zip(source_paths, source_hashes), start=1)
     ]
     source_identity = f"betfair-historical-files:{_canonical_hash(source_files)}"
@@ -192,9 +280,51 @@ def import_betfair_historical(
     settlement_ts: dict[str, str] = {}
     last_publish_ts: dict[str, str] = {}
     market_source_path: dict[str, Path] = {}
+    available_books: dict[tuple[str, str], BetfairAvailableBackBook] = {}
+    last_visible_price: dict[tuple[str, str], str] = {}
+    last_visible_metadata: dict[tuple[str, str], dict[str, Any]] = {}
     events: list[dict[str, Any]] = []
     source_event_ordinal = 0
     max_source_publish_ts: str | None = None
+    ltp_emitted = False
+    available_back_emitted = False
+    available_back_fields: set[str] = set()
+
+    def append_event(
+        *,
+        path: Path,
+        event_id: str,
+        market_id: str,
+        selection_id: str,
+        odds: Any,
+        observed: str,
+        canonical_market_type: str,
+        status: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        nonlocal source_event_ordinal
+        source_event_ordinal += 1
+        events.append(
+            {
+                "event_id": event_id,
+                "market_id": market_id,
+                "selection_id": selection_id,
+                "decimal_odds": str(odds),
+                "observed_ts": observed,
+                "source_id": _SOURCE_ID,
+                "market_type": canonical_market_type,
+                "status": status,
+                "source_ts": observed,
+                "ingest_ts": imported,
+                "score_state": None,
+                "metadata": metadata,
+                "_source_event_ordinal": source_event_ordinal,
+                "_source_file_ordinal": source_file_ordinals[path],
+            }
+        )
+        key = (market_id, selection_id)
+        last_visible_price[key] = str(odds)
+        last_visible_metadata[key] = dict(metadata)
 
     for path, line_number, message in _iter_messages(source_paths):
         if message.get("op") != "mcm":
@@ -225,11 +355,20 @@ def import_betfair_historical(
                 raise ValueError(f"{path}: line {line_number} market publish time moved backwards")
             last_publish_ts[market_id] = observed
 
+            image = change.get("img") is True
+            if image:
+                for (book_market_id, _selection_id), book in available_books.items():
+                    if book_market_id == market_id:
+                        book.reset()
+
+            prior_definition: dict[str, Any] | None = None
             market_definition = change.get("marketDefinition")
             if market_definition is not None:
                 if not isinstance(market_definition, dict):
                     raise ValueError(f"{path}: line {line_number} marketDefinition must be an object")
                 prior = definitions.get(market_id, {})
+                if prior:
+                    prior_definition = dict(prior)
                 for field in ("eventId", "eventTypeId", "marketType"):
                     if field not in market_definition or field not in prior:
                         continue
@@ -237,8 +376,7 @@ def import_betfair_historical(
                     declared_value = str(market_definition.get(field) or "").strip()
                     if previous_value and declared_value != previous_value:
                         raise ValueError(
-                            f"{path}: line {line_number} marketDefinition {field} changed "
-                            f"for Betfair market {market_id}"
+                            f"{path}: line {line_number} marketDefinition {field} changed for Betfair market {market_id}"
                         )
                 merged = {**prior, **market_definition}
                 definitions[market_id] = merged
@@ -265,8 +403,7 @@ def import_betfair_historical(
                         previous_statuses = final_statuses.get(market_id)
                         if previous_statuses is not None and previous_statuses != statuses:
                             raise ValueError(
-                                f"{path}: line {line_number} final settlement changed "
-                                f"for Betfair market {market_id}"
+                                f"{path}: line {line_number} final settlement changed for Betfair market {market_id}"
                             )
                         if previous_statuses is None:
                             final_statuses[market_id] = statuses
@@ -275,9 +412,7 @@ def import_betfair_historical(
             definition = definitions.get(market_id)
             if definition is None:
                 if change.get("rc"):
-                    raise ValueError(
-                        f"{path}: line {line_number} runner changes precede market definition"
-                    )
+                    raise ValueError(f"{path}: line {line_number} runner changes precede market definition")
                 continue
             canonical_market_type = _market_type(definition.get("marketType"), allowed)
             if canonical_market_type is None:
@@ -285,16 +420,75 @@ def import_betfair_historical(
             event_type_id = str(definition.get("eventTypeId") or "").strip()
             if event_type_id != _TABLE_TENNIS_EVENT_TYPE_ID:
                 raise ValueError(
-                    f"{path}: line {line_number} supported market is not Betfair Table Tennis "
-                    f"eventTypeId={_TABLE_TENNIS_EVENT_TYPE_ID}"
+                    f"{path}: line {line_number} supported market is not Betfair Table Tennis eventTypeId={_TABLE_TENNIS_EVENT_TYPE_ID}"
                 )
 
             market_status = str(definition.get("status") or "").upper()
+            current_bet_delay = _bet_delay_seconds(definition, path=path, line_number=line_number)
+            if prior_definition is not None:
+                prior_status = str(prior_definition.get("status") or "").upper()
+                prior_bet_delay = _bet_delay_seconds(
+                    prior_definition,
+                    path=path,
+                    line_number=line_number,
+                )
+                definition_state_changed = (
+                    prior_status != market_status or prior_bet_delay != current_bet_delay
+                )
+                if definition_state_changed and market_status != "CLOSED":
+                    names = runner_names.get(market_id, {})
+                    event_id = str(definition.get("eventId") or "").strip()
+                    if not event_id:
+                        raise ValueError(
+                            f"{path}: line {line_number} supported Betfair market requires source eventId"
+                        )
+                    visible_keys = sorted(
+                        key for key in last_visible_price if key[0] == market_id
+                    )
+                    for key in visible_keys:
+                        _market_id, selection_id = key
+                        previous_metadata = last_visible_metadata.get(key, {})
+                        provider_field = str(
+                            previous_metadata.get("provider_price_field") or "marketDefinition"
+                        )
+                        metadata = _base_metadata(definition, names, selection_id)
+                        metadata.update(
+                            {
+                                "price_semantics": "betfair_market_definition_state_transition",
+                                "provider_price_field": provider_field,
+                                "execution_quote_verified": False,
+                                "actual_fill_verified": False,
+                                "paper_fill_eligible": False,
+                                "paper_fill_eligibility_reason": (
+                                    "marketDefinition status/betDelay changed; prior quote is invalid until a fresh runner price update"
+                                ),
+                                "paper_fill_capacity_verified": False,
+                                "paper_fill_capacity_unit_bound": False,
+                                "betfair_market_status": market_status or "UNKNOWN",
+                                "betfair_bet_delay_seconds": current_bet_delay,
+                                "market_definition_transition": True,
+                                "prior_betfair_market_status": prior_status or "UNKNOWN",
+                                "prior_betfair_bet_delay_seconds": prior_bet_delay,
+                            }
+                        )
+                        append_event(
+                            path=path,
+                            event_id=event_id,
+                            market_id=market_id,
+                            selection_id=selection_id,
+                            odds=last_visible_price[key],
+                            observed=observed,
+                            canonical_market_type=canonical_market_type,
+                            status=(market_status.lower() if market_status else "unknown"),
+                            metadata=metadata,
+                        )
+
             if market_status == "CLOSED":
                 # Settlement facts stay outside strategy-visible market rows.
                 continue
             if market_status != "OPEN":
-                # SUSPENDED/unknown states are not rewritten as tradable/open history.
+                # Explicit pre-settlement marketDefinition state transitions invalidate
+                # prior quotes above; no non-open runner update is rewritten as tradable.
                 continue
 
             runner_changes = change.get("rc")
@@ -305,57 +499,103 @@ def import_betfair_historical(
             names = runner_names.get(market_id, {})
             event_id = str(definition.get("eventId") or "").strip()
             if not event_id:
-                raise ValueError(
-                    f"{path}: line {line_number} supported Betfair market requires source eventId"
-                )
-            event_name = str(definition.get("eventName") or "").strip()
+                raise ValueError(f"{path}: line {line_number} supported Betfair market requires source eventId")
+
             for runner_change in runner_changes:
                 if not isinstance(runner_change, dict) or runner_change.get("id") is None:
                     raise ValueError(f"{path}: line {line_number} runner change requires id")
-                if runner_change.get("ltp") is None:
-                    continue
-                odds = runner_change["ltp"]
-                if (
-                    isinstance(odds, bool)
-                    or not isinstance(odds, (int, float))
-                    or not math.isfinite(float(odds))
-                    or float(odds) <= 1.0
-                ):
-                    raise ValueError(
-                        f"{path}: line {line_number} ltp must be finite decimal odds > 1"
-                    )
                 selection_id = str(runner_change["id"])
-                metadata = {
-                    "provider": "betfair_exchange_historical",
-                    "betfair_market_type": str(definition.get("marketType") or ""),
-                    "price_semantics": "betfair_last_traded_price",
-                    "provider_price_field": "rc[].ltp",
-                    "execution_quote_verified": False,
-                }
-                if event_name:
-                    metadata["event_name"] = event_name
-                selection_name = names.get(selection_id)
-                if selection_name:
-                    metadata["selection_name"] = selection_name
-                source_event_ordinal += 1
-                events.append(
+                ltp: float | None = None
+                if runner_change.get("ltp") is not None:
+                    ltp = _validated_ltp(runner_change["ltp"], path=path, line_number=line_number)
+
+                key = (market_id, selection_id)
+                book = available_books.setdefault(key, BetfairAvailableBackBook())
+                try:
+                    update = book.apply(runner_change, image=image)
+                except ValueError as exc:
+                    raise ValueError(f"{path}: line {line_number} invalid Betfair available-back ladder: {exc}") from exc
+
+                if update.touched:
+                    quote = update.quote
+                    if quote is not None:
+                        metadata = _available_back_metadata(
+                            quote,
+                            definition=definition,
+                            names=names,
+                            selection_id=selection_id,
+                            path=path,
+                            line_number=line_number,
+                            last_traded_price=ltp,
+                        )
+                        append_event(
+                            path=path,
+                            event_id=event_id,
+                            market_id=market_id,
+                            selection_id=selection_id,
+                            odds=quote.decimal_odds,
+                            observed=observed,
+                            canonical_market_type=canonical_market_type,
+                            status="open",
+                            metadata=metadata,
+                        )
+                        available_back_emitted = True
+                        available_back_fields.add(quote.provider_price_field)
+                        continue
+
+                    previous_price = last_visible_price.get(key)
+                    if previous_price is not None:
+                        metadata = _base_metadata(definition, names, selection_id)
+                        provider_field = "rc[].atb" if book.mode == "atb" else "rc[].batb"
+                        metadata.update(
+                            {
+                                "price_semantics": "betfair_available_to_back_unavailable",
+                                "provider_price_field": provider_field,
+                                "execution_quote_verified": False,
+                                "actual_fill_verified": False,
+                                "paper_fill_eligible": False,
+                                "paper_fill_eligibility_reason": "available-to-back ladder has no verified best quote",
+                                "paper_fill_capacity_verified": False,
+                                "paper_fill_capacity_unit_bound": False,
+                            }
+                        )
+                        append_event(
+                            path=path,
+                            event_id=event_id,
+                            market_id=market_id,
+                            selection_id=selection_id,
+                            odds=previous_price,
+                            observed=observed,
+                            canonical_market_type=canonical_market_type,
+                            status="open",
+                            metadata=metadata,
+                        )
+                        available_back_emitted = True
+                        available_back_fields.add(provider_field)
+                    continue
+
+                if ltp is None:
+                    continue
+                metadata = _base_metadata(definition, names, selection_id)
+                metadata.update(
                     {
-                        "event_id": event_id,
-                        "market_id": market_id,
-                        "selection_id": selection_id,
-                        "decimal_odds": str(odds),
-                        "observed_ts": observed,
-                        "source_id": _SOURCE_ID,
-                        "market_type": canonical_market_type,
-                        "status": "open",
-                        "source_ts": observed,
-                        "ingest_ts": imported,
-                        "score_state": None,
-                        "metadata": metadata,
-                        "_source_event_ordinal": source_event_ordinal,
-                        "_source_file_ordinal": source_file_ordinals[path],
+                        "price_semantics": "betfair_last_traded_price",
+                        "provider_price_field": "rc[].ltp",
+                        "execution_quote_verified": False,
                     }
                 )
+                append_event(
+                    path=path,
+                    event_id=event_id,
+                    market_id=market_id,
+                    selection_id=selection_id,
+                    odds=ltp,
+                    observed=observed,
+                    canonical_market_type=canonical_market_type,
+                    status="open",
+                    metadata=metadata,
+                )
+                ltp_emitted = True
 
     if not events:
         raise ValueError("Betfair inputs produced no supported historical market quotes")
@@ -366,14 +606,18 @@ def import_betfair_historical(
             "acquired_at must not precede the latest source publish time present in the supplied files"
         )
 
-    semantic_keys: set[tuple[str, str, str, str]] = set()
+    semantic_keys: set[tuple[str, ...]] = set()
     sources_by_observed_ts: dict[str, set[int]] = {}
     for event in events:
+        metadata = event.get("metadata", {})
         semantic_key = (
             str(event["market_id"]),
             str(event["selection_id"]),
             str(event["observed_ts"]),
             str(event["decimal_odds"]),
+            str(event["status"]),
+            str(metadata.get("price_semantics", "")),
+            str(metadata.get("paper_fill_available_size", "")),
         )
         if semantic_key in semantic_keys:
             raise ValueError("Betfair historical inputs contain duplicate market quote changes")
@@ -392,8 +636,7 @@ def import_betfair_historical(
     )
     if ambiguous_cross_file_timestamps:
         raise ValueError(
-            "Betfair replay-visible events share publish time across input files; "
-            "cross-file source order is ambiguous: "
+            "Betfair replay-visible events share publish time across input files; cross-file source order is ambiguous: "
             + ",".join(ambiguous_cross_file_timestamps)
         )
 
@@ -461,6 +704,28 @@ def import_betfair_historical(
         market_sha256 = _sha256_bytes(market_bytes)
         results_sha256 = _sha256_path(results_path)
 
+        if available_back_emitted:
+            price_semantics: dict[str, Any] = {
+                "decimal_odds": "per_event_provider_price_semantics",
+                "provider_fields": sorted(available_back_fields | ({"rc[].ltp"} if ltp_emitted else set())),
+                "available_to_back_quote_verified_per_event": True,
+                "available_to_back_cache_requires_provider_image": True,
+                "paper_fill_capacity_enforced": False,
+                "paper_fill_capacity_unit_bound": False,
+                "paper_fill_capacity_authorizes_economics": False,
+                "positive_or_unknown_bet_delay_paper_fill_allowed": False,
+                "actual_fill_verified": False,
+                "last_traded_price_execution_quote_verified": False,
+            }
+        else:
+            # Keep the schema-v2 BASIC/LTP governance contract byte-for-byte compatible
+            # with the pre-order-book importer.
+            price_semantics = {
+                "decimal_odds": "betfair_last_traded_price",
+                "provider_field": "rc[].ltp",
+                "execution_quote_verified": False,
+            }
+
         governance = {
             "source_identity": source_identity,
             "source_files": source_files,
@@ -479,13 +744,10 @@ def import_betfair_historical(
                 "strategy_time_field": "observed_ts",
                 "outcome_reveal_after": outcome_reveal_after,
             },
-            "price_semantics": {
-                "decimal_odds": "betfair_last_traded_price",
-                "provider_field": "rc[].ltp",
-                "execution_quote_verified": False,
-            },
+            "price_semantics": price_semantics,
             "availability_semantics": {
-                "strategy_visible_market_status": "OPEN_ONLY",
+                "strategy_visible_market_status": "OPEN_QUOTES_PLUS_EXPLICIT_SOURCE_STATE_TRANSITIONS",
+                "definition_state_transitions_preserved": True,
                 "suspended_or_non_open_intervals_preserved": False,
                 "complete_availability_history_verified": False,
             },
@@ -584,6 +846,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"market_sha256={report.market_sha256}")
     print(f"sealed_results_sha256={report.results_sha256}")
     print(f"source_identity={report.source_identity}")
+    print("price_truth=available_back_observed quote_verified_requires_provider_image paper_capacity_unit_bound=false actual_fill_verified=false")
     print("licensing_retention_verified=false redistribution_verified=false")
     print("real_money_execution=false human_tested=false nvda_verified=false")
     print(f"dataset={report.root}")

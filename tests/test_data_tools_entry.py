@@ -10,12 +10,28 @@ class DataToolsEntryTests(unittest.TestCase):
             self.assertEqual(data_tools_entry.main(["--help"]), 0)
         self.assertIn("portable Windows historical-data tools", output.call_args.args[0])
         self.assertIn("walk-forward-evaluate", output.call_args.args[0])
+        self.assertIn("import-betfair-historical", output.call_args.args[0])
 
     def test_acquire_dispatches_exact_arguments(self):
         with patch("autosport.historical_acquisition.main", return_value=7) as target:
             result = data_tools_entry.main(["acquire", "--at", "2026-01-01T00:00:00Z"])
         self.assertEqual(result, 7)
         target.assert_called_once_with(["--at", "2026-01-01T00:00:00Z"])
+
+    def test_betfair_historical_import_dispatches_exact_arguments(self):
+        with patch("autosport.betfair_historical_import.main", return_value=12) as target:
+            result = data_tools_entry.main(
+                [
+                    "import-betfair-historical",
+                    "market.bz2",
+                    "--output-dir",
+                    "dataset",
+                ]
+            )
+        self.assertEqual(result, 12)
+        target.assert_called_once_with(
+            ["market.bz2", "--output-dir", "dataset"]
+        )
 
     def test_build_corpus_dispatches_exact_arguments(self):
         with patch("autosport.historical_corpus.main", return_value=8) as target:

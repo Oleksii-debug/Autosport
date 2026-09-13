@@ -121,6 +121,8 @@ class BetfairAvailableBackBook:
             if not isinstance(row, list) or len(row) != 2:
                 raise ValueError(f"atb[{index}] must be [price,size]")
             price = _decimal_number(row[0], field=f"atb[{index}].price", positive=True)
+            if price <= 1:
+                raise ValueError(f"atb[{index}].price must be decimal odds > 1")
             size = _decimal_number(row[1], field=f"atb[{index}].size", non_negative=True)
             if size == 0:
                 self._atb.pop(price, None)

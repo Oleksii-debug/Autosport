@@ -31,16 +31,32 @@ class RunRegistryReleaseTests(unittest.TestCase):
     def test_deterministic_package_ignores_source_mtimes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            exe, start, diagnostic, accessibility, keyboard, example = self._package_inputs(root)
+            exe, start, diagnostic, accessibility, keyboard, restart_recovery, example = self._package_inputs(root)
             first = root / "first.zip"
             second = root / "second.zip"
             _, first_hash = build_windows_package(
-                exe, start, example, diagnostic, accessibility, keyboard, first, "c" * 40
+                exe,
+                start,
+                example,
+                diagnostic,
+                accessibility,
+                keyboard,
+                restart_recovery,
+                first,
+                "c" * 40,
             )
             time.sleep(0.01)
             start.touch()
             _, second_hash = build_windows_package(
-                exe, start, example, diagnostic, accessibility, keyboard, second, "c" * 40
+                exe,
+                start,
+                example,
+                diagnostic,
+                accessibility,
+                keyboard,
+                restart_recovery,
+                second,
+                "c" * 40,
             )
             self.assertEqual(first_hash, second_hash)
             self.assertEqual(sha256_file(first), sha256_file(second))
@@ -48,11 +64,19 @@ class RunRegistryReleaseTests(unittest.TestCase):
     def test_package_verifier_binds_source_hashes_truth_and_accessibility_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            exe, start, diagnostic, accessibility, keyboard, example = self._package_inputs(root)
+            exe, start, diagnostic, accessibility, keyboard, restart_recovery, example = self._package_inputs(root)
             package = root / "candidate.zip"
             source_sha = "d" * 40
             build_windows_package(
-                exe, start, example, diagnostic, accessibility, keyboard, package, source_sha
+                exe,
+                start,
+                example,
+                diagnostic,
+                accessibility,
+                keyboard,
+                restart_recovery,
+                package,
+                source_sha,
             )
             report = verify_windows_package(package, expected_source_sha=source_sha)
             self.assertEqual(report["status"], "PASS")
@@ -63,6 +87,7 @@ class RunRegistryReleaseTests(unittest.TestCase):
                 names = set(archive.namelist())
             self.assertIn("Autosport-V1/accessibility-audit.json", names)
             self.assertIn("Autosport-V1/keyboard-audit.json", names)
+            self.assertIn("Autosport-V1/restart-recovery-audit.json", names)
             self.assertIn("Autosport-V1/packaged-diagnostic.json", names)
             with self.assertRaisesRegex(ValueError, "source_sha"):
                 verify_windows_package(package, expected_source_sha="e" * 40)
@@ -70,7 +95,7 @@ class RunRegistryReleaseTests(unittest.TestCase):
     def test_package_verifier_rejects_machine_evidence_that_claims_nvda(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            exe, start, diagnostic, accessibility, keyboard, example = self._package_inputs(root)
+            exe, start, diagnostic, accessibility, keyboard, restart_recovery, example = self._package_inputs(root)
             keyboard.write_text(
                 json.dumps(
                     {
@@ -85,18 +110,61 @@ class RunRegistryReleaseTests(unittest.TestCase):
             )
             package = root / "candidate.zip"
             build_windows_package(
-                exe, start, example, diagnostic, accessibility, keyboard, package, "f" * 40
+                exe,
+                start,
+                example,
+                diagnostic,
+                accessibility,
+                keyboard,
+                restart_recovery,
+                package,
+                "f" * 40,
             )
             with self.assertRaisesRegex(ValueError, "nvda_verified=false"):
                 verify_windows_package(package, expected_source_sha="f" * 40)
 
+    def test_package_verifier_requires_restart_and_recovery_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe, start, diagnostic, accessibility, keyboard, restart_recovery, example = self._package_inputs(root)
+            restart_recovery.write_text(
+                json.dumps(
+                    {
+                        "status": "PASS",
+                        "session_restart_status": "PASS",
+                        "transaction_recovery_status": "FAIL",
+                        "recovery_disposition": "aborted_uncommitted",
+                        "real_money_execution": False,
+                        "human_tested": False,
+                        "nvda_verified": False,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            package = root / "candidate.zip"
+            build_windows_package(
+                exe,
+                start,
+                example,
+                diagnostic,
+                accessibility,
+                keyboard,
+                restart_recovery,
+                package,
+                "a" * 40,
+            )
+            with self.assertRaisesRegex(ValueError, "transaction recovery PASS"):
+                verify_windows_package(package, expected_source_sha="a" * 40)
+
     @staticmethod
-    def _package_inputs(root: Path) -> tuple[Path, Path, Path, Path, Path, Path]:
+    def _package_inputs(root: Path) -> tuple[Path, Path, Path, Path, Path, Path, Path]:
         exe = root / "Autosport.exe"
         start = root / "WINDOWS_START_HERE.txt"
         diagnostic = root / "diag.json"
         accessibility = root / "a11y.json"
         keyboard = root / "keyboard.json"
+        restart_recovery = root / "restart-recovery.json"
         example = root / "example"
         example.mkdir()
         exe.write_bytes(b"fake-exe-for-package-test")
@@ -110,8 +178,20 @@ class RunRegistryReleaseTests(unittest.TestCase):
         diagnostic.write_text(json.dumps(evidence) + "\n", encoding="utf-8")
         accessibility.write_text(json.dumps(evidence) + "\n", encoding="utf-8")
         keyboard.write_text(json.dumps(evidence) + "\n", encoding="utf-8")
+        restart_recovery.write_text(
+            json.dumps(
+                {
+                    **evidence,
+                    "session_restart_status": "PASS",
+                    "transaction_recovery_status": "PASS",
+                    "recovery_disposition": "aborted_uncommitted",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         (example / "data.jsonl").write_text("{}\n", encoding="utf-8")
-        return exe, start, diagnostic, accessibility, keyboard, example
+        return exe, start, diagnostic, accessibility, keyboard, restart_recovery, example
 
 
 if __name__ == "__main__":

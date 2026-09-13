@@ -12,7 +12,7 @@ from autosport.release_package import (
 
 class ReleasePackageSourceIdentityTests(unittest.TestCase):
     def test_canonical_git_commit_sha_is_accepted(self) -> None:
-        source_sha = "71f3789616056a96b754714f7671d4813e8c9d2c"
+        source_sha = "d3d0e64496732411d46cc84ae6c29778215c73f4"
         self.assertEqual(
             _require_git_commit_sha(source_sha, field="source_sha"),
             source_sha,

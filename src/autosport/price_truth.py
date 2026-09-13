@@ -213,6 +213,15 @@ def paper_quote_rejection_reason(event: MarketEvent, stake: Decimal | str) -> st
 
     del stake  # No numerical comparison is truthful without a canonical stake unit.
     metadata = event.metadata
+
+    for key in (
+        "execution_quote_verified",
+        "paper_fill_eligible",
+        "paper_fill_capacity_verified",
+    ):
+        if key in metadata and not isinstance(metadata[key], bool):
+            return f"{key} assertion is malformed: expected boolean"
+
     if metadata.get("execution_quote_verified") is False:
         return "price evidence is not a verified executable quote"
     if metadata.get("paper_fill_eligible") is False:

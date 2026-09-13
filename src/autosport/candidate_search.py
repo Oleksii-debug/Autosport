@@ -57,20 +57,21 @@ class BeamParlayCandidateSearch:
             expanded: dict[tuple[str, ...], tuple[CandidateLeg, ...]] = {}
             for candidate in beam:
                 used_events = {leg.event_id for leg in candidate}
-                last_key = candidate[-1].quote_key if candidate else ""
                 for leg in ordered:
-                    if leg.event_id in used_events or (last_key and leg.quote_key <= last_key):
+                    if leg.event_id in used_events:
                         continue
-                    new_candidate = candidate + (leg,)
+                    new_candidate = tuple(
+                        sorted(candidate + (leg,), key=lambda item: item.quote_key)
+                    )
                     identity = tuple(item.quote_key for item in new_candidate)
-                    expanded[identity] = new_candidate
-            ranked = sorted(expanded.values(), key=self._score, reverse=True)
+                    expanded.setdefault(identity, new_candidate)
+            ranked = sorted(expanded.values(), key=self._rank_key)
             beam = ranked[: self.beam_width]
             if _depth >= minimum_legs:
                 results.extend(self._to_candidate(candidate) for candidate in beam)
             if not beam:
                 break
-        results.sort(key=lambda candidate: candidate.expected_profit_per_unit, reverse=True)
+        results.sort(key=self._result_rank_key)
         unique: dict[tuple[str, ...], ParlayCandidate] = {}
         for candidate in results:
             key = tuple(leg.quote_key for leg in candidate.legs)
@@ -121,6 +122,25 @@ class BeamParlayCandidateSearch:
             probability *= leg.probability
         return ParlayCandidate(legs, odds, probability, probability * odds - Decimal("1"))
 
-    def _score(self, legs: tuple[CandidateLeg, ...]) -> tuple[Decimal, Decimal, int]:
+    def _rank_key(
+        self,
+        legs: tuple[CandidateLeg, ...],
+    ) -> tuple[Decimal, Decimal, int, tuple[str, ...]]:
         candidate = self._to_candidate(legs)
-        return candidate.expected_profit_per_unit, candidate.independent_probability, -len(legs)
+        return (
+            -candidate.expected_profit_per_unit,
+            -candidate.independent_probability,
+            len(legs),
+            tuple(leg.quote_key for leg in legs),
+        )
+
+    @staticmethod
+    def _result_rank_key(
+        candidate: ParlayCandidate,
+    ) -> tuple[Decimal, Decimal, int, tuple[str, ...]]:
+        return (
+            -candidate.expected_profit_per_unit,
+            -candidate.independent_probability,
+            len(candidate.legs),
+            tuple(leg.quote_key for leg in candidate.legs),
+        )

@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Verify exact pristine source checkout before CI
-        run: python scripts/verify_source_checkout.py --source-sha "$AUTOSPORT_SOURCE_SHA"
+        run: python scripts/verify_source_checkout.py --source-sha "${{ env.AUTOSPORT_SOURCE_SHA }}"
       - run: python -m pip install -e '.[test]'
       - run: python -m pytest -v tests
       - run: python -m autosport demo

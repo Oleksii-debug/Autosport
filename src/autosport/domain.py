@@ -25,6 +25,13 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _require_canonical_market_identity(raw: dict[str, Any], key: str) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"{key} must be a canonical non-empty string")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class MarketEvent:
     event_id: str
@@ -51,13 +58,24 @@ class MarketEvent:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "MarketEvent":
+        event_id = _require_canonical_market_identity(raw, "event_id")
+        market_id = _require_canonical_market_identity(raw, "market_id")
+        selection_id = _require_canonical_market_identity(raw, "selection_id")
+        source_id_raw = raw.get("source_id", "fixture")
+        if not isinstance(source_id_raw, str) or not source_id_raw or source_id_raw != source_id_raw.strip():
+            raise ValueError("source_id must be a canonical non-empty string")
+        decimal_odds = Decimal(str(raw["decimal_odds"]))
+        if not decimal_odds.is_finite():
+            raise ValueError("decimal_odds must be finite")
+        if decimal_odds <= 1:
+            raise ValueError("decimal_odds must be greater than 1")
         return cls(
-            event_id=str(raw["event_id"]),
-            market_id=str(raw["market_id"]),
-            selection_id=str(raw["selection_id"]),
-            decimal_odds=Decimal(str(raw["decimal_odds"])),
+            event_id=event_id,
+            market_id=market_id,
+            selection_id=selection_id,
+            decimal_odds=decimal_odds,
             observed_ts=str(raw["observed_ts"]),
-            source_id=str(raw.get("source_id", "fixture")),
+            source_id=source_id_raw,
             sequence=int(raw["sequence"]),
             market_type=MarketType(str(raw.get("market_type", "other"))),
             status=str(raw.get("status", "open")),

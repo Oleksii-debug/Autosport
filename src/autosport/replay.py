@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -19,24 +20,43 @@ class FutureLeakageError(RuntimeError):
 class ReplayLeakageFirewall:
     """Results remain physically inaccessible to strategy code until replay completion."""
 
+    _SEALED = "sealed"
+    _IN_USE = "in_use"
+    _UNLOCKED = "unlocked"
+
     def __init__(self, final_results: dict[str, str] | None = None) -> None:
         self._results = dict(final_results or {})
-        self._unlocked = False
+        self._state = self._SEALED
+        self._state_lock = threading.Lock()
 
     def result_for(self, event_id: str) -> str | None:
-        if not self._unlocked:
-            raise FutureLeakageError("Final result is sealed until replay completion")
-        return self._results.get(event_id)
+        with self._state_lock:
+            if self._state != self._UNLOCKED:
+                raise FutureLeakageError("Final result is sealed until replay completion")
+            return self._results.get(event_id)
 
     def require_sealed(self) -> None:
-        if self._unlocked:
-            raise FutureLeakageError(
-                "Final result firewall was already unlocked by a completed replay; "
-                "use a fresh firewall for each replay"
-            )
+        """Atomically claim this firewall for exactly one replay run."""
+        with self._state_lock:
+            if self._state == self._UNLOCKED:
+                raise FutureLeakageError(
+                    "Final result firewall was already unlocked by a completed replay; "
+                    "use a fresh firewall for each replay"
+                )
+            if self._state == self._IN_USE:
+                raise FutureLeakageError(
+                    "Final result firewall was already claimed by another or failed replay; "
+                    "use a fresh firewall for each replay"
+                )
+            self._state = self._IN_USE
 
     def unlock(self) -> None:
-        self._unlocked = True
+        with self._state_lock:
+            if self._state != self._IN_USE:
+                raise FutureLeakageError(
+                    "Final result firewall can only unlock after its claimed replay completes"
+                )
+            self._state = self._UNLOCKED
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,9 +92,10 @@ class ReplayEngine:
         speed: float = 0.0,
         run_id: str | None = None,
     ) -> ReplayRun:
-        # A completed replay deliberately unseals final results. Reusing that
-        # firewall for another replay would expose outcome facts before the first
-        # event callback, so reject the run before any strategy-visible mutation.
+        # Claim the firewall before any strategy-visible callback. The atomic
+        # SEALED -> IN_USE transition rejects both completed reuse and concurrent
+        # reuse. A failed run deliberately leaves the firewall retired IN_USE
+        # rather than risking a later replay against ambiguous causal state.
         self.firewall.require_sealed()
         previous: float | None = None
         started = utc_now_iso()

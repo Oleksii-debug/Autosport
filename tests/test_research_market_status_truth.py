@@ -33,20 +33,14 @@ class _FailIfCalledPipeline:
         raise AssertionError("economic research pipeline must not run for a non-open market")
 
 
-def _non_open_plan(status: str = "suspended"):
+def _non_open_plan(status: str):
     dataset = load_dataset(Path("examples/tt_demo"))
-    ordered = sorted(
+    base_event = sorted(
         dataset.load_market_events(),
         key=lambda item: (item.observed_ts, item.sequence, item.dedupe_key),
-    )
-    base_event = ordered[0]
+    )[0]
     event = replace(base_event, status=status)
-    trigger = next(
-        item
-        for item in ordered
-        if item.quote_key != event.quote_key and item.observed_ts >= event.observed_ts
-    )
-    latest = {event.quote_key: event, trigger.quote_key: trigger}
+    latest = {event.quote_key: event}
     snapshot_hash = research_market_snapshot_hash(latest, [event.quote_key])
     evidence_hash = market_event_evidence_hash(event)
     probability = Decimal("0.90")
@@ -60,7 +54,7 @@ def _non_open_plan(status: str = "suspended"):
     forecast = ForecastRecord(
         quote_key=event.quote_key,
         probability=probability,
-        model_id="non-open-market-test",
+        model_id=f"{status}-market-test",
         model_version="1.0.0",
         strategy_version=RESEARCH_STRATEGY_ID,
         model_training_cutoff_ts="2020-01-01T00:00:00+00:00",
@@ -91,25 +85,25 @@ def _non_open_plan(status: str = "suspended"):
     )
     instruction = ResearchReplayInstruction(
         decision_id=f"decision-{status}-market",
-        trigger_quote_key=trigger.quote_key,
-        decision_ts=trigger.observed_ts,
+        trigger_quote_key=event.quote_key,
+        decision_ts=event.observed_ts,
         stake=Decimal("10"),
         candidate=candidate,
         groups=(group,),
         forecasts=(forecast,),
         evidence=(evidence,),
     )
-    return event, trigger, latest, ResearchStrategyPlan((instruction,), "0" * 64)
+    return event, latest, ResearchStrategyPlan((instruction,), "0" * 64)
 
 
 class ResearchMarketStatusTruthTests(unittest.TestCase):
-    def test_preflight_rejects_suspended_candidate_on_unrelated_trigger(self) -> None:
-        event, trigger, _latest, plan = _non_open_plan("suspended")
+    def test_preflight_rejects_suspended_candidate(self) -> None:
+        event, _latest, plan = _non_open_plan("suspended")
         with self.assertRaisesRegex(ValueError, "not open market state"):
-            plan.preflight([event, trigger])
+            plan.preflight([event])
 
     def test_runtime_rejects_suspended_candidate_before_economic_mutation(self) -> None:
-        _event, trigger, latest, plan = _non_open_plan("suspended")
+        event, latest, plan = _non_open_plan("suspended")
         pipeline = _FailIfCalledPipeline()
         agent = ResearchReplayAgent(plan, pipeline=pipeline)
 
@@ -124,15 +118,15 @@ class ResearchMarketStatusTruthTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "not open market state"):
-                agent.on_market_event(trigger, context)
+                agent.on_market_event(event, context)
 
             self.assertFalse(pipeline.called)
             self.assertEqual(book.balance, Decimal("1000"))
             self.assertEqual(book.tickets, {})
             self.assertFalse(ledger_path.exists())
 
-    def test_runtime_rejects_importer_unavailable_state_on_unrelated_trigger(self) -> None:
-        _event, trigger, latest, plan = _non_open_plan("unavailable")
+    def test_runtime_rejects_importer_unavailable_state_before_economic_mutation(self) -> None:
+        event, latest, plan = _non_open_plan("unavailable")
         pipeline = _FailIfCalledPipeline()
         agent = ResearchReplayAgent(plan, pipeline=pipeline)
 
@@ -147,7 +141,7 @@ class ResearchMarketStatusTruthTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "not open market state"):
-                agent.on_market_event(trigger, context)
+                agent.on_market_event(event, context)
 
             self.assertFalse(pipeline.called)
             self.assertEqual(book.balance, Decimal("1000"))

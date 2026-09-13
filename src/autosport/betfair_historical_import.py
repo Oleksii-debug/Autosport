@@ -478,12 +478,26 @@ def import_betfair_historical(
                 definitions[market_id] = merged
                 names = runner_names.setdefault(market_id, {})
                 runners = market_definition.get("runners")
-                if isinstance(runners, list):
+                if "runners" in market_definition:
+                    if not isinstance(runners, list):
+                        raise ValueError(
+                            f"{path}: line {line_number} marketDefinition.runners must be a list when declared"
+                        )
                     roster: set[str] = set()
-                    for runner in runners:
+                    for index, runner in enumerate(runners):
                         if not isinstance(runner, dict) or runner.get("id") is None:
-                            continue
-                        selection_id = str(runner["id"])
+                            raise ValueError(
+                                f"{path}: line {line_number} marketDefinition.runners[{index}] requires id"
+                            )
+                        selection_id = str(runner["id"]).strip()
+                        if not selection_id:
+                            raise ValueError(
+                                f"{path}: line {line_number} marketDefinition.runners[{index}].id must be non-empty"
+                            )
+                        if selection_id in roster:
+                            raise ValueError(
+                                f"{path}: line {line_number} marketDefinition.runners contains duplicate id {selection_id}"
+                            )
                         roster.add(selection_id)
                         if runner.get("name") is not None:
                             names[selection_id] = str(runner["name"])

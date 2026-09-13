@@ -365,6 +365,37 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"selection 999 is not declared by marketDefinition\.runners"):
                 self._import(Path(tmp), lines)
 
+    def test_latest_explicit_runner_roster_replaces_prior_membership(self) -> None:
+        lines = _pro_stream()
+        lines[0]["mc"][0]["marketDefinition"]["runners"].append(
+            {"id": 999, "name": "Removed Runner", "status": "ACTIVE"}
+        )
+        lines.insert(
+            1,
+            {
+                "op": "mcm",
+                "pt": _epoch_ms("2026-02-10T12:02:00Z"),
+                "mc": [
+                    {
+                        "id": "1.advanced",
+                        "marketDefinition": {
+                            "runners": [
+                                {"id": 101, "name": "Player A", "status": "ACTIVE"}
+                            ]
+                        },
+                    }
+                ],
+            },
+        )
+        lines[2]["mc"][0]["rc"][0]["id"] = 999
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                ValueError,
+                r"selection 999 is not declared by marketDefinition\.runners",
+            ):
+                self._import(Path(tmp), lines)
+
 
 if __name__ == "__main__":
     unittest.main()

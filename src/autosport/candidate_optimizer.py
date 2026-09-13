@@ -77,6 +77,8 @@ class PortfolioAwareCandidateOptimizer:
         stake: Decimal | str,
     ) -> list[CandidatePortfolioImpact]:
         amount = Decimal(str(stake))
+        if not amount.is_finite():
+            raise ValueError("stake must be finite")
         if amount <= 0:
             raise ValueError("stake must be positive")
         if not groups:
@@ -172,6 +174,8 @@ def _candidate_ticket(
             )
         touched_groups.add(group_index)
         used_event_ids.add(leg.event_id)
+        if not leg.probability.is_finite():
+            raise ValueError("candidate leg probability must be finite")
         if leg.probability < 0 or leg.probability > 1:
             raise ValueError("candidate leg probability must be between 0 and 1")
         ticket_leg = _ticket_leg_from_candidate(leg)
@@ -206,6 +210,8 @@ def _ticket_leg_from_candidate(leg: CandidateLeg) -> TicketLeg:
     event_id, market_id, selection_id = parts
     if event_id != leg.event_id:
         raise ValueError("candidate event_id does not match quote_key")
+    if not leg.decimal_odds.is_finite():
+        raise ValueError("candidate decimal odds must be finite")
     if leg.decimal_odds <= 1:
         raise ValueError("candidate decimal odds must be greater than 1")
     return TicketLeg(event_id, market_id, selection_id, leg.decimal_odds)

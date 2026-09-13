@@ -126,6 +126,7 @@ def _governance_proof(path: Path) -> dict[str, Any]:
 def _outcome_provenance(
     results: dict[str, Any],
     *,
+    source_root: Path,
     reveal_dt: datetime,
     imported_dt: datetime,
 ) -> dict[str, Any]:
@@ -144,6 +145,20 @@ def _outcome_provenance(
         )
 
     source_identity = _text(raw, "source_identity", context="sealed results outcome_provenance")
+    source_record_file = _text(
+        raw,
+        "source_record_file",
+        context="sealed results outcome_provenance",
+    )
+    relative_source_record = Path(source_record_file)
+    if (
+        relative_source_record.is_absolute()
+        or len(relative_source_record.parts) != 1
+        or source_record_file in {".", ".."}
+    ):
+        raise ValueError(
+            "sealed results outcome_provenance.source_record_file must name one direct sibling artifact"
+        )
     source_record_sha256 = _text(
         raw,
         "source_record_sha256",
@@ -155,6 +170,18 @@ def _outcome_provenance(
         raise ValueError(
             "sealed results outcome_provenance.source_record_sha256 must be a 64-character SHA-256 hex digest"
         )
+    source_record_path = source_root / relative_source_record
+    try:
+        actual_source_record_sha256 = _sha256(source_record_path)
+    except OSError as exc:
+        raise ValueError(
+            "sealed results outcome provenance source record is not readable"
+        ) from exc
+    if actual_source_record_sha256 != source_record_sha256:
+        raise ValueError(
+            "sealed results outcome_provenance.source_record_sha256 does not match source record artifact"
+        )
+
     terms_reference = _text(raw, "terms_reference", context="sealed results outcome_provenance")
     retention_basis = _text(raw, "retention_basis", context="sealed results outcome_provenance")
     authority_reference = _text(raw, "authority_reference", context="sealed results outcome_provenance")
@@ -209,6 +236,7 @@ def _outcome_provenance(
     return {
         **raw,
         "source_identity": source_identity,
+        "source_record_file": source_record_file,
         "source_record_sha256": source_record_sha256,
         "terms_reference": terms_reference,
         "retention_basis": retention_basis,
@@ -401,11 +429,13 @@ def assemble_historical_corpus(
         raise ValueError("governance proof.source_ids do not match historical snapshot source_ids")
     market_types = tuple(sorted({event.market_type.value for event, _ in events}))
 
-    results = _json_object(Path(results_path), context="sealed results")
+    results_path_obj = Path(results_path)
+    results = _json_object(results_path_obj, context="sealed results")
     if int(results.get("schema_version", 0)) != 1:
         raise ValueError("sealed results schema_version must be 1")
     outcome_provenance = _outcome_provenance(
         results,
+        source_root=results_path_obj.parent,
         reveal_dt=reveal_dt,
         imported_dt=imported_dt,
     )
@@ -420,8 +450,9 @@ def assemble_historical_corpus(
                 "sealed results outcome_reveal_after conflicts with requested causal reveal boundary"
             )
     # The canonical assembled package content-binds the causal reveal instant and
-    # independently sourced outcome provenance into sealed results. results_sha256
-    # therefore changes if either truth boundary changes.
+    # independently sourced outcome provenance into sealed results. The declared
+    # source-record digest is verified against an external sibling artifact before
+    # assembly, but that source artifact is deliberately not redistributed.
     results = {
         **results,
         "outcome_provenance": outcome_provenance,
@@ -493,7 +524,10 @@ def assemble_historical_corpus(
             },
             "outcome_evidence": {
                 "source_identity": outcome_provenance["source_identity"],
+                "source_record_file": outcome_provenance["source_record_file"],
                 "source_record_sha256": outcome_provenance["source_record_sha256"],
+                "source_record_checksum_verified": True,
+                "source_record_redistributed": False,
                 "terms_reference": outcome_provenance["terms_reference"],
                 "retention_basis": outcome_provenance["retention_basis"],
                 "authority_reference": outcome_provenance["authority_reference"],
@@ -567,7 +601,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--results",
         type=Path,
         required=True,
-        help="separate sealed results JSON with machine-verifiable outcome provenance",
+        help=(
+            "separate sealed results JSON with outcome provenance naming a sibling source artifact "
+            "whose SHA-256 is verified during assembly"
+        ),
     )
     parser.add_argument(
         "--governance-proof",
@@ -609,7 +646,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         "scope=selected_point_in_time_snapshots_only historical_window_market_coverage_verified=false "
-        "licensing_or_retention_verified=true outcome_provenance_verified=true "
+        "licensing_or_retention_verified=true outcome_source_checksum_verified=true "
         "profitability_claim=false real_money_execution=false"
     )
     print(f"dataset={result.root}")

@@ -394,11 +394,11 @@ class HistoricalBundleCorpusTests(unittest.TestCase):
         entry = scripts["autosport-build-historical-corpus-from-bundle"]
         self.assertEqual(
             entry.value,
-            "autosport.historical_bundle_corpus:main",
+            "autosport.historical_governance:bundle_corpus_main",
         )
         loaded = entry.load()
-        self.assertEqual(loaded.__module__, "autosport.historical_bundle_corpus")
-        self.assertEqual(loaded.__name__, "main")
+        self.assertEqual(loaded.__module__, "autosport.historical_governance")
+        self.assertEqual(loaded.__name__, "bundle_corpus_main")
 
 
 if __name__ == "__main__":

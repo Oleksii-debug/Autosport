@@ -13,6 +13,8 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertIn("walk-forward-evaluate", help_text)
         self.assertIn("import-betfair-historical", help_text)
         self.assertIn("repair-workspace", help_text)
+        self.assertIn("checksum-bound rights/retention evidence", help_text)
+        self.assertIn("not an independent legal opinion", help_text)
 
     def test_acquire_dispatches_exact_arguments(self):
         with patch("autosport.historical_acquisition.main", return_value=7) as target:
@@ -33,14 +35,14 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertEqual(result, 12)
         target.assert_called_once_with(["market.bz2", "--output-dir", "dataset"])
 
-    def test_build_corpus_dispatches_exact_arguments(self):
-        with patch("autosport.historical_corpus.main", return_value=8) as target:
+    def test_build_corpus_dispatches_through_governance_gate(self):
+        with patch("autosport.historical_governance.corpus_main", return_value=8) as target:
             result = data_tools_entry.main(["build-corpus", "--name", "real-corpus"])
         self.assertEqual(result, 8)
         target.assert_called_once_with(["--name", "real-corpus"])
 
-    def test_build_corpus_from_bundle_dispatches_exact_arguments(self):
-        with patch("autosport.historical_bundle_corpus.main", return_value=10) as target:
+    def test_build_corpus_from_bundle_dispatches_through_governance_gate(self):
+        with patch("autosport.historical_governance.bundle_corpus_main", return_value=10) as target:
             result = data_tools_entry.main(["build-corpus-from-bundle", "bundle-dir", "--bundle-sha256", "a" * 64])
         self.assertEqual(result, 10)
         target.assert_called_once_with(["bundle-dir", "--bundle-sha256", "a" * 64])

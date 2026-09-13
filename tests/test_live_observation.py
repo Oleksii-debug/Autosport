@@ -70,6 +70,13 @@ class LiveObservationTests(unittest.TestCase):
             self.assertFalse((Path(tmp) / "paper_book.json").exists())
 
     def test_worker_refuses_second_start_until_terminal_message_is_consumed(self):
+        # Build the real observation result outside the worker timing window. This
+        # test owns the worker single-flight/message-consumption contract; SQLite
+        # startup latency is covered by the workspace-observer integration test and
+        # must not become an accidental two-second completion SLA for live I/O.
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = self._observe(tmp)
+
         worker = OneShotObservationWorker()
         entered = threading.Event()
         release = threading.Event()
@@ -77,8 +84,7 @@ class LiveObservationTests(unittest.TestCase):
         def slow_task():
             entered.set()
             release.wait(timeout=2)
-            with tempfile.TemporaryDirectory() as tmp:
-                return self._observe(tmp)
+            return expected
 
         self.assertTrue(worker.start(slow_task))
         self.assertTrue(entered.wait(timeout=1))
@@ -86,7 +92,7 @@ class LiveObservationTests(unittest.TestCase):
         self.assertFalse(worker.start(slow_task))
         release.set()
         message = self._wait_for_message(worker)
-        self.assertIsNotNone(message.result)
+        self.assertIs(message.result, expected)
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 

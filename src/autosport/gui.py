@@ -11,8 +11,14 @@ from .dataset import load_dataset
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .paths import default_workspace
-from .replay_worker import OneShotReplayWorker, run_workspace_dataset_once
+from .replay_worker import (
+    OneShotReplayWorker,
+    run_workspace_dataset_once,
+    workspace_for_strategy,
+)
+from .research_strategy import ResearchStrategyPlan
 from .session import AutosportSession
+from .strategies import available_strategies, strategy_spec
 from .ui_model import (
     observation_quote_lines,
     observation_summary,
@@ -32,6 +38,7 @@ _LIVE_MODES = {
     "Public preview — без ключа": True,
     "API key з environment": False,
 }
+_STRATEGY_IDS = tuple(spec.strategy_id for spec in available_strategies())
 
 AUTOMATION_IDS = {
     "choose_dataset": 101,
@@ -39,6 +46,8 @@ AUTOMATION_IDS = {
     "replay_speed": 103,
     "live_mode": 104,
     "live_refresh": 105,
+    "strategy": 106,
+    "research_plan": 107,
     "tickets": 201,
     "log": 202,
     "live_quotes": 203,
@@ -49,11 +58,22 @@ class AutosportApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Автоспорт — V1 Windows Paper Lab")
-        self.geometry("960x800")
-        self.minsize(760, 620)
+        self.geometry("960x840")
+        self.minsize(760, 660)
         self.dataset_path: Path | None = None
-        self.workspace = default_workspace()
-        self.session: AutosportSession | None = AutosportSession(self.workspace, "10000")
+        self.workspace_root = default_workspace()
+        # Backward-compatible name for the shared live-observation workspace root.
+        self.workspace = self.workspace_root
+        self.active_workspace = self.workspace_root
+        self.active_strategy_id = "baseline-v1"
+        self.active_research_plan: ResearchStrategyPlan | None = None
+        self.research_plan_path: Path | None = None
+        self.research_plan: ResearchStrategyPlan | None = None
+        self.session: AutosportSession | None = AutosportSession(
+            self.active_workspace,
+            "10000",
+            strategy_id=self.active_strategy_id,
+        )
         self.replay_worker = OneShotReplayWorker()
         self.live_worker = OneShotObservationWorker()
         self._closing = False
@@ -61,6 +81,8 @@ class AutosportApp(tk.Tk):
         self.bank = tk.StringVar(value=self._bank_text())
         self.dataset_text = tk.StringVar(value="Dataset не вибраний.")
         self.speed_text = tk.StringVar(value="Подієвий — максимально швидко")
+        self.strategy_text = tk.StringVar(value="baseline-v1")
+        self.research_plan_text = tk.StringVar(value="Research plan: не потрібен для baseline-v1.")
         self.live_mode_text = tk.StringVar(value="Public preview — без ключа")
         self.live_status = tk.StringVar(value="Live snapshot ще не завантажувався.")
         self._build()
@@ -93,6 +115,28 @@ class AutosportApp(tk.Tk):
             takefocus=True,
         )
         self.speed.pack(side="left")
+
+        strategy_controls = ttk.Frame(frame)
+        strategy_controls.pack(fill="x", pady=(12, 0))
+        self.strategy_label = ttk.Label(strategy_controls, text="Strategy:")
+        self.strategy_label.pack(side="left", padx=(0, 4))
+        self.strategy = ttk.Combobox(
+            strategy_controls,
+            textvariable=self.strategy_text,
+            values=list(_STRATEGY_IDS),
+            state="readonly",
+            width=24,
+            takefocus=True,
+        )
+        self.strategy.pack(side="left", padx=(0, 8))
+        self.strategy.bind("<<ComboboxSelected>>", self._on_strategy_changed)
+        self.research_plan_button = ttk.Button(
+            strategy_controls,
+            text="Вибрати research plan",
+            command=self.choose_research_plan,
+        )
+        self.research_plan_button.pack(side="left")
+        ttk.Label(frame, textvariable=self.research_plan_text, wraplength=900).pack(anchor="w", pady=(5, 0))
 
         live_controls = ttk.Frame(frame)
         live_controls.pack(fill="x", pady=(14, 0))
@@ -142,6 +186,8 @@ class AutosportApp(tk.Tk):
             (self.choose_button, "Вибрати replay dataset", "Відкриває вибір папки replay dataset. Гаряча клавіша Control+O.", AUTOMATION_IDS["choose_dataset"]),
             (self.run_button, "Запустити paper replay", "Запускає causal paper replay для вибраного dataset. Гаряча клавіша Control+R.", AUTOMATION_IDS["run_replay"]),
             (self.speed, "Швидкість replay", "Вибір подієвого, 1×, 10×, 100× або 1000× режиму replay.", AUTOMATION_IDS["replay_speed"]),
+            (self.strategy, "Strategy replay", "Вибір canonical deterministic strategy: baseline, observe-only або typed research replay.", AUTOMATION_IDS["strategy"]),
+            (self.research_plan_button, "Вибрати research plan", "Вибирає typed causal JSON plan для strategy research-replay-v1. План прив'язується до replay за SHA-256.", AUTOMATION_IDS["research_plan"]),
             (self.live_mode, "Режим live observation", "Public preview без ключа або authenticated API key з environment.", AUTOMATION_IDS["live_mode"]),
             (self.live_refresh_button, "Оновити live snapshot", "Запускає один read-only table-tennis snapshot у worker thread. Гаряча клавіша Control+L.", AUTOMATION_IDS["live_refresh"]),
             (self.live_quotes, "Live quotes", "Поточні read-only quotes останнього snapshot. F7 переводить сюди фокус.", AUTOMATION_IDS["live_quotes"]),
@@ -155,11 +201,124 @@ class AutosportApp(tk.Tk):
 
     def _bank_text(self) -> str:
         if self.session is None:
-            return f"Віртуальний банк: оновлюється після replay; workspace: {self.workspace}"
+            return f"Віртуальний банк: economic state тимчасово недоступний; workspace: {self.active_workspace}"
         return (
             f"Віртуальний банк: {self.session.book.balance}; "
             f"committed: {self.session.book.committed_stake}; "
-            f"workspace: {self.session.workspace}"
+            f"strategy: {self.active_strategy_id}; workspace: {self.session.workspace}"
+        )
+
+    def _selected_strategy_id(self) -> str:
+        strategy_id = self.strategy_text.get()
+        if strategy_id not in _STRATEGY_IDS:
+            raise ValueError(f"Невідома strategy: {strategy_id}")
+        return strategy_id
+
+    def _selected_configuration(self) -> tuple[str, ResearchStrategyPlan | None]:
+        strategy_id = self._selected_strategy_id()
+        spec = strategy_spec(strategy_id)
+        if spec.requires_research_plan:
+            if self.research_plan is None:
+                raise ValueError(
+                    "research-replay-v1 потребує typed research plan. Натисніть «Вибрати research plan»."
+                )
+            return strategy_id, self.research_plan
+        return strategy_id, None
+
+    def _activate_configuration(
+        self,
+        strategy_id: str,
+        research_plan: ResearchStrategyPlan | None,
+    ) -> None:
+        workspace = workspace_for_strategy(self.workspace_root, strategy_id, research_plan)
+        if self.session is not None:
+            self.session.close()
+        self.active_workspace = workspace
+        self.active_strategy_id = strategy_id
+        self.active_research_plan = research_plan
+        self.session = AutosportSession(
+            workspace,
+            "10000",
+            strategy_id=strategy_id,
+            research_plan=research_plan,
+        )
+        self.bank.set(self._bank_text())
+        self._refresh_tickets()
+
+    def _on_strategy_changed(self, _event=None) -> None:
+        if self.replay_worker.busy:
+            self.strategy_text.set(self.active_strategy_id)
+            self.status.set("Strategy не можна змінювати під час active economic replay.")
+            return
+        try:
+            strategy_id = self._selected_strategy_id()
+            spec = strategy_spec(strategy_id)
+        except Exception as exc:
+            self.status.set(str(exc))
+            return
+        if spec.requires_research_plan and self.research_plan is None:
+            if self.session is not None:
+                self.session.close()
+                self.session = None
+            self.active_strategy_id = strategy_id
+            self.active_research_plan = None
+            self.active_workspace = self.workspace_root / "strategies" / "research-replay-v1-pending-plan"
+            self.research_plan_text.set("Research plan: обов'язковий для research-replay-v1; виберіть JSON plan.")
+            self.bank.set(self._bank_text())
+            self._refresh_tickets()
+            self.status.set("Research strategy вибрана, але replay заблоковано до валідного typed research plan.")
+            return
+        research_plan = self.research_plan if spec.requires_research_plan else None
+        try:
+            self._activate_configuration(strategy_id, research_plan)
+        except Exception as exc:
+            self.status.set(f"Strategy configuration відхилено: {exc}")
+            return
+        if spec.requires_research_plan and research_plan is not None:
+            self.research_plan_text.set(
+                f"Research plan: {self.research_plan_path}; SHA-256={research_plan.source_sha256[:16]}…"
+            )
+        else:
+            self.research_plan_text.set(f"Research plan: не використовується strategy {strategy_id}.")
+        self.status.set(f"Strategy активна: {strategy_id}. Economic workspace ізольовано за strategy identity.")
+
+    def choose_research_plan(self) -> None:
+        if self.replay_worker.busy:
+            self.status.set("Research plan не можна змінювати під час active economic replay.")
+            return
+        try:
+            strategy_id = self._selected_strategy_id()
+        except Exception as exc:
+            self.status.set(str(exc))
+            return
+        if not strategy_spec(strategy_id).requires_research_plan:
+            self.status.set("Поточна strategy не використовує research plan; спочатку виберіть research-replay-v1.")
+            return
+        selected = filedialog.askopenfilename(
+            title="Вибрати Autosport typed research plan",
+            filetypes=(("JSON", "*.json"), ("Усі файли", "*.*")),
+        )
+        if not selected:
+            return
+        try:
+            plan = ResearchStrategyPlan.from_path(selected)
+        except Exception as exc:
+            messagebox.showerror("Автоспорт", f"Research plan відхилено: {exc}")
+            self.status.set("Research plan не активовано; economic state не змінено.")
+            return
+        self.research_plan_path = Path(selected)
+        self.research_plan = plan
+        try:
+            self._activate_configuration(strategy_id, plan)
+        except Exception as exc:
+            messagebox.showerror("Автоспорт", f"Strategy workspace відхилено: {exc}")
+            self.status.set("Research strategy не активовано.")
+            return
+        self.research_plan_text.set(
+            f"Research plan: {self.research_plan_path}; SHA-256={plan.source_sha256[:16]}…"
+        )
+        self.status.set(
+            "Typed research plan перевірено. Research replay використовуватиме exact plan object/hash у власному economic workspace."
         )
 
     def choose_dataset(self) -> None:
@@ -191,7 +350,7 @@ class AutosportApp(tk.Tk):
         if public_preview is None:
             self.live_status.set("Невідомий live режим; snapshot не запущено.")
             return
-        workspace = self.workspace
+        workspace = self.workspace_root
 
         def task():
             api_key = None if public_preview else os.environ.get("AUTOSPORT_PARLAYAPI_KEY")
@@ -248,12 +407,16 @@ class AutosportApp(tk.Tk):
             self.choose_button.state(["disabled"])
             self.run_button.state(["disabled"])
             self.speed.configure(state="disabled")
+            self.strategy.configure(state="disabled")
+            self.research_plan_button.state(["disabled"])
             self.live_mode.configure(state="disabled")
             self.live_refresh_button.state(["disabled"])
             return
         self.choose_button.state(["!disabled"])
         self.run_button.state(["!disabled"])
         self.speed.configure(state="readonly")
+        self.strategy.configure(state="readonly")
+        self.research_plan_button.state(["!disabled"])
         self.live_mode.configure(state="readonly")
         self.live_refresh_button.state(["!disabled"])
 
@@ -267,23 +430,41 @@ class AutosportApp(tk.Tk):
         if self.live_worker.busy:
             self.status.set("Live snapshot ще виконується; paper replay почнеться лише після його завершення.")
             return
+        try:
+            strategy_id, research_plan = self._selected_configuration()
+            workspace = workspace_for_strategy(self.workspace_root, strategy_id, research_plan)
+        except Exception as exc:
+            messagebox.showerror("Автоспорт", str(exc))
+            self.status.set("Replay не запущено: strategy configuration incomplete/invalid.")
+            self.research_plan_button.focus_set()
+            return
 
         dataset_path = self.dataset_path
         speed = _SPEEDS[self.speed_text.get()]
+        self.active_workspace = workspace
+        self.active_strategy_id = strategy_id
+        self.active_research_plan = research_plan
         if self.session is not None:
             self.session.close()
             self.session = None
 
         def task():
             return run_workspace_dataset_once(
-                self.workspace,
+                workspace,
                 dataset_path,
                 initial_bankroll="10000",
                 speed=speed,
+                strategy_id=strategy_id,
+                research_plan=research_plan,
             )
 
         if not self.replay_worker.start(task):
-            self.session = AutosportSession(self.workspace, "10000")
+            self.session = AutosportSession(
+                workspace,
+                "10000",
+                strategy_id=strategy_id,
+                research_plan=research_plan,
+            )
             self.status.set("Paper replay уже виконується; новий run не запущено.")
             return
 
@@ -291,11 +472,23 @@ class AutosportApp(tk.Tk):
         self.bank.set(self._bank_text())
         self._refresh_tickets()
         self.status.set(
-            "Replay виконується у фоновому worker. Клавіатура, фокус, F6/F7 і журнал залишаються доступними; "
+            f"Replay strategy={strategy_id} виконується у фоновому worker. Клавіатура, фокус, F6/F7 і журнал залишаються доступними; "
             "закриття програми заблоковано до завершення economic transaction boundary."
         )
-        self._append_log("Paper replay запущено у background worker; Tk/UIA thread не блокується.")
+        self._append_log(
+            f"Paper replay запущено у background worker; strategy={strategy_id}; workspace={workspace}; Tk/UIA thread не блокується."
+        )
         self.after(100, self._poll_replay_worker)
+
+    def _reopen_active_session(self) -> None:
+        self.session = AutosportSession(
+            self.active_workspace,
+            "10000",
+            strategy_id=self.active_strategy_id,
+            research_plan=self.active_research_plan,
+        )
+        self.bank.set(self._bank_text())
+        self._refresh_tickets()
 
     def _poll_replay_worker(self) -> None:
         message = self.replay_worker.poll()
@@ -304,9 +497,14 @@ class AutosportApp(tk.Tk):
             return
 
         self._set_replay_controls_busy(False)
-        self.session = AutosportSession(self.workspace, "10000")
-        self.bank.set(self._bank_text())
-        self._refresh_tickets()
+        try:
+            self._reopen_active_session()
+        except Exception as exc:
+            text = f"Replay завершено, але strategy workspace не вдалося перевідкрити: {exc}"
+            self._append_log(text)
+            self.status.set(text)
+            messagebox.showerror("Автоспорт", text)
+            return
 
         if message.error is not None:
             text = f"Paper replay помилка: {message.error}"
@@ -323,13 +521,16 @@ class AutosportApp(tk.Tk):
             self.status.set("Replay worker завершився без terminal result; новий run не запускайте до перевірки workspace.")
             return
         summary = result_summary(result)
-        self.status.set(summary)
-        self._append_log(summary)
+        self.status.set(f"strategy={self.active_strategy_id}; {summary}")
+        self._append_log(f"strategy={self.active_strategy_id}; {summary}")
 
     def _refresh_tickets(self) -> None:
         self.tickets.delete(0, "end")
         if self.session is None:
-            self.tickets.insert("end", "Replay виконується; ticket state оновиться після завершення transaction.")
+            if self.replay_worker.busy:
+                self.tickets.insert("end", "Replay виконується; ticket state оновиться після завершення transaction.")
+            else:
+                self.tickets.insert("end", "Economic state недоступний до завершення strategy configuration.")
             return
         for line in ticket_lines(self.session):
             self.tickets.insert("end", line)

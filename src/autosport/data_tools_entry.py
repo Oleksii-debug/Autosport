@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 
 
-_USAGE = """Autosport-Data — portable Windows historical-data tools + research
+_USAGE = """Autosport-Data — portable Windows historical-data tools + research + recovery
 
 Usage:
   Autosport-Data.exe acquire [autosport-acquire-historical-evidence arguments]
@@ -12,6 +12,7 @@ Usage:
   Autosport-Data.exe verify-dataset <dataset-path>
   Autosport-Data.exe walk-forward-evaluate <bundle.json> [--output report.json]
   Autosport-Data.exe compare-strategies <run-summary> <run-summary> [...] [strategy-comparison arguments]
+  Autosport-Data.exe repair-workspace [--workspace <workspace-path>]
 
 Commands:
   acquire                   Capture immutable authenticated historical odds + match/result evidence.
@@ -20,10 +21,12 @@ Commands:
   verify-dataset            Verify sealed hashes and historical governance without replay.
   walk-forward-evaluate     Run the canonical strict causal walk-forward evaluator and emit machine-readable evidence.
   compare-strategies        Compare compatible completed paper strategy runs on the same sealed replay identity.
+  repair-workspace          Reconcile a late-crashed economic run using the canonical fail-closed recovery path.
 
 Truth boundaries remain fail closed: credentials, lawful retention/licensing, real sealed outcomes,
 coverage, profitability or predictive superiority, human testing, and NVDA verification are never
-inferred by this wrapper.
+inferred by this wrapper. Recovery never fabricates completion: an ambiguous workspace remains
+unresolved unless canonical transaction/base hashes prove the disposition.
 """
 
 
@@ -58,6 +61,10 @@ def main(argv: list[str] | None = None) -> int:
         from autosport.strategy_comparison import main as strategy_comparison_main
 
         return strategy_comparison_main(forwarded)
+    if command == "repair-workspace":
+        from autosport.cli import main as cli_main
+
+        return cli_main(["repair-workspace", *forwarded])
 
     print(f"Autosport-Data: unknown command {command!r}\n")
     print(_USAGE)

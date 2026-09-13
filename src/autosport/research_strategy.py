@@ -185,10 +185,15 @@ class ResearchStrategyPlan:
             ),
         )
         first_observed_quote_times: dict[str, Any] = {}
+        first_observed_event_times: dict[str, Any] = {}
+        first_observed_market_times: dict[tuple[str, str], Any] = {}
         for event in ordered:
-            first_observed_quote_times.setdefault(
-                event.quote_key,
-                parse_iso_timestamp(event.observed_ts),
+            observed_time = parse_iso_timestamp(event.observed_ts)
+            first_observed_quote_times.setdefault(event.quote_key, observed_time)
+            first_observed_event_times.setdefault(event.event_id, observed_time)
+            first_observed_market_times.setdefault(
+                (event.event_id, event.market_id),
+                observed_time,
             )
         for event in ordered:
             latest[event.quote_key] = event
@@ -198,6 +203,8 @@ class ResearchStrategyPlan:
             _validate_scenario_future_identity(
                 instruction.groups,
                 first_observed_quote_times,
+                first_observed_event_times,
+                first_observed_market_times,
                 parse_iso_timestamp(instruction.decision_ts),
             )
             _validate_market_binding(instruction, latest)
@@ -330,9 +337,11 @@ def _validate_market_binding(
 def _validate_scenario_future_identity(
     groups: tuple[ScenarioGroup, ...],
     first_observed_quote_times: dict[str, Any],
+    first_observed_event_times: dict[str, Any],
+    first_observed_market_times: dict[tuple[str, str], Any],
     decision_time,
 ) -> None:
-    """Reject exact replay identities that were not yet knowable at decision time."""
+    """Reject replay quote, event, or market identities not yet knowable at decision time."""
 
     for group in groups:
         for outcome in group.outcomes:
@@ -341,6 +350,33 @@ def _validate_scenario_future_identity(
                 raise ValueError(
                     "research scenario outcome identity first appears after decision: "
                     f"{outcome.quote_key}"
+                )
+            future_event_matches = sorted(
+                event_id
+                for event_id, first_event_observed in first_observed_event_times.items()
+                if first_event_observed > decision_time
+                and outcome.quote_key.startswith(f"{event_id}|")
+            )
+            if future_event_matches:
+                event_id = future_event_matches[0]
+                raise ValueError(
+                    "research scenario event identity first appears after decision: "
+                    f"{event_id}"
+                )
+            future_market_matches = sorted(
+                (
+                    (event_id, market_id)
+                    for (event_id, market_id), first_market_observed in first_observed_market_times.items()
+                    if first_market_observed > decision_time
+                    and outcome.quote_key.startswith(f"{event_id}|{market_id}|")
+                ),
+                key=lambda item: (item[0], item[1]),
+            )
+            if future_market_matches:
+                event_id, market_id = future_market_matches[0]
+                raise ValueError(
+                    "research scenario market identity first appears after decision: "
+                    f"{event_id}|{market_id}"
                 )
 
 

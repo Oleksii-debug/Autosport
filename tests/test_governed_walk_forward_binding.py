@@ -198,9 +198,32 @@ class GovernedWalkForwardBindingTests(unittest.TestCase):
             self.assertTrue(report["truth"]["sealed_dataset_identity_verified"])
             self.assertTrue(report["truth"]["sealed_outcomes_bound_to_forecasts"])
             self.assertTrue(report["truth"]["outcome_reveal_boundary_verified"])
-            self.assertTrue(report["truth"]["temporal_holdout_protocol_verified"])
+            self.assertTrue(report["truth"]["temporal_timestamp_constraints_verified"])
+            self.assertFalse(report["truth"]["temporal_holdout_protocol_verified"])
             self.assertFalse(report["truth"]["historical_window_market_coverage_verified"])
             self.assertFalse(report["truth"]["licensing_retention_verified"])
+            self.assertFalse(report["truth"]["profitability_claim"])
+
+    def test_outcome_perfect_backdated_json_does_not_claim_verified_holdout_protocol(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = _write_governed_dataset(root / "dataset")
+            raw = _raw_bundle(dataset)
+            # Simulate a post-outcome author writing outcome-perfect probabilities
+            # while backdating otherwise valid forecast timestamps. Without a
+            # durable pre-outcome forecast-origin proof, this must never promote
+            # temporal_holdout_protocol_verified.
+            raw["forecasts"][0]["probability"] = "0.999"
+            raw["forecasts"][1]["probability"] = "0.001"
+            raw["forecasts"][0]["provenance"] = {"fixture_attack": "authored_after_reveal"}
+            raw["forecasts"][1]["provenance"] = {"fixture_attack": "authored_after_reveal"}
+            bundle = WalkForwardBundle.from_path(_write_bundle(root, raw))
+
+            report = evaluate_walk_forward_bundle(bundle)
+
+            self.assertTrue(report["truth"]["temporal_timestamp_constraints_verified"])
+            self.assertFalse(report["truth"]["temporal_holdout_protocol_verified"])
+            self.assertFalse(report["truth"]["predictive_superiority_claim"])
             self.assertFalse(report["truth"]["profitability_claim"])
 
     def test_declared_historical_import_identity_mismatch_fails_closed(self):

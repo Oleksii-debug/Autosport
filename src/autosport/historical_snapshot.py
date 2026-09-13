@@ -35,6 +35,7 @@ class HistoricalSnapshotCapture:
     quote_count: int
     snapshot_timestamp_fallback_count: int
     market_types: tuple[str, ...]
+    provider_market_keys: tuple[str, ...]
     bookmaker_keys: tuple[str, ...]
     output_path: str
     evidence_path: str
@@ -60,8 +61,9 @@ def capture_historical_snapshot(
     timestamp is substituted for historical market time.
 
     This creates canonical market rows plus machine evidence only. It deliberately
-    does not fabricate results, settlement outcomes, licensing proof, or a replay-
-    ready schema-v2 dataset manifest.
+    does not fabricate results, settlement outcomes, licensing proof, requested-
+    market completeness, historical-window completeness, or a replay-ready schema-v2
+    dataset manifest.
     """
 
     if provider.public_preview or not provider.api_key:
@@ -106,6 +108,7 @@ def capture_historical_snapshot(
     normalizer = CanonicalNormalizer()
     events: list[MarketEvent] = []
     fallback_count = 0
+    provider_market_keys: set[str] = set()
     bookmaker_keys: set[str] = set()
     dedupe_keys: set[str] = set()
 
@@ -118,6 +121,9 @@ def capture_historical_snapshot(
             bookmaker = str(causal_quote.metadata.get("bookmaker_key") or "").strip()
             if bookmaker:
                 bookmaker_keys.add(bookmaker)
+            provider_market_key = str(causal_quote.metadata.get("market_key") or "").strip()
+            if provider_market_key:
+                provider_market_keys.add(provider_market_key)
             event = normalizer.normalize(provider.source_id, causal_quote)
             event = replace(event, ingest_ts=captured_at)
             if event.dedupe_key in dedupe_keys:
@@ -148,7 +154,10 @@ def capture_historical_snapshot(
         "market_sha256": market_sha256,
         "quote_count": len(events),
         "has_data": bool(events),
-        "market_types": list(market_types),
+        "requested_regions": list(provider.regions),
+        "requested_markets": list(provider.markets),
+        "observed_market_types": list(market_types),
+        "observed_provider_market_keys": sorted(provider_market_keys),
         "bookmaker_keys": sorted(bookmaker_keys),
         "snapshot_timestamp_fallback_count": fallback_count,
         "source_time_semantics": {
@@ -156,7 +165,9 @@ def capture_historical_snapshot(
             "fallback": "provider_historical_snapshot_timestamp",
             "wall_clock_used_as_historical_market_time": False,
         },
-        "point_in_time_odds_market_coverage_verified": bool(events),
+        "point_in_time_snapshot_data_observed": bool(events),
+        "requested_market_set_complete_verified": False,
+        "historical_window_coverage_verified": False,
         "sealed_outcomes_present": False,
         "replay_corpus_ready": False,
         "terms_reference": TERMS_REFERENCE,
@@ -179,6 +190,7 @@ def capture_historical_snapshot(
         quote_count=len(events),
         snapshot_timestamp_fallback_count=fallback_count,
         market_types=market_types,
+        provider_market_keys=tuple(sorted(provider_market_keys)),
         bookmaker_keys=tuple(sorted(bookmaker_keys)),
         output_path=str(output),
         evidence_path=str(evidence),
@@ -240,7 +252,8 @@ def _atomic_write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
                 handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
                 handle.write("\n")
             handle.flush()
-        temporary.replace(path)
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -298,10 +311,11 @@ def main(argv: list[str] | None = None) -> int:
         f"snapshot_at={report.snapshot_at} fallback_source_times={report.snapshot_timestamp_fallback_count}"
     )
     print(
-        "point_in_time_odds_market_coverage_verified=" + str(report.has_data).lower()
+        "point_in_time_snapshot_data_observed=" + str(report.has_data).lower()
+        + " requested_market_set_complete_verified=false historical_window_coverage_verified=false"
         + " sealed_outcomes_present=false replay_corpus_ready=false"
     )
-    print("licensing_or_retention_verified=false real_money_execution=false")
+    print("licensing_or_retention_verified=false redistribution_verified=false real_money_execution=false")
     print(f"market={report.output_path}")
     print(f"evidence={report.evidence_path}")
     return 0 if report.has_data else 6

@@ -66,13 +66,44 @@ class HistoricalGovernanceAuthorityTests(unittest.TestCase):
         )
         return proof_path, authority_path
 
+    @staticmethod
+    def _governance_argument(args: list[str]) -> Path:
+        for index, value in enumerate(args):
+            if value == "--governance-proof":
+                return Path(args[index + 1])
+            if value.startswith("--governance-proof="):
+                return Path(value.split("=", 1)[1])
+        raise AssertionError("delegated args did not contain --governance-proof")
+
     def test_valid_binding_hashes_and_matches_claims(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proof_path, authority_path = self._write_bound_pair(Path(tmp))
             binding = verify_governance_authority_binding(proof_path)
-            self.assertEqual(binding.governance_proof_sha256, hashlib.sha256(proof_path.read_bytes()).hexdigest())
-            self.assertEqual(binding.authority_record_sha256, hashlib.sha256(authority_path.read_bytes()).hexdigest())
+            self.assertEqual(
+                binding.governance_proof_sha256,
+                hashlib.sha256(proof_path.read_bytes()).hexdigest(),
+            )
+            self.assertEqual(
+                binding.authority_record_sha256,
+                hashlib.sha256(authority_path.read_bytes()).hexdigest(),
+            )
             self.assertEqual(binding.recorded_by, "release-owner")
+
+    def test_binding_reads_each_source_artifact_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proof_path, authority_path = self._write_bound_pair(Path(tmp))
+            original_read_bytes = Path.read_bytes
+            reads: list[Path] = []
+
+            def tracked_read_bytes(path: Path) -> bytes:
+                reads.append(path)
+                return original_read_bytes(path)
+
+            with patch.object(Path, "read_bytes", tracked_read_bytes):
+                verify_governance_authority_binding(proof_path)
+
+            self.assertEqual(reads.count(proof_path), 1)
+            self.assertEqual(reads.count(authority_path), 1)
 
     def test_bare_self_declared_proof_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -165,16 +196,62 @@ class HistoricalGovernanceAuthorityTests(unittest.TestCase):
             self.assertEqual(rc, 3)
             delegated.assert_not_called()
 
-    def test_both_wrappers_delegate_only_after_binding_passes(self) -> None:
+    def test_both_wrappers_delegate_only_frozen_verified_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            proof_path, _ = self._write_bound_pair(Path(tmp))
+            proof_path, authority_path = self._write_bound_pair(Path(tmp))
+            expected_proof = proof_path.read_bytes()
+            expected_authority = authority_path.read_bytes()
             args = ["--governance-proof", str(proof_path), "--sentinel"]
-            with patch("autosport.historical_corpus.main", return_value=17) as delegated:
+
+            def assert_frozen(delegated_args: list[str], result: int) -> int:
+                frozen_proof = self._governance_argument(delegated_args)
+                self.assertNotEqual(frozen_proof, proof_path)
+                self.assertEqual(frozen_proof.read_bytes(), expected_proof)
+                self.assertEqual(
+                    (frozen_proof.parent / authority_path.name).read_bytes(),
+                    expected_authority,
+                )
+                self.assertIn("--sentinel", delegated_args)
+                return result
+
+            with patch(
+                "autosport.historical_corpus.main",
+                side_effect=lambda delegated_args: assert_frozen(delegated_args, 17),
+            ) as delegated:
                 self.assertEqual(corpus_main(args), 17)
-                delegated.assert_called_once_with(args)
-            with patch("autosport.historical_bundle_corpus.main", return_value=23) as delegated:
+                delegated.assert_called_once()
+            with patch(
+                "autosport.historical_bundle_corpus.main",
+                side_effect=lambda delegated_args: assert_frozen(delegated_args, 23),
+            ) as delegated:
                 self.assertEqual(bundle_corpus_main(args), 23)
-                delegated.assert_called_once_with(args)
+                delegated.assert_called_once()
+
+    def test_source_replacement_after_verification_cannot_change_delegated_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proof_path, authority_path = self._write_bound_pair(Path(tmp))
+            expected_proof = proof_path.read_bytes()
+            expected_authority = authority_path.read_bytes()
+            expected_proof_sha = hashlib.sha256(expected_proof).hexdigest()
+            args = ["--governance-proof", str(proof_path)]
+
+            def replace_originals_then_assert_frozen(delegated_args: list[str]) -> int:
+                proof_path.write_text('{"tampered": true}', encoding="utf-8")
+                authority_path.write_text('{"tampered": true}', encoding="utf-8")
+                frozen_proof = self._governance_argument(delegated_args)
+                frozen_authority = frozen_proof.parent / authority_path.name
+                self.assertEqual(frozen_proof.read_bytes(), expected_proof)
+                self.assertEqual(frozen_authority.read_bytes(), expected_authority)
+                binding = verify_governance_authority_binding(frozen_proof)
+                self.assertEqual(binding.governance_proof_sha256, expected_proof_sha)
+                return 31
+
+            with patch(
+                "autosport.historical_corpus.main",
+                side_effect=replace_originals_then_assert_frozen,
+            ) as delegated:
+                self.assertEqual(corpus_main(args), 31)
+                delegated.assert_called_once()
 
     def test_help_bypasses_governance_gate_without_running_a_build(self) -> None:
         for entrypoint, target in (

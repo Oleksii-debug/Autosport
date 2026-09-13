@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from dataclasses import dataclass
+import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 
 _AUTHORITY_RECORD_KIND = "historical_corpus_governance_authority_record"
@@ -34,30 +36,30 @@ class GovernanceAuthorityBinding:
     evidence_reference: str
     verification_method: str
     recorded_by: str
+    authority_record_file: str
+    governance_proof_bytes: bytes = field(repr=False)
+    authority_record_bytes: bytes = field(repr=False)
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
 
 
-def _object_with_digest(path: Path, *, context: str) -> tuple[dict[str, Any], str]:
-    """Parse and hash one immutable byte snapshot of an evidence artifact."""
-
+def _read_bytes(path: Path, *, context: str) -> bytes:
     try:
-        payload = path.read_bytes()
+        return path.read_bytes()
     except OSError as exc:
-        raise ValueError(f"{context} is not readable valid JSON: {path}") from exc
+        raise ValueError(f"{context} is not readable: {path}") from exc
+
+
+def _object_bytes(payload: bytes, *, context: str, path: Path) -> dict[str, Any]:
     try:
         raw = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{context} is not readable valid JSON: {path}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"{context} must be a JSON object")
-    return raw, hashlib.sha256(payload).hexdigest()
+    return raw
 
 
 def _text(raw: dict[str, Any], key: str, *, context: str) -> str:
@@ -100,16 +102,18 @@ def _normalized_source_ids(raw: Any, *, context: str) -> tuple[str, ...]:
 def verify_governance_authority_binding(
     governance_proof_path: str | Path,
 ) -> GovernanceAuthorityBinding:
-    """Verify that a rights/retention claim is content-bound to a sibling evidence record.
+    """Verify that rights/retention claims are bound to the exact evidence bytes consumed.
 
-    This is a provenance/integrity gate, not a legal opinion. It prevents the canonical
-    product entrypoints from accepting a bare governance JSON that simply flips
-    ``licensing_or_retention_verified`` to true with unbound free-text references.
-    The authority record remains external input and must represent real, lawful evidence.
+    This is a provenance/integrity gate, not a legal opinion. The proof and authority
+    record are each read exactly once; parsing, claim checks and digests all derive from
+    those same byte snapshots so a path replacement cannot make hashing and parsing
+    observe different content.
     """
 
     proof_path = Path(governance_proof_path)
-    proof, proof_sha256 = _object_with_digest(proof_path, context="governance proof")
+    proof_bytes = _read_bytes(proof_path, context="governance proof")
+    proof = _object_bytes(proof_bytes, context="governance proof", path=proof_path)
+    proof_sha256 = _sha256_bytes(proof_bytes)
     if int(proof.get("schema_version", 0)) != 1:
         raise ValueError("governance proof schema_version must be 1")
     if proof.get("kind") != _GOVERNANCE_PROOF_KIND:
@@ -132,15 +136,18 @@ def verify_governance_authority_binding(
         authority_record_file,
         field="governance proof.authority_record_file",
     )
-    authority, actual_authority_sha256 = _object_with_digest(
-        authority_path,
-        context="governance authority record",
-    )
+    authority_bytes = _read_bytes(authority_path, context="governance authority record")
+    actual_authority_sha256 = _sha256_bytes(authority_bytes)
     if actual_authority_sha256 != authority_record_sha256:
         raise ValueError(
             "governance proof.authority_record_sha256 does not match authority evidence artifact"
         )
 
+    authority = _object_bytes(
+        authority_bytes,
+        context="governance authority record",
+        path=authority_path,
+    )
     if int(authority.get("schema_version", 0)) != 1:
         raise ValueError("governance authority record schema_version must be 1")
     if authority.get("kind") != _AUTHORITY_RECORD_KIND:
@@ -158,12 +165,12 @@ def verify_governance_authority_binding(
     if proof_source_ids != authority_source_ids:
         raise ValueError("governance proof source_ids do not match authority evidence artifact")
 
-    for field in _BOUND_FIELDS:
-        if field == "source_ids":
+    for bound_field in _BOUND_FIELDS:
+        if bound_field == "source_ids":
             continue
-        if proof.get(field) != authority.get(field):
+        if proof.get(bound_field) != authority.get(bound_field):
             raise ValueError(
-                f"governance proof.{field} does not match authority evidence artifact"
+                f"governance proof.{bound_field} does not match authority evidence artifact"
             )
 
     evidence_reference = _text(
@@ -190,6 +197,9 @@ def verify_governance_authority_binding(
         evidence_reference=evidence_reference,
         verification_method=verification_method,
         recorded_by=recorded_by,
+        authority_record_file=authority_record_file,
+        governance_proof_bytes=proof_bytes,
+        authority_record_bytes=authority_bytes,
     )
 
 
@@ -218,6 +228,36 @@ def _argument_value(argv: Sequence[str], flag: str) -> str | None:
     return values[0]
 
 
+def _replace_argument_value(argv: Sequence[str], flag: str, replacement: str) -> list[str]:
+    prefix = f"{flag}="
+    forwarded: list[str] = []
+    index = 0
+    replaced = False
+    while index < len(argv):
+        value = argv[index]
+        if value == flag:
+            if index + 1 >= len(argv):
+                raise ValueError(f"{flag} requires a value")
+            if replaced:
+                raise ValueError(f"{flag} must be provided exactly once")
+            forwarded.extend((flag, replacement))
+            replaced = True
+            index += 2
+            continue
+        if value.startswith(prefix):
+            if replaced:
+                raise ValueError(f"{flag} must be provided exactly once")
+            forwarded.append(f"{prefix}{replacement}")
+            replaced = True
+            index += 1
+            continue
+        forwarded.append(value)
+        index += 1
+    if not replaced:
+        raise ValueError(f"{flag} is required before rights provenance can be verified")
+    return forwarded
+
+
 def _help_requested(argv: Sequence[str]) -> bool:
     return any(value in {"-h", "--help"} for value in argv)
 
@@ -229,6 +269,47 @@ def _require_bound_governance(argv: Sequence[str]) -> GovernanceAuthorityBinding
     return verify_governance_authority_binding(proof)
 
 
+@contextmanager
+def _frozen_governance_args(
+    argv: Sequence[str],
+    binding: GovernanceAuthorityBinding,
+) -> Iterator[list[str]]:
+    """Delegate only a private snapshot of the exact bytes that passed verification.
+
+    The canonical assemblers may reopen their input path, but that path is no longer the
+    caller-controlled source path. It is a private temporary copy written from the exact
+    proof/authority byte snapshots used for digest and claim verification above. Replacing
+    the original files after verification therefore cannot change what the assembler parses
+    or hashes. The snapshot digests are checked before and after canonical assembly.
+    """
+
+    with tempfile.TemporaryDirectory(prefix="autosport-governance-") as tmp:
+        root = Path(tmp)
+        proof_path = root / "governance-proof.json"
+        authority_path = root / binding.authority_record_file
+        if authority_path == proof_path:
+            raise ValueError("authority record file must differ from governance proof file")
+        proof_path.write_bytes(binding.governance_proof_bytes)
+        authority_path.write_bytes(binding.authority_record_bytes)
+
+        if _sha256_bytes(proof_path.read_bytes()) != binding.governance_proof_sha256:
+            raise ValueError("frozen governance proof bytes do not match verified digest")
+        if _sha256_bytes(authority_path.read_bytes()) != binding.authority_record_sha256:
+            raise ValueError("frozen governance authority bytes do not match verified digest")
+
+        frozen = _replace_argument_value(
+            argv,
+            "--governance-proof",
+            str(proof_path),
+        )
+        yield frozen
+
+        if _sha256_bytes(proof_path.read_bytes()) != binding.governance_proof_sha256:
+            raise ValueError("frozen governance proof changed during canonical assembly")
+        if _sha256_bytes(authority_path.read_bytes()) != binding.authority_record_sha256:
+            raise ValueError("frozen governance authority changed during canonical assembly")
+
+
 def corpus_main(argv: list[str] | None = None) -> int:
     from .historical_corpus import main as canonical_main
 
@@ -236,11 +317,12 @@ def corpus_main(argv: list[str] | None = None) -> int:
     if _help_requested(forwarded):
         return canonical_main(forwarded)
     try:
-        _require_bound_governance(forwarded)
+        binding = _require_bound_governance(forwarded)
+        with _frozen_governance_args(forwarded, binding) as frozen:
+            return canonical_main(frozen)
     except (ValueError, OSError) as exc:
         print(f"historical_corpus=FAIL_CLOSED error={exc}")
         return 3
-    return canonical_main(forwarded)
 
 
 def bundle_corpus_main(argv: list[str] | None = None) -> int:
@@ -250,8 +332,9 @@ def bundle_corpus_main(argv: list[str] | None = None) -> int:
     if _help_requested(forwarded):
         return canonical_main(forwarded)
     try:
-        _require_bound_governance(forwarded)
+        binding = _require_bound_governance(forwarded)
+        with _frozen_governance_args(forwarded, binding) as frozen:
+            return canonical_main(frozen)
     except (ValueError, OSError) as exc:
         print(f"historical_bundle_corpus=FAIL_CLOSED error={exc}")
         return 3
-    return canonical_main(forwarded)

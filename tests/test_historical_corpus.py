@@ -75,11 +75,24 @@ def _write_results(
     provenance_overrides: dict | None = None,
 ) -> Path:
     path = root / "sealed-results.json"
+    source_record = root / "official-outcome-source-record.json"
+    source_record.write_text(
+        json.dumps(
+            {
+                "source": "official-results:test-fixture",
+                "events": list(event_ids),
+                "fixture_only": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     provenance = {
         "schema_version": 1,
         "kind": "historical_outcome_provenance",
         "source_identity": "official-results:test-fixture",
-        "source_record_sha256": "2" * 64,
+        "source_record_file": source_record.name,
+        "source_record_sha256": _sha256(source_record),
         "terms_reference": "https://example.test/results-terms",
         "retention_basis": "verified internal research retention for test outcome record",
         "authority_reference": "test-outcome-authority-record",
@@ -163,7 +176,13 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
             self.assertTrue(acquisition["licensing_or_retention_verified"])
             self.assertEqual(acquisition["rights_source_ids"], [ParlayApiTableTennisProvider.source_id])
             self.assertEqual(acquisition["governance_proof_sha256"], _sha256(proof))
-            self.assertEqual(outcome_evidence["source_record_sha256"], "2" * 64)
+            self.assertEqual(outcome_evidence["source_record_file"], "official-outcome-source-record.json")
+            self.assertEqual(
+                outcome_evidence["source_record_sha256"],
+                _sha256(root / "official-outcome-source-record.json"),
+            )
+            self.assertTrue(outcome_evidence["source_record_checksum_verified"])
+            self.assertFalse(outcome_evidence["source_record_redistributed"])
             self.assertEqual(outcome_evidence["available_at"], "2026-01-01T11:00:00+00:00")
             self.assertTrue(outcome_evidence["licensing_or_retention_verified"])
             self.assertEqual(
@@ -377,6 +396,25 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
                 )
             self.assertFalse(output.exists())
 
+    def test_missing_outcome_source_artifact_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            results = _write_results(root, "tt-a")
+            (root / "official-outcome-source-record.json").unlink()
+            output = root / "corpus"
+            with self.assertRaisesRegex(ValueError, "source record is not readable"):
+                assemble_historical_corpus(
+                    [snapshot],
+                    results_path=results,
+                    governance_proof_path=_write_governance(root),
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
+
     def test_outcome_availability_after_reveal_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -435,6 +473,28 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
             )
             output = root / "corpus"
             with self.assertRaisesRegex(ValueError, "64-character SHA-256"):
+                assemble_historical_corpus(
+                    [snapshot],
+                    results_path=results,
+                    governance_proof_path=_write_governance(root),
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
+
+    def test_mismatched_outcome_source_checksum_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            results = _write_results(
+                root,
+                "tt-a",
+                provenance_overrides={"source_record_sha256": "f" * 64},
+            )
+            output = root / "corpus"
+            with self.assertRaisesRegex(ValueError, "does not match source record artifact"):
                 assemble_historical_corpus(
                     [snapshot],
                     results_path=results,

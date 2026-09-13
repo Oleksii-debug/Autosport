@@ -44,14 +44,20 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _object(path: Path, *, context: str) -> dict[str, Any]:
+def _object_with_digest(path: Path, *, context: str) -> tuple[dict[str, Any], str]:
+    """Parse and hash one immutable byte snapshot of an evidence artifact."""
+
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"{context} is not readable valid JSON: {path}") from exc
+    try:
+        raw = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{context} is not readable valid JSON: {path}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"{context} must be a JSON object")
-    return raw
+    return raw, hashlib.sha256(payload).hexdigest()
 
 
 def _text(raw: dict[str, Any], key: str, *, context: str) -> str:
@@ -103,7 +109,7 @@ def verify_governance_authority_binding(
     """
 
     proof_path = Path(governance_proof_path)
-    proof = _object(proof_path, context="governance proof")
+    proof, proof_sha256 = _object_with_digest(proof_path, context="governance proof")
     if int(proof.get("schema_version", 0)) != 1:
         raise ValueError("governance proof schema_version must be 1")
     if proof.get("kind") != _GOVERNANCE_PROOF_KIND:
@@ -126,13 +132,15 @@ def verify_governance_authority_binding(
         authority_record_file,
         field="governance proof.authority_record_file",
     )
-    actual_authority_sha256 = _sha256(authority_path)
+    authority, actual_authority_sha256 = _object_with_digest(
+        authority_path,
+        context="governance authority record",
+    )
     if actual_authority_sha256 != authority_record_sha256:
         raise ValueError(
             "governance proof.authority_record_sha256 does not match authority evidence artifact"
         )
 
-    authority = _object(authority_path, context="governance authority record")
     if int(authority.get("schema_version", 0)) != 1:
         raise ValueError("governance authority record schema_version must be 1")
     if authority.get("kind") != _AUTHORITY_RECORD_KIND:
@@ -176,7 +184,7 @@ def verify_governance_authority_binding(
 
     return GovernanceAuthorityBinding(
         governance_proof=str(proof_path),
-        governance_proof_sha256=_sha256(proof_path),
+        governance_proof_sha256=proof_sha256,
         authority_record=str(authority_path),
         authority_record_sha256=authority_record_sha256,
         evidence_reference=evidence_reference,

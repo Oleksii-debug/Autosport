@@ -45,6 +45,11 @@ class PaperValueAgent:
     def on_market_event(self, event: MarketEvent, context: AgentContext) -> None:
         if event.quote_key in self._acted or event.status != "open":
             return
+        # Some historical providers expose observational prices rather than executable
+        # back/lay availability.  An explicit negative execution-truth assertion must
+        # therefore fail closed before virtual fill economics are calculated.
+        if event.metadata.get("execution_quote_verified") is False:
+            return
         forecast = self.forecasts.get(event.quote_key)
         if forecast is None:
             return

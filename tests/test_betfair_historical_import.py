@@ -209,6 +209,23 @@ class BetfairHistoricalImportTests(unittest.TestCase):
                     retention_basis="test-retention",
                 )
 
+    def test_unmapped_requested_market_type_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "market.bz2"
+            _write_bz2(source, _stream_lines())
+
+            with self.assertRaisesRegex(ValueError, "unsupported Betfair market type"):
+                import_betfair_historical(
+                    [source],
+                    root / "dataset",
+                    acquired_at="2026-02-10T13:30:00Z",
+                    imported_at="2026-02-10T14:00:00Z",
+                    terms_reference="test-rights",
+                    retention_basis="test-retention",
+                    allowed_market_types=("OVER_UNDER_25",),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

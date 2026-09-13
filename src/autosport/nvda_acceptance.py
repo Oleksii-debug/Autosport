@@ -19,6 +19,10 @@ _EXE_MEMBER = "Autosport-V1/Autosport.exe"
 _REQUIRED_CHECKS = (
     ("window_initial_focus", "Main window and initial focus are announced clearly by NVDA."),
     ("primary_tab_flow", "Tab/Shift+Tab primary flow exposes name, role and state without traps."),
+    (
+        "strategy_replay_settings",
+        "Keyboard-only strategy, research-plan, replay-speed and live-mode controls expose current selection/state and validation errors clearly through NVDA.",
+    ),
     ("baseline_replay", "Packaged baseline replay state/completion/error is available without visual reading."),
     ("evidence_surfaces", "F6/F7/F8 ticket, live quote and Evaluation surfaces receive predictable accessible focus."),
     ("research_missing_plan_error", "Research replay without a plan fails closed with an NVDA-accessible reason."),

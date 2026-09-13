@@ -12,7 +12,7 @@
 10. Ctrl+O — вибрати dataset; Ctrl+R — запустити replay; Ctrl+L — оновити live snapshot; F6 — paper tickets; F7 — live quotes. Strategy combobox і кнопка research plan входять у Tab traversal та мають UIA names/descriptions.
 11. Віртуальний банк, рішення, market history, source health та run summaries зберігаються у локальному Autosport workspace і відновлюються після перезапуску. Economic history різних strategy/plan identities ізольована у strategy-specific workspaces.
 
-PORTABLE HISTORICAL DATA TOOLS
+PORTABLE DATA / RESEARCH TOOLS
 
 12. У цій самій папці ZIP є Autosport-Data.exe — console tool, доступний з Windows Terminal / PowerShell і придатний для клавіатурної роботи та читання stdout screen reader-ом. Команда довідки: .\Autosport-Data.exe --help
 13. Перевірити dataset без replay: .\Autosport-Data.exe verify-dataset .\examples\tt_demo
@@ -20,6 +20,10 @@ PORTABLE HISTORICAL DATA TOOLS
 15. Команда build-corpus запускає fail-closed canonical corpus assembly: .\Autosport-Data.exe build-corpus --help. Вона вимагає окремі sealed outcomes і зовнішній governance proof; без них replay-ready historical corpus не оголошується.
 16. Для bundle, створеного командою acquire, використовуйте canonical adapter: .\Autosport-Data.exe build-corpus-from-bundle --help. Adapter перевіряє bundle identity і bound evidence перед передачею у той самий corpus assembler; opaque provider result rows не перетворюються автоматично на sealed outcomes.
 17. Autosport-Data.exe не виконує реальні ставки і не містить bookmaker execution/funding/withdrawal path.
+
+STRATEGY COMPARISON
+
+18. Для fail-closed порівняння двох або більше completed strategy run summaries на тому самому sealed dataset відкрийте PowerShell у папці програми та виконайте: .\Autosport-Data.exe compare-strategies <run-summary-1.json> <run-summary-2.json> --baseline-strategy baseline-v1 --output strategy-comparison.json. Команда приймає лише сумісні canonical run summaries і записує machine-readable report; observed paper ordering не є доказом profitability, predictive superiority або out-of-sample переваги.
 
 Live observation є read-only. Paper/replay функції використовують лише віртуальний банк. Програма не виконує реальні грошові ставки і не має механізму керування букмекерським рахунком, поповнення або виведення коштів.
 

@@ -11,6 +11,7 @@ from .dataset import load_dataset
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .paths import default_workspace
+from .replay_worker import OneShotReplayWorker, run_workspace_dataset_once
 from .session import AutosportSession
 from .ui_model import (
     observation_quote_lines,
@@ -51,7 +52,9 @@ class AutosportApp(tk.Tk):
         self.geometry("960x800")
         self.minsize(760, 620)
         self.dataset_path: Path | None = None
-        self.session = AutosportSession(default_workspace(), "10000")
+        self.workspace = default_workspace()
+        self.session: AutosportSession | None = AutosportSession(self.workspace, "10000")
+        self.replay_worker = OneShotReplayWorker()
         self.live_worker = OneShotObservationWorker()
         self._closing = False
         self.status = tk.StringVar(value="Готово. Виберіть папку replay dataset або оновіть live snapshot.")
@@ -151,6 +154,8 @@ class AutosportApp(tk.Tk):
             tk_uia.set_automation_id(widget, automation_id)
 
     def _bank_text(self) -> str:
+        if self.session is None:
+            return f"Віртуальний банк: оновлюється після replay; workspace: {self.workspace}"
         return (
             f"Віртуальний банк: {self.session.book.balance}; "
             f"committed: {self.session.book.committed_stake}; "
@@ -158,6 +163,9 @@ class AutosportApp(tk.Tk):
         )
 
     def choose_dataset(self) -> None:
+        if self.replay_worker.busy:
+            self.status.set("Replay уже виконується; вибір іншого dataset доступний після завершення поточного run.")
+            return
         selected = filedialog.askdirectory(title="Вибрати папку Autosport replay dataset")
         if not selected:
             return
@@ -175,12 +183,15 @@ class AutosportApp(tk.Tk):
     def refresh_live_snapshot(self) -> None:
         if self._closing:
             return
+        if self.replay_worker.busy:
+            self.live_status.set("Live snapshot відкладено: economic replay уже виконується у цьому workspace.")
+            return
         mode = self.live_mode_text.get()
         public_preview = _LIVE_MODES.get(mode)
         if public_preview is None:
             self.live_status.set("Невідомий live режим; snapshot не запущено.")
             return
-        workspace = Path(self.session.workspace)
+        workspace = self.workspace
 
         def task():
             api_key = None if public_preview else os.environ.get("AUTOSPORT_PARLAYAPI_KEY")
@@ -232,34 +243,112 @@ class AutosportApp(tk.Tk):
         self.log.insert("end", text + "\n")
         self.log.see("end")
 
+    def _set_replay_controls_busy(self, busy: bool) -> None:
+        if busy:
+            self.choose_button.state(["disabled"])
+            self.run_button.state(["disabled"])
+            self.speed.configure(state="disabled")
+            self.live_mode.configure(state="disabled")
+            self.live_refresh_button.state(["disabled"])
+            return
+        self.choose_button.state(["!disabled"])
+        self.run_button.state(["!disabled"])
+        self.speed.configure(state="readonly")
+        self.live_mode.configure(state="readonly")
+        self.live_refresh_button.state(["!disabled"])
+
     def run_dataset(self) -> None:
         if not self.dataset_path:
             messagebox.showinfo("Автоспорт", "Спочатку виберіть dataset.")
             return
-        try:
-            dataset = load_dataset(self.dataset_path)
-            speed = _SPEEDS[self.speed_text.get()]
-            self.status.set("Replay виконується. Strategy agents не мають доступу до sealed results.")
-            self.update_idletasks()
-            result = self.session.run_dataset(dataset, speed=speed)
-            summary = result_summary(result)
-            self.status.set(summary)
-            self._append_log(summary)
-            self.bank.set(self._bank_text())
-            self._refresh_tickets()
-        except Exception as exc:
-            messagebox.showerror("Автоспорт", str(exc))
-            self.status.set("Replay завершився помилкою; стан збережено fail-safe настільки, наскільки дозволив завершений transaction boundary.")
+        if self.replay_worker.busy:
+            self.status.set("Paper replay уже виконується; дочекайтеся його terminal state.")
+            return
+        if self.live_worker.busy:
+            self.status.set("Live snapshot ще виконується; paper replay почнеться лише після його завершення.")
+            return
+
+        dataset_path = self.dataset_path
+        speed = _SPEEDS[self.speed_text.get()]
+        if self.session is not None:
+            self.session.close()
+            self.session = None
+
+        def task():
+            return run_workspace_dataset_once(
+                self.workspace,
+                dataset_path,
+                initial_bankroll="10000",
+                speed=speed,
+            )
+
+        if not self.replay_worker.start(task):
+            self.session = AutosportSession(self.workspace, "10000")
+            self.status.set("Paper replay уже виконується; новий run не запущено.")
+            return
+
+        self._set_replay_controls_busy(True)
+        self.bank.set(self._bank_text())
+        self._refresh_tickets()
+        self.status.set(
+            "Replay виконується у фоновому worker. Клавіатура, фокус, F6/F7 і журнал залишаються доступними; "
+            "закриття програми заблоковано до завершення economic transaction boundary."
+        )
+        self._append_log("Paper replay запущено у background worker; Tk/UIA thread не блокується.")
+        self.after(100, self._poll_replay_worker)
+
+    def _poll_replay_worker(self) -> None:
+        message = self.replay_worker.poll()
+        if message is None:
+            self.after(100, self._poll_replay_worker)
+            return
+
+        self._set_replay_controls_busy(False)
+        self.session = AutosportSession(self.workspace, "10000")
+        self.bank.set(self._bank_text())
+        self._refresh_tickets()
+
+        if message.error is not None:
+            text = f"Paper replay помилка: {message.error}"
+            self._append_log(text)
+            self.status.set(
+                "Replay завершився помилкою; UI знову доступний. Якщо workspace має unresolved transaction, "
+                "виконайте repair-workspace перед наступним economic run."
+            )
+            messagebox.showerror("Автоспорт", text)
+            return
+
+        result = message.result
+        if result is None:
+            self.status.set("Replay worker завершився без terminal result; новий run не запускайте до перевірки workspace.")
+            return
+        summary = result_summary(result)
+        self.status.set(summary)
+        self._append_log(summary)
 
     def _refresh_tickets(self) -> None:
         self.tickets.delete(0, "end")
+        if self.session is None:
+            self.tickets.insert("end", "Replay виконується; ticket state оновиться після завершення transaction.")
+            return
         for line in ticket_lines(self.session):
             self.tickets.insert("end", line)
 
     def close_app(self) -> None:
+        if self.replay_worker.busy:
+            text = (
+                "Paper replay ще виконується. Закриття програми заблоковано до завершення economic transaction boundary, "
+                "щоб процес не обірвав commit у довільній точці."
+            )
+            self.status.set(text)
+            self._append_log(text)
+            self.bell()
+            return
         self._closing = True
         try:
-            self.session.close()
+            if self.session is not None:
+                self.session.close()
+                self.session = None
         finally:
             self.destroy()
 

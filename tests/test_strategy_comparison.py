@@ -33,6 +33,8 @@ class StrategyComparisonTests(unittest.TestCase):
             "transaction_schema_version": RunTransaction.SCHEMA_VERSION,
             "transaction_run_id": run_id,
             "run_id": run_id,
+            "paper_book_sha256": "5" * 64,
+            "decision_ledger_sha256": "6" * 64,
             "dataset_name": "licensed-table-tennis-slice",
             "sport": "table_tennis",
             "dataset_schema_version": 2,
@@ -50,9 +52,11 @@ class StrategyComparisonTests(unittest.TestCase):
                 "opens_paper_tickets": True,
                 "research_plan_sha256": None,
             },
+            "balance": final_balance,
             "evaluation": {
                 "initial_bankroll": "10000",
                 "final_balance": final_balance,
+                "committed_stake": "0",
                 "settled_stake": "500",
                 "net_profit": net_profit,
                 "roi": roi,
@@ -172,7 +176,7 @@ class StrategyComparisonTests(unittest.TestCase):
                     strategy_id="baseline-v1",
                     canonical_strategy_id="baseline-v1",
                     net_profit="1",
-                    roi="0.01",
+                    roi="0.002",
                     final_balance="10001",
                     run_id="run-b",
                 )
@@ -210,6 +214,71 @@ class StrategyComparisonTests(unittest.TestCase):
             payload["transaction_schema_version"] = RunTransaction.SCHEMA_VERSION + 1
             path.write_text(json.dumps(payload), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "canonical transaction schema"):
+                load_strategy_run_summary(path)
+
+    def test_loader_rejects_missing_durable_economic_hash(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._summary(
+                Path(temp) / "missing-hash.json",
+                strategy_id="baseline-v1",
+                canonical_strategy_id="baseline-v1",
+                net_profit="0",
+                roi="0",
+                final_balance="10000",
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload.pop("paper_book_sha256")
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "paper_book_sha256"):
+                load_strategy_run_summary(path)
+
+    def test_loader_rejects_evaluation_balance_divergence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._summary(
+                Path(temp) / "bad-balance.json",
+                strategy_id="baseline-v1",
+                canonical_strategy_id="baseline-v1",
+                net_profit="25",
+                roi="0.05",
+                final_balance="10025",
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["evaluation"]["final_balance"] = "999999"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "final_balance does not match canonical run balance"):
+                load_strategy_run_summary(path)
+
+    def test_loader_rejects_profit_identity_divergence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._summary(
+                Path(temp) / "bad-profit.json",
+                strategy_id="baseline-v1",
+                canonical_strategy_id="baseline-v1",
+                net_profit="25",
+                roi="0.05",
+                final_balance="10025",
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["evaluation"]["net_profit"] = "40"
+            payload["evaluation"]["roi"] = "0.08"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "committed_stake"):
+                load_strategy_run_summary(path)
+
+    def test_loader_rejects_roi_inconsistent_with_profit_and_settled_stake(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._summary(
+                Path(temp) / "bad-roi.json",
+                strategy_id="baseline-v1",
+                canonical_strategy_id="baseline-v1",
+                net_profit="25",
+                roi="0.05",
+                final_balance="10025",
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["evaluation"]["roi"] = "99"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "roi does not match net_profit / settled_stake"):
                 load_strategy_run_summary(path)
 
     def test_module_cli_writes_machine_report(self):

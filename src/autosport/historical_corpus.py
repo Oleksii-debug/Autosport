@@ -295,6 +295,20 @@ def assemble_historical_corpus(
     results = _json_object(Path(results_path), context="sealed results")
     if int(results.get("schema_version", 0)) != 1:
         raise ValueError("sealed results schema_version must be 1")
+    declared_reveal = results.get("outcome_reveal_after")
+    if declared_reveal is not None:
+        declared_reveal_dt = _timestamp(
+            declared_reveal,
+            field="sealed results.outcome_reveal_after",
+        )
+        if declared_reveal_dt != reveal_dt:
+            raise ValueError(
+                "sealed results outcome_reveal_after conflicts with requested causal reveal boundary"
+            )
+    # The canonical assembled package always content-binds the causal reveal instant
+    # into the sealed-results file. results_sha256 therefore changes if this boundary
+    # changes, and the shared schema-v2 loader checks it against governance.
+    results = {**results, "outcome_reveal_after": outcome_reveal_after}
     outcomes = results.get("quote_outcomes")
     if not isinstance(outcomes, dict):
         raise ValueError("sealed results quote_outcomes must be an object")

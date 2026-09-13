@@ -33,6 +33,7 @@ def _definition(*, status: str, bet_delay: int = 0) -> dict:
         "eventName": "Player A v Player B",
         "inPlay": bet_delay > 0,
         "betDelay": bet_delay,
+        "priceLadderDefinition": {"type": "CLASSIC"},
         "runners": runners,
     }
 
@@ -103,6 +104,8 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
         self.assertEqual([event.decimal_odds for event in events], [Decimal("1.9"), Decimal("1.85")])
         self.assertEqual(events[0].metadata["price_semantics"], "betfair_available_to_back")
         self.assertEqual(events[0].metadata["provider_price_field"], "rc[].atb")
+        self.assertEqual(events[0].metadata["betfair_price_ladder_type"], "CLASSIC")
+        self.assertIs(events[0].metadata["execution_price_ladder_verified"], True)
         self.assertIs(events[0].metadata["execution_quote_verified"], True)
         self.assertIs(events[0].metadata["actual_fill_verified"], False)
         self.assertIs(events[0].metadata["paper_fill_eligible"], False)
@@ -116,6 +119,9 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
         )
         price_truth = manifest["governance"]["price_semantics"]
         self.assertIs(price_truth["actual_fill_verified"], False)
+        self.assertIs(price_truth["execution_price_ladder_contract_verified"], True)
+        self.assertEqual(price_truth["supported_execution_price_ladder_types"], ["CLASSIC"])
+        self.assertIs(price_truth["runner_roster_membership_verified"], True)
         self.assertIs(price_truth["paper_fill_capacity_enforced"], False)
         self.assertIs(price_truth["paper_fill_capacity_unit_bound"], False)
         self.assertIs(price_truth["paper_fill_capacity_authorizes_economics"], False)
@@ -187,6 +193,8 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
         self.assertEqual(latest.metadata["price_semantics"], "betfair_available_to_back")
         self.assertEqual(latest.metadata["paper_fill_available_size"], "60.0")
         self.assertEqual(latest.metadata["betfair_last_traded_price"], "1.83")
+        self.assertEqual(latest.metadata["betfair_price_ladder_type"], "CLASSIC")
+        self.assertIs(latest.metadata["execution_price_ladder_verified"], True)
         self.assertIs(latest.metadata["execution_quote_verified"], True)
         self.assertIs(latest.metadata["paper_fill_eligible"], False)
         self.assertIs(latest.metadata["actual_fill_verified"], False)
@@ -273,6 +281,8 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
         self.assertEqual(event.status, "open")
         self.assertEqual(event.decimal_odds, Decimal("1.85"))
         self.assertEqual(event.metadata["price_semantics"], "betfair_available_to_back_unavailable")
+        self.assertEqual(event.metadata["betfair_price_ladder_type"], "CLASSIC")
+        self.assertIs(event.metadata["execution_price_ladder_verified"], True)
         self.assertIs(event.metadata["execution_quote_verified"], False)
         self.assertIs(event.metadata["paper_fill_eligible"], False)
         self.assertIn("not a verified executable quote", paper_quote_rejection_reason(event, "1"))
@@ -311,7 +321,49 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
         self.assertEqual([event.decimal_odds for event in events], [Decimal("2.1"), Decimal("2.04")])
         self.assertEqual(events[0].metadata["provider_price_field"], "rc[].batb")
         self.assertEqual(events[0].metadata["betfair_ladder_kind"], "best_three_level_ladder")
+        self.assertEqual(events[0].metadata["betfair_price_ladder_type"], "CLASSIC")
+        self.assertIs(events[0].metadata["execution_price_ladder_verified"], True)
         self.assertIs(events[0].metadata["paper_fill_eligible"], False)
+
+    def test_available_back_requires_explicit_supported_price_ladder(self) -> None:
+        mutations = (
+            (None, "requires explicit marketDefinition priceLadderDefinition"),
+            ({"type": "FINEST"}, "unsupported Betfair execution price ladder FINEST"),
+            ({"type": "LINE_RANGE"}, "unsupported Betfair execution price ladder LINE_RANGE"),
+        )
+        for ladder, expected in mutations:
+            with self.subTest(ladder=ladder), tempfile.TemporaryDirectory() as tmp:
+                lines = _pro_stream()
+                definition = lines[0]["mc"][0]["marketDefinition"]
+                if ladder is None:
+                    definition.pop("priceLadderDefinition")
+                else:
+                    definition["priceLadderDefinition"] = ladder
+                with self.assertRaisesRegex(ValueError, expected):
+                    self._import(Path(tmp), lines)
+
+    def test_classic_execution_prices_fail_closed_off_tick_or_out_of_range(self) -> None:
+        cases = (
+            ("atb", [[2.03, 10.0]], "2.03"),
+            ("atb", [[1001.0, 10.0]], "1001"),
+            ("batb", [[0, 2.03, 10.0]], "2.03"),
+            ("batb", [[0, 1001.0, 10.0]], "1001"),
+        )
+        for field, ladder, rendered in cases:
+            with self.subTest(field=field, ladder=ladder), tempfile.TemporaryDirectory() as tmp:
+                lines = _pro_stream()
+                runner = lines[0]["mc"][0]["rc"][0]
+                runner.pop("atb")
+                runner[field] = ladder
+                with self.assertRaisesRegex(ValueError, rf"{rendered}.*outside the declared CLASSIC"):
+                    self._import(Path(tmp), lines)
+
+    def test_unknown_runner_change_is_rejected_before_cache_or_event_publication(self) -> None:
+        lines = _pro_stream()
+        lines[0]["mc"][0]["rc"][0]["id"] = 999
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, r"selection 999 is not declared by marketDefinition\.runners"):
+                self._import(Path(tmp), lines)
 
 
 if __name__ == "__main__":

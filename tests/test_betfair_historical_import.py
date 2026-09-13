@@ -294,6 +294,31 @@ class BetfairHistoricalImportTests(unittest.TestCase):
                     retention_basis="test-retention",
                 )
 
+    def test_non_finite_ltp_values_fail_closed(self):
+        for bad_ltp in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(bad_ltp=bad_ltp), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "non-finite-price.bz2"
+                output = root / "dataset"
+                lines = _stream_lines()
+                lines[0]["mc"][0]["rc"][0]["ltp"] = bad_ltp
+                _write_bz2(source, lines)
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ltp must be finite decimal odds > 1",
+                ):
+                    import_betfair_historical(
+                        [source],
+                        output,
+                        acquired_at="2026-02-10T13:30:00Z",
+                        imported_at="2026-02-10T14:00:00Z",
+                        terms_reference="test-rights",
+                        retention_basis="test-retention",
+                    )
+
+                self.assertFalse(output.exists())
+
     def test_unmapped_requested_market_type_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

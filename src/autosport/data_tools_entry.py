@@ -3,22 +3,25 @@ from __future__ import annotations
 import sys
 
 
-_USAGE = """Autosport-Data — portable Windows historical-data tools
+_USAGE = """Autosport-Data — portable Windows data/research tools
 
 Usage:
   Autosport-Data.exe acquire [autosport-acquire-historical-evidence arguments]
   Autosport-Data.exe build-corpus [autosport-build-historical-corpus arguments]
   Autosport-Data.exe build-corpus-from-bundle [bundle-adapter arguments]
   Autosport-Data.exe verify-dataset <dataset-path>
+  Autosport-Data.exe compare-strategies <run-summary> <run-summary> [...] [strategy-comparison arguments]
 
 Commands:
   acquire                   Capture immutable authenticated historical odds + match/result evidence.
   build-corpus              Assemble selected snapshots, sealed outcomes, and rights proof into a governed corpus.
   build-corpus-from-bundle  Verify an acquisition bundle and reuse the canonical governed corpus assembler.
   verify-dataset            Verify sealed hashes and historical governance without replay.
+  compare-strategies        Compare compatible completed paper strategy runs on the same sealed replay identity.
 
 Truth boundaries remain fail closed: credentials, lawful retention/licensing, real sealed outcomes,
-coverage, profitability, human testing, and NVDA verification are never inferred by this wrapper.
+coverage, profitability or predictive superiority, human testing, and NVDA verification are never
+inferred by this wrapper.
 """
 
 
@@ -45,6 +48,10 @@ def main(argv: list[str] | None = None) -> int:
         from autosport.cli import main as cli_main
 
         return cli_main(["verify-dataset", *forwarded])
+    if command == "compare-strategies":
+        from autosport.strategy_comparison import main as strategy_comparison_main
+
+        return strategy_comparison_main(forwarded)
 
     print(f"Autosport-Data: unknown command {command!r}\n")
     print(_USAGE)

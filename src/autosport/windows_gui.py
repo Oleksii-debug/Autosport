@@ -25,7 +25,11 @@ class WindowsAutosportApp(AutosportApp):
         return bool(worker is not None and worker.busy)
 
     def _bank_text(self) -> str:
-        source = self.session if getattr(self, "session", None) is not None else self._recovery_view
+        source = (
+            self._recovery_view
+            if self._recovery_view is not None
+            else getattr(self, "session", None)
+        )
         if source is None:
             return f"Віртуальний банк: оновлюється після replay; workspace: {self._active_workspace}"
         return (
@@ -37,7 +41,11 @@ class WindowsAutosportApp(AutosportApp):
 
     def _refresh_tickets(self) -> None:
         self.tickets.delete(0, "end")
-        source = self.session if self.session is not None else self._recovery_view
+        source = (
+            self._recovery_view
+            if self._recovery_view is not None
+            else getattr(self, "session", None)
+        )
         if source is None:
             self.tickets.insert(
                 "end",

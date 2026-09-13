@@ -131,7 +131,8 @@ def _snapshot(
         raise ValueError("snapshot evidence schema_version must be 1")
     if evidence.get("kind") != _SNAPSHOT_KIND:
         raise ValueError(f"snapshot evidence kind must be {_SNAPSHOT_KIND}")
-    if evidence.get("sport_key") != "table_tennis":
+    sport_key = _text(evidence, "sport_key", context="snapshot evidence")
+    if sport_key != "table_tennis":
         raise ValueError("snapshot evidence sport_key must be table_tennis")
     if evidence.get("has_data") is not True:
         raise ValueError("snapshot evidence must prove has_data=true")
@@ -152,6 +153,7 @@ def _snapshot(
     if evidence.get("terms_reference") != expected_terms_reference:
         raise ValueError("snapshot evidence terms_reference does not match governance proof")
     provider = _text(evidence, "provider", context="snapshot evidence")
+    canonical_source_id = f"{provider}:{sport_key}"
 
     expected_sha = _text(evidence, "market_sha256", context="snapshot evidence")
     if _sha256(market_path) != expected_sha:
@@ -180,8 +182,8 @@ def _snapshot(
             if not isinstance(raw, dict):
                 raise ValueError(f"snapshot market line {line_number} must be an object")
             event = MarketEvent.from_dict(raw)
-            if event.source_id != provider:
-                raise ValueError("snapshot evidence provider does not match captured market source_id")
+            if event.source_id != canonical_source_id:
+                raise ValueError("snapshot evidence provider/sport does not match captured market source_id")
             if event.source_ts is None or not event.ingest_ts:
                 raise ValueError("historical snapshot rows require explicit source_ts and ingest_ts")
             source_dt = _timestamp(event.source_ts, field="historical snapshot source_ts")

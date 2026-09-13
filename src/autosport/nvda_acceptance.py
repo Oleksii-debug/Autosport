@@ -50,7 +50,12 @@ def _load_candidate_identity(
     expected_source_sha: str,
     expected_package_sha256: str,
 ) -> dict[str, str]:
-    """Bind one release ZIP to trust anchors supplied independently of that ZIP."""
+    """Bind one release ZIP to caller-supplied expected source/package identities.
+
+    This proves equality to the supplied anchors. It cannot prove where those anchors came
+    from; physical-release procedure must obtain them independently from canonical control
+    evidence rather than deriving them from the ZIP under test.
+    """
 
     expected_source_sha = _require_hex_digest(
         expected_source_sha,
@@ -65,7 +70,7 @@ def _load_candidate_identity(
     release_zip = Path(release_zip)
     package_sha = sha256_file(release_zip)
     if package_sha != expected_package_sha256:
-        raise ValueError("release ZIP SHA-256 does not match independently supplied expected package SHA-256")
+        raise ValueError("release ZIP SHA-256 does not match supplied expected package SHA-256")
 
     with zipfile.ZipFile(release_zip, "r") as archive:
         names = [item.filename for item in archive.infolist() if not item.is_dir()]
@@ -86,7 +91,7 @@ def _load_candidate_identity(
             raise ValueError("release BUILD_INFO source_sha is missing")
         source_sha = _require_hex_digest(source_sha, length=40, field="release BUILD_INFO source_sha")
         if source_sha != expected_source_sha:
-            raise ValueError("release BUILD_INFO source_sha does not match independently supplied expected source SHA")
+            raise ValueError("release BUILD_INFO source_sha does not match supplied expected source SHA")
         if not isinstance(exe_sha, str):
             raise ValueError("release BUILD_INFO autosport_exe_sha256 is invalid")
         exe_sha = _require_hex_digest(exe_sha, length=64, field="release BUILD_INFO autosport_exe_sha256")
@@ -127,8 +132,8 @@ def create_template(
         ],
         "attestation_scope": (
             "Human-supplied physical Windows 11 + NVDA test record. "
-            "Machine validation checks structure and exact candidate identity against "
-            "independently supplied source/package trust anchors only."
+            "Machine validation checks exact candidate identity against caller-supplied "
+            "expected source/package anchors. Anchor provenance/independence is not machine-proven."
         ),
         "real_money_execution": False,
         "human_tested": False,
@@ -251,8 +256,9 @@ def validate_evidence(
         "schema_version": _SCHEMA_VERSION,
         "kind": _KIND,
         "candidate_identity_verified": True,
-        "external_source_anchor_verified": True,
-        "external_package_anchor_verified": True,
+        "source_anchor_match_verified": True,
+        "package_anchor_match_verified": True,
+        "anchor_provenance_machine_verified": False,
         **identity,
         "windows_edition_build": environment["windows_edition_build"].strip(),
         "nvda_version": environment["nvda_version"].strip(),
@@ -282,12 +288,12 @@ def _add_trust_anchor_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--expected-source-sha",
         required=True,
-        help="canonical 40-hex Git source SHA obtained independently of the release ZIP",
+        help="canonical 40-hex Git source SHA expected for this release; obtain independently of the release ZIP",
     )
     parser.add_argument(
         "--expected-package-sha256",
         required=True,
-        help="canonical 64-hex release ZIP SHA-256 obtained independently of the release ZIP",
+        help="64-hex release ZIP SHA-256 expected for this release; obtain independently of the release ZIP",
     )
 
 
@@ -309,8 +315,9 @@ def template_main(argv: list[str] | None = None) -> int:
         return 2
     print(f"NVDA_EVIDENCE_TEMPLATE={args.output}")
     print(f"PACKAGE_SHA256={payload['candidate']['package_sha256']}")
-    print("EXTERNAL_SOURCE_ANCHOR_VERIFIED=true")
-    print("EXTERNAL_PACKAGE_ANCHOR_VERIFIED=true")
+    print("SOURCE_ANCHOR_MATCH_VERIFIED=true")
+    print("PACKAGE_ANCHOR_MATCH_VERIFIED=true")
+    print("ANCHOR_PROVENANCE_MACHINE_VERIFIED=false")
     print("HUMAN_TESTED=false")
     print("NVDA_VERIFIED=false")
     return 0
@@ -338,8 +345,9 @@ def verify_main(argv: list[str] | None = None) -> int:
     print(f"NVDA_EVIDENCE_CHECKS={result['status']}")
     print(f"PACKAGE_SHA256={result['package_sha256']}")
     print("CANDIDATE_IDENTITY_VERIFIED=true")
-    print("EXTERNAL_SOURCE_ANCHOR_VERIFIED=true")
-    print("EXTERNAL_PACKAGE_ANCHOR_VERIFIED=true")
+    print("SOURCE_ANCHOR_MATCH_VERIFIED=true")
+    print("PACKAGE_ANCHOR_MATCH_VERIFIED=true")
+    print("ANCHOR_PROVENANCE_MACHINE_VERIFIED=false")
     print("MACHINE_VERIFIED_PHYSICAL_EXECUTION=false")
     print("NVDA_VERIFIED=false")
     return 0 if result["status"] == "PASS" else 3

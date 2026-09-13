@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from autosport.historical_corpus import _snapshot
+from autosport.parlayapi_provider import ParlayApiTableTennisProvider
 
 
 class HistoricalSnapshotProviderBindingTests(unittest.TestCase):
@@ -65,7 +66,7 @@ class HistoricalSnapshotProviderBindingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             market_path, evidence_path = self._write_pair(
                 Path(tmp),
-                source_id="parlayapi:table_tennis",
+                source_id=ParlayApiTableTennisProvider.source_id,
             )
             rows, evidence = _snapshot(
                 market_path,
@@ -74,7 +75,7 @@ class HistoricalSnapshotProviderBindingTests(unittest.TestCase):
             )
 
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0][0].source_id, "parlayapi:table_tennis")
+            self.assertEqual(rows[0][0].source_id, ParlayApiTableTennisProvider.source_id)
             self.assertEqual(evidence["provider"], "parlayapi")
             self.assertEqual(evidence["sport_key"], "table_tennis")
 

@@ -96,6 +96,7 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
 
             self.assertEqual(evidence["candidate"]["package_sha256"], hashlib.sha256(package.read_bytes()).hexdigest())
             self.assertEqual(evidence["candidate"]["source_sha"], "a" * 40)
+            self.assertIn("Anchor provenance/independence is not machine-proven", evidence["attestation_scope"])
             self.assertEqual(len(evidence["checks"]), 6)
             self.assertTrue(all(check["status"] == "PENDING" for check in evidence["checks"]))
             self.assertFalse(evidence["human_tested"])
@@ -105,7 +106,7 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
     def test_self_consistent_package_with_wrong_external_source_anchor_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             package = self._release_zip(Path(directory), source_sha="b" * 40)
-            with self.assertRaisesRegex(ValueError, "independently supplied expected source SHA"):
+            with self.assertRaisesRegex(ValueError, "supplied expected source SHA"):
                 create_template(
                     package,
                     expected_source_sha="a" * 40,
@@ -115,7 +116,7 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
     def test_self_consistent_package_with_wrong_external_package_anchor_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             package = self._release_zip(Path(directory))
-            with self.assertRaisesRegex(ValueError, "independently supplied expected package SHA-256"):
+            with self.assertRaisesRegex(ValueError, "supplied expected package SHA-256"):
                 create_template(
                     package,
                     expected_source_sha="a" * 40,
@@ -157,8 +158,9 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "PASS")
             self.assertTrue(result["candidate_identity_verified"])
-            self.assertTrue(result["external_source_anchor_verified"])
-            self.assertTrue(result["external_package_anchor_verified"])
+            self.assertTrue(result["source_anchor_match_verified"])
+            self.assertTrue(result["package_anchor_match_verified"])
+            self.assertFalse(result["anchor_provenance_machine_verified"])
             self.assertFalse(result["machine_verified_physical_execution"])
             self.assertTrue(result["requires_owner_release_decision"])
             self.assertFalse(result["human_tested"])
@@ -203,6 +205,7 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "FAIL")
             self.assertEqual(result["failed_checks"], ["window_initial_focus"])
+            self.assertFalse(result["anchor_provenance_machine_verified"])
             self.assertFalse(result["nvda_verified"])
 
     def test_fail_check_without_defect_notes_is_rejected(self) -> None:
@@ -261,8 +264,9 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
             )
             validation = json.loads(validation_path.read_text(encoding="utf-8"))
             self.assertEqual(validation["status"], "PASS")
-            self.assertTrue(validation["external_source_anchor_verified"])
-            self.assertTrue(validation["external_package_anchor_verified"])
+            self.assertTrue(validation["source_anchor_match_verified"])
+            self.assertTrue(validation["package_anchor_match_verified"])
+            self.assertFalse(validation["anchor_provenance_machine_verified"])
             self.assertFalse(validation["machine_verified_physical_execution"])
             self.assertFalse(validation["nvda_verified"])
 
@@ -279,6 +283,13 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
             usage = Path("src/autosport/data_tools_entry.py").read_text(encoding="utf-8")
             self.assertIn("nvda-evidence-template", usage)
             self.assertIn("verify-nvda-evidence", usage)
+            self.assertIn("--expected-source-sha", usage)
+            self.assertIn("--expected-package-sha256", usage)
+
+            guide = Path("WINDOWS_START_HERE.txt").read_text(encoding="utf-8")
+            self.assertIn("--expected-source-sha", guide)
+            self.assertIn("--expected-package-sha256", guide)
+            self.assertIn("не можуть самі собі приписати human proof", guide)
 
 
 if __name__ == "__main__":

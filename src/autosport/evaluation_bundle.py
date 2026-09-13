@@ -122,8 +122,6 @@ def evaluate_walk_forward_bundle(bundle: WalkForwardBundle) -> dict[str, Any]:
     for record in bundle.forecasts:
         matching = [window for window in bundle.windows if window.contains(record.generated_at)]
         if len(matching) > 1:
-            # evaluate_walk_forward also rejects overlapping windows, but keep the
-            # cohort completeness check independently fail-closed.
             raise ValueError(f"forecast belongs to multiple evaluation windows: {record.forecast_id}")
         if not matching:
             continue
@@ -269,6 +267,10 @@ def _validate_governed_dataset_cohort(bundle: WalkForwardBundle) -> dict[str, An
             raise ValueError("walk-forward forecast input cutoff is outside governed dataset coverage")
         if generated < coverage_start or generated > coverage_end:
             raise ValueError("walk-forward forecast generation is outside governed dataset coverage")
+        if input_cutoff < first_observed:
+            raise ValueError(
+                "walk-forward forecast input cutoff predates the quote's first governed observation"
+            )
         if generated < first_observed:
             raise ValueError("walk-forward forecast was generated before its quote existed in governed corpus")
 

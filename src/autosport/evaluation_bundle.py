@@ -130,8 +130,10 @@ def evaluate_walk_forward_bundle(bundle: WalkForwardBundle) -> dict[str, Any]:
 
     Schema-v2 bundles additionally bind the cohort to a locally verified,
     governed historical ReplayDataset. Optional forecast-origin evidence can
-    further bind each evaluated ForecastRecord to a canonical pre-outcome
-    research decision ledger prefix committed by a matching durable run summary.
+    bind each evaluated ForecastRecord to canonical research decision-ledger
+    artifacts and a durable run summary. Local timestamps are checked for
+    internal ordering but cannot independently prove physical pre-outcome write
+    time without an immutable external timestamp/anchor.
     """
 
     outcome_by_id = {fact.forecast_id: fact for fact in bundle.outcomes}
@@ -177,15 +179,15 @@ def evaluate_walk_forward_bundle(bundle: WalkForwardBundle) -> dict[str, Any]:
         raise ValueError("walk-forward evaluator did not account for the complete evaluation cohort")
 
     governed = governed_evidence is not None
-    origin_verified = origin_evidence is not None
+    origin_bound = origin_evidence is not None
     report: dict[str, Any] = {
         "schema_version": 1,
         "kind": "strict_walk_forward_forecast_evaluation",
         "source_sha256": bundle.source_sha256,
         "input_bundle_schema_version": bundle.bundle_schema_version,
         "evaluation_mode": (
-            "governed-historical-preoutcome-origin-complete-cohort-causal-walk-forward"
-            if origin_verified
+            "governed-historical-canonical-origin-bound-complete-cohort-causal-walk-forward"
+            if origin_bound
             else (
                 "governed-historical-complete-cohort-causal-walk-forward"
                 if governed
@@ -204,9 +206,11 @@ def evaluate_walk_forward_bundle(bundle: WalkForwardBundle) -> dict[str, Any]:
             "sealed_outcomes_bound_to_forecasts": governed,
             "outcome_reveal_boundary_verified": governed,
             "temporal_timestamp_constraints_verified": governed,
-            "canonical_forecast_origin_verified": origin_verified,
-            "pre_outcome_ledger_write_verified": origin_verified,
-            "temporal_holdout_protocol_verified": origin_verified,
+            "canonical_forecast_origin_verified": origin_bound,
+            "declared_record_time_before_reveal_verified": origin_bound,
+            "independent_time_anchor_verified": False,
+            "pre_outcome_ledger_write_verified": False,
+            "temporal_holdout_protocol_verified": False,
             "historical_window_market_coverage_verified": False,
             "licensing_retention_verified": False,
             "profitability_claim": False,

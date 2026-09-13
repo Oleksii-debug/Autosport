@@ -6,6 +6,7 @@ from pathlib import Path
 
 from autosport.dataset import load_dataset
 from autosport.historical_corpus import assemble_historical_corpus
+from autosport.outcome_provenance import canonical_outcomes_sha256
 
 
 def _sha256(path: Path) -> str:
@@ -70,12 +71,29 @@ def _write_snapshot(
 
 def _write_results(root: Path, *event_ids: str) -> Path:
     path = root / "sealed-results.json"
+    outcomes = {f"{event_id}|winner|alice": "win" for event_id in event_ids}
     path.write_text(
         json.dumps(
             {
                 "schema_version": 1,
-                "quote_outcomes": {
-                    f"{event_id}|winner|alice": "win" for event_id in event_ids
+                "quote_outcomes": outcomes,
+                "outcome_provenance": {
+                    "schema_version": 1,
+                    "kind": "historical_outcome_provenance",
+                    "source_identity": "official-results-feed:table-tennis:2026-01-01",
+                    "source_reference": "official-results-export-2026-01-01",
+                    "authority_reference": "result-authority-record-2026-01",
+                    "terms_reference": "result-feed-contract-2026",
+                    "retention_basis": "licensed internal historical research through 2027-01-01",
+                    "redistribution_policy": "internal_only",
+                    "licensing_or_retention_verified": True,
+                    "redistribution_verified": False,
+                    "authoritative_outcomes_verified": True,
+                    "acquired_at": "2026-01-01T11:05:00+00:00",
+                    "verified_at": "2026-01-01T11:06:00+00:00",
+                    "source_payload_sha256": "a" * 64,
+                    "quote_outcomes_sha256": canonical_outcomes_sha256(outcomes),
+                    "real_money_execution": False,
                 },
             },
             sort_keys=True,
@@ -289,6 +307,7 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
             results = _write_results(root, "tt-a")
             payload = json.loads(results.read_text(encoding="utf-8"))
             payload["quote_outcomes"]["tt-a|winner|alice"] = "push"
+            payload["outcome_provenance"]["quote_outcomes_sha256"] = canonical_outcomes_sha256(payload["quote_outcomes"])
             results.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
             output = root / "corpus"
             with self.assertRaisesRegex(ValueError, "allowed values are win, loss, void"):

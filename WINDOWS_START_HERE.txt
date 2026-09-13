@@ -35,6 +35,15 @@ CRASH / ECONOMIC WORKSPACE RECOVERY
 21. Для baseline-v1 типовий workspace показується безпосередньо в рядку «Віртуальний банк» GUI. Для інших strategy/plan identities використовуйте саме strategy-specific workspace, який GUI також показує під час replay. Команда recovery не запускається паралельно з active economic writer.
 22. repair-workspace не «позначає run успішним» за припущенням. Вона завершує або відхиляє лише той стан, який може бути доведений canonical transaction/base hashes; неоднозначний стан залишається unresolved і повертає ненульовий exit code. Після успішного repair перезапустіть Autosport.exe і повторно відкрийте той самий strategy/plan context.
 
+PHYSICAL WINDOWS + NVDA ACCEPTANCE — HUMAN-ONLY GATE
+
+23. Цей розділ виконується лише на фізичному Windows 11 з реально запущеним NVDA і зі fresh-extracted release ZIP. Machine UIA/accessibility/keyboard audit не замінює цей тест і сам по собі не дозволяє змінювати HUMAN_TESTED або NVDA_VERIFIED.
+24. Запустіть NVDA, потім Autosport.exe лише клавіатурою. Перевірте Tab і Shift+Tab по всіх основних controls: dataset, strategy, research plan, replay speed, replay/live actions, paper tickets, live quotes, Evaluation/portfolio evidence, status/log. NVDA має оголошувати зрозумілу назву, поточне значення/стан і тип control; фокус не повинен губитися або потрапляти у недоступну пастку.
+25. Перевірте shortcuts без миші: Ctrl+O відкриває вибір dataset; Ctrl+R запускає replay лише після валідної конфігурації; Ctrl+L оновлює live snapshot; F6 переводить фокус на paper tickets; F7 — на live quotes; F8 — на Evaluation/portfolio evidence. Після кожної дії NVDA має озвучити фокус або доступний статус, достатній для розуміння результату.
+26. Навмисно викличте щонайменше одну fail-closed помилку, наприклад виберіть невалідний dataset/research plan або спробуйте replay з unresolved workspace. Повідомлення про помилку й подальший status мають бути доступні з клавіатури та зрозуміло прочитані NVDA; помилка не повинна мовчки запускати economic mutation.
+27. Виконайте один успішний paper replay, відкрийте F6 і F8, закрийте Autosport.exe, запустіть його знову й перевірте відновлення virtual bank/state. Для recovery-сценарію використовуйте canonical repair-workspace з пунктів 20–22 і після repair повторно відкрийте той самий strategy/plan context.
+28. Зафіксуйте physical evidence: exact release/source SHA, Windows version, NVDA version, fresh-extraction path, пройдені кроки 24–27 і будь-які фактичні defects. Лише реальний успішний physical run може бути підставою для окремого рішення змінити HUMAN_TESTED/NVDA_VERIFIED; до цього обидва прапорці залишаються false.
+
 Live observation є read-only. Paper/replay функції використовують лише віртуальний банк. Програма не виконує реальні грошові ставки і не має механізму керування букмекерським рахунком, поповнення або виведення коштів.
 
 Machine accessibility/keyboard audits є prerequisite evidence і не означають physical NVDA speech verification.

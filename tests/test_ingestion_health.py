@@ -75,6 +75,17 @@ class IngestionHealthTests(unittest.TestCase):
         self.assertEqual(policy.stale_after_seconds, 0)
         self.assertEqual(policy.max_future_skew_seconds, 0)
 
+    def test_request_bound_rejects_invalid_values_before_provider_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            provider = StaticProvider("source", [ProviderBatch("source", tuple())])
+            for value in (True, 1.5, float("nan"), float("inf")):
+                with self.subTest(max_items=value):
+                    with self.assertRaisesRegex(ValueError, "positive integer"):
+                        engine.poll_once(provider, max_items=value)
+            self.assertEqual(provider.calls, 0)
+            store.close()
+
     def test_backpressure_limit_rejects_oversized_request_before_provider_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, store, _health = self._engine(

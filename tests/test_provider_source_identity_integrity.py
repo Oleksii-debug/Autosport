@@ -6,15 +6,17 @@ from autosport.providers import CanonicalNormalizer, InMemoryProvider, ProviderB
 
 class ProviderSourceIdentityIntegrityTests(unittest.TestCase):
     @staticmethod
-    def _quote() -> ProviderQuote:
-        return ProviderQuote(
-            provider_event_id="match-1",
-            provider_market_id="winner",
-            provider_selection_id="player-a",
-            decimal_odds=Decimal("1.80"),
-            observed_ts="2026-09-13T18:00:00+00:00",
-            sequence=1,
-        )
+    def _quote(**overrides: object) -> ProviderQuote:
+        values: dict[str, object] = {
+            "provider_event_id": "match-1",
+            "provider_market_id": "winner",
+            "provider_selection_id": "player-a",
+            "decimal_odds": Decimal("1.80"),
+            "observed_ts": "2026-09-13T18:00:00+00:00",
+            "sequence": 1,
+        }
+        values.update(overrides)
+        return ProviderQuote(**values)  # type: ignore[arg-type]
 
     def test_reserved_delimiter_source_id_is_rejected_before_normalization(self):
         with self.assertRaisesRegex(ValueError, "reserved identity delimiter"):
@@ -31,6 +33,27 @@ class ProviderSourceIdentityIntegrityTests(unittest.TestCase):
                     ProviderBatch(source_id, ())
         with self.assertRaises(TypeError):
             ProviderBatch(7, ())  # type: ignore[arg-type]
+
+    def test_provider_identity_components_must_be_typed_nonempty_trimmed_strings(self):
+        for field_name in ("provider_event_id", "provider_market_id", "provider_selection_id"):
+            with self.subTest(field_name=field_name, value=7):
+                with self.assertRaisesRegex(TypeError, field_name):
+                    self._quote(**{field_name: 7})
+            for value in ("", " value", "value ", "   "):
+                with self.subTest(field_name=field_name, value=value):
+                    with self.assertRaisesRegex(ValueError, field_name):
+                        self._quote(**{field_name: value})
+
+    def test_delimiter_bearing_provider_components_remain_structured_input(self):
+        quote = self._quote(
+            provider_event_id="match|1",
+            provider_market_id="winner|main",
+            provider_selection_id="player|a",
+        )
+        event = CanonicalNormalizer().normalize("fixture", quote)
+        self.assertEqual(event.event_id, "fixture:match|1")
+        self.assertEqual(event.market_id, "fixture:winner|main")
+        self.assertEqual(event.selection_id, "fixture:player|a")
 
     def test_valid_source_identity_is_preserved_exactly_in_canonical_ids(self):
         event = CanonicalNormalizer().normalize("feed_eu", self._quote())

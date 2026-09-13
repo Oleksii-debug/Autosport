@@ -122,6 +122,7 @@ jobs:
             dist/restart-recovery-audit.json
             dist/research-demo-audit.json
             dist/walk-forward-package-smoke.json
+            dist/walk-forward-package-smoke-dataset
             dist/walk-forward-package-smoke-report.json
             dist/package-verification.json
             dist/fresh-extraction-diagnostic.json

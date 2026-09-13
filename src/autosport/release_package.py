@@ -16,6 +16,12 @@ _WINDOWS_RESERVED_NAMES = {
     "nul",
     *(f"com{index}" for index in range(1, 10)),
     *(f"lpt{index}" for index in range(1, 10)),
+    "com¹",
+    "com²",
+    "com³",
+    "lpt¹",
+    "lpt²",
+    "lpt³",
 }
 _WINDOWS_INVALID_CHARS = frozenset('<>:"\\|?*')
 

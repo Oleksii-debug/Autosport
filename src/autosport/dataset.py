@@ -22,6 +22,7 @@ _FORBIDDEN_HISTORICAL_METADATA_KEYS = frozenset(
         "future_quote",
     }
 )
+_ALLOWED_HISTORICAL_OUTCOMES = frozenset({"win", "loss", "void"})
 
 
 def _sha256(path: Path) -> str:
@@ -267,9 +268,20 @@ def _validate_historical_payloads(
     outcomes = results_raw.get("quote_outcomes")
     if not isinstance(outcomes, dict):
         raise ValueError("quote_outcomes must be an object")
-    unknown_outcomes = sorted(str(key) for key in outcomes if str(key) not in quote_keys)
+    outcome_keys = {str(key) for key in outcomes}
+    missing_outcomes = sorted(quote_keys - outcome_keys)
+    if missing_outcomes:
+        raise ValueError("sealed results are missing quote outcomes for historical market corpus")
+    unknown_outcomes = sorted(outcome_keys - quote_keys)
     if unknown_outcomes:
         raise ValueError("sealed results reference quote keys absent from historical market corpus")
+    invalid_outcomes = sorted(
+        str(key)
+        for key, value in outcomes.items()
+        if not isinstance(value, str) or value not in _ALLOWED_HISTORICAL_OUTCOMES
+    )
+    if invalid_outcomes:
+        raise ValueError("sealed results contain unsupported outcome; allowed values are win, loss, void")
 
 
 def _import_identity(

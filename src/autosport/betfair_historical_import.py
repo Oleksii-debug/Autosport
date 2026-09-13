@@ -433,7 +433,7 @@ def import_betfair_historical(
                 definition_state_changed = (
                     prior_status != market_status or prior_bet_delay != current_bet_delay
                 )
-                if definition_state_changed:
+                if definition_state_changed and market_status != "CLOSED":
                     names = runner_names.get(market_id, {})
                     event_id = str(definition.get("eventId") or "").strip()
                     if not event_id:
@@ -481,12 +481,11 @@ def import_betfair_historical(
                         )
 
             if market_status == "CLOSED":
-                # Settlement facts stay outside strategy-visible quote rows. A definition
-                # transition above may emit only an explicit non-executable invalidation.
+                # Settlement facts stay outside strategy-visible market rows.
                 continue
             if market_status != "OPEN":
-                # Explicit marketDefinition state transitions invalidate prior quotes above;
-                # no non-open runner update is rewritten as a tradable/open quote.
+                # Explicit pre-settlement marketDefinition state transitions invalidate
+                # prior quotes above; no non-open runner update is rewritten as tradable.
                 continue
 
             runner_changes = change.get("rc")
@@ -741,8 +740,7 @@ def import_betfair_historical(
             },
             "price_semantics": price_semantics,
             "availability_semantics": {
-                "strategy_visible_market_status": "OPEN_QUOTES_WITH_EXPLICIT_INELIGIBLE_TRANSITIONS",
-                "market_definition_ineligibility_transitions_preserved": True,
+                "strategy_visible_market_status": "OPEN_ONLY",
                 "suspended_or_non_open_intervals_preserved": False,
                 "complete_availability_history_verified": False,
             },

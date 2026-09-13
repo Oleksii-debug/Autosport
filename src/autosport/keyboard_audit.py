@@ -17,6 +17,8 @@ _FOCUS_BINDINGS = {
     "<F7>": "live_quotes",
 }
 _FOCUSABLE_CONTROLS = (
+    "strategy",
+    "research_plan",
     "choose_dataset",
     "run_replay",
     "replay_speed",
@@ -74,6 +76,8 @@ def summarize_keyboard_contract(
 
 def _critical_widgets(app: AutosportApp) -> dict[str, Any]:
     return {
+        "strategy": app.strategy,
+        "research_plan": app.research_plan_button,
         "choose_dataset": app.choose_button,
         "run_replay": app.run_button,
         "replay_speed": app.speed,
@@ -88,7 +92,7 @@ def _critical_widgets(app: AutosportApp) -> dict[str, Any]:
 def _tab_reachable_controls(app: AutosportApp) -> list[str]:
     controls = _critical_widgets(app)
     names_by_widget = {widget: name for name, widget in controls.items()}
-    start = app.choose_button
+    start = app.strategy
     current = start
     seen_widgets: set[Any] = set()
     reachable: list[str] = []
@@ -116,13 +120,13 @@ def _binding_presence(app: AutosportApp) -> dict[str, bool]:
 def _execute_focus_shortcuts(app: AutosportApp) -> dict[str, bool]:
     controls = _critical_widgets(app)
     results: dict[str, bool] = {}
-    app.choose_button.focus_set()
+    app.strategy.focus_set()
     app.update()
     for sequence, target in _FOCUS_BINDINGS.items():
         app.event_generate(sequence)
         app.update()
         results[sequence] = app.focus_get() is controls[target]
-        app.choose_button.focus_set()
+        app.strategy.focus_set()
         app.update()
     return results
 

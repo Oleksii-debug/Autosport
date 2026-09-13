@@ -10,6 +10,7 @@ class DataToolsEntryTests(unittest.TestCase):
             self.assertEqual(data_tools_entry.main(["--help"]), 0)
         self.assertIn("portable Windows historical-data tools", output.call_args.args[0])
         self.assertIn("walk-forward-evaluate", output.call_args.args[0])
+        self.assertIn("verify-forecast-origin", output.call_args.args[0])
 
     def test_acquire_dispatches_exact_arguments(self):
         with patch("autosport.historical_acquisition.main", return_value=7) as target:
@@ -43,6 +44,31 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertEqual(result, 11)
         target.assert_called_once_with(
             ["walk-forward-evaluate", "evaluation.json", "--output", "report.json"]
+        )
+
+    def test_verify_forecast_origin_dispatches_exact_arguments(self):
+        with patch("autosport.data_tools_entry.forecast_origin.main", return_value=12) as target:
+            result = data_tools_entry.main(
+                [
+                    "verify-forecast-origin",
+                    "workspace",
+                    "run-id",
+                    "--bundle",
+                    "evaluation.json",
+                    "--output",
+                    "origin.json",
+                ]
+            )
+        self.assertEqual(result, 12)
+        target.assert_called_once_with(
+            [
+                "workspace",
+                "run-id",
+                "--bundle",
+                "evaluation.json",
+                "--output",
+                "origin.json",
+            ]
         )
 
     def test_unknown_command_fails_closed(self):

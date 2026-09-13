@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import uuid
+from dataclasses import asdict
 from decimal import Decimal
 from pathlib import Path
 from typing import Callable
@@ -11,8 +12,13 @@ from .agents import AgentContext, AgentOrchestrator, MarketMirrorAgent, PaperBas
 from .dataset import load_dataset
 from .domain import MarketEvent
 from .endurance import EnduranceConfig, run_endurance
+from .integrity import atomic_write_json
 from .paper import PaperBook
-from .parlayapi_provider import ParlayApiTableTennisProvider
+from .parlayapi_provider import (
+    ParlayApiTableTennisProvider,
+    ProviderPayloadError,
+    ProviderTransportError,
+)
 from .portfolio import PortfolioEngine
 from .recovery import reconcile_late_crashes
 from .replay import ReplayEngine
@@ -56,6 +62,14 @@ def build_parser() -> argparse.ArgumentParser:
     observe.add_argument("--public-preview", action="store_true", help="use provider public preview without an API key")
     observe.add_argument("--max-items", type=int, default=250, help="hard maximum quotes requested from the provider")
     observe.add_argument("--show", type=int, default=50, help="maximum current quote lines to print")
+    coverage = sub.add_parser(
+        "historical-coverage",
+        help="verify authenticated table-tennis historical access/coverage (provider documents a 1-credit cost)",
+    )
+    coverage.add_argument("--from", dest="date_from", required=True, help="requested start date YYYY-MM-DD")
+    coverage.add_argument("--to", dest="date_to", required=True, help="requested end date YYYY-MM-DD")
+    coverage.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
+    coverage.add_argument("--output", type=Path, default=None, help="optional JSON evidence path")
     repair = sub.add_parser("repair-workspace", help="reconcile only late-crashed runs with durable hash-matched completion evidence")
     repair.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
     endurance = sub.add_parser("endurance", help="run deterministic bounded ingestion/replay/restart/settlement stress checks")
@@ -184,6 +198,72 @@ def run_observe_table_tennis(
     return 0
 
 
+def run_historical_coverage(
+    workspace: Path,
+    *,
+    date_from: str,
+    date_to: str,
+    output: Path | None,
+    provider_factory: ProviderFactory = ParlayApiTableTennisProvider,
+) -> int:
+    api_key = os.environ.get("AUTOSPORT_PARLAYAPI_KEY")
+    if not api_key:
+        print("historical_coverage=BLOCKED reason=AUTOSPORT_PARLAYAPI_KEY_not_set")
+        return 2
+    provider = provider_factory(api_key)
+    try:
+        report = provider.historical_coverage(date_from, date_to)
+    except (ProviderTransportError, ProviderPayloadError, ValueError) as exc:
+        print(f"historical_coverage=FAIL_CLOSED error={exc}")
+        return 3
+
+    destination = output or (workspace / "historical-coverage.json")
+    payload = {
+        "schema_version": 1,
+        "kind": "parlayapi_historical_coverage_preflight",
+        "provider": "parlayapi",
+        "sport_key": report.sport_key,
+        "date_from": report.date_from,
+        "date_to": report.date_to,
+        "coverage_surface": "historical_matches",
+        "priced_rows_meaning": "match_rows_with_real_odds_not_point_in_time_market_coverage",
+        "point_in_time_odds_market_coverage_verified": False,
+        "requested_window_access_verified": True,
+        "historical_window_hours": report.historical_window_hours,
+        "historical_window_from": report.historical_window_from,
+        "observed_at": report.observed_at,
+        "api_version": report.api_version,
+        "response_sha256": report.response_sha256,
+        "has_data": report.has_data,
+        "total_rows": report.total_rows,
+        "total_priced_rows": report.total_priced_rows,
+        "sources": [asdict(item) for item in report.sources],
+        "licensing_or_retention_verified": False,
+        "real_money_execution": False,
+    }
+    atomic_write_json(destination, payload)
+    status = "DATA_AVAILABLE" if report.has_data else "NO_DATA"
+    print(
+        f"historical_coverage={status} access_verified=true has_data={str(report.has_data).lower()} "
+        f"rows={report.total_rows} priced_rows={report.total_priced_rows}"
+    )
+    print(
+        "coverage_surface=historical_matches "
+        "point_in_time_odds_market_coverage_verified=false"
+    )
+    print(
+        f"entitlement_window_hours={report.historical_window_hours} "
+        f"entitlement_from={report.historical_window_from} licensing_or_retention_verified=false"
+    )
+    for source in report.sources:
+        print(
+            f"source={source.source} rows={source.rows} priced_rows={source.priced_rows} "
+            f"coverage={source.first_date}..{source.last_date}"
+        )
+    print(f"evidence={destination}")
+    return 0 if report.has_data else 6
+
+
 def run_repair_workspace(workspace: Path) -> int:
     try:
         report = reconcile_late_crashes(workspace)
@@ -295,6 +375,13 @@ def main(argv: list[str] | None = None) -> int:
             public_preview=args.public_preview,
             max_items=args.max_items,
             show=args.show,
+        )
+    if args.command == "historical-coverage":
+        return run_historical_coverage(
+            args.workspace,
+            date_from=args.date_from,
+            date_to=args.date_to,
+            output=args.output,
         )
     if args.command == "repair-workspace":
         return run_repair_workspace(args.workspace)

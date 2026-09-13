@@ -128,6 +128,12 @@ $fresh = Test-NvdaEvidenceContract `
 if ($packaged.template_sha256 -ne $fresh.template_sha256) {
   throw 'Packaged and fresh-extracted NVDA evidence templates are not deterministic-identical'
 }
+if ($packaged.required_checks_pending -ne $fresh.required_checks_pending) {
+  throw 'Packaged and fresh-extracted NVDA evidence templates disagree on required pending checks'
+}
+if ($packaged.anchor_provenance_machine_verified -ne $false -or $fresh.anchor_provenance_machine_verified -ne $false) {
+  throw 'Machine NVDA evidence smoke must not promote anchor provenance verification'
+}
 
 $evidence = [ordered]@{
   schema_version = 1
@@ -151,4 +157,45 @@ $evidence = [ordered]@{
 }
 $evidencePath = Join-Path $PWD 'dist/nvda-evidence-package-smoke.json'
 $evidence | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $evidencePath -Encoding utf8
+
+# Bind only machine-verifiable NVDA prerequisites into the canonical fresh-extraction
+# aggregate. This does not prove independent package-anchor provenance or physical NVDA use.
+$verificationPath = Join-Path $PWD 'dist/fresh-extraction-verification.json'
+if (-not (Test-Path $verificationPath -PathType Leaf)) {
+  throw 'Canonical fresh-extraction verification is missing before NVDA evidence aggregation'
+}
+$verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
+if ($verification.status -ne 'PASS') {
+  throw 'Canonical fresh-extraction verification is not PASS before NVDA evidence aggregation'
+}
+if ($verification.source_sha -ne $expectedSourceSha) {
+  throw 'Canonical fresh-extraction verification source identity drifted from external exact-head anchor'
+}
+if ($verification.package_sha256 -ne $packageSha) {
+  throw 'Canonical fresh-extraction verification package identity drifted from NVDA candidate'
+}
+if ($evidence.source_anchor_match_verified -ne $true -or $evidence.package_anchor_match_verified -ne $true) {
+  throw 'NVDA evidence smoke did not preserve required source/package anchor matches'
+}
+if ($evidence.package_anchor_external_provenance_verified -ne $false) {
+  throw 'CI NVDA smoke must not claim independent package-anchor provenance'
+}
+if ($evidence.machine_verified_physical_execution -ne $false) {
+  throw 'Machine NVDA smoke must not claim physical execution'
+}
+
+$verification | Add-Member -NotePropertyName extracted_nvda_evidence_contract_status -NotePropertyValue $evidence.status -Force
+$verification | Add-Member -NotePropertyName extracted_nvda_candidate_identity_verified -NotePropertyValue ($packaged.candidate_identity_verified -and $fresh.candidate_identity_verified) -Force
+$verification | Add-Member -NotePropertyName extracted_nvda_source_anchor_match_verified -NotePropertyValue $evidence.source_anchor_match_verified -Force
+$verification | Add-Member -NotePropertyName extracted_nvda_source_anchor_workflow_context -NotePropertyValue $evidence.source_anchor_workflow_context -Force
+$verification | Add-Member -NotePropertyName extracted_nvda_package_anchor_match_verified -NotePropertyValue $evidence.package_anchor_match_verified -Force
+$verification | Add-Member -NotePropertyName extracted_nvda_package_anchor_input_scope -NotePropertyValue $evidence.package_anchor_input_scope -Force
+$verification | Add-Member -NotePropertyName extracted_nvda_anchor_provenance_machine_verified -NotePropertyValue $false -Force
+$verification | Add-Member -NotePropertyName extracted_nvda_package_anchor_external_provenance_verified -NotePropertyValue $evidence.package_anchor_external_provenance_verified -Force
+$verification | Add-Member -NotePropertyName extracted_nvda_required_checks_pending -NotePropertyValue $packaged.required_checks_pending -Force
+$verification | Add-Member -NotePropertyName extracted_nvda_untouched_pending_template_rejected -NotePropertyValue ($packaged.untouched_pending_template_rejected -and $fresh.untouched_pending_template_rejected) -Force
+$verification | Add-Member -NotePropertyName extracted_nvda_machine_verified_physical_execution -NotePropertyValue $evidence.machine_verified_physical_execution -Force
+$verification | Add-Member -NotePropertyName extracted_nvda_template_sha256 -NotePropertyValue $packaged.template_sha256 -Force
+$verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
+
 Write-Host "NVDA_EVIDENCE_PACKAGE_SMOKE=PASS package_sha256=$packageSha source_sha=$expectedSourceSha package_anchor_external_provenance_verified=false"

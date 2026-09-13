@@ -8,8 +8,10 @@ class DataToolsEntryTests(unittest.TestCase):
     def test_help_is_success_without_gui(self):
         with patch("builtins.print") as output:
             self.assertEqual(data_tools_entry.main(["--help"]), 0)
-        self.assertIn("portable Windows historical-data tools", output.call_args.args[0])
-        self.assertIn("walk-forward-evaluate", output.call_args.args[0])
+        help_text = output.call_args.args[0]
+        self.assertIn("portable Windows historical-data tools", help_text)
+        self.assertIn("walk-forward-evaluate", help_text)
+        self.assertIn("repair-workspace", help_text)
 
     def test_acquire_dispatches_exact_arguments(self):
         with patch("autosport.historical_acquisition.main", return_value=7) as target:
@@ -43,6 +45,16 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertEqual(result, 11)
         target.assert_called_once_with(
             ["walk-forward-evaluate", "evaluation.json", "--output", "report.json"]
+        )
+
+    def test_repair_workspace_uses_canonical_fail_closed_cli_recovery(self):
+        with patch("autosport.cli.main", return_value=4) as target:
+            result = data_tools_entry.main(
+                ["repair-workspace", "--workspace", r"C:\\Autosport\\state"]
+            )
+        self.assertEqual(result, 4)
+        target.assert_called_once_with(
+            ["repair-workspace", "--workspace", r"C:\\Autosport\\state"]
         )
 
     def test_unknown_command_fails_closed(self):

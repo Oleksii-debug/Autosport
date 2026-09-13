@@ -63,6 +63,9 @@ def verify_forecast_origin_binding(
         raise ValueError("forecast origin proof references unknown evaluated forecasts: " + ",".join(unknown))
 
     summaries = [_load_summary(path, dataset) for path in binding.run_summary_paths]
+    run_ids = [item["run_id"] for item in summaries]
+    if len(run_ids) != len(set(run_ids)):
+        raise ValueError("forecast origin evidence contains duplicate run_id")
     expected_prefix_hashes = {item["decision_ledger_sha256"] for item in summaries}
     prefixes = _validated_ledger_prefixes(binding.decision_ledger_path, expected_prefix_hashes)
     missing_prefixes = sorted(expected_prefix_hashes.difference(prefixes))
@@ -120,7 +123,7 @@ def verify_forecast_origin_binding(
                 if latest_recorded_at is None or parse_iso_timestamp(latest_recorded_at) < recorded_at:
                     latest_recorded_at = recorded_at_value
 
-    missing = sorted(forecast_id for forecast_id, run_ids in matched.items() if not run_ids)
+    missing = sorted(forecast_id for forecast_id, matched_runs in matched.items() if not matched_runs)
     if missing:
         raise ValueError(
             "evaluated forecasts lack canonical pre-outcome decision-ledger origin: " + ",".join(missing)
@@ -128,9 +131,8 @@ def verify_forecast_origin_binding(
 
     return {
         "status": "VERIFIED",
-        "decision_ledger_path": str(binding.decision_ledger_path),
         "decision_ledger_sha256": hashlib.sha256(binding.decision_ledger_path.read_bytes()).hexdigest(),
-        "run_ids": sorted({run_id for run_ids in matched.values() for run_id in run_ids}),
+        "run_ids": sorted({run_id for matched_runs in matched.values() for run_id in matched_runs}),
         "run_summary_count": len(summaries),
         "evaluated_forecast_count": len(evaluated_forecast_ids),
         "latest_verified_recorded_at": latest_recorded_at,
@@ -164,6 +166,8 @@ def _load_summary(path: Path, dataset: ReplayDataset) -> dict[str, Any]:
         raise ValueError(f"forecast origin run summary is unreadable or invalid JSON: {path}") from exc
     if not isinstance(raw, dict) or raw.get("schema_version") != 2:
         raise ValueError("forecast origin run summary must use schema_version 2")
+    if raw.get("transaction_schema_version") != 1:
+        raise ValueError("forecast origin run summary lacks canonical transaction precommit evidence")
     run_id = _required_text(raw, "run_id", "forecast origin run summary")
     if raw.get("transaction_run_id") != run_id:
         raise ValueError("forecast origin run summary transaction_run_id mismatch")

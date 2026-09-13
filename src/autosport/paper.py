@@ -3,17 +3,33 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
+
+
+def parse_initial_bankroll(value: Decimal | str) -> Decimal:
+    """Parse one finite positive virtual bankroll amount.
+
+    This is paper-only economic state. Reject zero, negative, malformed and
+    non-finite values before a workspace can be initialized with ambiguous
+    virtual-bank semantics.
+    """
+    try:
+        amount = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError("initial virtual bankroll must be a finite positive decimal") from exc
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError("initial virtual bankroll must be a finite positive decimal")
+    return amount
 
 
 class PaperBook:
     """Virtual bankroll and auditable paper tickets. No real-money execution path exists."""
 
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
-        self.initial_bankroll = Decimal(str(initial_bankroll))
+        self.initial_bankroll = parse_initial_bankroll(initial_bankroll)
         self.balance = self.initial_bankroll
         self.tickets: dict[str, PaperTicket] = {}
 

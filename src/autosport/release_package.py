@@ -25,6 +25,20 @@ _WINDOWS_RESERVED_NAMES = {
 }
 _WINDOWS_INVALID_CHARS = frozenset('<>:"\\|?*')
 _WINDOWS_MAX_COMPONENT_UTF16_UNITS = 255
+_GIT_COMMIT_SHA_LENGTH = 40
+_GIT_COMMIT_SHA_CHARS = frozenset("0123456789abcdef")
+
+
+def _require_git_commit_sha(value: str, *, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != _GIT_COMMIT_SHA_LENGTH
+        or any(character not in _GIT_COMMIT_SHA_CHARS for character in value)
+    ):
+        raise ValueError(
+            f"{field} must be a canonical 40-character lowercase hexadecimal Git commit SHA"
+        )
+    return value
 
 
 def sha256_file(path: str | Path) -> str:
@@ -50,6 +64,7 @@ def build_windows_package(
     output_zip: str | Path,
     source_sha: str,
 ) -> tuple[Path, str]:
+    _require_git_commit_sha(source_sha, field="source_sha")
     exe_path = Path(exe_path)
     start_file = Path(start_file)
     example_dir = Path(example_dir)
@@ -114,6 +129,7 @@ def verify_windows_package(
 ) -> dict[str, Any]:
     """Fail closed on a release ZIP whose identity, truth labels, or payload hashes drift."""
 
+    _require_git_commit_sha(expected_source_sha, field="expected_source_sha")
     package_zip = Path(package_zip)
     with zipfile.ZipFile(package_zip, "r") as archive:
         infos = archive.infolist()

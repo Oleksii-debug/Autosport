@@ -26,9 +26,15 @@ jobs:
       AUTOSPORT_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Verify exact pristine source checkout before build
+        shell: pwsh
+        run: python scripts/verify_source_checkout.py --source-sha $env:AUTOSPORT_SOURCE_SHA
       - shell: pwsh
         run: ./scripts/build_windows.ps1
       - name: Execute packaged NVDA evidence contract

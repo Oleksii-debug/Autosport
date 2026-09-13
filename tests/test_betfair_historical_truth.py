@@ -5,10 +5,14 @@ import json
 import tempfile
 import unittest
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
+from autosport.agents import AgentContext
 from autosport.betfair_historical_import import import_betfair_historical
 from autosport.dataset import load_dataset
+from autosport.paper import PaperBook
+from autosport.paper_strategy import Forecast, PaperValueAgent
 
 
 def _epoch_ms(value: str) -> int:
@@ -104,29 +108,94 @@ class BetfairHistoricalTruthTests(unittest.TestCase):
             },
         )
 
-    def test_equal_publish_time_across_different_source_files_fails_closed(self) -> None:
+    def test_non_executable_ltp_cannot_open_paper_value_ticket(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "market.bz2"
+            output = root / "dataset"
+            _write_bz2(source, _stream(market_id="1.100", event_id="event-1"))
+            import_betfair_historical(
+                [source],
+                output,
+                acquired_at="2026-02-10T13:30:00Z",
+                imported_at="2026-02-10T14:00:00Z",
+                terms_reference="test-rights",
+                retention_basis="test-retention",
+            )
+            event = load_dataset(output).load_market_events()[0]
+
+        context = AgentContext(paper_book=PaperBook("1000"))
+        agent = PaperValueAgent(
+            {
+                event.quote_key: Forecast(
+                    quote_key=event.quote_key,
+                    probability=Decimal("0.90"),
+                    model_id="truth-boundary-test",
+                    as_of_ts=event.observed_ts,
+                )
+            },
+            stake="50",
+            minimum_expected_profit_per_unit="0",
+        )
+        agent.on_market_event(event, context)
+
+        self.assertEqual(context.paper_book.balance, Decimal("1000"))
+        self.assertEqual(context.paper_book.tickets, {})
+
+    def test_equal_publish_time_across_different_source_files_fails_closed_in_either_input_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first.bz2"
+            second = root / "second.bz2"
+            _write_bz2(first, _stream(market_id="1.100", event_id="event-1"))
+            _write_bz2(second, _stream(market_id="1.200", event_id="event-2"))
+
+            for index, inputs in enumerate(((first, second), (second, first)), start=1):
+                with self.subTest(input_order=index):
+                    output = root / f"dataset-{index}"
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "replay-visible events share publish time across input files.*cross-file source order is ambiguous",
+                    ):
+                        import_betfair_historical(
+                            inputs,
+                            output,
+                            acquired_at="2026-02-10T13:30:00Z",
+                            imported_at="2026-02-10T14:00:00Z",
+                            terms_reference="test-rights",
+                            retention_basis="test-retention",
+                        )
+                    self.assertFalse(output.exists())
+
+    def test_distinct_publish_times_across_source_files_remain_importable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             first = root / "first.bz2"
             second = root / "second.bz2"
             output = root / "dataset"
             _write_bz2(first, _stream(market_id="1.100", event_id="event-1"))
-            _write_bz2(second, _stream(market_id="1.200", event_id="event-2"))
+            _write_bz2(
+                second,
+                _stream(
+                    market_id="1.200",
+                    event_id="event-2",
+                    open_ts="2026-02-10T12:01:00Z",
+                ),
+            )
 
-            with self.assertRaisesRegex(
-                ValueError,
-                "replay-visible events share publish time across input files.*cross-file source order is ambiguous",
-            ):
-                import_betfair_historical(
-                    [first, second],
-                    output,
-                    acquired_at="2026-02-10T13:30:00Z",
-                    imported_at="2026-02-10T14:00:00Z",
-                    terms_reference="test-rights",
-                    retention_basis="test-retention",
-                )
+            import_betfair_historical(
+                [first, second],
+                output,
+                acquired_at="2026-02-10T13:30:00Z",
+                imported_at="2026-02-10T14:00:00Z",
+                terms_reference="test-rights",
+                retention_basis="test-retention",
+            )
 
-            self.assertFalse(output.exists())
+            events = load_dataset(output).load_market_events()
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual([event.sequence for event in events], [1, 2])
 
 
 if __name__ == "__main__":

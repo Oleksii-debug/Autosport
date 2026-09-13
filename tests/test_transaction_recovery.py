@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -23,29 +24,41 @@ class TransactionRecoveryTests(unittest.TestCase):
         self.assertEqual(len(unresolved), 1)
         return registry, unresolved[0][0], unresolved[0][1]
 
-    def test_crash_before_precommit_aborts_without_canonical_economic_side_effects(self):
+    def test_runtime_failure_before_precommit_aborts_without_canonical_economic_side_effects(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session = AutosportSession(root, "10000")
             with patch.object(
                 RunTransaction,
                 "stage_outputs",
-                side_effect=RuntimeError("simulated crash before precommit"),
+                side_effect=RuntimeError("simulated runtime failure before precommit"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "before precommit"):
                     session.run_dataset(self._dataset())
 
-            registry, key, item = self._in_progress(root)
+            registry = RunRegistry(root / "run_registry.json")
+            self.assertEqual(registry.in_progress(), ())
+            registry_state = json.loads(
+                (root / "run_registry.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(registry_state["runs"]), 1)
+            key, item = next(iter(registry_state["runs"].items()))
+            self.assertEqual(item["status"], "aborted")
             base_book_hash = item["base_paper_book_sha256"]
             base_ledger_hash = item["base_decision_ledger_sha256"]
             self.assertEqual(sha256_file(root / "paper_book.json"), base_book_hash)
             self.assertEqual(sha256_file(root / "decisions.jsonl"), base_ledger_hash)
             self.assertEqual((root / "decisions.jsonl").read_text(encoding="utf-8"), "")
+            tx = RunTransaction(root, str(item["run_id"]))
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["phase"], "aborted")
             session.close()
 
+            # Already-proven ordinary failures must not require or be reclassified by
+            # crash repair; repair is reserved for genuinely unresolved runs.
             report = reconcile_late_crashes(root)
             self.assertEqual(report.reconciled_keys, ())
-            self.assertEqual(report.aborted_uncommitted_keys, (key,))
+            self.assertEqual(report.aborted_uncommitted_keys, ())
             self.assertEqual(report.unresolved_without_summary, ())
             self.assertEqual(registry.get(key)["status"], "aborted")
 

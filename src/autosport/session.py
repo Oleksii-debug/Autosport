@@ -146,47 +146,89 @@ class AutosportSession:
             base_paper_book_sha256=base_book_hash,
             base_decision_ledger_sha256=base_ledger_hash,
         )
-        transaction = RunTransaction.start(
-            self.workspace,
-            run_id=run_id,
-            experiment_key=experiment_key,
-            market_sha256=dataset.market_sha256,
-            results_sha256=dataset.results_sha256,
-            strategy_id=self.strategy_id,
-            base_paper_book_sha256=base_book_hash,
-            base_decision_ledger_sha256=base_ledger_hash,
-        )
+        try:
+            transaction = RunTransaction.start(
+                self.workspace,
+                run_id=run_id,
+                experiment_key=experiment_key,
+                market_sha256=dataset.market_sha256,
+                results_sha256=dataset.results_sha256,
+                strategy_id=self.strategy_id,
+                base_paper_book_sha256=base_book_hash,
+                base_decision_ledger_sha256=base_ledger_hash,
+            )
+        except Exception:
+            # No economic mutation occurs before the transaction object exists.
+            # Do not turn an ordinary start failure into an in-progress workspace
+            # that falsely requires crash recovery.
+            self.registry.abort_uncommitted(
+                experiment_key,
+                reason="transaction start failed before durable precommit",
+                paper_book_sha256=sha256_file(self.book_path),
+                decision_ledger_sha256=sha256_file(self.ledger.path),
+            )
+            raise
 
-        working_book = PaperBook.load(self.book_path)
-        staged_ledger = JsonlDecisionLedger(transaction.run_ledger_path)
-        orchestrator = self._runtime(run_id, book=working_book, ledger=staged_ledger)
-        engine = ReplayEngine(dataset.load_market_events())
+        try:
+            working_book = PaperBook.load(self.book_path)
+            staged_ledger = JsonlDecisionLedger(transaction.run_ledger_path)
+            orchestrator = self._runtime(run_id, book=working_book, ledger=staged_ledger)
+            engine = ReplayEngine(dataset.load_market_events())
 
-        def consume(event) -> None:
-            self.store.append(event)
-            orchestrator.on_market_event(event)
+            def consume(event) -> None:
+                self.store.append(event)
+                orchestrator.on_market_event(event)
 
-        replay = engine.run(consume, speed=speed, run_id=run_id)
-        # Fail closed on any planned causal decision that did not execute before
-        # loading sealed outcome facts into settlement.
-        orchestrator.finalize_replay()
-        settlement = SettlementEngine()
-        settlement.record(dataset.load_results_after_replay())
-        settled = tuple(settlement.settle_ready(working_book))
-        evaluation = evaluate(working_book)
-        portfolio = self.portfolio_engine.analyse(list(working_book.tickets.values()))
-        destination = self.workspace / f"run-{replay.run_id}.json"
-        result = SessionResult(
-            replay,
-            settled,
-            working_book.balance,
-            evaluation,
-            portfolio,
-            experiment_key,
-            str(destination),
-        )
+            replay = engine.run(consume, speed=speed, run_id=run_id)
+            # Fail closed on any planned causal decision that did not execute before
+            # loading sealed outcome facts into settlement.
+            orchestrator.finalize_replay()
+            settlement = SettlementEngine()
+            settlement.record(dataset.load_results_after_replay())
+            settled = tuple(settlement.settle_ready(working_book))
+            evaluation = evaluate(working_book)
+            portfolio = self.portfolio_engine.analyse(list(working_book.tickets.values()))
+            destination = self.workspace / f"run-{replay.run_id}.json"
+            result = SessionResult(
+                replay,
+                settled,
+                working_book.balance,
+                evaluation,
+                portfolio,
+                experiment_key,
+                str(destination),
+            )
 
-        transaction.stage_outputs(working_book, self.ledger.path)
+            transaction.stage_outputs(working_book, self.ledger.path)
+        except Exception:
+            # A normal strategy/replay/staging failure before PRECOMMIT is not an
+            # ambiguous crash. Recovery must first prove canonical PaperBook and
+            # Decision Ledger are still exactly BASE; only then may the registry
+            # record an explicit aborted retry.
+            recovery = RunTransaction.recover(
+                self.workspace,
+                run_id=run_id,
+                registry_item=self.registry.get(experiment_key),
+                experiment_key=experiment_key,
+            )
+            if recovery.disposition != "aborted_uncommitted":
+                raise RuntimeError(
+                    "precommit failure unexpectedly crossed the durable commit boundary"
+                )
+            self.registry.abort_uncommitted(
+                experiment_key,
+                reason=(
+                    "strategy/replay/staging failed before durable precommit; "
+                    "canonical economic state remained BASE"
+                ),
+                paper_book_sha256=sha256_file(self.book_path),
+                decision_ledger_sha256=sha256_file(self.ledger.path),
+            )
+            raise
+
+        # After durable PRECOMMIT begins, failures deliberately remain unresolved.
+        # Recovery owns deciding whether BASE or NEW is canonical and must never
+        # downgrade an uncertain commit into an ordinary strategy rejection.
         summary = transaction.precommit(self._run_summary_payload(dataset, result))
         transaction.commit()
 
@@ -199,6 +241,7 @@ class AutosportSession:
             paper_book_sha256=str(summary["paper_book_sha256"]),
             decision_ledger_sha256=str(summary["decision_ledger_sha256"]),
         )
+        transaction.mark_registry_completed()
         return result
 
     def _ensure_canonical_economic_base(self) -> None:

@@ -45,6 +45,36 @@ A minimal v2 manifest has this shape:
 
 `redistribution_policy` is an explicit truth label: `prohibited`, `internal_only`, or `permitted`. It is not inferred from the provider name.
 
+## Rights/retention authority binding for corpus builds
+
+The production corpus-build entrypoints do not accept a bare JSON file that merely sets `licensing_or_retention_verified=true`. The governance proof must name a direct sibling authority-evidence record and bind that record by exact SHA-256. The claims copied into the governance proof must exactly match the hashed authority record.
+
+The governance proof therefore includes:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "historical_corpus_governance_proof",
+  "source_identity": "<provider/account/export identity>",
+  "source_ids": ["parlayapi:table_tennis"],
+  "terms_reference": "<specific terms/contract reference>",
+  "retention_basis": "<truthful retention basis>",
+  "authority_reference": "<entitlement/contract/decision reference>",
+  "verified_at": "2026-09-13T06:00:00Z",
+  "redistribution_policy": "internal_only",
+  "redistribution_verified": false,
+  "licensing_or_retention_verified": true,
+  "authority_record_file": "authority-record.json",
+  "authority_record_sha256": "<sha256 of authority-record.json>"
+}
+```
+
+The sibling `authority-record.json` uses `kind=historical_corpus_governance_authority_record`, repeats the exact rights-bearing fields above, and additionally records non-empty `evidence_reference`, `verification_method`, and `recorded_by` fields. The build fails closed if the file is missing, nested outside the direct sibling boundary, hash-mismatched, or disagrees with the proof on source, terms, retention, authority, verification time, licensing flag, or redistribution truth.
+
+This is an integrity/provenance gate, not independent legal certification. A fabricated authority record can still have a valid checksum. The record must refer to real evidence and an actual lawful basis. Autosport never turns a checksum, API credential, read-only provider response, or operator assertion into legal rights.
+
+The canonical installed commands `autosport-build-historical-corpus` and `autosport-build-historical-corpus-from-bundle`, and the packaged `Autosport-Data.exe build-corpus*` commands, route through this binding gate before the corpus assembler runs.
+
 ## Machine-verifiable gates
 
 For schema v2 Autosport verifies all of the following before a replay may consume the corpus:
@@ -60,7 +90,7 @@ For schema v2 Autosport verifies all of the following before a replay may consum
 - sealed results may reference only quote keys that actually exist in the market corpus;
 - the outcome reveal boundary cannot precede the end of strategy-visible market coverage.
 
-The derived `historical_import_identity` is the SHA-256 of the canonical schema-v2 manifest identity, including the exact market/results hashes and governance record. If a manifest declares an `import_identity`, Autosport recomputes it and rejects any mismatch. This makes the import identity content-addressed rather than user-asserted.
+The derived `historical_import_identity` is the SHA-256 of the canonical schema-v2 manifest identity, including the exact market/results hashes and governance record. If a manifest declares an `import_identity`, Autosport recomputes it and rejects any mismatch. This makes the import identity content-addressed rather than user-asserted. Because the governance proof itself contains the authority-record SHA-256 and the assembled manifest stores the governance-proof SHA-256, the final import identity transitively binds the accepted authority evidence record without redistributing that external evidence artifact.
 
 ## Verification without replay
 

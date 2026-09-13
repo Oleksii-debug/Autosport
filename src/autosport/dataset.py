@@ -207,16 +207,33 @@ class ReplayDataset:
 
     def load_market_events(self) -> list[MarketEvent]:
         self._assert_retention_current()
+        digest = hashlib.sha256()
         events: list[MarketEvent] = []
-        with self.market_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    events.append(MarketEvent.from_dict(json.loads(line)))
+        with self.market_path.open("rb") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                digest.update(raw_line)
+                if not raw_line.strip():
+                    continue
+                try:
+                    line = raw_line.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ValueError(
+                        f"market line {line_number} is not valid UTF-8"
+                    ) from exc
+                events.append(MarketEvent.from_dict(json.loads(line)))
+        if digest.hexdigest() != self.market_sha256:
+            raise ValueError("market dataset hash changed after verification")
         return events
 
     def load_results_after_replay(self) -> dict[str, str]:
         self._assert_retention_current()
-        raw = json.loads(self.results_path.read_text(encoding="utf-8"))
+        payload = self.results_path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != self.results_sha256:
+            raise ValueError("sealed results hash changed after verification")
+        try:
+            raw = json.loads(payload.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ValueError("sealed results payload is not valid UTF-8") from exc
         if not isinstance(raw, dict):
             raise ValueError("results payload must be an object")
         if int(raw.get("schema_version", 0)) != 1:
@@ -561,8 +578,8 @@ def _load_governance(raw: dict[str, Any], *, root: Path) -> DatasetGovernance:
 
 
 def _validate_historical_payloads(
-    market_path: Path,
-    results_path: Path,
+    market_payload: bytes,
+    results_payload: bytes,
     governance: DatasetGovernance,
 ) -> None:
     coverage_start = _parse_timestamp(governance.coverage_start_ts, field="coverage_start_ts")
@@ -573,50 +590,57 @@ def _validate_historical_payloads(
     dedupe_keys: set[str] = set()
     event_count = 0
 
-    with market_path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            if not line.strip():
-                continue
-            event_count += 1
-            try:
-                raw_event = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"market line {line_number} is not valid JSON") from exc
-            if not isinstance(raw_event, dict):
-                raise ValueError(f"market line {line_number} must be a JSON object")
-            for timestamp_field in ("source_ts", "observed_ts", "ingest_ts"):
-                timestamp_value = raw_event.get(timestamp_field)
-                if not isinstance(timestamp_value, str) or not timestamp_value.strip():
-                    raise ValueError(
-                        f"market line {line_number} requires explicit {timestamp_field} for historical governance"
-                    )
-            event = MarketEvent.from_dict(raw_event)
-            if event.source_id not in source_ids:
-                raise ValueError(f"market line {line_number} source_id is outside declared coverage")
-            if event.market_type.value not in market_types:
-                raise ValueError(f"market line {line_number} market_type is outside declared coverage")
-            if event.source_ts is None:
-                raise ValueError(f"market line {line_number} requires source_ts for historical governance")
-            source_ts = _parse_timestamp(event.source_ts, field=f"market line {line_number} source_ts")
-            observed_ts = _parse_timestamp(event.observed_ts, field=f"market line {line_number} observed_ts")
-            ingest_ts = _parse_timestamp(event.ingest_ts, field=f"market line {line_number} ingest_ts")
-            if source_ts > observed_ts:
-                raise ValueError(f"market line {line_number} source_ts is after observed_ts")
-            if ingest_ts < observed_ts:
-                raise ValueError(f"market line {line_number} ingest_ts is before observed_ts")
-            if observed_ts < coverage_start or observed_ts > coverage_end:
-                raise ValueError(f"market line {line_number} observed_ts is outside declared coverage")
-            if _contains_forbidden_historical_metadata(event.metadata):
-                raise ValueError(f"market line {line_number} contains future/outcome metadata")
-            if event.dedupe_key in dedupe_keys:
-                raise ValueError(f"market line {line_number} duplicates canonical source event identity")
-            dedupe_keys.add(event.dedupe_key)
-            quote_keys.add(event.quote_key)
+    try:
+        market_text = market_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("historical market corpus must be valid UTF-8") from exc
+
+    for line_number, line in enumerate(market_text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        event_count += 1
+        try:
+            raw_event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"market line {line_number} is not valid JSON") from exc
+        if not isinstance(raw_event, dict):
+            raise ValueError(f"market line {line_number} must be a JSON object")
+        for timestamp_field in ("source_ts", "observed_ts", "ingest_ts"):
+            timestamp_value = raw_event.get(timestamp_field)
+            if not isinstance(timestamp_value, str) or not timestamp_value.strip():
+                raise ValueError(
+                    f"market line {line_number} requires explicit {timestamp_field} for historical governance"
+                )
+        event = MarketEvent.from_dict(raw_event)
+        if event.source_id not in source_ids:
+            raise ValueError(f"market line {line_number} source_id is outside declared coverage")
+        if event.market_type.value not in market_types:
+            raise ValueError(f"market line {line_number} market_type is outside declared coverage")
+        if event.source_ts is None:
+            raise ValueError(f"market line {line_number} requires source_ts for historical governance")
+        source_ts = _parse_timestamp(event.source_ts, field=f"market line {line_number} source_ts")
+        observed_ts = _parse_timestamp(event.observed_ts, field=f"market line {line_number} observed_ts")
+        ingest_ts = _parse_timestamp(event.ingest_ts, field=f"market line {line_number} ingest_ts")
+        if source_ts > observed_ts:
+            raise ValueError(f"market line {line_number} source_ts is after observed_ts")
+        if ingest_ts < observed_ts:
+            raise ValueError(f"market line {line_number} ingest_ts is before observed_ts")
+        if observed_ts < coverage_start or observed_ts > coverage_end:
+            raise ValueError(f"market line {line_number} observed_ts is outside declared coverage")
+        if _contains_forbidden_historical_metadata(event.metadata):
+            raise ValueError(f"market line {line_number} contains future/outcome metadata")
+        if event.dedupe_key in dedupe_keys:
+            raise ValueError(f"market line {line_number} duplicates canonical source event identity")
+        dedupe_keys.add(event.dedupe_key)
+        quote_keys.add(event.quote_key)
 
     if event_count == 0:
         raise ValueError("historical market corpus must contain at least one event")
 
-    results_raw = json.loads(results_path.read_text(encoding="utf-8"))
+    try:
+        results_raw = json.loads(results_payload.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise ValueError("sealed results payload must be valid UTF-8") from exc
     if not isinstance(results_raw, dict):
         raise ValueError("results payload must be an object")
     if int(results_raw.get("schema_version", 0)) != 1:
@@ -704,8 +728,10 @@ def load_dataset(root: str | Path) -> ReplayDataset:
 
     expected_market = str(raw["market_sha256"])
     expected_results = str(raw["results_sha256"])
-    actual_market = _sha256(market_path)
-    actual_results = _sha256(results_path)
+    market_payload = market_path.read_bytes()
+    results_payload = results_path.read_bytes()
+    actual_market = hashlib.sha256(market_payload).hexdigest()
+    actual_results = hashlib.sha256(results_payload).hexdigest()
     if actual_market != expected_market:
         raise ValueError("market dataset hash mismatch")
     if actual_results != expected_results:
@@ -714,7 +740,7 @@ def load_dataset(root: str | Path) -> ReplayDataset:
     import_identity: str | None = None
     if schema_version == 2:
         assert governance is not None
-        _validate_historical_payloads(market_path, results_path, governance)
+        _validate_historical_payloads(market_payload, results_payload, governance)
         import_identity = _import_identity(
             raw=raw,
             market_sha256=actual_market,

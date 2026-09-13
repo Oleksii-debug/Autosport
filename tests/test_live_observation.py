@@ -96,6 +96,29 @@ class LiveObservationTests(unittest.TestCase):
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
+    def test_worker_thread_is_non_daemon_while_durable_observation_is_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = self._observe(tmp)
+
+        worker = OneShotObservationWorker()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_task():
+            entered.set()
+            release.wait(timeout=2)
+            return expected
+
+        self.assertTrue(worker.start(slow_task))
+        self.assertTrue(entered.wait(timeout=1))
+        self.assertTrue(worker.busy)
+        self.assertIsNotNone(worker._thread)
+        self.assertFalse(worker._thread.daemon)
+        release.set()
+        message = self._wait_for_message(worker)
+        self.assertIs(message.result, expected)
+        self.assertFalse(worker.busy)
+
     def test_worker_converts_exception_to_terminal_error_message(self):
         worker = OneShotObservationWorker()
         self.assertTrue(worker.start(lambda: (_ for _ in ()).throw(RuntimeError("network-test"))))

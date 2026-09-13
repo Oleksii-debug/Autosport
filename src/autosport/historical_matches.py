@@ -18,13 +18,12 @@ from .parlayapi_provider import (
 )
 
 TERMS_REFERENCE = "https://parlay-api.com/terms"
-REQUEST_CONTRACT_REFERENCE = "https://api.parlay-api.com/docs"
 
 
 @dataclass(frozen=True, slots=True)
 class HistoricalMatchCapture:
-    requested_date: str
-    priced_only: bool
+    date_from: str
+    date_to: str
     captured_at: str
     canonical_response_sha256: str
     capture_sha256: str
@@ -37,30 +36,41 @@ class HistoricalMatchCapture:
 def capture_historical_matches(
     provider: ParlayApiTableTennisProvider,
     *,
-    requested_date: str,
+    date_from: str,
+    date_to: str,
     output_path: str | Path,
     evidence_path: str | Path | None = None,
-    priced_only: bool = False,
+    sources: tuple[str, ...] = (),
+    limit: int = 1000,
 ) -> HistoricalMatchCapture:
-    """Capture provider historical match/result evidence through the documented API surface.
+    """Capture provider historical match/result evidence without guessing its row schema.
 
-    ParlayAPI documents ``/v1/historical/sports/{sport_key}/matches`` with one
-    required ``date=YYYY-MM-DD`` query parameter and optional ``pricedOnly``.
-    The result archive is intentionally kept opaque here: this capture proves a
-    response identity and runtime entitlement metadata, not quote outcomes,
-    historical market coverage, retention rights, or replay-corpus readiness.
+    The public ParlayAPI contract identifies ``/matches`` as the schedules/scores/results
+    archive and explicitly separates result-only rows from historical price evidence.
+    The OpenAPI response schema is currently untyped, so this function deliberately
+    preserves the provider JSON as an opaque payload. It does *not* derive quote
+    outcomes, market coverage, licensing rights, or a replay-ready corpus.
     """
 
     if provider.public_preview or not provider.api_key:
         raise ValueError("historical match capture requires an authenticated API key")
-    requested = _parse_date(requested_date, field="requested_date")
-    if not isinstance(priced_only, bool):
-        raise ValueError("priced_only must be boolean")
+    start = _parse_date(date_from, field="date_from")
+    end = _parse_date(date_to, field="date_to")
+    if end < start:
+        raise ValueError("date_to must not precede date_from")
+    if limit < 1 or limit > 5000:
+        raise ValueError("limit must be between 1 and 5000")
+    normalized_sources = tuple(sorted({value.strip() for value in sources if value.strip()}))
 
-    query_values = {
-        "date": requested_date,
-        "pricedOnly": "true" if priced_only else "false",
+    query_values: dict[str, Any] = {
+        "dateFrom": date_from,
+        "dateTo": date_to,
+        "pricedOnly": "false",
+        "includeRaw": "false",
+        "limit": str(limit),
     }
+    if normalized_sources:
+        query_values["sources"] = ",".join(normalized_sources)
     url = (
         f"{provider.base_url}/v1/historical/sports/{provider.sport_key}/matches?"
         + urlencode(query_values)
@@ -80,7 +90,7 @@ def capture_historical_matches(
     if window_hours <= 0:
         raise ProviderPayloadError("x-historical-window-hours must be positive")
     entitlement_from = _parse_provider_date(window_from_raw, field="x-historical-window-from")
-    if requested < entitlement_from:
+    if start < entitlement_from:
         raise ProviderPayloadError("historical matches response contradicts its entitlement-window header")
 
     payload = response.payload
@@ -97,10 +107,13 @@ def capture_historical_matches(
         "provider": "parlayapi",
         "sport_key": provider.sport_key,
         "request": {
-            "date": requested_date,
-            "priced_only": priced_only,
+            "date_from": date_from,
+            "date_to": date_to,
+            "sources": list(normalized_sources),
+            "priced_only": False,
+            "include_raw": False,
+            "limit": limit,
         },
-        "request_contract_reference": REQUEST_CONTRACT_REFERENCE,
         "captured_at": captured_at,
         "canonical_response_sha256": canonical_response_sha256,
         "payload": payload,
@@ -113,9 +126,9 @@ def capture_historical_matches(
         "kind": "parlayapi_historical_match_result_evidence",
         "provider": "parlayapi",
         "sport_key": provider.sport_key,
-        "requested_date": requested_date,
-        "priced_only": priced_only,
-        "request_contract_reference": REQUEST_CONTRACT_REFERENCE,
+        "date_from": date_from,
+        "date_to": date_to,
+        "sources": list(normalized_sources),
         "captured_at": captured_at,
         "canonical_response_sha256": canonical_response_sha256,
         "capture_sha256": capture_sha256,
@@ -138,8 +151,8 @@ def capture_historical_matches(
     atomic_write_json(evidence, evidence_payload)
 
     return HistoricalMatchCapture(
-        requested_date=requested_date,
-        priced_only=priced_only,
+        date_from=date_from,
+        date_to=date_to,
         captured_at=captured_at,
         canonical_response_sha256=canonical_response_sha256,
         capture_sha256=capture_sha256,
@@ -189,19 +202,17 @@ def build_parser() -> argparse.ArgumentParser:
         prog="autosport-capture-historical-matches",
         description="Capture authenticated table-tennis match/result archive evidence without deriving settlement outcomes.",
     )
-    parser.add_argument("--date", required=True, help="provider game date, YYYY-MM-DD")
-    parser.add_argument(
-        "--priced-only",
-        action="store_true",
-        help="request only match rows that include real odds; this still does not prove historical market coverage",
-    )
+    parser.add_argument("--from", dest="date_from", required=True, help="first provider date, YYYY-MM-DD")
+    parser.add_argument("--to", dest="date_to", required=True, help="last provider date, YYYY-MM-DD")
     parser.add_argument(
         "--output",
         type=Path,
         default=Path(".autosport-workspace/historical-matches.json"),
-        help="opaque provider response capture",
+        help="normalized provider response capture",
     )
     parser.add_argument("--evidence", type=Path, default=None, help="optional machine evidence JSON path")
+    parser.add_argument("--sources", default="", help="optional comma-separated provider source filter")
+    parser.add_argument("--limit", type=int, default=1000, help="provider row limit, 1..5000")
     return parser
 
 
@@ -211,22 +222,25 @@ def main(argv: list[str] | None = None) -> int:
     if not api_key:
         print("historical_matches=BLOCKED reason=AUTOSPORT_PARLAYAPI_KEY_not_set")
         return 2
+    sources = tuple(value.strip() for value in args.sources.split(",") if value.strip())
     try:
         provider = ParlayApiTableTennisProvider(api_key)
         report = capture_historical_matches(
             provider,
-            requested_date=args.date,
+            date_from=args.date_from,
+            date_to=args.date_to,
             output_path=args.output,
             evidence_path=args.evidence,
-            priced_only=args.priced_only,
+            sources=sources,
+            limit=args.limit,
         )
     except (ProviderTransportError, ProviderPayloadError, ValueError, OSError) as exc:
         print(f"historical_matches=FAIL_CLOSED error={exc}")
         return 3
 
     print(
-        f"historical_matches=CAPTURED date={report.requested_date} "
-        f"priced_only={str(report.priced_only).lower()} window_hours={report.historical_window_hours}"
+        f"historical_matches=CAPTURED range={report.date_from}..{report.date_to} "
+        f"window_hours={report.historical_window_hours}"
     )
     print(
         "provider_result_schema_parsed=false sealed_quote_outcomes_derived=false "

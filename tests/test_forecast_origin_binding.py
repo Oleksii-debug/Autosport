@@ -251,7 +251,7 @@ def _write_bundle(root: Path, raw: dict) -> Path:
 
 
 class ForecastOriginBindingTests(unittest.TestCase):
-    def test_canonical_preoutcome_ledger_promotes_holdout_protocol_truth(self):
+    def test_canonical_local_origin_binds_without_overclaiming_physical_write_time(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dataset = _write_dataset(root / "dataset")
@@ -261,15 +261,19 @@ class ForecastOriginBindingTests(unittest.TestCase):
             report = evaluate_walk_forward_bundle(WalkForwardBundle.from_path(_write_bundle(root, raw)))
 
             self.assertTrue(report["truth"]["canonical_forecast_origin_verified"])
-            self.assertTrue(report["truth"]["pre_outcome_ledger_write_verified"])
-            self.assertTrue(report["truth"]["temporal_holdout_protocol_verified"])
-            self.assertEqual(report["forecast_origin"]["status"], "VERIFIED")
+            self.assertTrue(report["truth"]["declared_record_time_before_reveal_verified"])
+            self.assertFalse(report["truth"]["independent_time_anchor_verified"])
+            self.assertFalse(report["truth"]["pre_outcome_ledger_write_verified"])
+            self.assertFalse(report["truth"]["temporal_holdout_protocol_verified"])
+            self.assertEqual(report["forecast_origin"]["status"], "CANONICAL_BINDING_VERIFIED")
             self.assertEqual(report["forecast_origin"]["evaluated_forecast_count"], 2)
+            self.assertFalse(report["forecast_origin"]["pre_outcome_ledger_write_verified"])
+            self.assertFalse(report["forecast_origin"]["independent_time_anchor_verified"])
             self.assertFalse(report["truth"]["historical_window_market_coverage_verified"])
             self.assertFalse(report["truth"]["licensing_retention_verified"])
             self.assertFalse(report["truth"]["profitability_claim"])
 
-    def test_post_reveal_ledger_write_fails_closed(self):
+    def test_declared_post_reveal_record_time_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dataset = _write_dataset(root / "dataset")
@@ -289,7 +293,7 @@ class ForecastOriginBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "forecast audit mismatch"):
                 evaluate_walk_forward_bundle(WalkForwardBundle.from_path(_write_bundle(root, raw)))
 
-    def test_missing_origin_declaration_preserves_holdout_false(self):
+    def test_missing_origin_declaration_preserves_all_origin_truth_false(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dataset = _write_dataset(root / "dataset")
@@ -299,6 +303,8 @@ class ForecastOriginBindingTests(unittest.TestCase):
             report = evaluate_walk_forward_bundle(WalkForwardBundle.from_path(_write_bundle(root, raw)))
 
             self.assertFalse(report["truth"]["canonical_forecast_origin_verified"])
+            self.assertFalse(report["truth"]["declared_record_time_before_reveal_verified"])
+            self.assertFalse(report["truth"]["independent_time_anchor_verified"])
             self.assertFalse(report["truth"]["pre_outcome_ledger_write_verified"])
             self.assertFalse(report["truth"]["temporal_holdout_protocol_verified"])
 

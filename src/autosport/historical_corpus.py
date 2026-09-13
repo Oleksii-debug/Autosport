@@ -14,6 +14,7 @@ from typing import Any, Iterable, Sequence
 from .dataset import load_dataset
 from .domain import MarketEvent
 from .integrity import atomic_write_json
+from .parlayapi_provider import ParlayApiTableTennisProvider
 
 
 _SNAPSHOT_KIND = "parlayapi_point_in_time_historical_snapshot"
@@ -132,7 +133,7 @@ def _snapshot(
     if evidence.get("kind") != _SNAPSHOT_KIND:
         raise ValueError(f"snapshot evidence kind must be {_SNAPSHOT_KIND}")
     sport_key = _text(evidence, "sport_key", context="snapshot evidence")
-    if sport_key != "table_tennis":
+    if sport_key != ParlayApiTableTennisProvider.sport_key:
         raise ValueError("snapshot evidence sport_key must be table_tennis")
     if evidence.get("has_data") is not True:
         raise ValueError("snapshot evidence must prove has_data=true")
@@ -153,7 +154,9 @@ def _snapshot(
     if evidence.get("terms_reference") != expected_terms_reference:
         raise ValueError("snapshot evidence terms_reference does not match governance proof")
     provider = _text(evidence, "provider", context="snapshot evidence")
-    canonical_source_id = f"{provider}:{sport_key}"
+    if provider != "parlayapi":
+        raise ValueError("snapshot evidence provider must be parlayapi")
+    canonical_source_id = ParlayApiTableTennisProvider.source_id
 
     expected_sha = _text(evidence, "market_sha256", context="snapshot evidence")
     if _sha256(market_path) != expected_sha:

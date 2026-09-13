@@ -9,7 +9,14 @@ from autosport.parlayapi_provider import ParlayApiTableTennisProvider
 
 
 class HistoricalSnapshotProviderBindingTests(unittest.TestCase):
-    def _write_pair(self, root: Path, *, source_id: str) -> tuple[Path, Path]:
+    def _write_pair(
+        self,
+        root: Path,
+        *,
+        source_id: str,
+        provider: str = "parlayapi",
+        sport_key: str = "table_tennis",
+    ) -> tuple[Path, Path]:
         market_path = root / "snapshot.jsonl"
         evidence_path = root / "snapshot.evidence.json"
 
@@ -35,8 +42,8 @@ class HistoricalSnapshotProviderBindingTests(unittest.TestCase):
         evidence = {
             "schema_version": 1,
             "kind": "parlayapi_point_in_time_historical_snapshot",
-            "provider": "parlayapi",
-            "sport_key": "table_tennis",
+            "provider": provider,
+            "sport_key": sport_key,
             "requested_at": "2026-01-01T10:00:30+00:00",
             "snapshot_at": "2026-01-01T10:00:20+00:00",
             "captured_at": "2026-01-02T00:00:00+00:00",
@@ -77,7 +84,7 @@ class HistoricalSnapshotProviderBindingTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0][0].source_id, ParlayApiTableTennisProvider.source_id)
             self.assertEqual(evidence["provider"], "parlayapi")
-            self.assertEqual(evidence["sport_key"], "table_tennis")
+            self.assertEqual(evidence["sport_key"], ParlayApiTableTennisProvider.sport_key)
 
     def test_snapshot_evidence_provider_must_reject_forged_market_source_id(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -87,6 +94,21 @@ class HistoricalSnapshotProviderBindingTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "provider.*source_id"):
+                _snapshot(
+                    market_path,
+                    evidence_path,
+                    expected_terms_reference="https://parlay-api.com/terms",
+                )
+
+    def test_parlayapi_snapshot_kind_rejects_renamed_provider_even_with_matching_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            market_path, evidence_path = self._write_pair(
+                Path(tmp),
+                provider="evil",
+                source_id="evil:table_tennis",
+            )
+
+            with self.assertRaisesRegex(ValueError, "provider must be parlayapi"):
                 _snapshot(
                     market_path,
                     evidence_path,

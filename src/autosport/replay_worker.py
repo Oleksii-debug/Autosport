@@ -102,12 +102,16 @@ def run_workspace_dataset_once(
     strategy_id: str = "baseline-v1",
     research_plan: ResearchStrategyPlan | None = None,
 ) -> SessionResult:
-    """Own all replay-session resources on the calling worker thread."""
+    """Own all replay-session resources on the calling worker thread.
+
+    ``workspace`` is the exact economic workspace chosen by the caller. Windows GUI
+    callers resolve it once with :func:`workspace_for_strategy`; keeping this helper
+    literal prevents accidental nested ``strategies/<identity>`` directories.
+    """
 
     dataset = load_dataset(dataset_path)
-    economic_workspace = workspace_for_strategy(workspace, strategy_id, research_plan)
     session = AutosportSession(
-        economic_workspace,
+        workspace,
         initial_bankroll,
         strategy_id=strategy_id,
         research_plan=research_plan,

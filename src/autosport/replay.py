@@ -28,6 +28,13 @@ class ReplayLeakageFirewall:
             raise FutureLeakageError("Final result is sealed until replay completion")
         return self._results.get(event_id)
 
+    def require_sealed(self) -> None:
+        if self._unlocked:
+            raise FutureLeakageError(
+                "Final result firewall was already unlocked by a completed replay; "
+                "use a fresh firewall for each replay"
+            )
+
     def unlock(self) -> None:
         self._unlocked = True
 
@@ -65,6 +72,10 @@ class ReplayEngine:
         speed: float = 0.0,
         run_id: str | None = None,
     ) -> ReplayRun:
+        # A completed replay deliberately unseals final results. Reusing that
+        # firewall for another replay would expose outcome facts before the first
+        # event callback, so reject the run before any strategy-visible mutation.
+        self.firewall.require_sealed()
         previous: float | None = None
         started = utc_now_iso()
         count = 0

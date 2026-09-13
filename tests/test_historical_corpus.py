@@ -76,11 +76,16 @@ def _write_results(
 ) -> Path:
     path = root / "sealed-results.json"
     source_record = root / "official-outcome-source-record.json"
+    quote_outcomes = {
+        f"{event_id}|winner|alice": "win" for event_id in event_ids
+    }
     source_record.write_text(
         json.dumps(
             {
-                "source": "official-results:test-fixture",
-                "events": list(event_ids),
+                "schema_version": 1,
+                "kind": "historical_outcome_source_record",
+                "source_identity": "official-results:test-fixture",
+                "quote_outcomes": quote_outcomes,
                 "fixture_only": True,
             },
             sort_keys=True,
@@ -109,9 +114,7 @@ def _write_results(
         json.dumps(
             {
                 "schema_version": 1,
-                "quote_outcomes": {
-                    f"{event_id}|winner|alice": "win" for event_id in event_ids
-                },
+                "quote_outcomes": quote_outcomes,
                 "outcome_provenance": provenance,
             },
             sort_keys=True,
@@ -182,6 +185,7 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
                 _sha256(root / "official-outcome-source-record.json"),
             )
             self.assertTrue(outcome_evidence["source_record_checksum_verified"])
+            self.assertTrue(outcome_evidence["source_record_outcomes_verified"])
             self.assertFalse(outcome_evidence["source_record_redistributed"])
             self.assertEqual(outcome_evidence["available_at"], "2026-01-01T11:00:00+00:00")
             self.assertTrue(outcome_evidence["licensing_or_retention_verified"])
@@ -495,6 +499,31 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
             )
             output = root / "corpus"
             with self.assertRaisesRegex(ValueError, "does not match source record artifact"):
+                assemble_historical_corpus(
+                    [snapshot],
+                    results_path=results,
+                    governance_proof_path=_write_governance(root),
+                    output_dir=output,
+                    name="blocked",
+                    outcome_reveal_after="2026-01-01T11:00:00+00:00",
+                    imported_at="2026-01-02T00:05:00+00:00",
+                )
+            self.assertFalse(output.exists())
+
+    def test_changed_sealed_label_with_valid_source_hash_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            results = _write_results(root, "tt-a")
+            payload = json.loads(results.read_text(encoding="utf-8"))
+            payload["quote_outcomes"]["tt-a|winner|alice"] = "loss"
+            results.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            source_record = root / "official-outcome-source-record.json"
+            provenance = payload["outcome_provenance"]
+            self.assertEqual(provenance["source_record_sha256"], _sha256(source_record))
+
+            output = root / "corpus"
+            with self.assertRaisesRegex(ValueError, "do not match hashed outcome source record"):
                 assemble_historical_corpus(
                     [snapshot],
                     results_path=results,

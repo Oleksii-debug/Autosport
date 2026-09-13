@@ -396,6 +396,32 @@ class BetfairAvailableBackImportTests(unittest.TestCase):
             ):
                 self._import(Path(tmp), lines)
 
+    def test_explicit_malformed_runner_roster_fails_closed_before_membership_reuse(self) -> None:
+        malformed_rosters = (
+            ({"id": 101}, r"marketDefinition\.runners must be a list"),
+            ([{"name": "missing id"}], r"marketDefinition\.runners\[0\] requires id"),
+            ([{"id": 101}, {"id": 101}], r"marketDefinition\.runners contains duplicate id 101"),
+        )
+        for malformed, expected in malformed_rosters:
+            with self.subTest(malformed=malformed), tempfile.TemporaryDirectory() as tmp:
+                lines = _pro_stream()
+                lines.insert(
+                    1,
+                    {
+                        "op": "mcm",
+                        "pt": _epoch_ms("2026-02-10T12:02:00Z"),
+                        "mc": [
+                            {
+                                "id": "1.advanced",
+                                "marketDefinition": {"runners": malformed},
+                                "rc": [{"id": 101, "ltp": 1.82}],
+                            }
+                        ],
+                    },
+                )
+                with self.assertRaisesRegex(ValueError, expected):
+                    self._import(Path(tmp), lines)
+
 
 if __name__ == "__main__":
     unittest.main()

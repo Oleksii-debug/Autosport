@@ -23,6 +23,7 @@ _FORBIDDEN_HISTORICAL_METADATA_KEYS = frozenset(
     }
 )
 _ALLOWED_HISTORICAL_OUTCOMES = frozenset({"win", "loss", "void"})
+_PARLAY_SOURCE_PREFIX = "parlayapi:"
 _PARLAY_TERMS_REFERENCE = "https://parlay-api.com/terms"
 _PARLAY_STANDARD_RETENTION_CEILING = timedelta(days=90)
 
@@ -221,6 +222,11 @@ def _load_governance(raw: dict[str, Any]) -> DatasetGovernance:
 
     source_identity = _require_string(governance, "source_identity", context="governance")
     terms_reference = _require_string(governance, "terms_reference", context="governance")
+    if (
+        source_identity.startswith(_PARLAY_SOURCE_PREFIX)
+        and terms_reference.rstrip("/") != _PARLAY_TERMS_REFERENCE
+    ):
+        raise ValueError("ParlayAPI historical governance must use canonical terms_reference")
     retention_basis = _require_string(governance, "retention_basis", context="governance")
     redistribution_policy = _require_string(governance, "redistribution_policy", context="governance")
     if redistribution_policy not in {"prohibited", "internal_only", "permitted"}:
@@ -295,6 +301,11 @@ def _load_governance(raw: dict[str, Any]) -> DatasetGovernance:
     source_ids = tuple(str(value).strip() for value in source_ids_raw)
     if any(not value for value in source_ids) or len(set(source_ids)) != len(source_ids):
         raise ValueError("governance.coverage.source_ids must contain unique non-empty strings")
+    if (
+        any(source_id.startswith(_PARLAY_SOURCE_PREFIX) for source_id in source_ids)
+        and terms_reference.rstrip("/") != _PARLAY_TERMS_REFERENCE
+    ):
+        raise ValueError("ParlayAPI historical governance must use canonical terms_reference")
 
     market_types_raw = coverage.get("market_types")
     if not isinstance(market_types_raw, list) or not market_types_raw:

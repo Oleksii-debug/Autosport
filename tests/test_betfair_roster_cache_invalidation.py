@@ -9,6 +9,7 @@ from pathlib import Path
 
 from autosport.betfair_historical_import import import_betfair_historical
 from autosport.dataset import load_dataset
+from autosport.storage import SQLiteMarketStore
 
 
 def _epoch_ms(value: str) -> int:
@@ -136,6 +137,33 @@ class BetfairRosterCacheInvalidationTests(unittest.TestCase):
                 retention_basis="test-retention",
             )
             events = load_dataset(output).load_market_events()
+
+        roster_removal_events = [
+            event
+            for event in events
+            if event.selection_id == "999" and event.observed_ts == "2026-02-10T12:02:00Z"
+        ]
+        self.assertEqual(len(roster_removal_events), 1)
+        removed = roster_removal_events[0]
+        self.assertEqual(removed.metadata["price_semantics"], "betfair_runner_roster_removed")
+        self.assertIs(removed.metadata["runner_roster_membership"], False)
+        self.assertIs(removed.metadata["runner_removed_from_authoritative_roster"], True)
+        self.assertIs(removed.metadata["execution_quote_verified"], False)
+        self.assertIs(removed.metadata["paper_fill_eligible"], False)
+
+        with tempfile.TemporaryDirectory() as projection_tmp:
+            store = SQLiteMarketStore(Path(projection_tmp) / "market.db")
+            try:
+                store.append_many(
+                    event
+                    for event in events
+                    if event.observed_ts <= "2026-02-10T12:02:00Z"
+                )
+                current = store.current()[removed.quote_key]
+            finally:
+                store.close()
+        self.assertEqual(current.observed_ts, "2026-02-10T12:02:00Z")
+        self.assertEqual(current.metadata["price_semantics"], "betfair_runner_roster_removed")
 
         removed_transition_events = [
             event

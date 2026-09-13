@@ -14,6 +14,7 @@ _NON_EXECUTABLE_PRICE_SEMANTICS = frozenset(
         "legacy_betfair_last_traded_price_unverified",
         "betfair_available_to_back_unavailable",
         "betfair_market_definition_state_transition",
+        "betfair_runner_roster_removed",
     }
 )
 

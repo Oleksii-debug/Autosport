@@ -458,6 +458,7 @@ def import_betfair_historical(
                         book.reset()
 
             prior_definition: dict[str, Any] | None = None
+            removed_runner_quotes: list[tuple[str, str, dict[str, Any], str | None]] = []
             market_definition = change.get("marketDefinition")
             if market_definition is not None:
                 if not isinstance(market_definition, dict):
@@ -505,9 +506,18 @@ def import_betfair_historical(
                     for removed_selection_id in previous_roster.difference(roster):
                         removed_key = (market_id, removed_selection_id)
                         available_books.pop(removed_key, None)
-                        last_visible_price.pop(removed_key, None)
-                        last_visible_metadata.pop(removed_key, None)
-                        names.pop(removed_selection_id, None)
+                        previous_price = last_visible_price.pop(removed_key, None)
+                        previous_metadata = last_visible_metadata.pop(removed_key, {})
+                        previous_name = names.pop(removed_selection_id, None)
+                        if previous_price is not None:
+                            removed_runner_quotes.append(
+                                (
+                                    removed_selection_id,
+                                    previous_price,
+                                    previous_metadata,
+                                    previous_name,
+                                )
+                            )
                     declared_runner_ids[market_id] = roster
 
                 closed = str(merged.get("status") or "").upper() == "CLOSED"
@@ -545,6 +555,57 @@ def import_betfair_historical(
 
             market_status = str(definition.get("status") or "").upper()
             current_bet_delay = _bet_delay_seconds(definition, path=path, line_number=line_number)
+            if removed_runner_quotes and market_status != "CLOSED":
+                event_id = str(definition.get("eventId") or "").strip()
+                if not event_id:
+                    raise ValueError(
+                        f"{path}: line {line_number} supported Betfair market requires source eventId"
+                    )
+                current_names = runner_names.get(market_id, {})
+                for selection_id, previous_price, previous_metadata, previous_name in removed_runner_quotes:
+                    event_names = dict(current_names)
+                    if previous_name:
+                        event_names[selection_id] = previous_name
+                    provider_field = str(
+                        previous_metadata.get("provider_price_field") or "marketDefinition.runners"
+                    )
+                    metadata = _base_metadata(definition, event_names, selection_id)
+                    metadata.update(
+                        {
+                            "price_semantics": "betfair_runner_roster_removed",
+                            "provider_price_field": provider_field,
+                            "execution_quote_verified": False,
+                            "actual_fill_verified": False,
+                            "paper_fill_eligible": False,
+                            "paper_fill_eligibility_reason": (
+                                "selection was removed from the authoritative marketDefinition.runners roster"
+                            ),
+                            "paper_fill_capacity_verified": False,
+                            "paper_fill_capacity_unit_bound": False,
+                            "betfair_market_status": market_status or "UNKNOWN",
+                            "betfair_bet_delay_seconds": current_bet_delay,
+                            "market_definition_transition": True,
+                            "runner_roster_membership": False,
+                            "runner_removed_from_authoritative_roster": True,
+                        }
+                    )
+                    append_event(
+                        path=path,
+                        event_id=event_id,
+                        market_id=market_id,
+                        selection_id=selection_id,
+                        odds=previous_price,
+                        observed=observed,
+                        canonical_market_type=canonical_market_type,
+                        status=(market_status.lower() if market_status else "unknown"),
+                        metadata=metadata,
+                    )
+                    # append_event updates the importer-visible quote cache; this marker
+                    # is an invalidation, not a quote that may seed future transitions.
+                    removed_key = (market_id, selection_id)
+                    last_visible_price.pop(removed_key, None)
+                    last_visible_metadata.pop(removed_key, None)
+
             if prior_definition is not None:
                 prior_status = str(prior_definition.get("status") or "").upper()
                 prior_bet_delay = _bet_delay_seconds(
@@ -860,6 +921,7 @@ def import_betfair_historical(
                 "execution_price_ladder_contract_verified": True,
                 "supported_execution_price_ladder_types": ["CLASSIC"],
                 "runner_roster_membership_verified": True,
+                "runner_roster_removal_invalidates_cached_quotes": True,
                 "paper_fill_capacity_enforced": False,
                 "paper_fill_capacity_unit_bound": False,
                 "paper_fill_capacity_authorizes_economics": False,
@@ -880,6 +942,7 @@ def import_betfair_historical(
         availability_semantics: dict[str, Any] = {
             "strategy_visible_market_status": "OPEN_QUOTES_PLUS_EXPLICIT_SOURCE_STATE_TRANSITIONS",
             "definition_state_transitions_preserved": True,
+            "runner_roster_removals_preserved": True,
             "suspended_or_non_open_intervals_preserved": False,
             "complete_availability_history_verified": False,
         }

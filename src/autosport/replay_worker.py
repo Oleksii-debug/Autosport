@@ -105,8 +105,9 @@ def run_workspace_dataset_once(
     """Own all replay-session resources on the calling worker thread."""
 
     dataset = load_dataset(dataset_path)
+    economic_workspace = workspace_for_strategy(workspace, strategy_id, research_plan)
     session = AutosportSession(
-        workspace,
+        economic_workspace,
         initial_bankroll,
         strategy_id=strategy_id,
         research_plan=research_plan,

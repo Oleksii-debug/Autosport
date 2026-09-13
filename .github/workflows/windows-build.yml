@@ -101,6 +101,13 @@ jobs:
           $verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
           $verification | Add-Member -NotePropertyName extracted_external_uia_status -NotePropertyValue $external.status -Force
           $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
+      - name: Upload external UIA failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Autosport-external-uia-failure-evidence
+          path: dist/fresh-extraction-external-uia-audit.json
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: Autosport-V1-Windows-prehuman

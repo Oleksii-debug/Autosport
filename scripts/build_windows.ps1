@@ -21,6 +21,16 @@ $accessibility = Get-Content $a11y -Raw | ConvertFrom-Json
 if ($accessibility.status -ne 'PASS') { throw 'Packaged accessibility audit did not PASS' }
 if ($accessibility.nvda_verified -ne $false) { throw 'Machine accessibility audit must not claim NVDA verification' }
 
+$keyboard = Join-Path $PWD 'dist/keyboard-audit.json'
+if (Test-Path $keyboard) { Remove-Item -Force $keyboard }
+$keyboardProcess = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--keyboard-audit-output', $keyboard -Wait -PassThru
+if ($keyboardProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe keyboard audit exited $($keyboardProcess.ExitCode)" }
+$keyboardEvidence = Get-Content $keyboard -Raw | ConvertFrom-Json
+if ($keyboardEvidence.status -ne 'PASS') { throw 'Packaged keyboard audit did not PASS' }
+if ($keyboardEvidence.human_tested -ne $false -or $keyboardEvidence.nvda_verified -ne $false) {
+  throw 'Machine keyboard audit must not claim physical human/NVDA verification'
+}
+
 $sourceSha = $env:AUTOSPORT_SOURCE_SHA
 if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
 $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
@@ -31,6 +41,7 @@ python scripts/package_windows.py `
   --example-dir examples/tt_demo `
   --diagnostic $diag `
   --accessibility-audit $a11y `
+  --keyboard-audit $keyboard `
   --output $package `
   --source-sha $sourceSha `
   --verification-output $packageVerification
@@ -74,6 +85,16 @@ if ($freshAccessibility.real_money_execution -ne $false -or $freshAccessibility.
   throw 'Fresh-extracted accessibility audit violated release truth labels'
 }
 
+$freshKeyboard = Join-Path $PWD 'dist/fresh-extraction-keyboard-audit.json'
+if (Test-Path $freshKeyboard) { Remove-Item -Force $freshKeyboard }
+$freshKeyboardProcess = Start-Process -FilePath $extractedExe -ArgumentList '--keyboard-audit-output', $freshKeyboard -Wait -PassThru
+if ($freshKeyboardProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe keyboard audit exited $($freshKeyboardProcess.ExitCode)" }
+$freshKeyboardEvidence = Get-Content $freshKeyboard -Raw | ConvertFrom-Json
+if ($freshKeyboardEvidence.status -ne 'PASS') { throw 'Fresh-extracted keyboard audit did not PASS' }
+if ($freshKeyboardEvidence.real_money_execution -ne $false -or $freshKeyboardEvidence.human_tested -ne $false -or $freshKeyboardEvidence.nvda_verified -ne $false) {
+  throw 'Fresh-extracted keyboard audit violated release truth labels'
+}
+
 $freshEvidence = [ordered]@{
   status = 'PASS'
   source_sha = $sourceSha
@@ -82,6 +103,7 @@ $freshEvidence = [ordered]@{
   package_verification_status = 'PASS'
   extracted_diagnostic_status = $freshDiagnostic.status
   extracted_accessibility_status = $freshAccessibility.status
+  extracted_keyboard_status = $freshKeyboardEvidence.status
   real_money_execution = $false
   human_tested = $false
   nvda_verified = $false

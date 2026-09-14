@@ -42,6 +42,40 @@ class SettlementBatchAtomicityTests(unittest.TestCase):
         self.assertEqual(second.payout, Decimal("0"))
         self.assertEqual(book._lifecycle, before_lifecycle)
 
+    def test_noncanonical_later_ticket_identity_fails_before_batch_mutation(self) -> None:
+        book = PaperBook("100")
+        first_leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        second_leg = TicketLeg("event-2", "winner", "bob", Decimal("2"))
+        first = book.open_ticket(
+            [first_leg],
+            "10",
+            placed_at="2026-09-14T19:30:00+00:00",
+        )
+        second = book.open_ticket(
+            [second_leg],
+            "10",
+            placed_at="2026-09-14T19:31:00+00:00",
+        )
+        settlement = SettlementEngine(
+            {
+                first_leg.quote_key: "win",
+                second_leg.quote_key: "win",
+            }
+        )
+        before_balance = book.balance
+        before_lifecycle = list(book._lifecycle)
+        second.ticket_id = "mutated-ticket-id"
+
+        with self.assertRaisesRegex(ValueError, "mapping key must match ticket_id"):
+            settlement.settle_ready(book)
+
+        self.assertEqual(book.balance, before_balance)
+        self.assertIs(first.status, TicketStatus.OPEN)
+        self.assertEqual(first.payout, Decimal("0"))
+        self.assertIs(second.status, TicketStatus.OPEN)
+        self.assertEqual(second.payout, Decimal("0"))
+        self.assertEqual(book._lifecycle, before_lifecycle)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -93,6 +93,51 @@ class SettlementBatchAtomicityTests(unittest.TestCase):
         self.assertEqual(second.payout, Decimal("0"))
         self.assertEqual(book._lifecycle, before_lifecycle)
 
+    def test_overridable_paperbook_cannot_break_batch_atomicity(self) -> None:
+        class PartiallyApplyingPaperBook(PaperBook):
+            def __init__(self, initial_bankroll: str) -> None:
+                super().__init__(initial_bankroll)
+                self.settle_calls = 0
+
+            def settle(self, ticket_id, winning_quote_keys, void_quote_keys=None):
+                self.settle_calls += 1
+                if self.settle_calls == 2:
+                    raise RuntimeError("subclass interrupted batch apply")
+                return super().settle(ticket_id, winning_quote_keys, void_quote_keys)
+
+        book = PartiallyApplyingPaperBook("100")
+        first_leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        second_leg = TicketLeg("event-2", "winner", "bob", Decimal("2"))
+        first = book.open_ticket(
+            [first_leg],
+            "10",
+            placed_at="2026-09-14T19:30:00+00:00",
+        )
+        second = book.open_ticket(
+            [second_leg],
+            "10",
+            placed_at="2026-09-14T19:31:00+00:00",
+        )
+        settlement = SettlementEngine(
+            {
+                first_leg.quote_key: "win",
+                second_leg.quote_key: "win",
+            }
+        )
+        before_balance = book.balance
+        before_lifecycle = list(book._lifecycle)
+
+        with self.assertRaisesRegex(ValueError, "settlement book must be an exact PaperBook"):
+            settlement.settle_ready(book)
+
+        self.assertEqual(book.settle_calls, 0)
+        self.assertEqual(book.balance, before_balance)
+        self.assertIs(first.status, TicketStatus.OPEN)
+        self.assertEqual(first.payout, Decimal("0"))
+        self.assertIs(second.status, TicketStatus.OPEN)
+        self.assertEqual(second.payout, Decimal("0"))
+        self.assertEqual(book._lifecycle, before_lifecycle)
+
     def test_invalid_public_outcome_state_cannot_become_false_loss(self) -> None:
         book, leg, ticket = self._single_ticket_book()
         settlement = SettlementEngine({leg.quote_key: "corrupt"})

@@ -1,6 +1,10 @@
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import autosport.accessibility_audit as accessibility_audit
 from autosport.accessibility_audit import summarize_description
 from autosport.gui import AUTOMATION_IDS, _SPEEDS, _STRATEGY_CHOICES, strategy_id_from_display
 from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
@@ -160,6 +164,44 @@ class AccessibilityAuditTests(unittest.TestCase):
         report = self._summarize(SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)}))
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("list rows are not exposed" in item for item in report["failures"]))
+
+    def test_machine_evidence_publication_failure_preserves_existing_file(self):
+        class _AuditApp:
+            def update_idletasks(self):
+                return None
+
+            def update(self):
+                return None
+
+            def close_app(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "accessibility.json"
+            original = '{"status":"PREVIOUS"}\n'
+            destination.write_text(original, encoding="utf-8")
+            nonfinite_report = {
+                "status": "PASS",
+                "probe": float("nan"),
+                "human_tested": False,
+                "nvda_verified": False,
+                "real_money_execution": False,
+            }
+
+            with (
+                patch.object(accessibility_audit, "WindowsAutosportApp", return_value=_AuditApp()),
+                patch.object(accessibility_audit.tk_uia, "describe", return_value=object()),
+                patch.object(
+                    accessibility_audit,
+                    "summarize_description",
+                    return_value=nonfinite_report,
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    accessibility_audit.run_accessibility_audit(destination)
+
+            self.assertEqual(destination.read_text(encoding="utf-8"), original)
+            self.assertEqual(list(destination.parent.glob(f".{destination.name}.*.tmp")), [])
 
 
 if __name__ == "__main__":

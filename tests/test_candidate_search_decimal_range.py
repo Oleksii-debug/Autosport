@@ -1,5 +1,5 @@
 import unittest
-from decimal import Decimal, Overflow, localcontext
+from decimal import Decimal, Overflow, ROUND_DOWN, Underflow, localcontext
 
 from autosport.candidate_search import BeamParlayCandidateSearch, CandidateLeg
 
@@ -27,7 +27,7 @@ class CandidateSearchDecimalRangeTests(unittest.TestCase):
         ):
             search.search(legs, minimum_legs=2)
 
-    def test_disabled_decimal_overflow_trap_cannot_publish_infinity(self) -> None:
+    def test_disabled_decimal_overflow_trap_cannot_publish_finite_saturation(self) -> None:
         search = BeamParlayCandidateSearch(beam_width=4, max_legs=2, result_limit=4)
         legs = [
             self._leg("event-1", "1E+999999"),
@@ -36,11 +36,41 @@ class CandidateSearchDecimalRangeTests(unittest.TestCase):
 
         with localcontext() as context:
             context.traps[Overflow] = False
+            context.rounding = ROUND_DOWN
             with self.assertRaisesRegex(
                 ValueError,
                 "candidate combined economics exceed Decimal range",
             ):
                 search.search(legs, minimum_legs=2)
+
+    def test_finite_nonzero_probabilities_that_underflow_combination_fail_closed(self) -> None:
+        search = BeamParlayCandidateSearch(beam_width=4, max_legs=2, result_limit=4)
+        legs = [
+            self._leg("event-1", "2", "1E-999999"),
+            self._leg("event-2", "2", "1E-999999"),
+        ]
+
+        with localcontext() as context:
+            self.assertFalse(context.traps[Underflow])
+            with self.assertRaisesRegex(
+                ValueError,
+                "candidate combined economics exceed Decimal range",
+            ):
+                search.search(legs, minimum_legs=2)
+
+    def test_exact_zero_probability_is_not_mistaken_for_underflow(self) -> None:
+        search = BeamParlayCandidateSearch(beam_width=4, max_legs=2, result_limit=4)
+        legs = [
+            self._leg("event-1", "2", "0"),
+            self._leg("event-2", "2", "0.5"),
+        ]
+
+        result = search.search(legs, minimum_legs=2)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].combined_odds, Decimal("4"))
+        self.assertEqual(result[0].independent_probability, Decimal("0"))
+        self.assertEqual(result[0].expected_profit_per_unit, Decimal("-1"))
 
     def test_large_representable_candidate_remains_valid(self) -> None:
         search = BeamParlayCandidateSearch(beam_width=4, max_legs=2, result_limit=4)

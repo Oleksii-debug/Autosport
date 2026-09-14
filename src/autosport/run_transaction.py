@@ -72,6 +72,17 @@ class VerifiedFileSnapshot:
     sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class TransactionIdentity:
+    run_id: str
+    experiment_key: str
+    market_sha256: str
+    sealed_results_sha256: str
+    strategy_id: str
+    base_paper_book_sha256: str | None
+    base_decision_ledger_sha256: str | None
+
+
 class RunTransaction:
     """Crash-recoverable commit protocol for PaperBook, Decision Ledger and run summary."""
 
@@ -87,6 +98,7 @@ class RunTransaction:
         self.staged_book_path = self.root / "paper_book.next.json"
         self.staged_ledger_path = self.root / "decisions.next.jsonl"
         self.staged_summary_path = self.root / "run-summary.next.json"
+        self._identity: TransactionIdentity | None = None
 
     @classmethod
     def start(
@@ -130,9 +142,20 @@ class RunTransaction:
             },
         }
         atomic_write_json(tx.manifest_path, manifest)
+        tx._identity = TransactionIdentity(
+            run_id=run_id,
+            experiment_key=experiment_key,
+            market_sha256=market_sha256,
+            sealed_results_sha256=results_sha256,
+            strategy_id=strategy_id,
+            base_paper_book_sha256=base_paper_book_sha256,
+            base_decision_ledger_sha256=base_decision_ledger_sha256,
+        )
+        tx._require_complete_identity_anchor()
         return tx
 
     def stage_outputs(self, book: PaperBook, canonical_ledger_path: str | Path) -> tuple[str, str]:
+        self._require_complete_identity_anchor()
         manifest = self._read_manifest()
         if manifest["phase"] != "staging":
             raise RunTransactionError("transaction is not in staging phase")
@@ -189,6 +212,7 @@ class RunTransaction:
         return book_snapshot.sha256, staged_snapshot.sha256
 
     def precommit(self, summary_payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_complete_identity_anchor()
         manifest = self._read_manifest()
         if manifest["phase"] != "staging":
             raise RunTransactionError("transaction is not in staging phase")
@@ -256,34 +280,34 @@ class RunTransaction:
         summary["decision_ledger_sha256"] = ledger_hash
         summary["transaction_schema_version"] = self.SCHEMA_VERSION
         summary["transaction_run_id"] = self.run_id
-        self._decode_strict_json(
-            json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True),
+        summary_snapshot = self._canonical_json_snapshot(
+            summary,
             label="staged run summary",
         )
+        decoded_summary = self._decode_file_snapshot_json(
+            summary_snapshot,
+            label="staged run summary",
+        )
+        if not isinstance(decoded_summary, dict):
+            raise RunTransactionError("staged run summary schema is invalid")
         self._validate_summary_identity(
-            summary,
+            decoded_summary,
             manifest,
             label="staged run summary",
         )
-        atomic_write_json(self.staged_summary_path, summary)
-        validated_summary = self._read_strict_json_file(
-            self.staged_summary_path,
-            label="staged run summary",
-        )
-        if not isinstance(validated_summary, dict):
-            raise RunTransactionError("staged run summary schema is invalid")
-        summary_hash = sha256_file(self.staged_summary_path)
+        self._atomic_write_bytes(self.staged_summary_path, summary_snapshot.payload)
 
         manifest["new"] = {
             "paper_book_sha256": book_hash,
             "decision_ledger_sha256": ledger_hash,
-            "summary_sha256": summary_hash,
+            "summary_sha256": summary_snapshot.sha256,
         }
         manifest["phase"] = "precommitted"
         atomic_write_json(self.manifest_path, manifest)
         return summary
 
     def commit(self) -> Path:
+        self._ensure_commit_identity_anchor()
         manifest = self._read_manifest()
         if manifest["phase"] not in {"precommitted", "canonical_committed", "completed"}:
             raise RunTransactionError("transaction lacks durable precommit evidence")
@@ -330,10 +354,8 @@ class RunTransaction:
         experiment_key: str,
     ) -> TransactionRecovery:
         tx = cls(workspace, run_id)
-        if not tx.manifest_path.is_file():
-            raise RunTransactionError("transaction manifest not found")
+        tx._identity = tx._identity_from_registry(registry_item, experiment_key)
         manifest = tx._read_manifest()
-        tx._validate_identity(manifest, registry_item, experiment_key)
         tx._validate_manifest_paths(manifest)
 
         phase = manifest["phase"]
@@ -369,12 +391,14 @@ class RunTransaction:
             return TransactionRecovery("aborted_uncommitted")
 
         if phase in {"precommitted", "canonical_committed", "completed"}:
+            tx._require_complete_identity_anchor()
             summary_path = tx.commit()
             return TransactionRecovery("committed", summary_path)
 
         raise RunTransactionError(f"unsupported transaction phase: {phase}")
 
     def mark_registry_completed(self) -> None:
+        self._require_complete_identity_anchor()
         manifest = self._read_manifest()
         if manifest["phase"] != "canonical_committed":
             raise RunTransactionError("canonical artifacts are not fully committed")
@@ -432,19 +456,140 @@ class RunTransaction:
             raise RunTransactionError("transaction manifest run_id mismatch")
         if manifest.get("real_money_execution") is not False:
             raise RunTransactionError("transaction manifest truth boundary is invalid")
+        if self._identity is not None:
+            self._validate_manifest_identity(manifest, self._identity)
         return manifest
 
-    def _validate_identity(self, manifest: dict[str, Any], item: dict[str, Any], experiment_key: str) -> None:
+    def _identity_from_registry(
+        self,
+        item: dict[str, Any],
+        experiment_key: str,
+    ) -> TransactionIdentity:
+        if not isinstance(item, dict):
+            raise RunTransactionError("registry transaction identity is invalid")
+        run_id = self._require_identity_text(item.get("run_id"), "run_id")
+        if run_id != self.run_id:
+            raise RunTransactionError("registry transaction run_id mismatch")
+        experiment = self._require_identity_text(experiment_key, "experiment_key")
+        market = self._require_identity_hash(item.get("market_sha256"), "market_sha256")
+        results = self._require_identity_hash(item.get("results_sha256"), "results_sha256")
+        strategy = self._require_identity_text(item.get("strategy_id"), "strategy_id")
+        expected_base_identity = hashlib.sha256(
+            f"{market}|{results}|{strategy}".encode("utf-8")
+        ).hexdigest()
+        declared_base_identity = item.get("base_identity")
+        if declared_base_identity is not None and declared_base_identity != expected_base_identity:
+            raise RunTransactionError("registry base identity is inconsistent")
+
+        base_book_value = item.get("base_paper_book_sha256")
+        base_ledger_value = item.get("base_decision_ledger_sha256")
+        if (base_book_value is None) != (base_ledger_value is None):
+            raise RunTransactionError("registry transaction base hashes are incomplete")
+        base_book = (
+            None
+            if base_book_value is None
+            else self._require_identity_hash(base_book_value, "base_paper_book_sha256")
+        )
+        base_ledger = (
+            None
+            if base_ledger_value is None
+            else self._require_identity_hash(base_ledger_value, "base_decision_ledger_sha256")
+        )
+        return TransactionIdentity(
+            run_id=run_id,
+            experiment_key=experiment,
+            market_sha256=market,
+            sealed_results_sha256=results,
+            strategy_id=strategy,
+            base_paper_book_sha256=base_book,
+            base_decision_ledger_sha256=base_ledger,
+        )
+
+    @staticmethod
+    def _require_identity_text(value: object, label: str) -> str:
+        if not isinstance(value, str) or not value:
+            raise RunTransactionError(f"registry transaction {label} is invalid")
+        return value
+
+    @staticmethod
+    def _require_identity_hash(value: object, label: str) -> str:
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise RunTransactionError(f"registry transaction {label} is invalid")
+        return value
+
+    def _require_complete_identity_anchor(self) -> None:
+        identity = self._identity
+        if (
+            identity is None
+            or identity.base_paper_book_sha256 is None
+            or identity.base_decision_ledger_sha256 is None
+        ):
+            raise RunTransactionError("transaction lacks immutable start identity")
+
+    def _ensure_commit_identity_anchor(self) -> None:
+        if self._identity is None:
+            self._bind_in_progress_registry_identity()
+        self._require_complete_identity_anchor()
+
+    def _bind_in_progress_registry_identity(self) -> None:
+        try:
+            from .run_registry import RunRegistry
+
+            registry = RunRegistry(self.workspace / "run_registry.json")
+            matches = [
+                (key, item)
+                for key, item in registry.in_progress()
+                if item.get("run_id") == self.run_id
+            ]
+        except Exception as exc:
+            raise RunTransactionError(
+                "transaction commit cannot validate external registry identity"
+            ) from exc
+        if len(matches) != 1:
+            raise RunTransactionError("transaction commit lacks unique in-progress registry identity")
+        experiment_key, item = matches[0]
+        self._identity = self._identity_from_registry(item, experiment_key)
+
+    def _validate_manifest_identity(
+        self,
+        manifest: dict[str, Any],
+        identity: TransactionIdentity,
+    ) -> None:
         expected = {
-            "experiment_key": experiment_key,
-            "run_id": item.get("run_id"),
-            "market_sha256": item.get("market_sha256"),
-            "sealed_results_sha256": item.get("results_sha256"),
-            "strategy_id": item.get("strategy_id"),
+            "run_id": identity.run_id,
+            "experiment_key": identity.experiment_key,
+            "market_sha256": identity.market_sha256,
+            "sealed_results_sha256": identity.sealed_results_sha256,
+            "strategy_id": identity.strategy_id,
         }
-        mismatches = [field for field, expected_value in expected.items() if manifest.get(field) != expected_value]
+        mismatches = [
+            field
+            for field, expected_value in expected.items()
+            if manifest.get(field) != expected_value
+        ]
+        base = manifest.get("base")
+        if not isinstance(base, dict):
+            mismatches.append("base")
+        else:
+            if (
+                identity.base_paper_book_sha256 is not None
+                and base.get("paper_book_sha256") != identity.base_paper_book_sha256
+            ):
+                mismatches.append("base.paper_book_sha256")
+            if (
+                identity.base_decision_ledger_sha256 is not None
+                and base.get("decision_ledger_sha256") != identity.base_decision_ledger_sha256
+            ):
+                mismatches.append("base.decision_ledger_sha256")
         if mismatches:
-            raise RunTransactionError("transaction identity mismatch: " + ",".join(sorted(mismatches)))
+            raise RunTransactionError(
+                "transaction manifest immutable identity mismatch: "
+                + ",".join(sorted(set(mismatches)))
+            )
 
     def _validate_manifest_paths(self, manifest: dict[str, Any]) -> None:
         expected_targets = {
@@ -491,6 +636,69 @@ class RunTransaction:
             payload=payload,
             sha256=hashlib.sha256(payload).hexdigest(),
         )
+
+    @classmethod
+    def _canonical_json_snapshot(
+        cls,
+        payload: dict[str, Any],
+        *,
+        label: str,
+    ) -> VerifiedFileSnapshot:
+        try:
+            text = json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ) + "\n"
+        except (TypeError, ValueError) as exc:
+            raise RunTransactionError(f"{label} cannot be serialized as JSON") from exc
+        # Strict re-decode rejects NaN/Infinity and duplicate ambiguity on the exact
+        # canonical bytes before their digest can become durable transaction evidence.
+        cls._decode_strict_json(text, label=label)
+        encoded = text.encode("utf-8")
+        return VerifiedFileSnapshot(
+            payload=encoded,
+            sha256=hashlib.sha256(encoded).hexdigest(),
+        )
+
+    @classmethod
+    def _decode_file_snapshot_json(
+        cls,
+        snapshot: VerifiedFileSnapshot,
+        *,
+        label: str,
+    ) -> Any:
+        try:
+            text = snapshot.payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RunTransactionError(f"{label} is invalid UTF-8") from exc
+        return cls._decode_strict_json(text, label=label)
+
+    @staticmethod
+    def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
 
     @classmethod
     def _validate_paper_book_snapshot(
@@ -633,26 +841,26 @@ class RunTransaction:
         expected_summary_hash = self._hash_field(manifest, "new", "summary_sha256")
         summary_target = self.workspace / f"run-{self.run_id}.json"
 
-        candidates: list[tuple[str, Path]] = []
-        for label, path in (
-            ("staged run summary", self.staged_summary_path),
-            ("canonical run summary", summary_target),
-        ):
-            if path.exists():
-                if not path.is_file():
-                    raise RunTransactionError(f"{label} is not a file")
-                candidates.append((label, path))
-        if not candidates:
+        if summary_target.exists():
+            if not summary_target.is_file():
+                raise RunTransactionError("canonical run summary is not a file")
+            candidates = [("canonical run summary", summary_target)]
+        elif self.staged_summary_path.exists():
+            if not self.staged_summary_path.is_file():
+                raise RunTransactionError("staged run summary is not a file")
+            candidates = [("staged run summary", self.staged_summary_path)]
+        else:
             raise RunTransactionError("run summary precommit artifact is missing")
 
         for label, path in candidates:
-            if sha256_file(path) != expected_summary_hash:
+            snapshot = self._read_file_snapshot(path, label)
+            if snapshot.sha256 != expected_summary_hash:
                 if label == "canonical run summary":
                     raise RunTransactionError(
                         "canonical run summary SHA-256 mismatch (identity mismatch or SHA-256 mismatch)"
                     )
                 raise RunTransactionError(f"{label} SHA-256 mismatch")
-            summary = self._read_strict_json_file(path, label=label)
+            summary = self._decode_file_snapshot_json(snapshot, label=label)
             if not isinstance(summary, dict):
                 raise RunTransactionError(f"{label} schema is invalid")
             self._validate_summary_identity(summary, manifest, label=label)

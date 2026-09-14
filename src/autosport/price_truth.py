@@ -92,6 +92,8 @@ def classify_market_price_truth(
             raise ValueError("price_semantics must be a non-empty string when explicit")
         if not isinstance(execution_quote_verified, bool):
             raise ValueError("explicit price semantics require boolean execution_quote_verified")
+        if execution_quote_verified and not normalized:
+            raise ValueError("executable quote verification requires at least one canonical source_id")
         semantics = price_semantics.strip()
         _validate_semantic_execution_pair(semantics, execution_quote_verified)
         return MarketPriceTruth(

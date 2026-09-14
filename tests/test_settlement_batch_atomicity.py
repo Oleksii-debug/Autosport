@@ -76,6 +76,26 @@ class SettlementBatchAtomicityTests(unittest.TestCase):
         self.assertEqual(second.payout, Decimal("0"))
         self.assertEqual(book._lifecycle, before_lifecycle)
 
+    def test_invalid_public_outcome_state_cannot_become_false_loss(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T19:30:00+00:00",
+        )
+        settlement = SettlementEngine({leg.quote_key: "corrupt"})
+        before_balance = book.balance
+        before_lifecycle = list(book._lifecycle)
+
+        with self.assertRaisesRegex(ValueError, "unsupported outcome: corrupt"):
+            settlement.settle_ready(book)
+
+        self.assertEqual(book.balance, before_balance)
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+        self.assertEqual(book._lifecycle, before_lifecycle)
+
 
 if __name__ == "__main__":
     unittest.main()

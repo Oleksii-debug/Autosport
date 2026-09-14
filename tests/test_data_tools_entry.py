@@ -1,6 +1,8 @@
 import io
+import tempfile
 import unittest
 from contextlib import redirect_stderr
+from pathlib import Path
 from unittest.mock import patch
 
 from autosport import data_tools_entry
@@ -74,6 +76,21 @@ class DataToolsEntryTests(unittest.TestCase):
         target.assert_called_once_with(
             ["repair-workspace", "--workspace", r"C:\\Autosport\\state"]
         )
+
+    def test_real_missing_dataset_is_fail_closed_at_portable_boundary(self):
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing-dataset"
+            with redirect_stderr(stderr):
+                result = data_tools_entry.main(["verify-dataset", str(missing)])
+
+        self.assertEqual(result, 3)
+        self.assertTrue(
+            stderr.getvalue().strip().startswith(
+                "Autosport-Data: verify-dataset=FAIL_CLOSED error="
+            )
+        )
+        self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_expected_validation_failure_is_contained_without_traceback(self):
         stderr = io.StringIO()

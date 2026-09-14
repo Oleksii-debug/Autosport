@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from autosport.run_registry import ReconciliationError, RunRegistry
+from autosport.run_registry import ReconciliationError, RepeatedExperimentError, RunRegistry
 
 
 class RunRegistryStateIntegrityTests(unittest.TestCase):
@@ -18,6 +18,7 @@ class RunRegistryStateIntegrityTests(unittest.TestCase):
         *,
         run_id: str = "run-1",
         transaction_evidence: bool = False,
+        allow_repeat: bool = False,
     ) -> str:
         kwargs = {}
         if transaction_evidence:
@@ -30,6 +31,7 @@ class RunRegistryStateIntegrityTests(unittest.TestCase):
             "b" * 64,
             "strategy",
             run_id,
+            allow_repeat=allow_repeat,
             **kwargs,
         )
 
@@ -63,6 +65,103 @@ class RunRegistryStateIntegrityTests(unittest.TestCase):
             registry, path = self._new_registry(root)
             in_progress = self._begin(registry, transaction_evidence=True)
             self.assertEqual(RunRegistry(path).get(in_progress)["status"], "in_progress")
+
+    def test_reused_repeat_run_id_cannot_overwrite_completed_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry, path = self._new_registry(root)
+            base = self._begin(registry, transaction_evidence=True)
+            registry.complete(
+                base,
+                str(root / "run-run-1.json"),
+                paper_book_sha256="e" * 64,
+                decision_ledger_sha256="f" * 64,
+            )
+            repeat = self._begin(
+                registry,
+                run_id="repeat-1",
+                transaction_evidence=True,
+                allow_repeat=True,
+            )
+            registry.complete(
+                repeat,
+                str(root / "run-repeat-1.json"),
+                paper_book_sha256="1" * 64,
+                decision_ledger_sha256="2" * 64,
+            )
+            before = path.read_bytes()
+
+            with self.assertRaisesRegex(RepeatedExperimentError, "durable history"):
+                self._begin(
+                    registry,
+                    run_id="repeat-1",
+                    transaction_evidence=True,
+                    allow_repeat=True,
+                )
+
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(registry.get(repeat)["status"], "completed")
+
+    def test_reused_retry_run_id_cannot_overwrite_aborted_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry, path = self._new_registry(root)
+            base = self._begin(registry, run_id="base", transaction_evidence=True)
+            registry.abort_uncommitted(
+                base,
+                reason="base aborted",
+                paper_book_sha256="c" * 64,
+                decision_ledger_sha256="d" * 64,
+            )
+            retry = self._begin(registry, run_id="retry-1", transaction_evidence=True)
+            registry.abort_uncommitted(
+                retry,
+                reason="retry aborted",
+                paper_book_sha256="c" * 64,
+                decision_ledger_sha256="d" * 64,
+            )
+            before = path.read_bytes()
+
+            with self.assertRaisesRegex(RepeatedExperimentError, "durable history"):
+                self._begin(registry, run_id="retry-1", transaction_evidence=True)
+
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(registry.get(retry)["status"], "aborted")
+
+    def test_transaction_aware_completed_entry_requires_terminal_evidence(self):
+        for missing_field in ("result_path", "paper_book_sha256", "decision_ledger_sha256"):
+            with self.subTest(missing_field=missing_field):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    registry, path = self._new_registry(root)
+                    key = self._begin(registry, transaction_evidence=True)
+                    registry.complete(
+                        key,
+                        str(root / "run-run-1.json"),
+                        paper_book_sha256="e" * 64,
+                        decision_ledger_sha256="f" * 64,
+                    )
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    raw["runs"][key].pop(missing_field)
+                    path.write_text(json.dumps(raw), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "terminal economic evidence"):
+                        RunRegistry(path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry, path = self._new_registry(root)
+            key = self._begin(registry, transaction_evidence=True)
+            registry.complete(
+                key,
+                str(root / "run-run-1.json"),
+                paper_book_sha256="e" * 64,
+                decision_ledger_sha256="f" * 64,
+            )
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["runs"][key]["result_path"] = ""
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "result_path evidence"):
+                RunRegistry(path)
 
     def test_constructor_rejects_non_object_bad_schema_and_root_drift(self):
         payloads = (
@@ -130,6 +229,7 @@ class RunRegistryStateIntegrityTests(unittest.TestCase):
                     key = self._begin(registry, transaction_evidence=True)
                     registry.complete(
                         key,
+                        str(root / "run-run-1.json"),
                         paper_book_sha256="e" * 64,
                         decision_ledger_sha256="f" * 64,
                     )

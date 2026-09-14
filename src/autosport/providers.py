@@ -10,6 +10,8 @@ from .domain import MarketEvent, MarketType
 
 
 _MAX_PROVIDER_METADATA_NESTING = 64
+_SQLITE_SEQUENCE_MIN = -(1 << 63)
+_SQLITE_SEQUENCE_MAX = (1 << 63) - 1
 
 
 def _validate_source_id(source_id: object) -> str:
@@ -44,6 +46,8 @@ def _validate_sequence(value: object) -> int:
 
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError("sequence must be a non-boolean int")
+    if value < _SQLITE_SEQUENCE_MIN or value > _SQLITE_SEQUENCE_MAX:
+        raise ValueError("sequence must fit signed 64-bit SQLite INTEGER")
     return value
 
 

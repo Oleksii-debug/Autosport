@@ -6,11 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autosport.dataset import load_dataset
+from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
 from autosport.integrity import sha256_file
 from autosport.paper import PaperBook
 from autosport.recovery import reconcile_late_crashes
 from autosport.run_registry import ReconciliationError, RunRegistry
-from autosport.run_transaction import RunTransaction
+from autosport.run_transaction import RunTransaction, RunTransactionError
 from autosport.session import AutosportSession
 
 
@@ -23,6 +24,52 @@ class TransactionRecoveryTests(unittest.TestCase):
         unresolved = registry.in_progress()
         self.assertEqual(len(unresolved), 1)
         return registry, unresolved[0][0], unresolved[0][1]
+
+    @staticmethod
+    def _write_corrupt_ledger(root: Path) -> Path:
+        ledger = JsonlDecisionLedger(root / "decisions.jsonl")
+        ledger.append(
+            DecisionRecord(
+                "prior-run",
+                "agent",
+                "2026-01-01T00:00:00+00:00",
+                "OBSERVE",
+                {"x": 1},
+                "ctx",
+            )
+        )
+        envelope = json.loads(ledger.path.read_text(encoding="utf-8"))
+        envelope["record"]["payload"]["x"] = 2
+        ledger.path.write_text(
+            json.dumps(envelope, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return ledger.path
+
+    @staticmethod
+    def _start_transaction(root: Path, run_id: str) -> tuple[RunTransaction, dict]:
+        book_path = root / "paper_book.json"
+        PaperBook("10000").save(book_path)
+        ledger_path = TransactionRecoveryTests._write_corrupt_ledger(root)
+        market_hash = "a" * 64
+        results_hash = "b" * 64
+        item = {
+            "run_id": run_id,
+            "market_sha256": market_hash,
+            "results_sha256": results_hash,
+            "strategy_id": "baseline-v1",
+        }
+        tx = RunTransaction.start(
+            root,
+            run_id=run_id,
+            experiment_key="experiment",
+            market_sha256=market_hash,
+            results_sha256=results_hash,
+            strategy_id="baseline-v1",
+            base_paper_book_sha256=sha256_file(book_path),
+            base_decision_ledger_sha256=sha256_file(ledger_path),
+        )
+        return tx, item
 
     def test_runtime_failure_before_precommit_aborts_without_canonical_economic_side_effects(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -142,6 +189,62 @@ class TransactionRecoveryTests(unittest.TestCase):
                 reconcile_late_crashes(root)
             self.assertEqual(registry.get(key)["status"], "in_progress")
             self.assertEqual(PaperBook.load(root / "paper_book.json").balance, 10000)
+
+    def test_stage_outputs_rejects_hash_matching_corrupt_base_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx, _item = self._start_transaction(root, "corrupt-stage")
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "canonical Decision Ledger integrity validation failed",
+            ):
+                tx.stage_outputs(
+                    PaperBook.load(root / "paper_book.json"),
+                    root / "decisions.jsonl",
+                )
+            self.assertFalse(tx.staged_book_path.exists())
+
+    def test_transaction_recovery_rejects_hash_matching_corrupt_base_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx, item = self._start_transaction(root, "corrupt-recovery")
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "canonical Decision Ledger integrity validation failed",
+            ):
+                RunTransaction.recover(
+                    root,
+                    run_id="corrupt-recovery",
+                    registry_item=item,
+                    experiment_key="experiment",
+                )
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["phase"], "staging")
+
+    def test_pre_manifest_recovery_rejects_hash_matching_corrupt_base_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book_path = root / "paper_book.json"
+            PaperBook("10000").save(book_path)
+            ledger_path = self._write_corrupt_ledger(root)
+            registry = RunRegistry(root / "run_registry.json")
+            key = registry.begin(
+                "a" * 64,
+                "b" * 64,
+                "baseline-v1",
+                "crash-before-manifest",
+                base_paper_book_sha256=sha256_file(book_path),
+                base_decision_ledger_sha256=sha256_file(ledger_path),
+            )
+
+            with self.assertRaisesRegex(
+                ReconciliationError,
+                "canonical Decision Ledger integrity validation failed",
+            ):
+                reconcile_late_crashes(root)
+            self.assertEqual(registry.get(key)["status"], "in_progress")
 
 
 if __name__ == "__main__":

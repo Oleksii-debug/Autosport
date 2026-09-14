@@ -1,7 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Context, Decimal, InvalidOperation, Overflow, Underflow, localcontext
+from decimal import (
+    Context,
+    Decimal,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    Rounded,
+    Underflow,
+    localcontext,
+)
 
 from .domain import PaperTicket, TicketStatus
 from .paper import PaperBook
@@ -23,13 +32,16 @@ class EvaluationSummary:
     void: int
 
 
-def _evaluation_decimal_context() -> Context:
-    """Return a deterministic context for economic validation and derived metrics."""
+def _evaluation_decimal_context(*, exact: bool = False) -> Context:
+    """Return the deterministic context used for durable evaluation economics."""
 
     context = Context(prec=28, Emin=-999999, Emax=999999)
     context.traps[InvalidOperation] = True
     context.traps[Overflow] = True
     context.traps[Underflow] = True
+    if exact:
+        context.traps[Inexact] = True
+        context.traps[Rounded] = True
     context.clear_flags()
     return context
 
@@ -51,6 +63,8 @@ def _validated_evaluation_state(
     PaperBook merely because the object originated from a previously validated
     snapshot. Reuse the canonical PaperBook invariant immediately before
     publishing metrics, and isolate Decimal behavior from the caller context.
+    Ledger aggregates and profit must be exact at the canonical precision;
+    non-terminating ROI division may use normal Decimal rounding.
     """
 
     try:
@@ -61,7 +75,7 @@ def _validated_evaluation_state(
             if not isinstance(ticket, PaperTicket) or not isinstance(ticket.status, TicketStatus):
                 raise TypeError("PaperBook contains a noncanonical ticket/status")
 
-        with localcontext(_evaluation_decimal_context()):
+        with localcontext(_evaluation_decimal_context(exact=True)):
             PaperBook._validate_loaded_state(book)
             initial_bankroll = book.initial_bankroll
             final_balance = book.balance
@@ -71,6 +85,8 @@ def _validated_evaluation_state(
             )
             settled_stake = sum((ticket.stake for ticket in settled), Decimal("0"))
             net_profit = final_balance + committed_stake - initial_bankroll
+
+        with localcontext(_evaluation_decimal_context()):
             roi = (net_profit / settled_stake) if settled_stake else Decimal("0")
     except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
         raise ValueError(_INVALID_EVALUATION_STATE) from exc

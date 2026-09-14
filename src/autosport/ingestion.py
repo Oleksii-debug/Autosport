@@ -68,6 +68,11 @@ class IngestionEngine:
             )
         started = perf_counter()
         now = self.clock()
+
+        # Only provider acquisition and provider-owned batch-contract validation may
+        # transition provider health to failed. Local health projection, clock,
+        # normalization, persistence and subscriber failures are separate pipeline
+        # failures and must never be misattributed to the external source.
         try:
             batch = provider.read_batch(max_items=max_items)
             if batch.source_id != provider.source_id:
@@ -76,49 +81,50 @@ class IngestionEngine:
                 raise ValueError(
                     f"provider returned {len(batch.quotes)} quotes above requested batch bound {max_items}"
                 )
-            flags = set(batch.quality_flags)
-            previous_source_ts = None
-            if self.health_store is not None:
-                previous_source_ts = self.health_store.get(batch.source_id).latest_source_ts
-
-            normalized = []
-            rejected = 0
-            latest_source: datetime | None = None
-            now_point = parse_source_timestamp(now)
-            for quote in batch.quotes:
-                source_point: datetime | None = None
-                if quote.source_ts is not None:
-                    try:
-                        source_point = parse_source_timestamp(quote.source_ts)
-                    except (AttributeError, TypeError, ValueError):
-                        flags.add("INVALID_SOURCE_TIMESTAMP")
-                        rejected += 1
-                        continue
-                    age_seconds = (now_point - source_point).total_seconds()
-                    if age_seconds > self.policy.stale_after_seconds:
-                        flags.add("STALE_SOURCE")
-                    if age_seconds < -self.policy.max_future_skew_seconds:
-                        flags.add("FUTURE_CLOCK_SKEW")
-                try:
-                    event = self.normalizer.normalize(batch.source_id, quote)
-                except (TypeError, ValueError):
-                    flags.add("INVALID_QUOTE")
-                    rejected += 1
-                    continue
-                normalized.append(event)
-                if source_point is not None and (
-                    latest_source is None or source_point > latest_source
-                ):
-                    latest_source = source_point
-
-            latest_source_ts = latest_source.isoformat() if latest_source is not None else None
-            if previous_source_ts is not None and latest_source is not None:
-                if latest_source < parse_source_timestamp(previous_source_ts):
-                    flags.add("SOURCE_TIME_REGRESSION")
         except Exception as exc:
             if self.health_store is not None:
                 self.health_store.record_failure(provider.source_id, now=now, error=exc)
             raise
+
+        flags = set(batch.quality_flags)
+        previous_source_ts = None
+        if self.health_store is not None:
+            previous_source_ts = self.health_store.get(batch.source_id).latest_source_ts
+
+        normalized = []
+        rejected = 0
+        latest_source: datetime | None = None
+        now_point = parse_source_timestamp(now)
+        for quote in batch.quotes:
+            source_point: datetime | None = None
+            if quote.source_ts is not None:
+                try:
+                    source_point = parse_source_timestamp(quote.source_ts)
+                except (AttributeError, TypeError, ValueError):
+                    flags.add("INVALID_SOURCE_TIMESTAMP")
+                    rejected += 1
+                    continue
+                age_seconds = (now_point - source_point).total_seconds()
+                if age_seconds > self.policy.stale_after_seconds:
+                    flags.add("STALE_SOURCE")
+                if age_seconds < -self.policy.max_future_skew_seconds:
+                    flags.add("FUTURE_CLOCK_SKEW")
+            try:
+                event = self.normalizer.normalize(batch.source_id, quote)
+            except (TypeError, ValueError):
+                flags.add("INVALID_QUOTE")
+                rejected += 1
+                continue
+            normalized.append(event)
+            if source_point is not None and (
+                latest_source is None or source_point > latest_source
+            ):
+                latest_source = source_point
+
+        latest_source_ts = latest_source.isoformat() if latest_source is not None else None
+        if previous_source_ts is not None and latest_source is not None:
+            if latest_source < parse_source_timestamp(previous_source_ts):
+                flags.add("SOURCE_TIME_REGRESSION")
 
         # Persistence and subscriber delivery are local pipeline stages. A failure here
         # must still propagate, but it must not be attributed to provider health after

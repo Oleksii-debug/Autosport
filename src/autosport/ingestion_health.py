@@ -149,6 +149,11 @@ class SourceHealthStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self._write({"schema_version": 1, "sources": {}})
+        else:
+            # Validate durable operational truth before any provider call can depend on it.
+            # Existing live-observation/session lifecycle code can then unwind already-open
+            # resources at the constructor boundary instead of discovering corruption later.
+            self._read()
 
     def get(self, source_id: str) -> SourceHealthState:
         _validate_source_id(source_id)
@@ -224,13 +229,16 @@ class SourceHealthStore:
                 object_pairs_hook=_reject_duplicate_json_keys,
                 parse_constant=_reject_nonfinite_json_constant,
             )
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError("invalid source health store") from exc
 
+        schema_version = raw.get("schema_version") if isinstance(raw, dict) else None
         if (
             not isinstance(raw, dict)
             or set(raw) != {"schema_version", "sources"}
-            or raw.get("schema_version") != 1
+            or isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != 1
             or not isinstance(raw.get("sources"), dict)
         ):
             raise ValueError("invalid source health store")

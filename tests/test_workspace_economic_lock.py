@@ -84,6 +84,22 @@ class WorkspaceEconomicLockTests(unittest.TestCase):
             finally:
                 self._stop_holder(process, release)
 
+    def test_recovery_fails_closed_before_active_writer_creates_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertFalse((root / "run_registry.json").exists())
+            process, release = self._start_holder(root)
+            try:
+                self.assertFalse((root / "run_registry.json").exists())
+                with self.assertRaisesRegex(
+                    ReconciliationError,
+                    "active economic writer",
+                ):
+                    reconcile_late_crashes(root)
+                self.assertFalse((root / "run_registry.json").exists())
+            finally:
+                self._stop_holder(process, release)
+
 
 if __name__ == "__main__":
     unittest.main()

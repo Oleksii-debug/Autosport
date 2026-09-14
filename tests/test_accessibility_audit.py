@@ -87,6 +87,40 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
 
+    def test_wrong_semantic_roles_fail_closed(self):
+        cases = (
+            (AUTOMATION_IDS["choose_dataset"], "EDIT", "BUTTON"),
+            (AUTOMATION_IDS["replay_speed"], "BUTTON", "COMBOBOX"),
+            (AUTOMATION_IDS["tickets"], "EDIT", "LIST"),
+            (AUTOMATION_IDS["log"], "BUTTON", "EDIT"),
+            (WINDOWS_BANKROLL_AUTOMATION_ID, "BUTTON", "EDIT"),
+        )
+        for automation_id, wrong_role, expected_role in cases:
+            with self.subTest(automation_id=automation_id):
+                description = self._passing_description()
+                widgets = list(description.widgets)
+                index = next(
+                    i for i, item in enumerate(widgets) if item.automation_id == automation_id
+                )
+                original = widgets[index]
+                widgets[index] = self._widget(
+                    automation_id,
+                    original.name,
+                    role=wrong_role,
+                    patterns=tuple(item.name for item in original.patterns),
+                    answers_rows=original.answers_rows,
+                )
+                report = self._summarize(
+                    SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)})
+                )
+                self.assertEqual(report["status"], "FAIL")
+                self.assertTrue(
+                    any(
+                        f"unexpected accessible role={wrong_role} expected={expected_role}" in failure
+                        for failure in report["failures"]
+                    )
+                )
+
     def test_editable_bankroll_summary_fails_closed(self):
         report = self._summarize(self._passing_description(), bankroll_readonly=False)
         self.assertEqual(report["status"], "FAIL")

@@ -62,7 +62,7 @@ class MarketEvent:
             market_type=MarketType(str(raw.get("market_type", "other"))),
             status=str(raw.get("status", "open")),
             source_ts=raw.get("source_ts"),
-            ingest_ts=str(raw.get("ingest_ts", utc_now_iso())),
+            ingest_ts=str(raw.get("ingest_ts", raw["observed_ts"])),
             score_state=raw.get("score_state"),
             metadata=dict(raw.get("metadata", {})),
         )

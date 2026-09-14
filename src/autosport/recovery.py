@@ -25,13 +25,32 @@ def reconcile_late_crashes(workspace: str | Path) -> RecoveryReport:
 
     try:
         with WorkspaceEconomicLock(root):
-            if not registry_path.is_file():
-                return RecoveryReport((), (), ())
-            return _reconcile_late_crashes_locked(root, registry_path)
+            try:
+                if not registry_path.exists():
+                    if _has_durable_run_history(root):
+                        raise ReconciliationError(
+                            "run registry is missing while durable run history exists"
+                        )
+                    return RecoveryReport((), (), ())
+                if not registry_path.is_file():
+                    raise ReconciliationError("run registry path is not a file")
+                return _reconcile_late_crashes_locked(root, registry_path)
+            except ReconciliationError:
+                raise
+            except (OSError, ValueError) as exc:
+                raise ReconciliationError(f"run registry recovery failed: {exc}") from exc
     except WorkspaceEconomicLockError as exc:
         raise ReconciliationError(
             "workspace has an active economic writer; recovery cannot run concurrently"
         ) from exc
+
+
+def _has_durable_run_history(root: Path) -> bool:
+    transaction_root = root / RunTransaction.ROOT_NAME
+    if transaction_root.exists():
+        if not transaction_root.is_dir() or any(transaction_root.iterdir()):
+            return True
+    return any(root.glob("run-*.json"))
 
 
 def _reconcile_late_crashes_locked(root: Path, registry_path: Path) -> RecoveryReport:

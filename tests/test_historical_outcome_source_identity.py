@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from autosport.historical_corpus import _outcome_provenance
+from autosport.outcome_revision import canonical_outcome_revision_id
 
 
 class HistoricalOutcomeSourceIdentityTests(unittest.TestCase):
@@ -20,7 +21,25 @@ class HistoricalOutcomeSourceIdentityTests(unittest.TestCase):
         include_source: bool = True,
     ) -> dict[str, object]:
         outcomes = {"tt-a|winner|alice": "win"}
-        source_record: dict[str, object] = {"quote_outcomes": outcomes}
+        effective_at = "2026-01-01T10:59:00Z"
+        revision_id = canonical_outcome_revision_id(
+            source_identity="official-results:test-fixture",
+            kind="initial",
+            effective_at=effective_at,
+            quote_outcomes=outcomes,
+        )
+        source_record: dict[str, object] = {
+            "quote_outcomes": outcomes,
+            "revision": {
+                "schema_version": 1,
+                "kind": "initial",
+                "effective_at": effective_at,
+                "revision_id": revision_id,
+                "supersedes_revision_id": None,
+                "predecessor_record_file": None,
+                "predecessor_record_sha256": None,
+            },
+        }
         if include_source:
             source_record["source"] = record_source
         source_path = root / "official-outcome-source-record.json"
@@ -34,6 +53,8 @@ class HistoricalOutcomeSourceIdentityTests(unittest.TestCase):
                 "source_identity": claimed_source,
                 "source_record_file": source_path.name,
                 "source_record_sha256": source_sha256,
+                "outcome_revision_id": revision_id,
+                "outcome_lineage_root_revision_id": revision_id,
                 "terms_reference": "https://example.test/results-terms",
                 "retention_basis": "test-only",
                 "authority_reference": "test-authority",
@@ -71,6 +92,12 @@ class HistoricalOutcomeSourceIdentityTests(unittest.TestCase):
             root = Path(tmp)
             provenance = self._validate(root, self._results(root))
             self.assertEqual(provenance["source_identity"], "official-results:test-fixture")
+            self.assertTrue(provenance["outcome_revision_chain_verified"])
+            self.assertEqual(provenance["outcome_revision_chain_length"], 1)
+            self.assertEqual(
+                provenance["outcome_revision_id"],
+                provenance["outcome_lineage_root_revision_id"],
+            )
 
     def test_rehashed_source_record_cannot_be_relabelled_as_another_source(self):
         with tempfile.TemporaryDirectory() as tmp:

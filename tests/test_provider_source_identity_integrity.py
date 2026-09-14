@@ -44,6 +44,14 @@ class ProviderSourceIdentityIntegrityTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, field_name):
                         self._quote(**{field_name: value})
 
+    def test_provider_sequence_identity_requires_non_boolean_integer(self):
+        for value in (True, False, 1.0, "1", Decimal("1")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(TypeError, "sequence"):
+                    self._quote(sequence=value)
+        self.assertEqual(self._quote(sequence=0).sequence, 0)
+        self.assertEqual(self._quote(sequence=-1).sequence, -1)
+
     def test_reserved_provider_delimiters_are_canonically_escaped_without_rekeying_source(self):
         quote = self._quote(
             provider_event_id="match|1",

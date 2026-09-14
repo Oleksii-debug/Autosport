@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -412,9 +413,9 @@ class RunTransaction:
         self._validate_completed_registry_evidence(manifest, registry_item)
         expected_book_hash = self._hash_field(manifest, "new", "paper_book_sha256")
         expected_ledger_hash = self._hash_field(manifest, "new", "decision_ledger_sha256")
-        book_snapshot = self._verified_paper_book_snapshot(
+        book_snapshot = self._verified_canonical_paper_book_snapshot(
             self.workspace / "paper_book.json",
-            "canonical PaperBook",
+            "PaperBook",
         )
         if book_snapshot.sha256 != expected_book_hash:
             raise RunTransactionError(
@@ -706,11 +707,10 @@ class RunTransaction:
             raise RunTransactionError(f"transaction manifest lacks {section}.{field} or value is invalid")
         return value
 
-    @staticmethod
-    def _require_hash(path: Path, expected_hash: str, label: str) -> None:
-        if not path.is_file():
-            raise RunTransactionError(f"{label} canonical file is missing")
-        if sha256_file(path) != expected_hash:
+    @classmethod
+    def _require_hash(cls, path: Path, expected_hash: str, label: str) -> None:
+        snapshot = cls._read_canonical_file_snapshot(path, label)
+        if snapshot.sha256 != expected_hash:
             raise RunTransactionError(f"{label} SHA-256 canonical hash is not the expected transaction state")
 
     @staticmethod
@@ -720,6 +720,71 @@ class RunTransaction:
                 payload = handle.read()
         except OSError as exc:
             raise RunTransactionError(f"{label} artifact is missing or unreadable") from exc
+        return VerifiedFileSnapshot(
+            payload=payload,
+            sha256=hashlib.sha256(payload).hexdigest(),
+        )
+
+    @staticmethod
+    def _read_canonical_file_snapshot(path: Path, label: str) -> VerifiedFileSnapshot:
+        """Read exact canonical bytes while rejecting pathname indirection/replacement."""
+
+        try:
+            path_before = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise RunTransactionError(f"{label} canonical file is missing") from exc
+        except OSError as exc:
+            raise RunTransactionError(f"{label} canonical file is unreadable") from exc
+        if not stat.S_ISREG(path_before.st_mode):
+            raise RunTransactionError(
+                f"{label} canonical path must be a regular non-symlink file"
+            )
+
+        try:
+            handle = path.open("rb")
+        except FileNotFoundError as exc:
+            raise RunTransactionError(
+                f"{label} canonical path changed while validating"
+            ) from exc
+        except OSError as exc:
+            raise RunTransactionError(f"{label} canonical file is unreadable") from exc
+
+        with handle:
+            try:
+                opened_before = os.fstat(handle.fileno())
+                path_opened = os.stat(path, follow_symlinks=False)
+            except OSError as exc:
+                raise RunTransactionError(
+                    f"{label} canonical path changed while validating"
+                ) from exc
+            if (
+                not stat.S_ISREG(opened_before.st_mode)
+                or not stat.S_ISREG(path_opened.st_mode)
+                or not os.path.samestat(opened_before, path_opened)
+            ):
+                raise RunTransactionError(
+                    f"{label} canonical path must be a stable regular non-symlink file"
+                )
+
+            try:
+                payload = handle.read()
+                opened_after = os.fstat(handle.fileno())
+                path_after = os.stat(path, follow_symlinks=False)
+            except OSError as exc:
+                raise RunTransactionError(
+                    f"{label} canonical path changed while validating"
+                ) from exc
+            if (
+                not stat.S_ISREG(opened_after.st_mode)
+                or not stat.S_ISREG(path_after.st_mode)
+                or not os.path.samestat(opened_before, opened_after)
+                or not os.path.samestat(opened_after, path_after)
+                or not os.path.samestat(path_before, path_after)
+            ):
+                raise RunTransactionError(
+                    f"{label} canonical path changed while validating"
+                )
+
         return VerifiedFileSnapshot(
             payload=payload,
             sha256=hashlib.sha256(payload).hexdigest(),
@@ -842,6 +907,16 @@ class RunTransaction:
         cls._validate_paper_book_snapshot(snapshot, path, label)
         return snapshot
 
+    @classmethod
+    def _verified_canonical_paper_book_snapshot(
+        cls,
+        path: Path,
+        label: str,
+    ) -> VerifiedFileSnapshot:
+        snapshot = cls._read_canonical_file_snapshot(path, label)
+        cls._validate_paper_book_snapshot(snapshot, path, f"canonical {label}")
+        return snapshot
+
     @staticmethod
     def _verified_decision_ledger(
         path: Path,
@@ -853,6 +928,42 @@ class RunTransaction:
             raise RunTransactionError(
                 f"{label} integrity validation failed: {exc}"
             ) from exc
+
+    @classmethod
+    def _verified_canonical_decision_ledger(
+        cls,
+        path: Path,
+        label: str,
+    ) -> VerifiedDecisionLedgerSnapshot:
+        snapshot = cls._read_canonical_file_snapshot(path, label)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=path.parent,
+                prefix=f".{path.name}.verify-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(snapshot.payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            verified = cls._verified_decision_ledger(
+                temporary,
+                f"canonical {label} verification copy",
+            )
+            if verified.sha256 != snapshot.sha256 or verified.payload != snapshot.payload:
+                raise RunTransactionError(
+                    f"canonical {label} exact snapshot copy mismatch"
+                )
+            return verified
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
 
     @classmethod
     def _require_run_decision_identity(
@@ -911,7 +1022,7 @@ class RunTransaction:
         expected_hash: str,
         label: str,
     ) -> VerifiedDecisionLedgerSnapshot:
-        snapshot = cls._verified_decision_ledger(path, f"canonical {label}")
+        snapshot = cls._verified_canonical_decision_ledger(path, label)
         if snapshot.sha256 != expected_hash:
             raise RunTransactionError(
                 f"{label} SHA-256 canonical hash is not the expected transaction state"
@@ -976,13 +1087,11 @@ class RunTransaction:
 
     def _validate_paper_book_commit_state(self, manifest: dict[str, Any]) -> None:
         target = self.workspace / "paper_book.json"
-        if not target.is_file():
-            raise RunTransactionError("PaperBook canonical file is missing")
         base_hash = self._hash_field(manifest, "base", "paper_book_sha256")
         new_hash = self._hash_field(manifest, "new", "paper_book_sha256")
-        current_snapshot = self._verified_paper_book_snapshot(
+        current_snapshot = self._verified_canonical_paper_book_snapshot(
             target,
-            "canonical PaperBook",
+            "PaperBook",
         )
         if current_snapshot.sha256 not in {base_hash, new_hash}:
             raise RunTransactionError("PaperBook SHA-256 canonical hash is neither BASE nor NEW")
@@ -1003,13 +1112,11 @@ class RunTransaction:
 
     def _validate_decision_ledger_commit_state(self, manifest: dict[str, Any]) -> None:
         target = self.workspace / "decisions.jsonl"
-        if not target.is_file():
-            raise RunTransactionError("Decision Ledger canonical file is missing")
         base_hash = self._hash_field(manifest, "base", "decision_ledger_sha256")
         new_hash = self._hash_field(manifest, "new", "decision_ledger_sha256")
-        current_snapshot = self._verified_decision_ledger(
+        current_snapshot = self._verified_canonical_decision_ledger(
             target,
-            "canonical Decision Ledger",
+            "Decision Ledger",
         )
         if current_snapshot.sha256 not in {base_hash, new_hash}:
             raise RunTransactionError(
@@ -1046,12 +1153,10 @@ class RunTransaction:
         new_hash: str,
         label: str,
     ) -> None:
-        if not target.is_file():
-            raise RunTransactionError(f"{label} canonical file is missing")
-        current_hash = sha256_file(target)
-        if current_hash == new_hash:
+        current_snapshot = cls._read_canonical_file_snapshot(target, label)
+        if current_snapshot.sha256 == new_hash:
             return
-        if current_hash != base_hash:
+        if current_snapshot.sha256 != base_hash:
             raise RunTransactionError(f"{label} SHA-256 canonical hash is neither BASE nor NEW")
         cls._replace_verified(staged, target, new_hash, label)
 
@@ -1063,8 +1168,8 @@ class RunTransaction:
             return
         cls._replace_verified(staged, target, expected_hash, "run summary")
 
-    @staticmethod
-    def _replace_verified(staged: Path, target: Path, expected_hash: str, label: str) -> None:
+    @classmethod
+    def _replace_verified(cls, staged: Path, target: Path, expected_hash: str, label: str) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary: Path | None = None
         try:
@@ -1091,7 +1196,8 @@ class RunTransaction:
                 raise RunTransactionError(f"staged {label} artifact hash mismatch")
             os.replace(temporary, target)
             temporary = None
-            if sha256_file(target) != expected_hash:
+            committed_snapshot = cls._read_canonical_file_snapshot(target, label)
+            if committed_snapshot.sha256 != expected_hash:
                 raise RunTransactionError(f"committed {label} artifact hash mismatch")
         finally:
             if temporary is not None:

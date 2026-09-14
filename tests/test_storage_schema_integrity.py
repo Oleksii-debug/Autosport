@@ -158,6 +158,40 @@ class StorageSchemaIntegrityTests(unittest.TestCase):
             finally:
                 check.close()
 
+    def test_nonempty_projection_with_empty_history_fails_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "market.db"
+            connection = self._connect(db_path)
+            try:
+                self._create_canonical_tables(connection)
+                connection.execute(
+                    "INSERT INTO current_quotes(quote_key,observed_ts,sequence,payload_json) VALUES (?,?,?,?)",
+                    ("sentinel", "2026-01-01T00:00:00+00:00", 1, "{}"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "history is empty while current_quotes projection is non-empty",
+            ):
+                SQLiteMarketStore(db_path)
+
+            check = self._connect(db_path)
+            try:
+                history_rows = check.execute("SELECT dedupe_key FROM market_events").fetchall()
+                projection_rows = check.execute(
+                    "SELECT quote_key,observed_ts,sequence,payload_json FROM current_quotes"
+                ).fetchall()
+                self.assertEqual(history_rows, [])
+                self.assertEqual(
+                    projection_rows,
+                    [("sentinel", "2026-01-01T00:00:00+00:00", 1, "{}")],
+                )
+            finally:
+                check.close()
+
     def test_trigger_on_canonical_table_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "market.db"

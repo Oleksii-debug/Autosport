@@ -146,7 +146,7 @@ class BetfairAvailableBackBook:
             level_raw = row[0]
             if isinstance(level_raw, bool) or not isinstance(level_raw, int) or level_raw < 0:
                 raise ValueError(f"batb[{index}].level must be a non-negative integer")
-            price = _decimal_number(row[1], field=f"batb[{index}].price")
+            price = _decimal_number(row[1], field=f"batb[{index}].price", non_negative=True)
             size = _decimal_number(row[2], field=f"batb[{index}].size", non_negative=True)
             if size == 0:
                 # The level is the removal identity and Betfair may carry zero as the

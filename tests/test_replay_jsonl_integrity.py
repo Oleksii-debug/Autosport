@@ -20,14 +20,13 @@ class ReplayJsonlIntegrityTests(unittest.TestCase):
             "metadata": {"nested": {"provider_sequence": 7}},
         }
 
-    def test_valid_jsonl_and_blank_lines_remain_supported(self):
+    def test_valid_jsonl_and_json_whitespace_blank_lines_remain_supported(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "market.jsonl"
-            path.write_text(
-                "\n"
-                + json.dumps(self._event_payload(), ensure_ascii=False)
-                + "\n\n",
-                encoding="utf-8",
+            path.write_bytes(
+                b" \t\r\n"
+                + json.dumps(self._event_payload(), ensure_ascii=False).encode("utf-8")
+                + b"\n\t \r\n"
             )
 
             engine = ReplayEngine.from_jsonl(path)
@@ -35,6 +34,23 @@ class ReplayJsonlIntegrityTests(unittest.TestCase):
             self.assertEqual(len(engine.events), 1)
             self.assertEqual(engine.events[0].event_id, "event-1")
             self.assertEqual(engine.events[0].metadata["nested"]["provider_sequence"], 7)
+
+    def test_non_json_whitespace_physical_record_is_rejected(self):
+        for label, invalid_whitespace in (
+            ("nbsp", "\u00a0"),
+            ("vertical-tab", "\u000b"),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "market.jsonl"
+                path.write_bytes(
+                    json.dumps(self._event_payload()).encode("utf-8")
+                    + b"\n"
+                    + invalid_whitespace.encode("utf-8")
+                    + b"\n"
+                )
+
+                with self.assertRaisesRegex(ValueError, r"invalid replay JSONL at line 2"):
+                    ReplayEngine.from_jsonl(path)
 
     def test_duplicate_top_level_key_is_rejected_before_market_event_coercion(self):
         with tempfile.TemporaryDirectory() as tmp:

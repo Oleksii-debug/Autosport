@@ -167,7 +167,7 @@ class ReplayEngine:
                         raise ValueError(
                             f"invalid replay JSONL UTF-8 at line {line_number}"
                         ) from exc
-                    if line.strip():
+                    if line.strip(" \t\r\n"):
                         events.append(_parse_jsonl_event(line, line_number))
         except OSError as exc:
             raise ValueError(f"unable to read replay JSONL: {source}") from exc

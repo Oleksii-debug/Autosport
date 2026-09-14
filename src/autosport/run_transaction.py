@@ -15,8 +15,36 @@ from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
 
 
+_WINDOWS_RESERVED_CHARACTERS = frozenset('<>:"/\\|?*')
+_WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{suffix}" for suffix in (*range(1, 10), "¹", "²", "³")),
+        *(f"LPT{suffix}" for suffix in (*range(1, 10), "¹", "²", "³")),
+    }
+)
+
+
 class RunTransactionError(RuntimeError):
     pass
+
+
+def _require_portable_run_id(run_id: object) -> str:
+    """Reject path components that cannot be represented safely by the Windows product."""
+
+    if not isinstance(run_id, str) or not run_id:
+        raise RunTransactionError("run_id is not a safe workspace path component")
+    if run_id in {".", ".."} or run_id[0] == " " or run_id[-1] in {" ", "."}:
+        raise RunTransactionError("run_id is not a safe workspace path component")
+    if any(character in _WINDOWS_RESERVED_CHARACTERS or ord(character) < 32 for character in run_id):
+        raise RunTransactionError("run_id is not a safe workspace path component")
+    device_base = run_id.split(".", 1)[0].upper()
+    if device_base in _WINDOWS_RESERVED_DEVICE_NAMES:
+        raise RunTransactionError("run_id is not a safe workspace path component")
+    return run_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,11 +60,9 @@ class RunTransaction:
     ROOT_NAME = ".run-transactions"
 
     def __init__(self, workspace: str | Path, run_id: str) -> None:
-        if not run_id or run_id in {".", ".."} or "/" in run_id or "\\" in run_id:
-            raise RunTransactionError("run_id is not a safe workspace path component")
         self.workspace = Path(workspace)
-        self.run_id = run_id
-        self.root = self.workspace / self.ROOT_NAME / run_id
+        self.run_id = _require_portable_run_id(run_id)
+        self.root = self.workspace / self.ROOT_NAME / self.run_id
         self.manifest_path = self.root / "manifest.json"
         self.run_ledger_path = self.root / "run-decisions.jsonl"
         self.staged_book_path = self.root / "paper_book.next.json"

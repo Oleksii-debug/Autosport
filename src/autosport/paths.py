@@ -7,7 +7,13 @@ from pathlib import Path
 def default_workspace() -> Path:
     override = os.environ.get("AUTOSPORT_WORKSPACE")
     if override is not None and override.strip():
-        override_path = Path(override).expanduser()
+        try:
+            override_path = Path(override).expanduser()
+        except RuntimeError as exc:
+            raise ValueError(
+                "AUTOSPORT_WORKSPACE home expansion could not be resolved; "
+                "configure an absolute workspace path"
+            ) from exc
         if not override_path.is_absolute():
             raise ValueError(
                 "AUTOSPORT_WORKSPACE must be an absolute path so durable workspace identity "
@@ -23,7 +29,12 @@ def default_workspace() -> Path:
                 "does not depend on the process working directory"
             )
         return local_app_data_path / "Autosport" / "workspace"
-    home = Path.home()
+    try:
+        home = Path.home()
+    except RuntimeError as exc:
+        raise ValueError(
+            "home directory could not be resolved; configure an absolute AUTOSPORT_WORKSPACE"
+        ) from exc
     if not home.is_absolute():
         raise ValueError(
             "home directory must be an absolute path so durable workspace identity "

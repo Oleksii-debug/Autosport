@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import json
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from autosport.gui import AutosportApp
+from autosport.live_observation import observe_workspace_once
+from autosport.providers import ProviderBatch, ProviderQuote
+from autosport.session import AutosportSession
 from autosport.windows_gui import WindowsAutosportApp
 
 
@@ -99,8 +106,62 @@ class _NeverStartWorker:
         return True
 
 
+class _OneQuoteProvider:
+    source_id = "startup-live-isolation"
+
+    def __init__(self, *, sequence: int, odds: str) -> None:
+        self.sequence = sequence
+        self.odds = Decimal(odds)
+
+    def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+        assert max_items > 0
+        quote = ProviderQuote(
+            provider_event_id="event-1",
+            provider_market_id="match-odds",
+            provider_selection_id="player-a",
+            decimal_odds=self.odds,
+            observed_ts="2026-09-14T12:00:00+00:00",
+            sequence=self.sequence,
+        )
+        return ProviderBatch(self.source_id, (quote,))
+
+
 def _string_var(*_args, value: str = "", **_kwargs) -> _Value:
     return _Value(value)
+
+
+def test_real_paperbook_corruption_does_not_block_real_live_market_observation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+
+    # Establish real, valid shared Market Store and source-health state first.
+    initial = observe_workspace_once(
+        workspace,
+        _OneQuoteProvider(sequence=1, odds="2.00"),
+        max_items=10,
+    )
+    assert len(initial.current_quotes) == 1
+
+    corrupt_paper = b"{ definitely-not-valid-json"
+    paper_path = workspace / "paper_book.json"
+    paper_path.write_bytes(corrupt_paper)
+
+    # The real economic session now fails specifically while loading PaperBook,
+    # after the same market/source-health prerequisites have opened successfully.
+    with pytest.raises(json.JSONDecodeError):
+        AutosportSession(workspace, "10000")
+
+    # Live observation uses only market.db + source_health.json. It must continue
+    # to mutate/read those real shared components without reading or repairing the
+    # corrupt economic artifact.
+    observed = observe_workspace_once(
+        workspace,
+        _OneQuoteProvider(sequence=2, odds="2.20"),
+        max_items=10,
+    )
+
+    assert len(observed.current_quotes) == 1
+    assert observed.current_quotes[0].decimal_odds == Decimal("2.20")
+    assert paper_path.read_bytes() == corrupt_paper
 
 
 def test_corrupt_economic_startup_keeps_shell_and_live_observation_reachable(tmp_path: Path) -> None:

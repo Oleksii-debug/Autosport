@@ -119,11 +119,7 @@ class BeamParlayCandidateSearch:
         self._validate_input_legs(legs)
         ordered = sorted(
             legs,
-            key=lambda leg: (
-                -leg.paper_value_per_unit,
-                -leg.probability,
-                leg.quote_key,
-            ),
+            key=lambda leg: self._rank_key((leg,)),
         )
         beam: list[tuple[CandidateLeg, ...]] = [tuple()]
         results: list[ParlayCandidate] = []

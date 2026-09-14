@@ -30,8 +30,10 @@ def ensure_durable_file(path: str | Path) -> None:
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    mode = "ab" if destination.exists() else "wb"
-    with destination.open(mode) as handle:
+    # "ab" is intentionally used for both existing and absent destinations:
+    # it creates atomically when absent while never truncating bytes published by
+    # a concurrent creator between path checks/open. No data is appended here.
+    with destination.open("ab") as handle:
         handle.flush()
         os.fsync(handle.fileno())
 

@@ -4,6 +4,7 @@ import time
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.live_observation import OneShotObservationWorker, observe_workspace_once
 from autosport.providers import InMemoryProvider, ProviderQuote
@@ -117,6 +118,36 @@ class LiveObservationTests(unittest.TestCase):
         release.set()
         message = self._wait_for_message(worker)
         self.assertIs(message.result, expected)
+        self.assertFalse(worker.busy)
+
+    def test_worker_thread_start_failure_rolls_back_busy_and_allows_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = self._observe(tmp)
+
+        worker = OneShotObservationWorker()
+        task_ran = threading.Event()
+
+        def task():
+            task_ran.set()
+            return expected
+
+        with patch.object(
+            threading.Thread,
+            "start",
+            side_effect=RuntimeError("can't start new thread"),
+        ):
+            self.assertFalse(worker.start(task))
+
+        self.assertFalse(task_ran.is_set())
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+
+        self.assertTrue(worker.start(task))
+        message = self._wait_for_message(worker)
+        self.assertTrue(task_ran.is_set())
+        self.assertIs(message.result, expected)
+        self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
     def test_worker_converts_exception_to_terminal_error_message(self):

@@ -7,6 +7,7 @@ from decimal import Decimal, DecimalException
 from pathlib import Path
 
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
+from .forecasting import parse_iso_timestamp
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -45,8 +46,9 @@ class PaperBook:
             raise ValueError("stake must be positive")
         if amount > self.balance:
             raise ValueError("insufficient virtual bankroll")
-        ticket_placed_at = placed_at if placed_at is not None else utc_now_iso()
-        self._require_canonical_text(ticket_placed_at, "placed_at")
+        ticket_placed_at = self._validate_placed_at(
+            placed_at if placed_at is not None else utc_now_iso()
+        )
         if not isinstance(reason, str):
             raise ValueError("PaperBook strategy_reason must be a string")
         ticket_legs = tuple(legs)
@@ -144,6 +146,18 @@ class PaperBook:
             raise ValueError(f"PaperBook {label} must not contain quote-key delimiter '|'")
         return value
 
+    @staticmethod
+    def _validate_placed_at(value: object, *, snapshot: bool = False) -> str:
+        label = "PaperBook snapshot placed_at" if snapshot else "placed_at"
+        message = f"{label} must be a non-empty trimmed timezone-aware ISO timestamp"
+        if not isinstance(value, str) or not value or value.strip() != value:
+            raise ValueError(message)
+        try:
+            parse_iso_timestamp(value)
+        except ValueError as exc:
+            raise ValueError(message) from exc
+        return value
+
     @classmethod
     def _validate_ticket_leg(cls, leg: object, *, ticket_id: str | None = None) -> TicketLeg:
         if type(leg) is not TicketLeg:
@@ -188,7 +202,7 @@ class PaperBook:
             cls._require_canonical_text(ticket.ticket_id, "ticket_id")
             if ticket_key != ticket.ticket_id:
                 raise ValueError("PaperBook ticket mapping key must match ticket_id")
-            cls._require_canonical_text(ticket.placed_at, f"placed_at for ticket {ticket.ticket_id}")
+            cls._validate_placed_at(ticket.placed_at, snapshot=True)
             if not isinstance(ticket.strategy_reason, str):
                 raise ValueError("PaperBook snapshot strategy_reason must be a string")
             if type(ticket.status) is not TicketStatus:

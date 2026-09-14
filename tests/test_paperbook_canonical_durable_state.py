@@ -25,7 +25,14 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
         )
         return book, ticket
 
-    def _write_snapshot(self, *, event_id: str, market_id: str, selection_id: str) -> None:
+    def _write_snapshot(
+        self,
+        *,
+        event_id: str,
+        market_id: str,
+        selection_id: str,
+        placed_at: object = "2026-09-14T00:00:00+00:00",
+    ) -> None:
         payload = {
             "initial_bankroll": "100",
             "balance": "90",
@@ -33,7 +40,7 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
                 {
                     "ticket_id": "ticket-1",
                     "stake": "10",
-                    "placed_at": "2026-09-14T00:00:00+00:00",
+                    "placed_at": placed_at,
                     "status": "open",
                     "payout": "0",
                     "strategy_reason": "test",
@@ -82,6 +89,8 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
         cases = (
             {"placed_at": " "},
             {"placed_at": " 2026-09-14T00:00:00+00:00"},
+            {"placed_at": "2026-09-14T00:00:00"},
+            {"placed_at": 0},
             {"reason": None},
             {"reason": object()},
         )
@@ -92,6 +101,49 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
                     book.open_ticket([leg], "10", **kwargs)
                 self.assertEqual(book.balance, Decimal("100"))
                 self.assertEqual(book.tickets, {})
+
+    def test_open_ticket_preserves_explicit_timezone_aware_timestamp(self) -> None:
+        book = PaperBook("100")
+        placed_at = "2026-09-14T09:00:00Z"
+
+        ticket = book.open_ticket(
+            [TicketLeg("event-1", "winner", "alice", Decimal("2"))],
+            "10",
+            placed_at=placed_at,
+        )
+
+        self.assertEqual(ticket.placed_at, placed_at)
+        self.assertEqual(book.balance, Decimal("90"))
+
+    def test_load_rejects_invalid_persisted_timestamp(self) -> None:
+        for placed_at in ("", "2026-09-14T09:00:00", 0):
+            with self.subTest(placed_at=placed_at):
+                self._write_snapshot(
+                    event_id="event-1",
+                    market_id="winner",
+                    selection_id="alice",
+                    placed_at=placed_at,
+                )
+
+                with self.assertRaisesRegex(ValueError, "snapshot placed_at"):
+                    PaperBook.load(self.path)
+
+    def test_save_rejects_mutated_invalid_timestamp_without_replacing_snapshot(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            [TicketLeg("event-1", "winner", "alice", Decimal("2"))],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        book.save(self.path)
+        last_good = self.path.read_bytes()
+        ticket.placed_at = ""
+
+        with self.assertRaisesRegex(ValueError, "snapshot placed_at"):
+            book.save(self.path)
+
+        self.assertEqual(self.path.read_bytes(), last_good)
+        self.assertFalse(self.path.with_suffix(self.path.suffix + ".tmp").exists())
 
     def test_load_rejects_noncanonical_or_noninjective_leg_identity(self) -> None:
         cases = (

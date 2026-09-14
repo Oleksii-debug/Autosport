@@ -383,7 +383,7 @@ class RunTransaction:
         expected_hash: str,
         label: str,
     ) -> VerifiedDecisionLedgerSnapshot:
-        snapshot = cls._verified_decision_ledger(path, label)
+        snapshot = cls._verified_decision_ledger(path, f"canonical {label}")
         if snapshot.sha256 != expected_hash:
             raise RunTransactionError(
                 f"{label} SHA-256 canonical hash is not the expected transaction state"

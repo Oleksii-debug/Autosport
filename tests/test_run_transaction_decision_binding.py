@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -59,6 +60,20 @@ class RunTransactionDecisionBindingTests(unittest.TestCase):
             )
         )
 
+    @staticmethod
+    def _summary_payload(run_id: str = "current-run", **overrides: object) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "schema_version": 2,
+            "run_id": run_id,
+            "experiment_key": "experiment",
+            "market_sha256": "a" * 64,
+            "sealed_results_sha256": "b" * 64,
+            "strategy_id": "baseline-v1",
+            "real_money_execution": False,
+        }
+        payload.update(overrides)
+        return payload
+
     def test_stage_outputs_rejects_foreign_run_decision_before_combining_ledgers(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -93,6 +108,70 @@ class RunTransactionDecisionBindingTests(unittest.TestCase):
             self.assertEqual(staged_snapshot.record_count, 2)
             self.assertEqual(staged_snapshot.sha256, staged_ledger_hash)
             self.assertEqual(JsonlDecisionLedger(ledger_path).verify_integrity(), 1)
+
+            summary = tx.precommit(self._summary_payload())
+            self.assertEqual(summary["run_id"], "current-run")
+            self.assertEqual(summary["transaction_run_id"], "current-run")
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["phase"], "precommitted")
+
+    def test_precommit_rejects_summary_identity_mismatch_before_durable_precommit(self):
+        cases = {
+            "run_id": {"run_id": "foreign-run"},
+            "experiment_key": {"experiment_key": "foreign-experiment"},
+            "market_sha256": {"market_sha256": "c" * 64},
+            "sealed_results_sha256": {"sealed_results_sha256": "d" * 64},
+            "strategy_id": {"strategy_id": "observe-only-v1"},
+            "real_money_execution": {"real_money_execution": True},
+        }
+        for field_name, overrides in cases.items():
+            with self.subTest(field_name=field_name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                tx, book_path, ledger_path = self._start_transaction(root, "current-run")
+                tx.stage_outputs(PaperBook.load(book_path), ledger_path)
+
+                with self.assertRaisesRegex(
+                    RunTransactionError,
+                    rf"staged run summary transaction identity mismatch: .*{field_name}",
+                ):
+                    tx.precommit(self._summary_payload(**overrides))
+
+                manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+                self.assertEqual(manifest["phase"], "staging")
+                self.assertFalse(tx.staged_summary_path.exists())
+                self.assertFalse((root / "run-current-run.json").exists())
+
+    def test_commit_rejects_rehashed_summary_with_foreign_manifest_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx, book_path, ledger_path = self._start_transaction(root, "current-run")
+            base_book_hash = sha256_file(book_path)
+            base_ledger_hash = sha256_file(ledger_path)
+            tx.stage_outputs(PaperBook.load(book_path), ledger_path)
+            tx.precommit(self._summary_payload())
+
+            summary = json.loads(tx.staged_summary_path.read_text(encoding="utf-8"))
+            summary["strategy_id"] = "observe-only-v1"
+            tx.staged_summary_path.write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            manifest["new"]["summary_sha256"] = sha256_file(tx.staged_summary_path)
+            tx.manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "staged run summary transaction identity mismatch: strategy_id",
+            ):
+                tx.commit()
+
+            self.assertEqual(sha256_file(book_path), base_book_hash)
+            self.assertEqual(sha256_file(ledger_path), base_ledger_hash)
+            self.assertFalse((root / "run-current-run.json").exists())
 
 
 if __name__ == "__main__":

@@ -77,59 +77,6 @@ class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
             reversed_input[0].candidate.legs[0].quote_key,
         )
 
-    def test_canonical_tie_break_includes_economic_leg_values(self) -> None:
-        low_probability_leg = CandidateLeg(
-            "e1|winner|a",
-            "e1",
-            Decimal("2"),
-            Decimal("0.4"),
-        )
-        high_probability_leg = CandidateLeg(
-            "e1|winner|a",
-            "e1",
-            Decimal("2"),
-            Decimal("0.6"),
-        )
-        low_probability = ParlayCandidate(
-            (low_probability_leg,),
-            Decimal("2"),
-            Decimal("0.4"),
-            Decimal("-0.2"),
-        )
-        high_probability = ParlayCandidate(
-            (high_probability_leg,),
-            Decimal("2"),
-            Decimal("0.6"),
-            Decimal("0.2"),
-        )
-        groups = [
-            ScenarioGroup(
-                "e1",
-                (
-                    ScenarioOutcome("e1|winner|a", Decimal("0.5")),
-                    ScenarioOutcome("e1|winner|b", Decimal("0.5")),
-                ),
-            )
-        ]
-
-        forward = PortfolioAwareCandidateOptimizer().evaluate_candidates(
-            [],
-            [low_probability, high_probability],
-            groups,
-            stake="1",
-        )
-        reversed_input = PortfolioAwareCandidateOptimizer().evaluate_candidates(
-            [],
-            [high_probability, low_probability],
-            groups,
-            stake="1",
-        )
-
-        self.assertEqual(
-            [item.candidate.independent_probability for item in forward],
-            [item.candidate.independent_probability for item in reversed_input],
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

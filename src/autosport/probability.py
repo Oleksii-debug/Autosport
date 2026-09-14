@@ -45,6 +45,9 @@ def normalize_two_or_more_way_market(quotes: Iterable[MarketEvent]) -> dict[str,
     event_market = {(quote.event_id, quote.market_id) for quote in values}
     if len(event_market) != 1:
         raise ValueError("all quotes must belong to one event/market")
+    quote_keys = [quote.quote_key for quote in values]
+    if len(set(quote_keys)) != len(quote_keys):
+        raise ValueError("normalization requires distinct selections")
     raw = {quote.quote_key: implied_probability(quote.decimal_odds) for quote in values}
     total = sum(raw.values(), Decimal("0"))
     if total <= 0:

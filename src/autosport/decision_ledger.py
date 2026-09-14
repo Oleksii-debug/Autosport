@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -57,6 +58,34 @@ class JsonlDecisionLedger:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
+    @classmethod
+    def _validate_json_value(cls, value: object, *, path: str) -> None:
+        """Reject values whose JSON encoding changes identity or is non-standard."""
+
+        if value is None or isinstance(value, (str, bool, int)):
+            return
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise DecisionLedgerIntegrityError(
+                    f"Decision Ledger JSON value at {path} is non-finite"
+                )
+            return
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                cls._validate_json_value(item, path=f"{path}[{index}]")
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise DecisionLedgerIntegrityError(
+                        f"Decision Ledger JSON object keys at {path} must be strings"
+                    )
+                cls._validate_json_value(item, path=f"{path}.{key}")
+            return
+        raise DecisionLedgerIntegrityError(
+            f"Decision Ledger JSON value at {path} has unsupported type {type(value).__name__}"
+        )
+
     @staticmethod
     def _canonical_record(record: dict[str, Any]) -> str:
         try:
@@ -90,10 +119,12 @@ class JsonlDecisionLedger:
                 raise DecisionLedgerIntegrityError(
                     f"Decision Ledger record field {field_name!r} is invalid{location}"
                 )
-        if not isinstance(record.get("payload"), dict):
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger record field 'payload' is invalid{location}"
             )
+        cls._validate_json_value(payload, path="payload")
         return record
 
     @staticmethod

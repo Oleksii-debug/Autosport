@@ -135,6 +135,7 @@ class WorkspaceEconomicLockTests(unittest.TestCase):
             self.assertEqual(lock_path.read_bytes(), b"external-state")
             self.assertIsNone(lock._handle)
 
+    @unittest.skipIf(os.name == "nt", "Windows normally forbids replacing an open lock pathname")
     def test_path_swap_after_open_is_rejected_before_acquisition_succeeds(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -160,6 +161,7 @@ class WorkspaceEconomicLockTests(unittest.TestCase):
             self.assertEqual(lock_path.read_bytes(), b"replacement")
             self.assertIsNone(lock._handle)
 
+    @unittest.skipIf(os.name == "nt", "Windows normally forbids replacing an open lock pathname")
     def test_path_swap_after_os_lock_is_rejected_before_acquisition_succeeds(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

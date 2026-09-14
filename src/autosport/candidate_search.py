@@ -239,8 +239,8 @@ class BeamParlayCandidateSearch:
     ) -> tuple[Decimal, Decimal, int, tuple[str, ...]]:
         candidate = self._to_candidate(legs)
         return (
-            -candidate.expected_profit_per_unit,
-            -candidate.independent_probability,
+            candidate.expected_profit_per_unit.copy_negate(),
+            candidate.independent_probability.copy_negate(),
             len(legs),
             tuple(leg.quote_key for leg in legs),
         )
@@ -250,8 +250,8 @@ class BeamParlayCandidateSearch:
         candidate: ParlayCandidate,
     ) -> tuple[Decimal, Decimal, int, tuple[str, ...]]:
         return (
-            -candidate.expected_profit_per_unit,
-            -candidate.independent_probability,
+            candidate.expected_profit_per_unit.copy_negate(),
+            candidate.independent_probability.copy_negate(),
             len(candidate.legs),
             tuple(leg.quote_key for leg in candidate.legs),
         )

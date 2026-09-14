@@ -62,6 +62,15 @@ def test_export_is_deterministic_metadata_only_and_secret_safe(tmp_path: Path) -
     assert json.loads(first_output.read_text(encoding="utf-8")) == first
     assert json.loads(second_output.read_text(encoding="utf-8")) == second
     assert first["manifest_sha256"] == _manifest_hash(first)
+    assert first["expected_fixed_evidence_paths"] == [
+        "decisions.jsonl",
+        "paper_book.json",
+        "run_registry.json",
+        "source_health.json",
+    ]
+    assert first["missing_fixed_evidence_paths"] == []
+    assert first["fixed_evidence_set_complete"] is True
+    assert first["run_summary_count"] == 1
     assert first["file_contents_included"] is False
     assert first["market_database_included"] is False
     assert first["raw_historical_or_provider_bytes_included"] is False
@@ -80,6 +89,22 @@ def test_export_is_deterministic_metadata_only_and_secret_safe(tmp_path: Path) -
     exported_text = first_output.read_text(encoding="utf-8")
     for forbidden in ("market.db", ".env", "token.json", "API_KEY", "do-not-export", "secret"):
         assert forbidden not in exported_text
+
+
+def test_partial_fixed_evidence_is_truthfully_labeled(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "paper_book.json").write_text('{"balance":"100"}\n', encoding="utf-8")
+
+    report = export_evidence_manifest(workspace, tmp_path / "manifest.json")
+
+    assert report["fixed_evidence_set_complete"] is False
+    assert report["missing_fixed_evidence_paths"] == [
+        "decisions.jsonl",
+        "run_registry.json",
+        "source_health.json",
+    ]
+    assert report["run_summary_count"] == 0
 
 
 def test_export_rejects_empty_workspace_without_creating_lock_metadata(tmp_path: Path) -> None:
@@ -134,6 +159,43 @@ def test_export_rejects_canonical_symlink_instead_of_hashing_external_secret(tmp
     with pytest.raises(ValueError, match="not a regular file"):
         export_evidence_manifest(workspace, output)
 
+    assert not output.exists()
+
+
+def test_export_rejects_in_place_mutation_during_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    paper = workspace / "paper_book.json"
+    paper.write_bytes(b"A" * 128)
+    output = tmp_path / "manifest.json"
+    real_sha256 = hashlib.sha256
+    mutated = False
+
+    class MutatingDigest:
+        def __init__(self) -> None:
+            self.inner = real_sha256()
+
+        def update(self, chunk: bytes) -> None:
+            nonlocal mutated
+            if not mutated:
+                mutated = True
+                # Truncate/rewrite the same pathname in place: inode identity can
+                # remain unchanged, so size/mtime/ctime stability must reject it.
+                paper.write_bytes(b"B" * 257)
+            self.inner.update(chunk)
+
+        def hexdigest(self) -> str:
+            return self.inner.hexdigest()
+
+    monkeypatch.setattr(evidence_export.hashlib, "sha256", MutatingDigest)
+
+    with pytest.raises(ValueError, match="mutated during snapshot"):
+        export_evidence_manifest(workspace, output)
+
+    assert mutated is True
     assert not output.exists()
 
 
@@ -195,6 +257,7 @@ def test_cli_reports_fail_closed_and_success_without_traceback(tmp_path: Path, c
     assert main([str(workspace), "--output", str(output)]) == 0
     success_text = capsys.readouterr().out
     assert "evidence_export=PASS" in success_text
+    assert "fixed_evidence_set_complete=false" in success_text
     assert "file_contents_included=false" in success_text
     assert "environment_or_credential_values_included=false" in success_text
     assert "real_money_execution=false" in success_text

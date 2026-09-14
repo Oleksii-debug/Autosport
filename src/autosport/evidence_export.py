@@ -46,8 +46,18 @@ def _canonical_source_names(workspace: Path) -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
+def _stable_stat_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        os.path.samestat(left, right)
+        and left.st_mode == right.st_mode
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+    )
+
+
 def _open_and_hash_regular_file(path: Path) -> tuple[int, str]:
-    """Hash one stable regular-file identity without following canonical-path symlinks."""
+    """Hash one stable regular-file snapshot without following path symlinks."""
 
     before = os.stat(path, follow_symlinks=False)
     if not stat.S_ISREG(before.st_mode):
@@ -58,7 +68,7 @@ def _open_and_hash_regular_file(path: Path) -> tuple[int, str]:
     try:
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             opened = os.fstat(handle.fileno())
-            if not os.path.samestat(before, opened):
+            if not _stable_stat_identity(before, opened):
                 raise ValueError(f"canonical evidence path changed before snapshot: {path.name}")
 
             digest = hashlib.sha256()
@@ -70,8 +80,11 @@ def _open_and_hash_regular_file(path: Path) -> tuple[int, str]:
                 size += len(chunk)
                 digest.update(chunk)
 
-            after = os.stat(path, follow_symlinks=False)
-            if not os.path.samestat(opened, after):
+            opened_after = os.fstat(handle.fileno())
+            if not _stable_stat_identity(opened, opened_after):
+                raise ValueError(f"canonical evidence file mutated during snapshot: {path.name}")
+            path_after = os.stat(path, follow_symlinks=False)
+            if not _stable_stat_identity(opened_after, path_after):
                 raise ValueError(f"canonical evidence path changed during snapshot: {path.name}")
             return size, digest.hexdigest()
     finally:
@@ -144,11 +157,17 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
                 }
             )
 
+        missing_fixed = [name for name in _FIXED_EVIDENCE_NAMES if name not in names]
+        run_summary_count = sum(_is_canonical_run_summary_name(name) for name in names)
         payload: dict[str, Any] = {
             "schema_version": _SCHEMA_VERSION,
             "kind": _KIND,
             "file_count": len(files),
             "files": files,
+            "expected_fixed_evidence_paths": list(_FIXED_EVIDENCE_NAMES),
+            "missing_fixed_evidence_paths": missing_fixed,
+            "fixed_evidence_set_complete": not missing_fixed,
+            "run_summary_count": run_summary_count,
             "file_contents_included": False,
             "market_database_included": False,
             "raw_historical_or_provider_bytes_included": False,
@@ -182,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         f"evidence_export=PASS files={report['file_count']} "
+        f"run_summaries={report['run_summary_count']} "
+        f"fixed_evidence_set_complete={str(report['fixed_evidence_set_complete']).lower()} "
         f"manifest_sha256={report['manifest_sha256']}"
     )
     print(

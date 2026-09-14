@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -21,7 +22,9 @@ def _workspace_with_evidence(tmp_path: Path) -> Path:
     [
         (Path("market.db"), b"sqlite-product-state"),
         (Path(".economic-run.lock"), b"existing-lock-metadata"),
+        (Path("source_health.json.lock"), b"source-health-lock-metadata"),
         (Path("token.json"), b'{"token":"must-survive"}\n'),
+        (Path("arbitrary-product-state.bin"), b"arbitrary-product-state"),
         (Path(".run-transactions") / "run-1" / "manifest.json", b"transaction-evidence"),
     ],
 )
@@ -66,6 +69,26 @@ def test_export_rejects_external_path_that_resolves_back_into_workspace(tmp_path
         export_evidence_manifest(workspace, destination)
 
     assert not (workspace / "market.db").exists()
+
+
+def test_export_uses_resolved_external_target_without_replacing_workspace_symlink(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace_with_evidence(tmp_path)
+    external_target = tmp_path / "external-manifest.json"
+    external_target.write_text("old-external-bytes\n", encoding="utf-8")
+    link = workspace / "export-link.json"
+    try:
+        os.symlink(external_target, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("file symlinks unavailable in this environment")
+
+    report = export_evidence_manifest(workspace, link)
+
+    assert link.is_symlink()
+    assert link.resolve() == external_target.resolve()
+    assert json.loads(external_target.read_text(encoding="utf-8")) == report
+    assert not (workspace / "export-link.json").is_file() or link.is_symlink()
 
 
 def test_export_rechecks_destination_after_snapshot_before_publication(

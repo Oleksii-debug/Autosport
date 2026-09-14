@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from autosport.run_transaction import RunTransaction
+from autosport.strategies import strategy_spec
 from autosport.strategy_comparison import load_strategy_run_summary
 
 
@@ -33,7 +34,7 @@ class StrategyComparisonOpenExposureTests(unittest.TestCase):
                     "strategy_id": "baseline-v1",
                     "canonical_strategy_id": "baseline-v1",
                     "label": "baseline-v1",
-                    "agent_names": ["TestAgent"],
+                    "agent_names": list(strategy_spec("baseline-v1").agent_names),
                     "opens_paper_tickets": True,
                     "research_plan_sha256": None,
                 },
@@ -84,7 +85,7 @@ class StrategyComparisonOpenExposureTests(unittest.TestCase):
                     "strategy_id": "baseline-v1",
                     "canonical_strategy_id": "baseline-v1",
                     "label": "baseline-v1",
-                    "agent_names": ["TestAgent"],
+                    "agent_names": list(strategy_spec("baseline-v1").agent_names),
                     "opens_paper_tickets": True,
                     "research_plan_sha256": None,
                 },

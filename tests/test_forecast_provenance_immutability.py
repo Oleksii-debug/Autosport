@@ -21,6 +21,12 @@ class ForecastProvenanceImmutabilityTests(unittest.TestCase):
             forecast_id="forecast-immutability",
         )
 
+    def test_constructor_rejects_nested_future_result_fields(self):
+        for key in ("result", "winner", "outcome"):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, "future-result fields"):
+                    self._record({"nested": [{key: "selection-b"}]})
+
     def test_input_alias_cannot_inject_future_result_or_change_hash(self):
         original = {"nested": [{"feature": "serve-form"}]}
         record = self._record(original)
@@ -33,15 +39,22 @@ class ForecastProvenanceImmutabilityTests(unittest.TestCase):
         self.assertNotIn("result", record.provenance["nested"][0])
         self.assertEqual(record.canonical_hash, canonical_hash)
 
-    def test_validated_provenance_and_nested_containers_are_immutable(self):
+    def test_validated_provenance_is_structurally_immutable_even_via_builtin_base_methods(self):
         record = self._record({"nested": [{"feature": "serve-form"}]})
         canonical_hash = record.canonical_hash
 
-        with self.assertRaisesRegex(TypeError, "ForecastRecord provenance is immutable"):
-            record.provenance["winner"] = "selection-b"
-        with self.assertRaisesRegex(TypeError, "ForecastRecord provenance is immutable"):
-            record.provenance["nested"][0]["result"] = "selection-b"
+        self.assertNotIsInstance(record.provenance, dict)
+        self.assertNotIsInstance(record.provenance["nested"][0], dict)
+        self.assertIsInstance(record.provenance["nested"], tuple)
+        with self.assertRaises(TypeError):
+            dict.__setitem__(record.provenance, "winner", "selection-b")
+        with self.assertRaises(TypeError):
+            dict.__setitem__(record.provenance["nested"][0], "result", "selection-b")
+        with self.assertRaises(TypeError):
+            list.append(record.provenance["nested"], {"result": "selection-b"})
 
+        self.assertNotIn("winner", record.provenance)
+        self.assertNotIn("result", record.provenance["nested"][0])
         self.assertEqual(record.canonical_hash, canonical_hash)
 
     def test_to_dict_returns_detached_json_container_and_ledger_stays_causal(self):

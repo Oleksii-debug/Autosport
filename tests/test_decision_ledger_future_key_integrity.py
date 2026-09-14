@@ -31,7 +31,7 @@ class DecisionLedgerFutureKeyIntegrityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "future-result fields"):
                     self._record({"nested": [{key: "selection-a"}]})
 
-    def test_payload_is_snapshotted_and_normal_mutation_is_blocked(self):
+    def test_payload_is_snapshotted_and_structurally_immutable(self):
         original = {"nested": [{"feature": "serve-form"}]}
         record = self._record(original)
 
@@ -40,16 +40,22 @@ class DecisionLedgerFutureKeyIntegrityTests(unittest.TestCase):
 
         self.assertNotIn("winner", record.payload)
         self.assertNotIn("result", record.payload["nested"][0])
-        with self.assertRaisesRegex(TypeError, "DecisionRecord payload is immutable"):
-            record.payload["winner"] = "selection-b"
-        with self.assertRaisesRegex(TypeError, "DecisionRecord payload is immutable"):
-            record.payload["nested"].append({"result": "selection-b"})
-        with self.assertRaisesRegex(TypeError, "DecisionRecord payload is immutable"):
-            record.payload["nested"][0]["result"] = "selection-b"
+        self.assertNotIsInstance(record.payload, dict)
+        self.assertNotIsInstance(record.payload["nested"][0], dict)
+        self.assertIsInstance(record.payload["nested"], tuple)
+        with self.assertRaises(TypeError):
+            dict.__setitem__(record.payload, "winner", "selection-b")
+        with self.assertRaises(TypeError):
+            dict.__setitem__(record.payload["nested"][0], "result", "selection-b")
+        with self.assertRaises(TypeError):
+            list.append(record.payload["nested"], {"result": "selection-b"})
+        self.assertNotIn("winner", record.payload)
+        self.assertNotIn("result", record.payload["nested"][0])
 
     def test_to_dict_is_detached_and_append_persists_frozen_snapshot(self):
         record = self._record({"nested": [{"feature": "serve-form"}]})
         exported = record.to_dict()
+        self.assertIsInstance(exported["payload"]["nested"], list)
         exported["payload"]["winner"] = "selection-b"
         exported["payload"]["nested"][0]["result"] = "selection-b"
 
@@ -66,6 +72,16 @@ class DecisionLedgerFutureKeyIntegrityTests(unittest.TestCase):
             self.assertEqual(envelope["sha256"], digest)
             self.assertNotIn("winner", envelope["record"]["payload"])
             self.assertNotIn("result", envelope["record"]["payload"]["nested"][0])
+
+    def test_caller_tuple_remains_unsupported_for_json_ledger(self):
+        record = self._record({"tuple_value": ("not-json-list",)})
+        self.assertIsInstance(record.payload["tuple_value"], tuple)
+        self.assertNotIsInstance(record.payload["tuple_value"], list)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            with self.assertRaisesRegex(DecisionLedgerIntegrityError, "unsupported type tuple"):
+                JsonlDecisionLedger(path).append(record)
 
     def test_verifier_rejects_self_consistently_hashed_future_result_payload(self):
         forged_record = {

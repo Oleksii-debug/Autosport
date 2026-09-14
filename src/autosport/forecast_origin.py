@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .dataset import ReplayDataset
+from .decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
 from .forecasting import ForecastRecord, parse_iso_timestamp
 
 
@@ -69,7 +70,9 @@ def verify_forecast_origin_binding(
     if len(run_ids) != len(set(run_ids)):
         raise ValueError("forecast origin evidence contains duplicate run_id")
     expected_prefix_hashes = {item["decision_ledger_sha256"] for item in summaries}
-    prefixes = _validated_ledger_prefixes(binding.decision_ledger_path, expected_prefix_hashes)
+    prefixes, ledger_sha256 = _validated_ledger_prefixes(
+        binding.decision_ledger_path, expected_prefix_hashes
+    )
     missing_prefixes = sorted(expected_prefix_hashes.difference(prefixes))
     if missing_prefixes:
         raise ValueError("canonical decision ledger does not contain a run-summary committed prefix")
@@ -136,7 +139,7 @@ def verify_forecast_origin_binding(
 
     return {
         "status": "CANONICAL_BINDING_VERIFIED",
-        "decision_ledger_sha256": hashlib.sha256(binding.decision_ledger_path.read_bytes()).hexdigest(),
+        "decision_ledger_sha256": ledger_sha256,
         "run_ids": sorted({run_id for matched_runs in matched.values() for run_id in matched_runs}),
         "run_summary_count": len(summaries),
         "evaluated_forecast_count": len(evaluated_forecast_ids),
@@ -197,28 +200,33 @@ def _load_summary(path: Path, dataset: ReplayDataset) -> dict[str, Any]:
     }
 
 
-def _validated_ledger_prefixes(path: Path, expected_hashes: set[str]) -> dict[str, list[dict[str, Any]]]:
+def _validated_ledger_prefixes(
+    path: Path, expected_hashes: set[str]
+) -> tuple[dict[str, list[dict[str, Any]]], str]:
+    try:
+        snapshot = JsonlDecisionLedger(path).verified_snapshot()
+    except DecisionLedgerIntegrityError as exc:
+        raise ValueError(
+            "canonical decision ledger failed semantic integrity validation"
+        ) from exc
+
     hasher = hashlib.sha256()
     records: list[dict[str, Any]] = []
     found: dict[str, list[dict[str, Any]]] = {}
-    try:
-        with path.open("rb") as handle:
-            for raw_line in handle:
-                hasher.update(raw_line)
-                if not raw_line.endswith(b"\n"):
-                    raise ValueError("canonical decision ledger contains a non-terminated line")
-                try:
-                    envelope = json.loads(raw_line.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise ValueError("canonical decision ledger contains invalid UTF-8 JSON") from exc
-                _validate_envelope(envelope)
-                records.append(envelope)
-                digest = hasher.hexdigest()
-                if digest in expected_hashes:
-                    found[digest] = list(records)
-    except OSError as exc:
-        raise ValueError("canonical decision ledger is unreadable") from exc
-    return found
+    for raw_line in snapshot.payload.splitlines(keepends=True):
+        hasher.update(raw_line)
+        if not raw_line.endswith(b"\n"):
+            raise ValueError("canonical decision ledger contains a non-terminated line")
+        try:
+            envelope = json.loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("canonical decision ledger contains invalid UTF-8 JSON") from exc
+        _validate_envelope(envelope)
+        records.append(envelope)
+        digest = hasher.hexdigest()
+        if digest in expected_hashes:
+            found[digest] = list(records)
+    return found, snapshot.sha256
 
 
 def _validate_envelope(envelope: Any) -> None:

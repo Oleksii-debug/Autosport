@@ -2,37 +2,29 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
-
-_FORBIDDEN_FUTURE_KEYS = {"final_result", "result", "winner", "settled_outcome", "future_quote"}
-
-
-class _FrozenPayloadDict(dict[str, Any]):
-    """Dict-compatible immutable snapshot used for validated evidence payloads."""
-
-    @staticmethod
-    def _immutable(*_args: object, **_kwargs: object) -> None:
-        raise TypeError("EvidenceItem payload is immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable
-    setdefault = _immutable
-    update = _immutable
-    __ior__ = _immutable
+from .causal_integrity import contains_forbidden_future_key
 
 
 def _freeze_payload(value: Any) -> Any:
     if isinstance(value, dict):
-        return _FrozenPayloadDict(
-            (key, _freeze_payload(child)) for key, child in value.items()
+        return MappingProxyType(
+            {key: _freeze_payload(child) for key, child in value.items()}
         )
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_payload(child) for child in value)
+    return value
+
+
+def _json_payload(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _json_payload(child) for key, child in value.items()}
+    if isinstance(value, tuple):
+        return [_json_payload(child) for child in value]
     return value
 
 
@@ -47,7 +39,7 @@ class EvidenceItem:
 
     def __post_init__(self) -> None:
         payload = _freeze_payload(self.payload)
-        if _contains_forbidden_key(payload):
+        if contains_forbidden_future_key(payload):
             raise ValueError("strategy/research evidence must not contain future-result fields")
         object.__setattr__(self, "payload", payload)
 
@@ -58,7 +50,7 @@ class EvidenceItem:
             "as_of_ts": self.as_of_ts,
             "source": self.source,
             "kind": self.kind,
-            "payload": self.payload,
+            "payload": _json_payload(self.payload),
             "source_hash": self.source_hash,
         }
         canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -70,15 +62,3 @@ class ResearchPacket:
     event_id: str
     generated_at: str
     evidence: tuple[EvidenceItem, ...] = field(default_factory=tuple)
-
-
-def _contains_forbidden_key(value: Any) -> bool:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if str(key).lower() in _FORBIDDEN_FUTURE_KEYS:
-                return True
-            if _contains_forbidden_key(child):
-                return True
-    elif isinstance(value, (list, tuple)):
-        return any(_contains_forbidden_key(child) for child in value)
-    return False

@@ -5,14 +5,17 @@ import json
 import math
 import os
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Iterable
 
+from .causal_integrity import contains_forbidden_future_key
 
-_FORBIDDEN_FUTURE_KEYS = {"final_result", "result", "winner", "settled_outcome", "future_quote"}
+
 _ALLOWED_SPLITS = {"validation", "holdout"}
 _SHA256_HEX = frozenset("0123456789abcdef")
 
@@ -27,27 +30,10 @@ def parse_iso_timestamp(value: str) -> datetime:
     return parsed
 
 
-class _FrozenProvenanceDict(dict[str, Any]):
-    """Dict-compatible immutable snapshot for validated forecast provenance."""
-
-    @staticmethod
-    def _immutable(*_args: object, **_kwargs: object) -> None:
-        raise TypeError("ForecastRecord provenance is immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable
-    setdefault = _immutable
-    update = _immutable
-    __ior__ = _immutable
-
-
 def _freeze_provenance(value: Any) -> Any:
     if isinstance(value, dict):
-        return _FrozenProvenanceDict(
-            (key, _freeze_provenance(child)) for key, child in value.items()
+        return MappingProxyType(
+            {key: _freeze_provenance(child) for key, child in value.items()}
         )
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_provenance(child) for child in value)
@@ -55,22 +41,11 @@ def _freeze_provenance(value: Any) -> Any:
 
 
 def _json_provenance(value: Any) -> Any:
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {key: _json_provenance(child) for key, child in value.items()}
     if isinstance(value, tuple):
         return [_json_provenance(child) for child in value]
     return value
-
-
-def _contains_forbidden(value: Any) -> bool:
-    if isinstance(value, dict):
-        return any(
-            str(key).lower() in _FORBIDDEN_FUTURE_KEYS or _contains_forbidden(child)
-            for key, child in value.items()
-        )
-    if isinstance(value, (list, tuple)):
-        return any(_contains_forbidden(child) for child in value)
-    return False
 
 
 def _canonical_sha256(value: object, *, field_name: str) -> str:
@@ -122,7 +97,7 @@ class ForecastRecord:
         if input_cutoff > generated:
             raise ValueError("input cutoff cannot be after forecast generation")
         provenance = _freeze_provenance(self.provenance)
-        if _contains_forbidden(provenance):
+        if contains_forbidden_future_key(provenance):
             raise ValueError("forecast provenance must not contain future-result fields")
         object.__setattr__(self, "provenance", provenance)
         if not isinstance(self.evidence_hashes, (tuple, list)):

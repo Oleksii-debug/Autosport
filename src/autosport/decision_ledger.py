@@ -5,93 +5,49 @@ import json
 import math
 import os
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
+from .causal_integrity import contains_forbidden_future_key
 from .domain import utc_now_iso
-
-
-_FORBIDDEN_FUTURE_KEYS = {"final_result", "result", "winner", "outcome", "settled_outcome", "future_quote"}
 
 
 class DecisionLedgerIntegrityError(RuntimeError):
     """Raised when persisted decision-ledger evidence is not structurally self-consistent."""
 
 
-class _FrozenDecisionPayloadDict(dict[str, Any]):
-    """Dict-compatible immutable snapshot for one causal decision payload."""
-
-    @staticmethod
-    def _immutable(*_args: object, **_kwargs: object) -> None:
-        raise TypeError("DecisionRecord payload is immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable
-    setdefault = _immutable
-    update = _immutable
-    __ior__ = _immutable
-
-
-class _FrozenDecisionPayloadList(list[Any]):
-    """List-compatible immutable snapshot for nested causal decision data."""
-
-    @staticmethod
-    def _immutable(*_args: object, **_kwargs: object) -> None:
-        raise TypeError("DecisionRecord payload is immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    append = _immutable
-    clear = _immutable
-    extend = _immutable
-    insert = _immutable
-    pop = _immutable
-    remove = _immutable
-    reverse = _immutable
-    sort = _immutable
-    __iadd__ = _immutable
-    __imul__ = _immutable
+class _FrozenDecisionPayloadList(tuple):
+    """Tuple-backed marker preserving the source distinction between JSON lists and tuples."""
 
 
 def _freeze_decision_payload(value: Any) -> Any:
     if isinstance(value, dict):
-        return _FrozenDecisionPayloadDict(
-            (key, _freeze_decision_payload(child)) for key, child in value.items()
+        return MappingProxyType(
+            {key: _freeze_decision_payload(child) for key, child in value.items()}
         )
     if isinstance(value, list):
-        return _FrozenDecisionPayloadList(_freeze_decision_payload(child) for child in value)
+        return _FrozenDecisionPayloadList(
+            _freeze_decision_payload(child) for child in value
+        )
     if isinstance(value, tuple):
         return tuple(_freeze_decision_payload(child) for child in value)
     return value
 
 
 def _detached_decision_payload(value: Any) -> Any:
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {
             key: _detached_decision_payload(child)
             for key, child in value.items()
         }
-    if isinstance(value, list):
+    if isinstance(value, _FrozenDecisionPayloadList):
         return [_detached_decision_payload(child) for child in value]
     if isinstance(value, tuple):
         return tuple(_detached_decision_payload(child) for child in value)
     return value
-
-
-def _contains_forbidden_future_key(value: Any) -> bool:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if str(key).lower() in _FORBIDDEN_FUTURE_KEYS:
-                return True
-            if _contains_forbidden_future_key(child):
-                return True
-    elif isinstance(value, (list, tuple)):
-        return any(_contains_forbidden_future_key(child) for child in value)
-    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +63,7 @@ class DecisionRecord:
 
     def __post_init__(self) -> None:
         payload = _freeze_decision_payload(self.payload)
-        if _contains_forbidden_future_key(payload):
+        if contains_forbidden_future_key(payload):
             raise ValueError("decision payload must not contain future-result fields")
         object.__setattr__(self, "payload", payload)
 
@@ -230,7 +186,7 @@ class JsonlDecisionLedger:
                 f"Decision Ledger record field 'payload' is invalid{location}"
             )
         cls._validate_json_value(payload, path="payload")
-        if _contains_forbidden_future_key(payload):
+        if contains_forbidden_future_key(payload):
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger payload contains future-result fields{location}"
             )

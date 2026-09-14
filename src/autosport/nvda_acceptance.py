@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, Callable
 
 from .data_tool_package import verify_portable_data_tool
 from .release_package import verify_windows_package
@@ -50,6 +51,35 @@ def _require_hex_digest(value: str, *, length: int, field: str) -> str:
     return value.lower()
 
 
+def _validate_decoded_json_value(value: Any, *, context: str, path: str = "$") -> None:
+    """Reject decoded JSON values that cannot be represented safely and deterministically."""
+
+    if value is None or isinstance(value, (bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{context} contains a non-finite JSON number at {path}")
+        return
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                f"{context} contains a string that is not valid UTF-8 Unicode at {path}"
+            ) from exc
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_decoded_json_value(item, context=context, path=f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _validate_decoded_json_value(key, context=context, path=f"{path}.<key>")
+            _validate_decoded_json_value(item, context=context, path=f"{path}[{key!r}]")
+        return
+    raise ValueError(f"{context} contains an unsupported decoded JSON value at {path}")
+
+
 def _strict_json_object_bytes(payload: bytes, *, context: str) -> dict[str, Any]:
     """Parse one trust-boundary JSON object without lossy/ambiguous JSON extensions."""
 
@@ -71,6 +101,9 @@ def _strict_json_object_bytes(payload: bytes, *, context: str) -> dict[str, Any]
             object_pairs_hook=_unique_object,
             parse_constant=_reject_nonstandard_constant,
         )
+        _validate_decoded_json_value(value, context=context)
+    except RecursionError as exc:
+        raise ValueError(f"{context} JSON nesting exceeds parser recursion limit") from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{context} is not valid UTF-8 JSON") from exc
     if not isinstance(value, dict):
@@ -78,29 +111,75 @@ def _strict_json_object_bytes(payload: bytes, *, context: str) -> dict[str, Any]
     return value
 
 
-def _snapshot_release_zip(release_zip: Path) -> tuple[Path, str]:
-    """Copy one already-open release file to a private snapshot while hashing those exact bytes."""
+def _snapshot_release_zip(release_zip: Path) -> tuple[BinaryIO, str]:
+    """Capture one already-open release file into a stable open handle while hashing exact bytes."""
 
     digest = hashlib.sha256()
-    fd, temporary_name = tempfile.mkstemp(prefix="autosport-nvda-candidate-", suffix=".zip")
-    snapshot = Path(temporary_name)
+    snapshot = tempfile.TemporaryFile(mode="w+b")
     try:
-        with release_zip.open("rb") as source, os.fdopen(fd, "wb") as destination:
-            fd = -1
+        with release_zip.open("rb") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(chunk)
-                destination.write(chunk)
-            destination.flush()
-            os.fsync(destination.fileno())
+                snapshot.write(chunk)
+        snapshot.flush()
+        os.fsync(snapshot.fileno())
+        snapshot.seek(0)
         return snapshot, digest.hexdigest()
+    except Exception:
+        snapshot.close()
+        raise
+
+
+def _materialize_snapshot_copy(snapshot: BinaryIO) -> Path:
+    """Materialize a verifier-only path from the still-open authoritative snapshot handle."""
+
+    fd, temporary_name = tempfile.mkstemp(prefix="autosport-nvda-verifier-", suffix=".zip")
+    destination = Path(temporary_name)
+    try:
+        snapshot.seek(0)
+        with os.fdopen(fd, "wb") as output:
+            fd = -1
+            for chunk in iter(lambda: snapshot.read(1024 * 1024), b""):
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        snapshot.seek(0)
+        return destination
     except Exception:
         if fd >= 0:
             os.close(fd)
         try:
-            snapshot.unlink()
+            destination.unlink()
         except FileNotFoundError:
             pass
+        snapshot.seek(0)
         raise
+
+
+def _verify_snapshot_with_path(
+    snapshot: BinaryIO,
+    *,
+    expected_package_sha256: str,
+    label: str,
+    verifier: Callable[[Path], dict[str, Any]],
+) -> dict[str, Any]:
+    """Run a legacy path verifier on a fresh copy and reject any copy mutation/rebinding."""
+
+    candidate = _materialize_snapshot_copy(snapshot)
+    try:
+        if sha256_file(candidate) != expected_package_sha256:
+            raise ValueError(f"{label} snapshot identity mismatch before verification")
+        result = verifier(candidate)
+        if not isinstance(result, dict):
+            raise ValueError(f"{label} did not return verification evidence")
+        if sha256_file(candidate) != expected_package_sha256:
+            raise ValueError(f"{label} snapshot changed during verification")
+        return result
+    finally:
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _load_candidate_identity(
@@ -111,9 +190,11 @@ def _load_candidate_identity(
 ) -> dict[str, str]:
     """Bind one release ZIP to caller-supplied expected source/package identities.
 
-    The release path is opened once and copied to a private immutable snapshot while those
-    exact bytes are hashed. All subsequent structural/package verification uses only that
-    snapshot, preventing a path replacement from mixing identities across verification steps.
+    The caller-visible release path is opened once. Those exact bytes remain authoritative in
+    one still-open private handle, so later validation never trusts the caller pathname again.
+    Legacy path-based package verifiers each receive a fresh copy from that handle; the copy is
+    hashed before and after the verifier call and returned identity evidence is rebound to the
+    original package/source/executable anchors.
 
     This proves equality to the supplied anchors. It cannot prove where those anchors came
     from; physical-release procedure must obtain them independently from canonical control
@@ -131,7 +212,7 @@ def _load_candidate_identity(
         field="expected package SHA-256",
     )
     release_zip = Path(release_zip)
-    snapshot: Path | None = None
+    snapshot: BinaryIO | None = None
     try:
         snapshot, package_sha = _snapshot_release_zip(release_zip)
         if package_sha != expected_package_sha256:
@@ -158,9 +239,33 @@ def _load_candidate_identity(
             if not isinstance(exe_sha, str):
                 raise ValueError("release BUILD_INFO autosport_exe_sha256 is invalid")
             exe_sha = _require_hex_digest(exe_sha, length=64, field="release BUILD_INFO autosport_exe_sha256")
+            if hashlib.sha256(archive.read(_EXE_MEMBER)).hexdigest() != exe_sha:
+                raise ValueError("release BUILD_INFO Autosport.exe hash mismatch")
 
-        verify_windows_package(snapshot, expected_source_sha=expected_source_sha)
-        verify_portable_data_tool(snapshot)
+        windows_result = _verify_snapshot_with_path(
+            snapshot,
+            expected_package_sha256=package_sha,
+            label="Windows package verifier",
+            verifier=lambda candidate: verify_windows_package(
+                candidate,
+                expected_source_sha=expected_source_sha,
+            ),
+        )
+        expected_windows_identity = {
+            "package_sha256": package_sha,
+            "source_sha": source_sha,
+            "autosport_exe_sha256": exe_sha,
+        }
+        for field, expected in expected_windows_identity.items():
+            if windows_result.get(field) != expected:
+                raise ValueError(f"Windows package verifier {field} does not match captured release identity")
+
+        _verify_snapshot_with_path(
+            snapshot,
+            expected_package_sha256=package_sha,
+            label="portable data-tool verifier",
+            verifier=lambda candidate: verify_portable_data_tool(candidate),
+        )
         return {
             "package_sha256": package_sha,
             "source_sha": source_sha,
@@ -168,10 +273,7 @@ def _load_candidate_identity(
         }
     finally:
         if snapshot is not None:
-            try:
-                snapshot.unlink()
-            except FileNotFoundError:
-                pass
+            snapshot.close()
 
 
 def create_template(

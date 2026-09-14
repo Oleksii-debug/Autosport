@@ -86,6 +86,48 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
         query = parse_qs(urlparse(transport.urls[0]).query)
         self.assertEqual(query, {"date": ["2026-09-10"], "pricedOnly": ["true"]})
 
+    def test_capture_and_evidence_paths_must_not_alias(self) -> None:
+        transport = _Transport([])
+        with tempfile.TemporaryDirectory() as temp:
+            artifact = Path(temp) / "matches.json"
+            with self.assertRaisesRegex(ValueError, "must refer to different files"):
+                capture_historical_matches(
+                    self._provider(transport),
+                    requested_date="2026-09-10",
+                    output_path=artifact,
+                    evidence_path=artifact,
+                )
+            self.assertFalse(artifact.exists())
+        self.assertEqual(transport.urls, [])
+
+    def test_noncanonical_date_forms_fail_before_network(self) -> None:
+        for requested_date in ("20260910", "2026-W37-4"):
+            with self.subTest(requested_date=requested_date):
+                transport = _Transport([])
+                with tempfile.TemporaryDirectory() as temp:
+                    with self.assertRaisesRegex(ValueError, "requested_date must be YYYY-MM-DD"):
+                        capture_historical_matches(
+                            self._provider(transport),
+                            requested_date=requested_date,
+                            output_path=Path(temp) / "matches.json",
+                        )
+                self.assertEqual(transport.urls, [])
+
+    def test_nonfinite_provider_response_fails_closed_before_output(self) -> None:
+        transport = _Transport([{"provider_defined_id": "match-1", "score": float("nan")}])
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "matches.json"
+            evidence = Path(temp) / "matches.evidence.json"
+            with self.assertRaisesRegex(ProviderPayloadError, "strict UTF-8 JSON"):
+                capture_historical_matches(
+                    self._provider(transport),
+                    requested_date="2026-09-10",
+                    output_path=output,
+                    evidence_path=evidence,
+                )
+            self.assertFalse(output.exists())
+            self.assertFalse(evidence.exists())
+
     def test_missing_entitlement_headers_fail_closed_before_output(self) -> None:
         transport = _Transport([], headers={"x-api-version": "test"})
         with tempfile.TemporaryDirectory() as temp:

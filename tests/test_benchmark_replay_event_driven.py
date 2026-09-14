@@ -97,7 +97,7 @@ def test_small_synthetic_benchmark_is_explicitly_non_release_evidence() -> None:
     assert result.dataset_schema_version is None
     assert result.dataset_market_sha256 is None
     assert result.dataset_import_identity is None
-    assert result.release_evidence_input is False
+    assert result.governed_dataset_input is False
     assert result.mode == "fastest-event-driven"
     assert result.consumer_scope == "sqlite-market-store"
     assert result.fixture_construction_included is False
@@ -148,7 +148,7 @@ def test_canonical_dataset_mode_binds_real_input_identity_and_span() -> None:
         "33553b5e0c144997da51ba4555521a6636331ef8e315af0fc78a670e5a32742a"
     )
     assert result.dataset_import_identity is None
-    assert result.release_evidence_input is False
+    assert result.governed_dataset_input is False
     assert result.target_claim is False
     assert len(result.replay_dataset_hash) == 64
 

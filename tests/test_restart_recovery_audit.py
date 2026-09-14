@@ -9,6 +9,11 @@ from autosport.endurance import EnduranceConfig
 from autosport import restart_recovery_audit as restart_audit
 
 
+class _BrokenStringError(Exception):
+    def __str__(self) -> str:
+        raise RuntimeError("diagnostic rendering must not escape")
+
+
 class RestartRecoveryAuditTests(unittest.TestCase):
     @staticmethod
     def _restart_stub() -> dict[str, object]:
@@ -103,6 +108,28 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             self.assertTrue(payload["endurance_corrupt_paper_book_rejected"])
             self.assertEqual(len(payload["endurance_stable_invariant_fingerprint"]), 64)
 
+            self.assertFalse(payload["real_money_execution"])
+            self.assertFalse(payload["human_tested"])
+            self.assertFalse(payload["nvda_verified"])
+
+    def test_semantic_failure_with_broken_stringification_still_publishes_fail_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "restart-recovery-audit.json"
+            output.write_text('{"status":"LAST_KNOWN"}\n', encoding="utf-8")
+
+            with patch.object(
+                restart_audit,
+                "_audit_session_restart",
+                side_effect=_BrokenStringError(),
+            ):
+                self.assertEqual(restart_audit.run_restart_recovery_audit(output), 1)
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "FAIL")
+            self.assertEqual(
+                payload["error"],
+                "_BrokenStringError: exception details unavailable",
+            )
             self.assertFalse(payload["real_money_execution"])
             self.assertFalse(payload["human_tested"])
             self.assertFalse(payload["nvda_verified"])

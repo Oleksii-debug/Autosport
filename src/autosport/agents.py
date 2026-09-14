@@ -4,11 +4,38 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Protocol
+from typing import Iterable, Protocol
 
 from .decision_ledger import DecisionRecord, JsonlDecisionLedger
 from .domain import MarketEvent, TicketLeg
 from .paper import PaperBook
+
+
+def validate_agent_names(agent_names: Iterable[object]) -> tuple[str, ...]:
+    """Return one canonical ordered agent identity or fail closed on ambiguity."""
+
+    names = tuple(agent_names)
+    if not names:
+        raise ValueError("agent composition must contain at least one agent")
+    for name in names:
+        if not isinstance(name, str) or not name.strip() or name != name.strip():
+            raise ValueError("agent names must be non-empty canonical strings")
+    if len(set(names)) != len(names):
+        raise ValueError("agent composition contains duplicate agent names")
+    return names
+
+
+def agent_composition_sha256(agent_names: Iterable[object]) -> str:
+    """Hash the exact ordered canonical agent composition used by one strategy runtime."""
+
+    names = validate_agent_names(agent_names)
+    canonical = json.dumps(
+        {"schema_version": 1, "ordered_agent_names": list(names)},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(slots=True)
@@ -83,6 +110,10 @@ class PaperBaselineAgent:
 class AgentOrchestrator:
     def __init__(self, agents: list[Agent], context: AgentContext) -> None:
         self.agents = list(agents)
+        self.agent_names = validate_agent_names(
+            getattr(agent, "name", None) for agent in self.agents
+        )
+        self.agent_composition_sha256 = agent_composition_sha256(self.agent_names)
         self.context = context
 
     def on_market_event(self, event: MarketEvent) -> None:

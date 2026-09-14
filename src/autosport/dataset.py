@@ -28,6 +28,54 @@ _PARLAY_TERMS_REFERENCE = "https://parlay-api.com/terms"
 _PARLAY_STANDARD_RETENTION_CEILING = timedelta(days=90)
 
 
+class _DuplicateJsonKeyError(ValueError):
+    pass
+
+
+class _NonStandardJsonConstantError(ValueError):
+    pass
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateJsonKeyError(key)
+        value[key] = item
+    return value
+
+
+def _reject_nonstandard_json_constant(value: str) -> None:
+    raise _NonStandardJsonConstantError(value)
+
+
+def _strict_json_text(text: str, *, context: str) -> Any:
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_nonstandard_json_constant,
+        )
+    except _DuplicateJsonKeyError as exc:
+        raise ValueError(
+            f"{context} contains duplicate JSON object key: {exc.args[0]}"
+        ) from exc
+    except _NonStandardJsonConstantError as exc:
+        raise ValueError(
+            f"{context} contains non-standard JSON constant: {exc.args[0]}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{context} is not valid JSON") from exc
+
+
+def _strict_json_bytes(payload: bytes, *, context: str) -> Any:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{context} is not valid UTF-8") from exc
+    return _strict_json_text(text, context=context)
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -43,8 +91,21 @@ def _require_string(raw: dict[str, Any], key: str, *, context: str) -> str:
     return value.strip()
 
 
+def _require_canonical_string(raw: dict[str, Any], key: str, *, context: str) -> str:
+    value = raw.get(key)
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+    ):
+        raise ValueError(
+            f"{context}.{key} must be a non-empty canonical string without surrounding whitespace"
+        )
+    return value
+
+
 def _require_digest(raw: dict[str, Any], key: str, *, context: str) -> str:
-    value = _require_string(raw, key, context=context)
+    value = _require_canonical_string(raw, key, context=context)
     if (
         len(value) != 64
         or value != value.lower()
@@ -214,13 +275,13 @@ class ReplayDataset:
                 digest.update(raw_line)
                 if not raw_line.strip():
                     continue
-                try:
-                    line = raw_line.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise ValueError(
-                        f"market line {line_number} is not valid UTF-8"
-                    ) from exc
-                events.append(MarketEvent.from_dict(json.loads(line)))
+                raw_event = _strict_json_bytes(
+                    raw_line,
+                    context=f"market line {line_number}",
+                )
+                if not isinstance(raw_event, dict):
+                    raise ValueError(f"market line {line_number} must be a JSON object")
+                events.append(MarketEvent.from_dict(raw_event))
         if digest.hexdigest() != self.market_sha256:
             raise ValueError("market dataset hash changed after verification")
         return events
@@ -230,18 +291,18 @@ class ReplayDataset:
         payload = self.results_path.read_bytes()
         if hashlib.sha256(payload).hexdigest() != self.results_sha256:
             raise ValueError("sealed results hash changed after verification")
-        try:
-            raw = json.loads(payload.decode("utf-8"))
-        except UnicodeDecodeError as exc:
-            raise ValueError("sealed results payload is not valid UTF-8") from exc
+        raw = _strict_json_bytes(payload, context="sealed results payload")
         if not isinstance(raw, dict):
             raise ValueError("results payload must be an object")
-        if int(raw.get("schema_version", 0)) != 1:
+        schema_version = raw.get("schema_version")
+        if type(schema_version) is not int or schema_version != 1:
             raise ValueError("unsupported results schema")
         outcomes = raw.get("quote_outcomes")
         if not isinstance(outcomes, dict):
             raise ValueError("quote_outcomes must be an object")
-        return {str(key): str(value) for key, value in outcomes.items()}
+        if any(not isinstance(value, str) for value in outcomes.values()):
+            raise ValueError("quote_outcomes values must be strings")
+        return dict(outcomes)
 
 
 def _parlay_retention_capture_start(
@@ -367,10 +428,10 @@ def _verify_parlay_governance_authority(
             "governance.acquisition_evidence.authority_record_sha256 does not match verified authority artifact"
         )
 
-    try:
-        proof = json.loads(binding.governance_proof_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("verified governance proof bytes are not valid UTF-8 JSON") from exc
+    proof = _strict_json_bytes(
+        binding.governance_proof_bytes,
+        context="verified governance proof",
+    )
     if not isinstance(proof, dict):
         raise ValueError("verified governance proof must be a JSON object")
 
@@ -536,7 +597,9 @@ def _load_governance(raw: dict[str, Any], *, root: Path) -> DatasetGovernance:
     market_types_raw = coverage.get("market_types")
     if not isinstance(market_types_raw, list) or not market_types_raw:
         raise ValueError("governance.coverage.market_types must be a non-empty list")
-    market_types = tuple(str(value).strip() for value in market_types_raw)
+    if any(not isinstance(value, str) for value in market_types_raw):
+        raise ValueError("governance.coverage.market_types must contain strings")
+    market_types = tuple(value.strip() for value in market_types_raw)
     allowed_market_types = {market_type.value for market_type in MarketType}
     if (
         any(not value for value in market_types)
@@ -599,10 +662,7 @@ def _validate_historical_payloads(
         if not line.strip():
             continue
         event_count += 1
-        try:
-            raw_event = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"market line {line_number} is not valid JSON") from exc
+        raw_event = _strict_json_text(line, context=f"market line {line_number}")
         if not isinstance(raw_event, dict):
             raise ValueError(f"market line {line_number} must be a JSON object")
         for timestamp_field in ("source_ts", "observed_ts", "ingest_ts"):
@@ -637,13 +697,11 @@ def _validate_historical_payloads(
     if event_count == 0:
         raise ValueError("historical market corpus must contain at least one event")
 
-    try:
-        results_raw = json.loads(results_payload.decode("utf-8"))
-    except UnicodeDecodeError as exc:
-        raise ValueError("sealed results payload must be valid UTF-8") from exc
+    results_raw = _strict_json_bytes(results_payload, context="sealed results payload")
     if not isinstance(results_raw, dict):
         raise ValueError("results payload must be an object")
-    if int(results_raw.get("schema_version", 0)) != 1:
+    results_schema = results_raw.get("schema_version")
+    if type(results_schema) is not int or results_schema != 1:
         raise ValueError("unsupported results schema")
     results_reveal_after = _require_string(
         results_raw,
@@ -665,7 +723,7 @@ def _validate_historical_payloads(
     outcomes = results_raw.get("quote_outcomes")
     if not isinstance(outcomes, dict):
         raise ValueError("quote_outcomes must be an object")
-    outcome_keys = {str(key) for key in outcomes}
+    outcome_keys = set(outcomes)
     missing_outcomes = sorted(quote_keys - outcome_keys)
     if missing_outcomes:
         raise ValueError("sealed results are missing quote outcomes for historical market corpus")
@@ -673,7 +731,7 @@ def _validate_historical_payloads(
     if unknown_outcomes:
         raise ValueError("sealed results reference quote keys absent from historical market corpus")
     invalid_outcomes = sorted(
-        str(key)
+        key
         for key, value in outcomes.items()
         if not isinstance(value, str) or value not in _ALLOWED_HISTORICAL_OUTCOMES
     )
@@ -689,10 +747,10 @@ def _import_identity(
 ) -> str:
     payload = {
         "schema_version": 2,
-        "name": str(raw.get("name", "")),
-        "sport": str(raw.get("sport", "")),
-        "market_file": str(raw["market_file"]),
-        "results_file": str(raw["results_file"]),
+        "name": raw.get("name", ""),
+        "sport": raw.get("sport", ""),
+        "market_file": raw["market_file"],
+        "results_file": raw["results_file"],
         "market_sha256": market_sha256,
         "results_sha256": results_sha256,
         "governance": raw["governance"],
@@ -704,16 +762,26 @@ def _import_identity(
 def load_dataset(root: str | Path) -> ReplayDataset:
     root = Path(root)
     manifest_path = root / "manifest.json"
-    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw = _strict_json_bytes(
+        manifest_path.read_bytes(),
+        context="dataset manifest",
+    )
     if not isinstance(raw, dict):
         raise ValueError("dataset manifest must be an object")
-    schema_version = int(raw.get("schema_version", 0))
-    if schema_version not in {1, 2}:
+    schema_version = raw.get("schema_version")
+    if type(schema_version) is not int or schema_version not in {1, 2}:
         raise ValueError("unsupported dataset schema")
+
+    name_value = raw.get("name", root.name)
+    sport_value = raw.get("sport", "unknown")
+    if not isinstance(name_value, str) or not name_value.strip():
+        raise ValueError("dataset manifest.name must be a non-empty string")
+    if not isinstance(sport_value, str) or not sport_value.strip():
+        raise ValueError("dataset manifest.sport must be a non-empty string")
 
     governance: DatasetGovernance | None = None
     if schema_version == 2:
-        if str(raw.get("dataset_kind", "")) != "historical":
+        if raw.get("dataset_kind") != "historical":
             raise ValueError("schema v2 requires dataset_kind=historical")
         governance = _load_governance(raw, root=root)
         # Retention and authorization are byte-access boundaries, not merely replay API boundaries.
@@ -721,13 +789,15 @@ def load_dataset(root: str | Path) -> ReplayDataset:
         # before market/results members are resolved, hashed or parsed.
         _assert_governance_retention_current(governance)
 
-    market_path = _resolve_member(root, str(raw["market_file"]), field="market_file")
-    results_path = _resolve_member(root, str(raw["results_file"]), field="results_file")
+    market_file = _require_canonical_string(raw, "market_file", context="dataset manifest")
+    results_file = _require_canonical_string(raw, "results_file", context="dataset manifest")
+    market_path = _resolve_member(root, market_file, field="market_file")
+    results_path = _resolve_member(root, results_file, field="results_file")
     if market_path == results_path:
         raise ValueError("market and results files must remain physically separate")
 
-    expected_market = str(raw["market_sha256"])
-    expected_results = str(raw["results_sha256"])
+    expected_market = _require_digest(raw, "market_sha256", context="dataset manifest")
+    expected_results = _require_digest(raw, "results_sha256", context="dataset manifest")
     market_payload = market_path.read_bytes()
     results_payload = results_path.read_bytes()
     actual_market = hashlib.sha256(market_payload).hexdigest()
@@ -747,13 +817,14 @@ def load_dataset(root: str | Path) -> ReplayDataset:
             results_sha256=actual_results,
         )
         declared_identity = raw.get("import_identity")
-        if declared_identity is not None and str(declared_identity) != import_identity:
-            raise ValueError("historical import identity mismatch")
+        if declared_identity is not None:
+            if not isinstance(declared_identity, str) or declared_identity != import_identity:
+                raise ValueError("historical import identity mismatch")
 
     return ReplayDataset(
         root=root,
-        name=str(raw.get("name", root.name)),
-        sport=str(raw.get("sport", "unknown")),
+        name=name_value,
+        sport=sport_value,
         market_path=market_path,
         results_path=results_path,
         market_sha256=actual_market,

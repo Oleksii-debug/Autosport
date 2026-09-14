@@ -88,13 +88,27 @@ class AutosportApp(tk.Tk):
         self.workspace = default_workspace()
         self._active_workspace = self.workspace
         self._recovery_required_workspaces: set[Path] = set()
-        self.session: AutosportSession | None = AutosportSession(self.workspace, "10000")
+        self._startup_economic_error: str | None = None
+        self.session: AutosportSession | None = None
+        try:
+            self.session = AutosportSession(self.workspace, "10000")
+        except Exception as exc:
+            self._recovery_required_workspaces.add(Path(self.workspace))
+            self._startup_economic_error = f"{type(exc).__name__}: {exc}"
         self.replay_worker = OneShotReplayWorker()
         self.live_worker = OneShotObservationWorker()
         self._active_strategy_id = "baseline-v1"
         self._active_research_plan: ResearchStrategyPlan | None = None
         self._closing = False
-        self.status = tk.StringVar(value="Готово. Виберіть папку replay dataset або оновіть live snapshot.")
+        startup_status = (
+            "Готово. Виберіть папку replay dataset або оновіть live snapshot."
+            if self._startup_economic_error is None
+            else (
+                "Economic session не пройшла startup validation; paper replay для baseline workspace "
+                "заблоковано до recovery. Read-only live snapshot доступний через Control+L."
+            )
+        )
+        self.status = tk.StringVar(value=startup_status)
         self.bank = tk.StringVar(value=self._bank_text())
         self.dataset_text = tk.StringVar(value="Dataset не вибраний.")
         self.strategy_text = tk.StringVar(value=_DEFAULT_STRATEGY_TEXT)
@@ -315,6 +329,11 @@ class AutosportApp(tk.Tk):
 
     def _bank_text(self) -> str:
         if self.session is None:
+            if self.__dict__.get("_startup_economic_error"):
+                return (
+                    "Віртуальний банк: недоступний до успішного recovery; "
+                    f"workspace: {self._active_workspace}"
+                )
             return f"Віртуальний банк: оновлюється після replay; workspace: {self._active_workspace}"
         return (
             f"Віртуальний банк: {self.session.book.balance}; "
@@ -550,6 +569,7 @@ class AutosportApp(tk.Tk):
             messagebox.showerror("Автоспорт", detail)
             return
 
+        self._startup_economic_error = None
         self.bank.set(self._bank_text())
         self._refresh_tickets()
         self._recovery_required_workspaces.discard(replay_workspace)
@@ -696,6 +716,7 @@ class AutosportApp(tk.Tk):
             messagebox.showerror("Автоспорт", detail)
             return
 
+        self._startup_economic_error = None
         self.bank.set(self._bank_text())
         self._refresh_tickets()
         summary = result_summary(result)
@@ -706,7 +727,14 @@ class AutosportApp(tk.Tk):
     def _refresh_tickets(self) -> None:
         self.tickets.delete(0, "end")
         if self.session is None:
-            self.tickets.insert("end", "Replay виконується; ticket state оновиться після завершення transaction.")
+            if self.__dict__.get("_startup_economic_error"):
+                self.tickets.insert(
+                    "end",
+                    "Economic state недоступний через startup validation failure; "
+                    "read-only live snapshot лишається доступним, а paper replay потребує recovery.",
+                )
+            else:
+                self.tickets.insert("end", "Replay виконується; ticket state оновиться після завершення transaction.")
             return
         for line in ticket_lines(self.session):
             self.tickets.insert("end", line)

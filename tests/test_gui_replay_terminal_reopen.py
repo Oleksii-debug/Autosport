@@ -154,31 +154,34 @@ def test_missing_terminal_result_requires_recovery() -> None:
     assert "механічно заблоковано" in app.status.value
 
 
-def test_second_run_is_blocked_until_successful_exact_workspace_recovery() -> None:
-    app = _partial_app(ReplayWorkerMessage(error="unused"))
+def test_reopen_failure_blocks_second_run_until_successful_exact_workspace_recovery() -> None:
+    app = _partial_app(ReplayWorkerMessage(result=object()))
+    app._open_session = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        ValueError("workspace state failed validation")
+    )
+
+    with patch("autosport.gui.messagebox.showerror"):
+        AutosportApp._poll_replay_worker(app)
+
+    exact_workspace = Path("economic-workspace")
+    assert exact_workspace in app._recovery_required_workspaces
+
     run_worker = _RunWorker()
     app.replay_worker = run_worker
     app.dataset_path = Path("dataset")
     app._selected_replay_configuration = lambda: ("baseline-v1", None)
-    app._recovery_required_workspaces = {
-        Path("economic-workspace"),
-        Path("other-economic-workspace"),
-    }
     app._bank_text = lambda: "bank"
     app._refresh_tickets = lambda: None
     app.after = lambda *_args: None
 
     with (
-        patch(
-            "autosport.gui.workspace_for_strategy",
-            return_value=Path("economic-workspace"),
-        ),
+        patch("autosport.gui.workspace_for_strategy", return_value=exact_workspace),
         patch("autosport.gui.messagebox.showwarning") as showwarning,
     ):
         AutosportApp.run_dataset(app)
 
     assert run_worker.start_calls == 0
-    assert Path("economic-workspace") in app._recovery_required_workspaces
+    assert exact_workspace in app._recovery_required_workspaces
     assert "Paper replay заблоковано" in app.status.value
     showwarning.assert_called_once()
 
@@ -187,31 +190,71 @@ def test_second_run_is_blocked_until_successful_exact_workspace_recovery() -> No
         aborted_uncommitted_keys=(),
         unresolved_without_summary=(),
     )
-    reopened_session = _Session(Path("economic-workspace"))
+    reopened_session = _Session(exact_workspace)
     app._open_session = lambda *_args, **_kwargs: reopened_session
 
     with (
-        patch(
-            "autosport.gui.workspace_for_strategy",
-            return_value=Path("economic-workspace"),
-        ),
+        patch("autosport.gui.workspace_for_strategy", return_value=exact_workspace),
         patch("autosport.gui.reconcile_late_crashes", return_value=clean_report),
         patch("autosport.gui.messagebox.showinfo") as showinfo,
     ):
         AutosportApp.repair_workspace(app)
 
-    assert Path("economic-workspace") not in app._recovery_required_workspaces
-    assert Path("other-economic-workspace") in app._recovery_required_workspaces
+    assert exact_workspace not in app._recovery_required_workspaces
     showinfo.assert_called_once()
 
-    with patch(
-        "autosport.gui.workspace_for_strategy",
-        return_value=Path("economic-workspace"),
-    ):
+    with patch("autosport.gui.workspace_for_strategy", return_value=exact_workspace):
         AutosportApp.run_dataset(app)
 
     assert reopened_session.closed
     assert run_worker.start_calls == 1
+
+
+def test_recovery_gate_is_scoped_to_exact_workspace() -> None:
+    app = _partial_app(ReplayWorkerMessage(error="unused"))
+    run_worker = _RunWorker()
+    app.replay_worker = run_worker
+    app.dataset_path = Path("dataset")
+    app._selected_replay_configuration = lambda: ("baseline-v1", None)
+    app._recovery_required_workspaces = {Path("blocked-economic-workspace")}
+    app._bank_text = lambda: "bank"
+    app._refresh_tickets = lambda: None
+    app.after = lambda *_args: None
+
+    with patch(
+        "autosport.gui.workspace_for_strategy",
+        return_value=Path("healthy-economic-workspace"),
+    ):
+        AutosportApp.run_dataset(app)
+
+    assert Path("blocked-economic-workspace") in app._recovery_required_workspaces
+    assert run_worker.start_calls == 1
+
+
+def test_failed_recovery_keeps_exact_workspace_blocked() -> None:
+    app = _partial_app(ReplayWorkerMessage(error="unused"))
+    app.replay_worker = _RunWorker()
+    app._selected_replay_configuration = lambda: ("baseline-v1", None)
+    exact_workspace = Path("economic-workspace")
+    app._recovery_required_workspaces = {exact_workspace}
+    app._bank_text = lambda: "bank"
+    app._refresh_tickets = lambda: None
+    app._open_session = lambda *_args, **_kwargs: _Session(exact_workspace)
+
+    with (
+        patch("autosport.gui.workspace_for_strategy", return_value=exact_workspace),
+        patch(
+            "autosport.gui.reconcile_late_crashes",
+            side_effect=RuntimeError("recovery validation failed"),
+        ),
+        patch("autosport.gui.messagebox.showerror") as showerror,
+    ):
+        AutosportApp.repair_workspace(app)
+
+    assert exact_workspace in app._recovery_required_workspaces
+    assert "не завершено" in app.status.value
+    assert any("recovery validation failed" in line for line in app._logs)
+    showerror.assert_called_once()
 
 
 def test_unresolved_recovery_keeps_exact_workspace_blocked() -> None:

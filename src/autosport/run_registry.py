@@ -54,6 +54,9 @@ _FINAL_ONLY_FIELDS = frozenset(
         "reconciled_from_summary",
     }
 )
+_LEGACY_SCHEMA_VERSION = 1
+_LINEAGE_TRUST_SCHEMA_VERSION = 2
+_LINEAGE_TRUST_FIELD = "outcome_lineage_trust"
 
 
 def _is_canonical_sha256(value: object) -> bool:
@@ -124,7 +127,7 @@ class RunRegistry:
                 raise ValueError("run registry is missing while durable run history exists")
             if any(self.path.parent.glob("run-*.json")):
                 raise ValueError("run registry is missing while durable run history exists")
-            self._write({"schema_version": 1, "runs": {}})
+            self._write({"schema_version": _LEGACY_SCHEMA_VERSION, "runs": {}})
         else:
             # Validate recovery/economic truth before a session can use an existing workspace.
             self._read()
@@ -225,6 +228,7 @@ class RunRegistry:
             entry["base_paper_book_sha256"] = base_paper_book_sha256
             entry["base_decision_ledger_sha256"] = base_decision_ledger_sha256
         if outcome_lineage is not None:
+            self._record_outcome_lineage_trust_state(state, outcome_lineage)
             entry["outcome_lineage"] = outcome_lineage_payload(outcome_lineage)
         state["runs"][key] = entry
         self._validate_entry(key, entry)
@@ -405,22 +409,89 @@ class RunRegistry:
         self._write(state)
 
     @staticmethod
-    def _assert_outcome_lineage_compatible_state(
+    def _outcome_lineage_trust_bindings(
+        state: dict,
+    ) -> dict[tuple[str, str], OutcomeLineageBinding]:
+        if state.get("schema_version") != _LINEAGE_TRUST_SCHEMA_VERSION:
+            return {}
+        raw_trust = state.get(_LINEAGE_TRUST_FIELD)
+        if not isinstance(raw_trust, list) or not raw_trust:
+            raise ValueError("run registry lineage-trust schema requires durable trust bindings")
+        bindings: dict[tuple[str, str], OutcomeLineageBinding] = {}
+        for raw_binding in raw_trust:
+            try:
+                binding = outcome_lineage_binding_from_payload(
+                    raw_binding,
+                    context="run registry outcome_lineage_trust",
+                )
+            except OutcomeLineageTrustError as exc:
+                raise ValueError("run registry contains invalid outcome lineage trust") from exc
+            identity = (binding.source_identity, binding.record_id)
+            if identity in bindings:
+                raise ValueError("run registry contains duplicate outcome lineage trust identity")
+            bindings[identity] = binding
+        return bindings
+
+    @classmethod
+    def _record_outcome_lineage_trust_state(
+        cls,
         state: dict,
         incoming: OutcomeLineageBinding,
     ) -> None:
+        if state.get("schema_version") == _LEGACY_SCHEMA_VERSION:
+            if any("outcome_lineage" in item for item in state["runs"].values()):
+                raise ValueError(
+                    "legacy run registry cannot migrate outcome lineage evidence without durable trust binding"
+                )
+            state["schema_version"] = _LINEAGE_TRUST_SCHEMA_VERSION
+            state[_LINEAGE_TRUST_FIELD] = []
+            bindings: dict[tuple[str, str], OutcomeLineageBinding] = {}
+        else:
+            bindings = cls._outcome_lineage_trust_bindings(state)
+
+        identity = (incoming.source_identity, incoming.record_id)
+        trusted = bindings.get(identity)
+        if trusted is not None:
+            assert_compatible_outcome_lineages(trusted, incoming)
+            if len(incoming.revisions) <= len(trusted.revisions):
+                return
+
+        payload = outcome_lineage_payload(incoming)
+        raw_trust = state[_LINEAGE_TRUST_FIELD]
+        if trusted is None:
+            raw_trust.append(payload)
+        else:
+            for index, raw_binding in enumerate(raw_trust):
+                candidate = outcome_lineage_binding_from_payload(
+                    raw_binding,
+                    context="run registry outcome_lineage_trust",
+                )
+                if (candidate.source_identity, candidate.record_id) == identity:
+                    raw_trust[index] = payload
+                    break
+            else:
+                raise ValueError("run registry lost an accepted outcome lineage trust binding")
+        raw_trust.sort(key=lambda value: (value["source_identity"], value["record_id"]))
+
+    @classmethod
+    def _assert_outcome_lineage_compatible_state(
+        cls,
+        state: dict,
+        incoming: OutcomeLineageBinding,
+    ) -> None:
+        trusted_bindings = cls._outcome_lineage_trust_bindings(state)
+        trusted = trusted_bindings.get((incoming.source_identity, incoming.record_id))
+        if trusted is not None:
+            assert_compatible_outcome_lineages(trusted, incoming)
         for item in state["runs"].values():
             raw_lineage = item.get("outcome_lineage")
             if raw_lineage is None:
                 continue
-            try:
-                trusted = outcome_lineage_binding_from_payload(
-                    raw_lineage,
-                    context="run registry outcome_lineage",
-                )
-                assert_compatible_outcome_lineages(trusted, incoming)
-            except OutcomeLineageTrustError:
-                raise
+            lineage = outcome_lineage_binding_from_payload(
+                raw_lineage,
+                context="run registry outcome_lineage",
+            )
+            assert_compatible_outcome_lineages(lineage, incoming)
 
     def _validate_entry(self, key: object, item: object) -> None:
         if not isinstance(key, str) or not key:
@@ -546,15 +617,22 @@ class RunRegistry:
             raise ValueError("invalid run registry") from exc
 
         schema_version = raw.get("schema_version") if isinstance(raw, dict) else None
-        if (
-            not isinstance(raw, dict)
-            or set(raw) != {"schema_version", "runs"}
-            or isinstance(schema_version, bool)
-            or not isinstance(schema_version, int)
-            or schema_version != 1
-            or not isinstance(raw.get("runs"), dict)
+        if not isinstance(raw, dict) or isinstance(schema_version, bool) or not isinstance(
+            schema_version, int
         ):
             raise ValueError("invalid run registry")
+        if schema_version == _LEGACY_SCHEMA_VERSION:
+            if set(raw) != {"schema_version", "runs"}:
+                raise ValueError("invalid run registry")
+        elif schema_version == _LINEAGE_TRUST_SCHEMA_VERSION:
+            if set(raw) != {"schema_version", "runs", _LINEAGE_TRUST_FIELD}:
+                raise ValueError("invalid run registry")
+        else:
+            raise ValueError("invalid run registry")
+        if not isinstance(raw.get("runs"), dict):
+            raise ValueError("invalid run registry")
+
+        trusted_bindings = self._outcome_lineage_trust_bindings(raw)
         seen_run_ids: set[str] = set()
         longest_lineage_by_identity: dict[tuple[str, str], OutcomeLineageBinding] = {}
         for key, item in raw["runs"].items():
@@ -566,12 +644,24 @@ class RunRegistry:
             raw_lineage = item.get("outcome_lineage")
             if raw_lineage is None:
                 continue
+            if schema_version != _LINEAGE_TRUST_SCHEMA_VERSION:
+                raise ValueError("legacy run registry cannot contain outcome lineage evidence")
             try:
                 lineage = outcome_lineage_binding_from_payload(
                     raw_lineage,
                     context="run registry outcome_lineage",
                 )
                 identity = (lineage.source_identity, lineage.record_id)
+                durable_trust = trusted_bindings.get(identity)
+                if durable_trust is None:
+                    raise ValueError(
+                        "run registry outcome lineage lacks registry-level trust binding"
+                    )
+                assert_compatible_outcome_lineages(durable_trust, lineage)
+                if len(lineage.revisions) > len(durable_trust.revisions):
+                    raise ValueError(
+                        "run registry outcome lineage exceeds registry-level trust history"
+                    )
                 trusted = longest_lineage_by_identity.get(identity)
                 if trusted is not None:
                     assert_compatible_outcome_lineages(trusted, lineage)

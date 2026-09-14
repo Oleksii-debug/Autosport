@@ -84,6 +84,8 @@ def _decode_run_summary_json(raw_bytes: bytes, *, source: Path) -> dict[str, Any
             object_pairs_hook=_unique_object,
             parse_constant=_reject_nonstandard_constant,
         )
+    except RecursionError as exc:
+        raise ValueError(f"{source}: run summary JSON nesting exceeds parser recursion limit") from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{source}: run summary must be valid UTF-8 JSON") from exc
     if not isinstance(payload, dict):

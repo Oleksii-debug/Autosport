@@ -39,6 +39,23 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
                 ):
                     default_workspace()
 
+    def test_override_home_expansion_failure_is_actionable_value_error(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"AUTOSPORT_WORKSPACE": "~/workspace"},
+            clear=True,
+        ), patch(
+            "autosport.paths.Path.expanduser",
+            side_effect=RuntimeError("home directory cannot be resolved"),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                r"AUTOSPORT_WORKSPACE home expansion could not be resolved",
+            ) as caught:
+                default_workspace()
+
+        self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+
     def test_blank_override_preserves_absolute_local_app_data_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             local_app_data = Path(tmp) / "Local App Data"
@@ -66,6 +83,19 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
                 r"LOCALAPPDATA must be an absolute path",
             ):
                 default_workspace()
+
+    def test_home_resolution_failure_is_actionable_value_error(self) -> None:
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "autosport.paths.Path.home",
+            side_effect=RuntimeError("home directory cannot be resolved"),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                r"home directory could not be resolved",
+            ) as caught:
+                default_workspace()
+
+        self.assertIsInstance(caught.exception.__cause__, RuntimeError)
 
     def test_relative_home_fails_closed_instead_of_following_cwd(self) -> None:
         with patch.dict(os.environ, {}, clear=True), patch(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Protocol
 
 from .decision_ledger import DecisionRecord, JsonlDecisionLedger
@@ -49,7 +49,15 @@ class PaperBaselineAgent:
     name = "paper-baseline"
 
     def __init__(self, stake: Decimal | str = "50") -> None:
-        self.stake = Decimal(str(stake))
+        try:
+            amount = Decimal(str(stake))
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError("paper baseline stake must be a finite decimal") from exc
+        if not amount.is_finite():
+            raise ValueError("paper baseline stake must be a finite decimal")
+        if amount <= 0:
+            raise ValueError("paper baseline stake must be positive")
+        self.stake = amount
         self._used_signals: set[str] = set()
 
     def on_market_event(self, event: MarketEvent, context: AgentContext) -> None:

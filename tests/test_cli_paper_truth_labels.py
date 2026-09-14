@@ -12,22 +12,23 @@ from autosport.cli import run_dataset, run_demo, run_replay
 
 
 class CliPaperTruthLabelTests(unittest.TestCase):
-    def test_demo_labels_sample_fixture_and_preserves_metrics(self) -> None:
+    def test_demo_appends_sample_fixture_truth_after_legacy_output(self) -> None:
         output = io.StringIO()
         with redirect_stdout(output):
             self.assertEqual(run_demo(), 0)
 
-        text = output.getvalue()
-        self.assertIn(
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("run=demo-run "))
+        self.assertIn("balance=", lines[0])
+        self.assertIn("tickets=", lines[0])
+        self.assertEqual(
+            lines[1],
             "mode=demo paper_only=true real_money_execution=false "
             "profitability_claim=false sample_fixture=true",
-            text,
         )
-        self.assertIn("run=demo-run", text)
-        self.assertIn("balance=", text)
-        self.assertIn("tickets=", text)
 
-    def test_replay_labels_paper_execution_without_hiding_existing_metrics(self) -> None:
+    def test_replay_appends_truth_without_changing_legacy_output_prefix(self) -> None:
         replay_run = SimpleNamespace(run_id="run-1", dataset_hash="dataset-hash", event_count=0)
         scenario = SimpleNamespace(mode="empty", worst_case=Decimal("0"), best_case=Decimal("0"))
         with (
@@ -40,17 +41,24 @@ class CliPaperTruthLabelTests(unittest.TestCase):
             with redirect_stdout(output):
                 self.assertEqual(run_replay(Path("ignored.jsonl"), "10000"), 0)
 
-        text = output.getvalue()
-        self.assertIn(
-            "mode=replay paper_only=true real_money_execution=false profitability_claim=false",
-            text,
+        lines = output.getvalue().splitlines()
+        self.assertEqual(
+            lines[:5],
+            [
+                "run_id=run-1",
+                "dataset_hash=dataset-hash",
+                "events=0",
+                "virtual_balance=10000",
+                "scenario_mode=empty worst=0 best=0",
+            ],
         )
-        self.assertNotIn("sample_fixture=", text)
-        self.assertIn("dataset_hash=dataset-hash", text)
-        self.assertIn("virtual_balance=10000", text)
-        self.assertIn("scenario_mode=empty", text)
+        self.assertEqual(
+            lines[5],
+            "mode=replay paper_only=true real_money_execution=false profitability_claim=false",
+        )
+        self.assertNotIn("sample_fixture=", lines[5])
 
-    def test_dataset_labels_paper_execution_without_hiding_net_profit(self) -> None:
+    def test_dataset_appends_truth_without_changing_legacy_output_prefix(self) -> None:
         dataset = SimpleNamespace(import_identity=None)
         result = SimpleNamespace(
             replay=SimpleNamespace(run_id="run-2", event_count=3),
@@ -73,15 +81,24 @@ class CliPaperTruthLabelTests(unittest.TestCase):
                     0,
                 )
 
-        text = output.getvalue()
-        self.assertIn(
-            "mode=dataset paper_only=true real_money_execution=false profitability_claim=false",
-            text,
+        lines = output.getvalue().splitlines()
+        self.assertEqual(
+            lines[:7],
+            [
+                "run_id=run-2",
+                "strategy_id=baseline-v1",
+                "canonical_strategy_id=baseline-v1",
+                "events=3",
+                "balance=10025",
+                "net_profit=25",
+                "settled=1",
+            ],
         )
-        self.assertNotIn("sample_fixture=", text)
-        self.assertIn("balance=10025", text)
-        self.assertIn("net_profit=25", text)
-        self.assertIn("settled=1", text)
+        self.assertEqual(
+            lines[7],
+            "mode=dataset paper_only=true real_money_execution=false profitability_claim=false",
+        )
+        self.assertNotIn("sample_fixture=", lines[7])
         session.close.assert_called_once_with()
 
 

@@ -126,9 +126,9 @@ def run_replay(path: Path, bankroll: str) -> int:
     engine = ReplayEngine.from_jsonl(path)
     run = engine.run(orchestrator.on_market_event, run_id=run_id)
     report = PortfolioEngine().analyse(list(book.tickets.values()))
-    _print_paper_truth_boundary(mode="replay")
     print(f"run_id={run.run_id}\ndataset_hash={run.dataset_hash}\nevents={run.event_count}\nvirtual_balance={book.balance}")
     print(f"scenario_mode={report.mode} worst={report.worst_case} best={report.best_case}")
+    _print_paper_truth_boundary(mode="replay")
     return 0
 
 
@@ -153,7 +153,6 @@ def run_dataset(
     )
     try:
         result = session.run_dataset(dataset)
-        _print_paper_truth_boundary(mode="dataset")
         print(f"run_id={result.replay.run_id}")
         print(f"strategy_id={session.strategy_id}")
         print(f"canonical_strategy_id={session.strategy.strategy_id}")
@@ -165,6 +164,7 @@ def run_dataset(
         print(f"settled={len(result.settled_ticket_ids)}")
         if dataset.import_identity is not None:
             print(f"historical_import_identity={dataset.import_identity}")
+        _print_paper_truth_boundary(mode="dataset")
     finally:
         session.close()
     return 0
@@ -445,8 +445,8 @@ def run_demo() -> int:
     context = AgentContext(book, replay_run_id="demo-run")
     orchestrator = AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent("50")], context)
     run = ReplayEngine(events).run(orchestrator.on_market_event, run_id="demo-run")
-    _print_paper_truth_boundary(mode="demo", sample_fixture=True)
     print(f"run={run.run_id} dataset={run.dataset_hash[:12]} events={context.event_count} balance={book.balance} tickets={len(book.tickets)}")
+    _print_paper_truth_boundary(mode="demo", sample_fixture=True)
     return 0
 
 

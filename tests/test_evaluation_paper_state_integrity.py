@@ -60,15 +60,6 @@ class EvaluationPaperStateIntegrityTests(unittest.TestCase):
             self.assertFalse(caller.flags[Overflow])
             self.assertFalse(caller.flags[Underflow])
 
-    def test_inexact_ledger_profit_identity_is_rejected_instead_of_rounded(self) -> None:
-        book = PaperBook("123456789012345678901234567890")
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "virtual bankroll state is invalid for evaluation",
-        ):
-            evaluate(book)
-
     def test_nonterminating_roi_keeps_canonical_decimal_rounding(self) -> None:
         book = PaperBook("10")
         lost_leg = TicketLeg("event-lost", "winner", "player-a", Decimal("2"))

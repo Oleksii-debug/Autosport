@@ -111,6 +111,34 @@ class StrategyComparisonJsonIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-standard JSON constant: NaN"):
                 load_strategy_run_summary(path)
 
+    def test_loader_requires_exact_integer_run_summary_schema_version(self) -> None:
+        for invalid in (2.0, "2", True):
+            with self.subTest(invalid=invalid):
+                payload = self._valid_summary()
+                payload["schema_version"] = invalid
+                with tempfile.TemporaryDirectory() as temp:
+                    path = self._write_raw(
+                        Path(temp),
+                        "invalid-run-summary-schema.json",
+                        json.dumps(payload, separators=(",", ":")),
+                    )
+                    with self.assertRaisesRegex(ValueError, "run summary schema_version must be 2"):
+                        load_strategy_run_summary(path)
+
+    def test_loader_requires_exact_integer_transaction_schema_version(self) -> None:
+        for invalid in (float(RunTransaction.SCHEMA_VERSION), True, str(RunTransaction.SCHEMA_VERSION)):
+            with self.subTest(invalid=invalid):
+                payload = self._valid_summary()
+                payload["transaction_schema_version"] = invalid
+                with tempfile.TemporaryDirectory() as temp:
+                    path = self._write_raw(
+                        Path(temp),
+                        "invalid-transaction-schema.json",
+                        json.dumps(payload, separators=(",", ":")),
+                    )
+                    with self.assertRaisesRegex(ValueError, "canonical transaction schema"):
+                        load_strategy_run_summary(path)
+
 
 if __name__ == "__main__":
     unittest.main()

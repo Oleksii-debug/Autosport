@@ -95,9 +95,14 @@ def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
     source = Path(path)
     raw_bytes = source.read_bytes()
     payload = _decode_run_summary_json(raw_bytes, source=source)
-    if payload.get("schema_version") != 2:
+    schema_version = payload.get("schema_version")
+    if type(schema_version) is not int or schema_version != 2:
         raise ValueError(f"{source}: run summary schema_version must be 2")
-    if payload.get("transaction_schema_version") != RunTransaction.SCHEMA_VERSION:
+    transaction_schema_version = payload.get("transaction_schema_version")
+    if (
+        type(transaction_schema_version) is not int
+        or transaction_schema_version != RunTransaction.SCHEMA_VERSION
+    ):
         raise ValueError(
             f"{source}: durable transaction evidence must use canonical transaction schema "
             f"{RunTransaction.SCHEMA_VERSION}"

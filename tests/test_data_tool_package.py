@@ -76,6 +76,24 @@ class PortableDataToolPackageTests(unittest.TestCase):
     def _rewrite_member(cls, package: Path, relative: str, payload: bytes) -> None:
         cls._rewrite_members(package, {relative: payload})
 
+    @classmethod
+    def _rewrite_manifest_and_rehash_sums(cls, package: Path, manifest_payload: bytes) -> None:
+        sums = cls._read_member(package, "SHA256SUMS.txt").decode("utf-8")
+        manifest_sha = hashlib.sha256(manifest_payload).hexdigest()
+        rewritten_sums = []
+        for line in sums.splitlines():
+            digest, separator, relative = line.partition("  ")
+            if relative == "PACKAGE_MANIFEST.json":
+                digest = manifest_sha
+            rewritten_sums.append(f"{digest}{separator}{relative}")
+        cls._rewrite_members(
+            package,
+            {
+                "PACKAGE_MANIFEST.json": manifest_payload,
+                "SHA256SUMS.txt": ("\n".join(rewritten_sums) + "\n").encode("utf-8"),
+            },
+        )
+
     def test_data_tool_is_hash_bound_and_base_verifier_stays_green(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -134,28 +152,32 @@ class PortableDataToolPackageTests(unittest.TestCase):
                 '  "schema_version": 1,\n  "schema_version": 1',
             )
             self.assertNotEqual(manifest, ambiguous)
-            ambiguous_bytes = ambiguous.encode("utf-8")
-
-            sums = self._read_member(package, "SHA256SUMS.txt").decode("utf-8")
-            manifest_sha = hashlib.sha256(ambiguous_bytes).hexdigest()
-            rewritten_sums = []
-            for line in sums.splitlines():
-                digest, separator, relative = line.partition("  ")
-                if relative == "PACKAGE_MANIFEST.json":
-                    digest = manifest_sha
-                rewritten_sums.append(f"{digest}{separator}{relative}")
-            self._rewrite_members(
-                package,
-                {
-                    "PACKAGE_MANIFEST.json": ambiguous_bytes,
-                    "SHA256SUMS.txt": ("\n".join(rewritten_sums) + "\n").encode("utf-8"),
-                },
-            )
+            self._rewrite_manifest_and_rehash_sums(package, ambiguous.encode("utf-8"))
             before = package.read_bytes()
 
             with self.assertRaisesRegex(
                 ValueError,
                 "PACKAGE_MANIFEST.json contains duplicate JSON object key: schema_version",
+            ):
+                bind_portable_data_tool(package, data_exe)
+
+            self.assertEqual(package.read_bytes(), before)
+
+    def test_binding_rejects_nonstandard_manifest_before_mutating_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package, data_exe = self._build_base(Path(tmp), "h" * 40)
+            manifest = self._read_member(package, "PACKAGE_MANIFEST.json").decode("utf-8")
+            invalid = manifest.replace(
+                '  "schema_version": 1',
+                '  "metadata": {"nested_score": Infinity},\n  "schema_version": 1',
+            )
+            self.assertNotEqual(manifest, invalid)
+            self._rewrite_manifest_and_rehash_sums(package, invalid.encode("utf-8"))
+            before = package.read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "PACKAGE_MANIFEST.json contains non-standard JSON constant: Infinity",
             ):
                 bind_portable_data_tool(package, data_exe)
 

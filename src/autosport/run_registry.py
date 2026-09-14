@@ -408,6 +408,74 @@ class RunRegistry:
         self._validate_entry(key, item)
         self._write(state)
 
+    def _durable_summary_lineage_bindings(self) -> tuple[OutcomeLineageBinding, ...]:
+        """Recover lineage trust duplicated into checksum-bound completed summaries.
+
+        Legacy summaries carry no such field and remain outside this check. A summary
+        that does carry the field must still be bound to its existing transaction
+        manifest SHA-256 so registry downgrade detection cannot trust an unbound copy.
+        """
+        bindings: list[OutcomeLineageBinding] = []
+        for summary_path in sorted(self.path.parent.glob("run-*.json")):
+            if not summary_path.is_file():
+                continue
+            try:
+                text = summary_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            if f'"{_LINEAGE_TRUST_FIELD}"' not in text:
+                continue
+            try:
+                summary = json.loads(
+                    text,
+                    object_pairs_hook=_reject_duplicate_json_keys,
+                    parse_constant=_reject_nonfinite_json_constant,
+                )
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError("durable lineage-trust run summary is invalid") from exc
+            if not isinstance(summary, dict):
+                raise ValueError("durable lineage-trust run summary is invalid")
+            raw_binding = summary.get(_LINEAGE_TRUST_FIELD)
+            if raw_binding is None:
+                continue
+            run_id = summary.get("run_id")
+            if not isinstance(run_id, str) or not run_id or summary_path.name != f"run-{run_id}.json":
+                raise ValueError("durable lineage-trust run summary identity is invalid")
+
+            manifest_path = self.path.parent / ".run-transactions" / run_id / "manifest.json"
+            if not manifest_path.is_file():
+                raise ValueError("durable lineage-trust run summary lacks transaction manifest")
+            try:
+                manifest = json.loads(
+                    manifest_path.read_text(encoding="utf-8"),
+                    object_pairs_hook=_reject_duplicate_json_keys,
+                    parse_constant=_reject_nonfinite_json_constant,
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+                raise ValueError("durable lineage-trust transaction manifest is invalid") from exc
+            if not isinstance(manifest, dict) or manifest.get("run_id") != run_id:
+                raise ValueError("durable lineage-trust transaction manifest identity is invalid")
+            targets = manifest.get("targets")
+            if not isinstance(targets, dict) or targets.get("summary") != summary_path.name:
+                raise ValueError("durable lineage-trust transaction summary target is invalid")
+            new_state = manifest.get("new")
+            expected_summary_sha = (
+                new_state.get("summary_sha256") if isinstance(new_state, dict) else None
+            )
+            if not _is_canonical_sha256(expected_summary_sha):
+                raise ValueError("durable lineage-trust transaction lacks summary SHA-256")
+            if sha256_file(summary_path) != expected_summary_sha:
+                raise ValueError("durable lineage-trust run summary SHA-256 mismatch")
+            try:
+                binding = outcome_lineage_binding_from_payload(
+                    raw_binding,
+                    context="durable run summary outcome_lineage_trust",
+                )
+            except OutcomeLineageTrustError as exc:
+                raise ValueError("durable run summary contains invalid outcome lineage trust") from exc
+            bindings.append(binding)
+        return tuple(bindings)
+
     @staticmethod
     def _outcome_lineage_trust_bindings(
         state: dict,
@@ -632,7 +700,32 @@ class RunRegistry:
         if not isinstance(raw.get("runs"), dict):
             raise ValueError("invalid run registry")
 
+        durable_summary_bindings = self._durable_summary_lineage_bindings()
+        if schema_version == _LEGACY_SCHEMA_VERSION and durable_summary_bindings:
+            raise ValueError(
+                "run registry lineage-trust schema was downgraded despite durable run summary evidence"
+            )
+
         trusted_bindings = self._outcome_lineage_trust_bindings(raw)
+        if schema_version == _LINEAGE_TRUST_SCHEMA_VERSION:
+            for durable in durable_summary_bindings:
+                identity = (durable.source_identity, durable.record_id)
+                trusted = trusted_bindings.get(identity)
+                if trusted is None:
+                    raise ValueError(
+                        "run registry lost lineage trust preserved by durable run summary"
+                    )
+                try:
+                    assert_compatible_outcome_lineages(trusted, durable)
+                except OutcomeLineageTrustError as exc:
+                    raise ValueError(
+                        "run registry conflicts with lineage trust preserved by durable run summary"
+                    ) from exc
+                if len(trusted.revisions) < len(durable.revisions):
+                    raise ValueError(
+                        "run registry lineage trust is older than durable run summary evidence"
+                    )
+
         seen_run_ids: set[str] = set()
         longest_lineage_by_identity: dict[tuple[str, str], OutcomeLineageBinding] = {}
         for key, item in raw["runs"].items():

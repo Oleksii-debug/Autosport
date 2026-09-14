@@ -131,13 +131,12 @@ def _require_recorded_base_state(
         raise ReconciliationError("canonical economic base files are missing")
 
     actual_book = sha256_file(paper_book_path)
-    actual_ledger = sha256_file(decision_ledger_path)
-    if actual_book != expected_book or actual_ledger != expected_ledger:
-        raise ReconciliationError("canonical economic state no longer matches the recorded transaction BASE")
     try:
-        JsonlDecisionLedger(decision_ledger_path).verify_integrity()
+        ledger_snapshot = JsonlDecisionLedger(decision_ledger_path).verified_snapshot()
     except DecisionLedgerIntegrityError as exc:
         raise ReconciliationError(
             f"canonical Decision Ledger integrity validation failed: {exc}"
         ) from exc
-    return actual_book, actual_ledger
+    if actual_book != expected_book or ledger_snapshot.sha256 != expected_ledger:
+        raise ReconciliationError("canonical economic state no longer matches the recorded transaction BASE")
+    return actual_book, ledger_snapshot.sha256

@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
+from .decision_ledger import (
+    DecisionLedgerIntegrityError,
+    JsonlDecisionLedger,
+    VerifiedDecisionLedgerSnapshot,
+)
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
 
@@ -96,18 +100,27 @@ class RunTransaction:
             self._hash_field(manifest, "base", "paper_book_sha256"),
             "PaperBook",
         )
-        self._require_hash(
+        canonical_snapshot = self._require_decision_ledger_snapshot(
             canonical_ledger,
             self._hash_field(manifest, "base", "decision_ledger_sha256"),
             "Decision Ledger",
         )
-        self._verify_decision_ledger(canonical_ledger, "canonical Decision Ledger")
         book.save(self.staged_book_path)
         ensure_durable_file(self.run_ledger_path)
-        self._verify_decision_ledger(self.run_ledger_path, "staged run Decision Ledger")
-        self._write_combined_ledger(canonical_ledger, self.run_ledger_path, self.staged_ledger_path)
-        self._verify_decision_ledger(self.staged_ledger_path, "combined staged Decision Ledger")
-        return sha256_file(self.staged_book_path), sha256_file(self.staged_ledger_path)
+        run_snapshot = self._verified_decision_ledger(
+            self.run_ledger_path,
+            "staged run Decision Ledger",
+        )
+        self._write_combined_ledger(
+            canonical_snapshot.payload,
+            run_snapshot.payload,
+            self.staged_ledger_path,
+        )
+        staged_snapshot = self._verified_decision_ledger(
+            self.staged_ledger_path,
+            "combined staged Decision Ledger",
+        )
+        return sha256_file(self.staged_book_path), staged_snapshot.sha256
 
     def precommit(self, summary_payload: dict[str, Any]) -> dict[str, Any]:
         manifest = self._read_manifest()
@@ -120,22 +133,18 @@ class RunTransaction:
             self._hash_field(manifest, "base", "paper_book_sha256"),
             "PaperBook",
         )
-        self._require_hash(
+        self._require_decision_ledger_snapshot(
             self.workspace / "decisions.jsonl",
             self._hash_field(manifest, "base", "decision_ledger_sha256"),
             "Decision Ledger",
         )
-        self._verify_decision_ledger(
-            self.workspace / "decisions.jsonl",
-            "canonical Decision Ledger",
-        )
-        self._verify_decision_ledger(
+        staged_snapshot = self._verified_decision_ledger(
             self.staged_ledger_path,
             "combined staged Decision Ledger",
         )
 
         book_hash = sha256_file(self.staged_book_path)
-        ledger_hash = sha256_file(self.staged_ledger_path)
+        ledger_hash = staged_snapshot.sha256
         summary = dict(summary_payload)
         summary["paper_book_sha256"] = book_hash
         summary["decision_ledger_sha256"] = ledger_hash
@@ -213,15 +222,15 @@ class RunTransaction:
 
         phase = manifest["phase"]
         if phase == "staging":
-            tx._require_hash(tx.workspace / "paper_book.json", tx._hash_field(manifest, "base", "paper_book_sha256"), "PaperBook")
             tx._require_hash(
+                tx.workspace / "paper_book.json",
+                tx._hash_field(manifest, "base", "paper_book_sha256"),
+                "PaperBook",
+            )
+            tx._require_decision_ledger_snapshot(
                 tx.workspace / "decisions.jsonl",
                 tx._hash_field(manifest, "base", "decision_ledger_sha256"),
                 "Decision Ledger",
-            )
-            tx._verify_decision_ledger(
-                tx.workspace / "decisions.jsonl",
-                "canonical Decision Ledger",
             )
             summary_target = tx.workspace / f"run-{run_id}.json"
             if summary_target.exists():
@@ -231,15 +240,15 @@ class RunTransaction:
             return TransactionRecovery("aborted_uncommitted")
 
         if phase == "aborted":
-            tx._require_hash(tx.workspace / "paper_book.json", tx._hash_field(manifest, "base", "paper_book_sha256"), "PaperBook")
             tx._require_hash(
+                tx.workspace / "paper_book.json",
+                tx._hash_field(manifest, "base", "paper_book_sha256"),
+                "PaperBook",
+            )
+            tx._require_decision_ledger_snapshot(
                 tx.workspace / "decisions.jsonl",
                 tx._hash_field(manifest, "base", "decision_ledger_sha256"),
                 "Decision Ledger",
-            )
-            tx._verify_decision_ledger(
-                tx.workspace / "decisions.jsonl",
-                "canonical Decision Ledger",
             )
             return TransactionRecovery("aborted_uncommitted")
 
@@ -356,13 +365,35 @@ class RunTransaction:
             raise RunTransactionError(f"{label} SHA-256 canonical hash is not the expected transaction state")
 
     @staticmethod
-    def _verify_decision_ledger(path: Path, label: str) -> int:
+    def _verified_decision_ledger(
+        path: Path,
+        label: str,
+    ) -> VerifiedDecisionLedgerSnapshot:
         try:
-            return JsonlDecisionLedger(path).verify_integrity()
+            return JsonlDecisionLedger(path).verified_snapshot()
         except DecisionLedgerIntegrityError as exc:
             raise RunTransactionError(
                 f"{label} integrity validation failed: {exc}"
             ) from exc
+
+    @classmethod
+    def _require_decision_ledger_snapshot(
+        cls,
+        path: Path,
+        expected_hash: str,
+        label: str,
+    ) -> VerifiedDecisionLedgerSnapshot:
+        snapshot = cls._verified_decision_ledger(path, f"canonical {label}")
+        if snapshot.sha256 != expected_hash:
+            raise RunTransactionError(
+                f"{label} SHA-256 canonical hash is not the expected transaction state"
+            )
+        return snapshot
+
+    @staticmethod
+    def _verify_decision_ledger(path: Path, label: str) -> int:
+        """Compatibility wrapper for callers/tests that only need semantic validation."""
+        return RunTransaction._verified_decision_ledger(path, label).record_count
 
     def _validate_precommit_evidence(self, manifest: dict[str, Any]) -> None:
         expected_book_hash = self._hash_field(manifest, "new", "paper_book_sha256")
@@ -420,21 +451,23 @@ class RunTransaction:
             raise RunTransactionError("Decision Ledger canonical file is missing")
         base_hash = self._hash_field(manifest, "base", "decision_ledger_sha256")
         new_hash = self._hash_field(manifest, "new", "decision_ledger_sha256")
-        current_hash = sha256_file(target)
-        if current_hash not in {base_hash, new_hash}:
+        current_snapshot = self._verified_decision_ledger(
+            target,
+            "canonical Decision Ledger",
+        )
+        if current_snapshot.sha256 not in {base_hash, new_hash}:
             raise RunTransactionError(
                 "Decision Ledger SHA-256 canonical hash is neither BASE nor NEW"
             )
-        self._verify_decision_ledger(target, "canonical Decision Ledger")
-        if current_hash == base_hash:
+        if current_snapshot.sha256 == base_hash:
             if not self.staged_ledger_path.is_file():
                 raise RunTransactionError("staged Decision Ledger artifact is missing")
-            if sha256_file(self.staged_ledger_path) != new_hash:
-                raise RunTransactionError("staged Decision Ledger artifact hash mismatch")
-            self._verify_decision_ledger(
+            staged_snapshot = self._verified_decision_ledger(
                 self.staged_ledger_path,
                 "combined staged Decision Ledger",
             )
+            if staged_snapshot.sha256 != new_hash:
+                raise RunTransactionError("staged Decision Ledger artifact hash mismatch")
 
     @classmethod
     def _promote_base_or_new(
@@ -475,14 +508,12 @@ class RunTransaction:
             raise RunTransactionError(f"committed {label} artifact hash mismatch")
 
     @staticmethod
-    def _write_combined_ledger(base: Path, appended: Path, destination: Path) -> None:
+    def _write_combined_ledger(base: bytes, appended: bytes, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_suffix(destination.suffix + ".tmp")
         with temporary.open("wb") as output:
-            for source in (base, appended):
-                with source.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        output.write(chunk)
+            output.write(base)
+            output.write(appended)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, destination)

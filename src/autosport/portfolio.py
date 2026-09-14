@@ -18,7 +18,14 @@ class PortfolioReport:
 
 
 class PortfolioEngine:
-    """Scenario P&L engine using canonical quote keys, exact enumeration when bounded, deterministic sampling otherwise."""
+    """Scenario P&L engine with bounded exact enumeration and deterministic sampling.
+
+    ``exclusive_groups`` is an explicit mutual-exclusivity contract supplied by the
+    caller. It does *not* prove that the listed quote keys exhaust every terminal
+    outcome of the underlying market. To avoid false exact/worst-case claims, every
+    supplied group therefore includes a conservative ``none of the listed quotes``
+    state and reports are truth-labeled as conservative.
+    """
 
     def __init__(self, max_exact_states: int = 100_000, sample_count: int = 20_000, seed: int = 7) -> None:
         if isinstance(max_exact_states, bool) or not isinstance(max_exact_states, int) or max_exact_states < 1:
@@ -69,20 +76,23 @@ class PortfolioEngine:
         ungrouped = sorted(all_keys - grouped)
         state_count = 2 ** len(ungrouped)
         for group in groups:
-            state_count *= len(group)
+            # A set supplied by the caller proves mutual exclusivity only. It does
+            # not prove that one of its members must win, so preserve the possible
+            # terminal state where none of the listed quote keys wins.
+            state_count *= len(group) + 1
         if state_count <= self.max_exact_states:
             profits = list(self._exact_profits(open_tickets, groups, ungrouped))
-            mode = "exact"
+            mode = "conservative-enumeration" if groups else "exact"
         else:
             profits = list(self._sample_profits(open_tickets, groups, ungrouped))
-            mode = "approximate"
+            mode = "conservative-approximate" if groups else "approximate"
         return PortfolioReport(mode, len(profits), min(profits), max(profits), sum(profits, Decimal("0")) / Decimal(len(profits)))
 
     def _exact_profits(self, tickets, groups, ungrouped):
-        group_choices = [sorted(group) for group in groups]
+        group_choices = [tuple(sorted(group)) + (None,) for group in groups]
         group_product = itertools.product(*group_choices) if group_choices else [()]
         for selected_group_outcomes in group_product:
-            base = set(selected_group_outcomes)
+            base = {selection for selection in selected_group_outcomes if selection is not None}
             for mask in range(2 ** len(ungrouped)):
                 winners = set(base)
                 winners.update(selection for index, selection in enumerate(ungrouped) if mask & (1 << index))
@@ -90,8 +100,12 @@ class PortfolioEngine:
 
     def _sample_profits(self, tickets, groups, ungrouped):
         rng = random.Random(self.seed)
-        group_choices = [tuple(sorted(group)) for group in groups]
+        group_choices = [tuple(sorted(group)) + (None,) for group in groups]
         for _ in range(self.sample_count):
-            winners = {rng.choice(group) for group in group_choices}
+            winners: set[str] = set()
+            for group in group_choices:
+                selected = rng.choice(group)
+                if selected is not None:
+                    winners.add(selected)
             winners.update(selection for selection in ungrouped if rng.random() < 0.5)
             yield self.scenario_profit(tickets, winners)

@@ -62,6 +62,34 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
         self.assertEqual(report.best_case, Decimal("0"))
         self.assertEqual(report.mean_case, Decimal("0"))
 
+    def test_partial_singleton_group_reserves_unlisted_terminal_outcome(self) -> None:
+        book = PaperBook("100")
+        alice = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([alice], "10")
+
+        report = PortfolioEngine().analyse([ticket], exclusive_groups=[{alice.quote_key}])
+
+        self.assertEqual(report.mode, "conservative-enumeration")
+        self.assertEqual(report.scenario_count, 2)
+        self.assertEqual(report.worst_case, Decimal("-10"))
+        self.assertEqual(report.best_case, Decimal("10"))
+
+    def test_multi_member_group_does_not_claim_terminal_completeness(self) -> None:
+        book = PaperBook("100")
+        alice = TicketLeg("event", "winner", "alice", Decimal("2"))
+        bob = TicketLeg("event", "winner", "bob", Decimal("3"))
+        tickets = [book.open_ticket([alice], "10"), book.open_ticket([bob], "10")]
+
+        report = PortfolioEngine().analyse(
+            tickets,
+            exclusive_groups=[{alice.quote_key, bob.quote_key}],
+        )
+
+        self.assertEqual(report.mode, "conservative-enumeration")
+        self.assertEqual(report.scenario_count, 3)
+        self.assertEqual(report.worst_case, Decimal("-20"))
+        self.assertEqual(report.best_case, Decimal("10"))
+
     def test_valid_approximate_configuration_produces_requested_finite_samples(self) -> None:
         book = PaperBook("100")
         alice = TicketLeg("event", "winner", "alice", Decimal("2"))
@@ -83,7 +111,7 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
             TicketLeg("event-a", "winner", "a2", Decimal("10")),
             TicketLeg("event-b", "winner", "b1", Decimal("3")),
             TicketLeg("event-b", "winner", "b2", Decimal("30")),
-            TicketLeg("event-b", "winner", "b3", Decimal("300")),
+            TicketLeg("event-b", "winnner", "b3", Decimal("300")),
         )
         tickets = [book.open_ticket([leg], "1") for leg in legs]
         group_a = {legs[0].quote_key, legs[1].quote_key}
@@ -93,6 +121,7 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
         forward = engine.analyse(tickets, exclusive_groups=[group_a, group_b])
         reverse = engine.analyse(tickets, exclusive_groups=[group_b, group_a])
 
+        self.assertEqual(forward.mode, "conservative-approximate")
         self.assertEqual(forward, reverse)
 
 

@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
+from .forecasting import parse_iso_timestamp
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -20,6 +21,18 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
 
 def _reject_nonfinite_json_constant(value: str) -> None:
     raise ValueError(f"PaperBook snapshot contains non-finite JSON constant: {value}")
+
+
+def _validate_placed_at(value: object, *, snapshot: bool = False) -> str:
+    label = "PaperBook snapshot placed_at" if snapshot else "placed_at"
+    message = f"{label} must be a non-empty trimmed timezone-aware ISO timestamp"
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise ValueError(message)
+    try:
+        parse_iso_timestamp(value)
+    except ValueError as exc:
+        raise ValueError(message) from exc
+    return value
 
 
 class PaperBook:
@@ -55,8 +68,9 @@ class PaperBook:
             self._require_finite(leg.locked_odds, "locked_odds")
             if leg.locked_odds <= 1:
                 raise ValueError("decimal odds must be greater than 1")
+        ticket_placed_at = _validate_placed_at(utc_now_iso() if placed_at is None else placed_at)
         ticket = PaperTicket(
-            ticket_id=str(uuid.uuid4()), stake=amount, legs=ticket_legs, placed_at=placed_at or utc_now_iso(), strategy_reason=reason
+            ticket_id=str(uuid.uuid4()), stake=amount, legs=ticket_legs, placed_at=ticket_placed_at, strategy_reason=reason
         )
         self.balance -= amount
         self.tickets[ticket.ticket_id] = ticket
@@ -93,7 +107,7 @@ class PaperBook:
                 {
                     "ticket_id": t.ticket_id,
                     "stake": str(t.stake),
-                    "placed_at": t.placed_at,
+                    "placed_at": _validate_placed_at(t.placed_at, snapshot=True),
                     "status": t.status.value,
                     "payout": str(t.payout),
                     "strategy_reason": t.strategy_reason,
@@ -128,6 +142,7 @@ class PaperBook:
 
         expected_balance = book.initial_bankroll
         for ticket in book.tickets.values():
+            _validate_placed_at(ticket.placed_at, snapshot=True)
             cls._require_finite(ticket.stake, f"stake for ticket {ticket.ticket_id}")
             cls._require_finite(ticket.payout, f"payout for ticket {ticket.ticket_id}")
             if ticket.stake <= 0:

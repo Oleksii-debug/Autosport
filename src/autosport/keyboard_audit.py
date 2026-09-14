@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from .gui import AUTOMATION_IDS
+from .integrity import atomic_write_json
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 
 
@@ -175,8 +175,5 @@ def run_keyboard_audit(output_path: str | Path) -> int:
                 app.close_app()
             except Exception:
                 pass
-    destination.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(destination, report)
     return 0 if report.get("status") == "PASS" else 1

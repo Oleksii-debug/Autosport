@@ -165,7 +165,10 @@ def _decimal_number(
     positive: bool = False,
     non_negative: bool = False,
 ) -> Decimal:
-    if isinstance(value, bool):
+    # Betfair Stream ladder scalars are JSON numbers. Do not normalize strings or
+    # other coercible objects into executable-quote evidence: source type is part of
+    # the provider contract even when the rendered decimal text happens to match.
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
         raise ValueError(f"{field} must be a finite number")
     try:
         parsed = Decimal(str(value))

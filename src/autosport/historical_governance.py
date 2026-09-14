@@ -56,11 +56,34 @@ def _read_bytes(path: Path, *, context: str) -> bytes:
         raise ValueError(f"{context} is not readable: {path}") from exc
 
 
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
 def _object_bytes(payload: bytes, *, context: str, path: Path) -> dict[str, Any]:
     try:
-        raw = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise ValueError(f"{context} is not readable valid JSON: {path}") from exc
+    try:
+        raw = json.loads(
+            text,
+            object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_nonfinite_json,
+        )
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{context} is not readable valid JSON: {path}") from exc
+    except ValueError as exc:
+        raise ValueError(f"{context} contains invalid JSON semantics: {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"{context} must be a JSON object")
     return raw
@@ -140,7 +163,7 @@ def verify_governance_authority_binding(
     proof_bytes = _read_bytes(proof_path, context="governance proof")
     proof = _object_bytes(proof_bytes, context="governance proof", path=proof_path)
     proof_sha256 = _sha256_bytes(proof_bytes)
-    if int(proof.get("schema_version", 0)) != 1:
+    if type(proof.get("schema_version")) is not int or proof["schema_version"] != 1:
         raise ValueError("governance proof schema_version must be 1")
     if proof.get("kind") != _GOVERNANCE_PROOF_KIND:
         raise ValueError(f"governance proof kind must be {_GOVERNANCE_PROOF_KIND}")
@@ -174,7 +197,7 @@ def verify_governance_authority_binding(
         context="governance authority record",
         path=authority_path,
     )
-    if int(authority.get("schema_version", 0)) != 1:
+    if type(authority.get("schema_version")) is not int or authority["schema_version"] != 1:
         raise ValueError("governance authority record schema_version must be 1")
     if authority.get("kind") != _AUTHORITY_RECORD_KIND:
         raise ValueError(f"governance authority record kind must be {_AUTHORITY_RECORD_KIND}")

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from autosport.domain import MarketEvent
 from autosport.replay import ReplayEngine
 
@@ -50,3 +52,21 @@ def test_replay_jsonl_without_ingest_timestamp_has_stable_dataset_hash(tmp_path)
     assert first.events[0].ingest_ts == OBSERVED_TS
     assert second.events[0].ingest_ts == OBSERVED_TS
     assert first.dataset_hash == second.dataset_hash
+
+
+@pytest.mark.parametrize("source_id", [7, True, "", " fixture "])
+def test_deserialization_rejects_noncanonical_source_identity(source_id: object) -> None:
+    payload = _event_payload()
+    payload["source_id"] = source_id
+
+    with pytest.raises(ValueError, match="source_id must be a non-empty trimmed string"):
+        MarketEvent.from_dict(payload)
+
+
+def test_deserialization_preserves_canonical_source_identity_byte_for_byte() -> None:
+    payload = _event_payload()
+    payload["source_id"] = "parlayapi:table_tennis"
+
+    event = MarketEvent.from_dict(payload)
+
+    assert event.source_id == "parlayapi:table_tennis"

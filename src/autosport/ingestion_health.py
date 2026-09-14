@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
+from typing import BinaryIO
 
 
 def parse_source_timestamp(value: str) -> datetime:
@@ -58,14 +59,76 @@ class SourceHealthState:
     quality_flags: tuple[str, ...] = field(default_factory=tuple)
 
 
+class _SourceHealthWriterLock:
+    """Cross-process lock for one source-health JSON read/modify/write transaction."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._handle: BinaryIO | None = None
+
+    def __enter__(self) -> "_SourceHealthWriterLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+                os.fsync(handle.fileno())
+            handle.seek(0)
+            self._lock_handle(handle)
+        except BaseException:
+            handle.close()
+            raise
+        self._handle = handle
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        try:
+            self._unlock_handle(handle)
+        finally:
+            handle.close()
+            self._handle = None
+
+    @staticmethod
+    def _lock_handle(handle: BinaryIO) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            return
+
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+    @staticmethod
+    def _unlock_handle(handle: BinaryIO) -> None:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 class SourceHealthStore:
     """Durable operational projection for provider health; never used as market history."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            self._write({"schema_version": 1, "sources": {}})
+        self._lock_path = self.path.with_name(self.path.name + ".lock")
+        with self._writer_guard():
+            if not self.path.exists():
+                self._write({"schema_version": 1, "sources": {}})
 
     def get(self, source_id: str) -> SourceHealthState:
         raw = self._read()["sources"].get(source_id)
@@ -87,36 +150,41 @@ class SourceHealthStore:
         latest_source_ts: str | None,
         quality_flags: tuple[str, ...],
     ) -> SourceHealthState:
-        state = self.get(source_id)
-        state.poll_count += 1
-        state.total_received += received
-        state.total_accepted += accepted
-        state.total_rejected += rejected
-        state.consecutive_failures = 0
-        state.last_success_at = now
-        state.last_error = None
-        state.last_cursor = cursor
-        if latest_source_ts is not None:
-            if state.latest_source_ts is None or (
-                parse_source_timestamp(latest_source_ts)
-                >= parse_source_timestamp(state.latest_source_ts)
-            ):
-                state.latest_source_ts = latest_source_ts
-        state.quality_flags = tuple(sorted(set(quality_flags)))
-        state.status = "degraded" if state.quality_flags else "healthy"
-        self._put(state)
-        return state
+        with self._writer_guard():
+            state = self.get(source_id)
+            state.poll_count += 1
+            state.total_received += received
+            state.total_accepted += accepted
+            state.total_rejected += rejected
+            state.consecutive_failures = 0
+            state.last_success_at = now
+            state.last_error = None
+            state.last_cursor = cursor
+            if latest_source_ts is not None:
+                if state.latest_source_ts is None or (
+                    parse_source_timestamp(latest_source_ts)
+                    >= parse_source_timestamp(state.latest_source_ts)
+                ):
+                    state.latest_source_ts = latest_source_ts
+            state.quality_flags = tuple(sorted(set(quality_flags)))
+            state.status = "degraded" if state.quality_flags else "healthy"
+            self._put(state)
+            return state
 
     def record_failure(self, source_id: str, *, now: str, error: BaseException) -> SourceHealthState:
-        state = self.get(source_id)
-        state.poll_count += 1
-        state.total_failures += 1
-        state.consecutive_failures += 1
-        state.last_error_at = now
-        state.last_error = f"{type(error).__name__}: {error}"
-        state.status = "failed"
-        self._put(state)
-        return state
+        with self._writer_guard():
+            state = self.get(source_id)
+            state.poll_count += 1
+            state.total_failures += 1
+            state.consecutive_failures += 1
+            state.last_error_at = now
+            state.last_error = f"{type(error).__name__}: {error}"
+            state.status = "failed"
+            self._put(state)
+            return state
+
+    def _writer_guard(self) -> _SourceHealthWriterLock:
+        return _SourceHealthWriterLock(self._lock_path)
 
     def _put(self, state: SourceHealthState) -> None:
         raw = self._read()

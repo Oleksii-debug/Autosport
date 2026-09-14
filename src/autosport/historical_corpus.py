@@ -15,6 +15,7 @@ from .dataset import load_dataset
 from .domain import MarketEvent
 from .historical_governance import verify_governance_authority_binding
 from .integrity import atomic_write_json
+from .outcome_lineage import validate_outcome_source_lineage
 from .parlayapi_provider import ParlayApiTableTennisProvider
 
 
@@ -26,6 +27,22 @@ _REDISTRIBUTION_RANK = {"prohibited": 0, "internal_only": 1, "permitted": 2}
 _ALLOWED_OUTCOMES = {"win", "loss", "void"}
 _PARLAY_TERMS_REFERENCE = "https://parlay-api.com/terms"
 _PARLAY_STANDARD_RETENTION_CEILING = timedelta(days=90)
+_OUTCOME_LINEAGE_DERIVED_FIELDS = frozenset(
+    {
+        "source_record_id",
+        "source_record_revision_id",
+        "source_record_revision",
+        "source_record_revision_kind",
+        "source_record_recorded_at",
+        "source_record_predecessor_sha256",
+        "source_record_supersedes_revision_id",
+        "source_record_lineage_root_sha256",
+        "source_record_lineage_root_revision_id",
+        "source_record_lineage_depth",
+        "source_record_lineage",
+        "source_record_lineage_verified",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,8 +224,15 @@ def _outcome_provenance(
     raw = results.get("outcome_provenance")
     if not isinstance(raw, dict):
         raise ValueError("sealed results outcome_provenance must be an object")
-    if int(raw.get("schema_version", 0)) != 1:
-        raise ValueError("sealed results outcome_provenance.schema_version must be 1")
+    schema_version = raw.get("schema_version")
+    if type(schema_version) is not int or schema_version not in {1, 2}:
+        raise ValueError("sealed results outcome_provenance.schema_version must be exact integer 1 or 2")
+    reserved_lineage_fields = sorted(_OUTCOME_LINEAGE_DERIVED_FIELDS.intersection(raw))
+    if reserved_lineage_fields:
+        raise ValueError(
+            "sealed results outcome_provenance must not provide verifier-derived lineage fields: "
+            + ", ".join(reserved_lineage_fields)
+        )
     if raw.get("kind") != _OUTCOME_PROVENANCE_KIND:
         raise ValueError(
             f"sealed results outcome_provenance.kind must be {_OUTCOME_PROVENANCE_KIND}"
@@ -269,9 +293,22 @@ def _outcome_provenance(
         raise ValueError(
             "sealed outcome source record.source must match sealed results outcome_provenance.source_identity"
         )
-    source_record_outcomes = source_record.get("quote_outcomes")
-    if not isinstance(source_record_outcomes, dict):
-        raise ValueError("sealed outcome source record quote_outcomes must be an object")
+
+    lineage = None
+    if schema_version == 2:
+        lineage = validate_outcome_source_lineage(
+            source_root=source_root,
+            source_record_file=source_record_file,
+            source_record_sha256=source_record_sha256,
+            source_record=source_record,
+            expected_source_identity=source_identity,
+        )
+        source_record_outcomes = lineage.quote_outcomes
+    else:
+        source_record_outcomes = source_record.get("quote_outcomes")
+        if not isinstance(source_record_outcomes, dict):
+            raise ValueError("sealed outcome source record quote_outcomes must be an object")
+
     sealed_outcomes = results.get("quote_outcomes")
     if not isinstance(sealed_outcomes, dict):
         raise ValueError("sealed results quote_outcomes must be an object")
@@ -300,6 +337,15 @@ def _outcome_provenance(
         verified_at,
         field="sealed results outcome_provenance.verified_at",
     )
+    if lineage is not None:
+        source_recorded_dt = _timestamp(
+            lineage.recorded_at,
+            field="sealed outcome source record.recorded_at",
+        )
+        if available_dt < source_recorded_dt:
+            raise ValueError(
+                "sealed results outcome_provenance.available_at must not precede source record recorded_at"
+            )
     if reveal_dt < available_dt:
         raise ValueError(
             "outcome_reveal_after must not precede sealed outcome source availability"
@@ -332,7 +378,7 @@ def _outcome_provenance(
             "sealed results outcome_provenance redistribution_policy=permitted requires redistribution_verified=true"
         )
 
-    return {
+    normalized = {
         **raw,
         "source_identity": source_identity,
         "source_record_file": source_record_file,
@@ -348,6 +394,36 @@ def _outcome_provenance(
         "redistribution_verified": redistribution_verified,
         "licensing_or_retention_verified": True,
     }
+    if lineage is not None:
+        normalized.update(
+            {
+                "source_record_id": lineage.record_id,
+                "source_record_revision_id": lineage.revision_id,
+                "source_record_revision": lineage.revision,
+                "source_record_revision_kind": lineage.revision_kind,
+                "source_record_recorded_at": lineage.recorded_at,
+                "source_record_predecessor_sha256": lineage.predecessor_record_sha256,
+                "source_record_supersedes_revision_id": lineage.supersedes_revision_id,
+                "source_record_lineage_root_sha256": lineage.lineage_root_sha256,
+                "source_record_lineage_root_revision_id": lineage.lineage_root_revision_id,
+                "source_record_lineage_depth": lineage.lineage_depth,
+                "source_record_lineage": [
+                    {
+                        "revision_id": revision.revision_id,
+                        "revision": revision.revision,
+                        "revision_kind": revision.revision_kind,
+                        "recorded_at": revision.recorded_at,
+                        "record_sha256": revision.record_sha256,
+                        "predecessor_record_sha256": revision.predecessor_record_sha256,
+                        "supersedes_revision_id": revision.supersedes_revision_id,
+                        "correction_reason": revision.correction_reason,
+                    }
+                    for revision in lineage.revisions
+                ],
+                "source_record_lineage_verified": True,
+            }
+        )
+    return normalized
 
 
 def _snapshot(
@@ -590,8 +666,9 @@ def assemble_historical_corpus(
 
     results_path_obj = Path(results_path)
     results = _json_object(results_path_obj, context="sealed results")
-    if int(results.get("schema_version", 0)) != 1:
-        raise ValueError("sealed results schema_version must be 1")
+    results_schema_version = results.get("schema_version")
+    if type(results_schema_version) is not int or results_schema_version != 1:
+        raise ValueError("sealed results schema_version must be exact integer 1")
     outcomes = results.get("quote_outcomes")
     if not isinstance(outcomes, dict):
         raise ValueError("sealed results quote_outcomes must be an object")
@@ -664,6 +741,63 @@ def assemble_historical_corpus(
         market_sha = _sha256(market_destination)
         results_sha = _sha256(results_destination)
 
+        outcome_evidence = {
+            "source_identity": outcome_provenance["source_identity"],
+            "source_record_file": outcome_provenance["source_record_file"],
+            "source_record_sha256": outcome_provenance["source_record_sha256"],
+            "source_record_checksum_verified": True,
+            "quote_outcomes_bound_to_source_record": True,
+            "quote_outcomes_sha256": outcome_provenance["quote_outcomes_sha256"],
+            "source_record_redistributed": False,
+            "terms_reference": outcome_provenance["terms_reference"],
+            "retention_basis": outcome_provenance["retention_basis"],
+            "authority_reference": outcome_provenance["authority_reference"],
+            "available_at": outcome_provenance["available_at"],
+            "acquired_at": outcome_provenance["acquired_at"],
+            "verified_at": outcome_provenance["verified_at"],
+            "licensing_or_retention_verified": True,
+            "redistribution_policy": outcome_provenance["redistribution_policy"],
+            "redistribution_verified": outcome_provenance["redistribution_verified"],
+        }
+        if outcome_provenance["schema_version"] == 2:
+            if outcome_provenance.get("source_record_lineage_verified") is not True:
+                raise ValueError("validated schema-v2 outcome provenance lost lineage verification")
+            outcome_evidence.update(
+                {
+                    "source_record_id": outcome_provenance["source_record_id"],
+                    "source_record_revision_id": outcome_provenance[
+                        "source_record_revision_id"
+                    ],
+                    "source_record_revision": outcome_provenance["source_record_revision"],
+                    "source_record_revision_kind": outcome_provenance[
+                        "source_record_revision_kind"
+                    ],
+                    "source_record_recorded_at": outcome_provenance[
+                        "source_record_recorded_at"
+                    ],
+                    "source_record_predecessor_sha256": outcome_provenance[
+                        "source_record_predecessor_sha256"
+                    ],
+                    "source_record_supersedes_revision_id": outcome_provenance[
+                        "source_record_supersedes_revision_id"
+                    ],
+                    "source_record_lineage_root_sha256": outcome_provenance[
+                        "source_record_lineage_root_sha256"
+                    ],
+                    "source_record_lineage_root_revision_id": outcome_provenance[
+                        "source_record_lineage_root_revision_id"
+                    ],
+                    "source_record_lineage_depth": outcome_provenance[
+                        "source_record_lineage_depth"
+                    ],
+                    "source_record_lineage": [
+                        dict(revision)
+                        for revision in outcome_provenance["source_record_lineage"]
+                    ],
+                    "source_record_lineage_verified": True,
+                }
+            )
+
         governance = {
             "source_identity": proof["source_identity"],
             "terms_reference": proof["terms_reference"],
@@ -707,24 +841,7 @@ def assemble_historical_corpus(
                 "verified_at": proof["verified_at"],
                 "redistribution_verified": proof["redistribution_verified"],
             },
-            "outcome_evidence": {
-                "source_identity": outcome_provenance["source_identity"],
-                "source_record_file": outcome_provenance["source_record_file"],
-                "source_record_sha256": outcome_provenance["source_record_sha256"],
-                "source_record_checksum_verified": True,
-                "quote_outcomes_bound_to_source_record": True,
-                "quote_outcomes_sha256": outcome_provenance["quote_outcomes_sha256"],
-                "source_record_redistributed": False,
-                "terms_reference": outcome_provenance["terms_reference"],
-                "retention_basis": outcome_provenance["retention_basis"],
-                "authority_reference": outcome_provenance["authority_reference"],
-                "available_at": outcome_provenance["available_at"],
-                "acquired_at": outcome_provenance["acquired_at"],
-                "verified_at": outcome_provenance["verified_at"],
-                "licensing_or_retention_verified": True,
-                "redistribution_policy": outcome_provenance["redistribution_policy"],
-                "redistribution_verified": outcome_provenance["redistribution_verified"],
-            },
+            "outcome_evidence": outcome_evidence,
         }
         manifest = {
             "schema_version": 2,
@@ -790,7 +907,8 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "separate sealed results JSON with outcome provenance naming a sibling source artifact "
-            "whose SHA-256 and normalized outcome labels are verified during assembly"
+            "whose SHA-256 and normalized outcome labels are verified during assembly; provenance "
+            "schema 2 additionally requires verified append-only correction lineage"
         ),
     )
     parser.add_argument(

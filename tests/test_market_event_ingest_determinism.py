@@ -177,6 +177,29 @@ def test_deserialization_preserves_canonical_optional_fields() -> None:
     assert event.score_state == "2-1"
     assert event.metadata == metadata
     assert event.metadata is not metadata
+    assert event.metadata["tags"] is not metadata["tags"]
+    assert event.metadata["nested"] is not metadata["nested"]
+
+
+def test_deserialization_snapshots_nested_metadata_from_caller_mutation() -> None:
+    payload = _event_payload()
+    nested = {"value": 1}
+    items: list[object] = [1, {"name": "verified"}]
+    metadata: dict[str, object] = {"nested": nested, "items": items}
+    payload["metadata"] = metadata
+
+    event = MarketEvent.from_dict(payload)
+    snapshot = event.to_dict()
+
+    nested["value"] = float("nan")
+    items.append(("not", "canonical-json"))
+    metadata["late"] = {"unvalidated": True}
+
+    assert event.metadata == {
+        "nested": {"value": 1},
+        "items": [1, {"name": "verified"}],
+    }
+    assert event.to_dict() == snapshot
 
 
 @pytest.mark.parametrize(

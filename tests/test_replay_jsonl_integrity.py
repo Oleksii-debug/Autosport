@@ -92,10 +92,12 @@ class ReplayJsonlIntegrityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "market.jsonl"
             payload = json.dumps(self._event_payload())
+            surrogate_escape = "\\" + "ud800"
             payload = payload.replace(
                 '"provider_sequence": 7',
-                r'"provider_sequence": "\ud800"'.replace(r'\"', '"'),
+                f'"provider_sequence": "{surrogate_escape}"',
             )
+            self.assertIn(surrogate_escape, payload)
             path.write_text(payload + "\n", encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, r"invalid replay JSONL at line 1"):

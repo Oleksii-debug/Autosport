@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -191,7 +192,15 @@ def _candidate_ticket(
     if candidate.expected_profit_per_unit != recomputed_ev:
         raise ValueError("candidate expected_profit_per_unit does not match its legs")
 
-    identity = "|".join(item.quote_key for item in candidate.legs) + f"|stake={stake}"
+    identity = json.dumps(
+        {
+            "legs": [list(leg.ticket_identity()) for leg in candidate.legs],
+            "stake": str(stake),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     ticket_id = "optimizer:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
     return PaperTicket(
         ticket_id=ticket_id,
@@ -204,12 +213,11 @@ def _candidate_ticket(
 
 
 def _ticket_leg_from_candidate(leg: CandidateLeg) -> TicketLeg:
-    parts = leg.quote_key.split("|", 2)
-    if len(parts) != 3 or not all(parts):
-        raise ValueError(f"candidate quote_key is not canonical event|market|selection: {leg.quote_key}")
-    event_id, market_id, selection_id = parts
-    if event_id != leg.event_id:
-        raise ValueError("candidate event_id does not match quote_key")
+    event_id, market_id, selection_id = leg.ticket_identity()
+    if any("|" in component for component in (event_id, market_id, selection_id)):
+        raise ValueError(
+            "candidate structured identity cannot enter quote-key scenario risk while an identity component contains '|'"
+        )
     if not leg.decimal_odds.is_finite():
         raise ValueError("candidate decimal odds must be finite")
     if leg.decimal_odds <= 1:

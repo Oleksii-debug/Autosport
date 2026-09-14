@@ -142,6 +142,12 @@ class RunTransaction:
         summary["transaction_schema_version"] = self.SCHEMA_VERSION
         summary["transaction_run_id"] = self.run_id
         atomic_write_json(self.staged_summary_path, summary)
+        validated_summary = self._read_strict_json_file(
+            self.staged_summary_path,
+            label="staged run summary",
+        )
+        if not isinstance(validated_summary, dict):
+            raise RunTransactionError("staged run summary schema is invalid")
         summary_hash = sha256_file(self.staged_summary_path)
 
         manifest["new"] = {
@@ -339,7 +345,7 @@ class RunTransaction:
             or len(value) != 64
             or any(character not in "0123456789abcdef" for character in value)
         ):
-            raise RunTransactionError(f"transaction manifest lacks valid {section}.{field}")
+            raise RunTransactionError(f"transaction manifest lacks {section}.{field} or value is invalid")
         return value
 
     @staticmethod
@@ -389,7 +395,6 @@ class RunTransaction:
             expected_bindings = {
                 "paper_book_sha256": expected_book_hash,
                 "decision_ledger_sha256": expected_ledger_hash,
-                "transaction_schema_version": self.SCHEMA_VERSION,
                 "transaction_run_id": self.run_id,
             }
             mismatches = [
@@ -397,6 +402,13 @@ class RunTransaction:
                 for field_name, expected_value in expected_bindings.items()
                 if summary.get(field_name) != expected_value
             ]
+            summary_schema = summary.get("transaction_schema_version")
+            if (
+                isinstance(summary_schema, bool)
+                or not isinstance(summary_schema, int)
+                or summary_schema != self.SCHEMA_VERSION
+            ):
+                mismatches.append("transaction_schema_version")
             if mismatches:
                 raise RunTransactionError(
                     f"{label} transaction binding mismatch: " + ",".join(sorted(mismatches))

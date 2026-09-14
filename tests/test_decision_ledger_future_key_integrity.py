@@ -25,6 +25,19 @@ class DecisionLedgerFutureKeyIntegrityTests(unittest.TestCase):
             recorded_at="2026-01-01T00:00:01+00:00",
         )
 
+    @staticmethod
+    def _record_dict() -> dict[str, object]:
+        return {
+            "replay_run_id": "run-causal",
+            "agent": "agent-a",
+            "observed_ts": "2026-01-01T00:00:00+00:00",
+            "action": "OBSERVE",
+            "payload": {"feature": "serve-form"},
+            "context_hash": "context-a",
+            "decision_id": "decision-causal",
+            "recorded_at": "2026-01-01T00:00:01+00:00",
+        }
+
     def test_constructor_rejects_nested_future_result_fields(self):
         for key in ("result", "winner", "outcome"):
             with self.subTest(key=key):
@@ -116,6 +129,53 @@ class DecisionLedgerFutureKeyIntegrityTests(unittest.TestCase):
                 "future-result fields at line 1",
             ):
                 ledger.verify_integrity()
+
+    def test_verifier_rejects_lone_surrogate_strings_before_hashing(self):
+        cases = (
+            ("payload-value", lambda record: record["payload"].update({"note": "\ud800"})),
+            ("payload-key", lambda record: record["payload"].update({"\ud800": "value"})),
+            ("required-agent", lambda record: record.update({"agent": "\ud800"})),
+        )
+        for label, mutate in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                record = self._record_dict()
+                mutate(record)
+                envelope = {"sha256": "0" * 64, "record": record}
+                path = Path(tmp) / "decisions.jsonl"
+                path.write_bytes(
+                    (json.dumps(envelope, ensure_ascii=True, sort_keys=True) + "\n").encode("utf-8")
+                )
+
+                with self.assertRaisesRegex(DecisionLedgerIntegrityError, "valid UTF-8"):
+                    JsonlDecisionLedger(path).verified_snapshot()
+
+    def test_append_rejects_lone_surrogate_without_publishing_partial_line(self):
+        record = self._record({"note": "\ud800"})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+
+            with self.assertRaisesRegex(DecisionLedgerIntegrityError, "valid UTF-8"):
+                ledger.append(record)
+
+            self.assertFalse(path.exists())
+
+    def test_valid_cyrillic_json_round_trips_through_durable_ledger(self):
+        record = self._record({"нотатка": "дані", "nested": [{"ключ": "значення"}]})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+
+            ledger.append(record)
+            snapshot = ledger.verified_snapshot()
+            envelope = json.loads(snapshot.payload.decode("utf-8"))
+
+            self.assertEqual(snapshot.record_count, 1)
+            self.assertEqual(envelope["record"]["payload"]["нотатка"], "дані")
+            self.assertEqual(
+                envelope["record"]["payload"]["nested"][0]["ключ"],
+                "значення",
+            )
 
 
 if __name__ == "__main__":

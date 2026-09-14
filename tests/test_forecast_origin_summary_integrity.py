@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -111,6 +112,13 @@ class ForecastOriginSummaryIntegrityTests(unittest.TestCase):
 
     def test_non_utf8_summary_bytes_are_rejected(self) -> None:
         payload = json.dumps(self._summary(), sort_keys=True).encode("utf-8") + b"\xff"
+
+        with self.assertRaisesRegex(ValueError, "invalid canonical UTF-8 JSON"):
+            self._load_payload(payload)
+
+    def test_deep_json_nesting_is_contained_at_canonical_summary_boundary(self) -> None:
+        depth = sys.getrecursionlimit() + 200
+        payload = b'{"unused":' + (b"[" * depth) + b"0" + (b"]" * depth) + b"}"
 
         with self.assertRaisesRegex(ValueError, "invalid canonical UTF-8 JSON"):
             self._load_payload(payload)

@@ -243,7 +243,13 @@ def _load_strict_summary_json(path: Path) -> dict[str, Any]:
             )
         _validate_summary_json_domain(raw)
         return raw
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, _RunSummaryJsonIntegrityError) as exc:
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        _RunSummaryJsonIntegrityError,
+        RecursionError,
+    ) as exc:
         raise ValueError(
             f"forecast origin run summary is unreadable or invalid canonical UTF-8 JSON: {path}"
         ) from exc

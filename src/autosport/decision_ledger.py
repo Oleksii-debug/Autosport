@@ -119,11 +119,23 @@ class JsonlDecisionLedger:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _require_utf8_text(value: str, *, path: str) -> None:
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise DecisionLedgerIntegrityError(
+                f"Decision Ledger JSON text at {path} is not valid UTF-8"
+            ) from exc
+
     @classmethod
     def _validate_json_value(cls, value: object, *, path: str) -> None:
         """Reject values whose JSON encoding changes identity or is non-standard."""
 
-        if value is None or isinstance(value, (str, bool, int)):
+        if value is None or isinstance(value, (bool, int)):
+            return
+        if isinstance(value, str):
+            cls._require_utf8_text(value, path=path)
             return
         if isinstance(value, float):
             if not math.isfinite(value):
@@ -141,6 +153,7 @@ class JsonlDecisionLedger:
                     raise DecisionLedgerIntegrityError(
                         f"Decision Ledger JSON object keys at {path} must be strings"
                     )
+                cls._require_utf8_text(key, path=f"{path} object key")
                 cls._validate_json_value(item, path=f"{path}.{key}")
             return
         raise DecisionLedgerIntegrityError(
@@ -174,6 +187,12 @@ class JsonlDecisionLedger:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger record schema is invalid{location}"
             )
+        try:
+            cls._validate_json_value(record, path="record")
+        except RecursionError as exc:
+            raise DecisionLedgerIntegrityError(
+                f"Decision Ledger record nesting is too deep{location}"
+            ) from exc
         for field_name in cls._STRING_FIELDS:
             value = record.get(field_name)
             if not isinstance(value, str) or not value.strip():
@@ -185,7 +204,6 @@ class JsonlDecisionLedger:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger record field 'payload' is invalid{location}"
             )
-        cls._validate_json_value(payload, path="payload")
         if contains_forbidden_future_key(payload):
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger payload contains future-result fields{location}"
@@ -265,6 +283,10 @@ class JsonlDecisionLedger:
             except json.JSONDecodeError as exc:
                 raise DecisionLedgerIntegrityError(
                     f"Decision Ledger contains invalid JSON at line {line_number}"
+                ) from exc
+            except RecursionError as exc:
+                raise DecisionLedgerIntegrityError(
+                    f"Decision Ledger JSON nesting is too deep at line {line_number}"
                 ) from exc
             except DecisionLedgerIntegrityError as exc:
                 raise DecisionLedgerIntegrityError(

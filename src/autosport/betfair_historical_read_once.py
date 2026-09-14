@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import bz2
+import gzip
+import json
 import shutil
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator, TextIO
 
 from .betfair_historical_import import (
     BetfairHistoricalImportReport,
@@ -14,6 +17,54 @@ from .betfair_historical_import import (
 
 
 _COPY_CHUNK_BYTES = 1024 * 1024
+
+
+def _open_frozen_text(path: Path) -> TextIO:
+    if path.suffix.lower() == ".bz2":
+        return bz2.open(path, "rt", encoding="utf-8")
+    if path.suffix.lower() == ".gz":
+        return gzip.open(path, "rt", encoding="utf-8")
+    return path.open("r", encoding="utf-8")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object member {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_nonstandard_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON numeric constant {value}")
+
+
+def _validate_strict_json_inputs(inputs: Iterable[Path]) -> None:
+    """Reject ambiguous/non-standard raw JSON before the legacy decoder sees it."""
+
+    for path in inputs:
+        try:
+            with _open_frozen_text(path) as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        parsed = json.loads(
+                            line,
+                            object_pairs_hook=_unique_json_object,
+                            parse_constant=_reject_nonstandard_json_constant,
+                        )
+                    except (json.JSONDecodeError, ValueError) as exc:
+                        raise ValueError(
+                            f"{path}: line {line_number} is not strict unambiguous JSON: {exc}"
+                        ) from exc
+                    if not isinstance(parsed, dict):
+                        raise ValueError(
+                            f"{path}: line {line_number} must be a JSON object"
+                        )
+        except UnicodeError as exc:
+            raise ValueError(f"{path}: Betfair historical input must be UTF-8 text") from exc
 
 
 @contextmanager
@@ -64,6 +115,7 @@ def import_betfair_historical_read_once(
     """Canonical product-path Betfair import with hash-to-parse byte binding."""
 
     with frozen_betfair_inputs(inputs) as frozen_inputs:
+        _validate_strict_json_inputs(frozen_inputs)
         return import_betfair_historical(
             frozen_inputs,
             output_dir,

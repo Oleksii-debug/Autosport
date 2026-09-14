@@ -136,6 +136,16 @@ class RecoveryReconciliationTests(unittest.TestCase):
                 '{"schema_version":1,"runs":',
             )
 
+    def test_workspace_file_is_controlled_recovery_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.write_text("not a directory\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ReconciliationError, "workspace recovery failed"):
+                reconcile_late_crashes(workspace)
+            self.assertEqual(run_repair_workspace(workspace), 3)
+            self.assertEqual(workspace.read_text(encoding="utf-8"), "not a directory\n")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -814,8 +814,6 @@ class RunTransaction:
             ) + "\n"
         except (TypeError, ValueError) as exc:
             raise RunTransactionError(f"{label} cannot be serialized as JSON") from exc
-        # Strict re-decode rejects NaN/Infinity and duplicate ambiguity on the exact
-        # canonical bytes before their digest can become durable transaction evidence.
         cls._decode_strict_json(text, label=label)
         encoded = text.encode("utf-8")
         return VerifiedFileSnapshot(
@@ -943,35 +941,38 @@ class RunTransaction:
         path: Path,
         label: str,
     ) -> VerifiedDecisionLedgerSnapshot:
-        snapshot = cls._read_canonical_file_snapshot(path, label)
-        temporary: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile(
-                "wb",
-                dir=path.parent,
-                prefix=f".{path.name}.verify-",
-                suffix=".tmp",
-                delete=False,
-            ) as handle:
-                temporary = Path(handle.name)
-                handle.write(snapshot.payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            verified = cls._verified_decision_ledger(
-                temporary,
-                f"canonical {label} verification copy",
+            path_before = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise RunTransactionError(f"{label} canonical file is missing") from exc
+        except OSError as exc:
+            raise RunTransactionError(f"{label} canonical file is unreadable") from exc
+        if not stat.S_ISREG(path_before.st_mode):
+            raise RunTransactionError(
+                f"{label} canonical path must be a regular non-symlink file"
             )
-            if verified.sha256 != snapshot.sha256 or verified.payload != snapshot.payload:
-                raise RunTransactionError(
-                    f"canonical {label} exact snapshot copy mismatch"
-                )
-            return verified
-        finally:
-            if temporary is not None:
-                try:
-                    temporary.unlink()
-                except FileNotFoundError:
-                    pass
+        if path_before.st_nlink != 1:
+            raise RunTransactionError(
+                f"{label} canonical path must not have hard-link aliases"
+            )
+
+        verified = cls._verified_decision_ledger(path, f"canonical {label}")
+
+        try:
+            path_after = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            raise RunTransactionError(
+                f"{label} canonical path changed while validating"
+            ) from exc
+        if (
+            not stat.S_ISREG(path_after.st_mode)
+            or path_after.st_nlink != 1
+            or not os.path.samestat(path_before, path_after)
+        ):
+            raise RunTransactionError(
+                f"{label} canonical path changed while validating"
+            )
+        return verified
 
     @classmethod
     def _require_run_decision_identity(
@@ -981,8 +982,6 @@ class RunTransaction:
         expected_run_id: str,
         label: str,
     ) -> None:
-        """Bind every run-local decision in an immutable verified snapshot to this transaction."""
-
         if snapshot.record_count == 0:
             return
         for line_number, line in enumerate(snapshot.payload.decode("utf-8").splitlines(), start=1):
@@ -1002,8 +1001,6 @@ class RunTransaction:
         *,
         label: str,
     ) -> None:
-        """Bind run-summary truth to the durable transaction identity."""
-
         expected = {
             "run_id": self.run_id,
             "experiment_key": manifest.get("experiment_key"),
@@ -1039,7 +1036,6 @@ class RunTransaction:
 
     @staticmethod
     def _verify_decision_ledger(path: Path, label: str) -> int:
-        """Compatibility wrapper for callers/tests that only need semantic validation."""
         return RunTransaction._verified_decision_ledger(path, label).record_count
 
     def _validate_precommit_evidence(self, manifest: dict[str, Any]) -> None:

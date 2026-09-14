@@ -324,8 +324,7 @@ class AutosportApp(tk.Tk):
         )
 
     def _hide_uncertain_economic_state(self, ticket_message: str) -> None:
-        if self.session is not None:
-            self.session.close()
+        session = self.session
         self.session = None
         self.bank.set(
             "Віртуальний банк: недоступний до підтвердженого terminal state/recovery; "
@@ -333,6 +332,17 @@ class AutosportApp(tk.Tk):
         )
         self.tickets.delete(0, "end")
         self.tickets.insert("end", ticket_message)
+        if session is None:
+            return
+        try:
+            session.close()
+        except Exception as exc:
+            session_workspace = Path(session.workspace)
+            self._recovery_required_workspaces.add(session_workspace)
+            self._append_log(
+                "Economic session teardown після quarantine завершився помилкою; "
+                f"workspace={session_workspace}; secondary={type(exc).__name__}: {exc}"
+            )
 
     def choose_dataset(self) -> None:
         if self.replay_worker.busy:
@@ -461,9 +471,10 @@ class AutosportApp(tk.Tk):
         self._active_workspace = replay_workspace
         self._active_strategy_id = strategy_id
         self._active_research_plan = research_plan
-        if self.session is not None:
-            self.session.close()
-            self.session = None
+        self._recovery_required_workspaces.add(replay_workspace)
+        self._hide_uncertain_economic_state(
+            "Workspace recovery виконується; economic session state недоступний до завершення перевірки."
+        )
 
         try:
             report = reconcile_late_crashes(replay_workspace)

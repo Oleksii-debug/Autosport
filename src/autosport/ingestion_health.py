@@ -330,6 +330,7 @@ class SourceHealthStore:
             state.consecutive_failures += 1
             state.last_error_at = now
             state.last_error = f"{type(error).__name__}: {error}"
+            state.quality_flags = ()
             state.status = "failed"
             self._put(state)
             return state

@@ -24,6 +24,7 @@ _PAPER_DECIMAL_PRECISION = 28
 _PAPER_DECIMAL_EMIN = -999999
 _PAPER_DECIMAL_EMAX = 999999
 _PAPER_SNAPSHOT_SCHEMA_VERSION = 2
+_SCHEMA_MISSING = object()
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
 
@@ -98,8 +99,7 @@ class PaperBook:
         ticket_placed_at = self._validate_placed_at(
             placed_at if placed_at is not None else utc_now_iso()
         )
-        if not isinstance(reason, str):
-            raise ValueError("PaperBook strategy_reason must be a string")
+        self._require_utf8_string(reason, "strategy_reason")
         ticket_legs = tuple(legs)
         if not ticket_legs:
             raise ValueError("ticket requires at least one leg")
@@ -263,29 +263,45 @@ class PaperBook:
             raise ValueError(f"PaperBook snapshot contains non-finite {label}")
 
     @staticmethod
+    def _require_utf8_string(value: object, label: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"PaperBook {label} must be a string")
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError(f"PaperBook {label} must be valid UTF-8 text") from exc
+        return value
+
+    @classmethod
     def _require_canonical_text(
+        cls,
         value: object,
         label: str,
         *,
         forbid_quote_key_delimiter: bool = False,
     ) -> str:
-        if not isinstance(value, str) or not value or value.strip() != value:
+        text = cls._require_utf8_string(value, label)
+        if not text or text.strip() != text:
             raise ValueError(f"PaperBook {label} must be a non-empty trimmed string")
-        if forbid_quote_key_delimiter and "|" in value:
+        if forbid_quote_key_delimiter and "|" in text:
             raise ValueError(f"PaperBook {label} must not contain quote-key delimiter '|'")
-        return value
+        return text
 
-    @staticmethod
-    def _validate_placed_at(value: object, *, snapshot: bool = False) -> str:
-        label = "PaperBook snapshot placed_at" if snapshot else "placed_at"
-        message = f"{label} must be a non-empty trimmed timezone-aware ISO timestamp"
-        if not isinstance(value, str) or not value or value.strip() != value:
-            raise ValueError(message)
+    @classmethod
+    def _validate_placed_at(cls, value: object, *, snapshot: bool = False) -> str:
+        label = "snapshot placed_at" if snapshot else "placed_at"
+        message = f"PaperBook {label} must be a non-empty trimmed timezone-aware ISO timestamp"
         try:
-            parse_iso_timestamp(value)
+            text = cls._require_utf8_string(value, label)
         except ValueError as exc:
             raise ValueError(message) from exc
-        return value
+        if not text or text.strip() != text:
+            raise ValueError(message)
+        try:
+            parse_iso_timestamp(text)
+        except ValueError as exc:
+            raise ValueError(message) from exc
+        return text
 
     @classmethod
     def _validate_ticket_leg(cls, leg: object, *, ticket_id: str | None = None) -> TicketLeg:
@@ -312,20 +328,19 @@ class PaperBook:
             raise ValueError("PaperBook snapshot decimal odds must be greater than 1")
         return leg
 
-    @staticmethod
-    def _validate_lifecycle_entry(entry: object) -> _LifecycleEntry:
+    @classmethod
+    def _validate_lifecycle_entry(cls, entry: object) -> _LifecycleEntry:
         if type(entry) is not tuple or len(entry) != 4:
             raise ValueError("PaperBook lifecycle entries must be canonical tuples")
         action, ticket_id, winners, voids = entry
         if action not in {"open", "settle"}:
             raise ValueError("PaperBook lifecycle action must be open or settle")
-        if not isinstance(ticket_id, str) or not ticket_id:
-            raise ValueError("PaperBook lifecycle ticket_id must be a non-empty string")
+        cls._require_canonical_text(ticket_id, "lifecycle ticket_id")
         if type(winners) is not tuple or type(voids) is not tuple:
             raise ValueError("PaperBook lifecycle settlement keys must be canonical tuples")
         for values, label in ((winners, "winning_quote_keys"), (voids, "void_quote_keys")):
-            if any(not isinstance(value, str) or not value for value in values):
-                raise ValueError(f"PaperBook lifecycle {label} must contain non-empty strings")
+            for value in values:
+                cls._require_canonical_text(value, f"lifecycle {label}")
             if values != tuple(sorted(values)) or len(values) != len(set(values)):
                 raise ValueError(f"PaperBook lifecycle {label} must be sorted and unique")
         if action == "open" and (winners or voids):
@@ -416,8 +431,7 @@ class PaperBook:
             if ticket_key != ticket.ticket_id:
                 raise ValueError("PaperBook ticket mapping key must match ticket_id")
             cls._validate_placed_at(ticket.placed_at, snapshot=True)
-            if not isinstance(ticket.strategy_reason, str):
-                raise ValueError("PaperBook snapshot strategy_reason must be a string")
+            cls._require_utf8_string(ticket.strategy_reason, "snapshot strategy_reason")
             if type(ticket.status) is not TicketStatus:
                 raise ValueError("PaperBook snapshot ticket status must be canonical TicketStatus")
             cls._require_finite(ticket.stake, f"stake for ticket {ticket.ticket_id}")
@@ -443,14 +457,12 @@ class PaperBook:
 
         cls._validate_lifecycle_reachability(book)
 
-    @staticmethod
-    def _parse_lifecycle_key_list(value: object, label: str) -> tuple[str, ...]:
+    @classmethod
+    def _parse_lifecycle_key_list(cls, value: object, label: str) -> tuple[str, ...]:
         if type(value) is not list:
             raise ValueError(f"PaperBook snapshot lifecycle {label} must be a list")
-        if any(not isinstance(item, str) or not item for item in value):
-            raise ValueError(
-                f"PaperBook snapshot lifecycle {label} must contain non-empty strings"
-            )
+        for item in value:
+            cls._require_canonical_text(item, f"snapshot lifecycle {label}")
         normalized = tuple(value)
         if normalized != tuple(sorted(normalized)) or len(normalized) != len(set(normalized)):
             raise ValueError(
@@ -496,19 +508,33 @@ class PaperBook:
         return entries
 
     @classmethod
+    def _parse_snapshot_decimal(cls, value: object, label: str) -> Decimal:
+        if not isinstance(value, str) or not value or value.strip() != value:
+            raise ValueError(
+                f"PaperBook snapshot {label} must be a non-empty trimmed decimal string"
+            )
+        try:
+            parsed = Decimal(value)
+        except DecimalException as exc:
+            raise ValueError(f"PaperBook snapshot {label} is not a valid Decimal string") from exc
+        cls._require_finite(parsed, label)
+        return parsed
+
+    @classmethod
     def _from_raw_snapshot(cls, raw: object) -> "PaperBook":
         if type(raw) is not dict:
             raise ValueError("PaperBook snapshot root must be an object")
-        schema_version = raw.get("schema_version")
-        if schema_version is not None and (
-            isinstance(schema_version, bool)
-            or not isinstance(schema_version, int)
+        schema_version = raw.get("schema_version", _SCHEMA_MISSING)
+        is_legacy = schema_version is _SCHEMA_MISSING
+        if not is_legacy and (
+            type(schema_version) is not int
             or schema_version != _PAPER_SNAPSHOT_SCHEMA_VERSION
         ):
             raise ValueError("unsupported PaperBook snapshot schema_version")
 
-        book = cls(raw["initial_bankroll"])
-        book.balance = Decimal(raw["balance"])
+        initial_bankroll = cls._parse_snapshot_decimal(raw["initial_bankroll"], "initial_bankroll")
+        book = cls(initial_bankroll)
+        book.balance = cls._parse_snapshot_decimal(raw["balance"], "balance")
         tickets_raw = raw["tickets"]
         if type(tickets_raw) is not list:
             raise ValueError("PaperBook snapshot tickets must be a list")
@@ -516,26 +542,33 @@ class PaperBook:
         for item in tickets_raw:
             if type(item) is not dict:
                 raise ValueError("PaperBook snapshot ticket must be an object")
-            ticket_id = item["ticket_id"]
-            if not isinstance(ticket_id, str) or not ticket_id:
-                raise ValueError("PaperBook snapshot ticket_id must be a non-empty string")
+            ticket_id = cls._require_canonical_text(item["ticket_id"], "snapshot ticket_id")
             if ticket_id in seen_ticket_ids:
                 raise ValueError("PaperBook snapshot contains duplicate ticket_id")
             seen_ticket_ids.add(ticket_id)
             ticket = PaperTicket(
                 ticket_id=ticket_id,
-                stake=Decimal(item["stake"]),
+                stake=cls._parse_snapshot_decimal(item["stake"], f"stake for ticket {ticket_id}"),
                 legs=tuple(
-                    TicketLeg(leg["event_id"], leg["market_id"], leg["selection_id"], Decimal(leg["locked_odds"])) for leg in item["legs"]
+                    TicketLeg(
+                        leg["event_id"],
+                        leg["market_id"],
+                        leg["selection_id"],
+                        cls._parse_snapshot_decimal(
+                            leg["locked_odds"],
+                            f"locked_odds for ticket {ticket_id}",
+                        ),
+                    )
+                    for leg in item["legs"]
                 ),
                 placed_at=item["placed_at"],
                 status=TicketStatus(item["status"]),
-                payout=Decimal(item["payout"]),
+                payout=cls._parse_snapshot_decimal(item["payout"], f"payout for ticket {ticket_id}"),
                 strategy_reason=item.get("strategy_reason", ""),
             )
             book.tickets[ticket.ticket_id] = ticket
 
-        if schema_version is None:
+        if is_legacy:
             # Legacy snapshots did not persist settlement chronology or resolution
             # witnesses. Open-only books are still exactly replayable from ticket
             # insertion order. Settled legacy books fail closed later in lifecycle

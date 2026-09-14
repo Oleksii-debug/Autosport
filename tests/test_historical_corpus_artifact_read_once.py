@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import autosport.historical_corpus as corpus
+from autosport.outcome_revision import canonical_outcome_revision_id
 from autosport.parlayapi_provider import ParlayApiTableTennisProvider
 
 
@@ -119,12 +120,28 @@ def _write_governance(root: Path) -> Path:
 def _write_results(root: Path) -> tuple[Path, Path]:
     source = root / "official-outcome-source-record.json"
     outcomes = {"tt-a|winner|alice": "win"}
+    effective_at = "2026-01-01T10:59:00Z"
+    revision_id = canonical_outcome_revision_id(
+        source_identity="official-results:test-fixture",
+        kind="initial",
+        effective_at=effective_at,
+        quote_outcomes=outcomes,
+    )
     source.write_text(
         json.dumps(
             {
                 "source": "official-results:test-fixture",
                 "quote_outcomes": outcomes,
                 "fixture_only": True,
+                "revision": {
+                    "schema_version": 1,
+                    "kind": "initial",
+                    "effective_at": effective_at,
+                    "revision_id": revision_id,
+                    "supersedes_revision_id": None,
+                    "predecessor_record_file": None,
+                    "predecessor_record_sha256": None,
+                },
             },
             sort_keys=True,
         ),
@@ -142,6 +159,8 @@ def _write_results(root: Path) -> tuple[Path, Path]:
                     "source_identity": "official-results:test-fixture",
                     "source_record_file": source.name,
                     "source_record_sha256": _digest(source.read_bytes()),
+                    "outcome_revision_id": revision_id,
+                    "outcome_lineage_root_revision_id": revision_id,
                     "terms_reference": "https://example.test/results-terms",
                     "retention_basis": "verified internal research retention fixture",
                     "authority_reference": "fixture-outcome-authority",

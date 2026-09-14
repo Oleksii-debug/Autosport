@@ -16,6 +16,8 @@ _IDENTITY = {
     "source_sha": "b" * 40,
     "autosport_exe_sha256": "c" * 64,
 }
+_CANDIDATE_EXE_BYTES = b"candidate-executable"
+_CANDIDATE_EXE_SHA256 = hashlib.sha256(_CANDIDATE_EXE_BYTES).hexdigest()
 
 
 class NvdaAcceptanceJsonIntegrityTests(unittest.TestCase):
@@ -61,7 +63,7 @@ class NvdaAcceptanceJsonIntegrityTests(unittest.TestCase):
     def _write_candidate_zip(path: Path, *, marker: str) -> bytes:
         build_info = {
             "source_sha": "b" * 40,
-            "autosport_exe_sha256": "c" * 64,
+            "autosport_exe_sha256": _CANDIDATE_EXE_SHA256,
             "marker": marker,
         }
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -69,7 +71,7 @@ class NvdaAcceptanceJsonIntegrityTests(unittest.TestCase):
                 "Autosport-V1/BUILD_INFO.json",
                 json.dumps(build_info, sort_keys=True),
             )
-            archive.writestr("Autosport-V1/Autosport.exe", b"candidate-executable")
+            archive.writestr("Autosport-V1/Autosport.exe", _CANDIDATE_EXE_BYTES)
             archive.writestr(f"Autosport-V1/{marker}.txt", marker.encode("utf-8"))
         return path.read_bytes()
 
@@ -120,6 +122,26 @@ class NvdaAcceptanceJsonIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-standard JSON constant: NaN"):
                 self._validate(evidence_path)
 
+    def test_standard_json_numeric_overflow_is_rejected_even_when_semantically_unused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = Path(directory) / "nvda-evidence.json"
+            payload = json.dumps(self._evidence())
+            payload = payload[:-1] + ', "unexpected_numeric_evidence": 1e400}'
+            evidence_path.write_text(payload, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "non-finite JSON number"):
+                self._validate(evidence_path)
+
+    def test_lone_surrogate_string_is_rejected_even_when_semantically_unused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = Path(directory) / "nvda-evidence.json"
+            payload = json.dumps(self._evidence())
+            payload = payload[:-1] + ', "unexpected_text_evidence": "\\ud800"}'
+            evidence_path.write_text(payload, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "not valid UTF-8 Unicode"):
+                self._validate(evidence_path)
+
     def test_boolean_schema_version_does_not_alias_integer_one(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             evidence = self._evidence()
@@ -140,7 +162,7 @@ class NvdaAcceptanceJsonIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "canonical physical test contract"):
                 self._validate(evidence_path)
 
-    def test_candidate_verification_uses_one_immutable_release_snapshot(self) -> None:
+    def test_candidate_verification_uses_stable_handle_and_fresh_verifier_copies(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             release = root / "release.zip"
@@ -148,22 +170,27 @@ class NvdaAcceptanceJsonIntegrityTests(unittest.TestCase):
             original_bytes = self._write_candidate_zip(release, marker="original")
             replacement_bytes = self._write_candidate_zip(replacement, marker="replacement")
             expected_package_sha = hashlib.sha256(original_bytes).hexdigest()
-            snapshot_paths: list[Path] = []
+            verifier_bytes: list[bytes] = []
+            verifier_paths: list[Path] = []
 
             def verify_windows(candidate_path, *, expected_source_sha):
-                snapshot = Path(candidate_path)
-                snapshot_paths.append(snapshot)
-                self.assertNotEqual(snapshot.resolve(), release.resolve())
-                self.assertEqual(snapshot.read_bytes(), original_bytes)
+                candidate = Path(candidate_path)
+                verifier_paths.append(candidate)
+                verifier_bytes.append(candidate.read_bytes())
+                self.assertNotEqual(candidate.resolve(), release.resolve())
                 self.assertEqual(expected_source_sha, "b" * 40)
                 release.write_bytes(replacement_bytes)
-                return {"status": "PASS"}
+                return {
+                    "status": "PASS",
+                    "package_sha256": expected_package_sha,
+                    "source_sha": "b" * 40,
+                    "autosport_exe_sha256": _CANDIDATE_EXE_SHA256,
+                }
 
             def verify_data_tool(candidate_path):
-                snapshot = Path(candidate_path)
-                snapshot_paths.append(snapshot)
-                self.assertEqual(snapshot_paths[0], snapshot)
-                self.assertEqual(snapshot.read_bytes(), original_bytes)
+                candidate = Path(candidate_path)
+                verifier_paths.append(candidate)
+                verifier_bytes.append(candidate.read_bytes())
                 self.assertEqual(release.read_bytes(), replacement_bytes)
                 return {"status": "PASS"}
 
@@ -181,8 +208,82 @@ class NvdaAcceptanceJsonIntegrityTests(unittest.TestCase):
                 )
 
             self.assertEqual(template["candidate"]["package_sha256"], expected_package_sha)
-            self.assertEqual(len(snapshot_paths), 2)
-            self.assertFalse(snapshot_paths[0].exists())
+            self.assertEqual(verifier_bytes, [original_bytes, original_bytes])
+            self.assertEqual(len(verifier_paths), 2)
+            self.assertTrue(all(not path.exists() for path in verifier_paths))
+
+    def test_candidate_rejects_private_windows_verifier_copy_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root / "release.zip"
+            replacement = root / "replacement.zip"
+            original_bytes = self._write_candidate_zip(release, marker="original")
+            replacement_bytes = self._write_candidate_zip(replacement, marker="replacement")
+            expected_package_sha = hashlib.sha256(original_bytes).hexdigest()
+
+            def replace_private_copy(candidate_path, *, expected_source_sha):
+                Path(candidate_path).write_bytes(replacement_bytes)
+                return {
+                    "status": "PASS",
+                    "package_sha256": expected_package_sha,
+                    "source_sha": expected_source_sha,
+                    "autosport_exe_sha256": _CANDIDATE_EXE_SHA256,
+                }
+
+            with patch(
+                "autosport.nvda_acceptance.verify_windows_package",
+                side_effect=replace_private_copy,
+            ), patch(
+                "autosport.nvda_acceptance.verify_portable_data_tool",
+                return_value={"status": "PASS"},
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Windows package verifier snapshot changed during verification",
+                ):
+                    create_template(
+                        release,
+                        expected_source_sha="b" * 40,
+                        expected_package_sha256=expected_package_sha,
+                    )
+
+    def test_candidate_rejects_private_data_tool_verifier_copy_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root / "release.zip"
+            replacement = root / "replacement.zip"
+            original_bytes = self._write_candidate_zip(release, marker="original")
+            replacement_bytes = self._write_candidate_zip(replacement, marker="replacement")
+            expected_package_sha = hashlib.sha256(original_bytes).hexdigest()
+
+            def verify_windows(candidate_path, *, expected_source_sha):
+                return {
+                    "status": "PASS",
+                    "package_sha256": expected_package_sha,
+                    "source_sha": expected_source_sha,
+                    "autosport_exe_sha256": _CANDIDATE_EXE_SHA256,
+                }
+
+            def replace_private_copy(candidate_path):
+                Path(candidate_path).write_bytes(replacement_bytes)
+                return {"status": "PASS"}
+
+            with patch(
+                "autosport.nvda_acceptance.verify_windows_package",
+                side_effect=verify_windows,
+            ), patch(
+                "autosport.nvda_acceptance.verify_portable_data_tool",
+                side_effect=replace_private_copy,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "portable data-tool verifier snapshot changed during verification",
+                ):
+                    create_template(
+                        release,
+                        expected_source_sha="b" * 40,
+                        expected_package_sha256=expected_package_sha,
+                    )
 
 
 if __name__ == "__main__":

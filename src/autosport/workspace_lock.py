@@ -54,12 +54,12 @@ class WorkspaceEconomicLock:
         if self._handle is not None:
             raise WorkspaceEconomicLockError("workspace economic lock is already held by this lock object")
         self.workspace.mkdir(parents=True, exist_ok=True)
-        self._validate_existing_lock_path()
-        handle = self.path.open("a+b")
+        handle = self._open_lock_handle()
         try:
-            # Path.open() follows symlinks. Bind the opened handle back to the exact
-            # canonical workspace pathname before any sentinel byte is written so an
-            # unsafe alias cannot mutate an external file during lock initialization.
+            # The creation/open split never creates or truncates through an existing
+            # pathname. Bind the opened handle back to the exact canonical workspace
+            # pathname before any sentinel byte is written so a race-created alias
+            # cannot mutate an external file during lock initialization.
             self._validate_open_handle_identity(handle)
             handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:
@@ -140,6 +140,30 @@ class WorkspaceEconomicLock:
                 "WorkspaceEconomicLock release also failed while propagating the primary error",
                 release_error,
             )
+
+    def _open_lock_handle(self) -> BinaryIO:
+        """Create or open the canonical lock without create-through-alias races."""
+
+        try:
+            return self.path.open("x+b")
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise WorkspaceEconomicLockError(
+                "cannot create workspace economic lock path"
+            ) from exc
+
+        self._validate_existing_lock_path()
+        try:
+            return self.path.open("r+b")
+        except FileNotFoundError as exc:
+            raise WorkspaceEconomicLockError(
+                "workspace economic lock path changed during acquisition"
+            ) from exc
+        except OSError as exc:
+            raise WorkspaceEconomicLockError(
+                "cannot open workspace economic lock path"
+            ) from exc
 
     def _validate_existing_lock_path(self) -> None:
         """Reject unsafe aliases before opening the canonical lock pathname."""

@@ -146,13 +146,14 @@ class BetfairAvailableBackBook:
             level_raw = row[0]
             if isinstance(level_raw, bool) or not isinstance(level_raw, int) or level_raw < 0:
                 raise ValueError(f"batb[{index}].level must be a non-negative integer")
+            price = _decimal_number(row[1], field=f"batb[{index}].price")
             size = _decimal_number(row[2], field=f"batb[{index}].size", non_negative=True)
             if size == 0:
-                # Betfair removal deltas may carry a zero/sentinel price. The level is
-                # the identity for batb, so no price assertion is needed for removal.
+                # The level is the removal identity and Betfair may carry zero as the
+                # sentinel price, but the source scalar must still be a finite JSON
+                # number rather than an arbitrary coercible value.
                 ladder.pop(level_raw, None)
                 continue
-            price = _decimal_number(row[1], field=f"batb[{index}].price", positive=True)
             if price <= 1:
                 raise ValueError(f"batb[{index}].price must be decimal odds > 1")
             ladder[level_raw] = (price, size)

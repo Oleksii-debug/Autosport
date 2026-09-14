@@ -175,8 +175,8 @@ class SourceHealthState:
         if self.status == "failed":
             if self.consecutive_failures == 0:
                 raise ValueError("failed source health requires a positive consecutive failure count")
-            if self.last_error is None:
-                raise ValueError("failed source health requires last error evidence")
+            if not isinstance(self.last_error, str) or not self.last_error.strip():
+                raise ValueError("failed source health requires non-empty last error evidence")
         else:
             if self.consecutive_failures != 0:
                 raise ValueError("successful source health cannot retain consecutive failures")

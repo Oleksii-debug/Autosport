@@ -186,9 +186,11 @@ def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
     if not isinstance(payload_json, str):
         raise ValueError("stored market event payload must be JSON text")
     raw = _load_history_payload(payload_json)
+    canonical_raw = _canonical_json(raw)
+    if payload_json != canonical_raw:
+        raise ValueError("stored market event payload is not canonical JSON text")
 
     event = MarketEvent.from_dict(raw)
-    canonical_raw = _canonical_json(raw)
     if canonical_raw != _canonical_payload(event):
         raise ValueError("stored market event payload is not canonical")
 

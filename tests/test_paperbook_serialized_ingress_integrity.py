@@ -164,6 +164,46 @@ class PaperBookSerializedIngressIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "valid UTF-8 text"):
             PaperBook.load_bytes(self._encoded(payload))
 
+    def test_load_bytes_normalizes_json_parser_recursion_exhaustion(self) -> None:
+        deeply_nested_json = ("[" * 10000 + "]" * 10000).encode("ascii")
+
+        with self.assertRaisesRegex(ValueError, "JSON nesting is too deep"):
+            PaperBook.load_bytes(deeply_nested_json)
+
+    def test_load_bytes_rejects_missing_required_root_and_ticket_fields(self) -> None:
+        root_missing = self._payload()
+        root_missing.pop("initial_bankroll")
+        with self.assertRaisesRegex(ValueError, "missing required field: initial_bankroll"):
+            PaperBook.load_bytes(self._encoded(root_missing))
+
+        ticket_missing = self._payload()
+        ticket_missing["tickets"][0].pop("status")
+        with self.assertRaisesRegex(ValueError, "missing required field: status"):
+            PaperBook.load_bytes(self._encoded(ticket_missing))
+
+    def test_load_bytes_rejects_non_object_leg_member(self) -> None:
+        payload = self._payload()
+        payload["tickets"][0]["legs"] = [1]
+
+        with self.assertRaisesRegex(ValueError, "leg 0.*must be an object"):
+            PaperBook.load_bytes(self._encoded(payload))
+
+    def test_load_bytes_rejects_non_list_legs_container(self) -> None:
+        for malformed in (None, 1, {}, "not-a-list"):
+            with self.subTest(malformed=repr(malformed)):
+                payload = self._payload()
+                payload["tickets"][0]["legs"] = malformed
+                with self.assertRaisesRegex(ValueError, "legs for ticket ticket-1 must be a list"):
+                    PaperBook.load_bytes(self._encoded(payload))
+
+    def test_load_bytes_accepts_canonical_schema2_control_after_shape_validation(self) -> None:
+        book = PaperBook.load_bytes(self._encoded(self._payload()))
+
+        self.assertEqual(book.initial_bankroll, Decimal("100"))
+        self.assertEqual(book.balance, Decimal("90"))
+        self.assertEqual(tuple(book.tickets), ("ticket-1",))
+        self.assertEqual(book._lifecycle, [("open", "ticket-1", (), ())])
+
 
 if __name__ == "__main__":
     unittest.main()

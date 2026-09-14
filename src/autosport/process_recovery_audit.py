@@ -21,7 +21,7 @@ _PROCESS_RUN_ID = "packaged-process-kill-recovery-audit"
 _PROCESS_MARKET_SHA256 = "c" * 64
 _PROCESS_RESULTS_SHA256 = "d" * 64
 _PROCESS_STRATEGY_ID = "baseline-v1"
-_READY_STATUS = "READY_FOR_PARENT_KILL"
+_READY_STATUS = "READY_FOR_PARENT_KILL_AFTER_PRECOMMIT"
 _CHILD_START_TIMEOUT_SECONDS = 60.0
 _CHILD_RECOVERY_TIMEOUT_SECONDS = 60.0
 
@@ -78,7 +78,7 @@ def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | P
             base_paper_book_sha256=book_hash,
             base_decision_ledger_sha256=ledger_hash,
         )
-        RunTransaction.start(
+        transaction = RunTransaction.start(
             workspace,
             run_id=_PROCESS_RUN_ID,
             experiment_key=experiment_key,
@@ -88,6 +88,25 @@ def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | P
             base_paper_book_sha256=book_hash,
             base_decision_ledger_sha256=ledger_hash,
         )
+        # Cross the durable PRECOMMIT boundary before the parent kills this process.
+        # A distinct bankroll value is an audit canary proving recovery promotes NEW
+        # rather than merely observing unchanged BASE state.
+        transaction.stage_outputs(PaperBook("101"), ledger_path)
+        summary = transaction.precommit(
+            {
+                "schema_version": 2,
+                "experiment_key": experiment_key,
+                "market_sha256": _PROCESS_MARKET_SHA256,
+                "sealed_results_sha256": _PROCESS_RESULTS_SHA256,
+                "strategy_id": _PROCESS_STRATEGY_ID,
+                "run_id": _PROCESS_RUN_ID,
+                "real_money_execution": False,
+            }
+        )
+        new_book_hash = str(summary["paper_book_sha256"])
+        new_ledger_hash = str(summary["decision_ledger_sha256"])
+        if new_book_hash == book_hash:
+            raise RuntimeError("process-kill PRECOMMIT did not stage distinct NEW PaperBook state")
         atomic_write_json(
             ready,
             {
@@ -95,8 +114,11 @@ def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | P
                 "pid": os.getpid(),
                 "run_id": _PROCESS_RUN_ID,
                 "experiment_key": experiment_key,
-                "paper_book_sha256": book_hash,
-                "decision_ledger_sha256": ledger_hash,
+                "base_paper_book_sha256": book_hash,
+                "base_decision_ledger_sha256": ledger_hash,
+                "new_paper_book_sha256": new_book_hash,
+                "new_decision_ledger_sha256": new_ledger_hash,
+                "transaction_phase": "precommitted",
                 "real_money_execution": False,
             },
         )
@@ -130,8 +152,8 @@ def run_process_kill_recovery_child(
     try:
         paper_path = workspace / "paper_book.json"
         ledger_path = workspace / "decisions.jsonl"
-        book_hash = sha256_file(paper_path)
-        ledger_hash = sha256_file(ledger_path)
+        base_book_hash = sha256_file(paper_path)
+        base_ledger_hash = sha256_file(ledger_path)
         registry = RunRegistry(workspace / "run_registry.json")
         experiment_key = RunRegistry.experiment_identity(
             _PROCESS_MARKET_SHA256,
@@ -144,36 +166,53 @@ def run_process_kill_recovery_child(
         if registry_item.get("status") != "in_progress":
             raise RuntimeError("process-kill registry is not unresolved after crash")
 
+        transaction = RunTransaction(workspace, _PROCESS_RUN_ID)
+        manifest_before = _decode_strict_json(
+            transaction.manifest_path,
+            label="process-kill pre-recovery transaction manifest",
+        )
+        if manifest_before.get("phase") != "precommitted":
+            raise RuntimeError("process-kill child was not killed after durable PRECOMMIT")
+
         recovery = RunTransaction.recover(
             workspace,
             run_id=_PROCESS_RUN_ID,
             registry_item=registry_item,
             experiment_key=experiment_key,
         )
-        if recovery.disposition != "aborted_uncommitted":
-            raise RuntimeError("process-kill recovery did not fail closed as aborted_uncommitted")
+        if recovery.disposition != "committed" or recovery.summary_path is None:
+            raise RuntimeError("fresh-process PRECOMMIT recovery did not finish canonical commit")
 
-        if sha256_file(paper_path) != book_hash or sha256_file(ledger_path) != ledger_hash:
-            raise RuntimeError("process-kill recovery changed canonical economic BASE state")
+        new_book_hash = sha256_file(paper_path)
+        new_ledger_hash = sha256_file(ledger_path)
+        expected_new = manifest_before.get("new")
+        if not isinstance(expected_new, dict):
+            raise RuntimeError("process-kill PRECOMMIT manifest lacks NEW identity")
+        if new_book_hash != expected_new.get("paper_book_sha256"):
+            raise RuntimeError("fresh-process recovery did not promote expected NEW PaperBook")
+        if new_ledger_hash != expected_new.get("decision_ledger_sha256"):
+            raise RuntimeError("fresh-process recovery did not promote expected NEW Decision Ledger")
+        if new_book_hash == base_book_hash:
+            raise RuntimeError("fresh-process recovery did not cross the durable economic boundary")
 
-        registry.abort_uncommitted(
+        registry.reconcile_completed_summary(
             experiment_key,
-            reason="fresh-process recovery after intentional parent process kill",
-            paper_book_sha256=book_hash,
-            decision_ledger_sha256=ledger_hash,
+            recovery.summary_path,
+            paper_path,
         )
+        transaction.mark_registry_completed()
         if registry.in_progress():
             raise RuntimeError("process-kill recovery left an unresolved registry entry")
         final_item = registry.get(experiment_key)
-        if final_item.get("status") != "aborted":
-            raise RuntimeError("process-kill recovery did not persist aborted registry state")
+        if final_item.get("status") != "completed":
+            raise RuntimeError("process-kill recovery did not persist completed registry state")
 
         manifest = _decode_strict_json(
-            RunTransaction(workspace, _PROCESS_RUN_ID).manifest_path,
+            transaction.manifest_path,
             label="process-kill transaction manifest",
         )
-        if manifest.get("phase") != "aborted":
-            raise RuntimeError("process-kill transaction manifest did not persist aborted phase")
+        if manifest.get("phase") != "completed":
+            raise RuntimeError("process-kill transaction manifest did not persist completed phase")
 
         atomic_write_json(
             destination,
@@ -185,8 +224,10 @@ def run_process_kill_recovery_child(
                 "disposition": recovery.disposition,
                 "registry_status": final_item["status"],
                 "manifest_phase": manifest["phase"],
-                "paper_book_sha256": book_hash,
-                "decision_ledger_sha256": ledger_hash,
+                "base_paper_book_sha256": base_book_hash,
+                "base_decision_ledger_sha256": base_ledger_hash,
+                "new_paper_book_sha256": new_book_hash,
+                "new_decision_ledger_sha256": new_ledger_hash,
                 "real_money_execution": False,
             },
         )
@@ -236,6 +277,8 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
                 "process-kill stage child failed before intentional parent kill: "
                 + str(ready.get("error", "unknown child failure"))
             )
+        if ready.get("transaction_phase") != "precommitted":
+            raise RuntimeError("process-kill READY evidence is not bound to PRECOMMIT")
         stage_pid = ready.get("pid")
         if isinstance(stage_pid, bool) or not isinstance(stage_pid, int) or stage_pid <= 0:
             raise RuntimeError("process-kill READY evidence has invalid pid")
@@ -296,16 +339,20 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
         raise RuntimeError("recovery did not execute in a distinct fresh process")
     if recovered.get("run_id") != _PROCESS_RUN_ID:
         raise RuntimeError("process-kill recovery run_id mismatch")
-    if recovered.get("disposition") != "aborted_uncommitted":
+    if recovered.get("disposition") != "committed":
         raise RuntimeError("process-kill recovery disposition mismatch")
-    if recovered.get("registry_status") != "aborted":
+    if recovered.get("registry_status") != "completed":
         raise RuntimeError("process-kill recovery registry state mismatch")
-    if recovered.get("manifest_phase") != "aborted":
+    if recovered.get("manifest_phase") != "completed":
         raise RuntimeError("process-kill recovery manifest phase mismatch")
-    if recovered.get("paper_book_sha256") != ready.get("paper_book_sha256"):
-        raise RuntimeError("PaperBook identity changed across process kill/relaunch")
-    if recovered.get("decision_ledger_sha256") != ready.get("decision_ledger_sha256"):
-        raise RuntimeError("Decision Ledger identity changed across process kill/relaunch")
+    if recovered.get("base_paper_book_sha256") != ready.get("base_paper_book_sha256"):
+        raise RuntimeError("PaperBook BASE identity changed before fresh-process recovery")
+    if recovered.get("base_decision_ledger_sha256") != ready.get("base_decision_ledger_sha256"):
+        raise RuntimeError("Decision Ledger BASE identity changed before fresh-process recovery")
+    if recovered.get("new_paper_book_sha256") != ready.get("new_paper_book_sha256"):
+        raise RuntimeError("fresh-process recovery promoted unexpected PaperBook identity")
+    if recovered.get("new_decision_ledger_sha256") != ready.get("new_decision_ledger_sha256"):
+        raise RuntimeError("fresh-process recovery promoted unexpected Decision Ledger identity")
     if recovered.get("real_money_execution") is not False:
         raise RuntimeError("process-kill recovery crossed the paper-only boundary")
 
@@ -318,8 +365,10 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
         "disposition": recovered["disposition"],
         "registry_status": recovered["registry_status"],
         "manifest_phase": recovered["manifest_phase"],
-        "paper_book_sha256": recovered["paper_book_sha256"],
-        "decision_ledger_sha256": recovered["decision_ledger_sha256"],
+        "base_paper_book_sha256": recovered["base_paper_book_sha256"],
+        "base_decision_ledger_sha256": recovered["base_decision_ledger_sha256"],
+        "new_paper_book_sha256": recovered["new_paper_book_sha256"],
+        "new_decision_ledger_sha256": recovered["new_decision_ledger_sha256"],
         "real_money_execution": False,
     }
 
@@ -348,9 +397,17 @@ def run_packaged_restart_recovery_audit(output_path: str | Path) -> int:
                 "process_recovery_disposition": process["disposition"],
                 "process_recovery_registry_status": process["registry_status"],
                 "process_recovery_manifest_phase": process["manifest_phase"],
-                "process_recovery_paper_book_sha256": process["paper_book_sha256"],
-                "process_recovery_decision_ledger_sha256": process[
-                    "decision_ledger_sha256"
+                "process_recovery_base_paper_book_sha256": process[
+                    "base_paper_book_sha256"
+                ],
+                "process_recovery_base_decision_ledger_sha256": process[
+                    "base_decision_ledger_sha256"
+                ],
+                "process_recovery_new_paper_book_sha256": process[
+                    "new_paper_book_sha256"
+                ],
+                "process_recovery_new_decision_ledger_sha256": process[
+                    "new_decision_ledger_sha256"
                 ],
             }
         )

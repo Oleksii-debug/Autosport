@@ -26,7 +26,7 @@ def _validate_provider_component(value: object, name: str) -> str:
 
 
 def _escape_identity_component(value: str) -> str:
-    """Escape only canonical-ID delimiters so structured identity remains injective.
+    """Escape provider-component delimiters so structured identity remains injective.
 
     Percent is escaped first so literal escape-looking provider text cannot alias a
     real reserved character. Values without reserved characters remain unchanged.
@@ -36,7 +36,15 @@ def _escape_identity_component(value: str) -> str:
 
 
 def _scoped_identity(source_id: str, provider_component: str) -> str:
-    return f"{_escape_identity_component(source_id)}:{_escape_identity_component(provider_component)}"
+    """Preserve the deployed source prefix while making the provider component unambiguous.
+
+    Provider components contain no raw colon after escaping, so the final raw colon
+    is an injective source/component boundary even when source_id itself contains
+    colons. Keeping source_id byte-for-byte stable avoids silently re-keying durable
+    market state for existing sources such as ``parlayapi:table_tennis``.
+    """
+
+    return f"{source_id}:{_escape_identity_component(provider_component)}"
 
 
 @dataclass(frozen=True, slots=True)

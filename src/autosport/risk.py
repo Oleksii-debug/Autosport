@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation, Overflow, Underflow, localcontext
 
+from .domain import PaperTicket, TicketStatus
 from .paper import PaperBook
 
 
@@ -38,19 +39,73 @@ class PaperRiskPolicy:
             object.__setattr__(self, field_name, value)
 
     @staticmethod
-    def _book_state(book: PaperBook) -> tuple[Decimal, Decimal, Decimal] | None:
-        """Return canonical finite economic state, or None when risk cannot be evaluated safely."""
+    def _decimal_context() -> Context:
+        """Return the deterministic context used for risk-state validation and limit arithmetic."""
+
+        context = Context(prec=28, Emin=-999999, Emax=999999)
+        context.traps[InvalidOperation] = True
+        context.traps[Overflow] = True
+        context.traps[Underflow] = True
+        context.clear_flags()
+        return context
+
+    @classmethod
+    def _book_state(cls, book: PaperBook) -> tuple[Decimal, Decimal, Decimal] | None:
+        """Return validated finite economic state, or None when risk cannot be evaluated safely."""
 
         try:
-            initial_bankroll = book.initial_bankroll
-            balance = book.balance
-            committed_stake = book.committed_stake
-        except (ArithmeticError, TypeError, ValueError):
+            tickets = book.tickets
+            if not isinstance(tickets, dict):
+                return None
+            for ticket in tickets.values():
+                if not isinstance(ticket, PaperTicket) or not isinstance(ticket.status, TicketStatus):
+                    return None
+
+            # Reuse the canonical durable-book invariant rather than trusting a derived aggregate.
+            # Running it in our own Decimal context keeps this risk boundary independent of caller
+            # traps/flags while proving ticket economics and the cross-field balance equation.
+            with localcontext(cls._decimal_context()):
+                PaperBook._validate_loaded_state(book)
+                initial_bankroll = book.initial_bankroll
+                balance = book.balance
+                committed_stake = book.committed_stake
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
             return None
+
         values = (initial_bankroll, balance, committed_stake)
         if any(not isinstance(value, Decimal) or not value.is_finite() for value in values):
             return None
         if initial_bankroll <= 0 or balance < 0 or committed_stake < 0:
+            return None
+        return values
+
+    def _derived_risk_values(
+        self,
+        initial_bankroll: Decimal,
+        balance: Decimal,
+        committed_stake: Decimal,
+        amount: Decimal,
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | None:
+        """Calculate limit values without leaking Decimal context/range failures."""
+
+        try:
+            with localcontext(self._decimal_context()):
+                ticket_limit = initial_bankroll * self.max_ticket_fraction
+                aggregate_committed = committed_stake + amount
+                committed_limit = initial_bankroll * self.max_committed_fraction
+                remaining_balance = balance - amount
+                reserve_limit = initial_bankroll * self.minimum_cash_reserve_fraction
+        except ArithmeticError:
+            return None
+
+        values = (
+            ticket_limit,
+            aggregate_committed,
+            committed_limit,
+            remaining_balance,
+            reserve_limit,
+        )
+        if any(not value.is_finite() for value in values):
             return None
         return values
 
@@ -63,14 +118,21 @@ class PaperRiskPolicy:
             return RiskDecision(False, "stake must be a finite decimal")
         if amount <= 0:
             return RiskDecision(False, "stake must be positive")
+
         state = self._book_state(book)
         if state is None:
             return RiskDecision(False, "virtual bankroll state is invalid")
         initial_bankroll, balance, committed_stake = state
-        if amount > initial_bankroll * self.max_ticket_fraction:
+
+        derived = self._derived_risk_values(initial_bankroll, balance, committed_stake, amount)
+        if derived is None:
+            return RiskDecision(False, "virtual bankroll state is invalid")
+        ticket_limit, aggregate_committed, committed_limit, remaining_balance, reserve_limit = derived
+
+        if amount > ticket_limit:
             return RiskDecision(False, "ticket exceeds configured bankroll fraction")
-        if committed_stake + amount > initial_bankroll * self.max_committed_fraction:
+        if aggregate_committed > committed_limit:
             return RiskDecision(False, "aggregate committed stake limit exceeded")
-        if balance - amount < initial_bankroll * self.minimum_cash_reserve_fraction:
+        if remaining_balance < reserve_limit:
             return RiskDecision(False, "minimum virtual cash reserve would be violated")
         return RiskDecision(True, "allowed")

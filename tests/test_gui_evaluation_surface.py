@@ -96,6 +96,15 @@ def test_evaluation_lines_fail_closed_when_run_summary_evidence_is_unreadable(tm
     assert lines[4] == "Price truth | ERROR — run summary evidence is missing or unreadable."
 
 
+def test_evaluation_lines_fail_closed_when_run_summary_is_not_utf8(tmp_path: Path):
+    result_path = tmp_path / "corrupt-run-summary.json"
+    result_path.write_bytes(b"\xff\xfe\x00\x80")
+
+    lines = evaluation_lines(_result(mode="exact", result_path=result_path))
+
+    assert lines[4] == "Price truth | ERROR — run summary evidence is missing or unreadable."
+
+
 def test_gui_wires_evaluation_to_keyboard_uia_and_terminal_result_without_tk_startup():
     build_source = inspect.getsource(AutosportApp._build)
     accessibility_source = inspect.getsource(AutosportApp._configure_accessibility)

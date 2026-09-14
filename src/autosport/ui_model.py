@@ -19,7 +19,7 @@ def result_summary(result: SessionResult) -> str:
 def _market_price_truth_line(result: SessionResult) -> str:
     try:
         payload = json.loads(Path(result.result_path).read_text(encoding="utf-8"))
-    except OSError:
+    except (OSError, UnicodeError):
         return "Price truth | ERROR — run summary evidence is missing or unreadable."
     except json.JSONDecodeError as exc:
         return f"Price truth | ERROR — run summary JSON is invalid: {exc.msg}."

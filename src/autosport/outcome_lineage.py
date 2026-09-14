@@ -19,6 +19,18 @@ _CORRECTION_FIELDS = (
 
 
 @dataclass(frozen=True, slots=True)
+class OutcomeRevisionDescriptor:
+    revision_id: str
+    revision: int
+    revision_kind: str
+    recorded_at: str
+    record_sha256: str
+    predecessor_record_sha256: str | None
+    supersedes_revision_id: str | None
+    correction_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class OutcomeSourceLineage:
     source_identity: str
     record_id: str
@@ -32,6 +44,7 @@ class OutcomeSourceLineage:
     lineage_root_sha256: str
     lineage_root_revision_id: str
     lineage_depth: int
+    revisions: tuple[OutcomeRevisionDescriptor, ...]
 
 
 def validate_outcome_source_lineage(
@@ -74,6 +87,7 @@ def validate_outcome_source_lineage(
     visited_files: set[str] = set()
     visited_paths: set[Path] = {current_resolved}
     visited_revision_ids: set[str] = set()
+    revisions_head_to_root: list[OutcomeRevisionDescriptor] = []
     head: dict[str, Any] | None = None
     head_predecessor_sha: str | None = None
     head_supersedes_revision_id: str | None = None
@@ -161,6 +175,18 @@ def validate_outcome_source_lineage(
                 raise ValueError(
                     "sealed outcome source record revision 1 must not declare correction lineage fields"
                 )
+            revisions_head_to_root.append(
+                OutcomeRevisionDescriptor(
+                    revision_id=revision_id,
+                    revision=revision,
+                    revision_kind=revision_kind,
+                    recorded_at=recorded_at,
+                    record_sha256=current_sha,
+                    predecessor_record_sha256=None,
+                    supersedes_revision_id=None,
+                    correction_reason=None,
+                )
+            )
             lineage_root_sha256 = current_sha
             lineage_root_revision_id = revision_id
             break
@@ -181,9 +207,21 @@ def validate_outcome_source_lineage(
             supersedes_raw,
             field="sealed outcome source record.supersedes_revision_id",
         )
-        _canonical_text(
+        correction_reason = _canonical_text(
             correction_reason_raw,
             field="sealed outcome source record.correction_reason",
+        )
+        revisions_head_to_root.append(
+            OutcomeRevisionDescriptor(
+                revision_id=revision_id,
+                revision=revision,
+                revision_kind=revision_kind,
+                recorded_at=recorded_at,
+                record_sha256=current_sha,
+                predecessor_record_sha256=predecessor_sha,
+                supersedes_revision_id=supersedes_revision_id,
+                correction_reason=correction_reason,
+            )
         )
         if lineage_depth == 1:
             head_predecessor_sha = predecessor_sha
@@ -210,6 +248,15 @@ def validate_outcome_source_lineage(
             path=predecessor_path,
             context="sealed outcome predecessor record",
         )
+        predecessor_outcomes = _quote_outcomes(predecessor_record)
+        if set(predecessor_outcomes) != set(quote_outcomes):
+            raise ValueError(
+                "sealed outcome correction must preserve the authoritative quote key set"
+            )
+        if predecessor_outcomes == quote_outcomes:
+            raise ValueError(
+                "sealed outcome correction must change at least one authoritative outcome"
+            )
 
         expected_revision = revision - 1
         successor_recorded_at = recorded_dt
@@ -234,6 +281,7 @@ def validate_outcome_source_lineage(
         lineage_root_sha256=lineage_root_sha256,
         lineage_root_revision_id=lineage_root_revision_id,
         lineage_depth=lineage_depth,
+        revisions=tuple(reversed(revisions_head_to_root)),
     )
 
 

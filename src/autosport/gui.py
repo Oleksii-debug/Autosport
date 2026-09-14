@@ -360,7 +360,7 @@ class AutosportApp(tk.Tk):
             session.close()
         except Exception as exc:
             session_workspace = Path(session.workspace)
-            self._recovery_required_workspaces.add(session_workspace)
+            self._block_workspace_for_recovery(session_workspace)
             self._append_log(
                 "Economic session teardown після quarantine завершився помилкою; "
                 f"workspace={session_workspace}; secondary={type(exc).__name__}: {exc}"
@@ -611,10 +611,23 @@ class AutosportApp(tk.Tk):
 
         dataset_path = self.dataset_path
         speed = _SPEEDS[self.speed_text.get()]
+        teardown_succeeded = self._hide_uncertain_economic_state(
+            "Paper replay готується; previous economic session state приховано до підтвердженого transition."
+        )
+        if not teardown_succeeded:
+            detail = (
+                "Paper replay не запущено fail-closed: previous economic session teardown failed; "
+                "target replay не стартував, а exact failing workspace потребує recovery."
+            )
+            self.status.set(
+                "Paper replay не запущено: previous economic session teardown failed; "
+                "stale economic state приховано, а failing workspace заблоковано до recovery."
+            )
+            self._append_log(detail)
+            messagebox.showerror("Автоспорт", detail)
+            return
+
         self._active_workspace = replay_workspace
-        if self.session is not None:
-            self.session.close()
-            self.session = None
 
         def task():
             return run_workspace_dataset_once(

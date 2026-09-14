@@ -739,6 +739,10 @@ class RunTransaction:
             raise RunTransactionError(
                 f"{label} canonical path must be a regular non-symlink file"
             )
+        if path_before.st_nlink != 1:
+            raise RunTransactionError(
+                f"{label} canonical path must not have hard-link aliases"
+            )
 
         try:
             handle = path.open("rb")
@@ -760,6 +764,8 @@ class RunTransaction:
             if (
                 not stat.S_ISREG(opened_before.st_mode)
                 or not stat.S_ISREG(path_opened.st_mode)
+                or opened_before.st_nlink != 1
+                or path_opened.st_nlink != 1
                 or not os.path.samestat(opened_before, path_opened)
             ):
                 raise RunTransactionError(
@@ -777,6 +783,8 @@ class RunTransaction:
             if (
                 not stat.S_ISREG(opened_after.st_mode)
                 or not stat.S_ISREG(path_after.st_mode)
+                or opened_after.st_nlink != 1
+                or path_after.st_nlink != 1
                 or not os.path.samestat(opened_before, opened_after)
                 or not os.path.samestat(opened_after, path_after)
                 or not os.path.samestat(path_before, path_after)

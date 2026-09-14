@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -130,7 +131,7 @@ def _serialized_metadata(raw: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(metadata, dict):
         raise ValueError("metadata must be a JSON object")
     _validate_serialized_json_value(metadata, "metadata")
-    return dict(metadata)
+    return copy.deepcopy(metadata)
 
 
 @dataclass(frozen=True, slots=True)

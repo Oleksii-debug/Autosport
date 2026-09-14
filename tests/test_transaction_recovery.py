@@ -246,6 +246,73 @@ class TransactionRecoveryTests(unittest.TestCase):
                 reconcile_late_crashes(root)
             self.assertEqual(registry.get(key)["status"], "in_progress")
 
+    def test_commit_rejects_manifest_summary_ledger_misbinding_before_economic_promotion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = AutosportSession(root, "10000")
+            with patch.object(
+                RunTransaction,
+                "commit",
+                side_effect=RuntimeError("stop after precommit"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "stop after precommit"):
+                    session.run_dataset(self._dataset())
+            _registry, _key, item = self._in_progress(root)
+            tx = RunTransaction(root, str(item["run_id"]))
+            session.close()
+
+            JsonlDecisionLedger(tx.staged_ledger_path).append(
+                DecisionRecord(
+                    str(item["run_id"]),
+                    "adversarial-test",
+                    "2026-01-01T00:00:01+00:00",
+                    "OBSERVE",
+                    {"extra": True},
+                    "ctx-extra",
+                )
+            )
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            manifest["new"]["decision_ledger_sha256"] = sha256_file(tx.staged_ledger_path)
+            tx.manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "transaction binding mismatch: decision_ledger_sha256",
+            ):
+                tx.commit()
+            self.assertEqual(PaperBook.load(root / "paper_book.json").balance, 10000)
+            self.assertEqual((root / "decisions.jsonl").read_text(encoding="utf-8"), "")
+            self.assertFalse((root / f"run-{item['run_id']}.json").exists())
+
+    def test_commit_preflights_existing_summary_target_before_economic_promotion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = AutosportSession(root, "10000")
+            with patch.object(
+                RunTransaction,
+                "commit",
+                side_effect=RuntimeError("stop after precommit"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "stop after precommit"):
+                    session.run_dataset(self._dataset())
+            _registry, _key, item = self._in_progress(root)
+            tx = RunTransaction(root, str(item["run_id"]))
+            session.close()
+
+            summary_target = root / f"run-{item['run_id']}.json"
+            summary_target.write_text('{"poisoned":true}\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "canonical run summary SHA-256 mismatch",
+            ):
+                tx.commit()
+            self.assertEqual(PaperBook.load(root / "paper_book.json").balance, 10000)
+            self.assertEqual((root / "decisions.jsonl").read_text(encoding="utf-8"), "")
+
 
 if __name__ == "__main__":
     unittest.main()

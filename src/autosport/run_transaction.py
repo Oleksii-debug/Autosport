@@ -158,9 +158,12 @@ class RunTransaction:
         if manifest["phase"] not in {"precommitted", "canonical_committed", "completed"}:
             raise RunTransactionError("transaction lacks durable precommit evidence")
         self._validate_manifest_paths(manifest)
-        # Validate ledger states before promoting PaperBook. A semantically corrupt
-        # ledger must never cause a partial economic commit merely because its outer
-        # file hash happens to match the transaction manifest.
+        # Every artifact that can make the transaction irreversible is preflighted
+        # before the first economic os.replace.  In particular, the run summary must
+        # remain bound to the same NEW PaperBook and Decision Ledger identities as the
+        # manifest; otherwise a tampered manifest could commit mutually inconsistent
+        # but individually hash-valid evidence.
+        self._validate_precommit_evidence(manifest)
         self._validate_decision_ledger_commit_state(manifest)
         self._promote_base_or_new(
             target=self.workspace / "paper_book.json",
@@ -309,6 +312,49 @@ class RunTransaction:
             raise RunTransactionError(
                 f"{label} integrity validation failed: {exc}"
             ) from exc
+
+    def _validate_precommit_evidence(self, manifest: dict[str, Any]) -> None:
+        expected_book_hash = self._hash_field(manifest, "new", "paper_book_sha256")
+        expected_ledger_hash = self._hash_field(manifest, "new", "decision_ledger_sha256")
+        expected_summary_hash = self._hash_field(manifest, "new", "summary_sha256")
+        summary_target = self.workspace / f"run-{self.run_id}.json"
+
+        candidates: list[tuple[str, Path]] = []
+        for label, path in (
+            ("staged run summary", self.staged_summary_path),
+            ("canonical run summary", summary_target),
+        ):
+            if path.exists():
+                if not path.is_file():
+                    raise RunTransactionError(f"{label} is not a file")
+                candidates.append((label, path))
+        if not candidates:
+            raise RunTransactionError("run summary precommit artifact is missing")
+
+        for label, path in candidates:
+            if sha256_file(path) != expected_summary_hash:
+                raise RunTransactionError(f"{label} SHA-256 mismatch")
+            try:
+                summary = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RunTransactionError(f"{label} is unreadable or invalid JSON") from exc
+            if not isinstance(summary, dict):
+                raise RunTransactionError(f"{label} schema is invalid")
+            expected_bindings = {
+                "paper_book_sha256": expected_book_hash,
+                "decision_ledger_sha256": expected_ledger_hash,
+                "transaction_schema_version": self.SCHEMA_VERSION,
+                "transaction_run_id": self.run_id,
+            }
+            mismatches = [
+                field_name
+                for field_name, expected_value in expected_bindings.items()
+                if summary.get(field_name) != expected_value
+            ]
+            if mismatches:
+                raise RunTransactionError(
+                    f"{label} transaction binding mismatch: " + ",".join(sorted(mismatches))
+                )
 
     def _validate_decision_ledger_commit_state(self, manifest: dict[str, Any]) -> None:
         target = self.workspace / "decisions.jsonl"

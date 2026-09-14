@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .decision_ledger import DecisionRecord, JsonlDecisionLedger
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
 from .restart_recovery_audit import run_restart_recovery_audit
@@ -88,6 +89,22 @@ def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | P
             base_paper_book_sha256=book_hash,
             base_decision_ledger_sha256=ledger_hash,
         )
+        # Make both canonical economic artifacts change across the PRECOMMIT.
+        # The deterministic ledger canary uses the production append/validation path,
+        # so fresh-process recovery must promote a real canonical JSONL decision rather
+        # than succeeding because BASE and NEW Decision Ledger bytes happen to match.
+        JsonlDecisionLedger(transaction.run_ledger_path).append(
+            DecisionRecord(
+                replay_run_id=_PROCESS_RUN_ID,
+                agent="process-recovery-audit",
+                observed_ts="2000-01-01T00:00:00+00:00",
+                action="precommit_recovery_canary",
+                payload={"paper_only": True, "purpose": "process_recovery_audit"},
+                context_hash="e" * 64,
+                decision_id="process-recovery-audit-canary",
+                recorded_at="2000-01-01T00:00:00+00:00",
+            )
+        )
         # Cross the durable PRECOMMIT boundary before the parent kills this process.
         # A distinct bankroll value is an audit canary proving recovery promotes NEW
         # rather than merely observing unchanged BASE state.
@@ -107,6 +124,10 @@ def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | P
         new_ledger_hash = str(summary["decision_ledger_sha256"])
         if new_book_hash == book_hash:
             raise RuntimeError("process-kill PRECOMMIT did not stage distinct NEW PaperBook state")
+        if new_ledger_hash == ledger_hash:
+            raise RuntimeError(
+                "process-kill PRECOMMIT did not stage distinct NEW Decision Ledger state"
+            )
         atomic_write_json(
             ready,
             {
@@ -193,7 +214,9 @@ def run_process_kill_recovery_child(
         if new_ledger_hash != expected_new.get("decision_ledger_sha256"):
             raise RuntimeError("fresh-process recovery did not promote expected NEW Decision Ledger")
         if new_book_hash == base_book_hash:
-            raise RuntimeError("fresh-process recovery did not cross the durable economic boundary")
+            raise RuntimeError("fresh-process recovery did not cross the durable PaperBook boundary")
+        if new_ledger_hash == base_ledger_hash:
+            raise RuntimeError("fresh-process recovery did not cross the durable Decision Ledger boundary")
 
         registry.reconcile_completed_summary(
             experiment_key,
@@ -391,6 +414,10 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
         raise RuntimeError("parent verification found unexpected canonical PaperBook identity")
     if actual_new_ledger_hash != ready.get("new_decision_ledger_sha256"):
         raise RuntimeError("parent verification found unexpected canonical Decision Ledger identity")
+    if actual_new_book_hash == ready.get("base_paper_book_sha256"):
+        raise RuntimeError("parent verification did not observe promoted PaperBook state")
+    if actual_new_ledger_hash == ready.get("base_decision_ledger_sha256"):
+        raise RuntimeError("parent verification did not observe promoted Decision Ledger state")
     if actual_new_book_hash != parent_new.get("paper_book_sha256"):
         raise RuntimeError("parent verification PaperBook does not match transaction manifest")
     if actual_new_ledger_hash != parent_new.get("decision_ledger_sha256"):

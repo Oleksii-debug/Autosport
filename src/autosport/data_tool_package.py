@@ -9,13 +9,19 @@ from pathlib import Path
 from typing import Any
 
 from autosport.release_package import (
+    _FIXED_ZIP_TIME,
+    _ZIP_CREATE_SYSTEM,
+    _ZIP_CREATE_VERSION,
+    _ZIP_EXTRACT_VERSION,
+    _ZIP_INTERNAL_ATTR,
+    _ZIP_RESERVED,
+    _ZIP_VOLUME,
     _decode_json_object,
     _validate_windows_member,
     verify_windows_package,
 )
 
 
-_FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PREFIX = "Autosport-V1/"
 _DATA_TOOL = "Autosport-Data.exe"
 _BUILD_INFO = "BUILD_INFO.json"
@@ -63,6 +69,13 @@ def _write_deterministic(package_zip: Path, members: dict[str, bytes]) -> None:
             for relative in sorted(members):
                 info = zipfile.ZipInfo((_PREFIX + relative), _FIXED_ZIP_TIME)
                 info.compress_type = zipfile.ZIP_DEFLATED
+                info.create_system = _ZIP_CREATE_SYSTEM
+                info.create_version = _ZIP_CREATE_VERSION
+                info.extract_version = _ZIP_EXTRACT_VERSION
+                info.reserved = _ZIP_RESERVED
+                info.flag_bits = 0
+                info.volume = _ZIP_VOLUME
+                info.internal_attr = _ZIP_INTERNAL_ATTR
                 info.external_attr = (0o755 if relative.lower().endswith(".exe") else 0o644) << 16
                 archive.writestr(
                     info,

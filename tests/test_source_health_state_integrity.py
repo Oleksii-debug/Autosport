@@ -72,6 +72,7 @@ class SourceHealthStateIntegrityTests(unittest.TestCase):
             ("total_received", -1),
             ("total_accepted", 4),
             ("consecutive_failures", 2),
+            ("total_failures", 3),
         )
         for field_name, value in cases:
             with self.subTest(field_name=field_name, value=value):
@@ -83,6 +84,49 @@ class SourceHealthStateIntegrityTests(unittest.TestCase):
 
                     with self.assertRaisesRegex(ValueError, "invalid source health state"):
                         SourceHealthStore(path)
+
+    def test_impossible_status_state_machine_combinations_fail_closed(self):
+        cases = (
+            {"status": "failed", "consecutive_failures": 0, "last_error": "RuntimeError: boom"},
+            {"status": "healthy", "consecutive_failures": 1, "quality_flags": []},
+            {"status": "healthy", "quality_flags": ["GAP"]},
+            {"status": "degraded", "quality_flags": []},
+            {"status": "failed", "consecutive_failures": 1, "last_error": None},
+            {"status": "failed", "consecutive_failures": 1, "last_error_at": None, "last_error": "RuntimeError: boom"},
+            {"status": "unknown", "poll_count": 1, "quality_flags": []},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "source-health.json"
+                    state = self._valid_state()
+                    state.update(changes)
+                    self._write_state(path, state)
+
+                    with self.assertRaisesRegex(ValueError, "invalid source health state"):
+                        SourceHealthStore(path)
+
+    def test_canonical_failed_state_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "source-health.json"
+            state = self._valid_state()
+            state.update(
+                {
+                    "status": "failed",
+                    "poll_count": 3,
+                    "total_failures": 2,
+                    "consecutive_failures": 1,
+                    "last_error_at": "2026-09-14T00:01:00+00:00",
+                    "last_error": "RuntimeError: provider unavailable",
+                }
+            )
+            self._write_state(path, state)
+
+            reopened = SourceHealthStore(path).get("source")
+
+            self.assertEqual(reopened.status, "failed")
+            self.assertEqual(reopened.consecutive_failures, 1)
+            self.assertEqual(reopened.total_failures, 2)
 
     def test_invalid_persisted_status_and_timestamps_fail_closed(self):
         cases = (

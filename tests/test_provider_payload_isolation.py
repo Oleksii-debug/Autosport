@@ -32,6 +32,17 @@ class ProviderPayloadIsolationTests(unittest.TestCase):
         values.update(overrides)
         return ProviderQuote(**values)  # type: ignore[arg-type]
 
+    @staticmethod
+    def _deep_metadata(depth: int = 80) -> dict[str, object]:
+        root: dict[str, object] = {}
+        current = root
+        for _ in range(depth):
+            child: dict[str, object] = {}
+            current["next"] = child
+            current = child
+        current["leaf"] = "ok"
+        return root
+
     def test_normalizer_rejects_noncanonical_nonidentity_payload_fields(self) -> None:
         normalizer = CanonicalNormalizer()
         cases: tuple[tuple[str, object, type[BaseException], str], ...] = (
@@ -54,12 +65,29 @@ class ProviderPayloadIsolationTests(unittest.TestCase):
                 with self.assertRaisesRegex(error_type, message):
                     normalizer.normalize("fixture", quote)
 
+    def test_normalizer_rejects_cyclic_and_excessively_deep_metadata_without_recursion_error(self) -> None:
+        cyclic: dict[str, object] = {}
+        cyclic["self"] = cyclic
+
+        normalizer = CanonicalNormalizer()
+        with self.assertRaisesRegex(ValueError, "cyclic JSON container"):
+            normalizer.normalize("fixture", self._quote(metadata=cyclic))
+        with self.assertRaisesRegex(ValueError, "maximum JSON nesting depth"):
+            normalizer.normalize("fixture", self._quote(metadata=self._deep_metadata()))
+
     def test_valid_nonidentity_payload_is_preserved_exactly(self) -> None:
+        shared = {"ok": True}
+        metadata = {
+            "provider": "fixture",
+            "nested": [1, shared],
+            "same-again": shared,
+            "ratio": 1.25,
+        }
         quote = self._quote(
             status="suspended",
             source_ts="2026-09-14T02:59:59Z",
             score_state="1-0",
-            metadata={"provider": "fixture", "nested": [1, {"ok": True}], "ratio": 1.25},
+            metadata=metadata,
         )
 
         event = CanonicalNormalizer().normalize("fixture", quote)
@@ -101,6 +129,53 @@ class ProviderPayloadIsolationTests(unittest.TestCase):
                 self.assertEqual(stats.received, 5)
                 self.assertEqual(stats.accepted, 2)
                 self.assertEqual(stats.rejected, 3)
+                self.assertEqual(
+                    [event.selection_id for event in store.events()],
+                    ["fixture:valid-a", "fixture:valid-b"],
+                )
+            finally:
+                store.close()
+
+    def test_cyclic_and_deep_metadata_are_per_quote_rejections_not_provider_failures(self) -> None:
+        cyclic: dict[str, object] = {}
+        cyclic["self"] = cyclic
+        deep = self._deep_metadata()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                health = SourceHealthStore(Path(tmp) / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    policy=IngestionPolicy(max_batch_size=10),
+                    health_store=health,
+                    clock=lambda: "2026-09-14T03:00:05+00:00",
+                )
+                quotes = [
+                    self._quote(provider_selection_id="valid-a", sequence=1),
+                    self._quote(
+                        provider_selection_id="cyclic-metadata",
+                        sequence=2,
+                        metadata=cyclic,
+                    ),
+                    self._quote(
+                        provider_selection_id="deep-metadata",
+                        sequence=3,
+                        metadata=deep,
+                    ),
+                    self._quote(provider_selection_id="valid-b", sequence=4),
+                ]
+
+                stats = engine.poll_once(InMemoryProvider("fixture", quotes), max_items=10)
+
+                self.assertEqual(stats.received, 4)
+                self.assertEqual(stats.accepted, 2)
+                self.assertEqual(stats.rejected, 2)
+                state = health.get("fixture")
+                self.assertEqual(state.total_failures, 0)
+                self.assertEqual(state.total_received, 4)
+                self.assertEqual(state.total_accepted, 2)
+                self.assertEqual(state.total_rejected, 2)
                 self.assertEqual(
                     [event.selection_id for event in store.events()],
                     ["fixture:valid-a", "fixture:valid-b"],

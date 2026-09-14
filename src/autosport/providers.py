@@ -9,6 +9,9 @@ from typing import Any, Protocol
 from .domain import MarketEvent, MarketType
 
 
+_MAX_PROVIDER_METADATA_NESTING = 64
+
+
 def _validate_source_id(source_id: object) -> str:
     if not isinstance(source_id, str):
         raise TypeError("source_id must be str")
@@ -64,25 +67,47 @@ def _validate_provider_timestamp(value: object, name: str) -> str:
 
 
 def _validate_json_value(value: object, field: str) -> None:
-    """Require a value to survive durable JSON without type drift or non-finite numbers."""
+    """Require bounded durable JSON without type drift, cycles, or non-finite numbers."""
 
-    if value is None or isinstance(value, (str, bool, int)):
-        return
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError(f"{field} contains non-finite JSON number")
-        return
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            _validate_json_value(item, f"{field}[{index}]")
-        return
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError(f"{field} contains non-string JSON object key")
-            _validate_json_value(item, f"{field}.{key}")
-        return
-    raise TypeError(f"{field} contains non-canonical JSON value type {type(value).__name__}")
+    stack: list[tuple[object, str, int, bool]] = [(value, field, 0, False)]
+    active_containers: set[int] = set()
+
+    while stack:
+        current, path, depth, exiting = stack.pop()
+        if exiting:
+            active_containers.remove(id(current))
+            continue
+
+        if current is None or isinstance(current, (str, bool, int)):
+            continue
+        if isinstance(current, float):
+            if not math.isfinite(current):
+                raise ValueError(f"{path} contains non-finite JSON number")
+            continue
+        if isinstance(current, (list, dict)):
+            if depth > _MAX_PROVIDER_METADATA_NESTING:
+                raise ValueError(
+                    f"{field} exceeds maximum JSON nesting depth "
+                    f"{_MAX_PROVIDER_METADATA_NESTING}"
+                )
+            container_id = id(current)
+            if container_id in active_containers:
+                raise ValueError(f"{path} contains cyclic JSON container")
+            active_containers.add(container_id)
+            stack.append((current, path, depth, True))
+
+            if isinstance(current, list):
+                for index, item in enumerate(current):
+                    stack.append((item, f"{path}[{index}]", depth + 1, False))
+            else:
+                for key, item in current.items():
+                    if not isinstance(key, str):
+                        raise TypeError(f"{path} contains non-string JSON object key")
+                    stack.append((item, f"{path}.{key}", depth + 1, False))
+            continue
+        raise TypeError(
+            f"{path} contains non-canonical JSON value type {type(current).__name__}"
+        )
 
 
 def _scoped_identity(source_id: str, provider_component: str) -> str:

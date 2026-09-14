@@ -7,6 +7,7 @@ import pytest
 
 from benchmarks.benchmark_replay_event_driven import (
     _build_events,
+    _finite_positive_metric,
     _positive_elapsed_seconds,
     _positive_int,
     _source_duration_seconds,
@@ -49,8 +50,14 @@ def test_positive_elapsed_seconds_rejects_invalid_clock_samples(
         _positive_elapsed_seconds(  # type: ignore[arg-type]
             start_ns,
             end_ns,
-            "replay_elapsed_seconds",
+            "dispatch_elapsed_seconds",
         )
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf")])
+def test_finite_positive_metric_rejects_invalid_evidence(value: float) -> None:
+    with pytest.raises(RuntimeError, match="invalid throughput"):
+        _finite_positive_metric("throughput", value)
 
 
 def test_build_events_is_strictly_chronological_and_dedupe_unique() -> None:
@@ -79,14 +86,33 @@ def test_small_replay_benchmark_reports_truthful_durable_event_driven_scope() ->
     assert result.source_duration_seconds == 7.0
     assert result.mode == "fastest-event-driven"
     assert result.consumer_scope == "sqlite-market-store"
+    assert result.fixture_construction_included is False
+    assert result.sqlite_store_open_included is False
     assert result.provider_network_included is False
     assert result.agent_callbacks_included is False
     assert result.target_claim is False
     assert len(result.replay_dataset_hash) == 64
-    assert math.isfinite(result.prepare_elapsed_seconds) and result.prepare_elapsed_seconds > 0
-    assert math.isfinite(result.replay_elapsed_seconds) and result.replay_elapsed_seconds > 0
-    assert math.isfinite(result.events_per_second) and result.events_per_second > 0
+
     assert (
-        math.isfinite(result.equivalent_realtime_multiplier)
-        and result.equivalent_realtime_multiplier > 0
+        math.isfinite(result.engine_prepare_elapsed_seconds)
+        and result.engine_prepare_elapsed_seconds > 0
+    )
+    assert math.isfinite(result.dispatch_elapsed_seconds) and result.dispatch_elapsed_seconds > 0
+    assert result.measured_engine_total_elapsed_seconds == pytest.approx(
+        result.engine_prepare_elapsed_seconds + result.dispatch_elapsed_seconds
+    )
+    assert result.measured_engine_total_elapsed_seconds > result.dispatch_elapsed_seconds
+
+    assert math.isfinite(result.dispatch_events_per_second)
+    assert result.dispatch_events_per_second > 0
+    assert math.isfinite(result.measured_engine_total_events_per_second)
+    assert 0 < result.measured_engine_total_events_per_second < result.dispatch_events_per_second
+
+    assert math.isfinite(result.dispatch_realtime_multiplier)
+    assert result.dispatch_realtime_multiplier > 0
+    assert math.isfinite(result.measured_engine_total_realtime_multiplier)
+    assert (
+        0
+        < result.measured_engine_total_realtime_multiplier
+        < result.dispatch_realtime_multiplier
     )

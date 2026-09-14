@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+import autosport.evidence_export as evidence_export
+from autosport.evidence_export import export_evidence_manifest
+
+
+def _workspace_with_evidence(tmp_path: Path) -> Path:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "paper_book.json").write_bytes(b'{"balance":"100"}\n')
+    return workspace
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "original"),
+    [
+        (Path("market.db"), b"sqlite-product-state"),
+        (Path(".economic-run.lock"), b"existing-lock-metadata"),
+        (Path("token.json"), b'{"token":"must-survive"}\n'),
+        (Path(".run-transactions") / "run-1" / "manifest.json", b"transaction-evidence"),
+    ],
+)
+def test_export_rejects_existing_workspace_destination_without_modifying_bytes(
+    tmp_path: Path,
+    relative_path: Path,
+    original: bytes,
+) -> None:
+    workspace = _workspace_with_evidence(tmp_path)
+    destination = workspace / relative_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(original)
+
+    with pytest.raises(ValueError, match="outside the Autosport workspace"):
+        export_evidence_manifest(workspace, destination)
+
+    assert destination.read_bytes() == original
+    assert (workspace / "paper_book.json").read_bytes() == b'{"balance":"100"}\n'
+
+
+def test_export_rejects_new_destination_anywhere_inside_workspace(tmp_path: Path) -> None:
+    workspace = _workspace_with_evidence(tmp_path)
+    destination = workspace / "exports" / "manifest.json"
+
+    with pytest.raises(ValueError, match="outside the Autosport workspace"):
+        export_evidence_manifest(workspace, destination)
+
+    assert not destination.exists()
+    assert not destination.parent.exists()
+
+
+def test_export_rejects_external_path_that_resolves_back_into_workspace(tmp_path: Path) -> None:
+    workspace = _workspace_with_evidence(tmp_path)
+    alias = tmp_path / "workspace-alias"
+    try:
+        os.symlink(workspace, alias, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks unavailable in this environment")
+
+    destination = alias / "market.db"
+    with pytest.raises(ValueError, match="outside the Autosport workspace"):
+        export_evidence_manifest(workspace, destination)
+
+    assert not (workspace / "market.db").exists()
+
+
+def test_export_rechecks_destination_after_snapshot_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace_with_evidence(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    alias = tmp_path / "destination-alias"
+    try:
+        os.symlink(outside, alias, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks unavailable in this environment")
+
+    destination = alias / "manifest.json"
+    real_hash = evidence_export._open_and_hash_regular_file
+    redirected = False
+
+    def hash_then_redirect(path: Path) -> tuple[int, str]:
+        nonlocal redirected
+        result = real_hash(path)
+        if not redirected:
+            alias.unlink()
+            os.symlink(workspace, alias, target_is_directory=True)
+            redirected = True
+        return result
+
+    monkeypatch.setattr(evidence_export, "_open_and_hash_regular_file", hash_then_redirect)
+
+    with pytest.raises(ValueError, match="outside the Autosport workspace"):
+        export_evidence_manifest(workspace, destination)
+
+    assert redirected is True
+    assert not (workspace / "manifest.json").exists()
+    assert not (outside / "manifest.json").exists()

@@ -7,6 +7,55 @@ from typing import Any, Protocol
 from .domain import MarketEvent, MarketType
 
 
+def _validate_source_id(source_id: object) -> str:
+    if not isinstance(source_id, str):
+        raise TypeError("source_id must be str")
+    if not source_id or source_id != source_id.strip():
+        raise ValueError("source_id must be non-empty and trimmed")
+    if "|" in source_id:
+        raise ValueError("source_id must not contain reserved identity delimiter '|'")
+    return source_id
+
+
+def _validate_provider_component(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be str")
+    if not value or value != value.strip():
+        raise ValueError(f"{name} must be non-empty and trimmed")
+    if "|" in value:
+        raise ValueError(f"{name} must not contain reserved identity delimiter '|'")
+    return value
+
+
+def _validate_provider_event_id(value: object) -> str:
+    event_id = _validate_provider_component(value, "provider_event_id")
+    if ":" in event_id:
+        raise ValueError("provider_event_id must not contain reserved source-scope delimiter ':'")
+    return event_id
+
+
+def _validate_sequence(value: object) -> int:
+    """Keep provider sequence identity stable across JSON/SQLite round trips."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("sequence must be a non-boolean int")
+    return value
+
+
+def _scoped_identity(source_id: str, provider_component: str) -> str:
+    """Preserve the deployed canonical ``source_id:provider_id`` representation.
+
+    Colon is intentionally data inside existing source IDs and market/selection IDs
+    (the live Parlay adapter emits market IDs such as ``book:h2h``). Provider event
+    IDs are colon-free, which makes the source-scoped event identity unambiguous and
+    therefore prevents cross-source quote-key aliasing without re-keying deployed
+    market/selection identities. The top-level quote-key delimiter ``|`` remains
+    forbidden in every identity component.
+    """
+
+    return f"{source_id}:{provider_component}"
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderQuote:
     provider_event_id: str
@@ -21,6 +70,12 @@ class ProviderQuote:
     score_state: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        _validate_provider_event_id(self.provider_event_id)
+        _validate_provider_component(self.provider_market_id, "provider_market_id")
+        _validate_provider_component(self.provider_selection_id, "provider_selection_id")
+        _validate_sequence(self.sequence)
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderBatch:
@@ -30,8 +85,7 @@ class ProviderBatch:
     quality_flags: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        if not self.source_id:
-            raise ValueError("source_id required")
+        _validate_source_id(self.source_id)
         if len(set(self.quality_flags)) != len(self.quality_flags):
             raise ValueError("duplicate provider batch quality flag")
 
@@ -43,20 +97,20 @@ class MarketProvider(Protocol):
 
 
 class CanonicalNormalizer:
-    """Provider IDs are scoped under source_id so provider-specific identifiers never collide locally."""
+    """Provider IDs are scoped under a validated source without changing deployed IDs."""
 
     def normalize(self, source_id: str, quote: ProviderQuote) -> MarketEvent:
+        source_id = _validate_source_id(source_id)
         if not isinstance(quote.decimal_odds, Decimal):
             raise TypeError("decimal odds must be Decimal")
         if not quote.decimal_odds.is_finite():
             raise ValueError("decimal odds must be finite")
         if quote.decimal_odds <= 1:
             raise ValueError("decimal odds must be greater than 1")
-        prefix = source_id.replace("|", "_")
         return MarketEvent(
-            event_id=f"{prefix}:{quote.provider_event_id}",
-            market_id=f"{prefix}:{quote.provider_market_id}",
-            selection_id=f"{prefix}:{quote.provider_selection_id}",
+            event_id=_scoped_identity(source_id, quote.provider_event_id),
+            market_id=_scoped_identity(source_id, quote.provider_market_id),
+            selection_id=_scoped_identity(source_id, quote.provider_selection_id),
             decimal_odds=quote.decimal_odds,
             observed_ts=quote.observed_ts,
             source_id=source_id,
@@ -79,14 +133,14 @@ class InMemoryProvider:
         quotes: list[ProviderQuote],
         quality_flags: tuple[str, ...] = (),
     ) -> None:
-        self.source_id = source_id
+        self.source_id = _validate_source_id(source_id)
         self._quotes = list(quotes)
         self._offset = 0
         self.quality_flags = quality_flags
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
-        if max_items <= 0:
-            raise ValueError("max_items must be positive")
+        if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:
+            raise ValueError("max_items must be a positive non-boolean integer")
         items = self._quotes[self._offset : self._offset + max_items]
         self._offset += len(items)
         cursor = str(self._offset)

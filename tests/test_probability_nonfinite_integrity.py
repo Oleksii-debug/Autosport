@@ -4,10 +4,12 @@ import math
 import unittest
 from decimal import Decimal
 
+from autosport.domain import MarketEvent
 from autosport.probability import (
     ForecastObservation,
     implied_probability,
     log_loss,
+    normalize_two_or_more_way_market,
     paper_value,
 )
 
@@ -30,6 +32,32 @@ class ProbabilityNonFiniteIntegrityTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "decimal odds must be finite"):
                     paper_value("quote", "0.5", value)
+
+    def test_normalization_rejects_duplicate_selection(self) -> None:
+        first = MarketEvent.from_dict(
+            {
+                "event_id": "e",
+                "market_id": "m",
+                "selection_id": "a",
+                "decimal_odds": "2.0",
+                "observed_ts": "2026-01-01T00:00:00+00:00",
+                "source_id": "s",
+                "sequence": 1,
+            }
+        )
+        duplicate = MarketEvent.from_dict(
+            {
+                "event_id": "e",
+                "market_id": "m",
+                "selection_id": "a",
+                "decimal_odds": "2.2",
+                "observed_ts": "2026-01-01T00:00:01+00:00",
+                "source_id": "s",
+                "sequence": 2,
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "distinct selections"):
+            normalize_two_or_more_way_market([first, duplicate])
 
     def test_log_loss_rejects_nonfinite_and_out_of_range_epsilon(self) -> None:
         observations = [ForecastObservation(0.5, 1)]

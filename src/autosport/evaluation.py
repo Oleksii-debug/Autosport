@@ -41,9 +41,17 @@ def evaluate(book: PaperBook) -> EvaluationSummary:
         tickets = book.tickets
         if not isinstance(tickets, dict):
             raise TypeError("PaperBook tickets must be a dict")
-        for ticket in tickets.values():
+        for ticket_key, ticket in tickets.items():
+            if not isinstance(ticket_key, str) or not ticket_key:
+                raise TypeError("PaperBook contains a noncanonical ticket mapping key")
             if not isinstance(ticket, PaperTicket) or not isinstance(ticket.status, TicketStatus):
                 raise TypeError("PaperBook contains a noncanonical ticket/status")
+            if (
+                not isinstance(ticket.ticket_id, str)
+                or not ticket.ticket_id
+                or ticket_key != ticket.ticket_id
+            ):
+                raise TypeError("PaperBook contains a noncanonical ticket identity")
 
         # Evaluation becomes durable run evidence. Re-prove the mutable PaperBook
         # invariant immediately before calculating it, and isolate all Decimal

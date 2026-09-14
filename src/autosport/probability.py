@@ -24,8 +24,15 @@ class PaperValueEstimate:
     expected_profit_per_unit: Decimal
 
 
+def _finite_decimal(value: Decimal | str, *, field: str) -> Decimal:
+    numeric = Decimal(str(value))
+    if not numeric.is_finite():
+        raise ValueError(f"{field} must be finite")
+    return numeric
+
+
 def implied_probability(decimal_odds: Decimal | str) -> Decimal:
-    odds = Decimal(str(decimal_odds))
+    odds = _finite_decimal(decimal_odds, field="decimal odds")
     if odds <= 1:
         raise ValueError("decimal odds must be greater than 1")
     return Decimal("1") / odds
@@ -49,8 +56,8 @@ def normalize_two_or_more_way_market(quotes: Iterable[MarketEvent]) -> dict[str,
 
 
 def paper_value(quote_key: str, probability: Decimal | str, decimal_odds: Decimal | str) -> PaperValueEstimate:
-    p = Decimal(str(probability))
-    odds = Decimal(str(decimal_odds))
+    p = _finite_decimal(probability, field="probability")
+    odds = _finite_decimal(decimal_odds, field="decimal odds")
     if p < 0 or p > 1:
         raise ValueError("probability must be between 0 and 1")
     if odds <= 1:
@@ -78,6 +85,11 @@ def log_loss(observations: Iterable[ForecastObservation], epsilon: float = 1e-15
     values = list(observations)
     if not values:
         raise ValueError("observations required")
+    if isinstance(epsilon, bool) or not isinstance(epsilon, (int, float)):
+        raise ValueError("epsilon must be a finite number strictly between 0 and 0.5")
+    epsilon = float(epsilon)
+    if not math.isfinite(epsilon) or not 0.0 < epsilon < 0.5:
+        raise ValueError("epsilon must be a finite number strictly between 0 and 0.5")
     losses = []
     for item in values:
         if not 0.0 <= item.probability <= 1.0 or item.outcome not in (0, 1):

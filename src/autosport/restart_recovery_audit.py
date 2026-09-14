@@ -27,6 +27,14 @@ _RESULTS = (
     '{"quote_outcomes":{"restart-audit-1|winner|player-a":"win",'
     '"restart-audit-1|winner|player-b":"loss"},"schema_version":1}\n'
 )
+_PACKAGED_ENDURANCE_CONFIG = EnduranceConfig(
+    event_count=20_000,
+    quote_keys=2_000,
+    batch_size=500,
+    restart_cycles=3,
+    paper_tickets=50,
+    source_id="packaged-restart-endurance-audit",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -169,15 +177,7 @@ def _audit_uncommitted_recovery(root: Path) -> dict[str, object]:
 
 
 def _audit_bounded_endurance(root: Path) -> dict[str, object]:
-    config = EnduranceConfig(
-        event_count=20_000,
-        quote_keys=2_000,
-        batch_size=500,
-        restart_cycles=3,
-        paper_tickets=50,
-        source_id="packaged-restart-endurance-audit",
-    )
-    report = run_endurance(root / "endurance-workspace", config)
+    report = run_endurance(root / "endurance-workspace", _PACKAGED_ENDURANCE_CONFIG)
     if report.status != "PASS":
         raise RuntimeError("bounded endurance audit failed: " + "; ".join(report.failures))
     if report.real_money_execution:

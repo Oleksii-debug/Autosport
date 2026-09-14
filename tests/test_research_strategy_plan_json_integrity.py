@@ -21,7 +21,7 @@ class ResearchStrategyPlanJsonIntegrityTests(unittest.TestCase):
         marker = '          "probability": "0.60",'
         duplicate = source.replace(
             marker,
-            marker + '\n          "probability": "0.60",',
+            marker + '\n          "probability": "0.61",',
             1,
         )
         self.assertNotEqual(duplicate, source)

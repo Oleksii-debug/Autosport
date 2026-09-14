@@ -68,29 +68,14 @@ class ReleasePackageJsonIntegrityTests(unittest.TestCase):
         return package
 
     @staticmethod
-    def _replace_manifest_with_self_consistent_duplicate_key(package: Path) -> None:
+    def _replace_manifest_and_rehash_sums(package: Path, manifest_payload: bytes) -> None:
         with zipfile.ZipFile(package, "r") as archive:
             members = {item.filename: archive.read(item.filename) for item in archive.infolist()}
 
         manifest_name = "Autosport-V1/PACKAGE_MANIFEST.json"
         sums_name = "Autosport-V1/SHA256SUMS.txt"
-        manifest = json.loads(members[manifest_name].decode("utf-8"))
-        files_json = json.dumps(
-            manifest["files"],
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        )
-        ambiguous_manifest = (
-            "{\n"
-            f'  "files": {files_json},\n'
-            '  "schema_version": 1,\n'
-            '  "schema_version": 1\n'
-            "}\n"
-        ).encode("utf-8")
-        members[manifest_name] = ambiguous_manifest
-
-        manifest_sha = hashlib.sha256(ambiguous_manifest).hexdigest()
+        members[manifest_name] = manifest_payload
+        manifest_sha = hashlib.sha256(manifest_payload).hexdigest()
         rewritten_sums = []
         for line in members[sums_name].decode("utf-8").splitlines():
             digest, separator, relative = line.partition("  ")
@@ -108,6 +93,48 @@ class ReleasePackageJsonIntegrityTests(unittest.TestCase):
             for name, payload in members.items():
                 archive.writestr(name, payload)
 
+    @classmethod
+    def _replace_manifest_with_self_consistent_duplicate_key(cls, package: Path) -> None:
+        with zipfile.ZipFile(package, "r") as archive:
+            manifest = json.loads(
+                archive.read("Autosport-V1/PACKAGE_MANIFEST.json").decode("utf-8")
+            )
+        files_json = json.dumps(
+            manifest["files"],
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        ambiguous_manifest = (
+            "{\n"
+            f'  "files": {files_json},\n'
+            '  "schema_version": 1,\n'
+            '  "schema_version": 1\n'
+            "}\n"
+        ).encode("utf-8")
+        cls._replace_manifest_and_rehash_sums(package, ambiguous_manifest)
+
+    @classmethod
+    def _replace_manifest_with_self_consistent_nonstandard_constant(cls, package: Path) -> None:
+        with zipfile.ZipFile(package, "r") as archive:
+            manifest = json.loads(
+                archive.read("Autosport-V1/PACKAGE_MANIFEST.json").decode("utf-8")
+            )
+        files_json = json.dumps(
+            manifest["files"],
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        invalid_manifest = (
+            "{\n"
+            f'  "files": {files_json},\n'
+            '  "metadata": {"nested_score": NaN},\n'
+            '  "schema_version": 1\n'
+            "}\n"
+        ).encode("utf-8")
+        cls._replace_manifest_and_rehash_sums(package, invalid_manifest)
+
     def test_json_decoder_rejects_duplicate_keys_recursively(self) -> None:
         for payload, duplicate in (
             (b'{"status":"PASS","status":"PASS"}', "status"),
@@ -117,6 +144,16 @@ class ReleasePackageJsonIntegrityTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ValueError,
                     rf"duplicate JSON object key: {duplicate}",
+                ):
+                    _decode_json_object(payload, "evidence.json")
+
+    def test_json_decoder_rejects_nonstandard_constants_recursively(self) -> None:
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            payload = f'{{"outer":{{"score":{constant}}}}}'.encode("utf-8")
+            with self.subTest(constant=constant):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"non-standard JSON constant: {constant}",
                 ):
                     _decode_json_object(payload, "evidence.json")
 
@@ -133,6 +170,17 @@ class ReleasePackageJsonIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ValueError,
                 "PACKAGE_MANIFEST.json contains duplicate JSON object key: schema_version",
+            ):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
+    def test_verifier_rejects_hash_consistent_manifest_with_nan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_valid_package(Path(temporary))
+            self._replace_manifest_with_self_consistent_nonstandard_constant(package)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "PACKAGE_MANIFEST.json contains non-standard JSON constant: NaN",
             ):
                 verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
 

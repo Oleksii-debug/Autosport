@@ -101,8 +101,8 @@ def observe_workspace_once(
     root = Path(workspace)
     root.mkdir(parents=True, exist_ok=True)
     store = SQLiteMarketStore(root / "market.db")
-    health_store = SourceHealthStore(root / "source_health.json")
     try:
+        health_store = SourceHealthStore(root / "source_health.json")
         engine = IngestionEngine(
             MarketEventBus(store),
             policy=policy,

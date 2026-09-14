@@ -210,21 +210,28 @@ def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
     return event
 
 
+def _event_from_current_payload(payload_json: object) -> MarketEvent:
+    """Decode canonical projection payload independently of repairable redundant columns."""
+    if not isinstance(payload_json, str):
+        raise ValueError("current quote projection payload must be JSON text")
+    raw = _load_history_payload(payload_json)
+    try:
+        event = MarketEvent.from_dict(raw)
+    except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError("current quote projection payload is not canonical") from exc
+    if _canonical_json(raw) != _canonical_payload(event):
+        raise ValueError("current quote projection payload is not canonical")
+    _event_order_key(event)
+    return event
+
+
 def _event_from_current_row(row: tuple[object, ...]) -> MarketEvent:
     """Decode one current projection row and prove its redundant ordering identity."""
     if len(row) != len(_CURRENT_COLUMNS):
         raise ValueError("current quote projection row has unexpected shape")
 
     quote_key, observed_ts, sequence, payload_json = row
-    if not isinstance(payload_json, str):
-        raise ValueError("current quote projection payload must be JSON text")
-    raw = _load_history_payload(payload_json)
-    try:
-        event = MarketEvent.from_dict(raw)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("current quote projection payload is not canonical") from exc
-    if _canonical_json(raw) != _canonical_payload(event):
-        raise ValueError("current quote projection payload is not canonical")
+    event = _event_from_current_payload(payload_json)
 
     expected = (
         ("quote_key", quote_key, event.quote_key),
@@ -235,7 +242,6 @@ def _event_from_current_row(row: tuple[object, ...]) -> MarketEvent:
         if not _typed_equal(persisted, canonical):
             raise ValueError(f"current quote projection row identity mismatch: {field_name}")
 
-    _event_order_key(event)
     return event
 
 
@@ -475,6 +481,7 @@ class SQLiteMarketStore:
     def _rebuild_current_quotes(self) -> None:
         """Repair current projection from one write-locked physical-time history snapshot."""
         latest: dict[str, tuple[tuple[datetime, int, str], MarketEvent]] = {}
+        history_by_dedupe: dict[str, MarketEvent] = {}
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             rows = self.connection.execute(
@@ -482,10 +489,39 @@ class SQLiteMarketStore:
             ).fetchall()
             for row in rows:
                 event = _event_from_history_row(row)
+                history_by_dedupe[event.dedupe_key] = event
                 order_key = _event_order_key(event)
                 previous = latest.get(event.quote_key)
                 if previous is None or order_key > previous[0]:
                     latest[event.quote_key] = (order_key, event)
+
+            # current_quotes is repairable derived state, so malformed projection
+            # payloads must not outrank validated authoritative history. A canonical
+            # payload is surviving evidence even when redundant projection columns
+            # drifted: establish its history witness before treating that drift as
+            # repairable, otherwise rebuild could erase the last proof of loss.
+            projection_rows = self.connection.execute(
+                f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
+            ).fetchall()
+            for projection_row in projection_rows:
+                try:
+                    projection_event = _event_from_current_payload(projection_row[3])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                history_event = history_by_dedupe.get(projection_event.dedupe_key)
+                if history_event is None:
+                    raise ValueError(
+                        "current_quotes projection event is missing from authoritative history"
+                    )
+                if _canonical_payload(history_event) != _canonical_payload(projection_event):
+                    # The authoritative event still exists, so this projection
+                    # payload is corrupt derived state rather than evidence that
+                    # durable history was lost. Rebuild it from canonical history.
+                    continue
+                try:
+                    _event_from_current_row(projection_row)
+                except (KeyError, TypeError, ValueError):
+                    continue
 
             self.connection.execute("DELETE FROM current_quotes")
             for quote_key in sorted(latest):

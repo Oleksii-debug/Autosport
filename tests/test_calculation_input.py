@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 import pytest
 
 from autosport.calculation_input import CalculationInputBoundary, CalculationInputLimits
@@ -76,6 +78,52 @@ def test_decimal_mapping_rejects_non_utf8_key_and_invalid_decimal_value() -> Non
         boundary.decimal_mapping({"\ud800": "2"}, field="selection_odds")
     with pytest.raises(ValueError, match="canonical ASCII decimal syntax"):
         boundary.decimal_mapping({"a": "NaN"}, field="selection_odds")
+
+
+class _TextSubclass(str):
+    pass
+
+
+class _ListSubclass(list[str]):
+    pass
+
+
+class _DictSubclass(dict[str, str]):
+    pass
+
+
+class _SequenceTrap(Sequence[str]):
+    def __len__(self) -> int:
+        raise AssertionError("custom sequence length must not execute")
+
+    def __getitem__(self, index: int) -> str:
+        raise AssertionError("custom sequence item access must not execute")
+
+
+class _MappingTrap(Mapping[str, str]):
+    def __len__(self) -> int:
+        raise AssertionError("custom mapping length must not execute")
+
+    def __iter__(self):
+        raise AssertionError("custom mapping iteration must not execute")
+
+    def __getitem__(self, key: str) -> str:
+        raise AssertionError("custom mapping lookup must not execute")
+
+
+def test_boundary_rejects_custom_text_and_collection_protocols_before_callbacks() -> None:
+    boundary = CalculationInputBoundary()
+
+    with pytest.raises(ValueError, match="decimal text"):
+        boundary.decimal_text(_TextSubclass("2"), field="value")
+    with pytest.raises(ValueError, match="list or tuple"):
+        boundary.decimal_sequence(_ListSubclass(["1"]), field="values")
+    with pytest.raises(ValueError, match="dict"):
+        boundary.decimal_mapping(_DictSubclass({"a": "2"}), field="values")
+    with pytest.raises(ValueError, match="list or tuple"):
+        boundary.decimal_sequence(_SequenceTrap(), field="values")
+    with pytest.raises(ValueError, match="dict"):
+        boundary.decimal_mapping(_MappingTrap(), field="values")
 
 
 @pytest.mark.parametrize(

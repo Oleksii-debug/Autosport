@@ -394,6 +394,26 @@ def _validate_existing_canonical_tables(connection: sqlite3.Connection) -> None:
                 "market_events history is empty while current_quotes projection is non-empty"
             )
 
+        if projection_has_rows:
+            projection_rows = connection.execute(
+                f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
+            ).fetchall()
+            for projection_row in projection_rows:
+                projection_event = _event_from_current_row(projection_row)
+                history_row = connection.execute(
+                    f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE dedupe_key=?",
+                    (projection_event.dedupe_key,),
+                ).fetchone()
+                if history_row is None:
+                    raise ValueError(
+                        "current_quotes projection event is missing from authoritative history"
+                    )
+                history_event = _event_from_history_row(history_row)
+                if _canonical_payload(history_event) != _canonical_payload(projection_event):
+                    raise ValueError(
+                        "current_quotes projection event does not match authoritative history"
+                    )
+
 
 def _ensure_canonical_secondary_indexes(connection: sqlite3.Connection) -> None:
     index_rows = connection.execute("PRAGMA index_list(\"market_events\")").fetchall()

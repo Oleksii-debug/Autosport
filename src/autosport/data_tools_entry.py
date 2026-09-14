@@ -92,17 +92,20 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
 
 def _expected_failure_message(command: str, exc: OSError | ValueError) -> str:
     # Formatting belongs to the same packaged fail-closed boundary as dispatch.
-    # Exception subclasses are caller/library supplied and may implement a broken
-    # __str__(); diagnostic rendering must never turn a contained expected failure
-    # back into an uncaught traceback.
+    # Exception subclasses are caller/library supplied: neither custom type metadata
+    # nor __str__() may turn a contained expected failure back into a traceback.
+    try:
+        exception_type = type.__getattribute__(type(exc), "__name__")
+    except BaseException:
+        exception_type = "Exception"
     try:
         rendered = str(exc)
     except BaseException:
-        rendered = type(exc).__name__
+        rendered = exception_type
     detail = " ".join(rendered.splitlines()).strip()
     if not detail:
-        detail = type(exc).__name__
-    return f"Autosport-Data: {command}=FAIL_CLOSED error={type(exc).__name__}: {detail}"
+        detail = exception_type
+    return f"Autosport-Data: {command}=FAIL_CLOSED error={exception_type}: {detail}"
 
 
 def main(argv: list[str] | None = None) -> int:

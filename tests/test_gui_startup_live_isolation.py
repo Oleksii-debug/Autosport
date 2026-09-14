@@ -165,7 +165,7 @@ def test_corrupt_economic_startup_keeps_shell_and_live_observation_reachable(tmp
     showwarning.assert_called_once()
 
 
-def test_windows_startup_uses_native_recovery_quarantine_without_dual_permanent_block(tmp_path: Path) -> None:
+def test_windows_startup_uses_native_recovery_quarantine_and_replay_unblocks(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
 
     with (
@@ -180,6 +180,7 @@ def test_windows_startup_uses_native_recovery_quarantine_without_dual_permanent_
     assert app.session is None
     assert app._recovery_required_workspaces == set()
     assert app._workspace_requires_recovery(workspace)
+    assert app._startup_economic_error == "ValueError: corrupt paper state"
 
     # Windows recovery already owns this exact lifecycle. A successful terminal
     # recovery clears its native quarantine; the base startup path must not leave
@@ -188,6 +189,32 @@ def test_windows_startup_uses_native_recovery_quarantine_without_dual_permanent_
 
     assert not app._workspace_requires_recovery(workspace)
     assert app._recovery_required_workspaces == set()
+
+    # The diagnostic startup marker is intentionally latent in the Windows
+    # subclass: Windows overrides bankroll/ticket projections and all recovery
+    # gating. Prove that even while the marker remains for diagnostics, the exact
+    # recovered workspace reaches the canonical replay worker rather than being
+    # rejected by an inherited base quarantine.
+    replay_worker = _NeverStartWorker()
+    app.replay_worker = replay_worker
+    app.live_worker = SimpleNamespace(busy=False)
+    app.dataset_path = tmp_path / "dataset"
+    app._selected_replay_configuration = lambda: ("baseline-v1", None)
+    app._set_replay_controls_busy = lambda _busy: None
+    app._refresh_tickets = lambda: None
+    app._set_evaluation_lines = lambda _lines: None
+    app._append_log = lambda _text: None
+    app.after = lambda *_args: None
+
+    with (
+        patch("autosport.windows_gui.workspace_for_strategy", return_value=workspace),
+        patch("autosport.gui.workspace_for_strategy", return_value=workspace),
+    ):
+        WindowsAutosportApp.run_dataset(app)
+
+    assert app._startup_economic_error == "ValueError: corrupt paper state"
+    assert replay_worker.start_calls == 1
+    assert "Replay виконується" in app.status.value
 
 
 def test_valid_economic_startup_preserves_existing_ready_state(tmp_path: Path) -> None:

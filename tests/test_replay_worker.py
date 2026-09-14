@@ -80,12 +80,50 @@ class ReplayWorkerTests(unittest.TestCase):
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
+    def test_worker_thread_construction_exception_publishes_terminal_error(self):
+        worker = OneShotReplayWorker()
+        task_ran = threading.Event()
+
+        def task():
+            task_ran.set()
+            return object()
+
+        with patch(
+            "autosport.replay_worker.threading.Thread",
+            side_effect=OSError("thread allocation failed"),
+        ):
+            self.assertTrue(worker.start(task))
+
+        self.assertFalse(task_ran.is_set())
+        self.assertTrue(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertFalse(worker.start(task))
+        failed = self._terminal(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(failed.error, "OSError: thread allocation failed")
+        self.assertFalse(worker.busy)
+
     def test_worker_reports_failure_without_raising_on_tk_poll_thread(self):
         worker = OneShotReplayWorker()
         self.assertTrue(worker.start(lambda: (_ for _ in ()).throw(RuntimeError("boom"))))
         message = self._terminal(worker)
         self.assertIsNone(message.result)
         self.assertEqual(message.error, "RuntimeError: boom")
+        self.assertFalse(worker.busy)
+
+    def test_worker_terminalizes_system_exit_and_allows_retry(self):
+        worker = OneShotReplayWorker()
+        self.assertTrue(worker.start(lambda: (_ for _ in ()).throw(SystemExit("stop"))))
+        failed = self._terminal(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(failed.error, "SystemExit: stop")
+        self.assertFalse(worker.busy)
+
+        sentinel = object()
+        self.assertTrue(worker.start(lambda: sentinel))
+        message = self._terminal(worker)
+        self.assertIs(message.result, sentinel)
+        self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
     def test_strategy_workspace_resolution_preserves_baseline_and_isolates_plan_identity(self):

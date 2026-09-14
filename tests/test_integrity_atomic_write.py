@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import time
@@ -89,6 +90,29 @@ class AtomicWriteJsonTests(unittest.TestCase):
                         list(destination.parent.glob(f".{destination.name}.*.tmp")),
                         [],
                     )
+
+    def test_ensure_durable_file_preserves_bytes_from_concurrent_creator(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "decisions.jsonl"
+            concurrent_bytes = b'{"decision":"must-survive"}\n'
+            original_open = Path.open
+            injected = False
+
+            def racing_open(path: Path, mode: str = "r", *args, **kwargs):
+                nonlocal injected
+                if path == destination and mode in {"ab", "wb"} and not injected:
+                    injected = True
+                    with original_open(destination, "wb") as competitor:
+                        competitor.write(concurrent_bytes)
+                        competitor.flush()
+                        os.fsync(competitor.fileno())
+                return original_open(path, mode, *args, **kwargs)
+
+            with patch.object(Path, "open", new=racing_open):
+                integrity.ensure_durable_file(destination)
+
+            self.assertTrue(injected)
+            self.assertEqual(destination.read_bytes(), concurrent_bytes)
 
 
 if __name__ == "__main__":

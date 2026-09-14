@@ -1,6 +1,7 @@
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,11 +10,13 @@ from autosport import integrity
 
 
 class AtomicWriteJsonTests(unittest.TestCase):
-    def test_concurrent_writers_use_independent_temporary_files(self) -> None:
+    def test_concurrent_writers_serialize_publication_after_independent_temp_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             destination = Path(temporary_directory) / "state.json"
             barrier = threading.Barrier(2)
             original_dump = integrity.json.dump
+            original_replace = integrity.os.replace
+            replace_active = threading.Lock()
             errors: list[BaseException] = []
             payloads = ({"writer": 1, "value": "alpha"}, {"writer": 2, "value": "beta"})
 
@@ -22,13 +25,27 @@ class AtomicWriteJsonTests(unittest.TestCase):
                 original_dump(payload, handle, **kwargs)
                 barrier.wait(timeout=5)
 
+            def collision_sensitive_replace(source, target) -> None:
+                if not replace_active.acquire(blocking=False):
+                    raise PermissionError(13, "Access is denied")
+                try:
+                    # Model the Windows same-destination publication window that
+                    # exposed the post-#192 race on Python 3.12 CI.
+                    time.sleep(0.05)
+                    original_replace(source, target)
+                finally:
+                    replace_active.release()
+
             def writer(payload: dict[str, object]) -> None:
                 try:
                     integrity.atomic_write_json(destination, payload)
                 except BaseException as exc:  # pragma: no cover - assertion captures worker failure
                     errors.append(exc)
 
-            with patch.object(integrity.json, "dump", side_effect=synchronized_dump):
+            with (
+                patch.object(integrity.json, "dump", side_effect=synchronized_dump),
+                patch.object(integrity.os, "replace", side_effect=collision_sensitive_replace),
+            ):
                 threads = [threading.Thread(target=writer, args=(payload,)) for payload in payloads]
                 for thread in threads:
                     thread.start()

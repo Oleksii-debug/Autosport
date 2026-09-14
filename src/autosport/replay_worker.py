@@ -47,13 +47,27 @@ class OneShotReplayWorker:
         # Economic replay may be inside PRECOMMIT/promotion. A daemon thread could
         # be killed with the process at an arbitrary point, so keep it non-daemon
         # and let the GUI refuse close until the terminal worker message arrives.
-        self._thread = threading.Thread(
-            target=self._run,
-            args=(task,),
-            name="autosport-paper-replay",
-            daemon=False,
-        )
-        self._thread.start()
+        try:
+            thread = threading.Thread(
+                target=self._run,
+                args=(task,),
+                name="autosport-paper-replay",
+                daemon=False,
+            )
+            self._thread = thread
+            thread.start()
+        except RuntimeError as exc:
+            # A request that won the single-flight slot must have exactly one
+            # terminal poll outcome. Preserve that contract even when CPython/OS
+            # cannot start the thread: publish a terminal error and let poll()
+            # restore idle state. False remains reserved for a genuinely busy
+            # worker, so GUI callers never misreport thread-start failure as
+            # "replay already running" and can retry after consuming the error.
+            self._thread = None
+            self._messages.put(
+                ReplayWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+            )
+            return True
         return True
 
     def _run(self, task: ReplayTask) -> None:

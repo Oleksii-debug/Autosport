@@ -264,10 +264,10 @@ def _semantically_inert_extra_index(connection: sqlite3.Connection, index_name: 
     if not key_rows:
         return False
     for row in key_rows:
-        _seqno, cid, name, _descending, collation, _key = row[:6]
+        _seqno, cid, name, descending, collation, _key = row[:6]
         if not isinstance(cid, int) or cid < 0:
             return False
-        if not isinstance(name, str) or collation != "BINARY":
+        if not isinstance(name, str) or descending != 0 or collation != "BINARY":
             return False
     return True
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
 from .integrity import sha256_file
 from .run_registry import ReconciliationError, RunRegistry
 from .run_transaction import RunTransaction, RunTransactionError
@@ -133,4 +134,10 @@ def _require_recorded_base_state(
     actual_ledger = sha256_file(decision_ledger_path)
     if actual_book != expected_book or actual_ledger != expected_ledger:
         raise ReconciliationError("canonical economic state no longer matches the recorded transaction BASE")
+    try:
+        JsonlDecisionLedger(decision_ledger_path).verify_integrity()
+    except DecisionLedgerIntegrityError as exc:
+        raise ReconciliationError(
+            f"canonical Decision Ledger integrity validation failed: {exc}"
+        ) from exc
     return actual_book, actual_ledger

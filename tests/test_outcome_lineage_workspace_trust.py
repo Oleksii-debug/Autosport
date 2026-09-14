@@ -10,10 +10,10 @@ from unittest.mock import patch
 from autosport.dataset import ReplayDataset, load_dataset
 from autosport.outcome_trust import (
     OutcomeLineageTrustError,
-    bind_dataset_outcome_lineage,
+    outcome_lineage_binding_from_dataset,
 )
+from autosport.run_registry import RunRegistry
 from autosport.session import AutosportSession
-from autosport.workspace_lock import WorkspaceEconomicLock
 
 
 class OutcomeLineageWorkspaceTrustTests(unittest.TestCase):
@@ -86,7 +86,7 @@ class OutcomeLineageWorkspaceTrustTests(unittest.TestCase):
             sport="table_tennis",
             market_path=root / "unused-market.jsonl",
             results_path=results,
-            market_sha256="0" * 64,
+            market_sha256=self._sha(f"market-{name}"),
             results_sha256=results_sha,
             schema_version=2,
             governance=None,
@@ -94,49 +94,64 @@ class OutcomeLineageWorkspaceTrustTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _bind(workspace: Path, dataset: ReplayDataset):
-        with WorkspaceEconomicLock(workspace):
-            return bind_dataset_outcome_lineage(workspace, dataset)
+    def _binding(dataset: ReplayDataset):
+        binding = outcome_lineage_binding_from_dataset(dataset)
+        assert binding is not None
+        return binding
 
-    def test_identical_reimport_is_idempotent_and_later_correction_extends_trust(self) -> None:
+    @staticmethod
+    def _accept(
+        registry: RunRegistry,
+        dataset: ReplayDataset,
+        *,
+        run_id: str,
+        allow_repeat: bool = False,
+    ) -> str:
+        key = registry.begin(
+            dataset.market_sha256,
+            dataset.results_sha256,
+            "baseline-v1",
+            run_id,
+            allow_repeat=allow_repeat,
+            outcome_lineage=OutcomeLineageWorkspaceTrustTests._binding(dataset),
+        )
+        registry.complete(key)
+        return key
+
+    def test_identical_reimport_and_extension_persist_in_existing_run_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            workspace = root / "workspace"
+            registry = RunRegistry(root / "run_registry.json")
             r1 = ("results-r1", self._sha("r1"))
             r2 = ("results-r2", self._sha("r2"))
             r3 = ("results-r3", self._sha("r3"))
             first = self._dataset(root, revisions=(r1, r2), name="first")
 
-            self._bind(workspace, first)
-            trust_path = workspace / "outcome_lineage_trust.json"
-            initial_bytes = trust_path.read_bytes()
-            self._bind(workspace, first)
-            self.assertEqual(trust_path.read_bytes(), initial_bytes)
-
+            self._accept(registry, first, run_id="run-one")
+            self._accept(
+                registry,
+                first,
+                run_id="run-two",
+                allow_repeat=True,
+            )
             extended = self._dataset(root, revisions=(r1, r2, r3), name="extended")
-            binding = self._bind(workspace, extended)
-            self.assertIsNotNone(binding)
-            assert binding is not None
-            self.assertEqual(binding.head.revision, 3)
-            registry = json.loads(trust_path.read_text(encoding="utf-8"))
-            self.assertEqual(
-                [item["revision_id"] for item in registry["records"][0]["revisions"]],
-                ["results-r1", "results-r2", "results-r3"],
-            )
+            self._accept(registry, extended, run_id="run-three")
 
-            # Replaying a previously trusted historical prefix cannot downgrade the
-            # durable latest chain, but remains a valid idempotent import.
-            self._bind(workspace, first)
-            registry_after_prefix = json.loads(trust_path.read_text(encoding="utf-8"))
-            self.assertEqual(
-                [item["revision_id"] for item in registry_after_prefix["records"][0]["revisions"]],
-                ["results-r1", "results-r2", "results-r3"],
-            )
+            # A previously trusted prefix remains acceptable after a later extension.
+            registry.assert_outcome_lineage_compatible(self._binding(first))
+            state = json.loads((root / "run_registry.json").read_text(encoding="utf-8"))
+            histories = [
+                item["outcome_lineage"]["revisions"]
+                for item in state["runs"].values()
+                if "outcome_lineage" in item
+            ]
+            self.assertEqual([len(history) for history in histories], [2, 2, 3])
+            self.assertFalse((root / "outcome_lineage_trust.json").exists())
 
     def test_restart_from_different_revision_one_root_is_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            workspace = root / "workspace"
+            registry = RunRegistry(root / "run_registry.json")
             accepted = self._dataset(
                 root,
                 revisions=(("results-r1", self._sha("accepted-root")),),
@@ -147,23 +162,24 @@ class OutcomeLineageWorkspaceTrustTests(unittest.TestCase):
                 revisions=(("results-r1-restarted", self._sha("malicious-root")),),
                 name="restarted",
             )
+            self._accept(registry, accepted, run_id="accepted-run")
 
-            self._bind(workspace, accepted)
             with self.assertRaisesRegex(OutcomeLineageTrustError, "different root"):
-                self._bind(workspace, restarted)
-
-            registry = json.loads(
-                (workspace / "outcome_lineage_trust.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(
-                registry["records"][0]["root_record_sha256"],
-                self._sha("accepted-root"),
-            )
+                registry.assert_outcome_lineage_compatible(self._binding(restarted))
+            with self.assertRaisesRegex(OutcomeLineageTrustError, "different root"):
+                registry.begin(
+                    restarted.market_sha256,
+                    restarted.results_sha256,
+                    "baseline-v1",
+                    "restarted-run",
+                    outcome_lineage=self._binding(restarted),
+                )
+            self.assertEqual(len(json.loads(registry.path.read_text(encoding="utf-8"))["runs"]), 1)
 
     def test_same_root_divergent_correction_fork_is_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            workspace = root / "workspace"
+            registry = RunRegistry(root / "run_registry.json")
             root_revision = ("results-r1", self._sha("root"))
             accepted = self._dataset(
                 root,
@@ -175,51 +191,60 @@ class OutcomeLineageWorkspaceTrustTests(unittest.TestCase):
                 revisions=(root_revision, ("results-r2-fork", self._sha("fork-r2"))),
                 name="fork",
             )
+            self._accept(registry, accepted, run_id="accepted-run")
 
-            self._bind(workspace, accepted)
             with self.assertRaisesRegex(OutcomeLineageTrustError, "diverged at revision 2"):
-                self._bind(workspace, fork)
+                registry.assert_outcome_lineage_compatible(self._binding(fork))
 
-    def test_malformed_or_tampered_durable_registry_is_fail_closed(self) -> None:
+    def test_registry_reopen_rejects_tampered_conflicting_lineage_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            workspace = root / "workspace"
-            workspace.mkdir()
-            (workspace / "outcome_lineage_trust.json").write_text(
-                '{"schema_version":1,"schema_version":1,"records":[]}',
-                encoding="utf-8",
-            )
-            dataset = self._dataset(
+            registry = RunRegistry(root / "run_registry.json")
+            r1 = ("results-r1", self._sha("root"))
+            first = self._dataset(
                 root,
-                revisions=(("results-r1", self._sha("r1")),),
-                name="candidate",
+                revisions=(r1, ("results-r2", self._sha("r2"))),
+                name="first",
             )
+            second = self._dataset(
+                root,
+                revisions=(r1, ("results-r2", self._sha("r2")), ("results-r3", self._sha("r3"))),
+                name="second",
+            )
+            self._accept(registry, first, run_id="run-one")
+            self._accept(registry, second, run_id="run-two")
 
-            with self.assertRaisesRegex(OutcomeLineageTrustError, "duplicate JSON object key"):
-                self._bind(workspace, dataset)
+            state = json.loads(registry.path.read_text(encoding="utf-8"))
+            second_item = list(state["runs"].values())[1]
+            second_item["outcome_lineage"]["revisions"][1]["record_sha256"] = self._sha("forked-r2")
+            registry.path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "conflicting outcome lineage evidence"):
+                RunRegistry(registry.path)
 
     def test_results_hash_drift_is_rejected_before_registry_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            workspace = root / "workspace"
+            registry = RunRegistry(root / "run_registry.json")
             dataset = self._dataset(
                 root,
                 revisions=(("results-r1", self._sha("r1")),),
                 name="candidate",
             )
+            before = registry.path.read_bytes()
             dataset.results_path.write_text("{}", encoding="utf-8")
 
             with self.assertRaisesRegex(OutcomeLineageTrustError, "hash changed"):
-                self._bind(workspace, dataset)
-            self.assertFalse((workspace / "outcome_lineage_trust.json").exists())
+                outcome_lineage_binding_from_dataset(dataset)
+            self.assertEqual(registry.path.read_bytes(), before)
 
-    def test_session_enforces_trust_gate_before_any_economic_mutation(self) -> None:
+    def test_session_enforces_conflict_check_before_any_economic_mutation(self) -> None:
         dataset = load_dataset(Path("examples/tt_demo"))
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             session = AutosportSession(workspace, "10000")
             with patch(
-                "autosport.session.bind_dataset_outcome_lineage",
+                "autosport.session.outcome_lineage_binding_from_dataset",
                 side_effect=OutcomeLineageTrustError("synthetic lineage conflict"),
             ):
                 with self.assertRaisesRegex(OutcomeLineageTrustError, "synthetic lineage conflict"):

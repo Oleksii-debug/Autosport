@@ -71,8 +71,15 @@ class PortfolioDependencyIndex:
         return affected
 
 
+def _require_integer(value: int, *, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{field} must be a non-boolean integer")
+    return value
+
+
 def _require_positive_integer(value: int, *, field: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+    value = _require_integer(value, field=field)
+    if value <= 0:
         raise ValueError(f"{field} must be a positive non-boolean integer")
     return value
 
@@ -90,7 +97,7 @@ class ScenarioSearchEngine:
         self.exact_state_limit = _require_positive_integer(exact_state_limit, field="exact_state_limit")
         self.branch_node_limit = _require_positive_integer(branch_node_limit, field="branch_node_limit")
         self.sample_count = _require_positive_integer(sample_count, field="sample_count")
-        self.seed = seed
+        self.seed = _require_integer(seed, field="seed")
 
     def analyse(self, tickets: list[PaperTicket], groups: list[ScenarioGroup]) -> ScenarioSearchReport:
         open_tickets = [ticket for ticket in tickets if ticket.status is TicketStatus.OPEN]

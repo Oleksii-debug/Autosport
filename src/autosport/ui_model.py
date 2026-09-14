@@ -40,6 +40,8 @@ def _market_price_truth_line(result: SessionResult) -> str:
         )
     except (OSError, UnicodeError):
         return "Price truth | ERROR — run summary evidence is missing or unreadable."
+    except RecursionError:
+        return "Price truth | ERROR — run summary JSON nesting is too deep."
     except json.JSONDecodeError as exc:
         return f"Price truth | ERROR — run summary JSON is invalid: {exc.msg}."
     except ValueError as exc:

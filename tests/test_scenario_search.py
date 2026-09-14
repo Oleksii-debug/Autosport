@@ -47,6 +47,14 @@ class ScenarioSearchTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, f"^{field} must be a positive non-boolean integer$"):
                         ScenarioSearchEngine(**{field: value})
 
+    def test_search_seed_requires_non_boolean_integer(self):
+        for value in (True, 1.0, "17", None):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "^seed must be a non-boolean integer$"):
+                    ScenarioSearchEngine(seed=value)
+        self.assertEqual(ScenarioSearchEngine(seed=0).seed, 0)
+        self.assertEqual(ScenarioSearchEngine(seed=-17).seed, -17)
+
     def test_dependency_index_returns_only_affected_tickets(self):
         book = PaperBook("100")
         a = TicketLeg("e1", "winner", "a", Decimal("2"))

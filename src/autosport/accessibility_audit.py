@@ -26,6 +26,22 @@ _REQUIRED_PATTERNS = {
     WINDOWS_BANKROLL_AUTOMATION_ID: {"VALUE"},
 }
 
+_EXPECTED_ROLES = {
+    AUTOMATION_IDS["choose_dataset"]: "BUTTON",
+    AUTOMATION_IDS["run_replay"]: "BUTTON",
+    AUTOMATION_IDS["repair_workspace"]: "BUTTON",
+    AUTOMATION_IDS["replay_speed"]: "COMBOBOX",
+    AUTOMATION_IDS["live_mode"]: "COMBOBOX",
+    AUTOMATION_IDS["live_refresh"]: "BUTTON",
+    AUTOMATION_IDS["strategy"]: "COMBOBOX",
+    AUTOMATION_IDS["research_plan"]: "BUTTON",
+    AUTOMATION_IDS["tickets"]: "LIST",
+    AUTOMATION_IDS["log"]: "EDIT",
+    AUTOMATION_IDS["live_quotes"]: "LIST",
+    AUTOMATION_IDS["evaluation"]: "LIST",
+    WINDOWS_BANKROLL_AUTOMATION_ID: "EDIT",
+}
+
 _ROW_CONTROLS = {
     AUTOMATION_IDS["tickets"],
     AUTOMATION_IDS["live_quotes"],
@@ -76,10 +92,11 @@ def summarize_description(
             continue
         gap_names = sorted(_enum_name(gap) for gap in widget.gaps if _enum_name(gap))
         pattern_names = sorted(_enum_name(pattern) for pattern in widget.patterns if _enum_name(pattern))
+        role_name = _enum_name(widget.role)
         controls[int(automation_id)] = {
             "path": widget.path,
             "tk_class": widget.tk_class,
-            "role": _enum_name(widget.role),
+            "role": role_name,
             "name": widget.name,
             "automation_id": automation_id,
             "patterns": pattern_names,
@@ -88,8 +105,12 @@ def summarize_description(
         }
         if not widget.name:
             failures.append(f"automation_id={automation_id}: missing accessible name")
-        if widget.role is None:
-            failures.append(f"automation_id={automation_id}: missing accessible role")
+        expected_role = _EXPECTED_ROLES[int(automation_id)]
+        if role_name != expected_role:
+            actual_role = role_name if role_name is not None else "NONE"
+            failures.append(
+                f"automation_id={automation_id}: unexpected accessible role={actual_role} expected={expected_role}"
+            )
         blockers = sorted(set(gap_names) & _BLOCKING_GAPS)
         if blockers:
             failures.append(f"automation_id={automation_id}: blocking gaps={','.join(blockers)}")

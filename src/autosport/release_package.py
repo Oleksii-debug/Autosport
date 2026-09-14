@@ -69,6 +69,7 @@ def build_windows_package(
     accessibility_path: str | Path,
     keyboard_path: str | Path,
     restart_recovery_path: str | Path,
+    process_recovery_path: str | Path,
     output_zip: str | Path,
     source_sha: str,
 ) -> tuple[Path, str]:
@@ -80,6 +81,7 @@ def build_windows_package(
     accessibility_path = Path(accessibility_path)
     keyboard_path = Path(keyboard_path)
     restart_recovery_path = Path(restart_recovery_path)
+    process_recovery_path = Path(process_recovery_path)
     output_zip = Path(output_zip)
     package_dir = output_zip.parent / "Autosport-V1"
     if package_dir.exists():
@@ -91,6 +93,7 @@ def build_windows_package(
     shutil.copy2(accessibility_path, package_dir / "accessibility-audit.json")
     shutil.copy2(keyboard_path, package_dir / "keyboard-audit.json")
     shutil.copy2(restart_recovery_path, package_dir / "restart-recovery-audit.json")
+    shutil.copy2(process_recovery_path, package_dir / "process-recovery-audit.json")
     shutil.copytree(example_dir, package_dir / "examples" / example_dir.name)
 
     build_info = {
@@ -170,6 +173,7 @@ def verify_windows_package(
         "accessibility-audit.json",
         "keyboard-audit.json",
         "restart-recovery-audit.json",
+        "process-recovery-audit.json",
         "BUILD_INFO.json",
         "PACKAGE_MANIFEST.json",
         "SHA256SUMS.txt",
@@ -229,11 +233,16 @@ def verify_windows_package(
         members["restart-recovery-audit.json"],
         "restart-recovery-audit.json",
     )
+    process_recovery = _decode_json_object(
+        members["process-recovery-audit.json"],
+        "process-recovery-audit.json",
+    )
     for label, payload in (
         ("packaged-diagnostic.json", diagnostic),
         ("accessibility-audit.json", accessibility),
         ("keyboard-audit.json", keyboard),
         ("restart-recovery-audit.json", restart_recovery),
+        ("process-recovery-audit.json", process_recovery),
     ):
         if payload.get("status") != "PASS":
             raise ValueError(f"{label} does not record PASS")
@@ -245,6 +254,27 @@ def verify_windows_package(
         raise ValueError("restart-recovery-audit.json does not prove transaction recovery PASS")
     if restart_recovery.get("recovery_disposition") != "aborted_uncommitted":
         raise ValueError("restart-recovery-audit.json recovery disposition is not fail-closed")
+
+    if process_recovery.get("audit_id") != "real-process-kill-relaunch-recovery-v1":
+        raise ValueError("process-recovery-audit.json audit identity mismatch")
+    if process_recovery.get("forced_process_kill_observed") is not True:
+        raise ValueError("process-recovery-audit.json does not prove forced process termination")
+    crash_returncode = process_recovery.get("crash_worker_returncode")
+    if isinstance(crash_returncode, bool) or not isinstance(crash_returncode, int) or crash_returncode == 0:
+        raise ValueError("process-recovery-audit.json crash worker returncode is not a forced-failure code")
+    recovery_returncode = process_recovery.get("recovery_worker_returncode")
+    if isinstance(recovery_returncode, bool) or not isinstance(recovery_returncode, int) or recovery_returncode != 0:
+        raise ValueError("process-recovery-audit.json recovery worker did not exit successfully")
+    if process_recovery.get("recovery_disposition") != "aborted_uncommitted":
+        raise ValueError("process-recovery-audit.json recovery disposition is not fail-closed")
+    if process_recovery.get("run_status") != "aborted":
+        raise ValueError("process-recovery-audit.json registry state is not aborted")
+    if process_recovery.get("manifest_phase") != "aborted":
+        raise ValueError("process-recovery-audit.json transaction phase is not aborted")
+    if process_recovery.get("economic_base_preserved") is not True:
+        raise ValueError("process-recovery-audit.json does not prove economic BASE preservation")
+    if process_recovery.get("v1_ready") is not False:
+        raise ValueError("process-recovery-audit.json must record v1_ready=false")
 
     return {
         "status": "PASS",

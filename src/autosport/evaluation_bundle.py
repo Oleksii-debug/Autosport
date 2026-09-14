@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
+from decimal import Decimal, DecimalException
 from pathlib import Path
 from typing import Any
 
@@ -450,6 +451,15 @@ def _required_canonical_text(raw: dict[str, Any], key: str, *, context: str) -> 
     return value
 
 
+def _required_canonical_decimal_text(raw: dict[str, Any], key: str, *, context: str) -> str:
+    value = _required_canonical_text(raw, key, context=context)
+    try:
+        Decimal(value)
+    except DecimalException as exc:
+        raise ValueError(f"{context}.{key} must be a valid decimal string") from exc
+    return value
+
+
 def _forecast_from_dict(raw: Any) -> ForecastRecord:
     if not isinstance(raw, dict):
         raise ValueError("walk-forward forecast entry must be an object")
@@ -461,9 +471,17 @@ def _forecast_from_dict(raw: Any) -> ForecastRecord:
     provenance = raw.get("provenance", {})
     if not isinstance(provenance, dict):
         raise ValueError("walk-forward forecast provenance must be a JSON object")
+    probability = _required_canonical_decimal_text(
+        raw, "probability", context="walk-forward forecast"
+    )
+    uncertainty = (
+        _required_canonical_decimal_text(raw, "uncertainty", context="walk-forward forecast")
+        if "uncertainty" in raw
+        else "0"
+    )
     return ForecastRecord(
         quote_key=_required_canonical_text(raw, "quote_key", context="walk-forward forecast"),
-        probability=raw["probability"],
+        probability=probability,
         model_id=_required_canonical_text(raw, "model_id", context="walk-forward forecast"),
         model_version=_required_canonical_text(raw, "model_version", context="walk-forward forecast"),
         strategy_version=_required_canonical_text(raw, "strategy_version", context="walk-forward forecast"),
@@ -474,7 +492,7 @@ def _forecast_from_dict(raw: Any) -> ForecastRecord:
             raw, "input_cutoff_ts", context="walk-forward forecast"
         ),
         generated_at=_required_canonical_text(raw, "generated_at", context="walk-forward forecast"),
-        uncertainty=raw.get("uncertainty", "0"),
+        uncertainty=uncertainty,
         evidence_hashes=tuple(evidence_hashes_raw),
         market_snapshot_hash=(
             raw["market_snapshot_hash"]

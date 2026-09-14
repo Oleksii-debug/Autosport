@@ -102,6 +102,7 @@ class IngestionEngine:
                 try:
                     event = self.normalizer.normalize(batch.source_id, quote)
                 except (TypeError, ValueError):
+                    flags.add("INVALID_QUOTE")
                     rejected += 1
                     continue
                 normalized.append(event)

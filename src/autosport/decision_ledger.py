@@ -24,7 +24,7 @@ class _FrozenDecisionPayloadList(tuple):
 
 
 def _freeze_decision_payload(value: Any) -> Any:
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return MappingProxyType(
             {key: _freeze_decision_payload(child) for key, child in value.items()}
         )

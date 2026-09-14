@@ -11,7 +11,7 @@ from .causal_integrity import contains_forbidden_future_key
 
 
 def _freeze_payload(value: Any) -> Any:
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return MappingProxyType(
             {key: _freeze_payload(child) for key, child in value.items()}
         )

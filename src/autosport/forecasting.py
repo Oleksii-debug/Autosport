@@ -31,7 +31,7 @@ def parse_iso_timestamp(value: str) -> datetime:
 
 
 def _freeze_provenance(value: Any) -> Any:
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return MappingProxyType(
             {key: _freeze_provenance(child) for key, child in value.items()}
         )

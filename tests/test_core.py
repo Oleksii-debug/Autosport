@@ -46,16 +46,16 @@ class CoreTests(unittest.TestCase):
             restored.settle(ticket.ticket_id, {leg.quote_key})
             self.assertEqual(restored.balance, Decimal("110.0"))
 
-    def test_portfolio_exact_bounds_for_exclusive_match(self):
+    def test_portfolio_conservative_bounds_for_unproven_exclusive_match(self):
         book = PaperBook("100")
         a_leg = TicketLeg("e", "m", "a", Decimal("2.0"))
         b_leg = TicketLeg("e", "m", "b", Decimal("3.0"))
         a = book.open_ticket([a_leg], "10")
         b = book.open_ticket([b_leg], "10")
         report = PortfolioEngine().analyse([a, b], exclusive_groups=[{a_leg.quote_key, b_leg.quote_key}])
-        self.assertEqual(report.mode, "exact")
-        self.assertEqual(report.scenario_count, 2)
-        self.assertEqual(report.worst_case, Decimal("0.0"))
+        self.assertEqual(report.mode, "conservative-enumeration")
+        self.assertEqual(report.scenario_count, 3)
+        self.assertEqual(report.worst_case, Decimal("-20.0"))
         self.assertEqual(report.best_case, Decimal("10.0"))
 
 

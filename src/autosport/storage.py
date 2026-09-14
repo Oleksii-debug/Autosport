@@ -257,6 +257,21 @@ def _canonical_index_terms(connection: sqlite3.Connection, index_name: str) -> t
     return tuple(terms)
 
 
+def _semantically_inert_extra_index(connection: sqlite3.Connection, index_name: str) -> bool:
+    """Allow only ordinary-column BINARY non-unique indexes as harmless extras."""
+    rows = connection.execute(f"PRAGMA index_xinfo({_quoted_identifier(index_name)})").fetchall()
+    key_rows = [row for row in rows if len(row) >= 6 and row[5] == 1]
+    if not key_rows:
+        return False
+    for row in key_rows:
+        _seqno, cid, name, descending, collation, _key = row[:6]
+        if not isinstance(cid, int) or cid < 0:
+            return False
+        if not isinstance(name, str) or descending != 0 or collation != "BINARY":
+            return False
+    return True
+
+
 def _schema_object(connection: sqlite3.Connection, name: str) -> tuple[str, str] | None:
     row = connection.execute(
         "SELECT type, sql FROM sqlite_master WHERE name=?",
@@ -327,11 +342,27 @@ def _validate_canonical_table(connection: sqlite3.Connection, table_name: str) -
     for index_row in index_rows:
         if len(index_row) < 5:
             raise ValueError(f"{table_name} schema is not canonical: index metadata mismatch")
-        _seq, index_name, unique, origin, _partial = index_row[:5]
+        _seq, index_name, unique, origin, partial = index_row[:5]
+        if not isinstance(index_name, str):
+            raise ValueError(f"{table_name} schema is not canonical: index metadata mismatch")
         if unique and origin != "pk":
             raise ValueError(
                 f"{table_name} schema is not canonical: extra UNIQUE index {index_name}"
             )
+        is_repairable_canonical_secondary = (
+            table_name == "market_events"
+            and index_name in _CANONICAL_SECONDARY_INDEXES
+        )
+        if origin != "pk" and not is_repairable_canonical_secondary:
+            if (
+                origin != "c"
+                or partial != 0
+                or not _semantically_inert_extra_index(connection, index_name)
+            ):
+                raise ValueError(
+                    f"{table_name} schema is not canonical: extra non-unique index "
+                    f"{index_name} is not semantically inert"
+                )
 
 
 def _validate_existing_canonical_tables(connection: sqlite3.Connection) -> None:

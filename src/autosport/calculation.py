@@ -80,7 +80,7 @@ class CalculationEngine:
         """Convert decimal odds without silently applying bookmaker rounding conventions."""
 
         odds = _decimal(decimal_odds, field="decimal_odds", greater_than=Decimal("1"))
-        net = odds - Decimal("1")
+        net = _exact_subtract(odds, Decimal("1"), context="decimal odds conversion")
         numerator, denominator = net.as_integer_ratio()
         fractional_numerator = Decimal(numerator)
         fractional_denominator = Decimal(denominator)
@@ -142,7 +142,11 @@ class CalculationEngine:
             classification = "exact"
             warnings: tuple[str, ...] = ()
         else:
-            decimal_odds = Decimal("1") + _divide(Decimal("100"), abs(american))
+            decimal_odds = _approximate_add(
+                Decimal("1"),
+                _divide(Decimal("100"), abs(american)),
+                context="American-to-decimal conversion",
+            )
             classification = "approximate_decimal"
             warnings = ("division is rounded in the deterministic decimal context",)
         return _result(
@@ -164,7 +168,11 @@ class CalculationEngine:
     ) -> CalculationResult:
         numerator_value = _decimal(numerator, field="fractional_numerator", greater_than=Decimal("0"))
         denominator_value = _decimal(denominator, field="fractional_denominator", greater_than=Decimal("0"))
-        decimal_odds = Decimal("1") + _divide(numerator_value, denominator_value)
+        decimal_odds = _approximate_add(
+            Decimal("1"),
+            _divide(numerator_value, denominator_value),
+            context="fractional-to-decimal conversion",
+        )
         return _result(
             calculation_id="fractional_to_decimal_odds",
             method="fractional_ratio_to_decimal",
@@ -234,7 +242,11 @@ class CalculationEngine:
         inputs = {f"decimal_odds.{key}": odds for key, odds in ordered}
         outputs: dict[str, Decimal] = {
             "overround": total,
-            "market_margin": total - Decimal("1"),
+            "market_margin": _exact_subtract(
+                total,
+                Decimal("1"),
+                context="market margin",
+            ),
         }
         output_units: dict[str, str] = {
             "overround": "probability_sum",
@@ -731,7 +743,7 @@ class CalculationEngine:
         for value in values:
             if value > peak:
                 peak = value
-            absolute = peak - value
+            absolute = _exact_subtract(peak, value, context="maximum drawdown")
             fraction = Decimal("0") if peak == 0 else _divide(absolute, peak)
             if absolute > max_absolute:
                 max_absolute = absolute
@@ -826,6 +838,31 @@ def _decimal_series(
         )
         for index, value in enumerate(values)
     ]
+
+
+def _approximate_add(left: Decimal, right: Decimal, *, context: str) -> Decimal:
+    try:
+        with localcontext(_CONTEXT):
+            result = left + right
+    except DecimalException as exc:
+        raise ValueError(f"{context} is outside the supported decimal range") from exc
+    if not result.is_finite():
+        raise ValueError(f"{context} produced a non-finite result")
+    return result
+
+
+def _exact_subtract(left: Decimal, right: Decimal, *, context: str) -> Decimal:
+    try:
+        with localcontext(_CONTEXT) as ctx:
+            ctx.clear_flags()
+            result = left - right
+            if ctx.flags[Inexact]:
+                raise ValueError(f"{context} arithmetic would require rounding")
+    except DecimalException as exc:
+        raise ValueError(f"{context} is outside the supported decimal range") from exc
+    if not result.is_finite():
+        raise ValueError(f"{context} produced a non-finite result")
+    return result
 
 
 def _divide(numerator: Decimal, denominator: Decimal) -> Decimal:

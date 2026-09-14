@@ -27,18 +27,20 @@ def run_machine_diagnostic(output_path: str | Path) -> int:
         firewall = ReplayLeakageFirewall({event.event_id: event.selection_id})
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteMarketStore(Path(tmp) / "diag.db")
-            ReplayEngine([event], firewall).run(store.append, run_id="packaged-diagnostic")
-            if firewall.result_for(event.event_id) != event.selection_id:
-                raise RuntimeError("replay firewall/result diagnostic failed")
-            if store.current()[event.quote_key].decimal_odds != Decimal("2.0"):
-                raise RuntimeError("market storage diagnostic failed")
-            book = PaperBook("100")
-            leg = TicketLeg(event.event_id, event.market_id, event.selection_id, Decimal("2.0"))
-            ticket = book.open_ticket([leg], "10", reason="packaged diagnostic")
-            book.settle(ticket.ticket_id, {leg.quote_key})
-            if book.balance != Decimal("110.0"):
-                raise RuntimeError("paper settlement diagnostic failed")
-            store.close()
+            try:
+                ReplayEngine([event], firewall).run(store.append, run_id="packaged-diagnostic")
+                if firewall.result_for(event.event_id) != event.selection_id:
+                    raise RuntimeError("replay firewall/result diagnostic failed")
+                if store.current()[event.quote_key].decimal_odds != Decimal("2.0"):
+                    raise RuntimeError("market storage diagnostic failed")
+                book = PaperBook("100")
+                leg = TicketLeg(event.event_id, event.market_id, event.selection_id, Decimal("2.0"))
+                ticket = book.open_ticket([leg], "10", reason="packaged diagnostic")
+                book.settle(ticket.ticket_id, {leg.quote_key})
+                if book.balance != Decimal("110.0"):
+                    raise RuntimeError("paper settlement diagnostic failed")
+            finally:
+                store.close()
         payload = {
             "status": "PASS",
             "virtual_balance": "110.0",

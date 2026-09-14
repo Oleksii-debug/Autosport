@@ -75,6 +75,32 @@ class ReplayJsonlIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"invalid replay JSONL at line 1"):
                 ReplayEngine.from_jsonl(path)
 
+    def test_overflowing_json_number_is_rejected_after_decode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "market.jsonl"
+            payload = json.dumps(self._event_payload())
+            payload = payload.replace(
+                '"provider_sequence": 7',
+                '"provider_sequence": 1e400',
+            )
+            path.write_text(payload + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, r"invalid replay JSONL at line 1"):
+                ReplayEngine.from_jsonl(path)
+
+    def test_escaped_lone_surrogate_is_rejected_before_dataset_hashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "market.jsonl"
+            payload = json.dumps(self._event_payload())
+            payload = payload.replace(
+                '"provider_sequence": 7',
+                r'"provider_sequence": "\ud800"',
+            )
+            path.write_text(payload + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, r"invalid replay JSONL at line 1"):
+                ReplayEngine.from_jsonl(path)
+
     def test_malformed_later_record_reports_physical_line_number(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "market.jsonl"

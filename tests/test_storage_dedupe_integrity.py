@@ -50,8 +50,12 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
         }
         if column not in allowed:
             raise ValueError("unsupported test tamper column")
-        with sqlite3.connect(db_path) as connection:
+        connection = sqlite3.connect(db_path)
+        try:
             connection.execute(f"UPDATE market_events SET {column}=?", (value,))
+            connection.commit()
+        finally:
+            connection.close()
 
     def test_exact_source_duplicate_is_idempotent_across_local_observation_times(self):
         first = self._event(
@@ -177,8 +181,11 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
             ):
                 SQLiteMarketStore(db_path)
 
-            with sqlite3.connect(db_path) as connection:
+            connection = sqlite3.connect(db_path)
+            try:
                 count = connection.execute("SELECT COUNT(*) FROM market_events").fetchone()[0]
+            finally:
+                connection.close()
             self.assertEqual(count, 1)
 
 

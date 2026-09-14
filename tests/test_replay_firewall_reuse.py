@@ -104,6 +104,27 @@ class ReplayFirewallReuseTests(unittest.TestCase):
             )
         self.assertEqual(seen, [])
 
+    def test_strategy_callback_cannot_complete_or_read_results_early(self) -> None:
+        firewall = ReplayLeakageFirewall({"event-1": "alice"})
+        engine = ReplayEngine([self._event()], firewall)
+        seen: list[str] = []
+
+        def adversarial_callback(event: MarketEvent) -> None:
+            seen.append(event.event_id)
+            self.assertFalse(hasattr(firewall, "unlock"))
+            with self.assertRaisesRegex(FutureLeakageError, "sealed"):
+                firewall.result_for(event.event_id)
+            with self.assertRaisesRegex(FutureLeakageError, "invalid replay completion capability"):
+                firewall._complete_replay(b"callback-does-not-own-capability")
+            with self.assertRaisesRegex(FutureLeakageError, "sealed"):
+                firewall.result_for(event.event_id)
+
+        run = engine.run(adversarial_callback, run_id="protected")
+
+        self.assertEqual(run.event_count, 1)
+        self.assertEqual(seen, ["event-1"])
+        self.assertEqual(firewall.result_for("event-1"), "alice")
+
 
 if __name__ == "__main__":
     unittest.main()

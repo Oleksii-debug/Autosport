@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import secrets
 import threading
 import time
 import uuid
@@ -28,6 +30,7 @@ class ReplayLeakageFirewall:
         self._results = dict(final_results or {})
         self._state = self._SEALED
         self._state_lock = threading.Lock()
+        self._active_completion_digest: bytes | None = None
 
     def result_for(self, event_id: str) -> str | None:
         with self._state_lock:
@@ -35,8 +38,8 @@ class ReplayLeakageFirewall:
                 raise FutureLeakageError("Final result is sealed until replay completion")
             return self._results.get(event_id)
 
-    def require_sealed(self) -> None:
-        """Atomically claim this firewall for exactly one replay run."""
+    def _claim_for_replay(self) -> bytes:
+        """Atomically claim this firewall and return the engine-only completion capability."""
         with self._state_lock:
             if self._state == self._UNLOCKED:
                 raise FutureLeakageError(
@@ -48,14 +51,27 @@ class ReplayLeakageFirewall:
                     "Final result firewall was already claimed by another or failed replay; "
                     "use a fresh firewall for each replay"
                 )
+            completion_capability = secrets.token_bytes(32)
+            self._active_completion_digest = hashlib.sha256(completion_capability).digest()
             self._state = self._IN_USE
+            return completion_capability
 
-    def unlock(self) -> None:
+    def _complete_replay(self, completion_capability: bytes) -> None:
+        """Unlock only for the exact capability returned to the owning replay run."""
         with self._state_lock:
             if self._state != self._IN_USE:
                 raise FutureLeakageError(
-                    "Final result firewall can only unlock after its claimed replay completes"
+                    "Final result firewall can only complete after its claimed replay runs"
                 )
+            if not isinstance(completion_capability, bytes):
+                raise FutureLeakageError("invalid replay completion capability")
+            candidate_digest = hashlib.sha256(completion_capability).digest()
+            expected_digest = self._active_completion_digest
+            if expected_digest is None or not hmac.compare_digest(
+                candidate_digest, expected_digest
+            ):
+                raise FutureLeakageError("invalid replay completion capability")
+            self._active_completion_digest = None
             self._state = self._UNLOCKED
 
 
@@ -92,11 +108,10 @@ class ReplayEngine:
         speed: float = 0.0,
         run_id: str | None = None,
     ) -> ReplayRun:
-        # Claim the firewall before any strategy-visible callback. The atomic
-        # SEALED -> IN_USE transition rejects both completed reuse and concurrent
-        # reuse. A failed run deliberately leaves the firewall retired IN_USE
-        # rather than risking a later replay against ambiguous causal state.
-        self.firewall.require_sealed()
+        # Claim before any strategy-visible callback. The raw completion capability
+        # remains local to this run; the firewall stores only its digest. A failed
+        # run deliberately leaves the firewall retired IN_USE and therefore sealed.
+        completion_capability = self.firewall._claim_for_replay()
         previous: float | None = None
         started = utc_now_iso()
         count = 0
@@ -108,7 +123,7 @@ class ReplayEngine:
                 previous = current
             on_event(event)
             count += 1
-        self.firewall.unlock()
+        self.firewall._complete_replay(completion_capability)
         return ReplayRun(
             run_id=run_id or str(uuid.uuid4()),
             dataset_hash=self.dataset_hash,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Sequence
 
@@ -244,7 +244,7 @@ def _snapshot_quote_at_cutoff(
 
 def _causal_cutoff(value: str) -> tuple[datetime, str]:
     parsed = _timestamp(value, field="causal_cutoff_ts")
-    return parsed, parsed.isoformat()
+    return parsed, parsed.astimezone(timezone.utc).isoformat()
 
 
 def _timestamp(value: object, *, field: str) -> datetime:

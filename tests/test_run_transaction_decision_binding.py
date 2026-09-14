@@ -288,6 +288,59 @@ class RunTransactionDecisionBindingTests(unittest.TestCase):
             self.assertEqual(sha256_file(ledger_path), base_ledger_hash)
             self.assertFalse((root / "run-current-run.json").exists())
 
+    def test_commit_rejects_coherent_manifest_and_summary_identity_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx, book_path, ledger_path = self._start_transaction(root, "current-run")
+            base_book_hash = sha256_file(book_path)
+            base_ledger_hash = sha256_file(ledger_path)
+            tx.stage_outputs(PaperBook.load(book_path), ledger_path)
+            tx.precommit(self._summary_payload())
+
+            summary = json.loads(tx.staged_summary_path.read_text(encoding="utf-8"))
+            summary["strategy_id"] = "observe-only-v1"
+            tx.staged_summary_path.write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            manifest["strategy_id"] = "observe-only-v1"
+            manifest["new"]["summary_sha256"] = sha256_file(tx.staged_summary_path)
+            tx.manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "transaction manifest immutable identity mismatch: strategy_id",
+            ):
+                tx.commit()
+
+            self.assertEqual(sha256_file(book_path), base_book_hash)
+            self.assertEqual(sha256_file(ledger_path), base_ledger_hash)
+            self.assertFalse((root / "run-current-run.json").exists())
+
+    def test_detached_commit_without_registry_identity_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx, book_path, ledger_path = self._start_transaction(root, "current-run")
+            base_book_hash = sha256_file(book_path)
+            base_ledger_hash = sha256_file(ledger_path)
+            tx.stage_outputs(PaperBook.load(book_path), ledger_path)
+            tx.precommit(self._summary_payload())
+
+            detached = RunTransaction(root, "current-run")
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "transaction commit cannot validate external registry identity",
+            ):
+                detached.commit()
+
+            self.assertEqual(sha256_file(book_path), base_book_hash)
+            self.assertEqual(sha256_file(ledger_path), base_ledger_hash)
+            self.assertFalse((root / "run-current-run.json").exists())
+
     def test_commit_rejects_rehashed_semantically_invalid_paper_book_before_promotion(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -323,6 +376,54 @@ class RunTransactionDecisionBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 RunTransactionError,
                 "staged PaperBook semantic validation failed",
+            ):
+                tx.commit()
+
+            self.assertEqual(sha256_file(book_path), base_book_hash)
+            self.assertEqual(sha256_file(ledger_path), base_ledger_hash)
+            self.assertFalse((root / "run-current-run.json").exists())
+
+    def test_commit_rejects_rehashed_foreign_ledger_before_promotion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx, book_path, ledger_path = self._start_transaction(root, "current-run")
+            base_book_hash = sha256_file(book_path)
+            base_ledger_hash = sha256_file(ledger_path)
+            self._append_run_decision(tx, "current-run")
+            tx.stage_outputs(PaperBook.load(book_path), ledger_path)
+            tx.precommit(self._summary_payload())
+
+            forged = root / "post-precommit-foreign.jsonl"
+            JsonlDecisionLedger(forged).append(
+                DecisionRecord(
+                    "foreign-run",
+                    "paper-agent",
+                    "2026-01-03T00:00:00+00:00",
+                    "OPEN_PAPER_TICKET",
+                    {"ticket_id": "forged-after-precommit"},
+                    "foreign-context",
+                )
+            )
+            tx.staged_ledger_path.write_bytes(forged.read_bytes())
+            forged_hash = sha256_file(tx.staged_ledger_path)
+
+            summary = json.loads(tx.staged_summary_path.read_text(encoding="utf-8"))
+            summary["decision_ledger_sha256"] = forged_hash
+            tx.staged_summary_path.write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            manifest["new"]["decision_ledger_sha256"] = forged_hash
+            manifest["new"]["summary_sha256"] = sha256_file(tx.staged_summary_path)
+            tx.manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "combined staged Decision Ledger exact snapshot mismatch",
             ):
                 tx.commit()
 

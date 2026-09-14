@@ -70,10 +70,11 @@ class OneShotRecoveryWorker:
             )
             self._thread = thread
             thread.start()
-        except RuntimeError:
-            # CPython reports OS/runtime inability to start a new thread as
-            # RuntimeError. No task ran, so restore the worker to an idle state;
-            # callers already treat False as a fail-closed "not started" result.
+        except Exception:
+            # Thread construction/start may fail for reasons other than RuntimeError
+            # (for example an OS/resource failure). No task ran to a terminal
+            # recovery boundary, so preserve the existing fail-closed `False`
+            # contract while always releasing the single-flight slot for retry.
             self._thread = None
             with self._lock:
                 self._busy = False
@@ -83,7 +84,10 @@ class OneShotRecoveryWorker:
     def _run(self, task: RecoveryTask) -> None:
         try:
             message = RecoveryWorkerMessage(result=task())
-        except Exception as exc:
+        except BaseException as exc:
+            # SystemExit/KeyboardInterrupt raised inside this detached worker do
+            # not produce a GUI terminal state by themselves. Convert them into a
+            # pollable failure so the recovery surface cannot remain busy forever.
             message = RecoveryWorkerMessage(error=f"{type(exc).__name__}: {exc}")
         self._messages.put(message)
 

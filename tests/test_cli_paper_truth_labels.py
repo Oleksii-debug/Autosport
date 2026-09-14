@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import io
 import unittest
+from contextlib import redirect_stdout
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from contextlib import redirect_stdout
 
 from autosport.cli import run_dataset, run_demo, run_replay
 
@@ -42,10 +42,10 @@ class CliPaperTruthLabelTests(unittest.TestCase):
 
         text = output.getvalue()
         self.assertIn(
-            "mode=replay paper_only=true real_money_execution=false "
-            "profitability_claim=false sample_fixture=false",
+            "mode=replay paper_only=true real_money_execution=false profitability_claim=false",
             text,
         )
+        self.assertNotIn("sample_fixture=", text)
         self.assertIn("dataset_hash=dataset-hash", text)
         self.assertIn("virtual_balance=10000", text)
         self.assertIn("scenario_mode=empty", text)
@@ -75,10 +75,10 @@ class CliPaperTruthLabelTests(unittest.TestCase):
 
         text = output.getvalue()
         self.assertIn(
-            "mode=dataset paper_only=true real_money_execution=false "
-            "profitability_claim=false sample_fixture=false",
+            "mode=dataset paper_only=true real_money_execution=false profitability_claim=false",
             text,
         )
+        self.assertNotIn("sample_fixture=", text)
         self.assertIn("balance=10025", text)
         self.assertIn("net_profit=25", text)
         self.assertIn("settled=1", text)

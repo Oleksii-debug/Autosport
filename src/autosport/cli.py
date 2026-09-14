@@ -35,10 +35,13 @@ from .strategies import available_strategies
 ProviderFactory = Callable[..., ParlayApiTableTennisProvider]
 
 
-def _print_paper_truth_boundary(*, mode: str, sample_fixture: bool = False) -> None:
+def _print_paper_truth_boundary(*, mode: str, sample_fixture: bool | None = None) -> None:
+    sample_label = (
+        "" if sample_fixture is None else f" sample_fixture={str(sample_fixture).lower()}"
+    )
     print(
         f"mode={mode} paper_only=true real_money_execution=false "
-        f"profitability_claim=false sample_fixture={str(sample_fixture).lower()}"
+        f"profitability_claim=false{sample_label}"
     )
 
 

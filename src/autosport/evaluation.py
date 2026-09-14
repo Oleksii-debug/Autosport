@@ -46,26 +46,8 @@ def _evaluation_decimal_context(*, exact: bool = False) -> Context:
     return context
 
 
-def _validated_evaluation_state(
-    book: PaperBook,
-) -> tuple[
-    Decimal,
-    Decimal,
-    Decimal,
-    Decimal,
-    Decimal,
-    tuple[PaperTicket, ...],
-    Decimal,
-]:
-    """Validate the mutable paper ledger and derive finite evaluation economics.
-
-    Evaluation is durable product evidence, so it must not trust a mutable
-    PaperBook merely because the object originated from a previously validated
-    snapshot. Reuse the canonical PaperBook invariant immediately before
-    publishing metrics, and isolate Decimal behavior from the caller context.
-    Ledger aggregates and profit must be exact at the canonical precision;
-    non-terminating ROI division may use normal Decimal rounding.
-    """
+def evaluate(book: PaperBook) -> EvaluationSummary:
+    """Publish paper-evaluation metrics only from a valid canonical book state."""
 
     try:
         tickets = book.tickets
@@ -75,6 +57,10 @@ def _validated_evaluation_state(
             if not isinstance(ticket, PaperTicket) or not isinstance(ticket.status, TicketStatus):
                 raise TypeError("PaperBook contains a noncanonical ticket/status")
 
+        # Evaluation becomes durable run evidence. Re-prove the mutable PaperBook
+        # invariant immediately before calculating it, independent of caller
+        # Decimal traps/flags. Ledger aggregates and net profit must not be
+        # silently rounded; non-terminating ROI division may use normal rounding.
         with localcontext(_evaluation_decimal_context(exact=True)):
             PaperBook._validate_loaded_state(book)
             initial_bankroll = book.initial_bankroll
@@ -104,27 +90,6 @@ def _validated_evaluation_state(
     if initial_bankroll <= 0 or final_balance < 0 or committed_stake < 0 or settled_stake < 0:
         raise ValueError(_INVALID_EVALUATION_STATE)
 
-    return (
-        initial_bankroll,
-        final_balance,
-        committed_stake,
-        settled_stake,
-        net_profit,
-        settled,
-        roi,
-    )
-
-
-def evaluate(book: PaperBook) -> EvaluationSummary:
-    (
-        initial_bankroll,
-        final_balance,
-        committed_stake,
-        settled_stake,
-        net_profit,
-        settled,
-        roi,
-    ) = _validated_evaluation_state(book)
     return EvaluationSummary(
         initial_bankroll=initial_bankroll,
         final_balance=final_balance,

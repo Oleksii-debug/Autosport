@@ -10,6 +10,25 @@ class WorkspaceEconomicLockError(RuntimeError):
     """Raised when another process owns the workspace economic-writer lock."""
 
 
+def _add_secondary_failure_note(
+    primary: BaseException,
+    prefix: str,
+    secondary: BaseException,
+) -> None:
+    """Attach cleanup evidence without ever replacing the primary failure."""
+
+    try:
+        secondary_text = f"{type(secondary).__name__}: {secondary}"
+    except BaseException:
+        secondary_text = "secondary exception details unavailable"
+    try:
+        primary.add_note(f"{prefix}: {secondary_text}")
+    except BaseException:
+        # Exception subclasses may override add_note(), and diagnostic enrichment is
+        # never allowed to replace the economic/replay failure we are preserving.
+        return
+
+
 class WorkspaceEconomicLock:
     """Cross-process, crash-releasing exclusive lock for PaperBook/ledger mutations.
 
@@ -63,9 +82,10 @@ class WorkspaceEconomicLock:
                 # the handle as a poisoned ownership marker so this object cannot
                 # silently reserve another writer slot.
                 self._handle = handle
-                acquire_error.add_note(
-                    "workspace economic lock handle close also failed while cleaning up acquisition failure: "
-                    f"{type(close_error).__name__}: {close_error}"
+                _add_secondary_failure_note(
+                    acquire_error,
+                    "workspace economic lock handle close also failed while cleaning up acquisition failure",
+                    close_error,
                 )
             raise
         self._handle = handle
@@ -83,9 +103,10 @@ class WorkspaceEconomicLock:
             try:
                 handle.close()
             except BaseException as close_error:
-                unlock_error.add_note(
-                    "workspace economic lock handle close also failed after unlock failure: "
-                    f"{type(close_error).__name__}: {close_error}"
+                _add_secondary_failure_note(
+                    unlock_error,
+                    "workspace economic lock handle close also failed after unlock failure",
+                    close_error,
                 )
                 self._handle = handle
             else:
@@ -112,11 +133,12 @@ class WorkspaceEconomicLock:
             self.release()
         except BaseException as release_error:
             # Never replace the economic/replay failure that caused scope exit with
-            # a secondary lock-teardown failure. Keep both pieces of evidence on the
-            # primary exception so recovery diagnostics retain the actual root cause.
-            exc_value.add_note(
-                "WorkspaceEconomicLock release also failed while propagating the primary error: "
-                f"{type(release_error).__name__}: {release_error}"
+            # a secondary lock-teardown failure. Diagnostic enrichment itself is an
+            # untrusted exception boundary, so it is deliberately best-effort.
+            _add_secondary_failure_note(
+                exc_value,
+                "WorkspaceEconomicLock release also failed while propagating the primary error",
+                release_error,
             )
 
     def _validate_existing_lock_path(self) -> None:

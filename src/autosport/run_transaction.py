@@ -15,6 +15,11 @@ from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
 
 
+_WINDOWS_MAX_COMPONENT_UTF16_CODE_UNITS = 255
+_RUN_SUMMARY_COMPONENT_OVERHEAD_UTF16_CODE_UNITS = len("run-.json".encode("utf-16-le")) // 2
+_WINDOWS_MAX_RUN_ID_UTF16_CODE_UNITS = (
+    _WINDOWS_MAX_COMPONENT_UTF16_CODE_UNITS - _RUN_SUMMARY_COMPONENT_OVERHEAD_UTF16_CODE_UNITS
+)
 _WINDOWS_RESERVED_CHARACTERS = frozenset('<>:"/\\|?*')
 _WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
     {
@@ -36,6 +41,12 @@ def _require_portable_run_id(run_id: object) -> str:
     """Reject path components that cannot be represented safely by the Windows product."""
 
     if not isinstance(run_id, str) or not run_id:
+        raise RunTransactionError("run_id is not a safe workspace path component")
+    try:
+        utf16_code_units = len(run_id.encode("utf-16-le")) // 2
+    except UnicodeEncodeError as exc:
+        raise RunTransactionError("run_id is not a safe workspace path component") from exc
+    if utf16_code_units > _WINDOWS_MAX_RUN_ID_UTF16_CODE_UNITS:
         raise RunTransactionError("run_id is not a safe workspace path component")
     if run_id in {".", ".."} or run_id[0] == " " or run_id[-1] in {" ", "."}:
         raise RunTransactionError("run_id is not a safe workspace path component")

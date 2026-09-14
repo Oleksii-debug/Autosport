@@ -44,6 +44,47 @@ class RunTransactionPathSafetyTests(unittest.TestCase):
                         RunTransaction(workspace, run_id)
             self.assertFalse((workspace / RunTransaction.ROOT_NAME).exists())
 
+    def test_rejects_overlong_run_ids_before_start_filesystem_mutation(self):
+        invalid_run_ids = (
+            "x" * 247,
+            "😀" * 124,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            for run_id in invalid_run_ids:
+                with self.subTest(code_points=len(run_id)):
+                    with self.assertRaisesRegex(
+                        RunTransactionError,
+                        "run_id is not a safe workspace path component",
+                    ):
+                        RunTransaction.start(
+                            workspace,
+                            run_id=run_id,
+                            experiment_key="experiment",
+                            market_sha256="a" * 64,
+                            results_sha256="b" * 64,
+                            strategy_id="baseline-v1",
+                            base_paper_book_sha256="c" * 64,
+                            base_decision_ledger_sha256="d" * 64,
+                        )
+                    self.assertFalse((workspace / RunTransaction.ROOT_NAME).exists())
+
+    def test_accepts_run_id_at_canonical_summary_component_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            for run_id in (
+                "x" * 246,
+                "😀" * 123,
+            ):
+                with self.subTest(code_points=len(run_id)):
+                    transaction = RunTransaction(workspace, run_id)
+                    self.assertEqual(transaction.run_id, run_id)
+                    summary_component = f"run-{run_id}.json"
+                    self.assertEqual(
+                        len(summary_component.encode("utf-16-le")) // 2,
+                        255,
+                    )
+
     def test_rejects_non_string_run_id_with_domain_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(

@@ -143,12 +143,9 @@ def bind_portable_data_tool(package_zip: str | Path, data_exe: str | Path) -> di
 
 
 def verify_portable_data_tool(package_zip: str | Path) -> dict[str, Any]:
-    members = _read_members(Path(package_zip))
+    members, build_info = _verified_base_members(Path(package_zip))
     if _DATA_TOOL not in members:
         raise ValueError("release package is missing Autosport-Data.exe")
-    if _BUILD_INFO not in members:
-        raise ValueError("release package is missing BUILD_INFO.json")
-    build_info = _decode_json_object(members[_BUILD_INFO], _BUILD_INFO)
     if build_info.get("portable_historical_data_tools") is not True:
         raise ValueError("BUILD_INFO does not bind portable historical data tools")
     actual = _sha256_bytes(members[_DATA_TOOL])

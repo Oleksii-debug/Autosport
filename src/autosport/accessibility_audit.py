@@ -7,7 +7,7 @@ from typing import Any
 import tk_uia
 
 from .gui import AUTOMATION_IDS
-from .windows_gui import WindowsAutosportApp
+from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 
 
 _REQUIRED_PATTERNS = {
@@ -23,6 +23,7 @@ _REQUIRED_PATTERNS = {
     AUTOMATION_IDS["log"]: {"VALUE"},
     AUTOMATION_IDS["live_quotes"]: set(),
     AUTOMATION_IDS["evaluation"]: set(),
+    WINDOWS_BANKROLL_AUTOMATION_ID: {"VALUE"},
 }
 
 _ROW_CONTROLS = {
@@ -48,7 +49,23 @@ def _enum_name(value: Any) -> str | None:
     return str(getattr(value, "name", value))
 
 
-def summarize_description(description: Any) -> dict[str, Any]:
+def _bankroll_summary_is_readonly(app: WindowsAutosportApp) -> bool:
+    """Bind packaged accessibility evidence to the actual Tk bankroll widget state."""
+
+    bank_summary = getattr(app, "bank_summary", None)
+    if bank_summary is None:
+        return False
+    return (
+        str(bank_summary.cget("state")) == "readonly"
+        and bool(bank_summary.instate(("readonly", "!disabled")))
+    )
+
+
+def summarize_description(
+    description: Any,
+    *,
+    bankroll_readonly: bool | None = None,
+) -> dict[str, Any]:
     expected_ids = set(_REQUIRED_PATTERNS)
     controls: dict[int, dict[str, Any]] = {}
     failures: list[str] = []
@@ -89,6 +106,13 @@ def summarize_description(description: Any) -> dict[str, Any]:
     for automation_id in missing_ids:
         failures.append(f"automation_id={automation_id}: critical control not found")
 
+    if WINDOWS_BANKROLL_AUTOMATION_ID in controls:
+        controls[WINDOWS_BANKROLL_AUTOMATION_ID]["read_only"] = bankroll_readonly is True
+        if bankroll_readonly is not True:
+            failures.append(
+                f"automation_id={WINDOWS_BANKROLL_AUTOMATION_ID}: bankroll summary is not runtime readonly"
+            )
+
     provider_trouble = [str(item) for item in description.provider_trouble]
     if provider_trouble:
         failures.extend(f"provider trouble: {item}" for item in provider_trouble)
@@ -100,7 +124,10 @@ def summarize_description(description: Any) -> dict[str, Any]:
         "failures": failures,
         "provider_trouble": provider_trouble,
         "providers_stood_down_because": description.providers_stood_down_because,
-        "evidence_scope": "in-process tk-uia annotation/provider audit of the packaged Windows GUI class; not external UIA client or NVDA speech proof",
+        "evidence_scope": (
+            "in-process tk-uia annotation/provider audit plus runtime Tk readonly-state audit "
+            "of the packaged Windows GUI class; not external UIA client or NVDA speech proof"
+        ),
         "human_tested": False,
         "nvda_verified": False,
         "real_money_execution": False,
@@ -115,7 +142,10 @@ def run_accessibility_audit(output_path: str | Path) -> int:
         app = WindowsAutosportApp()
         app.update_idletasks()
         app.update()
-        report = summarize_description(tk_uia.describe(app))
+        report = summarize_description(
+            tk_uia.describe(app),
+            bankroll_readonly=_bankroll_summary_is_readonly(app),
+        )
     except Exception as exc:
         report = {
             "status": "FAIL",

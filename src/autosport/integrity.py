@@ -4,8 +4,17 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
+
+
+# NamedTemporaryFile isolates serialization for concurrent writers, but Windows can
+# still reject simultaneous os.replace() calls that publish to the same destination.
+# Keep only the final same-process publication syscall serialized; JSON encoding,
+# flushing, and fsync remain independent/concurrent and cross-process RMW ownership
+# stays with the higher-level durable-state locks.
+_ATOMIC_JSON_PUBLISH_LOCK = threading.Lock()
 
 
 def sha256_file(path: str | Path) -> str:
@@ -46,7 +55,8 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, destination)
+        with _ATOMIC_JSON_PUBLISH_LOCK:
+            os.replace(temporary, destination)
     finally:
         if temporary is not None:
             try:

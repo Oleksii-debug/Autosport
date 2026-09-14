@@ -78,7 +78,7 @@ class IngestionEngine:
                 if quote.source_ts is not None:
                     try:
                         source_point = parse_source_timestamp(quote.source_ts)
-                    except ValueError:
+                    except (AttributeError, TypeError, ValueError):
                         flags.add("INVALID_SOURCE_TIMESTAMP")
                         rejected += 1
                         continue

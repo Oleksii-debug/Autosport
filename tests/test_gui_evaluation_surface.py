@@ -105,6 +105,36 @@ def test_evaluation_lines_fail_closed_when_run_summary_is_not_utf8(tmp_path: Pat
     assert lines[4] == "Price truth | ERROR — run summary evidence is missing or unreadable."
 
 
+def test_evaluation_lines_reject_duplicate_run_summary_keys(tmp_path: Path):
+    result_path = tmp_path / "duplicate-run-summary.json"
+    result_path.write_text(
+        '{"market_price_truth": {}, "market_price_truth": {}}',
+        encoding="utf-8",
+    )
+
+    lines = evaluation_lines(_result(mode="exact", result_path=result_path))
+
+    assert lines[4] == (
+        "Price truth | ERROR — run summary JSON is ambiguous or non-canonical: "
+        "duplicate object key: market_price_truth."
+    )
+
+
+def test_evaluation_lines_reject_nonfinite_json_constants(tmp_path: Path):
+    result_path = tmp_path / "nonfinite-run-summary.json"
+    result_path.write_text(
+        '{"market_price_truth": {"price_semantics": NaN}}',
+        encoding="utf-8",
+    )
+
+    lines = evaluation_lines(_result(mode="exact", result_path=result_path))
+
+    assert lines[4] == (
+        "Price truth | ERROR — run summary JSON is ambiguous or non-canonical: "
+        "non-finite JSON constant: NaN."
+    )
+
+
 def test_gui_wires_evaluation_to_keyboard_uia_and_terminal_result_without_tk_startup():
     build_source = inspect.getsource(AutosportApp._build)
     accessibility_source = inspect.getsource(AutosportApp._configure_accessibility)

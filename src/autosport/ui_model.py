@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from .price_truth import market_price_truth_from_run_summary
 from .session import ObservationResult, SessionResult
@@ -16,13 +17,33 @@ def result_summary(result: SessionResult) -> str:
     )
 
 
+def _reject_duplicate_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError(f"duplicate object key: {key}")
+        payload[key] = value
+    return payload
+
+
+def _reject_nonfinite_json_constant(value: str) -> Any:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
 def _market_price_truth_line(result: SessionResult) -> str:
     try:
-        payload = json.loads(Path(result.result_path).read_text(encoding="utf-8"))
+        text = Path(result.result_path).read_text(encoding="utf-8")
+        payload = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_object_pairs,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
     except (OSError, UnicodeError):
         return "Price truth | ERROR — run summary evidence is missing or unreadable."
     except json.JSONDecodeError as exc:
         return f"Price truth | ERROR — run summary JSON is invalid: {exc.msg}."
+    except ValueError as exc:
+        return f"Price truth | ERROR — run summary JSON is ambiguous or non-canonical: {exc}."
 
     if not isinstance(payload, dict):
         return "Price truth | ERROR — run summary root is not an object."

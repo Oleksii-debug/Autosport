@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import math
 import secrets
 import threading
 import time
@@ -11,61 +10,15 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Callable, Iterable
 
 from .domain import MarketEvent, utc_now_iso
-
-
-def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    payload: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in payload:
-            raise ValueError(f"duplicate JSON object key: {key}")
-        payload[key] = value
-    return payload
-
-
-def _reject_nonfinite_json_constant(value: str) -> None:
-    raise ValueError(f"non-finite JSON constant: {value}")
-
-
-def _validate_strict_json_value(root: object) -> None:
-    stack = [root]
-    while stack:
-        value = stack.pop()
-        if isinstance(value, str):
-            try:
-                value.encode("utf-8")
-            except UnicodeEncodeError as exc:
-                raise ValueError("JSON string contains invalid Unicode scalar") from exc
-        elif value is None or isinstance(value, (bool, int)):
-            continue
-        elif isinstance(value, float):
-            if not math.isfinite(value):
-                raise ValueError("non-finite JSON number")
-        elif isinstance(value, list):
-            stack.extend(value)
-        elif isinstance(value, dict):
-            for key, item in value.items():
-                try:
-                    key.encode("utf-8")
-                except UnicodeEncodeError as exc:
-                    raise ValueError(
-                        "JSON object key contains invalid Unicode scalar"
-                    ) from exc
-                stack.append(item)
-        else:
-            raise ValueError(f"unsupported decoded JSON type: {type(value).__name__}")
+from .json_integrity import jsonl_bytes_are_blank, strict_json_loads
 
 
 def _parse_jsonl_event(line: str, line_number: int) -> MarketEvent:
     try:
-        raw = json.loads(
-            line,
-            object_pairs_hook=_reject_duplicate_json_keys,
-            parse_constant=_reject_nonfinite_json_constant,
-        )
-        _validate_strict_json_value(raw)
+        raw = strict_json_loads(line)
     except (json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise ValueError(f"invalid replay JSONL at line {line_number}") from exc
     if not isinstance(raw, dict):
@@ -161,14 +114,15 @@ class ReplayEngine:
         try:
             with source.open("rb") as handle:
                 for line_number, raw_line in enumerate(handle, start=1):
+                    if jsonl_bytes_are_blank(raw_line):
+                        continue
                     try:
                         line = raw_line.decode("utf-8")
                     except UnicodeDecodeError as exc:
                         raise ValueError(
                             f"invalid replay JSONL UTF-8 at line {line_number}"
                         ) from exc
-                    if line.strip(" \t\r\n"):
-                        events.append(_parse_jsonl_event(line, line_number))
+                    events.append(_parse_jsonl_event(line, line_number))
         except OSError as exc:
             raise ValueError(f"unable to read replay JSONL: {source}") from exc
         return cls(events, firewall)

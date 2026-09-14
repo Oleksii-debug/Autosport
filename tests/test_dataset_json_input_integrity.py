@@ -160,6 +160,64 @@ class DatasetJsonInputIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-standard JSON constant: Infinity"):
                 dataset.load_market_events()
 
+    def test_market_jsonl_rejects_standard_number_overflow(self):
+        event_text = json.dumps(_event(), sort_keys=True)
+        event_text = event_text.replace(
+            '"metadata": {}',
+            '"metadata": {"overflow": 1e400}',
+            1,
+        ) + "\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = load_dataset(
+                _write_schema1_dataset(Path(tmp), market_text=event_text)
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "market line 1 contains invalid JSON value: non-finite JSON number",
+            ):
+                dataset.load_market_events()
+
+    def test_market_jsonl_rejects_escaped_lone_surrogate(self):
+        event_text = json.dumps(_event(), sort_keys=True)
+        surrogate_escape = "\\" + "ud800"
+        event_text = event_text.replace(
+            '"metadata": {}',
+            f'"metadata": {{"bad": "{surrogate_escape}"}}',
+            1,
+        ) + "\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = load_dataset(
+                _write_schema1_dataset(Path(tmp), market_text=event_text)
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "market line 1 contains invalid JSON value: JSON string contains invalid Unicode scalar",
+            ):
+                dataset.load_market_events()
+
+    def test_market_jsonl_rejects_non_json_whitespace_pseudo_blank_record(self):
+        event_text = json.dumps(_event(), sort_keys=True) + "\n\v\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = load_dataset(
+                _write_schema1_dataset(Path(tmp), market_text=event_text)
+            )
+            with self.assertRaisesRegex(ValueError, "market line 2 is not valid JSON"):
+                dataset.load_market_events()
+
+    def test_market_jsonl_accepts_json_whitespace_blank_records(self):
+        event_text = (
+            " \t\r\n"
+            + json.dumps(_event(), sort_keys=True)
+            + "\n\t \r\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = load_dataset(
+                _write_schema1_dataset(Path(tmp), market_text=event_text)
+            )
+            events = dataset.load_market_events()
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].event_id, "tt-001")
+
     def test_results_reject_duplicate_key_before_reveal(self):
         results_text = (
             '{"schema_version":1,"quote_outcomes":{"tt-001|winner|alice":"win"},'

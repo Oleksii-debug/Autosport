@@ -18,6 +18,7 @@ class PortableDataToolPackageTests(unittest.TestCase):
         accessibility = root / "a11y.json"
         keyboard = root / "keyboard.json"
         restart = root / "restart.json"
+        process_recovery = root / "process-recovery.json"
         example = root / "example"
         package = root / "candidate.zip"
         example.mkdir()
@@ -45,6 +46,24 @@ class PortableDataToolPackageTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+        process_recovery.write_text(
+            json.dumps(
+                {
+                    **common,
+                    "audit_id": "real-process-kill-relaunch-recovery-v1",
+                    "forced_process_kill_observed": True,
+                    "crash_worker_returncode": -9,
+                    "recovery_worker_returncode": 0,
+                    "recovery_disposition": "aborted_uncommitted",
+                    "run_status": "aborted",
+                    "manifest_phase": "aborted",
+                    "economic_base_preserved": True,
+                    "v1_ready": False,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         build_windows_package(
             exe,
             start,
@@ -53,6 +72,7 @@ class PortableDataToolPackageTests(unittest.TestCase):
             accessibility,
             keyboard,
             restart,
+            process_recovery,
             package,
             source_sha,
         )

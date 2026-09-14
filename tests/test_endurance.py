@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, localcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -113,6 +113,34 @@ class EnduranceTests(unittest.TestCase):
         self.assertFalse(report.paper_economics_verified)
         self.assertIn("PaperBook endurance tickets were not all WON", report.failures)
         self.assertIn("PaperBook winning payouts do not match locked odds", report.failures)
+
+    def test_endurance_paper_economic_oracle_is_independent_of_caller_decimal_context(self):
+        config = EnduranceConfig(
+            event_count=20,
+            quote_keys=10,
+            batch_size=10,
+            restart_cycles=1,
+            paper_tickets=5,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline = run_endurance(root / "baseline", config)
+            with localcontext() as caller_context:
+                caller_context.prec = 6
+                caller_context.rounding = ROUND_DOWN
+                constrained = run_endurance(root / "constrained", config)
+
+        self.assertEqual(baseline.status, "PASS", baseline.failures)
+        self.assertEqual(constrained.status, "PASS", constrained.failures)
+        self.assertEqual(constrained.paper_payout_total, baseline.paper_payout_total)
+        self.assertEqual(constrained.paper_expected_balance, baseline.paper_expected_balance)
+        self.assertEqual(constrained.paper_balance_after_restart, baseline.paper_balance_after_restart)
+        self.assertEqual(
+            constrained.stable_invariant_fingerprint,
+            baseline.stable_invariant_fingerprint,
+        )
+        self.assertTrue(constrained.paper_economics_verified)
 
     def test_config_and_workspace_are_bounded_fail_closed(self):
         with self.assertRaises(ValueError):

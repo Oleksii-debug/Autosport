@@ -47,6 +47,71 @@ class IngestionStats:
 
 
 @dataclass(frozen=True, slots=True)
+class _SourceHealthSnapshot:
+    source_id: str
+    status: str
+    poll_count: int
+    total_received: int
+    total_accepted: int
+    total_rejected: int
+    total_failures: int
+    consecutive_failures: int
+    last_success_at: str | None
+    last_error_at: str | None
+    last_error: str | None
+    last_cursor: str | None
+    latest_source_ts: str | None
+    quality_flags: tuple[str, ...]
+
+    @classmethod
+    def from_state(cls, state: SourceHealthState) -> "_SourceHealthSnapshot":
+        return cls(
+            source_id=state.source_id,
+            status=state.status,
+            poll_count=state.poll_count,
+            total_received=state.total_received,
+            total_accepted=state.total_accepted,
+            total_rejected=state.total_rejected,
+            total_failures=state.total_failures,
+            consecutive_failures=state.consecutive_failures,
+            last_success_at=state.last_success_at,
+            last_error_at=state.last_error_at,
+            last_error=state.last_error,
+            last_cursor=state.last_cursor,
+            latest_source_ts=state.latest_source_ts,
+            quality_flags=state.quality_flags,
+        )
+
+    def after_success(
+        self, outcome: "CommittedIngestionOutcome"
+    ) -> "_SourceHealthSnapshot":
+        latest_source_ts = self.latest_source_ts
+        if outcome.latest_source_ts is not None:
+            if latest_source_ts is None or (
+                parse_source_timestamp(outcome.latest_source_ts)
+                >= parse_source_timestamp(latest_source_ts)
+            ):
+                latest_source_ts = outcome.latest_source_ts
+        quality_flags = tuple(sorted(outcome.quality_flags))
+        return _SourceHealthSnapshot(
+            source_id=self.source_id,
+            status="degraded" if quality_flags else "healthy",
+            poll_count=self.poll_count + 1,
+            total_received=self.total_received + outcome.received,
+            total_accepted=self.total_accepted + outcome.accepted,
+            total_rejected=self.total_rejected + outcome.rejected,
+            total_failures=self.total_failures,
+            consecutive_failures=0,
+            last_success_at=outcome.now,
+            last_error_at=self.last_error_at,
+            last_error=None,
+            last_cursor=outcome.cursor,
+            latest_source_ts=latest_source_ts,
+            quality_flags=quality_flags,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CommittedIngestionOutcome:
     """Exact market-commit result whose source-health projection is still pending."""
 
@@ -59,8 +124,9 @@ class CommittedIngestionOutcome:
     cursor: str | None
     latest_source_ts: str | None
     quality_flags: tuple[str, ...]
+    health_before: _SourceHealthSnapshot | None = None
 
-    def record_health(self, store: SourceHealthStore) -> SourceHealthState:
+    def _record_health_once(self, store: SourceHealthStore) -> SourceHealthState:
         return store.record_success(
             self.source_id,
             now=self.now,
@@ -71,6 +137,24 @@ class CommittedIngestionOutcome:
             latest_source_ts=self.latest_source_ts,
             quality_flags=self.quality_flags,
         )
+
+    def record_health(self, store: SourceHealthStore) -> SourceHealthState:
+        """Safely repair a failed post-commit health projection without double counting."""
+        if self.health_before is None:
+            raise RuntimeError(
+                "committed ingestion outcome lacks pre-health state for a safe retry"
+            )
+        current = store.get(self.source_id)
+        current_snapshot = _SourceHealthSnapshot.from_state(current)
+        expected = self.health_before.after_success(self)
+        if current_snapshot == expected:
+            return current
+        if current_snapshot != self.health_before:
+            raise RuntimeError(
+                "source health changed since the committed ingestion outcome; "
+                "refusing ambiguous retry"
+            )
+        return self._record_health_once(store)
 
     def stats(self, *, health_status: str | None = None) -> IngestionStats:
         if health_status is None:
@@ -148,11 +232,15 @@ class IngestionEngine:
                 self.health_store.record_failure(provider.source_id, now=now, error=exc)
             raise
 
-        flags = set(batch.quality_flags)
+        health_before = None
         previous_source_ts = None
         if self.health_store is not None:
-            previous_source_ts = self.health_store.get(batch.source_id).latest_source_ts
+            health_before = _SourceHealthSnapshot.from_state(
+                self.health_store.get(batch.source_id)
+            )
+            previous_source_ts = health_before.latest_source_ts
 
+        flags = set(batch.quality_flags)
         normalized = []
         rejected = 0
         latest_source: datetime | None = None
@@ -208,10 +296,11 @@ class IngestionEngine:
                 cursor=batch.cursor,
                 latest_source_ts=latest_source_ts,
                 quality_flags=ordered_flags,
+                health_before=health_before,
             )
             if self.health_store is not None:
                 try:
-                    outcome.record_health(self.health_store)
+                    outcome._record_health_once(self.health_store)
                 except Exception as health_error:
                     raise CommittedIngestionHealthError(
                         outcome,
@@ -229,11 +318,12 @@ class IngestionEngine:
             cursor=batch.cursor,
             latest_source_ts=latest_source_ts,
             quality_flags=ordered_flags,
+            health_before=health_before,
         )
         health_status = "degraded" if ordered_flags else "healthy"
         if self.health_store is not None:
             try:
-                state = outcome.record_health(self.health_store)
+                state = outcome._record_health_once(self.health_store)
             except Exception as health_error:
                 raise CommittedIngestionHealthError(outcome) from health_error
             health_status = state.status

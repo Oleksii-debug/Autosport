@@ -25,21 +25,40 @@ class SettlementEngine:
         self.outcomes.update(quote_outcomes)
 
     def settle_ready(self, book: PaperBook) -> list[str]:
-        settled: list[str] = []
+        # Build and economically preflight the complete ready batch before
+        # mutating the PaperBook. A later ticket can fail deterministic payout
+        # validation even when an earlier ticket is valid; applying tickets as
+        # they are discovered would leave a partially settled book.
+        outcomes = dict(self.outcomes)
+        plan: list[tuple[str, set[str], set[str]]] = []
+        simulated_balance = book.balance
+
         for ticket in list(book.tickets.values()):
             if ticket.status is not TicketStatus.OPEN:
                 continue
-            states = [self.outcomes.get(leg.quote_key) for leg in ticket.legs]
-            if "loss" in states:
-                winning = {leg.quote_key for leg in ticket.legs if self.outcomes.get(leg.quote_key) == "win"}
-                voids = {leg.quote_key for leg in ticket.legs if self.outcomes.get(leg.quote_key) == "void"}
-                book.settle(ticket.ticket_id, winning, voids)
-                settled.append(ticket.ticket_id)
+            states = [outcomes.get(leg.quote_key) for leg in ticket.legs]
+            if "loss" not in states and any(state is None for state in states):
                 continue
-            if any(state is None for state in states):
-                continue
-            winning = {leg.quote_key for leg in ticket.legs if self.outcomes.get(leg.quote_key) == "win"}
-            voids = {leg.quote_key for leg in ticket.legs if self.outcomes.get(leg.quote_key) == "void"}
-            book.settle(ticket.ticket_id, winning, voids)
-            settled.append(ticket.ticket_id)
+            winning = {
+                leg.quote_key
+                for leg in ticket.legs
+                if outcomes.get(leg.quote_key) == "win"
+            }
+            voids = {
+                leg.quote_key
+                for leg in ticket.legs
+                if outcomes.get(leg.quote_key) == "void"
+            }
+            _, _, simulated_balance = PaperBook._settlement_result(
+                ticket,
+                simulated_balance,
+                winning,
+                voids,
+            )
+            plan.append((ticket.ticket_id, winning, voids))
+
+        settled: list[str] = []
+        for ticket_id, winning, voids in plan:
+            book.settle(ticket_id, winning, voids)
+            settled.append(ticket_id)
         return settled

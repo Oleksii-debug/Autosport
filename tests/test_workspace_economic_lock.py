@@ -277,7 +277,7 @@ class WorkspaceEconomicLockTests(unittest.TestCase):
             )
 
             with (
-                mock.patch.object(lock, "_open_new_lock_handle", return_value=handle),
+                mock.patch.object(lock, "_open_lock_handle", return_value=handle),
                 mock.patch.object(lock, "_validate_open_handle_identity"),
                 mock.patch.object(WorkspaceEconomicLock, "_lock_handle", side_effect=primary),
             ):

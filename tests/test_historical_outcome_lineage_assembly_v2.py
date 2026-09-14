@@ -223,13 +223,139 @@ class HistoricalOutcomeLineageV2AssemblyTests(unittest.TestCase):
             self.assertEqual(evidence["source_record_lineage_root_sha256"], _sha256(first))
             self.assertEqual(evidence["source_record_lineage_root_revision_id"], "results-r1")
             self.assertEqual(evidence["source_record_lineage_depth"], 2)
+            self.assertEqual(
+                [revision["revision_id"] for revision in evidence["source_record_lineage"]],
+                ["results-r1", "results-r2"],
+            )
             self.assertIs(evidence["source_record_lineage_verified"], True)
             self.assertFalse(evidence["source_record_redistributed"])
             self.assertFalse((output / first.name).exists())
             self.assertFalse((output / second.name).exists())
             self.assertEqual(provenance["source_record_revision_id"], "results-r2")
             self.assertEqual(provenance["source_record_lineage_root_sha256"], _sha256(first))
+            self.assertEqual(provenance["source_record_lineage"], evidence["source_record_lineage"])
             self.assertIs(provenance["source_record_lineage_verified"], True)
+
+    def test_three_revision_chain_preserves_every_verified_link_after_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            governance = _write_governance(root)
+            results, first, second = _write_corrected_results(root)
+            quote_key = "tt-a|winner|alice"
+            third = root / "official-outcomes-r3.json"
+            third.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "source": "official-results:test-fixture",
+                        "record_id": "table-tennis-results:2026-01-01",
+                        "revision_id": "results-r3",
+                        "revision": 3,
+                        "revision_kind": "correction",
+                        "recorded_at": "2026-01-01T11:58:00+00:00",
+                        "quote_outcomes": {quote_key: "loss"},
+                        "predecessor_record_file": second.name,
+                        "predecessor_record_sha256": _sha256(second),
+                        "supersedes_revision_id": "results-r2",
+                        "correction_reason": "second official result correction",
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            sealed = json.loads(results.read_text(encoding="utf-8"))
+            sealed["quote_outcomes"] = {quote_key: "loss"}
+            sealed["outcome_provenance"]["source_record_file"] = third.name
+            sealed["outcome_provenance"]["source_record_sha256"] = _sha256(third)
+            results.write_text(json.dumps(sealed, sort_keys=True), encoding="utf-8")
+            output = root / "corpus-deep"
+
+            assemble_historical_corpus(
+                [snapshot],
+                results_path=results,
+                governance_proof_path=governance,
+                output_dir=output,
+                name="verified deep corrected TT outcomes",
+                outcome_reveal_after="2026-01-01T12:00:00+00:00",
+                imported_at="2026-01-02T00:05:00+00:00",
+            )
+
+            loaded = load_dataset(output)
+            self.assertIsNotNone(loaded.import_identity)
+            manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+            persisted = json.loads((output / "results.json").read_text(encoding="utf-8"))
+            evidence_lineage = manifest["governance"]["outcome_evidence"]["source_record_lineage"]
+            provenance_lineage = persisted["outcome_provenance"]["source_record_lineage"]
+
+            self.assertEqual(provenance_lineage, evidence_lineage)
+            self.assertEqual(
+                evidence_lineage,
+                [
+                    {
+                        "revision_id": "results-r1",
+                        "revision": 1,
+                        "revision_kind": "initial",
+                        "recorded_at": "2026-01-01T11:30:00+00:00",
+                        "record_sha256": _sha256(first),
+                        "predecessor_record_sha256": None,
+                        "supersedes_revision_id": None,
+                        "correction_reason": None,
+                    },
+                    {
+                        "revision_id": "results-r2",
+                        "revision": 2,
+                        "revision_kind": "correction",
+                        "recorded_at": "2026-01-01T11:55:00+00:00",
+                        "record_sha256": _sha256(second),
+                        "predecessor_record_sha256": _sha256(first),
+                        "supersedes_revision_id": "results-r1",
+                        "correction_reason": "official result correction",
+                    },
+                    {
+                        "revision_id": "results-r3",
+                        "revision": 3,
+                        "revision_kind": "correction",
+                        "recorded_at": "2026-01-01T11:58:00+00:00",
+                        "record_sha256": _sha256(third),
+                        "predecessor_record_sha256": _sha256(second),
+                        "supersedes_revision_id": "results-r2",
+                        "correction_reason": "second official result correction",
+                    },
+                ],
+            )
+            self.assertEqual(
+                manifest["governance"]["outcome_evidence"]["source_record_lineage_depth"],
+                len(evidence_lineage),
+            )
+            for source_record in (first, second, third):
+                self.assertFalse((output / source_record.name).exists())
+
+    def test_sealed_results_schema_version_is_exact_non_boolean_integer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _write_snapshot(root)
+            governance = _write_governance(root)
+            results, _, _ = _write_corrected_results(root)
+            canonical = json.loads(results.read_text(encoding="utf-8"))
+
+            for index, invalid in enumerate((True, "1", 1.0), start=1):
+                malformed = dict(canonical)
+                malformed["schema_version"] = invalid
+                results.write_text(json.dumps(malformed, sort_keys=True), encoding="utf-8")
+                output = root / f"corpus-invalid-schema-{index}"
+                with self.subTest(schema_version=invalid):
+                    with self.assertRaisesRegex(ValueError, "exact integer 1"):
+                        assemble_historical_corpus(
+                            [snapshot],
+                            results_path=results,
+                            governance_proof_path=governance,
+                            output_dir=output,
+                            name="invalid schema fixture",
+                            outcome_reveal_after="2026-01-01T12:00:00+00:00",
+                            imported_at="2026-01-02T00:05:00+00:00",
+                        )
+                    self.assertFalse(output.exists())
 
     def test_identical_revision_reassembly_has_identical_import_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

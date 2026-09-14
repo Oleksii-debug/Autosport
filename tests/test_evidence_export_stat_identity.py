@@ -53,7 +53,7 @@ def test_path_binding_does_not_require_path_stat_identity_fields(
         os.close(descriptor)
 
 
-def test_path_binding_rejects_different_open_file_even_if_metadata_is_forged_equal(
+def test_path_binding_rejects_different_open_file_with_equal_path_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -62,28 +62,22 @@ def test_path_binding_rejects_different_open_file_even_if_metadata_is_forged_equ
     source.write_bytes(b"same-size-old")
     replacement.write_bytes(b"same-size-new")
 
-    original_stat = os.stat(source, follow_symlinks=False)
-    descriptor = os.open(source, evidence_export._read_only_open_flags())
-    os.replace(replacement, source)
+    expected = os.stat(source, follow_symlinks=False)
+    real_open = os.open
+    descriptor = real_open(source, evidence_export._read_only_open_flags())
 
-    real_stat = os.stat
-
-    def forged_stable_path_stat(path, *args, **kwargs):
-        if (
-            not isinstance(path, int)
-            and Path(path) == source
-            and kwargs.get("follow_symlinks", True) is False
-        ):
-            return original_stat
-        return real_stat(path, *args, **kwargs)
+    def redirected_verification_open(path, flags, *args, **kwargs):
+        if not isinstance(path, int) and Path(path) == source:
+            return real_open(replacement, flags, *args, **kwargs)
+        return real_open(path, flags, *args, **kwargs)
 
     try:
-        monkeypatch.setattr(evidence_export.os, "stat", forged_stable_path_stat)
+        monkeypatch.setattr(evidence_export.os, "open", redirected_verification_open)
 
         assert evidence_export._path_still_matches_open_file(
             source,
             descriptor,
-            original_stat,
+            expected,
         ) is False
     finally:
         os.close(descriptor)

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from autosport.ingestion import IngestionEngine
 from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
-from autosport.market_bus import MarketEventBus
+from autosport.market_bus import MarketEventBus, MarketEventDeliveryError
 from autosport.providers import ProviderBatch, ProviderQuote
 from autosport.storage import SQLiteMarketStore
 
@@ -58,20 +58,32 @@ class IngestionHealthFailureBoundaryTests(unittest.TestCase):
         )
         return engine, bus, store, health
 
-    def test_post_persistence_subscriber_failure_does_not_mark_provider_failed(self):
+    def test_post_persistence_delivery_failure_records_exact_provider_success_before_reraising(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, bus, store, health = self._engine(tmp)
+            first_quote = _quote(
+                "2026-09-12T11:59:50+00:00",
+                sequence=1,
+                selection="a",
+            )
             provider = StaticProvider(
                 "source",
                 [
                     ProviderBatch(
                         "source",
-                        (_quote("2026-09-12T11:59:50+00:00", sequence=1, selection="a"),),
+                        (first_quote,),
                         cursor="1",
                     ),
                     ProviderBatch(
                         "source",
-                        (_quote("2026-09-12T11:59:51+00:00", sequence=2, selection="b"),),
+                        (
+                            first_quote,
+                            _quote(
+                                "2026-09-12T11:59:51+00:00",
+                                sequence=2,
+                                selection="b",
+                            ),
+                        ),
                         cursor="2",
                     ),
                 ],
@@ -85,14 +97,30 @@ class IngestionHealthFailureBoundaryTests(unittest.TestCase):
                 raise RuntimeError("consumer failed after persistence")
 
             bus.subscribe(fail_consumer)
-            with self.assertRaisesRegex(RuntimeError, "consumer failed after persistence"):
+            with self.assertRaises(MarketEventDeliveryError) as raised:
                 engine.poll_once(provider, max_items=10)
+
+            self.assertEqual(raised.exception.accepted_count, 1)
+            self.assertEqual(len(raised.exception.exceptions), 1)
+            self.assertIsInstance(raised.exception.exceptions[0], RuntimeError)
+            self.assertEqual(
+                str(raised.exception.exceptions[0]),
+                "consumer failed after persistence",
+            )
 
             state = health.get("source")
             self.assertEqual(state.status, "healthy")
-            self.assertEqual(state.poll_count, 1)
+            self.assertEqual(state.poll_count, 2)
+            self.assertEqual(state.total_received, 3)
+            self.assertEqual(state.total_accepted, 2)
+            self.assertEqual(state.total_rejected, 0)
             self.assertEqual(state.total_failures, 0)
             self.assertEqual(state.consecutive_failures, 0)
+            self.assertEqual(state.last_cursor, "2")
+            self.assertEqual(
+                state.latest_source_ts,
+                "2026-09-12T11:59:51+00:00",
+            )
             self.assertEqual(len(store.events()), 2)
             store.close()
 

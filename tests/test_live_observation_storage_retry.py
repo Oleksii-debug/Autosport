@@ -4,7 +4,11 @@ import unittest
 from unittest.mock import patch
 
 from autosport.live_observation import observe_workspace_once
-from autosport.parlayapi_provider import HttpJsonResponse, ParlayApiTableTennisProvider
+from autosport.parlayapi_provider import (
+    HttpJsonResponse,
+    ParlayApiTableTennisProvider,
+    ProviderPayloadError,
+)
 from autosport.storage import SQLiteMarketStore
 
 
@@ -93,6 +97,55 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
                 "parlayapi:table_tennis:E",
             },
         )
+
+    def test_deferred_payload_failure_clears_pending_snapshot_before_next_read(self):
+        transport_calls: list[str] = []
+        payloads = iter(
+            [
+                [
+                    self._event("event-1", ["A", "B"]),
+                    {"id": "broken-event", "bookmakers": "not-a-list"},
+                ],
+                [self._event("event-2", ["C"])],
+            ]
+        )
+        clock_values = iter(
+            [
+                "2026-09-14T08:00:10+00:00",
+                "2026-09-14T08:00:20+00:00",
+            ]
+        )
+
+        def transport(url, headers, timeout):
+            transport_calls.append(url)
+            return HttpJsonResponse(next(payloads), 200, {})
+
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=transport,
+            clock=lambda: next(clock_values),
+        )
+
+        first = provider.read_batch(max_items=1)
+        self.assertEqual([quote.provider_selection_id for quote in first.quotes], ["A"])
+        self.assertEqual(first.quality_flags, ("TRUNCATED_BATCH",))
+        self.assertEqual(len(transport_calls), 1)
+
+        with self.assertRaises(ProviderPayloadError):
+            provider.read_batch(max_items=1)
+        self.assertEqual(len(transport_calls), 1)
+
+        recovered = provider.read_batch(max_items=1)
+        self.assertEqual(len(transport_calls), 2)
+        self.assertEqual(
+            [quote.provider_event_id for quote in recovered.quotes],
+            ["event-2"],
+        )
+        self.assertEqual(
+            [quote.provider_selection_id for quote in recovered.quotes],
+            ["C"],
+        )
+        self.assertEqual(recovered.cursor, "2026-09-14T08:00:20+00:00")
 
 
 if __name__ == "__main__":

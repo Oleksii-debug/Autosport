@@ -106,6 +106,23 @@ class PortableDataToolPackageTests(unittest.TestCase):
             self.assertEqual(data_report["status"], "PASS")
             self.assertEqual(binding["autosport_data_exe_sha256"], data_report["autosport_data_exe_sha256"])
 
+    def test_portable_verifier_rejects_tampered_non_data_member(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package, data_exe = self._build_base(root, "9" * 40)
+            bind_portable_data_tool(package, data_exe)
+            self._rewrite_member(
+                package,
+                "WINDOWS_START_HERE.txt",
+                b"tampered instructions\n",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "PACKAGE_MANIFEST hash mismatch: WINDOWS_START_HERE.txt",
+            ):
+                verify_portable_data_tool(package)
+
     def test_binding_is_deterministic(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

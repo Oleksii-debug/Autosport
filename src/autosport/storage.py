@@ -22,6 +22,8 @@ _HISTORY_COLUMNS = (
     "payload_json",
 )
 _HISTORY_COLUMNS_SQL = ",".join(_HISTORY_COLUMNS)
+_CURRENT_COLUMNS = ("quote_key", "observed_ts", "sequence", "payload_json")
+_CURRENT_COLUMNS_SQL = ",".join(_CURRENT_COLUMNS)
 
 
 def _observed_instant(value: str) -> datetime:
@@ -173,6 +175,32 @@ def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
     return event
 
 
+def _event_from_current_row(row: tuple[object, ...]) -> MarketEvent:
+    """Decode one current projection row and prove its redundant ordering identity."""
+    if len(row) != len(_CURRENT_COLUMNS):
+        raise ValueError("current quote projection row has unexpected shape")
+
+    quote_key, observed_ts, sequence, payload_json = row
+    if not isinstance(payload_json, str):
+        raise ValueError("current quote projection payload must be JSON text")
+    raw = _load_history_payload(payload_json)
+    event = MarketEvent.from_dict(raw)
+    if _canonical_json(raw) != _canonical_payload(event):
+        raise ValueError("current quote projection payload is not canonical")
+
+    expected = (
+        ("quote_key", quote_key, event.quote_key),
+        ("observed_ts", observed_ts, event.observed_ts),
+        ("sequence", sequence, event.sequence),
+    )
+    for field_name, persisted, canonical in expected:
+        if not _typed_equal(persisted, canonical):
+            raise ValueError(f"current quote projection row identity mismatch: {field_name}")
+
+    _event_order_key(event)
+    return event
+
+
 class SQLiteMarketStore:
     """Crash-safe append-only normalized market history plus current quote projection."""
 
@@ -284,14 +312,10 @@ class SQLiteMarketStore:
                 )
             return False
         previous = self.connection.execute(
-            "SELECT payload_json FROM current_quotes WHERE quote_key=?",
+            f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes WHERE quote_key=?",
             (event.quote_key,),
         ).fetchone()
-        previous_event = (
-            MarketEvent.from_dict(_load_history_payload(previous[0]))
-            if previous is not None
-            else None
-        )
+        previous_event = _event_from_current_row(previous) if previous is not None else None
         if previous_event is None or incoming_key > _event_order_key(previous_event):
             self.connection.execute(
                 """INSERT INTO current_quotes(quote_key,observed_ts,sequence,payload_json)
@@ -332,14 +356,13 @@ class SQLiteMarketStore:
         return sorted(events, key=_event_order_key)
 
     def current(self) -> dict[str, MarketEvent]:
-        rows = self.connection.execute("SELECT quote_key,payload_json FROM current_quotes").fetchall()
+        rows = self.connection.execute(
+            f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
+        ).fetchall()
         current: dict[str, MarketEvent] = {}
-        for quote_key, payload_json in rows:
-            event = MarketEvent.from_dict(_load_history_payload(payload_json))
-            _event_order_key(event)
-            if event.quote_key != quote_key:
-                raise ValueError("current quote projection identity mismatch")
-            current[quote_key] = event
+        for row in rows:
+            event = _event_from_current_row(row)
+            current[event.quote_key] = event
         return current
 
     def close(self) -> None:

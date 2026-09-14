@@ -89,8 +89,10 @@ def _write_deterministic(package_zip: Path, members: dict[str, bytes]) -> None:
             tmp.unlink()
 
 
-def _verified_base_members(package: Path) -> tuple[dict[str, bytes], dict[str, Any]]:
-    """Verify and return members from one immutable read of the base ZIP bytes."""
+def _verified_base_members(
+    package: Path,
+) -> tuple[dict[str, bytes], dict[str, Any], dict[str, Any]]:
+    """Verify and return members plus evidence from one immutable ZIP snapshot."""
 
     base_bytes = package.read_bytes()
     fd, tmp_name = tempfile.mkstemp(
@@ -111,11 +113,11 @@ def _verified_base_members(package: Path) -> tuple[dict[str, bytes], dict[str, A
                 raise ValueError(f"base release package is missing required member: {required}")
 
         build_info = _decode_json_object(members[_BUILD_INFO], _BUILD_INFO)
-        verify_windows_package(
+        verification = verify_windows_package(
             snapshot,
             expected_source_sha=build_info.get("source_sha"),
         )
-        return members, build_info
+        return members, build_info, verification
     finally:
         if snapshot.exists():
             snapshot.unlink()
@@ -130,7 +132,7 @@ def bind_portable_data_tool(package_zip: str | Path, data_exe: str | Path) -> di
     if not data_bytes:
         raise ValueError("portable data tool executable is empty")
 
-    members, build_info = _verified_base_members(package)
+    members, build_info, _verification = _verified_base_members(package)
 
     members[_DATA_TOOL] = data_bytes
     data_sha = _sha256_bytes(data_bytes)
@@ -156,7 +158,7 @@ def bind_portable_data_tool(package_zip: str | Path, data_exe: str | Path) -> di
 
 
 def verify_portable_data_tool(package_zip: str | Path) -> dict[str, Any]:
-    members, build_info = _verified_base_members(Path(package_zip))
+    members, build_info, verification = _verified_base_members(Path(package_zip))
     if _DATA_TOOL not in members:
         raise ValueError("release package is missing Autosport-Data.exe")
     if build_info.get("portable_historical_data_tools") is not True:
@@ -165,6 +167,7 @@ def verify_portable_data_tool(package_zip: str | Path) -> dict[str, Any]:
     if build_info.get("autosport_data_exe_sha256") != actual:
         raise ValueError("BUILD_INFO Autosport-Data.exe hash mismatch")
     return {
+        **verification,
         "status": "PASS",
         "autosport_data_exe_sha256": actual,
         "portable_historical_data_tools": True,

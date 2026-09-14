@@ -1,13 +1,34 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 
 from .domain import MarketEvent
 from .storage import SQLiteMarketStore
 
 
+class MarketEventDeliveryError(ExceptionGroup):
+    """Subscriber failures raised only after persistence, with the exact durable outcome."""
+
+    def __new__(
+        cls,
+        message: str,
+        exceptions: Sequence[Exception],
+        accepted_events: Iterable[MarketEvent],
+    ) -> "MarketEventDeliveryError":
+        instance = super().__new__(cls, message, exceptions)
+        instance.accepted_events = tuple(accepted_events)
+        return instance
+
+    def derive(self, exceptions: Sequence[Exception]) -> "MarketEventDeliveryError":
+        return type(self)(self.message, exceptions, self.accepted_events)
+
+    @property
+    def accepted_count(self) -> int:
+        return len(self.accepted_events)
+
+
 class MarketEventBus:
-    """Single normalized ingestion boundary: persist first, then notify consumers exactly once."""
+    """Persist first, then attempt every subscriber once for each accepted event."""
 
     def __init__(self, store: SQLiteMarketStore) -> None:
         self.store = store
@@ -29,7 +50,18 @@ class MarketEventBus:
         return len(accepted)
 
     def _notify(self, events: Iterable[MarketEvent]) -> None:
+        accepted_events = tuple(events)
         subscribers = tuple(self.subscribers)
-        for event in events:
+        failures: list[Exception] = []
+        for event in accepted_events:
             for callback in subscribers:
-                callback(event)
+                try:
+                    callback(event)
+                except Exception as exc:
+                    failures.append(exc)
+        if failures:
+            raise MarketEventDeliveryError(
+                "one or more market event subscribers failed after persistence",
+                failures,
+                accepted_events,
+            )

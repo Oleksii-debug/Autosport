@@ -95,6 +95,18 @@ def _positive_nonboolean_int(value: object, *, field: str, maximum: int | None =
     return value
 
 
+def _provider_identity(value: object, *, field: str) -> str:
+    """Validate raw provider identity without normalizing away type or byte differences."""
+
+    if not isinstance(value, str):
+        raise ProviderPayloadError(f"{field} must be a string")
+    if not value or value != value.strip():
+        raise ProviderPayloadError(f"{field} must be a non-empty trimmed string")
+    if "|" in value:
+        raise ProviderPayloadError(f"{field} must not contain reserved identity delimiter '|'")
+    return value
+
+
 def _default_transport(url: str, headers: Mapping[str, str], timeout: float) -> HttpJsonResponse:
     request = Request(url, headers=dict(headers), method="GET")
     try:
@@ -319,9 +331,12 @@ class ParlayApiTableTennisProvider:
         return events
 
     def _event_quotes(self, event: dict[str, Any], observed_ts: str, http_status: int) -> list[ProviderQuote]:
-        event_id = str(event.get("id") or event.get("canonical_event_id") or "").strip()
-        if not event_id:
+        raw_event_id = event.get("id")
+        if raw_event_id is None or raw_event_id == "":
+            raw_event_id = event.get("canonical_event_id")
+        if raw_event_id is None or raw_event_id == "":
             raise ProviderPayloadError("event is missing id")
+        event_id = _provider_identity(raw_event_id, field="event id")
         bookmakers = event.get("bookmakers", [])
         if not isinstance(bookmakers, list):
             raise ProviderPayloadError("event bookmakers must be a list")
@@ -329,16 +344,22 @@ class ParlayApiTableTennisProvider:
         for bookmaker in bookmakers:
             if not isinstance(bookmaker, dict):
                 continue
-            book_key = str(bookmaker.get("key") or bookmaker.get("title") or "unknown-book").strip()
+            raw_book_key = bookmaker.get("key")
+            if raw_book_key is None or raw_book_key == "":
+                raw_book_key = bookmaker.get("title")
+            if raw_book_key is None or raw_book_key == "":
+                raise ProviderPayloadError("bookmaker is missing key/title identity")
+            book_key = _provider_identity(raw_book_key, field="bookmaker identity")
             markets = bookmaker.get("markets", [])
             if not isinstance(markets, list):
                 continue
             for market in markets:
                 if not isinstance(market, dict):
                     continue
-                market_key = str(market.get("key") or "").strip()
-                if not market_key:
+                raw_market_key = market.get("key")
+                if raw_market_key is None or raw_market_key == "":
                     continue
+                market_key = _provider_identity(raw_market_key, field="market key")
                 source_ts = _first_nonempty(market.get("last_update"), bookmaker.get("last_update"))
                 outcomes = market.get("outcomes", [])
                 if not isinstance(outcomes, list):
@@ -346,9 +367,10 @@ class ParlayApiTableTennisProvider:
                 for outcome in outcomes:
                     if not isinstance(outcome, dict):
                         continue
-                    selection = str(outcome.get("name") or "").strip()
-                    if not selection:
+                    raw_selection = outcome.get("name")
+                    if raw_selection is None or raw_selection == "":
                         continue
+                    selection = _provider_identity(raw_selection, field="outcome name")
                     price = _decimal_price(outcome.get("price"))
                     if price is None:
                         continue

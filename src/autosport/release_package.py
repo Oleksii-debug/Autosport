@@ -62,6 +62,57 @@ def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _sorted_package_files(package_dir: Path) -> list[Path]:
+    return sorted(
+        (item for item in package_dir.rglob("*") if item.is_file()),
+        key=lambda item: item.relative_to(package_dir).as_posix(),
+    )
+
+
+def _require_canonical_zip_representation(
+    infos: list[zipfile.ZipInfo],
+    archive_comment: bytes,
+) -> None:
+    if archive_comment:
+        raise ValueError("release package contains a non-canonical archive comment")
+
+    names = [info.filename for info in infos]
+    if names != sorted(names):
+        raise ValueError("release package member order is not canonical")
+
+    for info in infos:
+        if info.date_time != _FIXED_ZIP_TIME:
+            raise ValueError(
+                f"release package member has non-canonical timestamp: {info.filename}"
+            )
+        if info.compress_type != zipfile.ZIP_DEFLATED:
+            raise ValueError(
+                f"release package member has non-canonical compression: {info.filename}"
+            )
+        expected_mode = 0o755 if info.filename.lower().endswith(".exe") else 0o644
+        if info.external_attr != expected_mode << 16:
+            raise ValueError(
+                f"release package member has non-canonical permissions: {info.filename}"
+            )
+        if info.extra or info.comment:
+            raise ValueError(
+                f"release package member has non-canonical member metadata: {info.filename}"
+            )
+
+
 def _require_process_recovery_evidence(payload: dict[str, Any], label: str) -> None:
     if payload.get("process_kill_relaunch_status") != "PASS":
         raise ValueError(f"{label} does not prove real process kill/relaunch PASS")
@@ -169,28 +220,48 @@ def build_windows_package(
     _write_json(package_dir / "BUILD_INFO.json", build_info)
 
     payload_hashes = {}
-    for path in sorted(item for item in package_dir.rglob("*") if item.is_file()):
+    for path in _sorted_package_files(package_dir):
         relative = path.relative_to(package_dir).as_posix()
         if relative == "SHA256SUMS.txt":
             continue
         payload_hashes[relative] = sha256_file(path)
-    _write_json(package_dir / "PACKAGE_MANIFEST.json", {"schema_version": 1, "files": payload_hashes})
+    _write_json(
+        package_dir / "PACKAGE_MANIFEST.json",
+        {"schema_version": 1, "files": payload_hashes},
+    )
 
     lines = []
-    for path in sorted(item for item in package_dir.rglob("*") if item.is_file() and item.name != "SHA256SUMS.txt"):
+    for path in _sorted_package_files(package_dir):
+        if path.name == "SHA256SUMS.txt":
+            continue
         relative = path.relative_to(package_dir).as_posix()
         lines.append(f"{sha256_file(path)}  {relative}")
-    (package_dir / "SHA256SUMS.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (package_dir / "SHA256SUMS.txt").write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
 
     if output_zip.exists():
         output_zip.unlink()
-    with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        for path in sorted(item for item in package_dir.rglob("*") if item.is_file()):
+    with zipfile.ZipFile(
+        output_zip,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+    ) as archive:
+        for path in _sorted_package_files(package_dir):
             relative = Path("Autosport-V1") / path.relative_to(package_dir)
             info = zipfile.ZipInfo(relative.as_posix(), _FIXED_ZIP_TIME)
             info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = (0o755 if path.name.lower().endswith(".exe") else 0o644) << 16
-            archive.writestr(info, path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+            info.external_attr = (
+                0o755 if path.name.lower().endswith(".exe") else 0o644
+            ) << 16
+            archive.writestr(
+                info,
+                path.read_bytes(),
+                compress_type=zipfile.ZIP_DEFLATED,
+                compresslevel=9,
+            )
     return output_zip, sha256_file(output_zip)
 
 
@@ -205,6 +276,7 @@ def verify_windows_package(
     package_zip = Path(package_zip)
     with zipfile.ZipFile(package_zip, "r") as archive:
         infos = archive.infolist()
+        archive_comment = archive.comment
         directory_names = [item.filename for item in infos if item.is_dir()]
         if directory_names:
             raise ValueError(
@@ -252,7 +324,10 @@ def verify_windows_package(
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")
 
-    manifest = _decode_json_object(members["PACKAGE_MANIFEST.json"], "PACKAGE_MANIFEST.json")
+    manifest = _decode_json_object(
+        members["PACKAGE_MANIFEST.json"],
+        "PACKAGE_MANIFEST.json",
+    )
     schema_version = manifest.get("schema_version")
     if (
         isinstance(schema_version, bool)
@@ -261,8 +336,13 @@ def verify_windows_package(
         or not isinstance(manifest.get("files"), dict)
     ):
         raise ValueError("PACKAGE_MANIFEST schema is invalid")
-    manifest_files = {str(key): str(value) for key, value in manifest["files"].items()}
-    expected_manifest_files = set(members).difference({"PACKAGE_MANIFEST.json", "SHA256SUMS.txt"})
+    manifest_files = {
+        str(key): str(value)
+        for key, value in manifest["files"].items()
+    }
+    expected_manifest_files = set(members).difference(
+        {"PACKAGE_MANIFEST.json", "SHA256SUMS.txt"}
+    )
     if set(manifest_files) != expected_manifest_files:
         raise ValueError("PACKAGE_MANIFEST file set does not match package payload")
     for relative, expected_hash in manifest_files.items():
@@ -286,9 +366,18 @@ def verify_windows_package(
         if _sha256_bytes(members[relative]) != expected_hash:
             raise ValueError(f"SHA256SUMS hash mismatch: {relative}")
 
-    diagnostic = _decode_json_object(members["packaged-diagnostic.json"], "packaged-diagnostic.json")
-    accessibility = _decode_json_object(members["accessibility-audit.json"], "accessibility-audit.json")
-    keyboard = _decode_json_object(members["keyboard-audit.json"], "keyboard-audit.json")
+    diagnostic = _decode_json_object(
+        members["packaged-diagnostic.json"],
+        "packaged-diagnostic.json",
+    )
+    accessibility = _decode_json_object(
+        members["accessibility-audit.json"],
+        "accessibility-audit.json",
+    )
+    keyboard = _decode_json_object(
+        members["keyboard-audit.json"],
+        "keyboard-audit.json",
+    )
     restart_recovery = _decode_json_object(
         members["restart-recovery-audit.json"],
         "restart-recovery-audit.json",
@@ -309,7 +398,22 @@ def verify_windows_package(
         raise ValueError("restart-recovery-audit.json does not prove transaction recovery PASS")
     if restart_recovery.get("recovery_disposition") != "aborted_uncommitted":
         raise ValueError("restart-recovery-audit.json recovery disposition is not fail-closed")
-    _require_process_recovery_evidence(restart_recovery, "restart-recovery-audit.json")
+    _require_process_recovery_evidence(
+        restart_recovery,
+        "restart-recovery-audit.json",
+    )
+
+    if members["BUILD_INFO.json"] != _canonical_json_bytes(build_info):
+        raise ValueError("BUILD_INFO.json is not in canonical JSON representation")
+    if members["PACKAGE_MANIFEST.json"] != _canonical_json_bytes(manifest):
+        raise ValueError("PACKAGE_MANIFEST.json is not in canonical JSON representation")
+    canonical_sums = "".join(
+        f"{sums[relative]}  {relative}\n"
+        for relative in sorted(sums)
+    ).encode("utf-8")
+    if members["SHA256SUMS.txt"] != canonical_sums:
+        raise ValueError("SHA256SUMS.txt is not in canonical sorted representation")
+    _require_canonical_zip_representation(infos, archive_comment)
 
     return {
         "status": "PASS",
@@ -345,7 +449,10 @@ def _validate_windows_member(name: str) -> tuple[str, str]:
             raise ValueError(f"release package contains unsafe Windows path component: {name}")
         if component[-1] in {" ", "."}:
             raise ValueError(f"release package contains Windows trailing space or dot: {name}")
-        if any(ord(character) < 32 or character in _WINDOWS_INVALID_CHARS for character in component):
+        if any(
+            ord(character) < 32 or character in _WINDOWS_INVALID_CHARS
+            for character in component
+        ):
             raise ValueError(f"release package contains Windows-invalid path character: {name}")
         if len(component.encode("utf-16-le")) // 2 > _WINDOWS_MAX_COMPONENT_UTF16_UNITS:
             raise ValueError(f"release package contains overlong Windows path component: {name}")
@@ -377,9 +484,13 @@ def _decode_json_object(payload: bytes, label: str) -> dict[str, Any]:
             parse_constant=_reject_nonstandard_json_constant,
         )
     except _DuplicateJsonKeyError as exc:
-        raise ValueError(f"{label} contains duplicate JSON object key: {exc.args[0]}") from exc
+        raise ValueError(
+            f"{label} contains duplicate JSON object key: {exc.args[0]}"
+        ) from exc
     except _NonStandardJsonConstantError as exc:
-        raise ValueError(f"{label} contains non-standard JSON constant: {exc.args[0]}") from exc
+        raise ValueError(
+            f"{label} contains non-standard JSON constant: {exc.args[0]}"
+        ) from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{label} is not valid UTF-8 JSON") from exc
     if not isinstance(value, dict):
@@ -394,4 +505,4 @@ def _require_false_truth_labels(payload: dict[str, Any], label: str) -> None:
 
 
 def _write_json(path: Path, payload: dict) -> None:
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_bytes(_canonical_json_bytes(payload))

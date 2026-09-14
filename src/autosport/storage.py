@@ -382,6 +382,18 @@ def _validate_existing_canonical_tables(connection: sqlite3.Connection) -> None:
             "market_events schema is not canonical: authoritative history table is missing"
         )
 
+    if existing["market_events"] is not None and existing["current_quotes"] is not None:
+        history_has_rows = connection.execute(
+            "SELECT 1 FROM market_events LIMIT 1"
+        ).fetchone() is not None
+        projection_has_rows = connection.execute(
+            "SELECT 1 FROM current_quotes LIMIT 1"
+        ).fetchone() is not None
+        if not history_has_rows and projection_has_rows:
+            raise ValueError(
+                "market_events history is empty while current_quotes projection is non-empty"
+            )
+
 
 def _ensure_canonical_secondary_indexes(connection: sqlite3.Connection) -> None:
     index_rows = connection.execute("PRAGMA index_list(\"market_events\")").fetchall()

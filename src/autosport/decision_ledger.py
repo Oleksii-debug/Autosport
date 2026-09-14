@@ -154,7 +154,8 @@ class JsonlDecisionLedger:
                         f"Decision Ledger JSON object keys at {path} must be strings"
                     )
                 cls._require_utf8_text(key, path=f"{path} object key")
-                cls._validate_json_value(item, path=f"{path}.{key}")
+                child_path = "payload" if path == "record" and key == "payload" else f"{path}.{key}"
+                cls._validate_json_value(item, path=child_path)
             return
         raise DecisionLedgerIntegrityError(
             f"Decision Ledger JSON value at {path} has unsupported type {type(value).__name__}"

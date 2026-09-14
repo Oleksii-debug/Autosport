@@ -150,6 +150,7 @@ class AgentOrchestrator:
         self._assert_bound_composition()
         for agent in self._agents:
             agent.on_market_event(event, self.context)
+        self._assert_bound_composition()
 
     def finalize_replay(self) -> None:
         """Allow causal agents to fail closed on unconsumed replay-time work before outcomes unlock."""
@@ -159,3 +160,4 @@ class AgentOrchestrator:
             finalize = getattr(agent, "finalize_replay", None)
             if finalize is not None:
                 finalize(self.context)
+        self._assert_bound_composition()

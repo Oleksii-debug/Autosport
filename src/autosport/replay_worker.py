@@ -56,13 +56,13 @@ class OneShotReplayWorker:
             )
             self._thread = thread
             thread.start()
-        except RuntimeError as exc:
+        except Exception as exc:
             # A request that won the single-flight slot must have exactly one
-            # terminal poll outcome. Preserve that contract even when CPython/OS
-            # cannot start the thread: publish a terminal error and let poll()
-            # restore idle state. False remains reserved for a genuinely busy
-            # worker, so GUI callers never misreport thread-start failure as
-            # "replay already running" and can retry after consuming the error.
+            # terminal poll outcome. Preserve that contract for ordinary Thread
+            # construction/start failures as well as RuntimeError: publish one
+            # terminal error and let poll() restore idle state. False remains
+            # reserved for a genuinely busy worker, so GUI callers never confuse
+            # setup failure with another replay already running.
             self._thread = None
             self._messages.put(
                 ReplayWorkerMessage(error=f"{type(exc).__name__}: {exc}")
@@ -73,7 +73,11 @@ class OneShotReplayWorker:
     def _run(self, task: ReplayTask) -> None:
         try:
             message = ReplayWorkerMessage(result=task())
-        except Exception as exc:
+        except BaseException as exc:
+            # SystemExit/KeyboardInterrupt raised inside this detached background
+            # thread do not provide a GUI terminal outcome by themselves. Publish
+            # one so poll() clears the single-flight state instead of leaving the
+            # application permanently busy after the worker thread has died.
             message = ReplayWorkerMessage(error=f"{type(exc).__name__}: {exc}")
         self._messages.put(message)
 

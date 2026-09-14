@@ -150,6 +150,19 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
             self.assertEqual(store.current()[existing.quote_key].decimal_odds, existing.decimal_odds)
             store.close()
 
+    def test_corrupt_database_constructor_releases_connection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "market.db"
+            corrupt_bytes = b"not-a-sqlite-database"
+            db_path.write_bytes(corrupt_bytes)
+
+            with self.assertRaises(sqlite3.DatabaseError):
+                SQLiteMarketStore(db_path)
+
+            self.assertEqual(db_path.read_bytes(), corrupt_bytes)
+            db_path.unlink()
+            self.assertFalse(db_path.exists())
+
     def test_reopen_rejects_duplicate_keys_in_persisted_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "market.db"

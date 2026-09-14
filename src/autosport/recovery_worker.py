@@ -64,9 +64,13 @@ class OneShotRecoveryWorker:
         # behind a gate until Thread.start() has returned successfully, so an
         # interrupted/failed start can cancel a partially-created OS thread without
         # ever running the economic recovery task.
-        start_gate = threading.Event()
-        cancelled = threading.Event()
         try:
+            # Gate allocation is part of pre-commit worker setup too. If either
+            # synchronization primitive cannot be created after this request has won
+            # the single-flight slot, release that slot under the same contract as a
+            # failed Thread construction rather than leaving recovery permanently busy.
+            start_gate = threading.Event()
+            cancelled = threading.Event()
             thread = threading.Thread(
                 target=self._run_when_committed,
                 args=(task, start_gate, cancelled),

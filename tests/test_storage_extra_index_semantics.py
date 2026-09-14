@@ -79,6 +79,25 @@ class StorageExtraIndexSemanticTests(unittest.TestCase):
             ):
                 SQLiteMarketStore(db_path)
 
+    def test_extra_descending_index_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "market.db"
+            connection = sqlite3.connect(db_path)
+            try:
+                self._create_canonical_tables(connection)
+                connection.execute(
+                    "CREATE INDEX extra_descending ON market_events(event_id DESC)"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "extra non-unique index extra_descending is not semantically inert",
+            ):
+                SQLiteMarketStore(db_path)
+
     def test_extra_partial_index_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "market.db"

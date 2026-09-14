@@ -34,8 +34,21 @@ class MarketPriceTruth:
         return payload
 
 
-def _normalise_source_ids(source_ids: Iterable[str]) -> tuple[str, ...]:
-    return tuple(sorted({str(value).strip() for value in source_ids if str(value).strip()}))
+def _normalise_source_ids(
+    source_ids: Iterable[object],
+    *,
+    field: str = "source_ids",
+) -> tuple[str, ...]:
+    """Canonicalize source identity ordering without coercing or trimming identity bytes."""
+
+    if isinstance(source_ids, (str, bytes)):
+        raise ValueError(f"{field} must be an iterable of canonical source-id strings")
+    normalized: set[str] = set()
+    for value in source_ids:
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise ValueError(f"{field} must contain non-empty trimmed strings")
+        normalized.add(value)
+    return tuple(sorted(normalized))
 
 
 def _validate_semantic_execution_pair(price_semantics: str, executable_quote_verified: bool) -> None:
@@ -50,11 +63,12 @@ def _governed_source_ids(payload: dict[str, Any]) -> tuple[str, ...] | None:
     raw = governance.get("source_ids")
     if raw is None:
         return None
-    if not isinstance(raw, (list, tuple)) or not all(
-        isinstance(value, str) and value.strip() for value in raw
-    ):
+    if not isinstance(raw, (list, tuple)):
         raise ValueError("dataset_governance.source_ids is malformed")
-    return _normalise_source_ids(raw)
+    try:
+        return _normalise_source_ids(raw, field="dataset_governance.source_ids")
+    except ValueError as exc:
+        raise ValueError("dataset_governance.source_ids is malformed") from exc
 
 
 def classify_market_price_truth(
@@ -106,7 +120,10 @@ def market_price_truth_from_events(events: Iterable[Any]) -> MarketPriceTruth:
     """Derive truth from canonical event metadata without assuming provider semantics."""
 
     materialized = tuple(events)
-    source_ids = _normalise_source_ids(getattr(event, "source_id", "") for event in materialized)
+    source_ids = _normalise_source_ids(
+        (getattr(event, "source_id", "") for event in materialized),
+        field="event source_ids",
+    )
     if not materialized:
         return classify_market_price_truth(source_ids)
 
@@ -176,14 +193,19 @@ def market_price_truth_from_run_summary(payload: dict[str, Any]) -> MarketPriceT
             and isinstance(executable, bool)
             and isinstance(fill_fidelity, bool)
             and isinstance(source_ids, list)
-            and all(isinstance(value, str) and value.strip() for value in source_ids)
         ):
             raise ValueError("market_price_truth is malformed")
         if fill_fidelity:
             raise ValueError(
                 "paper fill fidelity cannot be verified by market price truth without independent fill evidence"
             )
-        normalized_source_ids = _normalise_source_ids(source_ids)
+        try:
+            normalized_source_ids = _normalise_source_ids(
+                source_ids,
+                field="market_price_truth.source_ids",
+            )
+        except ValueError as exc:
+            raise ValueError("market_price_truth is malformed") from exc
         if governed_source_ids is not None and normalized_source_ids != governed_source_ids:
             raise ValueError("market_price_truth.source_ids do not match dataset_governance.source_ids")
         return classify_market_price_truth(

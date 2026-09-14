@@ -14,6 +14,40 @@ _MACHINE_MODE_ARITY = {
 }
 
 
+def _show_workspace_configuration_error(detail: str) -> None:
+    """Show an accessible native Windows error before any interactive GUI state opens."""
+
+    import ctypes
+
+    title = "Автоспорт — помилка конфігурації workspace"
+    message = (
+        "Автоспорт не відкрив interactive workspace через недійсну конфігурацію.\n\n"
+        f"{detail}\n\n"
+        "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
+        "потім перезапустіть Автоспорт. Economic і live state не змінено."
+    )
+    # MB_OK | MB_ICONERROR. Native MessageBox is keyboard-operable and exposed
+    # through standard Windows accessibility rather than a custom visual surface.
+    ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)
+
+
+def _run_interactive_gui() -> int:
+    # Validate durable workspace identity before importing/constructing the GUI.
+    # `default_workspace()` owns the path contract; this boundary only turns its
+    # explicit configuration rejection into deterministic packaged feedback.
+    from autosport.paths import default_workspace
+
+    try:
+        default_workspace()
+    except ValueError as exc:
+        _show_workspace_configuration_error(str(exc))
+        return 2
+
+    from autosport.windows_gui import main as gui_main
+
+    return gui_main()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
@@ -59,9 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         from autosport.research_demo_audit import run_research_demo_audit
 
         return run_research_demo_audit(args[1], args[2])
-    from autosport.windows_gui import main as gui_main
-
-    return gui_main()
+    return _run_interactive_gui()
 
 
 if __name__ == "__main__":

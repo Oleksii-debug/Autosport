@@ -14,7 +14,11 @@ from .ingestion import IngestionEngine, IngestionStats
 from .ingestion_health import IngestionPolicy, SourceHealthState, SourceHealthStore
 from .integrity import ensure_durable_file, sha256_file
 from .market_bus import MarketEventBus
-from .outcome_trust import OutcomeLineageBinding, outcome_lineage_binding_from_dataset
+from .outcome_trust import (
+    OutcomeLineageBinding,
+    outcome_lineage_binding_from_dataset,
+    outcome_lineage_payload,
+)
 from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
 from .price_truth import market_price_truth_from_events
@@ -258,7 +262,13 @@ class AutosportSession:
         # After durable PRECOMMIT begins, failures deliberately remain unresolved.
         # Recovery owns deciding whether BASE or NEW is canonical and must never
         # downgrade an uncertain commit into an ordinary strategy rejection.
-        summary = transaction.precommit(self._run_summary_payload(dataset, result))
+        summary = transaction.precommit(
+            self._run_summary_payload(
+                dataset,
+                result,
+                outcome_lineage=outcome_lineage,
+            )
+        )
         transaction.commit()
 
         # From this point canonical PaperBook is NEW. Keep in-memory state aligned
@@ -306,9 +316,11 @@ class AutosportSession:
         self,
         dataset: ReplayDataset,
         result: SessionResult,
+        *,
+        outcome_lineage: OutcomeLineageBinding | None = None,
     ) -> dict:
         market_price_truth = market_price_truth_from_events(dataset.load_market_events())
-        return {
+        payload = {
             "schema_version": 2,
             "dataset_name": dataset.name,
             "sport": dataset.sport,
@@ -345,6 +357,13 @@ class AutosportSession:
             },
             "real_money_execution": False,
         }
+        if outcome_lineage is not None:
+            # Duplicate only the compact canonical trust binding into the existing
+            # checksum-bound run summary. This makes prior schema-v2 activation
+            # discoverable after restart even if the mutable registry is rewritten
+            # to look like a never-upgraded schema-v1 workspace.
+            payload["outcome_lineage_trust"] = outcome_lineage_payload(outcome_lineage)
+        return payload
 
     def close(self) -> None:
         # Canonical PaperBook persistence is owned by the workspace-locked run

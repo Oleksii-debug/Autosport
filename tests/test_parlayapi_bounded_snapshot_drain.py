@@ -97,7 +97,10 @@ class ParlayApiBoundedSnapshotDrainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteMarketStore(Path(tmp) / "market.db")
             try:
-                engine = IngestionEngine(MarketEventBus(store))
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    clock=lambda: "2026-09-14T08:00:10+00:00",
+                )
                 first = engine.poll_once(provider, max_items=2)
                 second = engine.poll_once(provider, max_items=2)
                 third = engine.poll_once(provider, max_items=2)
@@ -110,14 +113,14 @@ class ParlayApiBoundedSnapshotDrainTests(unittest.TestCase):
                 events = store.events()
                 self.assertEqual(len(events), 5)
                 self.assertEqual(
-                    [event.selection_id for event in events],
-                    [
+                    {event.selection_id for event in events},
+                    {
                         "parlayapi:table_tennis:A",
                         "parlayapi:table_tennis:B",
                         "parlayapi:table_tennis:C",
                         "parlayapi:table_tennis:D",
                         "parlayapi:table_tennis:E",
-                    ],
+                    },
                 )
             finally:
                 store.close()

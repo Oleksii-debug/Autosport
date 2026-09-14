@@ -1,11 +1,76 @@
 $ErrorActionPreference = 'Stop'
+
+function Assert-ProcessRecoveryEvidence {
+  param(
+    [Parameter(Mandatory = $true)] $Evidence,
+    [Parameter(Mandatory = $true)] [string] $Label
+  )
+
+  if ($Evidence.process_kill_relaunch_status -ne 'PASS') {
+    throw "$Label did not prove real process kill/relaunch"
+  }
+  if ($null -eq $Evidence.process_kill_stage_pid -or [long]$Evidence.process_kill_stage_pid -le 0) {
+    throw "$Label has invalid process_kill_stage_pid"
+  }
+  if ($null -eq $Evidence.process_recovery_pid -or [long]$Evidence.process_recovery_pid -le 0) {
+    throw "$Label has invalid process_recovery_pid"
+  }
+  if ([long]$Evidence.process_kill_stage_pid -eq [long]$Evidence.process_recovery_pid) {
+    throw "$Label did not prove a distinct fresh recovery process"
+  }
+  if ($null -eq $Evidence.process_kill_return_code -or [long]$Evidence.process_kill_return_code -eq 0) {
+    throw "$Label did not prove non-clean process termination"
+  }
+  if ([string]::IsNullOrWhiteSpace([string]$Evidence.process_recovery_run_id)) {
+    throw "$Label has invalid process_recovery_run_id"
+  }
+  if ($Evidence.process_recovery_disposition -ne 'committed') {
+    throw "$Label did not prove process_recovery_disposition=committed"
+  }
+  if ($Evidence.process_recovery_registry_status -ne 'completed') {
+    throw "$Label did not prove process_recovery_registry_status=completed"
+  }
+  if ($Evidence.process_recovery_manifest_phase -ne 'completed') {
+    throw "$Label did not prove process_recovery_manifest_phase=completed"
+  }
+
+  $hashFields = @(
+    'process_recovery_base_paper_book_sha256',
+    'process_recovery_base_decision_ledger_sha256',
+    'process_recovery_new_paper_book_sha256',
+    'process_recovery_new_decision_ledger_sha256'
+  )
+  foreach ($field in $hashFields) {
+    $value = [string]$Evidence.$field
+    if ($value -notmatch '^[0-9a-f]{64}$') {
+      throw "$Label has invalid $field"
+    }
+  }
+  if ($Evidence.process_recovery_base_paper_book_sha256 -eq $Evidence.process_recovery_new_paper_book_sha256) {
+    throw "$Label did not prove promoted PaperBook state"
+  }
+  if ($Evidence.process_recovery_base_decision_ledger_sha256 -eq $Evidence.process_recovery_new_decision_ledger_sha256) {
+    throw "$Label did not prove promoted Decision Ledger state"
+  }
+}
+
+$sourceSha = $env:AUTOSPORT_SOURCE_SHA
+if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
+python scripts/verify_source_checkout.py --source-sha $sourceSha
+if ($LASTEXITCODE -ne 0) { throw "Source checkout preflight exited $LASTEXITCODE" }
 python -m pip install --upgrade pip
-python -m pip install -e '.[build]'
-python -m unittest discover -s tests -v
+if ($LASTEXITCODE -ne 0) { throw "pip upgrade exited $LASTEXITCODE" }
+python -m pip install -e '.[build,test]'
+if ($LASTEXITCODE -ne 0) { throw "build/test dependency install exited $LASTEXITCODE" }
+python -m pytest -v tests
+if ($LASTEXITCODE -ne 0) { throw "Full pytest gate exited $LASTEXITCODE" }
 if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
 python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace
+if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
+if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
+if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }
 
 $diag = Join-Path $PWD 'dist/packaged-diagnostic.json'
 if (Test-Path $diag) { Remove-Item -Force $diag }
@@ -44,6 +109,7 @@ if ($restartRecoveryEvidence.recovery_disposition -ne 'aborted_uncommitted') { t
 if ($restartRecoveryEvidence.real_money_execution -ne $false -or $restartRecoveryEvidence.human_tested -ne $false -or $restartRecoveryEvidence.nvda_verified -ne $false) {
   throw 'Machine restart/recovery audit violated release truth labels'
 }
+Assert-ProcessRecoveryEvidence -Evidence $restartRecoveryEvidence -Label 'Packaged restart/recovery audit'
 
 $dataExe = Join-Path $PWD 'dist/Autosport-Data.exe'
 if (-not (Test-Path $dataExe -PathType Leaf)) { throw 'Packaged build is missing Autosport-Data.exe' }
@@ -138,10 +204,10 @@ if ([string]::IsNullOrWhiteSpace($walkForwardEvidence.source_sha256) -or $walkFo
 if ($walkForwardEvidence.profitability_claim -ne $false) { throw 'Packaged walk-forward smoke must not claim profitability' }
 if ($walkForwardEvidence.real_money_execution -ne $false) { throw 'Packaged walk-forward smoke must preserve REAL_MONEY_EXECUTION=false' }
 
-$sourceSha = $env:AUTOSPORT_SOURCE_SHA
-if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
 $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
 $packageVerification = Join-Path $PWD 'dist/package-verification.json'
+if (Test-Path $package) { Remove-Item -Force $package }
+if (Test-Path $packageVerification) { Remove-Item -Force $packageVerification }
 python scripts/package_windows.py `
   --exe dist/Autosport.exe `
   --data-exe dist/Autosport-Data.exe `
@@ -154,6 +220,7 @@ python scripts/package_windows.py `
   --output $package `
   --source-sha $sourceSha `
   --verification-output $packageVerification
+if ($LASTEXITCODE -ne 0) { throw "Windows package assembly exited $LASTEXITCODE" }
 
 # Binding release gate: verify the artifact after a clean extraction, not only the
 # pre-package executables. This catches archive/path/packaging defects that a
@@ -250,6 +317,7 @@ if ($freshRestartRecoveryEvidence.recovery_disposition -ne 'aborted_uncommitted'
 if ($freshRestartRecoveryEvidence.real_money_execution -ne $false -or $freshRestartRecoveryEvidence.human_tested -ne $false -or $freshRestartRecoveryEvidence.nvda_verified -ne $false) {
   throw 'Machine restart/recovery audit violated release truth labels'
 }
+Assert-ProcessRecoveryEvidence -Evidence $freshRestartRecoveryEvidence -Label 'Fresh-extracted restart/recovery audit'
 
 $freshEvidence = [ordered]@{
   status = 'PASS'
@@ -274,6 +342,10 @@ $freshEvidence = [ordered]@{
   extracted_restart_recovery_status = $freshRestartRecoveryEvidence.status
   extracted_session_restart_status = $freshRestartRecoveryEvidence.session_restart_status
   extracted_transaction_recovery_status = $freshRestartRecoveryEvidence.transaction_recovery_status
+  extracted_process_kill_relaunch_status = $freshRestartRecoveryEvidence.process_kill_relaunch_status
+  extracted_process_recovery_disposition = $freshRestartRecoveryEvidence.process_recovery_disposition
+  extracted_process_recovery_registry_status = $freshRestartRecoveryEvidence.process_recovery_registry_status
+  extracted_process_recovery_manifest_phase = $freshRestartRecoveryEvidence.process_recovery_manifest_phase
   real_money_execution = $false
   human_tested = $false
   nvda_verified = $false

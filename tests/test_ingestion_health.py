@@ -3,7 +3,7 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
-from autosport.ingestion import IngestionEngine
+from autosport.ingestion import IngestionEngine, IngestionStats
 from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
 from autosport.market_bus import MarketEventBus
 from autosport.providers import InMemoryProvider, ProviderBatch, ProviderQuote
@@ -54,6 +54,33 @@ class IngestionHealthTests(unittest.TestCase):
             sequence=sequence,
             source_ts=source_ts,
         )
+
+    def test_stats_throughput_uses_finite_positive_elapsed(self):
+        stats = IngestionStats(
+            source_id="source",
+            received=2,
+            accepted=1,
+            rejected=1,
+            elapsed_seconds=0.25,
+            cursor=None,
+        )
+
+        self.assertEqual(stats.accepted_per_second, 4.0)
+
+    def test_stats_throughput_rejects_invalid_elapsed_truth(self):
+        invalid_values = (True, "1", 0.0, -1.0, float("nan"), float("inf"), float("-inf"))
+        for elapsed in invalid_values:
+            with self.subTest(elapsed=elapsed):
+                stats = IngestionStats(
+                    source_id="source",
+                    received=1,
+                    accepted=1,
+                    rejected=0,
+                    elapsed_seconds=elapsed,  # type: ignore[arg-type]
+                    cursor=None,
+                )
+                with self.assertRaisesRegex(ValueError, "elapsed_seconds must be a finite positive number"):
+                    _ = stats.accepted_per_second
 
     def test_policy_rejects_invalid_backpressure_bound(self):
         for value in (True, 1.5, float("nan"), float("inf")):

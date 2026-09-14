@@ -90,6 +90,47 @@ class BetfairAvailableBackBookTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     book.apply(change, image=True)
 
+    def test_rejected_atb_delta_does_not_publish_earlier_rows(self) -> None:
+        book = BetfairAvailableBackBook()
+        original = book.apply({"atb": [[2.0, 10.0]]}, image=True).quote
+
+        with self.assertRaisesRegex(ValueError, "decimal odds > 1"):
+            book.apply({"atb": [[2.2, 5.0], [1.0, 1.0]]})
+
+        self.assertEqual(book.current_quote(), original)
+        carried = book.apply({"ltp": 1.95})
+        self.assertEqual(carried.quote, original)
+        self.assertTrue(carried.quote.cache_verified)
+
+    def test_rejected_batb_delta_does_not_apply_earlier_removal(self) -> None:
+        book = BetfairAvailableBackBook()
+        original = book.apply(
+            {"batb": [[0, 2.1, 9.0], [1, 2.08, 11.0]]},
+            image=True,
+        ).quote
+
+        with self.assertRaisesRegex(ValueError, "decimal odds > 1"):
+            book.apply({"batb": [[0, 0, 0], [1, 1.0, 4.0]]})
+
+        self.assertEqual(book.current_quote(), original)
+        self.assertEqual(book.mode, "batb")
+
+    def test_rejected_image_preserves_previous_verified_cache_and_mode(self) -> None:
+        book = BetfairAvailableBackBook()
+        original = book.apply({"atb": [[1.9, 40.0]]}, image=True).quote
+
+        with self.assertRaisesRegex(ValueError, "decimal odds > 1"):
+            book.apply(
+                {"batb": [[0, 2.5, 7.0], [1, 1.0, 5.0]]},
+                image=True,
+            )
+
+        self.assertEqual(book.mode, "atb")
+        self.assertEqual(book.current_quote(), original)
+        carried = book.apply({"ltp": 1.84})
+        self.assertEqual(carried.quote, original)
+        self.assertTrue(carried.quote.cache_verified)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -413,15 +413,20 @@ class ResearchDecisionPipeline:
         )
 
 
+def _candidate_identity_payload(leg) -> dict[str, str]:
+    event_id, market_id, selection_id = leg.ticket_identity()
+    return {
+        "quote_key": leg.quote_key,
+        "event_id": event_id,
+        "market_id": market_id,
+        "selection_id": selection_id,
+    }
+
+
 def _ticket_legs(candidate: ParlayCandidate) -> list[TicketLeg]:
     legs: list[TicketLeg] = []
     for item in candidate.legs:
-        parts = item.quote_key.split("|", 2)
-        if len(parts) != 3 or not all(parts):
-            raise ValueError("candidate quote_key is not canonical event|market|selection")
-        event_id, market_id, selection_id = parts
-        if event_id != item.event_id:
-            raise ValueError("candidate event_id does not match quote_key")
+        event_id, market_id, selection_id = item.ticket_identity()
         legs.append(TicketLeg(event_id, market_id, selection_id, item.decimal_odds))
     return legs
 
@@ -450,6 +455,9 @@ def _audit_payload(
         "ticket_id": ticket_id,
         "stake": str(amount),
         "candidate_quote_keys": [leg.quote_key for leg in candidate.legs],
+        "candidate_ticket_identities": [
+            _candidate_identity_payload(leg) for leg in candidate.legs
+        ],
         "candidate_combined_odds": str(candidate.combined_odds),
         "candidate_independent_probability": str(candidate.independent_probability),
         "candidate_expected_profit_per_unit": str(candidate.expected_profit_per_unit),
@@ -550,8 +558,7 @@ def _research_context_hash(
         },
         "candidate": [
             {
-                "quote_key": leg.quote_key,
-                "event_id": leg.event_id,
+                **_candidate_identity_payload(leg),
                 "decimal_odds": str(leg.decimal_odds),
                 "probability": str(leg.probability),
             }

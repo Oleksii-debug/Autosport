@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 from .dataset import ReplayDataset
+from .endurance import EnduranceConfig, run_endurance
 from .integrity import ensure_durable_file, sha256_file
 from .paper import PaperBook
 from .run_registry import RunRegistry
@@ -25,6 +26,14 @@ _MARKET = (
 _RESULTS = (
     '{"quote_outcomes":{"restart-audit-1|winner|player-a":"win",'
     '"restart-audit-1|winner|player-b":"loss"},"schema_version":1}\n'
+)
+_PACKAGED_ENDURANCE_CONFIG = EnduranceConfig(
+    event_count=20_000,
+    quote_keys=2_000,
+    batch_size=500,
+    restart_cycles=3,
+    paper_tickets=50,
+    source_id="packaged-restart-endurance-audit",
 )
 
 
@@ -167,6 +176,31 @@ def _audit_uncommitted_recovery(root: Path) -> dict[str, object]:
     }
 
 
+def _audit_bounded_endurance(root: Path) -> dict[str, object]:
+    report = run_endurance(root / "endurance-workspace", _PACKAGED_ENDURANCE_CONFIG)
+    if report.status != "PASS":
+        raise RuntimeError("bounded endurance audit failed: " + "; ".join(report.failures))
+    if report.real_money_execution:
+        raise RuntimeError("bounded endurance audit crossed the paper/replay boundary")
+
+    return {
+        "status": report.status,
+        "history_events": report.history_events,
+        "current_quotes": report.current_quotes,
+        "accepted_duplicate_pass": report.accepted_duplicate_pass,
+        "replay_dataset_hash": report.replay_dataset_hash,
+        "restart_hashes": list(report.restart_hashes),
+        "restart_projection_counts": list(report.restart_projection_counts),
+        "independent_reingest_hash_match": report.independent_reingest_hash_match,
+        "paper_tickets_settled_first_pass": report.paper_tickets_settled_first_pass,
+        "paper_tickets_settled_second_pass": report.paper_tickets_settled_second_pass,
+        "corrupt_health_rejected": report.corrupt_health_rejected,
+        "corrupt_paper_book_rejected": report.corrupt_paper_book_rejected,
+        "stable_invariant_fingerprint": report.stable_invariant_fingerprint,
+        "real_money_execution": report.real_money_execution,
+    }
+
+
 def run_restart_recovery_audit(output_path: str | Path) -> int:
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -175,6 +209,7 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
             root = Path(tmp)
             restart = _audit_session_restart(root)
             recovery = _audit_uncommitted_recovery(root)
+            endurance = _audit_bounded_endurance(root)
         payload = {
             "status": "PASS",
             "session_restart_status": restart["status"],
@@ -184,6 +219,19 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
             "ticket_count": restart["ticket_count"],
             "paper_book_sha256": restart["paper_book_sha256"],
             "decision_ledger_sha256": restart["decision_ledger_sha256"],
+            "endurance_status": endurance["status"],
+            "endurance_history_events": endurance["history_events"],
+            "endurance_current_quotes": endurance["current_quotes"],
+            "endurance_accepted_duplicate_pass": endurance["accepted_duplicate_pass"],
+            "endurance_replay_dataset_hash": endurance["replay_dataset_hash"],
+            "endurance_restart_hashes": endurance["restart_hashes"],
+            "endurance_restart_projection_counts": endurance["restart_projection_counts"],
+            "endurance_independent_reingest_hash_match": endurance["independent_reingest_hash_match"],
+            "endurance_paper_tickets_settled_first_pass": endurance["paper_tickets_settled_first_pass"],
+            "endurance_paper_tickets_settled_second_pass": endurance["paper_tickets_settled_second_pass"],
+            "endurance_corrupt_health_rejected": endurance["corrupt_health_rejected"],
+            "endurance_corrupt_paper_book_rejected": endurance["corrupt_paper_book_rejected"],
+            "endurance_stable_invariant_fingerprint": endurance["stable_invariant_fingerprint"],
             "real_money_execution": False,
             "human_tested": False,
             "nvda_verified": False,

@@ -199,6 +199,18 @@ class RunRegistryReleaseTests(unittest.TestCase):
                     "session_restart_status": "PASS",
                     "transaction_recovery_status": "PASS",
                     "recovery_disposition": "aborted_uncommitted",
+                    "process_kill_relaunch_status": "PASS",
+                    "process_kill_stage_pid": 101,
+                    "process_kill_return_code": -15,
+                    "process_recovery_pid": 202,
+                    "process_recovery_run_id": "process-recovery-audit-run",
+                    "process_recovery_disposition": "committed",
+                    "process_recovery_registry_status": "completed",
+                    "process_recovery_manifest_phase": "completed",
+                    "process_recovery_base_paper_book_sha256": "1" * 64,
+                    "process_recovery_base_decision_ledger_sha256": "2" * 64,
+                    "process_recovery_new_paper_book_sha256": "3" * 64,
+                    "process_recovery_new_decision_ledger_sha256": "4" * 64,
                 }
             )
             + "\n",

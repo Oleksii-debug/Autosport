@@ -27,6 +27,7 @@ _WINDOWS_INVALID_CHARS = frozenset('<>:"\\|?*')
 _WINDOWS_MAX_COMPONENT_UTF16_UNITS = 255
 _GIT_COMMIT_SHA_LENGTH = 40
 _GIT_COMMIT_SHA_CHARS = frozenset("0123456789abcdef")
+_SHA256_LENGTH = 64
 
 
 class _DuplicateJsonKeyError(ValueError):
@@ -59,6 +60,69 @@ def sha256_file(path: str | Path) -> str:
 
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _require_process_recovery_evidence(payload: dict[str, Any], label: str) -> None:
+    if payload.get("process_kill_relaunch_status") != "PASS":
+        raise ValueError(f"{label} does not prove real process kill/relaunch PASS")
+
+    process_ids: dict[str, int] = {}
+    for field in ("process_kill_stage_pid", "process_recovery_pid"):
+        value = payload.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{label} has invalid {field}")
+        process_ids[field] = value
+    if process_ids["process_kill_stage_pid"] == process_ids["process_recovery_pid"]:
+        raise ValueError(f"{label} does not prove a distinct fresh recovery process")
+
+    killed_return_code = payload.get("process_kill_return_code")
+    if (
+        isinstance(killed_return_code, bool)
+        or not isinstance(killed_return_code, int)
+        or killed_return_code == 0
+    ):
+        raise ValueError(f"{label} does not prove non-clean process termination")
+
+    run_id = payload.get("process_recovery_run_id")
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError(f"{label} has invalid process_recovery_run_id")
+
+    required_states = {
+        "process_recovery_disposition": "committed",
+        "process_recovery_registry_status": "completed",
+        "process_recovery_manifest_phase": "completed",
+    }
+    for field, expected in required_states.items():
+        if payload.get(field) != expected:
+            raise ValueError(f"{label} does not prove {field}={expected}")
+
+    hash_fields = (
+        "process_recovery_base_paper_book_sha256",
+        "process_recovery_base_decision_ledger_sha256",
+        "process_recovery_new_paper_book_sha256",
+        "process_recovery_new_decision_ledger_sha256",
+    )
+    hashes: dict[str, str] = {}
+    for field in hash_fields:
+        value = payload.get(field)
+        if (
+            not isinstance(value, str)
+            or len(value) != _SHA256_LENGTH
+            or any(character not in _GIT_COMMIT_SHA_CHARS for character in value)
+        ):
+            raise ValueError(f"{label} has invalid {field}")
+        hashes[field] = value
+
+    if (
+        hashes["process_recovery_base_paper_book_sha256"]
+        == hashes["process_recovery_new_paper_book_sha256"]
+    ):
+        raise ValueError(f"{label} does not prove promoted PaperBook state")
+    if (
+        hashes["process_recovery_base_decision_ledger_sha256"]
+        == hashes["process_recovery_new_decision_ledger_sha256"]
+    ):
+        raise ValueError(f"{label} does not prove promoted Decision Ledger state")
 
 
 def build_windows_package(
@@ -245,6 +309,7 @@ def verify_windows_package(
         raise ValueError("restart-recovery-audit.json does not prove transaction recovery PASS")
     if restart_recovery.get("recovery_disposition") != "aborted_uncommitted":
         raise ValueError("restart-recovery-audit.json recovery disposition is not fail-closed")
+    _require_process_recovery_evidence(restart_recovery, "restart-recovery-audit.json")
 
     return {
         "status": "PASS",

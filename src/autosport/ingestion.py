@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import isfinite
 from time import perf_counter
 from typing import Callable
 
@@ -26,7 +27,18 @@ class IngestionStats:
 
     @property
     def accepted_per_second(self) -> float:
-        return self.accepted / self.elapsed_seconds if self.elapsed_seconds > 0 else float("inf")
+        elapsed = self.elapsed_seconds
+        if (
+            isinstance(elapsed, bool)
+            or not isinstance(elapsed, (int, float))
+            or not isfinite(elapsed)
+            or elapsed <= 0
+        ):
+            raise ValueError("elapsed_seconds must be a finite positive number")
+        rate = self.accepted / elapsed
+        if not isfinite(rate):
+            raise ValueError("accepted_per_second must be finite")
+        return rate
 
 
 class IngestionEngine:

@@ -10,10 +10,63 @@ class CandidateLeg:
     event_id: str
     decimal_odds: Decimal
     probability: Decimal
+    market_id: str | None = None
+    selection_id: str | None = None
 
     @property
     def paper_value_per_unit(self) -> Decimal:
         return self.probability * self.decimal_odds - Decimal("1")
+
+    def ticket_identity(self) -> tuple[str, str, str]:
+        """Return a lossless structured ticket identity or fail closed.
+
+        ``quote_key`` is a serialization, not a reversible container when identity
+        components themselves may contain ``|``.  New callers can therefore carry
+        market/selection identity explicitly.  Legacy delimiter-free suffixes remain
+        supported only when they are unambiguous after the already-structured event
+        prefix.
+        """
+
+        if (
+            not isinstance(self.event_id, str)
+            or not self.event_id
+            or self.event_id.strip() != self.event_id
+        ):
+            raise ValueError("candidate leg event_id must be a non-empty canonical string")
+        if (self.market_id is None) != (self.selection_id is None):
+            raise ValueError(
+                "candidate leg market_id and selection_id must be provided together"
+            )
+        if self.market_id is not None and self.selection_id is not None:
+            for field_name, value in (
+                ("market_id", self.market_id),
+                ("selection_id", self.selection_id),
+            ):
+                if not isinstance(value, str) or not value or value.strip() != value:
+                    raise ValueError(
+                        f"candidate leg {field_name} must be a non-empty canonical string"
+                    )
+            expected = f"{self.event_id}|{self.market_id}|{self.selection_id}"
+            if self.quote_key != expected:
+                raise ValueError(
+                    "candidate structured event/market/selection identity does not match quote_key"
+                )
+            return self.event_id, self.market_id, self.selection_id
+
+        prefix = f"{self.event_id}|"
+        if not self.quote_key.startswith(prefix):
+            raise ValueError(
+                "candidate quote_key is not canonical event|market|selection for structured event_id"
+            )
+        remainder = self.quote_key[len(prefix) :]
+        if remainder.count("|") != 1:
+            raise ValueError(
+                "candidate leg requires structured market_id and selection_id when quote_key suffix is ambiguous"
+            )
+        market_id, selection_id = remainder.split("|", 1)
+        if not market_id or not selection_id:
+            raise ValueError("candidate quote_key is not canonical event|market|selection")
+        return self.event_id, market_id, selection_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +180,11 @@ class BeamParlayCandidateSearch:
                 raise ValueError(
                     f"candidate leg {index} quote_key is not consistent with structured event_id"
                 )
+            if leg.market_id is not None or leg.selection_id is not None:
+                try:
+                    leg.ticket_identity()
+                except ValueError as exc:
+                    raise ValueError(f"candidate leg {index}: {exc}") from exc
             if not isinstance(leg.decimal_odds, Decimal):
                 raise ValueError(f"candidate leg {index} decimal_odds must be Decimal")
             if not leg.decimal_odds.is_finite():

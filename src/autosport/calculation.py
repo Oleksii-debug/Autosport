@@ -123,6 +123,66 @@ class CalculationEngine:
             warnings=warnings,
         )
 
+    def american_to_decimal_odds(
+        self,
+        american_odds: Decimal | str | int,
+    ) -> CalculationResult:
+        american = _decimal(american_odds, field="american_odds")
+        if Decimal("-100") < american < Decimal("100"):
+            raise ValueError("american_odds must be at most -100 or at least 100")
+        if american >= Decimal("100"):
+            try:
+                with localcontext(_CONTEXT) as ctx:
+                    ctx.clear_flags()
+                    decimal_odds = Decimal("1") + (american / Decimal("100"))
+                    if ctx.flags[Inexact]:
+                        raise ValueError("American-to-decimal conversion would require rounding")
+            except DecimalException as exc:
+                raise ValueError("American-to-decimal conversion is outside the supported decimal range") from exc
+            classification = "exact"
+            warnings: tuple[str, ...] = ()
+        else:
+            decimal_odds = Decimal("1") + _divide(Decimal("100"), abs(american))
+            classification = "approximate_decimal"
+            warnings = ("division is rounded in the deterministic decimal context",)
+        return _result(
+            calculation_id="american_to_decimal_odds",
+            method="american_to_decimal_unrounded",
+            classification=classification,
+            inputs={"american_odds": american},
+            input_units={"american_odds": "american_odds"},
+            assumptions=("American odds are supplied without bookmaker display rounding reversal",),
+            outputs={"decimal_odds": decimal_odds},
+            output_units={"decimal_odds": "decimal_odds"},
+            warnings=warnings,
+        )
+
+    def fractional_to_decimal_odds(
+        self,
+        numerator: Decimal | str | int,
+        denominator: Decimal | str | int,
+    ) -> CalculationResult:
+        numerator_value = _decimal(numerator, field="fractional_numerator", greater_than=Decimal("0"))
+        denominator_value = _decimal(denominator, field="fractional_denominator", greater_than=Decimal("0"))
+        decimal_odds = Decimal("1") + _divide(numerator_value, denominator_value)
+        return _result(
+            calculation_id="fractional_to_decimal_odds",
+            method="fractional_ratio_to_decimal",
+            classification="approximate_decimal",
+            inputs={
+                "fractional_numerator": numerator_value,
+                "fractional_denominator": denominator_value,
+            },
+            input_units={
+                "fractional_numerator": "fractional_odds_numerator",
+                "fractional_denominator": "fractional_odds_denominator",
+            },
+            assumptions=("fractional odds are supplied as a positive numerator/denominator ratio",),
+            outputs={"decimal_odds": decimal_odds},
+            output_units={"decimal_odds": "decimal_odds"},
+            warnings=("division is rounded in the deterministic decimal context",),
+        )
+
     def implied_probability(self, decimal_odds: Decimal | str | int) -> CalculationResult:
         odds = _decimal(decimal_odds, field="decimal_odds", greater_than=Decimal("1"))
         probability = _divide(Decimal("1"), odds)
@@ -172,11 +232,21 @@ class CalculationEngine:
         fair = {key: _divide(probability, total) for key, probability in raw_probabilities.items()}
 
         inputs = {f"decimal_odds.{key}": odds for key, odds in ordered}
-        outputs: dict[str, Decimal] = {"overround": total}
+        outputs: dict[str, Decimal] = {
+            "overround": total,
+            "market_margin": total - Decimal("1"),
+        }
+        output_units: dict[str, str] = {
+            "overround": "probability_sum",
+            "market_margin": "fraction",
+        }
         for key in sorted(raw_probabilities):
             outputs[f"raw_implied_probability.{key}"] = raw_probabilities[key]
             outputs[f"fair_probability.{key}"] = fair[key]
-        output_units = {name: "probability" for name in outputs}
+            outputs[f"fair_decimal_odds.{key}"] = _divide(Decimal("1"), fair[key])
+            output_units[f"raw_implied_probability.{key}"] = "probability"
+            output_units[f"fair_probability.{key}"] = "probability"
+            output_units[f"fair_decimal_odds.{key}"] = "decimal_odds"
         input_units = {name: "decimal_odds" for name in inputs}
         return _result(
             calculation_id="multiplicative_devig",
@@ -571,6 +641,73 @@ class CalculationEngine:
             calculation_id="paper_parlay",
             method="decimal_odds_parlay_with_optional_independent_probability",
             classification=classification,
+            inputs=inputs,
+            input_units=input_units,
+            assumptions=assumptions,
+            outputs=outputs,
+            output_units=output_units,
+            warnings=warnings,
+        )
+
+    def finite_scenario_table(
+        self,
+        scenario_profits: Mapping[str, Decimal | str | int],
+        *,
+        completeness: str,
+    ) -> CalculationResult:
+        if not isinstance(scenario_profits, Mapping) or not scenario_profits:
+            raise ValueError("scenario_profits must contain at least one named scenario")
+        if len(scenario_profits) > _MAX_MARKET_SELECTIONS:
+            raise ValueError("scenario count exceeds the supported limit")
+        if completeness not in {"complete", "partial"}:
+            raise ValueError("scenario completeness must be exactly 'complete' or 'partial'")
+        normalized: dict[str, Decimal] = {}
+        for raw_name, raw_profit in scenario_profits.items():
+            name = _text_key(raw_name, field="scenario")
+            if name in normalized:
+                raise ValueError("scenario identifiers must be unique")
+            normalized[name] = _decimal(raw_profit, field=f"scenario_profit[{name}]")
+        ordered = sorted(normalized.items())
+        profits = [value for _, value in ordered]
+        outputs: dict[str, Decimal] = {
+            "scenario_count": Decimal(len(ordered)),
+            "worst_case": min(profits),
+            "best_case": max(profits),
+        }
+        output_units: dict[str, str] = {
+            "scenario_count": "count",
+            "worst_case": "paper_currency",
+            "best_case": "paper_currency",
+        }
+        inputs: dict[str, Decimal] = {}
+        input_units: dict[str, str] = {}
+        for name, profit in ordered:
+            input_name = f"scenario_profit.{name}"
+            inputs[input_name] = profit
+            input_units[input_name] = "paper_currency"
+            outputs[input_name] = profit
+            output_units[input_name] = "paper_currency"
+        if completeness == "complete":
+            method = "finite_scenario_table_caller_asserted_complete"
+            assumptions = (
+                "caller explicitly asserts that the supplied scenarios exhaust the modeled state space",
+                "the calculator does not independently prove scenario completeness",
+            )
+            warnings = (
+                "global worst/best claims are valid only if upstream evidence justifies the caller's completeness assertion",
+            )
+        else:
+            method = "finite_scenario_table_partial"
+            assumptions = (
+                "the supplied scenario set is explicitly partial and does not claim to exhaust the modeled state space",
+            )
+            warnings = (
+                "worst_case and best_case apply only to the supplied partial scenarios and are not global portfolio bounds",
+            )
+        return _result(
+            calculation_id="finite_scenario_table",
+            method=method,
+            classification="exact",
             inputs=inputs,
             input_units=input_units,
             assumptions=assumptions,

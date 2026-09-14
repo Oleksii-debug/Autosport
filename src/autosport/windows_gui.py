@@ -83,11 +83,13 @@ class WindowsAutosportApp(AutosportApp):
         the set.
         """
 
-        blocked = getattr(self, "_recovery_blocked_workspaces", None)
+        # Avoid Tkinter.Misc.__getattr__ here: headless/partially constructed app
+        # instances legitimately exercise this fail-closed state helper in tests.
+        blocked = self.__dict__.get("_recovery_blocked_workspaces")
         if blocked is None:
             blocked = set()
             self._recovery_blocked_workspaces = blocked
-        legacy = getattr(self, "_recovery_blocked_workspace", None)
+        legacy = self.__dict__.get("_recovery_blocked_workspace")
         if legacy is not None:
             blocked.add(Path(legacy))
         return blocked
@@ -100,7 +102,7 @@ class WindowsAutosportApp(AutosportApp):
     def _unblock_workspace_after_recovery(self, workspace: Path) -> None:
         workspace = Path(workspace)
         self._blocked_recovery_workspaces().discard(workspace)
-        if getattr(self, "_recovery_blocked_workspace", None) == workspace:
+        if self.__dict__.get("_recovery_blocked_workspace") == workspace:
             self._recovery_blocked_workspace = None
 
     def _workspace_requires_recovery(self, workspace: Path) -> bool:

@@ -13,9 +13,15 @@ class WorkspaceEconomicLockError(RuntimeError):
 class WorkspaceEconomicLock:
     """Cross-process, crash-releasing exclusive lock for PaperBook/ledger mutations.
 
-    The lock is advisory and intentionally scoped to Autosport's economic writers.
-    The lock file itself may persist after process exit; the operating-system lock
-    is the authority and is released automatically when the owning process dies.
+    The lock is advisory and intentionally scoped to cooperating Autosport economic
+    writers. Those writers treat the lock pathname as persistent workspace metadata:
+    they do not unlink, rename, replace, or hard-link it while coordinating. Acquire
+    rejects unsafe aliases and detects pathname replacement through its post-lock
+    identity checkpoint. Like any pathname-based advisory file lock, it cannot make
+    the pathname immutable against an external actor that replaces it after the final
+    validated checkpoint; such filesystem mutation is outside this coordination
+    contract. The file itself may persist after process exit; the operating-system
+    lock is the authority and is released automatically when the owning process dies.
     """
 
     FILE_NAME = ".economic-run.lock"
@@ -43,9 +49,10 @@ class WorkspaceEconomicLock:
                 os.fsync(handle.fileno())
             handle.seek(0)
             self._lock_handle(handle)
-            # A pathname can be replaced between open and OS-lock acquisition. Recheck
-            # immediately after locking so successful acquire() never reports ownership
-            # of a different inode than the canonical workspace lock pathname.
+            # Detect replacement that happened between open and this post-lock
+            # checkpoint. This is deliberately not a claim that an external actor
+            # cannot replace a POSIX pathname after the checkpoint; cooperating
+            # Autosport writers never perform that mutation (see class contract).
             self._validate_open_handle_identity(handle)
         except BaseException as acquire_error:
             try:

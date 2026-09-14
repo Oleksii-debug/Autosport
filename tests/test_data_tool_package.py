@@ -165,7 +165,7 @@ class PortableDataToolPackageTests(unittest.TestCase):
 
     def test_binding_rejects_nonstandard_manifest_before_mutating_package(self):
         with tempfile.TemporaryDirectory() as tmp:
-            package, data_exe = self._build_base(Path(tmp), "h" * 40)
+            package, data_exe = self._build_base(Path(tmp), "1" * 40)
             manifest = self._read_member(package, "PACKAGE_MANIFEST.json").decode("utf-8")
             invalid = manifest.replace(
                 '  "schema_version": 1',
@@ -185,7 +185,7 @@ class PortableDataToolPackageTests(unittest.TestCase):
 
     def test_binding_rejects_stale_sums_before_mutating_package(self):
         with tempfile.TemporaryDirectory() as tmp:
-            package, data_exe = self._build_base(Path(tmp), "g" * 40)
+            package, data_exe = self._build_base(Path(tmp), "2" * 40)
             sums = self._read_member(package, "SHA256SUMS.txt").decode("utf-8")
             rewritten_sums = []
             for line in sums.splitlines():

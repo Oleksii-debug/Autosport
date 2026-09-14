@@ -60,6 +60,47 @@ class RecoveryWorkerTerminalLifecycleTests(unittest.TestCase):
 
         self._assert_retry_succeeds(worker)
 
+    def test_start_gate_event_exception_rolls_back_busy_and_allows_retry(self) -> None:
+        worker = OneShotRecoveryWorker()
+        with patch(
+            "autosport.recovery_worker.threading.Event",
+            side_effect=OSError("start gate allocation failed"),
+        ):
+            self.assertFalse(worker.start(lambda: self.fail("task must not run")))
+
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+        self._assert_retry_succeeds(worker)
+
+    def test_cancel_event_exception_after_start_gate_rolls_back_and_allows_retry(self) -> None:
+        worker = OneShotRecoveryWorker()
+        first_gate = __import__("threading").Event()
+        with patch(
+            "autosport.recovery_worker.threading.Event",
+            side_effect=[first_gate, OSError("cancel gate allocation failed")],
+        ):
+            self.assertFalse(worker.start(lambda: self.fail("task must not run")))
+
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+        self._assert_retry_succeeds(worker)
+
+    def test_start_gate_event_baseexception_cleans_up_before_reraise(self) -> None:
+        worker = OneShotRecoveryWorker()
+        with patch(
+            "autosport.recovery_worker.threading.Event",
+            side_effect=KeyboardInterrupt("start gate interrupted"),
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "start gate interrupted"):
+                worker.start(lambda: self.fail("task must not run"))
+
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+        self._assert_retry_succeeds(worker)
+
     def test_thread_constructor_exception_rolls_back_busy_and_allows_retry(self) -> None:
         worker = OneShotRecoveryWorker()
         with patch(

@@ -161,6 +161,10 @@ class PaperBook:
                     effective_odds *= leg.locked_odds
                 payout = ticket.stake if status is TicketStatus.VOID else ticket.stake * effective_odds
                 cls._require_finite(payout, f"settlement payout for ticket {ticket.ticket_id}")
+                if status is TicketStatus.WON and payout <= ticket.stake:
+                    raise ValueError(
+                        "PaperBook winning settlement payout must exceed stake after canonical Decimal rounding"
+                    )
                 new_balance = balance + payout
                 cls._require_finite(new_balance, f"balance after settling ticket {ticket.ticket_id}")
                 if payout != 0 and new_balance == balance:

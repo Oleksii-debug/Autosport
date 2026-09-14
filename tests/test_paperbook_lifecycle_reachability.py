@@ -151,6 +151,30 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
         self.assertIs(ticket.status, TicketStatus.OPEN)
         self.assertEqual(ticket.payout, Decimal("0"))
 
+    def test_winning_payout_that_rounds_to_stake_fails_atomically(self) -> None:
+        book = PaperBook("100")
+        leg = self._leg(
+            "event-1",
+            "alice",
+            "1.00000000000000000000000000000000000000001",
+        )
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        before_balance = book.balance
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "winning settlement payout must exceed stake",
+        ):
+            book.settle(ticket.ticket_id, {leg.quote_key})
+
+        self.assertEqual(book.balance, before_balance)
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+
     def test_legacy_open_only_snapshot_remains_loadable_and_upgrades_on_save(self) -> None:
         payload = {
             "initial_bankroll": "100",

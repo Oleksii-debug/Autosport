@@ -1,4 +1,6 @@
+import io
 import unittest
+from contextlib import redirect_stderr
 from unittest.mock import patch
 
 from autosport import data_tools_entry
@@ -72,6 +74,48 @@ class DataToolsEntryTests(unittest.TestCase):
         target.assert_called_once_with(
             ["repair-workspace", "--workspace", r"C:\\Autosport\\state"]
         )
+
+    def test_expected_validation_failure_is_contained_without_traceback(self):
+        stderr = io.StringIO()
+        with patch(
+            "autosport.cli.main",
+            side_effect=ValueError("invalid dataset\nsecond diagnostic line"),
+        ):
+            with redirect_stderr(stderr):
+                result = data_tools_entry.main(["verify-dataset", "broken-dataset"])
+
+        self.assertEqual(result, 3)
+        self.assertEqual(
+            stderr.getvalue().strip(),
+            "Autosport-Data: verify-dataset=FAIL_CLOSED error=ValueError: "
+            "invalid dataset second diagnostic line",
+        )
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_expected_filesystem_failure_is_contained_without_traceback(self):
+        stderr = io.StringIO()
+        with patch(
+            "autosport.cli.main",
+            side_effect=FileNotFoundError("dataset file is missing"),
+        ):
+            with redirect_stderr(stderr):
+                result = data_tools_entry.main(["verify-dataset", "missing-dataset"])
+
+        self.assertEqual(result, 3)
+        self.assertEqual(
+            stderr.getvalue().strip(),
+            "Autosport-Data: verify-dataset=FAIL_CLOSED error=FileNotFoundError: "
+            "dataset file is missing",
+        )
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_unexpected_programming_failure_is_not_mislabeled_as_expected_input_error(self):
+        with patch(
+            "autosport.cli.main",
+            side_effect=RuntimeError("programming defect"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "programming defect"):
+                data_tools_entry.main(["verify-dataset", "dataset-dir"])
 
     def test_unknown_command_fails_closed(self):
         with patch("builtins.print"):

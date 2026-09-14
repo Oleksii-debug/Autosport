@@ -68,8 +68,23 @@ def _json_object_bytes(
     path: Path,
     context: str,
 ) -> dict[str, Any]:
+    def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"{context} contains duplicate JSON object key: {key}")
+            value[key] = item
+        return value
+
+    def _reject_nonstandard_constant(value: str) -> None:
+        raise ValueError(f"{context} contains non-standard JSON constant: {value}")
+
     try:
-        raw = json.loads(payload.decode("utf-8"))
+        raw = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_nonstandard_constant,
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{context} is not readable valid JSON: {path}") from exc
     if not isinstance(raw, dict):

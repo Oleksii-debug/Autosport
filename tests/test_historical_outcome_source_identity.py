@@ -54,6 +54,18 @@ class HistoricalOutcomeSourceIdentityTests(unittest.TestCase):
             imported_dt=datetime.fromisoformat("2026-01-02T00:05:00+00:00"),
         )
 
+    def _replace_source_record(
+        self,
+        root: Path,
+        results: dict[str, object],
+        payload: bytes,
+    ) -> None:
+        provenance = results["outcome_provenance"]
+        self.assertIsInstance(provenance, dict)
+        source_path = root / str(provenance["source_record_file"])
+        source_path.write_bytes(payload)
+        provenance["source_record_sha256"] = hashlib.sha256(payload).hexdigest()
+
     def test_matching_source_identity_is_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -81,6 +93,54 @@ class HistoricalOutcomeSourceIdentityTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ValueError,
                 "sealed outcome source record.source must be a non-empty string",
+            ):
+                self._validate(root, results)
+
+    def test_rehashed_source_record_rejects_duplicate_source_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            results = self._results(root)
+            payload = (
+                b'{"source":"official-results:ambiguous",'
+                b'"source":"official-results:test-fixture",'
+                b'"quote_outcomes":{"tt-a|winner|alice":"win"}}'
+            )
+            self._replace_source_record(root, results, payload)
+            with self.assertRaisesRegex(
+                ValueError,
+                "sealed outcome source record contains duplicate JSON object key: source",
+            ):
+                self._validate(root, results)
+
+    def test_rehashed_source_record_rejects_duplicate_nested_outcome_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            results = self._results(root)
+            payload = (
+                b'{"source":"official-results:test-fixture",'
+                b'"quote_outcomes":{"tt-a|winner|alice":"loss",'
+                b'"tt-a|winner|alice":"win"}}'
+            )
+            self._replace_source_record(root, results, payload)
+            with self.assertRaisesRegex(
+                ValueError,
+                "sealed outcome source record contains duplicate JSON object key: tt-a\\|winner\\|alice",
+            ):
+                self._validate(root, results)
+
+    def test_rehashed_source_record_rejects_nonstandard_json_constant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            results = self._results(root)
+            payload = (
+                b'{"source":"official-results:test-fixture",'
+                b'"quote_outcomes":{"tt-a|winner|alice":"win"},'
+                b'"confidence":NaN}'
+            )
+            self._replace_source_record(root, results, payload)
+            with self.assertRaisesRegex(
+                ValueError,
+                "sealed outcome source record contains non-standard JSON constant: NaN",
             ):
                 self._validate(root, results)
 

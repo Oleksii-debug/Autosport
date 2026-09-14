@@ -27,6 +27,22 @@ _REDISTRIBUTION_RANK = {"prohibited": 0, "internal_only": 1, "permitted": 2}
 _ALLOWED_OUTCOMES = {"win", "loss", "void"}
 _PARLAY_TERMS_REFERENCE = "https://parlay-api.com/terms"
 _PARLAY_STANDARD_RETENTION_CEILING = timedelta(days=90)
+_OUTCOME_LINEAGE_DERIVED_FIELDS = frozenset(
+    {
+        "source_record_id",
+        "source_record_revision_id",
+        "source_record_revision",
+        "source_record_revision_kind",
+        "source_record_recorded_at",
+        "source_record_predecessor_sha256",
+        "source_record_supersedes_revision_id",
+        "source_record_lineage_root_sha256",
+        "source_record_lineage_root_revision_id",
+        "source_record_lineage_depth",
+        "source_record_lineage",
+        "source_record_lineage_verified",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +227,12 @@ def _outcome_provenance(
     schema_version = raw.get("schema_version")
     if type(schema_version) is not int or schema_version not in {1, 2}:
         raise ValueError("sealed results outcome_provenance.schema_version must be exact integer 1 or 2")
+    reserved_lineage_fields = sorted(_OUTCOME_LINEAGE_DERIVED_FIELDS.intersection(raw))
+    if reserved_lineage_fields:
+        raise ValueError(
+            "sealed results outcome_provenance must not provide verifier-derived lineage fields: "
+            + ", ".join(reserved_lineage_fields)
+        )
     if raw.get("kind") != _OUTCOME_PROVENANCE_KIND:
         raise ValueError(
             f"sealed results outcome_provenance.kind must be {_OUTCOME_PROVENANCE_KIND}"
@@ -737,7 +759,9 @@ def assemble_historical_corpus(
             "redistribution_policy": outcome_provenance["redistribution_policy"],
             "redistribution_verified": outcome_provenance["redistribution_verified"],
         }
-        if outcome_provenance.get("source_record_lineage_verified") is True:
+        if outcome_provenance["schema_version"] == 2:
+            if outcome_provenance.get("source_record_lineage_verified") is not True:
+                raise ValueError("validated schema-v2 outcome provenance lost lineage verification")
             outcome_evidence.update(
                 {
                     "source_record_id": outcome_provenance["source_record_id"],

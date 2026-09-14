@@ -43,6 +43,8 @@ def reconcile_late_crashes(workspace: str | Path) -> RecoveryReport:
         raise ReconciliationError(
             "workspace has an active economic writer; recovery cannot run concurrently"
         ) from exc
+    except OSError as exc:
+        raise ReconciliationError(f"workspace recovery failed: {exc}") from exc
 
 
 def _has_durable_run_history(root: Path) -> bool:

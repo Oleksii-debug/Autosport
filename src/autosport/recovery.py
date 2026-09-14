@@ -22,11 +22,11 @@ def reconcile_late_crashes(workspace: str | Path) -> RecoveryReport:
 
     root = Path(workspace)
     registry_path = root / "run_registry.json"
-    if not registry_path.is_file():
-        return RecoveryReport((), (), ())
 
     try:
         with WorkspaceEconomicLock(root):
+            if not registry_path.is_file():
+                return RecoveryReport((), (), ())
             return _reconcile_late_crashes_locked(root, registry_path)
     except WorkspaceEconomicLockError as exc:
         raise ReconciliationError(

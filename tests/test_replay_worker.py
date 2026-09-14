@@ -6,6 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from autosport.replay_worker import (
     OneShotReplayWorker,
@@ -43,6 +44,34 @@ class ReplayWorkerTests(unittest.TestCase):
         self.assertFalse(worker.start(task))
         release.set()
         message = self._terminal(worker)
+        self.assertIs(message.result, sentinel)
+        self.assertIsNone(message.error)
+        self.assertFalse(worker.busy)
+
+    def test_worker_thread_start_failure_rolls_back_busy_and_allows_retry(self):
+        worker = OneShotReplayWorker()
+        task_ran = threading.Event()
+        sentinel = object()
+
+        def task():
+            task_ran.set()
+            return sentinel
+
+        with patch.object(
+            threading.Thread,
+            "start",
+            side_effect=RuntimeError("can't start new thread"),
+        ):
+            self.assertFalse(worker.start(task))
+
+        self.assertFalse(task_ran.is_set())
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+
+        self.assertTrue(worker.start(task))
+        message = self._terminal(worker)
+        self.assertTrue(task_ran.is_set())
         self.assertIs(message.result, sentinel)
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)

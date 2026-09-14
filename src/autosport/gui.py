@@ -620,6 +620,16 @@ class AutosportApp(tk.Tk):
             self._append_log(text)
             self.bell()
             return
+        if self.live_worker.busy:
+            text = (
+                "Live snapshot ще виконується. Закриття програми заблоковано до terminal live observation state, "
+                "щоб процес не приховав незавершений market/source-health persistence boundary."
+            )
+            self.live_status.set(text)
+            self.status.set(text)
+            self._append_log(text)
+            self.bell()
+            return
         self._closing = True
         try:
             if self.session is not None:

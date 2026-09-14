@@ -52,13 +52,23 @@ class OneShotObservationWorker:
             if self._busy:
                 return False
             self._busy = True
-        self._thread = threading.Thread(
-            target=self._run,
-            args=(task,),
-            name="autosport-live-observation",
-            daemon=False,
-        )
-        self._thread.start()
+        try:
+            thread = threading.Thread(
+                target=self._run,
+                args=(task,),
+                name="autosport-live-observation",
+                daemon=False,
+            )
+            self._thread = thread
+            thread.start()
+        except RuntimeError:
+            # CPython reports OS/runtime inability to start a new thread as
+            # RuntimeError. No observation task ran, so restore the single-flight
+            # worker to idle and let the caller retry without restarting the app.
+            self._thread = None
+            with self._lock:
+                self._busy = False
+            return False
         return True
 
     def _run(self, task: ObservationTask) -> None:
@@ -91,8 +101,8 @@ def observe_workspace_once(
     root = Path(workspace)
     root.mkdir(parents=True, exist_ok=True)
     store = SQLiteMarketStore(root / "market.db")
-    health_store = SourceHealthStore(root / "source_health.json")
     try:
+        health_store = SourceHealthStore(root / "source_health.json")
         engine = IngestionEngine(
             MarketEventBus(store),
             policy=policy,

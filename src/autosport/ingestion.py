@@ -6,7 +6,7 @@ from time import perf_counter
 from typing import Callable
 
 from .ingestion_health import IngestionPolicy, SourceHealthStore, parse_source_timestamp
-from .market_bus import MarketEventBus
+from .market_bus import MarketEventBus, MarketEventDeliveryError
 from .providers import CanonicalNormalizer, MarketProvider
 
 
@@ -48,8 +48,8 @@ class IngestionEngine:
         self.clock = clock or _utc_now_iso
 
     def poll_once(self, provider: MarketProvider, max_items: int = 1000) -> IngestionStats:
-        if max_items <= 0:
-            raise ValueError("max_items must be positive")
+        if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:
+            raise ValueError("max_items must be a positive integer")
         if max_items > self.policy.max_batch_size:
             raise ValueError(
                 f"requested batch {max_items} exceeds backpressure limit {self.policy.max_batch_size}"
@@ -74,6 +74,7 @@ class IngestionEngine:
             latest_source: datetime | None = None
             now_point = parse_source_timestamp(now)
             for quote in batch.quotes:
+                source_point: datetime | None = None
                 if quote.source_ts is not None:
                     try:
                         source_point = parse_source_timestamp(quote.source_ts)
@@ -81,53 +82,78 @@ class IngestionEngine:
                         flags.add("INVALID_SOURCE_TIMESTAMP")
                         rejected += 1
                         continue
-                    if latest_source is None or source_point > latest_source:
-                        latest_source = source_point
                     age_seconds = (now_point - source_point).total_seconds()
                     if age_seconds > self.policy.stale_after_seconds:
                         flags.add("STALE_SOURCE")
                     if age_seconds < -self.policy.max_future_skew_seconds:
                         flags.add("FUTURE_CLOCK_SKEW")
                 try:
-                    normalized.append(self.normalizer.normalize(batch.source_id, quote))
+                    event = self.normalizer.normalize(batch.source_id, quote)
                 except (TypeError, ValueError):
                     rejected += 1
+                    continue
+                normalized.append(event)
+                if source_point is not None and (
+                    latest_source is None or source_point > latest_source
+                ):
+                    latest_source = source_point
 
             latest_source_ts = latest_source.isoformat() if latest_source is not None else None
             if previous_source_ts is not None and latest_source is not None:
                 if latest_source < parse_source_timestamp(previous_source_ts):
                     flags.add("SOURCE_TIME_REGRESSION")
-
-            accepted = self.bus.publish_many(normalized)
-            elapsed = perf_counter() - started
-            ordered_flags = tuple(sorted(flags))
-            health_status = "degraded" if ordered_flags else "healthy"
+        except Exception as exc:
             if self.health_store is not None:
-                state = self.health_store.record_success(
+                self.health_store.record_failure(provider.source_id, now=now, error=exc)
+            raise
+
+        # Persistence and subscriber delivery are local pipeline stages. A failure here
+        # must still propagate, but it must not be attributed to provider health after
+        # acquisition/validation/normalization already succeeded.
+        ordered_flags = tuple(sorted(flags))
+        try:
+            accepted = self.bus.publish_many(normalized)
+        except MarketEventDeliveryError as exc:
+            # MarketEventDeliveryError can only be raised after transactional
+            # persistence succeeds. Preserve the exact storage-derived outcome in
+            # provider progress before re-raising the consumer delivery failure.
+            if self.health_store is not None:
+                self.health_store.record_success(
                     batch.source_id,
                     now=now,
                     received=len(batch.quotes),
-                    accepted=accepted,
+                    accepted=exc.accepted_count,
                     rejected=rejected,
                     cursor=batch.cursor,
                     latest_source_ts=latest_source_ts,
                     quality_flags=ordered_flags,
                 )
-                health_status = state.status
-            return IngestionStats(
-                batch.source_id,
-                len(batch.quotes),
-                accepted,
-                rejected,
-                elapsed,
-                batch.cursor,
-                ordered_flags,
-                health_status,
-            )
-        except Exception as exc:
-            if self.health_store is not None:
-                self.health_store.record_failure(provider.source_id, now=now, error=exc)
             raise
+
+        elapsed = perf_counter() - started
+        health_status = "degraded" if ordered_flags else "healthy"
+        if self.health_store is not None:
+            state = self.health_store.record_success(
+                batch.source_id,
+                now=now,
+                received=len(batch.quotes),
+                accepted=accepted,
+                rejected=rejected,
+                cursor=batch.cursor,
+                latest_source_ts=latest_source_ts,
+                quality_flags=ordered_flags,
+            )
+            health_status = state.status
+        return IngestionStats(
+            batch.source_id,
+            len(batch.quotes),
+            accepted,
+            rejected,
+            elapsed,
+            batch.cursor,
+            ordered_flags,
+            health_status,
+        )
 
 
 def _utc_now_iso() -> str:

@@ -76,6 +76,17 @@ def strategy_id_from_display(display: str) -> str:
         raise ValueError(f"Невідома canonical strategy: {display!r}") from exc
 
 
+def _safe_exception_text(exc: BaseException) -> str:
+    """Describe a caught failure without allowing hostile __str__ to escape containment."""
+
+    name = type(exc).__name__
+    try:
+        detail = str(exc)
+    except BaseException:
+        return f"{name}: <message unavailable>"
+    return f"{name}: {detail}" if detail else name
+
+
 class AutosportApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -94,7 +105,7 @@ class AutosportApp(tk.Tk):
             self.session = AutosportSession(self.workspace, "10000")
         except Exception as exc:
             self._block_workspace_for_recovery(Path(self.workspace))
-            self._startup_economic_error = f"{type(exc).__name__}: {exc}"
+            self._startup_economic_error = _safe_exception_text(exc)
         self.replay_worker = OneShotReplayWorker()
         self.live_worker = OneShotObservationWorker()
         self._active_strategy_id = "baseline-v1"
@@ -363,7 +374,7 @@ class AutosportApp(tk.Tk):
             self._block_workspace_for_recovery(session_workspace)
             self._append_log(
                 "Economic session teardown після quarantine завершився помилкою; "
-                f"workspace={session_workspace}; secondary={type(exc).__name__}: {exc}"
+                f"workspace={session_workspace}; secondary={_safe_exception_text(exc)}"
             )
             return False
         return True

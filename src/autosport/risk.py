@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Context, Decimal, InvalidOperation, Overflow, Underflow, localcontext
+from decimal import Context, Decimal, Inexact, InvalidOperation, Overflow, Underflow, localcontext
 
 from .domain import PaperTicket, TicketStatus
 from .paper import PaperBook
@@ -43,6 +43,10 @@ class PaperRiskPolicy:
         """Return the deterministic context used for risk-state validation and limit arithmetic."""
 
         context = Context(prec=28, Emin=-999999, Emax=999999)
+        # Risk boundaries must never silently relax because Decimal rounded an otherwise-finite
+        # calculation. Inexact covers non-zero discarded digits; exact normalization that only
+        # discards insignificant zeroes remains acceptable.
+        context.traps[Inexact] = True
         context.traps[InvalidOperation] = True
         context.traps[Overflow] = True
         context.traps[Underflow] = True
@@ -86,7 +90,7 @@ class PaperRiskPolicy:
         committed_stake: Decimal,
         amount: Decimal,
     ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | None:
-        """Calculate limit values without leaking Decimal context/range failures."""
+        """Calculate limit values without leaking Decimal context/range or precision failures."""
 
         try:
             with localcontext(self._decimal_context()):

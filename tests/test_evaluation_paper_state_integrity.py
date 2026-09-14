@@ -47,6 +47,38 @@ class EvaluationPaperStateIntegrityTests(unittest.TestCase):
         ):
             evaluate(book)
 
+    def test_subprecision_ticket_economics_are_rejected_instead_of_disappearing(self) -> None:
+        book = PaperBook("1")
+        leg = TicketLeg("event-tiny", "winner", "player-a", Decimal("2"))
+        ticket = PaperTicket(
+            ticket_id="tiny-win",
+            stake=Decimal("1E-29"),
+            legs=(leg,),
+            placed_at="2026-09-14T00:00:00+00:00",
+            status=TicketStatus.WON,
+            payout=Decimal("2E-29"),
+        )
+        book.tickets[ticket.ticket_id] = ticket
+        book.balance = Decimal("1")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "virtual bankroll state is invalid for evaluation",
+        ):
+            evaluate(book)
+
+    def test_exact_large_power_of_ten_book_is_not_rejected_for_representation_rounding(self) -> None:
+        book = PaperBook("1E+28")
+
+        summary = evaluate(book)
+
+        self.assertEqual(summary.initial_bankroll, Decimal("1E+28"))
+        self.assertEqual(summary.final_balance, Decimal("1E+28"))
+        self.assertEqual(summary.committed_stake, Decimal("0"))
+        self.assertEqual(summary.settled_stake, Decimal("0"))
+        self.assertEqual(summary.net_profit, Decimal("0E+1"))
+        self.assertEqual(summary.roi, Decimal("0"))
+
     def test_derived_roi_decimal_range_failure_is_fail_closed_and_context_isolated(self) -> None:
         book = PaperBook(Decimal("1E+999999"))
         leg = TicketLeg("event-1", "winner", "player-a", Decimal("2"))

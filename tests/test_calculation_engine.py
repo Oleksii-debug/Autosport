@@ -71,11 +71,11 @@ def test_multiplicative_devig_is_order_independent_and_sums_to_one() -> None:
 
     assert forward.result_hash == reverse.result_hash
     outputs = _outputs(forward)
-    fair_total = Decimal(outputs["fair_probability.home"]) + Decimal(outputs["fair_probability.away"])
-    assert fair_total == Decimal("1")
     assert Decimal(outputs["overround"]) > Decimal("1")
     with localcontext() as context:
         context.prec = 200
+        fair_total = Decimal(outputs["fair_probability.home"]) + Decimal(outputs["fair_probability.away"])
+        assert fair_total == Decimal("1")
         assert Decimal(outputs["market_margin"]) == Decimal(outputs["overround"]) - Decimal("1")
     assert Decimal(outputs["fair_decimal_odds.home"]) > Decimal("1")
     assert Decimal(outputs["fair_decimal_odds.away"]) > Decimal("1")
@@ -325,6 +325,29 @@ def test_result_serialization_contains_full_truth_and_hashes() -> None:
     assert payload["outputs"] == {"payout": "25", "profit": "15"}
     assert payload["input_hash"] == result.input_hash
     assert payload["result_hash"] == result.result_hash
+
+
+@pytest.mark.parametrize("precision", [6, 10, 28, 50, 100])
+def test_engine_results_are_independent_of_callers_decimal_precision(precision: int) -> None:
+    engine = CalculationEngine()
+
+    with localcontext() as baseline_context:
+        baseline_context.prec = 160
+        baseline = (
+            engine.multiplicative_devig({"home": "2.10", "away": "1.80"}).result_hash,
+            engine.american_to_decimal_odds("-137").result_hash,
+            engine.maximum_drawdown(["100", "123.45", "67.89", "130"]).result_hash,
+        )
+
+    with localcontext() as caller_context:
+        caller_context.prec = precision
+        observed = (
+            engine.multiplicative_devig({"home": "2.10", "away": "1.80"}).result_hash,
+            engine.american_to_decimal_odds("-137").result_hash,
+            engine.maximum_drawdown(["100", "123.45", "67.89", "130"]).result_hash,
+        )
+
+    assert observed == baseline
 
 
 def test_engine_does_not_mutate_callers_decimal_context() -> None:

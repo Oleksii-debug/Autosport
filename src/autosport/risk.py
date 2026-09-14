@@ -33,6 +33,8 @@ class PaperRiskPolicy:
                 raise ValueError(f"{field_name} must be a finite decimal") from exc
             if not value.is_finite():
                 raise ValueError(f"{field_name} must be a finite decimal")
+            if value < 0 or value > 1:
+                raise ValueError(f"{field_name} must be between 0 and 1 inclusive")
             object.__setattr__(self, field_name, value)
 
     def evaluate(self, book: PaperBook, stake: Decimal | str) -> RiskDecision:

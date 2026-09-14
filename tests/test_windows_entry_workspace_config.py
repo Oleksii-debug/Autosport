@@ -41,6 +41,37 @@ def test_valid_workspace_configuration_delegates_to_gui(tmp_path: Path) -> None:
     gui_main.assert_called_once_with()
 
 
+def test_machine_mode_does_not_validate_interactive_workspace() -> None:
+    install_layout = MagicMock()
+    run_diagnostic = MagicMock(return_value=0)
+    fake_layout_module = types.ModuleType("autosport.windows_layout")
+    fake_layout_module.install_compact_windows_layout = install_layout
+    fake_diagnostic_module = types.ModuleType("autosport.diagnostic")
+    fake_diagnostic_module.run_machine_diagnostic = run_diagnostic
+
+    with (
+        patch.dict(
+            sys.modules,
+            {
+                "autosport.windows_layout": fake_layout_module,
+                "autosport.diagnostic": fake_diagnostic_module,
+            },
+        ),
+        patch(
+            "autosport.paths.default_workspace",
+            side_effect=ValueError("AUTOSPORT_WORKSPACE must be an absolute path"),
+        ) as validate_workspace,
+        patch.object(windows_entry, "_show_workspace_configuration_error") as show_error,
+    ):
+        exit_code = windows_entry.main(["--diagnostic-output", "diagnostic.json"])
+
+    assert exit_code == 0
+    install_layout.assert_called_once_with()
+    run_diagnostic.assert_called_once_with("diagnostic.json")
+    validate_workspace.assert_not_called()
+    show_error.assert_not_called()
+
+
 def test_native_workspace_error_dialog_is_actionable_and_accessible_boundary() -> None:
     user32 = MagicMock()
     fake_windll = types.SimpleNamespace(user32=user32)

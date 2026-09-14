@@ -1,18 +1,23 @@
 import unittest
 from decimal import Decimal
 
+from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy
 
 
 class PaperRiskFiniteIntegrityTests(unittest.TestCase):
-    def test_non_finite_or_malformed_stake_is_denied_without_exception(self) -> None:
-        book = PaperBook("100")
-        policy = PaperRiskPolicy(
+    @staticmethod
+    def _permissive_policy() -> PaperRiskPolicy:
+        return PaperRiskPolicy(
             max_ticket_fraction=Decimal("0.50"),
             max_committed_fraction=Decimal("0.90"),
             minimum_cash_reserve_fraction=Decimal("0"),
         )
+
+    def test_non_finite_or_malformed_stake_is_denied_without_exception(self) -> None:
+        book = PaperBook("100")
+        policy = self._permissive_policy()
 
         for value in ("NaN", "sNaN", "Infinity", "-Infinity", "not-a-decimal"):
             with self.subTest(value=value):
@@ -22,6 +27,51 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
 
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
+
+    def test_non_finite_book_financial_state_is_denied_without_exception(self) -> None:
+        policy = self._permissive_policy()
+        for field_name in ("initial_bankroll", "balance"):
+            for value in (
+                Decimal("NaN"),
+                Decimal("sNaN"),
+                Decimal("Infinity"),
+                Decimal("-Infinity"),
+            ):
+                with self.subTest(field_name=field_name, value=str(value)):
+                    book = PaperBook("100")
+                    setattr(book, field_name, value)
+                    decision = policy.evaluate(book, "1")
+                    self.assertFalse(decision.allowed)
+                    self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+
+    def test_noncanonical_or_negative_book_state_is_denied(self) -> None:
+        policy = self._permissive_policy()
+        cases = (
+            ("initial_bankroll", Decimal("0")),
+            ("initial_bankroll", "100"),
+            ("balance", Decimal("-1")),
+            ("balance", "100"),
+        )
+        for field_name, value in cases:
+            with self.subTest(field_name=field_name, value=repr(value)):
+                book = PaperBook("100")
+                setattr(book, field_name, value)
+                decision = policy.evaluate(book, "1")
+                self.assertFalse(decision.allowed)
+                self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+
+    def test_corrupt_open_ticket_stake_is_denied_without_committed_stake_exception(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            [TicketLeg("event-1", "market-1", "selection-1", Decimal("2"))],
+            "10",
+        )
+        ticket.stake = Decimal("sNaN")
+
+        decision = self._permissive_policy().evaluate(book, "1")
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
 
     def test_non_finite_policy_fraction_is_rejected_at_construction(self) -> None:
         defaults = {

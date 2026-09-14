@@ -108,6 +108,19 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "virtual bankroll state is invalid")
 
+    def test_aliased_ticket_identity_cannot_fabricate_valid_ledger_state(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket([self._leg()], "10")
+        book.tickets["alias"] = ticket
+        # The durable loader rejects this duplicated identity, but the economic validator alone
+        # would count the aliased open stake twice and accept this fabricated matching balance.
+        book.balance = Decimal("80")
+
+        decision = self._permissive_policy().evaluate(book, "1")
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+
     def test_inflated_balance_breaking_ledger_equation_is_denied(self) -> None:
         book = PaperBook("100")
         book.open_ticket([self._leg()], "50")

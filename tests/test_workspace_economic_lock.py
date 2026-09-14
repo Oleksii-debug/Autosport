@@ -193,6 +193,78 @@ class WorkspaceEconomicLockTests(unittest.TestCase):
             with WorkspaceEconomicLock(root):
                 pass
 
+    def test_cooperating_reacquire_preserves_canonical_lock_file_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = WorkspaceEconomicLock(root)
+            first.acquire()
+            lock_path = first.path
+            first_path_stat = os.stat(lock_path, follow_symlinks=False)
+            first_handle_stat = os.fstat(first._handle.fileno())
+            self.assertTrue(os.path.samestat(first_path_stat, first_handle_stat))
+            first.release()
+
+            after_release_stat = os.stat(lock_path, follow_symlinks=False)
+            self.assertTrue(os.path.samestat(first_path_stat, after_release_stat))
+
+            second = WorkspaceEconomicLock(root)
+            second.acquire()
+            try:
+                second_path_stat = os.stat(lock_path, follow_symlinks=False)
+                second_handle_stat = os.fstat(second._handle.fileno())
+                self.assertTrue(os.path.samestat(first_path_stat, second_path_stat))
+                self.assertTrue(os.path.samestat(second_path_stat, second_handle_stat))
+            finally:
+                second.release()
+
+    @unittest.skipIf(os.name == "nt", "Windows normally forbids replacing an open lock pathname")
+    def test_external_replacement_after_final_checkpoint_is_outside_advisory_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = WorkspaceEconomicLock(root)
+            lock_path = first.path
+            original_validate = first._validate_open_handle_identity
+            validation_count = 0
+
+            def validate_then_replace_after_final(handle):
+                nonlocal validation_count
+                validation_count += 1
+                original_validate(handle)
+                if validation_count == 2:
+                    # Deliberately act *after* the final validated checkpoint. POSIX
+                    # advisory file locking cannot make a pathname immutable here;
+                    # this external filesystem mutation is explicitly outside the
+                    # cooperating-Autosport contract and this regression prevents a
+                    # future implementation/report from overclaiming otherwise.
+                    os.unlink(lock_path)
+                    lock_path.write_bytes(b"externally-replaced-after-checkpoint")
+
+            with mock.patch.object(
+                first,
+                "_validate_open_handle_identity",
+                side_effect=validate_then_replace_after_final,
+            ):
+                first.acquire()
+
+            self.assertIsNotNone(first._handle)
+            self.assertEqual(lock_path.read_bytes(), b"externally-replaced-after-checkpoint")
+
+            # The replacement inode is independently lockable. This is the explicit
+            # threat-model boundary, not a compliant-writer behavior.
+            second = WorkspaceEconomicLock(root)
+            second.acquire()
+            try:
+                self.assertIsNotNone(second._handle)
+                self.assertFalse(
+                    os.path.samestat(
+                        os.fstat(first._handle.fileno()),
+                        os.fstat(second._handle.fileno()),
+                    )
+                )
+            finally:
+                second.release()
+                first.release()
+
     def test_acquire_preserves_primary_failure_when_cleanup_close_also_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

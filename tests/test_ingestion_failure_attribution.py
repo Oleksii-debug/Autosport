@@ -2,7 +2,8 @@ import unittest
 from decimal import Decimal
 from types import SimpleNamespace
 
-from autosport.ingestion import IngestionEngine
+from autosport.ingestion import CommittedIngestionHealthError, IngestionEngine
+from autosport.market_bus import MarketEventDeliveryError
 from autosport.providers import ProviderBatch, ProviderQuote
 
 
@@ -19,9 +20,12 @@ class _SuccessfulProvider:
 
 
 class _TrackingHealthStore:
-    def __init__(self, *, fail_get: bool = False) -> None:
+    def __init__(self, *, fail_get: bool = False, fail_success: bool = False) -> None:
         self.fail_get = fail_get
+        self.fail_success = fail_success
         self.failure_calls = 0
+        self.success_calls = 0
+        self.last_success: dict[str, object] | None = None
 
     def get(self, source_id: str):
         if self.fail_get:
@@ -32,10 +36,41 @@ class _TrackingHealthStore:
         self.failure_calls += 1
         return None
 
+    def record_success(self, source_id: str, **kwargs):
+        self.success_calls += 1
+        self.last_success = {"source_id": source_id, **kwargs}
+        if self.fail_success:
+            raise OSError("health write failed")
+        quality_flags = tuple(kwargs["quality_flags"])
+        return SimpleNamespace(status="degraded" if quality_flags else "healthy")
+
 
 class _UnusedBus:
     def publish_many(self, events):
         raise AssertionError("local failure must occur before persistence")
+
+
+class _CommittedBus:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.events = ()
+
+    def publish_many(self, events):
+        self.calls += 1
+        self.events = tuple(events)
+        return len(self.events)
+
+
+class _CommittedDeliveryFailingBus(_CommittedBus):
+    def publish_many(self, events):
+        accepted = tuple(events)
+        self.calls += 1
+        self.events = accepted
+        raise MarketEventDeliveryError(
+            "subscriber failed after persistence",
+            [RuntimeError("subscriber failed")],
+            accepted,
+        )
 
 
 class _ExplodingNormalizer:
@@ -99,6 +134,67 @@ class IngestionFailureAttributionTests(unittest.TestCase):
             engine.poll_once(provider, max_items=10)
 
         self.assertEqual(provider.calls, 1)
+        self.assertEqual(health.failure_calls, 0)
+
+    def test_post_commit_health_failure_preserves_exact_outcome_without_republishing(self):
+        health = _TrackingHealthStore(fail_success=True)
+        bus = _CommittedBus()
+        provider = _SuccessfulProvider(ProviderBatch("source", (self._quote(),), cursor="cursor-1"))
+        engine = IngestionEngine(
+            bus,  # type: ignore[arg-type]
+            health_store=health,  # type: ignore[arg-type]
+            clock=lambda: "2026-09-14T08:00:01+00:00",
+        )
+
+        with self.assertRaises(CommittedIngestionHealthError) as raised:
+            engine.poll_once(provider, max_items=10)
+
+        error = raised.exception
+        self.assertIsInstance(error.__cause__, OSError)
+        self.assertIsNone(error.delivery_error)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(bus.calls, 1)
+        self.assertEqual(len(bus.events), 1)
+        self.assertEqual(health.failure_calls, 0)
+        self.assertEqual(health.success_calls, 1)
+        self.assertEqual(error.outcome.source_id, "source")
+        self.assertEqual(error.outcome.received, 1)
+        self.assertEqual(error.outcome.accepted, 1)
+        self.assertEqual(error.outcome.rejected, 0)
+        self.assertEqual(error.outcome.cursor, "cursor-1")
+        self.assertEqual(error.outcome.quality_flags, ())
+        self.assertGreater(error.outcome.elapsed_seconds, 0)
+        self.assertEqual(health.last_success["accepted"], 1)  # type: ignore[index]
+
+        health.fail_success = False
+        state = error.outcome.record_health(health)  # type: ignore[arg-type]
+        recovered = error.outcome.stats(health_status=state.status)
+
+        self.assertEqual(health.success_calls, 2)
+        self.assertEqual(bus.calls, 1)
+        self.assertEqual(recovered.accepted, 1)
+        self.assertEqual(recovered.health_status, "healthy")
+
+    def test_delivery_failure_is_preserved_if_health_write_also_fails(self):
+        health = _TrackingHealthStore(fail_success=True)
+        bus = _CommittedDeliveryFailingBus()
+        provider = _SuccessfulProvider(ProviderBatch("source", (self._quote(),)))
+        engine = IngestionEngine(
+            bus,  # type: ignore[arg-type]
+            health_store=health,  # type: ignore[arg-type]
+            clock=lambda: "2026-09-14T08:00:01+00:00",
+        )
+
+        with self.assertRaises(CommittedIngestionHealthError) as raised:
+            engine.poll_once(provider, max_items=10)
+
+        error = raised.exception
+        self.assertIsInstance(error.__cause__, OSError)
+        self.assertIsInstance(error.delivery_error, MarketEventDeliveryError)
+        self.assertEqual(error.delivery_error.accepted_count, 1)  # type: ignore[union-attr]
+        self.assertEqual(error.outcome.accepted, 1)
+        self.assertEqual(bus.calls, 1)
+        self.assertEqual(health.success_calls, 1)
         self.assertEqual(health.failure_calls, 0)
 
 

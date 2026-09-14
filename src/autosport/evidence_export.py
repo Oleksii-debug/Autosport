@@ -142,10 +142,11 @@ def _resolved(path: Path, *, strict: bool) -> Path:
 def _reject_output_collision(workspace: Path, output: Path) -> None:
     workspace_root = _resolved(workspace, strict=True)
     output_path = _resolved(output, strict=False)
-    if output_path.parent != workspace_root:
+    try:
+        output_path.relative_to(workspace_root)
+    except ValueError:
         return
-    if _is_canonical_evidence_name(output_path.name):
-        raise ValueError("output path must not overwrite canonical workspace evidence")
+    raise ValueError("output path must be outside the Autosport workspace")
 
 
 def _reject_duplicate_manifest_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -307,6 +308,9 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
         }
         payload["manifest_sha256"] = _manifest_sha256(payload)
 
+    # Re-resolve immediately before publication so a destination symlink/ancestor
+    # redirected into the workspace while evidence was being snapshotted fails closed.
+    _reject_output_collision(root, destination)
     atomic_write_json(destination, payload)
     return payload
 

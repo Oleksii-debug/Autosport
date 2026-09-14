@@ -61,6 +61,17 @@ class SettlementEngine:
         if type(book) is not PaperBook:
             raise ValueError("settlement book must be an exact PaperBook")
 
+        # PaperBook instances have an instance dictionary even when their runtime
+        # type is exact. PaperBook.settle() dynamically resolves these two helpers,
+        # so instance-level shadows could succeed for an earlier ticket and fail a
+        # later one after the batch preflight. Reject that caller-controlled apply
+        # dispatch before any economic mutation.
+        if any(
+            helper in vars(book)
+            for helper in ("_normalize_resolution_keys", "_settlement_result")
+        ):
+            raise ValueError("settlement book mutation helpers must not be shadowed")
+
         # The commit phase below relies on stable canonical ticket identity and
         # lifecycle state. Reject caller-mutated PaperBook state before any
         # settlement mutation instead of discovering it after an earlier ticket

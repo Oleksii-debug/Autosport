@@ -54,30 +54,29 @@ class DecisionLedgerSnapshotBindingTests(unittest.TestCase):
             run_ledger.append(self._record("snapshot-swap", 3))
             run_bytes = run_ledger.path.read_bytes()
 
-            original_verify = RunTransaction._verify_decision_ledger
+            original_snapshot = JsonlDecisionLedger.verified_snapshot
             swapped = False
 
-            def verify_then_swap(path: Path, label: str) -> int:
+            def snapshot_then_swap(ledger: JsonlDecisionLedger):
                 nonlocal swapped
-                count = original_verify(path, label)
-                if Path(path) == canonical.path and not swapped:
+                snapshot = original_snapshot(ledger)
+                if ledger.path == canonical.path and not swapped:
                     # Both A and B are individually valid ledgers. The attack is
-                    # identity substitution between the old verify and combine reads,
-                    # not malformed evidence.
+                    # identity substitution after an exact-byte semantic proof, not
+                    # malformed evidence. Production must consume snapshot.payload,
+                    # never reopen the substituted canonical path for combination.
                     canonical.path.write_bytes(replacement_bytes)
                     swapped = True
-                return count
+                return snapshot
 
             with patch.object(
-                RunTransaction,
-                "_verify_decision_ledger",
-                side_effect=verify_then_swap,
+                JsonlDecisionLedger,
+                "verified_snapshot",
+                new=snapshot_then_swap,
             ):
                 tx.stage_outputs(book, canonical.path)
 
-            # A read-once implementation may either fail closed before this point or
-            # construct NEW from the immutable bytes whose BASE identity was verified.
-            # It must never reopen the substituted live path and silently stage B.
+            self.assertTrue(swapped)
             self.assertEqual(
                 tx.staged_ledger_path.read_bytes(),
                 verified_base_bytes + run_bytes,

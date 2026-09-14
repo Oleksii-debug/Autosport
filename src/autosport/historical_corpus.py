@@ -385,6 +385,19 @@ def _outcome_provenance(
                 "source_record_lineage_root_sha256": lineage.lineage_root_sha256,
                 "source_record_lineage_root_revision_id": lineage.lineage_root_revision_id,
                 "source_record_lineage_depth": lineage.lineage_depth,
+                "source_record_lineage": [
+                    {
+                        "revision_id": revision.revision_id,
+                        "revision": revision.revision,
+                        "revision_kind": revision.revision_kind,
+                        "recorded_at": revision.recorded_at,
+                        "record_sha256": revision.record_sha256,
+                        "predecessor_record_sha256": revision.predecessor_record_sha256,
+                        "supersedes_revision_id": revision.supersedes_revision_id,
+                        "correction_reason": revision.correction_reason,
+                    }
+                    for revision in lineage.revisions
+                ],
                 "source_record_lineage_verified": True,
             }
         )
@@ -631,8 +644,9 @@ def assemble_historical_corpus(
 
     results_path_obj = Path(results_path)
     results = _json_object(results_path_obj, context="sealed results")
-    if int(results.get("schema_version", 0)) != 1:
-        raise ValueError("sealed results schema_version must be 1")
+    results_schema_version = results.get("schema_version")
+    if type(results_schema_version) is not int or results_schema_version != 1:
+        raise ValueError("sealed results schema_version must be exact integer 1")
     outcomes = results.get("quote_outcomes")
     if not isinstance(outcomes, dict):
         raise ValueError("sealed results quote_outcomes must be an object")
@@ -751,6 +765,10 @@ def assemble_historical_corpus(
                     ],
                     "source_record_lineage_depth": outcome_provenance[
                         "source_record_lineage_depth"
+                    ],
+                    "source_record_lineage": [
+                        dict(revision)
+                        for revision in outcome_provenance["source_record_lineage"]
                     ],
                     "source_record_lineage_verified": True,
                 }

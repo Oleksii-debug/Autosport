@@ -147,6 +147,33 @@ class DataToolsEntryTests(unittest.TestCase):
         )
         self.assertNotIn("Traceback", stderr.getvalue())
 
+    def test_expected_failure_with_hostile_type_metadata_is_still_fail_closed(self):
+        class BrokenNameMeta(type):
+            def __getattribute__(cls, name):
+                if name == "__name__":
+                    raise RuntimeError("diagnostic type formatter failed")
+                return super().__getattribute__(name)
+
+        class BrokenMetadataValueError(ValueError, metaclass=BrokenNameMeta):
+            def __str__(self):
+                raise RuntimeError("diagnostic string formatter failed")
+
+        stderr = io.StringIO()
+        with patch(
+            "autosport.cli.main",
+            side_effect=BrokenMetadataValueError(),
+        ):
+            with redirect_stderr(stderr):
+                result = data_tools_entry.main(["verify-dataset", "broken-dataset"])
+
+        self.assertEqual(result, 3)
+        self.assertEqual(
+            stderr.getvalue().strip(),
+            "Autosport-Data: verify-dataset=FAIL_CLOSED error=BrokenMetadataValueError: "
+            "BrokenMetadataValueError",
+        )
+        self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_unexpected_programming_failure_is_not_mislabeled_as_expected_input_error(self):
         with patch(
             "autosport.cli.main",

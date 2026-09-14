@@ -60,6 +60,30 @@ class EvaluationPaperStateIntegrityTests(unittest.TestCase):
             self.assertFalse(caller.flags[Overflow])
             self.assertFalse(caller.flags[Underflow])
 
+    def test_inexact_ledger_profit_identity_is_rejected_instead_of_rounded(self) -> None:
+        book = PaperBook("123456789012345678901234567890")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "virtual bankroll state is invalid for evaluation",
+        ):
+            evaluate(book)
+
+    def test_nonterminating_roi_keeps_canonical_decimal_rounding(self) -> None:
+        book = PaperBook("10")
+        lost_leg = TicketLeg("event-lost", "winner", "player-a", Decimal("2"))
+        lost_ticket = book.open_ticket([lost_leg], "2", reason="paper-only loss")
+        book.settle(lost_ticket.ticket_id, set())
+        won_leg = TicketLeg("event-won", "winner", "player-b", Decimal("2"))
+        won_ticket = book.open_ticket([won_leg], "1", reason="paper-only win")
+        book.settle(won_ticket.ticket_id, {won_leg.quote_key})
+
+        summary = evaluate(book)
+
+        self.assertEqual(summary.net_profit, Decimal("-1"))
+        self.assertEqual(summary.settled_stake, Decimal("3"))
+        self.assertEqual(summary.roi, Decimal("-0.3333333333333333333333333333"))
+
     def test_valid_open_and_settled_economics_are_preserved(self) -> None:
         book = PaperBook("100")
         open_leg = TicketLeg("event-open", "winner", "player-a", Decimal("2"))

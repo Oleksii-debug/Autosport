@@ -109,15 +109,39 @@ def _provider_identity(value: object, *, field: str, allow_colon: bool = True) -
     return value
 
 
+def _decode_provider_json(raw: bytes) -> Any:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProviderPayloadError("provider returned invalid UTF-8 JSON") from exc
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in payload:
+                raise ProviderPayloadError(f"provider returned duplicate JSON key {key!r}")
+            payload[key] = value
+        return payload
+
+    def reject_non_finite(value: str) -> None:
+        raise ProviderPayloadError(f"provider returned non-standard JSON constant {value!r}")
+
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_non_finite,
+        )
+    except json.JSONDecodeError as exc:
+        raise ProviderPayloadError("provider returned invalid JSON") from exc
+
+
 def _default_transport(url: str, headers: Mapping[str, str], timeout: float) -> HttpJsonResponse:
     request = Request(url, headers=dict(headers), method="GET")
     try:
         with urlopen(request, timeout=timeout) as response:  # nosec B310 - fixed HTTPS base URL by default
             raw = response.read()
-            try:
-                payload = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise ProviderPayloadError("provider returned invalid JSON") from exc
+            payload = _decode_provider_json(raw)
             return HttpJsonResponse(payload, int(response.status), dict(response.headers.items()))
     except HTTPError as exc:
         retry_after = _parse_retry_after(exc.headers.get("Retry-After") if exc.headers else None)

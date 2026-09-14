@@ -1,6 +1,7 @@
 import unittest
 
 from autosport.keyboard_audit import summarize_keyboard_contract
+from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
 
 
 class KeyboardAuditTests(unittest.TestCase):
@@ -28,12 +29,14 @@ class KeyboardAuditTests(unittest.TestCase):
             "tickets",
             "evaluation",
             "log",
+            "bankroll",
         ]
         return bindings, focus, reachable
 
     def test_keyboard_contract_passes_without_claiming_nvda(self):
         report = summarize_keyboard_contract(*self._passing())
         self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["expected_automation_ids"]["bankroll"], WINDOWS_BANKROLL_AUTOMATION_ID)
         self.assertFalse(report["human_tested"])
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["real_money_execution"])
@@ -58,6 +61,13 @@ class KeyboardAuditTests(unittest.TestCase):
         report = summarize_keyboard_contract(bindings, focus, reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("evaluation" in item for item in report["failures"]))
+
+    def test_bankroll_summary_must_be_tab_reachable(self):
+        bindings, focus, reachable = self._passing()
+        reachable.remove("bankroll")
+        report = summarize_keyboard_contract(bindings, focus, reachable)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(any("bankroll" in item for item in report["failures"]))
 
 
 if __name__ == "__main__":

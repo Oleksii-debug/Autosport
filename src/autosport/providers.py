@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
 from .domain import MarketEvent, MarketType
+
+
+_MAX_PROVIDER_METADATA_NESTING = 64
 
 
 def _validate_source_id(source_id: object) -> str:
@@ -40,6 +45,69 @@ def _validate_sequence(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError("sequence must be a non-boolean int")
     return value
+
+
+def _validate_provider_text(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be str")
+    if not value or value != value.strip():
+        raise ValueError(f"{name} must be non-empty and trimmed")
+    return value
+
+
+def _validate_provider_timestamp(value: object, name: str) -> str:
+    timestamp = _validate_provider_text(value, name)
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be valid ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware ISO-8601")
+    return timestamp
+
+
+def _validate_json_value(value: object, field: str) -> None:
+    """Require bounded durable JSON without type drift, cycles, or non-finite numbers."""
+
+    stack: list[tuple[object, str, int, bool]] = [(value, field, 0, False)]
+    active_containers: set[int] = set()
+
+    while stack:
+        current, path, depth, exiting = stack.pop()
+        if exiting:
+            active_containers.remove(id(current))
+            continue
+
+        if current is None or isinstance(current, (str, bool, int)):
+            continue
+        if isinstance(current, float):
+            if not math.isfinite(current):
+                raise ValueError(f"{path} contains non-finite JSON number")
+            continue
+        if isinstance(current, (list, dict)):
+            if depth > _MAX_PROVIDER_METADATA_NESTING:
+                raise ValueError(
+                    f"{field} exceeds maximum JSON nesting depth "
+                    f"{_MAX_PROVIDER_METADATA_NESTING}"
+                )
+            container_id = id(current)
+            if container_id in active_containers:
+                raise ValueError(f"{path} contains cyclic JSON container")
+            active_containers.add(container_id)
+            stack.append((current, path, depth, True))
+
+            if isinstance(current, list):
+                for index, item in enumerate(current):
+                    stack.append((item, f"{path}[{index}]", depth + 1, False))
+            else:
+                for key, item in current.items():
+                    if not isinstance(key, str):
+                        raise TypeError(f"{path} contains non-string JSON object key")
+                    stack.append((item, f"{path}.{key}", depth + 1, False))
+            continue
+        raise TypeError(
+            f"{path} contains non-canonical JSON value type {type(current).__name__}"
+        )
 
 
 def _scoped_identity(source_id: str, provider_component: str) -> str:
@@ -107,19 +175,32 @@ class CanonicalNormalizer:
             raise ValueError("decimal odds must be finite")
         if quote.decimal_odds <= 1:
             raise ValueError("decimal odds must be greater than 1")
+        observed_ts = _validate_provider_timestamp(quote.observed_ts, "observed_ts")
+        if not isinstance(quote.market_type, MarketType):
+            raise TypeError("market_type must be MarketType")
+        status = _validate_provider_text(quote.status, "status")
+        source_ts = quote.source_ts
+        if source_ts is not None:
+            source_ts = _validate_provider_timestamp(source_ts, "source_ts")
+        score_state = quote.score_state
+        if score_state is not None:
+            score_state = _validate_provider_text(score_state, "score_state")
+        if not isinstance(quote.metadata, dict):
+            raise TypeError("metadata must be dict")
+        _validate_json_value(quote.metadata, "metadata")
         return MarketEvent(
             event_id=_scoped_identity(source_id, quote.provider_event_id),
             market_id=_scoped_identity(source_id, quote.provider_market_id),
             selection_id=_scoped_identity(source_id, quote.provider_selection_id),
             decimal_odds=quote.decimal_odds,
-            observed_ts=quote.observed_ts,
+            observed_ts=observed_ts,
             source_id=source_id,
             sequence=quote.sequence,
             market_type=quote.market_type,
-            status=quote.status,
-            source_ts=quote.source_ts,
-            ingest_ts=quote.observed_ts,
-            score_state=quote.score_state,
+            status=status,
+            source_ts=source_ts,
+            ingest_ts=observed_ts,
+            score_state=score_state,
             metadata=dict(quote.metadata),
         )
 

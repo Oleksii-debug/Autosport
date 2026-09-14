@@ -4,9 +4,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.run_transaction import RunTransaction
-from autosport.strategy_comparison import load_strategy_run_summary
+from autosport.strategy_comparison import load_strategy_run_summary, main
 
 
 class StrategyComparisonJsonIntegrityTests(unittest.TestCase):
@@ -110,6 +111,20 @@ class StrategyComparisonJsonIntegrityTests(unittest.TestCase):
             path = self._write_raw(Path(temp), "nan-summary.json", raw)
             with self.assertRaisesRegex(ValueError, "non-standard JSON constant: NaN"):
                 load_strategy_run_summary(path)
+
+    def test_cli_normalizes_json_recursion_exhaustion_to_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = self._write_raw(root, "deep-summary.json", "{}")
+            output = root / "comparison.json"
+            with patch(
+                "autosport.strategy_comparison.json.loads",
+                side_effect=RecursionError("maximum recursion depth exceeded while decoding JSON"),
+            ):
+                rc = main([str(path), "--output", str(output)])
+
+            self.assertEqual(rc, 2)
+            self.assertFalse(output.exists())
 
     def test_loader_requires_exact_integer_run_summary_schema_version(self) -> None:
         for invalid in (2.0, "2", True):

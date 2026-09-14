@@ -36,6 +36,32 @@ class RecoveryWorkerTerminalLifecycleTests(unittest.TestCase):
         self.assertIsNone(completed.error)
         self.assertFalse(worker.busy)
 
+    def test_unprintable_base_exception_is_terminal_and_worker_can_retry(self) -> None:
+        worker = OneShotRecoveryWorker()
+
+        class BrokenStringError(BaseException):
+            def __str__(self) -> str:
+                raise RuntimeError("broken exception formatter")
+
+        def fails_with_unprintable_error() -> None:
+            raise BrokenStringError()
+
+        self.assertTrue(worker.start(fails_with_unprintable_error))
+        failed = self._terminal(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(
+            failed.error,
+            "BaseException: recovery task failed; exception details unavailable",
+        )
+        self.assertFalse(worker.busy)
+
+        sentinel = object()
+        self.assertTrue(worker.start(lambda: sentinel))
+        completed = self._terminal(worker)
+        self.assertIs(completed.result, sentinel)
+        self.assertIsNone(completed.error)
+        self.assertFalse(worker.busy)
+
     def test_thread_constructor_exception_rolls_back_busy_and_allows_retry(self) -> None:
         worker = OneShotRecoveryWorker()
         with patch(

@@ -21,6 +21,25 @@ class _NamedAgent:
         del event, context
 
 
+class _EventRenamingAgent:
+    name = "event-stable-agent"
+
+    def on_market_event(self, event, context) -> None:
+        del event, context
+        self.name = "event-renamed-after-dispatch"
+
+
+class _FinalizeRenamingAgent:
+    name = "finalize-stable-agent"
+
+    def on_market_event(self, event, context) -> None:
+        del event, context
+
+    def finalize_replay(self, context) -> None:
+        del context
+        self.name = "finalize-renamed-after-callback"
+
+
 class AgentCompositionIdentityTests(unittest.TestCase):
     def test_composition_hash_is_deterministic_and_order_sensitive(self):
         names = ("market-mirror", "paper-baseline")
@@ -61,6 +80,20 @@ class AgentCompositionIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "changed after provenance binding"):
             _ = orchestrator.agent_composition_sha256
         self.assertEqual(len(bound_hash), 64)
+
+    def test_orchestrator_rejects_identity_drift_during_market_callback(self):
+        context = AgentContext(PaperBook("100"))
+        orchestrator = AgentOrchestrator([_EventRenamingAgent()], context)
+
+        with self.assertRaisesRegex(RuntimeError, "changed after provenance binding"):
+            orchestrator.on_market_event(object())
+
+    def test_orchestrator_rejects_identity_drift_during_finalize_callback(self):
+        context = AgentContext(PaperBook("100"))
+        orchestrator = AgentOrchestrator([_FinalizeRenamingAgent()], context)
+
+        with self.assertRaisesRegex(RuntimeError, "changed after provenance binding"):
+            orchestrator.finalize_replay()
 
     def test_strategy_factory_drift_fails_closed(self):
         spec, original_factory = strategies._STRATEGIES["baseline-v1"]

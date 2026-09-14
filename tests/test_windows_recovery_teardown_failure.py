@@ -67,8 +67,7 @@ class WindowsRecoveryTeardownFailureTests(unittest.TestCase):
             detached_before_close: list[bool] = []
 
             class _FailingSession:
-                workspace = prior_workspace
-
+                # Recovery teardown must not require a new session.workspace protocol.
                 def close(self) -> None:
                     detached_before_close.append(app.session is None)
                     raise RuntimeError("teardown exploded")

@@ -61,10 +61,27 @@ class ProbabilityNonFiniteIntegrityTests(unittest.TestCase):
 
     def test_log_loss_rejects_nonfinite_and_out_of_range_epsilon(self) -> None:
         observations = [ForecastObservation(0.5, 1)]
-        for epsilon in (float("nan"), float("inf"), float("-inf"), 0.0, -1.0, 0.5, 1.0, True):
+        for epsilon in (
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            0.0,
+            -1.0,
+            0.5,
+            1.0,
+            True,
+            10**10000,
+        ):
             with self.subTest(epsilon=epsilon):
                 with self.assertRaisesRegex(ValueError, "epsilon must be a finite number"):
                     log_loss(observations, epsilon=epsilon)
+
+    def test_log_loss_rejects_epsilon_that_cannot_move_upper_endpoint(self) -> None:
+        epsilon = math.nextafter(0.0, 1.0)
+        self.assertGreater(epsilon, 0.0)
+        self.assertEqual(1.0 - epsilon, 1.0)
+        with self.assertRaisesRegex(ValueError, "epsilon must be a finite number"):
+            log_loss([ForecastObservation(1.0, 0)], epsilon=epsilon)
 
     def test_finite_probability_economics_remain_unchanged(self) -> None:
         self.assertEqual(implied_probability(Decimal("2.0")), Decimal("0.5"))

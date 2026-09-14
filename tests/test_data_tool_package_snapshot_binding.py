@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import autosport.data_tool_package as data_tool_package
+import autosport.release_package as release_package
 from autosport.release_package import build_windows_package, verify_windows_package
 from scripts.package_windows import _require_verified_package_digest
 
@@ -184,6 +185,60 @@ class PortableDataToolSnapshotBindingTests(unittest.TestCase):
                 "bound package digest does not match the exact verified package snapshot",
             ):
                 _require_verified_package_digest(binding, verification)
+
+    def test_base_writer_digest_rejects_replacement_before_portable_bind(self) -> None:
+        """A valid base B cannot replace authored A and become this invocation's bind input."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate_root = root / "candidate"
+            package, data_exe = self._build_base(candidate_root, "candidate")
+            valid_swap, _ = self._build_base(root / "swap", "swap")
+            valid_swap_bytes = valid_swap.read_bytes()
+            valid_swap_sha = verify_windows_package(
+                valid_swap,
+                expected_source_sha=self.SOURCE_SHA,
+            )["package_sha256"]
+
+            real_replace = os.replace
+
+            def replace_then_substitute(source, destination):
+                real_replace(source, destination)
+                if Path(destination) == package:
+                    Path(destination).write_bytes(valid_swap_bytes)
+
+            with patch.object(
+                release_package.os,
+                "replace",
+                side_effect=replace_then_substitute,
+            ):
+                output, writer_sha = build_windows_package(
+                    candidate_root / "candidate-Autosport.exe",
+                    candidate_root / "candidate-WINDOWS_START_HERE.txt",
+                    candidate_root / "candidate-example",
+                    candidate_root / "candidate-diagnostic.json",
+                    candidate_root / "candidate-accessibility.json",
+                    candidate_root / "candidate-keyboard.json",
+                    candidate_root / "candidate-restart.json",
+                    package,
+                    self.SOURCE_SHA,
+                )
+
+            self.assertEqual(output, package)
+            self.assertEqual(package.read_bytes(), valid_swap_bytes)
+            self.assertNotEqual(writer_sha, valid_swap_sha)
+            with self.assertRaisesRegex(
+                ValueError,
+                "base release package digest does not match exact writer-bound package bytes",
+            ):
+                data_tool_package.bind_portable_data_tool(
+                    package,
+                    data_exe,
+                    expected_base_package_sha256=writer_sha,
+                )
+
+            with zipfile.ZipFile(package, "r") as archive:
+                self.assertNotIn("Autosport-V1/Autosport-Data.exe", archive.namelist())
 
 
 if __name__ == "__main__":

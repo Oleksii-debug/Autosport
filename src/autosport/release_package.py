@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 import zipfile
@@ -97,6 +98,69 @@ def _expected_zip_flag_bits(filename: str) -> int:
     except UnicodeEncodeError:
         return _ZIP_UTF8_FLAG
     return 0
+
+
+def _write_canonical_zip(package_zip: Path, members: dict[str, bytes]) -> str:
+    """Atomically publish one canonical ZIP and return the SHA of its authored bytes.
+
+    Archive construction happens in a private seekable stream. The digest is
+    accumulated while those exact completed bytes are copied to a same-directory
+    publication temp, so a later destination-path replacement cannot redefine the
+    identity returned by the writer.
+    """
+
+    package_zip.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.SpooledTemporaryFile(
+        max_size=_PACKAGE_SNAPSHOT_MEMORY_LIMIT,
+        mode="w+b",
+    ) as authored:
+        with zipfile.ZipFile(
+            authored,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+        ) as archive:
+            for archive_name in sorted(members):
+                info = zipfile.ZipInfo(archive_name, _FIXED_ZIP_TIME)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.create_system = _ZIP_CREATE_SYSTEM
+                info.create_version = _ZIP_CREATE_VERSION
+                info.extract_version = _ZIP_EXTRACT_VERSION
+                info.reserved = _ZIP_RESERVED
+                info.flag_bits = 0
+                info.volume = _ZIP_VOLUME
+                info.internal_attr = _ZIP_INTERNAL_ATTR
+                info.external_attr = (
+                    0o755 if archive_name.lower().endswith(".exe") else 0o644
+                ) << 16
+                archive.writestr(
+                    info,
+                    members[archive_name],
+                    compress_type=zipfile.ZIP_DEFLATED,
+                    compresslevel=9,
+                )
+
+        authored.seek(0)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{package_zip.name}.",
+            suffix=".tmp",
+            dir=package_zip.parent,
+        )
+        publication = Path(tmp_name)
+        digest = hashlib.sha256()
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                for chunk in iter(lambda: authored.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+            writer_sha = digest.hexdigest()
+            os.replace(publication, package_zip)
+            return writer_sha
+        finally:
+            if publication.exists():
+                publication.unlink()
 
 
 def _require_canonical_zip_metadata(
@@ -287,35 +351,12 @@ def build_windows_package(
         encoding="utf-8",
     )
 
-    if output_zip.exists():
-        output_zip.unlink()
-    with zipfile.ZipFile(
-        output_zip,
-        "w",
-        compression=zipfile.ZIP_DEFLATED,
-        compresslevel=9,
-    ) as archive:
-        for path in _sorted_package_files(package_dir):
-            relative = Path("Autosport-V1") / path.relative_to(package_dir)
-            info = zipfile.ZipInfo(relative.as_posix(), _FIXED_ZIP_TIME)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.create_system = _ZIP_CREATE_SYSTEM
-            info.create_version = _ZIP_CREATE_VERSION
-            info.extract_version = _ZIP_EXTRACT_VERSION
-            info.reserved = _ZIP_RESERVED
-            info.flag_bits = 0
-            info.volume = _ZIP_VOLUME
-            info.internal_attr = _ZIP_INTERNAL_ATTR
-            info.external_attr = (
-                0o755 if path.name.lower().endswith(".exe") else 0o644
-            ) << 16
-            archive.writestr(
-                info,
-                path.read_bytes(),
-                compress_type=zipfile.ZIP_DEFLATED,
-                compresslevel=9,
-            )
-    return output_zip, sha256_file(output_zip)
+    archive_members = {
+        (Path("Autosport-V1") / path.relative_to(package_dir)).as_posix(): path.read_bytes()
+        for path in _sorted_package_files(package_dir)
+    }
+    writer_sha = _write_canonical_zip(output_zip, archive_members)
+    return output_zip, writer_sha
 
 
 def verify_windows_package(

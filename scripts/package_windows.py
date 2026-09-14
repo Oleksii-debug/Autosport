@@ -166,7 +166,7 @@ def main() -> int:
 
     _bind_source_sha_to_checkout(args.source_sha, repo_root=Path.cwd())
 
-    output, _base_digest = build_windows_package(
+    output, base_digest = build_windows_package(
         args.exe,
         args.start_file,
         args.example_dir,
@@ -177,7 +177,11 @@ def main() -> int:
         args.output,
         args.source_sha,
     )
-    binding = bind_portable_data_tool(output, args.data_exe)
+    binding = bind_portable_data_tool(
+        output,
+        args.data_exe,
+        expected_base_package_sha256=base_digest,
+    )
     verification = verify_portable_data_tool(output)
     package_sha = _require_verified_package_digest(binding, verification)
     if args.verification_output is not None:

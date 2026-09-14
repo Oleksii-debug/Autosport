@@ -39,6 +39,29 @@ class AgentCompositionIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate agent names"):
             AgentOrchestrator([_NamedAgent(), _NamedAgent()], context)
 
+    def test_orchestrator_exposes_immutable_bound_agent_tuple(self):
+        context = AgentContext(PaperBook("100"))
+        orchestrator = AgentOrchestrator([MarketMirrorAgent()], context)
+
+        self.assertIsInstance(orchestrator.agents, tuple)
+        self.assertEqual(orchestrator.agent_names, ("market-mirror",))
+        with self.assertRaises(AttributeError):
+            orchestrator.agents = ()
+
+    def test_orchestrator_fails_closed_if_agent_identity_drifts_after_binding(self):
+        context = AgentContext(PaperBook("100"))
+        agent = _NamedAgent()
+        orchestrator = AgentOrchestrator([agent], context)
+        bound_hash = orchestrator.agent_composition_sha256
+
+        agent.name = "renamed-after-binding"
+
+        with self.assertRaisesRegex(RuntimeError, "changed after provenance binding"):
+            _ = orchestrator.agent_names
+        with self.assertRaisesRegex(RuntimeError, "changed after provenance binding"):
+            _ = orchestrator.agent_composition_sha256
+        self.assertEqual(len(bound_hash), 64)
+
     def test_strategy_factory_drift_fails_closed(self):
         spec, original_factory = strategies._STRATEGIES["baseline-v1"]
         self.assertIsNotNone(original_factory)

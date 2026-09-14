@@ -61,8 +61,17 @@ class PaperRiskPolicy:
             tickets = book.tickets
             if not isinstance(tickets, dict):
                 return None
-            for ticket in tickets.values():
+            for ticket_key, ticket in tickets.items():
                 if not isinstance(ticket, PaperTicket) or not isinstance(ticket.status, TicketStatus):
+                    return None
+                # PaperBook.load() establishes this identity invariant before validating
+                # economics. Recheck it for mutable in-memory state so an aliased ticket cannot
+                # be counted twice under a fabricated mapping key and corresponding balance.
+                if (
+                    not isinstance(ticket.ticket_id, str)
+                    or not ticket.ticket_id
+                    or ticket_key != ticket.ticket_id
+                ):
                     return None
 
             # Reuse the canonical durable-book invariant rather than trusting a derived aggregate.

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -62,6 +64,12 @@ def _require_portable_run_id(run_id: object) -> str:
 class TransactionRecovery:
     disposition: str
     summary_path: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedFileSnapshot:
+    payload: bytes
+    sha256: str
 
 
 class RunTransaction:
@@ -143,6 +151,10 @@ class RunTransaction:
             "Decision Ledger",
         )
         book.save(self.staged_book_path)
+        book_snapshot = self._verified_paper_book_snapshot(
+            self.staged_book_path,
+            "staged PaperBook",
+        )
         ensure_durable_file(self.run_ledger_path)
         run_snapshot = self._verified_decision_ledger(
             self.run_ledger_path,
@@ -162,7 +174,19 @@ class RunTransaction:
             self.staged_ledger_path,
             "combined staged Decision Ledger",
         )
-        return sha256_file(self.staged_book_path), staged_snapshot.sha256
+        if staged_snapshot.payload != canonical_snapshot.payload + run_snapshot.payload:
+            raise RunTransactionError("combined staged Decision Ledger exact snapshot mismatch")
+
+        # Persist the exact stage boundary before precommit. Later phases must bind
+        # to these exact bytes instead of blessing whichever mutable path happens to
+        # exist when precommit is called.
+        manifest["staged_snapshot"] = {
+            "paper_book_sha256": book_snapshot.sha256,
+            "decision_ledger_sha256": staged_snapshot.sha256,
+            "run_decision_ledger_sha256": run_snapshot.sha256,
+        }
+        atomic_write_json(self.manifest_path, manifest)
+        return book_snapshot.sha256, staged_snapshot.sha256
 
     def precommit(self, summary_payload: dict[str, Any]) -> dict[str, Any]:
         manifest = self._read_manifest()
@@ -175,17 +199,57 @@ class RunTransaction:
             self._hash_field(manifest, "base", "paper_book_sha256"),
             "PaperBook",
         )
-        self._require_decision_ledger_snapshot(
+        canonical_snapshot = self._require_decision_ledger_snapshot(
             self.workspace / "decisions.jsonl",
             self._hash_field(manifest, "base", "decision_ledger_sha256"),
             "Decision Ledger",
         )
+
+        expected_book_hash = self._hash_field(
+            manifest,
+            "staged_snapshot",
+            "paper_book_sha256",
+        )
+        expected_ledger_hash = self._hash_field(
+            manifest,
+            "staged_snapshot",
+            "decision_ledger_sha256",
+        )
+        expected_run_ledger_hash = self._hash_field(
+            manifest,
+            "staged_snapshot",
+            "run_decision_ledger_sha256",
+        )
+
+        book_snapshot = self._verified_paper_book_snapshot(
+            self.staged_book_path,
+            "staged PaperBook",
+        )
+        if book_snapshot.sha256 != expected_book_hash:
+            raise RunTransactionError("staged PaperBook changed after stage_outputs")
+
+        run_snapshot = self._verified_decision_ledger(
+            self.run_ledger_path,
+            "staged run Decision Ledger",
+        )
+        self._require_run_decision_identity(
+            run_snapshot,
+            expected_run_id=self.run_id,
+            label="staged run Decision Ledger",
+        )
+        if run_snapshot.sha256 != expected_run_ledger_hash:
+            raise RunTransactionError("staged run Decision Ledger changed after stage_outputs")
+
         staged_snapshot = self._verified_decision_ledger(
             self.staged_ledger_path,
             "combined staged Decision Ledger",
         )
+        if staged_snapshot.sha256 != expected_ledger_hash:
+            raise RunTransactionError("combined staged Decision Ledger changed after stage_outputs")
+        if staged_snapshot.payload != canonical_snapshot.payload + run_snapshot.payload:
+            raise RunTransactionError("combined staged Decision Ledger exact snapshot mismatch")
 
-        book_hash = sha256_file(self.staged_book_path)
+        book_hash = book_snapshot.sha256
         ledger_hash = staged_snapshot.sha256
         summary = dict(summary_payload)
         summary["paper_book_sha256"] = book_hash
@@ -225,11 +289,12 @@ class RunTransaction:
             raise RunTransactionError("transaction lacks durable precommit evidence")
         self._validate_manifest_paths(manifest)
         # Every artifact that can make the transaction irreversible is preflighted
-        # before the first economic os.replace.  In particular, the run summary must
+        # before the first economic os.replace. In particular, the run summary must
         # remain bound to the same NEW PaperBook and Decision Ledger identities as the
         # manifest; otherwise a tampered manifest could commit mutually inconsistent
         # but individually hash-valid evidence.
         self._validate_precommit_evidence(manifest)
+        self._validate_paper_book_commit_state(manifest)
         self._validate_decision_ledger_commit_state(manifest)
         self._promote_base_or_new(
             target=self.workspace / "paper_book.json",
@@ -416,6 +481,63 @@ class RunTransaction:
             raise RunTransactionError(f"{label} SHA-256 canonical hash is not the expected transaction state")
 
     @staticmethod
+    def _read_file_snapshot(path: Path, label: str) -> VerifiedFileSnapshot:
+        try:
+            with path.open("rb") as handle:
+                payload = handle.read()
+        except OSError as exc:
+            raise RunTransactionError(f"{label} artifact is missing or unreadable") from exc
+        return VerifiedFileSnapshot(
+            payload=payload,
+            sha256=hashlib.sha256(payload).hexdigest(),
+        )
+
+    @classmethod
+    def _verified_paper_book_snapshot(
+        cls,
+        path: Path,
+        label: str,
+    ) -> VerifiedFileSnapshot:
+        snapshot = cls._read_file_snapshot(path, label)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=path.parent,
+                prefix=f".{path.name}.verify-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(snapshot.payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            verification_copy = cls._read_file_snapshot(
+                temporary,
+                f"{label} verification copy",
+            )
+            if verification_copy.sha256 != snapshot.sha256:
+                raise RunTransactionError(f"{label} exact snapshot copy mismatch")
+            PaperBook.load(temporary)
+            verification_after = cls._read_file_snapshot(
+                temporary,
+                f"{label} verification copy",
+            )
+            if verification_after.sha256 != snapshot.sha256:
+                raise RunTransactionError(f"{label} changed during semantic validation")
+        except RunTransactionError:
+            raise
+        except Exception as exc:
+            raise RunTransactionError(f"{label} semantic validation failed: {exc}") from exc
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+        return snapshot
+
+    @staticmethod
     def _verified_decision_ledger(
         path: Path,
         label: str,
@@ -547,6 +669,28 @@ class RunTransaction:
                     f"{label} transaction binding mismatch: " + ",".join(sorted(mismatches))
                 )
 
+    def _validate_paper_book_commit_state(self, manifest: dict[str, Any]) -> None:
+        target = self.workspace / "paper_book.json"
+        if not target.is_file():
+            raise RunTransactionError("PaperBook canonical file is missing")
+        base_hash = self._hash_field(manifest, "base", "paper_book_sha256")
+        new_hash = self._hash_field(manifest, "new", "paper_book_sha256")
+        current_snapshot = self._verified_paper_book_snapshot(
+            target,
+            "canonical PaperBook",
+        )
+        if current_snapshot.sha256 not in {base_hash, new_hash}:
+            raise RunTransactionError("PaperBook SHA-256 canonical hash is neither BASE nor NEW")
+        if current_snapshot.sha256 == base_hash:
+            if not self.staged_book_path.is_file():
+                raise RunTransactionError("staged PaperBook artifact is missing")
+            staged_snapshot = self._verified_paper_book_snapshot(
+                self.staged_book_path,
+                "staged PaperBook",
+            )
+            if staged_snapshot.sha256 != new_hash:
+                raise RunTransactionError("staged PaperBook artifact hash mismatch")
+
     def _validate_decision_ledger_commit_state(self, manifest: dict[str, Any]) -> None:
         target = self.workspace / "decisions.jsonl"
         if not target.is_file():
@@ -600,14 +744,40 @@ class RunTransaction:
 
     @staticmethod
     def _replace_verified(staged: Path, target: Path, expected_hash: str, label: str) -> None:
-        if not staged.is_file():
-            raise RunTransactionError(f"staged {label} artifact is missing")
-        if sha256_file(staged) != expected_hash:
-            raise RunTransactionError(f"staged {label} artifact hash mismatch")
         target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(staged, target)
-        if sha256_file(target) != expected_hash:
-            raise RunTransactionError(f"committed {label} artifact hash mismatch")
+        temporary: Path | None = None
+        try:
+            digest = hashlib.sha256()
+            try:
+                source = staged.open("rb")
+            except OSError as exc:
+                raise RunTransactionError(f"staged {label} artifact is missing or unreadable") from exc
+            with source:
+                with tempfile.NamedTemporaryFile(
+                    "wb",
+                    dir=target.parent,
+                    prefix=f".{target.name}.promote-",
+                    suffix=".tmp",
+                    delete=False,
+                ) as output:
+                    temporary = Path(output.name)
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+            if digest.hexdigest() != expected_hash:
+                raise RunTransactionError(f"staged {label} artifact hash mismatch")
+            os.replace(temporary, target)
+            temporary = None
+            if sha256_file(target) != expected_hash:
+                raise RunTransactionError(f"committed {label} artifact hash mismatch")
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
 
     @staticmethod
     def _write_combined_ledger(base: bytes, appended: bytes, destination: Path) -> None:

@@ -123,7 +123,8 @@ class WorkspaceEconomicLock:
             raise WorkspaceEconomicLockError(
                 "cannot inspect workspace economic lock path"
             ) from exc
-        self._require_single_regular_file(path_stat)
+        self._require_regular_file(path_stat)
+        self._require_single_link(path_stat)
 
     def _validate_open_handle_identity(self, handle: BinaryIO) -> None:
         """Prove the opened handle is the current canonical single-link lock file."""
@@ -135,19 +136,27 @@ class WorkspaceEconomicLock:
             raise WorkspaceEconomicLockError(
                 "workspace economic lock path changed during acquisition"
             ) from exc
-        self._require_single_regular_file(opened_stat)
-        self._require_single_regular_file(path_stat)
+        self._require_regular_file(opened_stat)
+        self._require_regular_file(path_stat)
         if not os.path.samestat(opened_stat, path_stat):
             raise WorkspaceEconomicLockError(
                 "workspace economic lock path changed during acquisition"
             )
+        # Only after proving both stat snapshots identify the same inode can link
+        # count describe aliases of the canonical lock rather than an unlinked old
+        # handle from a pathname-replacement race.
+        self._require_single_link(opened_stat)
+        self._require_single_link(path_stat)
 
     @staticmethod
-    def _require_single_regular_file(path_stat: os.stat_result) -> None:
+    def _require_regular_file(path_stat: os.stat_result) -> None:
         if not stat.S_ISREG(path_stat.st_mode):
             raise WorkspaceEconomicLockError(
                 "workspace economic lock path must be a regular non-symlink file"
             )
+
+    @staticmethod
+    def _require_single_link(path_stat: os.stat_result) -> None:
         if path_stat.st_nlink != 1:
             raise WorkspaceEconomicLockError(
                 "workspace economic lock path must not have hard-link aliases"

@@ -25,6 +25,7 @@ class ReleasePackageManifestSchemaIntegrityTests(unittest.TestCase):
         accessibility = root / "accessibility.json"
         keyboard = root / "keyboard.json"
         restart = root / "restart.json"
+        process_recovery = root / "process-recovery.json"
         package = root / "candidate.zip"
 
         executable.write_bytes(b"autosport-executable")
@@ -49,6 +50,21 @@ class ReleasePackageManifestSchemaIntegrityTests(unittest.TestCase):
                 "recovery_disposition": "aborted_uncommitted",
             },
         )
+        self._write_json(
+            process_recovery,
+            {
+                **common,
+                "audit_id": "real-process-kill-relaunch-recovery-v1",
+                "forced_process_kill_observed": True,
+                "crash_worker_returncode": -9,
+                "recovery_worker_returncode": 0,
+                "recovery_disposition": "aborted_uncommitted",
+                "run_status": "aborted",
+                "manifest_phase": "aborted",
+                "economic_base_preserved": True,
+                "v1_ready": False,
+            },
+        )
 
         build_windows_package(
             executable,
@@ -58,6 +74,7 @@ class ReleasePackageManifestSchemaIntegrityTests(unittest.TestCase):
             accessibility,
             keyboard,
             restart,
+            process_recovery,
             package,
             self.SOURCE_SHA,
         )

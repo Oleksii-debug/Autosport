@@ -25,6 +25,20 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _required_canonical_string(raw: dict[str, Any], field_name: str) -> str:
+    value = raw.get(field_name)
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise ValueError(f"{field_name} must be a non-empty trimmed string")
+    return value
+
+
+def _required_sequence(raw: dict[str, Any]) -> int:
+    value = raw.get("sequence")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("sequence must be a non-boolean int")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class MarketEvent:
     event_id: str
@@ -51,18 +65,29 @@ class MarketEvent:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "MarketEvent":
+        event_id = _required_canonical_string(raw, "event_id")
+        market_id = _required_canonical_string(raw, "market_id")
+        selection_id = _required_canonical_string(raw, "selection_id")
+        observed_ts = _required_canonical_string(raw, "observed_ts")
+        source_id = _required_canonical_string(raw, "source_id")
+        sequence = _required_sequence(raw)
+
+        ingest_ts = raw.get("ingest_ts", observed_ts)
+        if not isinstance(ingest_ts, str) or not ingest_ts or ingest_ts.strip() != ingest_ts:
+            raise ValueError("ingest_ts must be a non-empty trimmed string")
+
         return cls(
-            event_id=str(raw["event_id"]),
-            market_id=str(raw["market_id"]),
-            selection_id=str(raw["selection_id"]),
+            event_id=event_id,
+            market_id=market_id,
+            selection_id=selection_id,
             decimal_odds=Decimal(str(raw["decimal_odds"])),
-            observed_ts=str(raw["observed_ts"]),
-            source_id=str(raw.get("source_id", "fixture")),
-            sequence=int(raw["sequence"]),
+            observed_ts=observed_ts,
+            source_id=source_id,
+            sequence=sequence,
             market_type=MarketType(str(raw.get("market_type", "other"))),
             status=str(raw.get("status", "open")),
             source_ts=raw.get("source_ts"),
-            ingest_ts=str(raw.get("ingest_ts", utc_now_iso())),
+            ingest_ts=ingest_ts,
             score_state=raw.get("score_state"),
             metadata=dict(raw.get("metadata", {})),
         )

@@ -184,7 +184,10 @@ def _event_from_current_row(row: tuple[object, ...]) -> MarketEvent:
     if not isinstance(payload_json, str):
         raise ValueError("current quote projection payload must be JSON text")
     raw = _load_history_payload(payload_json)
-    event = MarketEvent.from_dict(raw)
+    try:
+        event = MarketEvent.from_dict(raw)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("current quote projection payload is not canonical") from exc
     if _canonical_json(raw) != _canonical_payload(event):
         raise ValueError("current quote projection payload is not canonical")
 

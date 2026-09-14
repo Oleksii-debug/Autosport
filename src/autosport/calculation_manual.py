@@ -79,12 +79,13 @@ class ManualCalculationService:
         engine: CalculationEngine | None = None,
         input_boundary: CalculationInputBoundary | None = None,
     ) -> None:
-        if engine is not None and not isinstance(engine, CalculationEngine):
-            raise ValueError("engine must be a CalculationEngine")
-        if input_boundary is not None and not isinstance(
-            input_boundary, CalculationInputBoundary
+        if engine is not None and type(engine) is not CalculationEngine:
+            raise ValueError("engine must be an exact CalculationEngine")
+        if (
+            input_boundary is not None
+            and type(input_boundary) is not CalculationInputBoundary
         ):
-            raise ValueError("input_boundary must be a CalculationInputBoundary")
+            raise ValueError("input_boundary must be an exact CalculationInputBoundary")
         self._engine = engine if engine is not None else CalculationEngine()
         self._input = (
             input_boundary if input_boundary is not None else MANUAL_CALCULATION_INPUT

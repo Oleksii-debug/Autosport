@@ -109,13 +109,15 @@ def test_manual_service_delegates_every_v1_formula_to_canonical_engine() -> None
     )
 
 
-class _ExplodingOddsEngine(CalculationEngine):
-    def odds_conversion(self, decimal_odds):
+def test_invalid_raw_numeric_text_is_rejected_before_engine_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ManualCalculationService()
+
+    def explode(*args, **kwargs):
         raise AssertionError("engine must not receive rejected raw manual input")
 
-
-def test_invalid_raw_numeric_text_is_rejected_before_engine_invocation() -> None:
-    service = ManualCalculationService(engine=_ExplodingOddsEngine())
+    monkeypatch.setattr(CalculationEngine, "odds_conversion", explode)
 
     with pytest.raises(ValueError, match="decimal text"):
         service.odds_conversion(2)
@@ -123,23 +125,17 @@ def test_invalid_raw_numeric_text_is_rejected_before_engine_invocation() -> None
         service.odds_conversion("1" * 129)
 
 
-class _ExplodingCollectionEngine(CalculationEngine):
-    def multiplicative_devig(self, selection_odds):
-        raise AssertionError("engine must not receive over-limit mapping")
+def test_collection_limits_reject_before_later_values_or_engine_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ManualCalculationService()
 
-    def paper_parlay(
-        self,
-        stake,
-        decimal_odds,
-        *,
-        probabilities=None,
-        probability_assumption=None,
-    ):
-        raise AssertionError("engine must not receive over-limit parlay")
+    def explode(*args, **kwargs):
+        raise AssertionError("engine must not receive over-limit collection")
 
+    monkeypatch.setattr(CalculationEngine, "multiplicative_devig", explode)
+    monkeypatch.setattr(CalculationEngine, "paper_parlay", explode)
 
-def test_collection_limits_reject_before_later_values_or_engine_work() -> None:
-    service = ManualCalculationService(engine=_ExplodingCollectionEngine())
     oversized_market = {f"s{index}": "2" for index in range(1000)}
     oversized_market["poison"] = object()
 
@@ -183,10 +179,7 @@ def test_boolean_control_is_exact_and_not_coerced() -> None:
 
 
 def test_default_numeric_arguments_also_cross_manual_input_boundary() -> None:
-    class _ShortNumericBoundary(CalculationInputBoundary):
-        pass
-
-    boundary = _ShortNumericBoundary(CalculationInputLimits(numeric_text_chars=1))
+    boundary = CalculationInputBoundary(CalculationInputLimits(numeric_text_chars=1))
     service = ManualCalculationService(input_boundary=boundary)
 
     # Defaults are canonical raw text, not hidden Decimal objects that bypass #330.
@@ -272,3 +265,16 @@ def test_manual_evidence_constructor_rejects_forged_truth_fields() -> None:
             real_money_execution=valid.real_money_execution,
             evidence_sha256="0" * 64,
         )
+
+
+def test_manual_service_rejects_subclassed_authority_collaborators() -> None:
+    class _EngineSubclass(CalculationEngine):
+        pass
+
+    class _BoundarySubclass(CalculationInputBoundary):
+        pass
+
+    with pytest.raises(ValueError, match="exact CalculationEngine"):
+        ManualCalculationService(engine=_EngineSubclass())
+    with pytest.raises(ValueError, match="exact CalculationInputBoundary"):
+        ManualCalculationService(input_boundary=_BoundarySubclass())

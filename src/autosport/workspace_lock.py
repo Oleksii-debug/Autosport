@@ -37,8 +37,19 @@ class WorkspaceEconomicLock:
                 os.fsync(handle.fileno())
             handle.seek(0)
             self._lock_handle(handle)
-        except BaseException:
-            handle.close()
+        except BaseException as acquire_error:
+            try:
+                handle.close()
+            except BaseException as close_error:
+                # Closing the handle is the only generic cleanup that can prove any
+                # partially-acquired OS lock is gone. If that proof fails, retain
+                # the handle as a poisoned ownership marker so this object cannot
+                # silently reserve another writer slot.
+                self._handle = handle
+                acquire_error.add_note(
+                    "workspace economic lock handle close also failed while cleaning up acquisition failure: "
+                    f"{type(close_error).__name__}: {close_error}"
+                )
             raise
         self._handle = handle
 
@@ -49,10 +60,9 @@ class WorkspaceEconomicLock:
         try:
             self._unlock_handle(handle)
         except BaseException as unlock_error:
-            # The OS handle is still the authority. Always close it and detach this
-            # lock object even if the explicit unlock operation itself failed; a
-            # stale closed handle would otherwise leave the object logically held
-            # forever. Preserve the unlock failure as the primary teardown error.
+            # Closing the handle is the final OS-level release fallback. Detach only
+            # if close succeeds. If both unlock and close fail, ownership is unknown
+            # and the retained handle keeps this object fail-closed/non-reusable.
             try:
                 handle.close()
             except BaseException as close_error:
@@ -60,15 +70,15 @@ class WorkspaceEconomicLock:
                     "workspace economic lock handle close also failed after unlock failure: "
                     f"{type(close_error).__name__}: {close_error}"
                 )
-            finally:
+                self._handle = handle
+            else:
                 self._handle = None
             raise
         try:
             handle.close()
         finally:
-            # Closing can itself fail. Do not retain a stale ownership marker after
-            # teardown was attempted; callers receive the close error and must fail
-            # closed rather than treating this object as a still-valid lock owner.
+            # Explicit unlock succeeded, so OS lock release is proven even if
+            # closing the now-unlocked file handle itself reports an error.
             self._handle = None
 
     def __enter__(self) -> "WorkspaceEconomicLock":

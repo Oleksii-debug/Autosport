@@ -7,6 +7,23 @@ from autosport.settlement import SettlementEngine
 
 
 class SettlementBatchAtomicityTests(unittest.TestCase):
+    @staticmethod
+    def _single_ticket_book() -> tuple[PaperBook, TicketLeg, object]:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T19:30:00+00:00",
+        )
+        return book, leg, ticket
+
+    def _assert_unchanged_open_ticket(self, book, ticket, before_balance, before_lifecycle) -> None:
+        self.assertEqual(book.balance, before_balance)
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+        self.assertEqual(book._lifecycle, before_lifecycle)
+
     def test_later_ready_failure_leaves_entire_batch_unsettled(self) -> None:
         book = PaperBook("9E+999999")
         first_leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
@@ -77,13 +94,7 @@ class SettlementBatchAtomicityTests(unittest.TestCase):
         self.assertEqual(book._lifecycle, before_lifecycle)
 
     def test_invalid_public_outcome_state_cannot_become_false_loss(self) -> None:
-        book = PaperBook("100")
-        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
-        ticket = book.open_ticket(
-            [leg],
-            "10",
-            placed_at="2026-09-14T19:30:00+00:00",
-        )
+        book, leg, ticket = self._single_ticket_book()
         settlement = SettlementEngine({leg.quote_key: "corrupt"})
         before_balance = book.balance
         before_lifecycle = list(book._lifecycle)
@@ -91,10 +102,53 @@ class SettlementBatchAtomicityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported outcome: corrupt"):
             settlement.settle_ready(book)
 
-        self.assertEqual(book.balance, before_balance)
-        self.assertIs(ticket.status, TicketStatus.OPEN)
-        self.assertEqual(ticket.payout, Decimal("0"))
-        self.assertEqual(book._lifecycle, before_lifecycle)
+        self._assert_unchanged_open_ticket(book, ticket, before_balance, before_lifecycle)
+
+    def test_duplicate_iterable_constructor_state_cannot_collapse_to_false_loss(self) -> None:
+        book, leg, ticket = self._single_ticket_book()
+        settlement = SettlementEngine(  # type: ignore[arg-type]
+            [(leg.quote_key, "win"), (leg.quote_key, "loss")]
+        )
+        before_balance = book.balance
+        before_lifecycle = list(book._lifecycle)
+
+        with self.assertRaisesRegex(ValueError, "settlement outcomes must be an exact dict"):
+            settlement.settle_ready(book)
+
+        self._assert_unchanged_open_ticket(book, ticket, before_balance, before_lifecycle)
+
+    def test_coercible_non_mapping_constructor_state_is_rejected_without_mutation(self) -> None:
+        book, leg, ticket = self._single_ticket_book()
+        settlement = SettlementEngine([(leg.quote_key, "win")])  # type: ignore[arg-type]
+        before_balance = book.balance
+        before_lifecycle = list(book._lifecycle)
+
+        with self.assertRaisesRegex(ValueError, "settlement outcomes must be an exact dict"):
+            settlement.settle_ready(book)
+
+        self._assert_unchanged_open_ticket(book, ticket, before_balance, before_lifecycle)
+
+    def test_invalid_quote_key_shape_is_rejected_without_mutation(self) -> None:
+        book, _, ticket = self._single_ticket_book()
+        settlement = SettlementEngine({" quote-key ": "win"})
+        before_balance = book.balance
+        before_lifecycle = list(book._lifecycle)
+
+        with self.assertRaisesRegex(
+            ValueError, "settlement quote key must be a non-empty trimmed string"
+        ):
+            settlement.settle_ready(book)
+
+        self._assert_unchanged_open_ticket(book, ticket, before_balance, before_lifecycle)
+
+    def test_canonical_dict_still_settles_normally(self) -> None:
+        book, leg, ticket = self._single_ticket_book()
+        settlement = SettlementEngine({leg.quote_key: "win"})
+
+        self.assertEqual(settlement.settle_ready(book), [ticket.ticket_id])
+        self.assertIs(ticket.status, TicketStatus.WON)
+        self.assertEqual(ticket.payout, Decimal("20"))
+        self.assertEqual(book.balance, Decimal("110"))
 
 
 if __name__ == "__main__":

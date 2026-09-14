@@ -15,23 +15,44 @@ class SettlementEngine:
 
     outcomes: dict[str, str] = field(default_factory=dict)
 
+    @staticmethod
+    def _validated_outcomes_snapshot(raw: object) -> dict[str, str]:
+        """Snapshot only the canonical public settlement-truth container shape."""
+
+        # Do not coerce arbitrary mappings/iterables with dict(raw): iterable pairs
+        # can contain duplicate quote keys that collapse last-wins before validation.
+        # Requiring the built-in dict also prevents overridden copy/items behavior
+        # from normalizing untrusted public state while this truth boundary snapshots it.
+        if type(raw) is not dict:
+            raise ValueError("settlement outcomes must be an exact dict")
+        snapshot = raw.copy()
+        for quote_key, outcome in snapshot.items():
+            if (
+                type(quote_key) is not str
+                or not quote_key
+                or quote_key.strip() != quote_key
+            ):
+                raise ValueError("settlement quote key must be a non-empty trimmed string")
+            if type(outcome) is not str or outcome not in VALID_OUTCOMES:
+                if type(outcome) is str:
+                    raise ValueError(f"unsupported outcome: {outcome}")
+                raise ValueError("unsupported outcome type")
+        return snapshot
+
     def record(self, quote_outcomes: dict[str, str]) -> None:
-        for quote_key, outcome in quote_outcomes.items():
-            if not isinstance(outcome, str) or outcome not in VALID_OUTCOMES:
-                raise ValueError(f"unsupported outcome: {outcome}")
-            previous = self.outcomes.get(quote_key)
+        current = self._validated_outcomes_snapshot(self.outcomes)
+        incoming = self._validated_outcomes_snapshot(quote_outcomes)
+        for quote_key, outcome in incoming.items():
+            previous = current.get(quote_key)
             if previous is not None and previous != outcome:
                 raise ValueError(f"conflicting settlement for {quote_key}")
-        self.outcomes.update(quote_outcomes)
+        self.outcomes.update(incoming)
 
     def settle_ready(self, book: PaperBook) -> list[str]:
         # Snapshot and revalidate public mutable settlement state. Callers can
-        # construct SettlementEngine with a mapping or mutate outcomes directly,
-        # so record() is not the only ingress to this economic truth boundary.
-        outcomes = dict(self.outcomes)
-        for outcome in outcomes.values():
-            if not isinstance(outcome, str) or outcome not in VALID_OUTCOMES:
-                raise ValueError(f"unsupported outcome: {outcome}")
+        # construct SettlementEngine with invalid runtime values or mutate outcomes
+        # directly, so record() is not the only ingress to this economic truth boundary.
+        outcomes = self._validated_outcomes_snapshot(self.outcomes)
 
         # The commit phase below relies on stable canonical ticket identity and
         # lifecycle state. Reject caller-mutated PaperBook state before any

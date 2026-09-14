@@ -27,19 +27,19 @@ _REQUIRED_PATTERNS = {
 }
 
 _EXPECTED_ROLES = {
-    AUTOMATION_IDS["choose_dataset"]: "BUTTON",
-    AUTOMATION_IDS["run_replay"]: "BUTTON",
-    AUTOMATION_IDS["repair_workspace"]: "BUTTON",
-    AUTOMATION_IDS["replay_speed"]: "COMBOBOX",
-    AUTOMATION_IDS["live_mode"]: "COMBOBOX",
-    AUTOMATION_IDS["live_refresh"]: "BUTTON",
-    AUTOMATION_IDS["strategy"]: "COMBOBOX",
-    AUTOMATION_IDS["research_plan"]: "BUTTON",
+    AUTOMATION_IDS["choose_dataset"]: "PUSH_BUTTON",
+    AUTOMATION_IDS["run_replay"]: "PUSH_BUTTON",
+    AUTOMATION_IDS["repair_workspace"]: "PUSH_BUTTON",
+    AUTOMATION_IDS["replay_speed"]: "COMBO_BOX",
+    AUTOMATION_IDS["live_mode"]: "COMBO_BOX",
+    AUTOMATION_IDS["live_refresh"]: "PUSH_BUTTON",
+    AUTOMATION_IDS["strategy"]: "COMBO_BOX",
+    AUTOMATION_IDS["research_plan"]: "PUSH_BUTTON",
     AUTOMATION_IDS["tickets"]: "LIST",
-    AUTOMATION_IDS["log"]: "EDIT",
+    AUTOMATION_IDS["log"]: "TEXT",
     AUTOMATION_IDS["live_quotes"]: "LIST",
     AUTOMATION_IDS["evaluation"]: "LIST",
-    WINDOWS_BANKROLL_AUTOMATION_ID: "EDIT",
+    WINDOWS_BANKROLL_AUTOMATION_ID: "TEXT",
 }
 
 _ROW_CONTROLS = {

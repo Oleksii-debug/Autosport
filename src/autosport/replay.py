@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import secrets
 import threading
 import time
@@ -28,6 +29,35 @@ def _reject_nonfinite_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON constant: {value}")
 
 
+def _validate_strict_json_value(root: object) -> None:
+    stack = [root]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, str):
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError("JSON string contains invalid Unicode scalar") from exc
+        elif value is None or isinstance(value, (bool, int)):
+            continue
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError("non-finite JSON number")
+        elif isinstance(value, list):
+            stack.extend(value)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                try:
+                    key.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise ValueError(
+                        "JSON object key contains invalid Unicode scalar"
+                    ) from exc
+                stack.append(item)
+        else:
+            raise ValueError(f"unsupported decoded JSON type: {type(value).__name__}")
+
+
 def _parse_jsonl_event(line: str, line_number: int) -> MarketEvent:
     try:
         raw = json.loads(
@@ -35,7 +65,8 @@ def _parse_jsonl_event(line: str, line_number: int) -> MarketEvent:
             object_pairs_hook=_reject_duplicate_json_keys,
             parse_constant=_reject_nonfinite_json_constant,
         )
-    except (json.JSONDecodeError, ValueError) as exc:
+        _validate_strict_json_value(raw)
+    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise ValueError(f"invalid replay JSONL at line {line_number}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"invalid replay JSONL at line {line_number}: event must be a JSON object")

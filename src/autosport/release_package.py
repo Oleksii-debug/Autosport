@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -28,6 +29,7 @@ _WINDOWS_MAX_COMPONENT_UTF16_UNITS = 255
 _GIT_COMMIT_SHA_LENGTH = 40
 _GIT_COMMIT_SHA_CHARS = frozenset("0123456789abcdef")
 _SHA256_LENGTH = 64
+_PACKAGE_SNAPSHOT_MEMORY_LIMIT = 8 * 1024 * 1024
 
 
 class _DuplicateJsonKeyError(ValueError):
@@ -203,29 +205,39 @@ def verify_windows_package(
 
     _require_git_commit_sha(expected_source_sha, field="expected_source_sha")
     package_zip = Path(package_zip)
-    with zipfile.ZipFile(package_zip, "r") as archive:
-        infos = archive.infolist()
-        directory_names = [item.filename for item in infos if item.is_dir()]
-        if directory_names:
-            raise ValueError(
-                "release package contains unsupported directory entries: "
-                + ", ".join(directory_names)
-            )
-        names = [item.filename for item in infos]
-        if len(names) != len(set(names)):
-            raise ValueError("release package contains duplicate member names")
-        members: dict[str, bytes] = {}
-        windows_keys: dict[str, str] = {}
-        for name in names:
-            relative, windows_key = _validate_windows_member(name)
-            previous = windows_keys.get(windows_key)
-            if previous is not None:
+    digest = hashlib.sha256()
+    with package_zip.open("rb") as source, tempfile.SpooledTemporaryFile(
+        max_size=_PACKAGE_SNAPSHOT_MEMORY_LIMIT,
+        mode="w+b",
+    ) as snapshot:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+            snapshot.write(chunk)
+        package_sha = digest.hexdigest()
+        snapshot.seek(0)
+        with zipfile.ZipFile(snapshot, "r") as archive:
+            infos = archive.infolist()
+            directory_names = [item.filename for item in infos if item.is_dir()]
+            if directory_names:
                 raise ValueError(
-                    "release package contains Windows path collision: "
-                    f"{previous} vs {name}"
+                    "release package contains unsupported directory entries: "
+                    + ", ".join(directory_names)
                 )
-            windows_keys[windows_key] = name
-            members[relative] = archive.read(name)
+            names = [item.filename for item in infos]
+            if len(names) != len(set(names)):
+                raise ValueError("release package contains duplicate member names")
+            members: dict[str, bytes] = {}
+            windows_keys: dict[str, str] = {}
+            for name in names:
+                relative, windows_key = _validate_windows_member(name)
+                previous = windows_keys.get(windows_key)
+                if previous is not None:
+                    raise ValueError(
+                        "release package contains Windows path collision: "
+                        f"{previous} vs {name}"
+                    )
+                windows_keys[windows_key] = name
+                members[relative] = archive.read(name)
 
     required = {
         "Autosport.exe",
@@ -314,7 +326,7 @@ def verify_windows_package(
     return {
         "status": "PASS",
         "source_sha": expected_source_sha,
-        "package_sha256": sha256_file(package_zip),
+        "package_sha256": package_sha,
         "autosport_exe_sha256": exe_sha,
         "file_count": len(members),
         "real_money_execution": False,

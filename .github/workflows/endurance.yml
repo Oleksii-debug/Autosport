@@ -35,15 +35,22 @@ jobs:
     name: endurance (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    env:
+      AUTOSPORT_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Verify exact pristine source checkout before endurance
+        run: python scripts/verify_source_checkout.py --source-sha "${{ env.AUTOSPORT_SOURCE_SHA }}"
       - name: Install Autosport
         run: python -m pip install -e .
       - name: Run bounded endurance gate

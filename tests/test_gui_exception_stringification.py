@@ -94,12 +94,13 @@ def test_teardown_exception_with_broken_str_still_quarantines_and_returns_false(
     app._append_log = logs.append
 
     class _FailingSession:
-        workspace = workspace
+        def __init__(self, session_workspace: Path) -> None:
+            self.workspace = session_workspace
 
         def close(self) -> None:
             raise _BrokenTextError()
 
-    app.session = _FailingSession()
+    app.session = _FailingSession(workspace)
 
     result = AutosportApp._hide_uncertain_economic_state(
         app,

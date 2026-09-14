@@ -40,7 +40,7 @@ class ReplayBenchmarkResult:
     dataset_schema_version: int | None = None
     dataset_market_sha256: str | None = None
     dataset_import_identity: str | None = None
-    release_evidence_input: bool = False
+    governed_dataset_input: bool = False
     mode: str = "fastest-event-driven"
     consumer_scope: str = "sqlite-market-store"
     fixture_construction_included: bool = False
@@ -127,7 +127,7 @@ def _measure_events(
     dataset_schema_version: int | None = None,
     dataset_market_sha256: str | None = None,
     dataset_import_identity: str | None = None,
-    release_evidence_input: bool = False,
+    governed_dataset_input: bool = False,
 ) -> ReplayBenchmarkResult:
     count = len(events)
     if count < 2:
@@ -246,7 +246,7 @@ def _measure_events(
         dataset_schema_version=dataset_schema_version,
         dataset_market_sha256=dataset_market_sha256,
         dataset_import_identity=dataset_import_identity,
-        release_evidence_input=release_evidence_input,
+        governed_dataset_input=governed_dataset_input,
     )
 
 
@@ -255,7 +255,7 @@ def run_replay_benchmark(
     count: int = 5_000,
     interval_ms: int = 1_000,
 ) -> ReplayBenchmarkResult:
-    """Run a synthetic smoke/workload benchmark, never release-evidence input.
+    """Run a synthetic smoke/workload benchmark, never target evidence by itself.
 
     Synthetic fixture construction is outside measurement. Because ``interval_ms`` defines an
     artificial recording span, the resulting realtime multiplier must not be presented as a
@@ -270,7 +270,7 @@ def run_replay_benchmark(
         events,
         input_mode="synthetic",
         recording_span_is_synthetic=True,
-        release_evidence_input=False,
+        governed_dataset_input=False,
     )
 
 
@@ -279,10 +279,9 @@ def run_replay_dataset_benchmark(dataset_root: str | Path) -> ReplayBenchmarkRes
 
     Dataset manifest/governance verification and market-event loading are measured as a
     separate input phase through the production ``load_dataset`` boundary. Engine preparation
-    and fastest event-driven dispatch remain separately observable. Schema-v2 governed input
-    is marked as release-evidence-capable input, but ``target_claim`` remains false because the
-    final target still depends on the exact integrated build, target Windows laptop, corpus
-    representativeness, and published environment/result evidence.
+    and fastest event-driven dispatch remain separately observable. Schema-v2 governance is
+    surfaced as an input fact, not as proof that the corpus is representative or that a V1
+    performance target is met. ``target_claim`` therefore remains false on every run.
     """
 
     load_started = time.perf_counter_ns()
@@ -294,7 +293,7 @@ def run_replay_dataset_benchmark(dataset_root: str | Path) -> ReplayBenchmarkRes
         load_ended,
         "input_load_elapsed_seconds",
     )
-    governed_release_input = dataset.schema_version == 2 and dataset.governance is not None
+    governed_input = dataset.schema_version == 2 and dataset.governance is not None
     return _measure_events(
         events,
         input_mode="canonical-dataset",
@@ -304,7 +303,7 @@ def run_replay_dataset_benchmark(dataset_root: str | Path) -> ReplayBenchmarkRes
         dataset_schema_version=dataset.schema_version,
         dataset_market_sha256=dataset.market_sha256,
         dataset_import_identity=dataset.import_identity,
-        release_evidence_input=governed_release_input,
+        governed_dataset_input=governed_input,
     )
 
 

@@ -30,6 +30,7 @@ class ReleasePackageSourceIdentityTests(unittest.TestCase):
                         "missing-accessibility.json",
                         "missing-keyboard.json",
                         "missing-restart.json",
+                        "missing-process-recovery.json",
                         "missing.zip",
                         source_sha,
                     )

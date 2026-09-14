@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bz2
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -28,7 +29,8 @@ class BetfairHistoricalReadOnceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             tmp_path = Path(temporary)
             source = tmp_path / "market.bz2"
-            source.write_bytes(b"original-betfair-bytes")
+            original_bytes = bz2.compress(b'{"op":"mcm","pt":1789372800000}\n')
+            source.write_bytes(original_bytes)
             frozen_paths: tuple[Path, ...] = ()
 
             def fake_import(inputs, output_dir, **_kwargs):
@@ -37,7 +39,7 @@ class BetfairHistoricalReadOnceTests(unittest.TestCase):
                 source.write_bytes(b"replacement-bytes")
                 self.assertEqual(
                     [path.read_bytes() for path in frozen_paths],
-                    [b"original-betfair-bytes"],
+                    [original_bytes],
                 )
                 self.assertTrue(all(path != source for path in frozen_paths))
                 return _report(output_dir)
@@ -56,6 +58,49 @@ class BetfairHistoricalReadOnceTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), b"replacement-bytes")
             self.assertTrue(frozen_paths)
             self.assertTrue(all(not path.exists() for path in frozen_paths))
+
+    def test_product_wrapper_rejects_duplicate_json_members_before_legacy_parse(self) -> None:
+        with TemporaryDirectory() as temporary:
+            tmp_path = Path(temporary)
+            source = tmp_path / "market.jsonl"
+            source.write_text(
+                '{"op":"mcm","mc":[{"id":"1.1","id":"1.2"}]}\n',
+                encoding="utf-8",
+            )
+            output = tmp_path / "dataset"
+
+            with patch.object(read_once, "import_betfair_historical") as legacy_import:
+                with self.assertRaisesRegex(ValueError, "duplicate JSON object member 'id'"):
+                    read_once.import_betfair_historical_read_once(
+                        [source],
+                        output,
+                        acquired_at="2026-09-13T08:00:00Z",
+                        terms_reference="terms",
+                        retention_basis="basis",
+                    )
+
+            legacy_import.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def test_product_wrapper_rejects_nonstandard_json_numeric_constants(self) -> None:
+        with TemporaryDirectory() as temporary:
+            tmp_path = Path(temporary)
+            source = tmp_path / "market.jsonl"
+            source.write_text('{"op":"mcm","pt":NaN}\n', encoding="utf-8")
+            output = tmp_path / "dataset"
+
+            with patch.object(read_once, "import_betfair_historical") as legacy_import:
+                with self.assertRaisesRegex(ValueError, "non-standard JSON numeric constant NaN"):
+                    read_once.import_betfair_historical_read_once(
+                        [source],
+                        output,
+                        acquired_at="2026-09-13T08:00:00Z",
+                        terms_reference="terms",
+                        retention_basis="basis",
+                    )
+
+            legacy_import.assert_not_called()
+            self.assertFalse(output.exists())
 
     def test_windows_data_tool_routes_betfair_import_through_read_once_boundary(self) -> None:
         seen: list[list[str]] = []

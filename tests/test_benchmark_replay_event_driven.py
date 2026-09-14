@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,7 @@ from benchmarks.benchmark_replay_event_driven import (
     _positive_int,
     _source_duration_seconds,
     run_replay_benchmark,
+    run_replay_dataset_benchmark,
 )
 
 
@@ -73,17 +75,29 @@ def test_build_events_is_strictly_chronological_and_dedupe_unique() -> None:
 
 def test_source_duration_uses_recording_span_not_event_count() -> None:
     events = _build_events(4, 250)
+    events = [events[2], events[0], events[3], events[1]]
 
     assert _source_duration_seconds(events) == 0.75
 
 
-def test_small_replay_benchmark_reports_truthful_durable_event_driven_scope() -> None:
+def test_small_synthetic_benchmark_is_explicitly_non_release_evidence() -> None:
     result = run_replay_benchmark(count=8, interval_ms=1_000)
 
     assert result.event_count == 8
     assert result.accepted_events == 8
     assert result.durable_history_events == 8
+    assert result.input_mode == "synthetic"
     assert result.source_duration_seconds == 7.0
+    assert result.recording_span_is_synthetic is True
+    assert result.input_load_elapsed_seconds is None
+    assert result.measured_input_pipeline_elapsed_seconds is None
+    assert result.measured_input_pipeline_events_per_second is None
+    assert result.measured_input_pipeline_realtime_multiplier is None
+    assert result.dataset_name is None
+    assert result.dataset_schema_version is None
+    assert result.dataset_market_sha256 is None
+    assert result.dataset_import_identity is None
+    assert result.release_evidence_input is False
     assert result.mode == "fastest-event-driven"
     assert result.consumer_scope == "sqlite-market-store"
     assert result.fixture_construction_included is False
@@ -113,6 +127,54 @@ def test_small_replay_benchmark_reports_truthful_durable_event_driven_scope() ->
     assert math.isfinite(result.measured_engine_total_realtime_multiplier)
     assert (
         0
+        < result.measured_engine_total_realtime_multiplier
+        < result.dispatch_realtime_multiplier
+    )
+
+
+def test_canonical_dataset_mode_binds_real_input_identity_and_span() -> None:
+    dataset_root = Path(__file__).resolve().parents[1] / "examples" / "tt_demo"
+
+    result = run_replay_dataset_benchmark(dataset_root)
+
+    assert result.input_mode == "canonical-dataset"
+    assert result.recording_span_is_synthetic is False
+    assert result.event_count == result.accepted_events == result.durable_history_events
+    assert result.event_count >= 2
+    assert result.source_duration_seconds > 0
+    assert result.dataset_name == "table-tennis-demo-v1"
+    assert result.dataset_schema_version == 1
+    assert result.dataset_market_sha256 == (
+        "33553b5e0c144997da51ba4555521a6636331ef8e315af0fc78a670e5a32742a"
+    )
+    assert result.dataset_import_identity is None
+    assert result.release_evidence_input is False
+    assert result.target_claim is False
+    assert len(result.replay_dataset_hash) == 64
+
+    assert result.input_load_elapsed_seconds is not None
+    assert result.input_load_elapsed_seconds > 0
+    assert result.measured_input_pipeline_elapsed_seconds is not None
+    assert result.measured_input_pipeline_elapsed_seconds == pytest.approx(
+        result.input_load_elapsed_seconds + result.measured_engine_total_elapsed_seconds
+    )
+    assert (
+        result.measured_input_pipeline_elapsed_seconds
+        > result.measured_engine_total_elapsed_seconds
+        > result.dispatch_elapsed_seconds
+    )
+
+    assert result.measured_input_pipeline_events_per_second is not None
+    assert (
+        0
+        < result.measured_input_pipeline_events_per_second
+        < result.measured_engine_total_events_per_second
+        < result.dispatch_events_per_second
+    )
+    assert result.measured_input_pipeline_realtime_multiplier is not None
+    assert (
+        0
+        < result.measured_input_pipeline_realtime_multiplier
         < result.measured_engine_total_realtime_multiplier
         < result.dispatch_realtime_multiplier
     )

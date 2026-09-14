@@ -107,6 +107,27 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
             self.assertTrue(ledger_path.is_symlink())
             self.assertEqual(external.read_bytes(), expected_external)
 
+    def test_commit_preflight_rejects_symlinked_run_summary_with_exact_new_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx = self._prepare_precommitted(root)
+            summary_path = tx.workspace / f"run-{tx.run_id}.json"
+            external = root / "external-run-summary.json"
+            expected_external = tx.staged_summary_path.read_bytes()
+            external.write_bytes(expected_external)
+            summary_path.symlink_to(external)
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "canonical run summary canonical path must be a regular non-symlink file",
+            ):
+                tx.commit()
+
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["phase"], "precommitted")
+            self.assertTrue(summary_path.is_symlink())
+            self.assertEqual(external.read_bytes(), expected_external)
+
     def test_regular_already_new_commit_retry_remains_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -120,6 +141,7 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
 
             self.assertFalse(book_path.is_symlink())
             self.assertFalse(ledger_path.is_symlink())
+            self.assertFalse(summary_path.is_symlink())
             self.assertEqual(
                 json.loads(tx.manifest_path.read_text(encoding="utf-8"))["phase"],
                 "canonical_committed",
@@ -128,6 +150,7 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
             self.assertEqual(tx.commit(), summary_path)
             self.assertEqual(book_path.read_bytes(), first_book_bytes)
             self.assertEqual(ledger_path.read_bytes(), first_ledger_bytes)
+            self.assertFalse(summary_path.is_symlink())
             self.assertEqual(
                 json.loads(tx.manifest_path.read_text(encoding="utf-8"))["phase"],
                 "canonical_committed",

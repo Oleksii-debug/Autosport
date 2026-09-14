@@ -327,18 +327,41 @@ def _validate_canonical_table(connection: sqlite3.Connection, table_name: str) -
     for index_row in index_rows:
         if len(index_row) < 5:
             raise ValueError(f"{table_name} schema is not canonical: index metadata mismatch")
-        _seq, index_name, unique, origin, _partial = index_row[:5]
+        _seq, index_name, unique, origin, partial = index_row[:5]
         if unique and origin != "pk":
             raise ValueError(
                 f"{table_name} schema is not canonical: extra UNIQUE index {index_name}"
             )
+        if origin not in {"c", "pk"}:
+            raise ValueError(f"{table_name} schema is not canonical: unsupported index origin")
+        if (
+            origin == "c"
+            and not unique
+            and index_name not in _CANONICAL_SECONDARY_INDEXES
+        ):
+            terms = _canonical_index_terms(connection, index_name)
+            if partial != 0 or not terms:
+                raise ValueError(
+                    f"{table_name} schema is not canonical: unsupported secondary index {index_name}"
+                )
 
 
 def _validate_existing_canonical_tables(connection: sqlite3.Connection) -> None:
-    for table_name in _EXPECTED_TABLE_XINFO:
-        schema_object = _schema_object(connection, table_name)
+    existing = {
+        table_name: _schema_object(connection, table_name)
+        for table_name in _EXPECTED_TABLE_XINFO
+    }
+    for table_name, schema_object in existing.items():
         if schema_object is not None:
             _validate_canonical_table(connection, table_name)
+
+    # current_quotes is a derived projection. It is safe to recreate it from
+    # canonical history, but never safe to synthesize missing authoritative
+    # history from a projection that cannot prove what was lost.
+    if existing["market_events"] is None and existing["current_quotes"] is not None:
+        raise ValueError(
+            "market_events schema is not canonical: authoritative history table is missing"
+        )
 
 
 def _ensure_canonical_secondary_indexes(connection: sqlite3.Connection) -> None:

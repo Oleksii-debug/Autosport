@@ -130,6 +130,34 @@ class StorageSchemaIntegrityTests(unittest.TestCase):
             finally:
                 check.close()
 
+    def test_orphan_projection_without_authoritative_history_fails_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "market.db"
+            connection = self._connect(db_path)
+            try:
+                connection.execute(CURRENT_TABLE)
+                connection.execute(
+                    "INSERT INTO current_quotes(quote_key,observed_ts,sequence,payload_json) VALUES (?,?,?,?)",
+                    ("sentinel", "2026-01-01T00:00:00+00:00", 1, "{}"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "authoritative history table is missing"):
+                SQLiteMarketStore(db_path)
+
+            check = self._connect(db_path)
+            try:
+                history = check.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='market_events'"
+                ).fetchone()
+                rows = check.execute("SELECT quote_key FROM current_quotes").fetchall()
+                self.assertIsNone(history)
+                self.assertEqual(rows, [("sentinel",)])
+            finally:
+                check.close()
+
     def test_trigger_on_canonical_table_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "market.db"
@@ -159,6 +187,22 @@ class StorageSchemaIntegrityTests(unittest.TestCase):
                 connection.close()
 
             with self.assertRaisesRegex(ValueError, "extra UNIQUE index unexpected_unique"):
+                SQLiteMarketStore(db_path)
+
+    def test_partial_extra_nonunique_index_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "market.db"
+            connection = self._connect(db_path)
+            try:
+                self._create_canonical_tables(connection)
+                connection.execute(
+                    "CREATE INDEX unsafe_partial ON market_events(event_id) WHERE sequence > 0"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "unsupported secondary index unsafe_partial"):
                 SQLiteMarketStore(db_path)
 
     def test_hidden_collation_semantics_fail_closed(self):

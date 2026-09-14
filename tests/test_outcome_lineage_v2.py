@@ -149,6 +149,99 @@ class OutcomeSourceLineageV2Tests(unittest.TestCase):
             self.assertEqual(lineage.lineage_depth, 2)
             self.assertEqual(lineage.quote_outcomes, {"tt-a|winner|alice": "void"})
 
+    def test_three_revision_descriptor_is_complete_and_root_to_head_ordered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = self._write(
+                root / "outcomes-r1.json",
+                self._record(
+                    revision=1,
+                    revision_id="results-r1",
+                    recorded_at="2026-01-01T11:00:00+00:00",
+                    outcome="win",
+                ),
+            )
+            second = self._write(
+                root / "outcomes-r2.json",
+                self._record(
+                    revision=2,
+                    revision_id="results-r2",
+                    recorded_at="2026-01-01T12:00:00+00:00",
+                    outcome="void",
+                    predecessor=first,
+                    predecessor_revision_id="results-r1",
+                ),
+            )
+            third = self._write(
+                root / "outcomes-r3.json",
+                self._record(
+                    revision=3,
+                    revision_id="results-r3",
+                    recorded_at="2026-01-01T13:00:00+00:00",
+                    outcome="loss",
+                    predecessor=second,
+                    predecessor_revision_id="results-r2",
+                ),
+            )
+
+            lineage = self._validate(root, third)
+
+            self.assertEqual(lineage.lineage_depth, 3)
+            self.assertEqual(
+                [revision.revision_id for revision in lineage.revisions],
+                ["results-r1", "results-r2", "results-r3"],
+            )
+            self.assertEqual(
+                [revision.record_sha256 for revision in lineage.revisions],
+                [self._sha256(first), self._sha256(second), self._sha256(third)],
+            )
+            self.assertIsNone(lineage.revisions[0].predecessor_record_sha256)
+            self.assertEqual(
+                lineage.revisions[1].predecessor_record_sha256,
+                self._sha256(first),
+            )
+            self.assertEqual(
+                lineage.revisions[2].predecessor_record_sha256,
+                self._sha256(second),
+            )
+            self.assertEqual(
+                [revision.supersedes_revision_id for revision in lineage.revisions],
+                [None, "results-r1", "results-r2"],
+            )
+            self.assertEqual(
+                [revision.correction_reason for revision in lineage.revisions],
+                [None, "official result correction", "official result correction"],
+            )
+
+    def test_correction_must_change_outcome_and_preserve_quote_key_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = self._write(
+                root / "outcomes-r1.json",
+                self._record(
+                    revision=1,
+                    revision_id="results-r1",
+                    recorded_at="2026-01-01T11:00:00+00:00",
+                    outcome="win",
+                ),
+            )
+            second_payload = self._record(
+                revision=2,
+                revision_id="results-r2",
+                recorded_at="2026-01-01T12:00:00+00:00",
+                outcome="win",
+                predecessor=first,
+                predecessor_revision_id="results-r1",
+            )
+            second = self._write(root / "outcomes-r2.json", second_payload)
+            with self.assertRaisesRegex(ValueError, "change at least one"):
+                self._validate(root, second)
+
+            second_payload["quote_outcomes"] = {"tt-a|winner|bob": "loss"}
+            self._write(second, second_payload)
+            with self.assertRaisesRegex(ValueError, "quote key set"):
+                self._validate(root, second)
+
     def test_revision_above_one_requires_correction_lineage_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

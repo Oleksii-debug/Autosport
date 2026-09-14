@@ -260,6 +260,11 @@ class AutosportSession:
                 f"({', '.join(foreign_strategy_ids)}). Use a separate workspace per strategy/plan "
                 "so PaperBook, decision-ledger, portfolio and evaluation evidence cannot be mixed."
             )
+        # Validate the append-only audit evidence under the economic lock before its
+        # file hash can become the BASE identity of a new transaction. This prevents
+        # pre-existing corruption from being legitimized by a later successful run.
+        ensure_durable_file(self.ledger.path)
+        self.ledger.verify_integrity()
         # Session construction happens outside WorkspaceEconomicLock. Another process
         # or session may therefore have committed a newer canonical PaperBook while
         # this instance was waiting for the lock. Refresh under the lock instead of
@@ -268,7 +273,6 @@ class AutosportSession:
             self.book = PaperBook.load(self.book_path)
         else:
             self.book.save(self.book_path)
-        ensure_durable_file(self.ledger.path)
 
     def _run_summary_payload(
         self,

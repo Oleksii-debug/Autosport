@@ -39,7 +39,7 @@ def validate_outcome_source_lineage(
     """Validate a schema-v2 append-only correction chain.
 
     ``source_record`` is the already-frozen, already-hash-verified current head.
-    This function deliberately never re-opens ``source_record_file``.  Each
+    This function deliberately never re-opens ``source_record_file``. Each
     predecessor is read exactly once, hashed, and parsed from those same bytes.
     """
 
@@ -58,8 +58,10 @@ def validate_outcome_source_lineage(
     if not isinstance(source_record, dict):
         raise ValueError("sealed outcome source record must be a JSON object")
 
+    source_root_resolved = source_root.resolve()
     current_record = source_record
     visited_files: set[str] = set()
+    visited_paths: set[Path] = {(source_root / current_file).resolve()}
     visited_revision_ids: set[str] = set()
     head: dict[str, Any] | None = None
     head_predecessor_sha: str | None = None
@@ -185,6 +187,15 @@ def validate_outcome_source_lineage(
             head_supersedes_revision_id = supersedes_revision_id
 
         predecessor_path = source_root / predecessor_file
+        predecessor_resolved = predecessor_path.resolve()
+        if predecessor_resolved.parent != source_root_resolved:
+            raise ValueError(
+                "sealed outcome source record predecessor must resolve to a direct sibling artifact"
+            )
+        if predecessor_resolved in visited_paths:
+            raise ValueError("sealed outcome source record lineage contains a path cycle")
+        visited_paths.add(predecessor_resolved)
+
         predecessor_bytes = _read_bytes(predecessor_path)
         actual_predecessor_sha = hashlib.sha256(predecessor_bytes).hexdigest()
         if actual_predecessor_sha != predecessor_sha:

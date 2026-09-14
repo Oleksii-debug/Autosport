@@ -68,6 +68,24 @@ class AtomicWriteJsonTests(unittest.TestCase):
             self.assertEqual(json.loads(destination.read_text(encoding="utf-8")), {"stable": True})
             self.assertEqual(list(destination.parent.glob(f".{destination.name}.*.tmp")), [])
 
+    def test_non_finite_serialization_preserves_destination_and_removes_temporary_file(self) -> None:
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temporary_directory:
+                destination = Path(temporary_directory) / "state.json"
+                integrity.atomic_write_json(destination, {"stable": True})
+
+                with self.assertRaises(ValueError):
+                    integrity.atomic_write_json(destination, {"invalid": value})
+
+                self.assertEqual(
+                    json.loads(destination.read_text(encoding="utf-8")),
+                    {"stable": True},
+                )
+                self.assertEqual(
+                    list(destination.parent.glob(f".{destination.name}.*.tmp")),
+                    [],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

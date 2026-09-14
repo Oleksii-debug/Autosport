@@ -20,15 +20,20 @@ class ReplayBenchmarkResult:
     event_count: int
     interval_ms: int
     source_duration_seconds: float
-    prepare_elapsed_seconds: float
-    replay_elapsed_seconds: float
-    events_per_second: float
-    equivalent_realtime_multiplier: float
+    engine_prepare_elapsed_seconds: float
+    dispatch_elapsed_seconds: float
+    measured_engine_total_elapsed_seconds: float
+    dispatch_events_per_second: float
+    measured_engine_total_events_per_second: float
+    dispatch_realtime_multiplier: float
+    measured_engine_total_realtime_multiplier: float
     accepted_events: int
     durable_history_events: int
     replay_dataset_hash: str
     mode: str = "fastest-event-driven"
     consumer_scope: str = "sqlite-market-store"
+    fixture_construction_included: bool = False
+    sqlite_store_open_included: bool = False
     provider_network_included: bool = False
     agent_callbacks_included: bool = False
     target_claim: bool = False
@@ -50,6 +55,12 @@ def _positive_elapsed_seconds(start_ns: int, end_ns: int, field_name: str) -> fl
     if elapsed_ns <= 0:
         raise ValueError(f"{field_name} measured clock did not advance")
     return elapsed_ns / 1_000_000_000
+
+
+def _finite_positive_metric(name: str, value: float) -> float:
+    if not math.isfinite(value) or value <= 0:
+        raise RuntimeError(f"replay benchmark produced invalid {name}")
+    return value
 
 
 def _build_events(count: int, interval_ms: int) -> list[MarketEvent]:
@@ -93,13 +104,16 @@ def run_replay_benchmark(
     count: int = 5_000,
     interval_ms: int = 1_000,
 ) -> ReplayBenchmarkResult:
-    """Measure fastest event-driven ReplayEngine dispatch into durable local market state.
+    """Measure fastest event-driven replay into durable local market state.
 
-    Event construction is outside the benchmark. Engine preparation (ordering + dataset hash)
-    is measured separately from replay dispatch. The replay timer includes only
-    ReplayEngine.run(speed=0) and synchronous SQLiteMarketStore.append callbacks.
-    Provider/network acquisition and strategy/agent callbacks are deliberately excluded and
-    surfaced as truth fields; this harness reports observations, not a V1 target claim.
+    Fixture construction and SQLite store opening are outside measurement. ReplayEngine
+    preparation (ordering + dataset hash) and event dispatch are measured separately. The
+    dispatch timer includes ReplayEngine.run(speed=0) plus synchronous
+    SQLiteMarketStore.append callbacks. A second metric sums engine preparation + dispatch,
+    so release evidence cannot silently present dispatch-only acceleration as total measured
+    engine work. Provider/network acquisition and strategy/agent callbacks are deliberately
+    excluded and surfaced as truth fields. This harness reports observations, not a V1 target
+    claim.
     """
 
     count = _positive_int("count", count, minimum=2)
@@ -113,7 +127,7 @@ def run_replay_benchmark(
     prepare_elapsed = _positive_elapsed_seconds(
         prepare_started,
         prepare_ended,
-        "prepare_elapsed_seconds",
+        "engine_prepare_elapsed_seconds",
     )
 
     with tempfile.TemporaryDirectory(prefix="autosport-replay-benchmark-") as temp_dir:
@@ -126,13 +140,13 @@ def run_replay_benchmark(
                     raise RuntimeError("replay benchmark event was not durably accepted")
                 accepted += 1
 
-            replay_started = time.perf_counter_ns()
+            dispatch_started = time.perf_counter_ns()
             run = engine.run(consume, speed=0.0, run_id="replay-performance-benchmark")
-            replay_ended = time.perf_counter_ns()
-            replay_elapsed = _positive_elapsed_seconds(
-                replay_started,
-                replay_ended,
-                "replay_elapsed_seconds",
+            dispatch_ended = time.perf_counter_ns()
+            dispatch_elapsed = _positive_elapsed_seconds(
+                dispatch_started,
+                dispatch_ended,
+                "dispatch_elapsed_seconds",
             )
             durable_history_events = len(store.events())
         finally:
@@ -152,21 +166,38 @@ def run_replay_benchmark(
             f"{durable_history_events} != {count}"
         )
 
-    throughput = count / replay_elapsed
-    multiplier = source_duration / replay_elapsed
-    if not math.isfinite(throughput) or throughput <= 0:
-        raise RuntimeError("replay benchmark produced invalid throughput")
-    if not math.isfinite(multiplier) or multiplier <= 0:
-        raise RuntimeError("replay benchmark produced invalid realtime multiplier")
+    measured_total_elapsed = _finite_positive_metric(
+        "measured engine total elapsed seconds",
+        prepare_elapsed + dispatch_elapsed,
+    )
+    dispatch_throughput = _finite_positive_metric(
+        "dispatch throughput",
+        count / dispatch_elapsed,
+    )
+    measured_total_throughput = _finite_positive_metric(
+        "measured engine total throughput",
+        count / measured_total_elapsed,
+    )
+    dispatch_multiplier = _finite_positive_metric(
+        "dispatch realtime multiplier",
+        source_duration / dispatch_elapsed,
+    )
+    measured_total_multiplier = _finite_positive_metric(
+        "measured engine total realtime multiplier",
+        source_duration / measured_total_elapsed,
+    )
 
     return ReplayBenchmarkResult(
         event_count=count,
         interval_ms=interval_ms,
         source_duration_seconds=source_duration,
-        prepare_elapsed_seconds=prepare_elapsed,
-        replay_elapsed_seconds=replay_elapsed,
-        events_per_second=throughput,
-        equivalent_realtime_multiplier=multiplier,
+        engine_prepare_elapsed_seconds=prepare_elapsed,
+        dispatch_elapsed_seconds=dispatch_elapsed,
+        measured_engine_total_elapsed_seconds=measured_total_elapsed,
+        dispatch_events_per_second=dispatch_throughput,
+        measured_engine_total_events_per_second=measured_total_throughput,
+        dispatch_realtime_multiplier=dispatch_multiplier,
+        measured_engine_total_realtime_multiplier=measured_total_multiplier,
         accepted_events=accepted,
         durable_history_events=durable_history_events,
         replay_dataset_hash=run.dataset_hash,

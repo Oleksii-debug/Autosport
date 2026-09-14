@@ -44,6 +44,12 @@ class ProviderSourceIdentityIntegrityTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, field_name):
                         self._quote(**{field_name: value})
 
+    def test_provider_identity_components_reject_quote_key_delimiter(self):
+        for field_name in ("provider_event_id", "provider_market_id", "provider_selection_id"):
+            with self.subTest(field_name=field_name):
+                with self.assertRaisesRegex(ValueError, "reserved identity delimiter"):
+                    self._quote(**{field_name: "left|right"})
+
     def test_provider_sequence_identity_requires_non_boolean_integer(self):
         for value in (True, False, 1.0, "1", Decimal("1")):
             with self.subTest(value=value):
@@ -52,57 +58,21 @@ class ProviderSourceIdentityIntegrityTests(unittest.TestCase):
         self.assertEqual(self._quote(sequence=0).sequence, 0)
         self.assertEqual(self._quote(sequence=-1).sequence, -1)
 
-    def test_reserved_provider_delimiters_are_canonically_escaped_without_rekeying_source(self):
+    def test_deployed_parlay_source_and_colon_bearing_market_identity_are_byte_stable(self):
         quote = self._quote(
-            provider_event_id="match|1",
-            provider_market_id="book:winner|main",
-            provider_selection_id="player%|a",
+            provider_event_id="match-1",
+            provider_market_id="book:h2h:-1.5",
+            provider_selection_id="player-a",
         )
         event = CanonicalNormalizer().normalize("parlayapi:table_tennis", quote)
         self.assertEqual(event.source_id, "parlayapi:table_tennis")
-        self.assertEqual(event.event_id, "parlayapi:table_tennis:match%7C1")
-        self.assertEqual(
-            event.market_id,
-            "parlayapi:table_tennis:book%3Awinner%7Cmain",
-        )
-        self.assertEqual(event.selection_id, "parlayapi:table_tennis:player%25%7Ca")
-        self.assertNotIn("|", event.event_id)
-        self.assertNotIn("|", event.market_id)
-        self.assertNotIn("|", event.selection_id)
-        self.assertEqual(event.quote_key.count("|"), 2)
-
-    def test_deployed_colon_source_prefix_is_stable_for_safe_provider_components(self):
-        event = CanonicalNormalizer().normalize("parlayapi:table_tennis", self._quote())
         self.assertEqual(event.event_id, "parlayapi:table_tennis:match-1")
-        self.assertEqual(event.market_id, "parlayapi:table_tennis:winner")
+        self.assertEqual(event.market_id, "parlayapi:table_tennis:book:h2h:-1.5")
         self.assertEqual(event.selection_id, "parlayapi:table_tennis:player-a")
-
-    def test_cross_source_colon_alias_is_not_possible(self):
-        normalizer = CanonicalNormalizer()
-        first = normalizer.normalize("a:b", self._quote())
-        second = normalizer.normalize(
-            "a",
-            self._quote(
-                provider_event_id="b:match-1",
-                provider_market_id="b:winner",
-                provider_selection_id="b:player-a",
-            ),
+        self.assertEqual(
+            event.quote_key,
+            "parlayapi:table_tennis:match-1|parlayapi:table_tennis:book:h2h:-1.5|parlayapi:table_tennis:player-a",
         )
-        self.assertEqual(first.event_id, "a:b:match-1")
-        self.assertEqual(second.event_id, "a:b%3Amatch-1")
-        self.assertNotEqual(first.event_id, second.event_id)
-        self.assertNotEqual(first.market_id, second.market_id)
-        self.assertNotEqual(first.selection_id, second.selection_id)
-        self.assertNotEqual(first.quote_key, second.quote_key)
-        self.assertNotEqual(first.dedupe_key, second.dedupe_key)
-
-    def test_literal_escape_text_in_source_cannot_alias_raw_source_character(self):
-        normalizer = CanonicalNormalizer()
-        colon_source = normalizer.normalize("a:b", self._quote())
-        literal_escape_source = normalizer.normalize("a%3Ab", self._quote())
-        self.assertEqual(colon_source.event_id, "a:b:match-1")
-        self.assertEqual(literal_escape_source.event_id, "a%3Ab:match-1")
-        self.assertNotEqual(colon_source.quote_key, literal_escape_source.quote_key)
 
     def test_valid_safe_source_identity_is_preserved_exactly_in_canonical_ids(self):
         event = CanonicalNormalizer().normalize("feed_eu", self._quote())

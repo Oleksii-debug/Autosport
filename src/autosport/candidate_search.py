@@ -1,7 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, DecimalException, Overflow, Underflow, localcontext
+from decimal import Context, Decimal, DecimalException, Overflow, ROUND_HALF_EVEN, Underflow, localcontext
+
+
+# Candidate economics must not inherit precision, exponent range, rounding, or traps
+# from unrelated caller code. These values deliberately match Python's ordinary
+# Decimal default arithmetic so existing default-path economics stay unchanged.
+_CANDIDATE_DECIMAL_CONTEXT = Context(
+    prec=28,
+    rounding=ROUND_HALF_EVEN,
+    Emin=-999999,
+    Emax=999999,
+    capitals=1,
+    clamp=0,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,7 +213,7 @@ class BeamParlayCandidateSearch:
     @staticmethod
     def _to_candidate(legs: tuple[CandidateLeg, ...]) -> ParlayCandidate:
         try:
-            with localcontext() as context:
+            with localcontext(_CANDIDATE_DECIMAL_CONTEXT) as context:
                 context.clear_flags()
                 odds = Decimal("1")
                 probability = Decimal("1")

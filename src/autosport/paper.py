@@ -520,6 +520,54 @@ class PaperBook:
         cls._require_finite(parsed, label)
         return parsed
 
+    @staticmethod
+    def _required_snapshot_field(
+        mapping: dict[str, object], field: str, context: str
+    ) -> object:
+        if field not in mapping:
+            raise ValueError(
+                f"PaperBook snapshot {context} is missing required field: {field}"
+            )
+        return mapping[field]
+
+    @classmethod
+    def _parse_snapshot_legs(
+        cls, value: object, ticket_id: str
+    ) -> tuple[TicketLeg, ...]:
+        if type(value) is not list:
+            raise ValueError(f"PaperBook snapshot legs for ticket {ticket_id} must be a list")
+        legs: list[TicketLeg] = []
+        for index, raw_leg in enumerate(value):
+            if type(raw_leg) is not dict:
+                raise ValueError(
+                    f"PaperBook snapshot leg {index} for ticket {ticket_id} must be an object"
+                )
+            legs.append(
+                TicketLeg(
+                    cls._required_snapshot_field(raw_leg, "event_id", "ticket leg"),
+                    cls._required_snapshot_field(raw_leg, "market_id", "ticket leg"),
+                    cls._required_snapshot_field(raw_leg, "selection_id", "ticket leg"),
+                    cls._parse_snapshot_decimal(
+                        cls._required_snapshot_field(raw_leg, "locked_odds", "ticket leg"),
+                        f"locked_odds for ticket {ticket_id}",
+                    ),
+                )
+            )
+        return tuple(legs)
+
+    @staticmethod
+    def _parse_snapshot_status(value: object, ticket_id: str) -> TicketStatus:
+        if not isinstance(value, str):
+            raise ValueError(
+                f"PaperBook snapshot status for ticket {ticket_id} must be a string"
+            )
+        try:
+            return TicketStatus(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"PaperBook snapshot status for ticket {ticket_id} is invalid"
+            ) from exc
+
     @classmethod
     def _from_raw_snapshot(cls, raw: object) -> "PaperBook":
         if type(raw) is not dict:
@@ -532,38 +580,50 @@ class PaperBook:
         ):
             raise ValueError("unsupported PaperBook snapshot schema_version")
 
-        initial_bankroll = cls._parse_snapshot_decimal(raw["initial_bankroll"], "initial_bankroll")
+        initial_bankroll = cls._parse_snapshot_decimal(
+            cls._required_snapshot_field(raw, "initial_bankroll", "root"),
+            "initial_bankroll",
+        )
         book = cls(initial_bankroll)
-        book.balance = cls._parse_snapshot_decimal(raw["balance"], "balance")
-        tickets_raw = raw["tickets"]
+        book.balance = cls._parse_snapshot_decimal(
+            cls._required_snapshot_field(raw, "balance", "root"),
+            "balance",
+        )
+        tickets_raw = cls._required_snapshot_field(raw, "tickets", "root")
         if type(tickets_raw) is not list:
             raise ValueError("PaperBook snapshot tickets must be a list")
         seen_ticket_ids: set[str] = set()
         for item in tickets_raw:
             if type(item) is not dict:
                 raise ValueError("PaperBook snapshot ticket must be an object")
-            ticket_id = cls._require_canonical_text(item["ticket_id"], "snapshot ticket_id")
+            ticket_id = cls._require_canonical_text(
+                cls._required_snapshot_field(item, "ticket_id", "ticket"),
+                "snapshot ticket_id",
+            )
             if ticket_id in seen_ticket_ids:
                 raise ValueError("PaperBook snapshot contains duplicate ticket_id")
             seen_ticket_ids.add(ticket_id)
             ticket = PaperTicket(
                 ticket_id=ticket_id,
-                stake=cls._parse_snapshot_decimal(item["stake"], f"stake for ticket {ticket_id}"),
-                legs=tuple(
-                    TicketLeg(
-                        leg["event_id"],
-                        leg["market_id"],
-                        leg["selection_id"],
-                        cls._parse_snapshot_decimal(
-                            leg["locked_odds"],
-                            f"locked_odds for ticket {ticket_id}",
-                        ),
-                    )
-                    for leg in item["legs"]
+                stake=cls._parse_snapshot_decimal(
+                    cls._required_snapshot_field(item, "stake", f"ticket {ticket_id}"),
+                    f"stake for ticket {ticket_id}",
                 ),
-                placed_at=item["placed_at"],
-                status=TicketStatus(item["status"]),
-                payout=cls._parse_snapshot_decimal(item["payout"], f"payout for ticket {ticket_id}"),
+                legs=cls._parse_snapshot_legs(
+                    cls._required_snapshot_field(item, "legs", f"ticket {ticket_id}"),
+                    ticket_id,
+                ),
+                placed_at=cls._required_snapshot_field(
+                    item, "placed_at", f"ticket {ticket_id}"
+                ),
+                status=cls._parse_snapshot_status(
+                    cls._required_snapshot_field(item, "status", f"ticket {ticket_id}"),
+                    ticket_id,
+                ),
+                payout=cls._parse_snapshot_decimal(
+                    cls._required_snapshot_field(item, "payout", f"ticket {ticket_id}"),
+                    f"payout for ticket {ticket_id}",
+                ),
                 strategy_reason=item.get("strategy_reason", ""),
             )
             book.tickets[ticket.ticket_id] = ticket
@@ -593,11 +653,14 @@ class PaperBook:
             text = payload.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("PaperBook snapshot must be valid UTF-8") from exc
-        raw = json.loads(
-            text,
-            object_pairs_hook=_reject_duplicate_json_keys,
-            parse_constant=_reject_nonfinite_json_constant,
-        )
+        try:
+            raw = json.loads(
+                text,
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
+        except RecursionError as exc:
+            raise ValueError("PaperBook snapshot JSON nesting is too deep") from exc
         return cls._from_raw_snapshot(raw)
 
     @classmethod

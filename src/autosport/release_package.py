@@ -29,6 +29,10 @@ _GIT_COMMIT_SHA_LENGTH = 40
 _GIT_COMMIT_SHA_CHARS = frozenset("0123456789abcdef")
 
 
+class _DuplicateJsonKeyError(ValueError):
+    pass
+
+
 def _require_git_commit_sha(value: str, *, field: str) -> str:
     if (
         not isinstance(value, str)
@@ -277,9 +281,23 @@ def _validate_windows_member(name: str) -> tuple[str, str]:
     return relative, "/".join(normalized_parts)
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateJsonKeyError(key)
+        value[key] = item
+    return value
+
+
 def _decode_json_object(payload: bytes, label: str) -> dict[str, Any]:
     try:
-        value = json.loads(payload.decode("utf-8"))
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+        )
+    except _DuplicateJsonKeyError as exc:
+        raise ValueError(f"{label} contains duplicate JSON object key: {exc.args[0]}") from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{label} is not valid UTF-8 JSON") from exc
     if not isinstance(value, dict):

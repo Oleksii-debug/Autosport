@@ -1,11 +1,21 @@
 $ErrorActionPreference = 'Stop'
+$sourceSha = $env:AUTOSPORT_SOURCE_SHA
+if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
+python scripts/verify_source_checkout.py --source-sha $sourceSha
+if ($LASTEXITCODE -ne 0) { throw "Source checkout preflight exited $LASTEXITCODE" }
 python -m pip install --upgrade pip
-python -m pip install -e '.[build]'
-python -m unittest discover -s tests -v
+if ($LASTEXITCODE -ne 0) { throw "pip upgrade exited $LASTEXITCODE" }
+python -m pip install -e '.[build,test]'
+if ($LASTEXITCODE -ne 0) { throw "build/test dependency install exited $LASTEXITCODE" }
+python -m pytest -v tests
+if ($LASTEXITCODE -ne 0) { throw "Full pytest gate exited $LASTEXITCODE" }
 if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
 python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace
+if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
+if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
+if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }
 
 $diag = Join-Path $PWD 'dist/packaged-diagnostic.json'
 if (Test-Path $diag) { Remove-Item -Force $diag }
@@ -138,10 +148,10 @@ if ([string]::IsNullOrWhiteSpace($walkForwardEvidence.source_sha256) -or $walkFo
 if ($walkForwardEvidence.profitability_claim -ne $false) { throw 'Packaged walk-forward smoke must not claim profitability' }
 if ($walkForwardEvidence.real_money_execution -ne $false) { throw 'Packaged walk-forward smoke must preserve REAL_MONEY_EXECUTION=false' }
 
-$sourceSha = $env:AUTOSPORT_SOURCE_SHA
-if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
 $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
 $packageVerification = Join-Path $PWD 'dist/package-verification.json'
+if (Test-Path $package) { Remove-Item -Force $package }
+if (Test-Path $packageVerification) { Remove-Item -Force $packageVerification }
 python scripts/package_windows.py `
   --exe dist/Autosport.exe `
   --data-exe dist/Autosport-Data.exe `
@@ -154,6 +164,7 @@ python scripts/package_windows.py `
   --output $package `
   --source-sha $sourceSha `
   --verification-output $packageVerification
+if ($LASTEXITCODE -ne 0) { throw "Windows package assembly exited $LASTEXITCODE" }
 
 # Binding release gate: verify the artifact after a clean extraction, not only the
 # pre-package executables. This catches archive/path/packaging defects that a

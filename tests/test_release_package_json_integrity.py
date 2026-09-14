@@ -21,7 +21,12 @@ class ReleasePackageJsonIntegrityTests(unittest.TestCase):
     def _write_json(path: Path, payload: dict) -> None:
         path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
-    def _build_valid_package(self, root: Path) -> Path:
+    def _build_valid_package(
+        self,
+        root: Path,
+        *,
+        include_process_recovery: bool = True,
+    ) -> Path:
         executable = root / "Autosport.exe"
         start = root / "WINDOWS_START_HERE.txt"
         example = root / "example"
@@ -44,27 +49,30 @@ class ReleasePackageJsonIntegrityTests(unittest.TestCase):
         }
         for path in (diagnostic, accessibility, keyboard):
             self._write_json(path, common)
-        self._write_json(
-            restart,
-            {
-                **common,
-                "session_restart_status": "PASS",
-                "transaction_recovery_status": "PASS",
-                "recovery_disposition": "aborted_uncommitted",
-                "process_kill_relaunch_status": "PASS",
-                "process_kill_stage_pid": 101,
-                "process_kill_return_code": -15,
-                "process_recovery_pid": 202,
-                "process_recovery_run_id": "process-recovery-audit-run",
-                "process_recovery_disposition": "committed",
-                "process_recovery_registry_status": "completed",
-                "process_recovery_manifest_phase": "completed",
-                "process_recovery_base_paper_book_sha256": "1" * 64,
-                "process_recovery_base_decision_ledger_sha256": "2" * 64,
-                "process_recovery_new_paper_book_sha256": "3" * 64,
-                "process_recovery_new_decision_ledger_sha256": "4" * 64,
-            },
-        )
+        restart_payload = {
+            **common,
+            "session_restart_status": "PASS",
+            "transaction_recovery_status": "PASS",
+            "recovery_disposition": "aborted_uncommitted",
+        }
+        if include_process_recovery:
+            restart_payload.update(
+                {
+                    "process_kill_relaunch_status": "PASS",
+                    "process_kill_stage_pid": 101,
+                    "process_kill_return_code": -15,
+                    "process_recovery_pid": 202,
+                    "process_recovery_run_id": "process-recovery-audit-run",
+                    "process_recovery_disposition": "committed",
+                    "process_recovery_registry_status": "completed",
+                    "process_recovery_manifest_phase": "completed",
+                    "process_recovery_base_paper_book_sha256": "1" * 64,
+                    "process_recovery_base_decision_ledger_sha256": "2" * 64,
+                    "process_recovery_new_paper_book_sha256": "3" * 64,
+                    "process_recovery_new_decision_ledger_sha256": "4" * 64,
+                }
+            )
+        self._write_json(restart, restart_payload)
 
         build_windows_package(
             executable,
@@ -161,13 +169,25 @@ class ReleasePackageJsonIntegrityTests(unittest.TestCase):
 
     def test_json_decoder_rejects_nonstandard_constants_recursively(self) -> None:
         for constant in ("NaN", "Infinity", "-Infinity"):
-            payload = f'{{"outer":{{"score":{constant}}}}'.encode("utf-8")
+            payload = ('{"outer":{"score":' + constant + '}}').encode("utf-8")
             with self.subTest(constant=constant):
                 with self.assertRaisesRegex(
                     ValueError,
                     rf"non-standard JSON constant: {constant}",
                 ):
                     _decode_json_object(payload, "evidence.json")
+
+    def test_verifier_rejects_legacy_restart_evidence_without_process_boundary_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_valid_package(
+                Path(temporary),
+                include_process_recovery=False,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "does not prove real process kill/relaunch PASS",
+            ):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
 
     def test_verifier_rejects_hash_consistent_manifest_with_duplicate_key(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

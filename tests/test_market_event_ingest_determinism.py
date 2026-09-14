@@ -179,6 +179,41 @@ def test_deserialization_preserves_canonical_optional_fields() -> None:
     assert event.metadata is not metadata
 
 
+@pytest.mark.parametrize(
+    "source_ts",
+    [
+        "2026-09-12T09:59:59Z",
+        "2026-09-12T09:59:59+02:30",
+        "2026-09-12T09:59:59-04:00",
+    ],
+)
+def test_deserialization_preserves_timezone_aware_source_timestamp(source_ts: str) -> None:
+    payload = _event_payload()
+    payload["source_ts"] = source_ts
+
+    event = MarketEvent.from_dict(payload)
+
+    assert event.source_ts == source_ts
+
+
+@pytest.mark.parametrize(
+    ("source_ts", "error"),
+    [
+        ("not-a-time", "source_ts must be valid ISO-8601"),
+        ("2026-09-12T09:59:59", "source_ts must be timezone-aware ISO-8601"),
+    ],
+)
+def test_deserialization_rejects_invalid_source_timestamp(
+    source_ts: str,
+    error: str,
+) -> None:
+    payload = _event_payload()
+    payload["source_ts"] = source_ts
+
+    with pytest.raises(ValueError, match=error):
+        MarketEvent.from_dict(payload)
+
+
 def test_deserialization_preserves_optional_defaults() -> None:
     payload = _event_payload()
     del payload["market_type"]
@@ -285,4 +320,28 @@ def test_replay_jsonl_rejects_coerced_optional_status(tmp_path) -> None:
     )
 
     with pytest.raises(ValueError, match="status must be a non-empty trimmed string"):
+        ReplayEngine.from_jsonl(replay_path)
+
+
+@pytest.mark.parametrize(
+    ("source_ts", "error"),
+    [
+        ("not-a-time", "source_ts must be valid ISO-8601"),
+        ("2026-09-12T09:59:59", "source_ts must be timezone-aware ISO-8601"),
+    ],
+)
+def test_replay_jsonl_rejects_invalid_source_timestamp(
+    tmp_path,
+    source_ts: str,
+    error: str,
+) -> None:
+    payload = _event_payload()
+    payload["source_ts"] = source_ts
+    replay_path = tmp_path / "invalid-source-timestamp-replay.jsonl"
+    replay_path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=error):
         ReplayEngine.from_jsonl(replay_path)

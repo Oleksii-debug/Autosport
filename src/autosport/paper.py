@@ -9,6 +9,15 @@ from pathlib import Path
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError(f"PaperBook snapshot contains duplicate JSON key: {key}")
+        payload[key] = value
+    return payload
+
+
 class PaperBook:
     """Virtual bankroll and auditable paper tickets. No real-money execution path exists."""
 
@@ -149,7 +158,10 @@ class PaperBook:
 
     @classmethod
     def load(cls, path: str | Path) -> "PaperBook":
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        raw = json.loads(
+            Path(path).read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
         book = cls(raw["initial_bankroll"])
         book.balance = Decimal(raw["balance"])
         seen_ticket_ids: set[str] = set()

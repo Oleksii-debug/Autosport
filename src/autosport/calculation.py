@@ -432,8 +432,9 @@ class CalculationEngine:
             field="starting_bankroll",
             greater_than=Decimal("0"),
         )
-        roi = _divide(profit, bankroll)
+        roi = _divide(profit, turnover_value)
         yield_value = _divide(profit, turnover_value)
+        bankroll_return = _divide(profit, bankroll)
         return _result(
             calculation_id="performance_summary",
             method="paper_return_ratios",
@@ -448,9 +449,22 @@ class CalculationEngine:
                 "turnover": "paper_currency",
                 "starting_bankroll": "paper_currency",
             },
-            assumptions=("profit, turnover, and bankroll refer to the same paper accounting scope",),
-            outputs={"roi": roi, "yield": yield_value, "turnover": turnover_value},
-            output_units={"roi": "fraction", "yield": "fraction", "turnover": "paper_currency"},
+            assumptions=(
+                "profit, turnover, and bankroll refer to the same paper accounting scope",
+                "turnover is the settled-stake denominator used by canonical product ROI and yield semantics",
+            ),
+            outputs={
+                "roi": roi,
+                "yield": yield_value,
+                "bankroll_return": bankroll_return,
+                "turnover": turnover_value,
+            },
+            output_units={
+                "roi": "fraction",
+                "yield": "fraction",
+                "bankroll_return": "fraction",
+                "turnover": "paper_currency",
+            },
             warnings=("ratio division is rounded in the deterministic decimal context",),
         )
 
@@ -771,6 +785,10 @@ class CalculationEngine:
 def _text_key(value: object, *, field: str) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
         raise ValueError(f"{field} must be a non-empty trimmed string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must be UTF-8 encodable") from exc
     return value
 
 

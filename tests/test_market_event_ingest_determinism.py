@@ -54,19 +54,64 @@ def test_replay_jsonl_without_ingest_timestamp_has_stable_dataset_hash(tmp_path)
     assert first.dataset_hash == second.dataset_hash
 
 
-@pytest.mark.parametrize("source_id", [7, True, "", " fixture "])
-def test_deserialization_rejects_noncanonical_source_identity(source_id: object) -> None:
+@pytest.mark.parametrize(
+    "field_name",
+    ["event_id", "market_id", "selection_id", "observed_ts", "source_id"],
+)
+@pytest.mark.parametrize("value", [7, True, "", " padded "])
+def test_deserialization_rejects_noncanonical_required_string_fields(
+    field_name: str,
+    value: object,
+) -> None:
     payload = _event_payload()
-    payload["source_id"] = source_id
+    payload[field_name] = value
+
+    with pytest.raises(ValueError, match=rf"{field_name} must be a non-empty trimmed string"):
+        MarketEvent.from_dict(payload)
+
+
+def test_deserialization_rejects_missing_source_identity() -> None:
+    payload = _event_payload()
+    del payload["source_id"]
 
     with pytest.raises(ValueError, match="source_id must be a non-empty trimmed string"):
         MarketEvent.from_dict(payload)
 
 
-def test_deserialization_preserves_canonical_source_identity_byte_for_byte() -> None:
+@pytest.mark.parametrize("sequence", [True, 1.0, "1", None])
+def test_deserialization_rejects_coerced_sequence_identity(sequence: object) -> None:
     payload = _event_payload()
-    payload["source_id"] = "parlayapi:table_tennis"
+    payload["sequence"] = sequence
+
+    with pytest.raises(ValueError, match="sequence must be a non-boolean int"):
+        MarketEvent.from_dict(payload)
+
+
+@pytest.mark.parametrize("ingest_ts", [7, True, "", " 2026-09-12T10:00:05+00:00 "])
+def test_deserialization_rejects_noncanonical_explicit_ingest_timestamp(ingest_ts: object) -> None:
+    payload = _event_payload()
+    payload["ingest_ts"] = ingest_ts
+
+    with pytest.raises(ValueError, match="ingest_ts must be a non-empty trimmed string"):
+        MarketEvent.from_dict(payload)
+
+
+def test_deserialization_preserves_canonical_identity_bytes() -> None:
+    payload = _event_payload()
+    payload.update(
+        {
+            "event_id": "parlayapi:table_tennis:event-42",
+            "market_id": "parlayapi:table_tennis:book:h2h:-1.5",
+            "selection_id": "parlayapi:table_tennis:player-a",
+            "source_id": "parlayapi:table_tennis",
+            "sequence": 42,
+        }
+    )
 
     event = MarketEvent.from_dict(payload)
 
-    assert event.source_id == "parlayapi:table_tennis"
+    assert event.event_id == payload["event_id"]
+    assert event.market_id == payload["market_id"]
+    assert event.selection_id == payload["selection_id"]
+    assert event.source_id == payload["source_id"]
+    assert event.sequence == 42

@@ -4,6 +4,7 @@ from collections.abc import Iterator
 
 import pytest
 
+import benchmarks.benchmark_portfolio_recompute_latency as benchmark
 from autosport.portfolio import PortfolioEngine
 from benchmarks.benchmark_portfolio_recompute_latency import (
     _build_portfolio,
@@ -85,3 +86,33 @@ def test_small_benchmark_reports_complete_exact_affected_workload() -> None:
     assert result.p95_ms == pytest.approx(0.00001)
     assert result.p99_ms == pytest.approx(0.00001)
     assert result.max_ms == pytest.approx(0.00001)
+
+
+def test_cli_output_preserves_target_truth_boundary(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(
+        benchmark,
+        "run_latency_benchmark",
+        lambda **_kwargs: benchmark.PortfolioRecomputeLatencyResult(
+            total_tickets=12,
+            event_count=3,
+            tickets_per_event=4,
+            measured_updates=7,
+            warmup_updates=2,
+            affected_tickets_per_update=4,
+            scenarios_per_update=16,
+            p50_ms=1.0,
+            p95_ms=2.0,
+            p99_ms=3.0,
+            max_ms=4.0,
+        ),
+    )
+    monkeypatch.setattr("sys.argv", ["benchmark_portfolio_recompute_latency.py"])
+
+    benchmark.main()
+
+    output = capsys.readouterr().out.strip()
+    assert "scope=affected_ticket_discovery_plus_exact_subgraph_analysis" in output
+    assert "target_machine_required=true" in output
+    assert "target_claim=false" in output
+    assert "target_p95_ms=100" in output
+    assert "p95_ms=2.000" in output

@@ -10,9 +10,39 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from .domain import MarketEvent, utc_now_iso
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        payload[key] = value
+    return payload
+
+
+def _reject_nonfinite_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _parse_jsonl_event(line: str, line_number: int) -> MarketEvent:
+    try:
+        raw = json.loads(
+            line,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid replay JSONL at line {line_number}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"invalid replay JSONL at line {line_number}: event must be a JSON object")
+    try:
+        return MarketEvent.from_dict(raw)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid replay event schema at line {line_number}") from exc
 
 
 class FutureLeakageError(RuntimeError):
@@ -95,11 +125,21 @@ class ReplayEngine:
 
     @classmethod
     def from_jsonl(cls, path: str | Path, firewall: ReplayLeakageFirewall | None = None) -> "ReplayEngine":
+        source = Path(path)
         events: list[MarketEvent] = []
-        with Path(path).open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    events.append(MarketEvent.from_dict(json.loads(line)))
+        try:
+            with source.open("rb") as handle:
+                for line_number, raw_line in enumerate(handle, start=1):
+                    try:
+                        line = raw_line.decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise ValueError(
+                            f"invalid replay JSONL UTF-8 at line {line_number}"
+                        ) from exc
+                    if line.strip():
+                        events.append(_parse_jsonl_event(line, line_number))
+        except OSError as exc:
+            raise ValueError(f"unable to read replay JSONL: {source}") from exc
         return cls(events, firewall)
 
     def run(

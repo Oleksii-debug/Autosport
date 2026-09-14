@@ -70,6 +70,23 @@ class LiveObservationTests(unittest.TestCase):
             self.assertTrue((Path(tmp) / "source_health.json").exists())
             self.assertFalse((Path(tmp) / "paper_book.json").exists())
 
+    def test_workspace_observer_closes_market_store_if_health_store_init_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("autosport.live_observation.SQLiteMarketStore") as store_type:
+                with patch(
+                    "autosport.live_observation.SourceHealthStore",
+                    side_effect=OSError("health-store-init-failed"),
+                ):
+                    with self.assertRaisesRegex(OSError, "health-store-init-failed"):
+                        observe_workspace_once(
+                            tmp,
+                            self._provider(),
+                            max_items=10,
+                            clock=lambda: _RECEIVE_TIME,
+                        )
+
+            store_type.return_value.close.assert_called_once_with()
+
     def test_worker_refuses_second_start_until_terminal_message_is_consumed(self):
         # Build the real observation result outside the worker timing window. This
         # test owns the worker single-flight/message-consumption contract; SQLite

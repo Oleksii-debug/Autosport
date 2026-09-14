@@ -48,8 +48,27 @@ class WorkspaceEconomicLock:
             return
         try:
             self._unlock_handle(handle)
-        finally:
+        except BaseException as unlock_error:
+            # The OS handle is still the authority. Always close it and detach this
+            # lock object even if the explicit unlock operation itself failed; a
+            # stale closed handle would otherwise leave the object logically held
+            # forever. Preserve the unlock failure as the primary teardown error.
+            try:
+                handle.close()
+            except BaseException as close_error:
+                unlock_error.add_note(
+                    "workspace economic lock handle close also failed after unlock failure: "
+                    f"{type(close_error).__name__}: {close_error}"
+                )
+            finally:
+                self._handle = None
+            raise
+        try:
             handle.close()
+        finally:
+            # Closing can itself fail. Do not retain a stale ownership marker after
+            # teardown was attempted; callers receive the close error and must fail
+            # closed rather than treating this object as a still-valid lock owner.
             self._handle = None
 
     def __enter__(self) -> "WorkspaceEconomicLock":
@@ -57,7 +76,21 @@ class WorkspaceEconomicLock:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
-        self.release()
+        if exc_value is None:
+            # A release failure after a successful body is itself a run failure and
+            # must remain observable to the caller.
+            self.release()
+            return
+        try:
+            self.release()
+        except BaseException as release_error:
+            # Never replace the economic/replay failure that caused scope exit with
+            # a secondary lock-teardown failure. Keep both pieces of evidence on the
+            # primary exception so recovery diagnostics retain the actual root cause.
+            exc_value.add_note(
+                "WorkspaceEconomicLock release also failed while propagating the primary error: "
+                f"{type(release_error).__name__}: {release_error}"
+            )
 
     @staticmethod
     def _lock_handle(handle: BinaryIO) -> None:

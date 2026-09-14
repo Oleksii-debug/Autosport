@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Iterable
 
 from .candidate_optimizer import CandidatePortfolioImpact, PortfolioAwareCandidateOptimizer
@@ -37,6 +37,27 @@ def _validate_sha256(value: str, label: str) -> str:
     return value.lower()
 
 
+def _validate_canonical_string(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or not value.strip()
+        or value != value.strip()
+    ):
+        raise ValueError(f"{label} must be a non-empty canonical string")
+    return value
+
+
+def _finite_decimal(value: object, label: str) -> Decimal:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a finite decimal") from exc
+    if not parsed.is_finite():
+        raise ValueError(f"{label} must be a finite decimal")
+    return parsed
+
+
 @dataclass(frozen=True, slots=True)
 class ResearchEvidence:
     """One causal market evidence item made available before a research decision."""
@@ -52,9 +73,15 @@ class ResearchEvidence:
     market_snapshot_hash: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.evidence_id or not self.quote_key or not self.source_id:
-            raise ValueError("evidence identity fields must not be empty")
-        odds = Decimal(str(self.decimal_odds))
+        for label, value in (
+            ("evidence_id", self.evidence_id),
+            ("quote_key", self.quote_key),
+            ("source_id", self.source_id),
+            ("observed_at", self.observed_at),
+            ("available_at", self.available_at),
+        ):
+            _validate_canonical_string(value, label)
+        odds = _finite_decimal(self.decimal_odds, "evidence decimal odds")
         if odds <= 1:
             raise ValueError("evidence decimal odds must be greater than 1")
         object.__setattr__(self, "decimal_odds", odds)
@@ -99,12 +126,19 @@ class ResearchDecisionPolicy:
     minimum_standalone_expected_profit_per_unit: Decimal | None = None
 
     def __post_init__(self) -> None:
-        uncertainty = Decimal(str(self.max_forecast_uncertainty))
+        uncertainty = _finite_decimal(
+            self.max_forecast_uncertainty,
+            "max_forecast_uncertainty",
+        )
         if uncertainty < 0 or uncertainty > 1:
             raise ValueError("max_forecast_uncertainty must be between 0 and 1")
         object.__setattr__(self, "max_forecast_uncertainty", uncertainty)
-        if self.minimum_evidence_per_leg < 1:
-            raise ValueError("minimum_evidence_per_leg must be positive")
+        if (
+            isinstance(self.minimum_evidence_per_leg, bool)
+            or not isinstance(self.minimum_evidence_per_leg, int)
+            or self.minimum_evidence_per_leg < 1
+        ):
+            raise ValueError("minimum_evidence_per_leg must be a positive integer")
         if not isinstance(self.blocked_quality_flags, (tuple, list, set, frozenset)):
             raise ValueError(
                 "blocked_quality_flags must be a tuple, list, set, or frozenset"
@@ -126,13 +160,19 @@ class ResearchDecisionPolicy:
             object.__setattr__(
                 self,
                 "minimum_ranking_risk_change",
-                Decimal(str(self.minimum_ranking_risk_change)),
+                _finite_decimal(
+                    self.minimum_ranking_risk_change,
+                    "minimum_ranking_risk_change",
+                ),
             )
         if self.minimum_standalone_expected_profit_per_unit is not None:
             object.__setattr__(
                 self,
                 "minimum_standalone_expected_profit_per_unit",
-                Decimal(str(self.minimum_standalone_expected_profit_per_unit)),
+                _finite_decimal(
+                    self.minimum_standalone_expected_profit_per_unit,
+                    "minimum_standalone_expected_profit_per_unit",
+                ),
             )
 
 
@@ -310,10 +350,10 @@ class ResearchDecisionPipeline:
         decision_ledger: JsonlDecisionLedger,
         replay_run_id: str,
     ) -> ResearchDecision:
-        if not replay_run_id:
-            raise ValueError("replay_run_id is required for audit")
+        _validate_canonical_string(replay_run_id, "replay_run_id")
+        _validate_canonical_string(decision_ts, "decision_ts")
         parse_iso_timestamp(decision_ts)
-        amount = Decimal(str(stake))
+        amount = _finite_decimal(stake, "stake")
         if amount <= 0:
             raise ValueError("stake must be positive")
 

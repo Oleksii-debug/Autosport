@@ -262,7 +262,11 @@ class WindowsAutosportApp(AutosportApp):
             return
 
         expected_workspace = Path(self._active_workspace)
-        expected_strategy_id = self._active_strategy_id
+        expected_strategy_id = (
+            self._active_research_plan.experiment_strategy_id
+            if self._active_research_plan is not None
+            else self._active_strategy_id
+        )
         try:
             result_workspace = Path(result.session_view.workspace)
         except (TypeError, ValueError):

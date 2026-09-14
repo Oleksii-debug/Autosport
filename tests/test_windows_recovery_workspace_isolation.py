@@ -105,6 +105,50 @@ class WindowsRecoveryWorkspaceIsolationTests(unittest.TestCase):
             parent_run.assert_not_called()
             self.assertIn("заблоковано fail-closed", app.status.value)
 
+    def test_research_plan_runtime_strategy_identity_is_accepted(self) -> None:
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "strategies" / "research-plan"
+            runtime_strategy_id = "research-replay-v1@plan-sha"
+            plan = SimpleNamespace(experiment_strategy_id=runtime_strategy_id)
+            view = SimpleNamespace(
+                workspace=workspace,
+                strategy_id=runtime_strategy_id,
+                book=SimpleNamespace(balance=0, committed_stake=0),
+            )
+            result = RecoveryTaskResult(
+                report=RecoveryReport((), (), ()),
+                session_view=view,
+            )
+
+            app = object.__new__(WindowsAutosportApp)
+            app.workspace = Path(temporary)
+            app._active_workspace = workspace
+            app._active_strategy_id = "research-replay-v1"
+            app._active_research_plan = plan
+            app._recovery_view = None
+            app._recovery_blocked_workspace = workspace
+            app._recovery_blocked_workspaces = {workspace}
+            app.recovery_worker = _TerminalWorker(RecoveryWorkerMessage(result=result))
+            app.bank = _Value()
+            app.status = _Value()
+            app._set_replay_controls_busy = lambda _busy: None
+            app._refresh_tickets = lambda: None
+            app._append_log = lambda _text: None
+            app._bank_text = lambda: "bank"
+
+            with (
+                patch("autosport.windows_gui.messagebox.showinfo") as info,
+                patch("autosport.windows_gui.messagebox.showerror") as error,
+            ):
+                WindowsAutosportApp._poll_recovery_worker(app)
+
+            self.assertIs(app._recovery_view, view)
+            self.assertNotIn(workspace, app._recovery_blocked_workspaces)
+            self.assertIsNone(app._recovery_blocked_workspace)
+            self.assertIn("Workspace готовий", app.status.value)
+            info.assert_called_once()
+            error.assert_not_called()
+
     def test_mismatched_terminal_workspace_never_unblocks_returned_workspace(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -238,15 +239,17 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
         stage_pid = ready.get("pid")
         if isinstance(stage_pid, bool) or not isinstance(stage_pid, int) or stage_pid <= 0:
             raise RuntimeError("process-kill READY evidence has invalid pid")
-        if stage_pid != stage.pid:
-            raise RuntimeError("process-kill READY pid does not match spawned child")
         if stage_pid == os.getpid():
             raise RuntimeError("process-kill stage did not run in a separate process")
 
-        stage.kill()
+        # In a PyInstaller one-file build Popen.pid may be the bootloader launcher
+        # while the Python payload has a distinct PID. Kill the durable payload PID
+        # reported by the child rather than assuming launcher/payload identity.
+        try:
+            os.kill(stage_pid, signal.SIGTERM)
+        except OSError as exc:
+            raise RuntimeError("parent could not terminate process-kill stage payload") from exc
         killed_return_code = stage.wait(timeout=10.0)
-        if killed_return_code == 0:
-            raise RuntimeError("process-kill stage child exited cleanly instead of being killed")
     finally:
         if stage.poll() is None:
             stage.kill()

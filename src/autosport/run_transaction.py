@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
 
@@ -100,9 +101,12 @@ class RunTransaction:
             self._hash_field(manifest, "base", "decision_ledger_sha256"),
             "Decision Ledger",
         )
+        self._verify_decision_ledger(canonical_ledger, "canonical Decision Ledger")
         book.save(self.staged_book_path)
         ensure_durable_file(self.run_ledger_path)
+        self._verify_decision_ledger(self.run_ledger_path, "staged run Decision Ledger")
         self._write_combined_ledger(canonical_ledger, self.run_ledger_path, self.staged_ledger_path)
+        self._verify_decision_ledger(self.staged_ledger_path, "combined staged Decision Ledger")
         return sha256_file(self.staged_book_path), sha256_file(self.staged_ledger_path)
 
     def precommit(self, summary_payload: dict[str, Any]) -> dict[str, Any]:
@@ -120,6 +124,14 @@ class RunTransaction:
             self.workspace / "decisions.jsonl",
             self._hash_field(manifest, "base", "decision_ledger_sha256"),
             "Decision Ledger",
+        )
+        self._verify_decision_ledger(
+            self.workspace / "decisions.jsonl",
+            "canonical Decision Ledger",
+        )
+        self._verify_decision_ledger(
+            self.staged_ledger_path,
+            "combined staged Decision Ledger",
         )
 
         book_hash = sha256_file(self.staged_book_path)
@@ -146,6 +158,13 @@ class RunTransaction:
         if manifest["phase"] not in {"precommitted", "canonical_committed", "completed"}:
             raise RunTransactionError("transaction lacks durable precommit evidence")
         self._validate_manifest_paths(manifest)
+        # Every artifact that can make the transaction irreversible is preflighted
+        # before the first economic os.replace.  In particular, the run summary must
+        # remain bound to the same NEW PaperBook and Decision Ledger identities as the
+        # manifest; otherwise a tampered manifest could commit mutually inconsistent
+        # but individually hash-valid evidence.
+        self._validate_precommit_evidence(manifest)
+        self._validate_decision_ledger_commit_state(manifest)
         self._promote_base_or_new(
             target=self.workspace / "paper_book.json",
             staged=self.staged_book_path,
@@ -194,6 +213,10 @@ class RunTransaction:
                 tx._hash_field(manifest, "base", "decision_ledger_sha256"),
                 "Decision Ledger",
             )
+            tx._verify_decision_ledger(
+                tx.workspace / "decisions.jsonl",
+                "canonical Decision Ledger",
+            )
             summary_target = tx.workspace / f"run-{run_id}.json"
             if summary_target.exists():
                 raise RunTransactionError("uncommitted transaction unexpectedly has a canonical run summary")
@@ -207,6 +230,10 @@ class RunTransaction:
                 tx.workspace / "decisions.jsonl",
                 tx._hash_field(manifest, "base", "decision_ledger_sha256"),
                 "Decision Ledger",
+            )
+            tx._verify_decision_ledger(
+                tx.workspace / "decisions.jsonl",
+                "canonical Decision Ledger",
             )
             return TransactionRecovery("aborted_uncommitted")
 
@@ -276,6 +303,80 @@ class RunTransaction:
             raise RunTransactionError(f"{label} canonical file is missing")
         if sha256_file(path) != expected_hash:
             raise RunTransactionError(f"{label} SHA-256 canonical hash is not the expected transaction state")
+
+    @staticmethod
+    def _verify_decision_ledger(path: Path, label: str) -> int:
+        try:
+            return JsonlDecisionLedger(path).verify_integrity()
+        except DecisionLedgerIntegrityError as exc:
+            raise RunTransactionError(
+                f"{label} integrity validation failed: {exc}"
+            ) from exc
+
+    def _validate_precommit_evidence(self, manifest: dict[str, Any]) -> None:
+        expected_book_hash = self._hash_field(manifest, "new", "paper_book_sha256")
+        expected_ledger_hash = self._hash_field(manifest, "new", "decision_ledger_sha256")
+        expected_summary_hash = self._hash_field(manifest, "new", "summary_sha256")
+        summary_target = self.workspace / f"run-{self.run_id}.json"
+
+        candidates: list[tuple[str, Path]] = []
+        for label, path in (
+            ("staged run summary", self.staged_summary_path),
+            ("canonical run summary", summary_target),
+        ):
+            if path.exists():
+                if not path.is_file():
+                    raise RunTransactionError(f"{label} is not a file")
+                candidates.append((label, path))
+        if not candidates:
+            raise RunTransactionError("run summary precommit artifact is missing")
+
+        for label, path in candidates:
+            if sha256_file(path) != expected_summary_hash:
+                raise RunTransactionError(f"{label} SHA-256 mismatch")
+            try:
+                summary = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RunTransactionError(f"{label} is unreadable or invalid JSON") from exc
+            if not isinstance(summary, dict):
+                raise RunTransactionError(f"{label} schema is invalid")
+            expected_bindings = {
+                "paper_book_sha256": expected_book_hash,
+                "decision_ledger_sha256": expected_ledger_hash,
+                "transaction_schema_version": self.SCHEMA_VERSION,
+                "transaction_run_id": self.run_id,
+            }
+            mismatches = [
+                field_name
+                for field_name, expected_value in expected_bindings.items()
+                if summary.get(field_name) != expected_value
+            ]
+            if mismatches:
+                raise RunTransactionError(
+                    f"{label} transaction binding mismatch: " + ",".join(sorted(mismatches))
+                )
+
+    def _validate_decision_ledger_commit_state(self, manifest: dict[str, Any]) -> None:
+        target = self.workspace / "decisions.jsonl"
+        if not target.is_file():
+            raise RunTransactionError("Decision Ledger canonical file is missing")
+        base_hash = self._hash_field(manifest, "base", "decision_ledger_sha256")
+        new_hash = self._hash_field(manifest, "new", "decision_ledger_sha256")
+        current_hash = sha256_file(target)
+        if current_hash not in {base_hash, new_hash}:
+            raise RunTransactionError(
+                "Decision Ledger SHA-256 canonical hash is neither BASE nor NEW"
+            )
+        self._verify_decision_ledger(target, "canonical Decision Ledger")
+        if current_hash == base_hash:
+            if not self.staged_ledger_path.is_file():
+                raise RunTransactionError("staged Decision Ledger artifact is missing")
+            if sha256_file(self.staged_ledger_path) != new_hash:
+                raise RunTransactionError("staged Decision Ledger artifact hash mismatch")
+            self._verify_decision_ledger(
+                self.staged_ledger_path,
+                "combined staged Decision Ledger",
+            )
 
     @classmethod
     def _promote_base_or_new(

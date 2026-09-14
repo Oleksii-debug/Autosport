@@ -25,6 +25,12 @@ class SettlementEngine:
         self.outcomes.update(quote_outcomes)
 
     def settle_ready(self, book: PaperBook) -> list[str]:
+        # The commit phase below relies on stable canonical ticket identity and
+        # lifecycle state. Reject caller-mutated PaperBook state before any
+        # settlement mutation instead of discovering it after an earlier ticket
+        # has already been applied.
+        PaperBook._validate_loaded_state(book)
+
         # Build and economically preflight the complete ready batch before
         # mutating the PaperBook. A later ticket can fail deterministic payout
         # validation even when an earlier ticket is valid; applying tickets as

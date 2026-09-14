@@ -5,8 +5,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from autosport.integrity import sha256_file
 from autosport.outcome_trust import (
     OutcomeLineageBinding,
     TrustedOutcomeRevision,
@@ -50,11 +50,26 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
         run_id: str = "accepted-run",
         expected_hash_override: str | None = None,
     ) -> Path:
+        market_sha256 = "a" * 64
+        results_sha256 = "b" * 64
+        paper_book_sha256 = "c" * 64
+        decision_ledger_sha256 = "d" * 64
+        experiment_key = hashlib.sha256(
+            f"{market_sha256}|{results_sha256}|baseline-v1".encode("utf-8")
+        ).hexdigest()
         summary_path = root / f"run-{run_id}.json"
         summary = {
             "schema_version": 2,
             "run_id": run_id,
+            "experiment_key": experiment_key,
+            "market_sha256": market_sha256,
+            "sealed_results_sha256": results_sha256,
+            "strategy_id": "baseline-v1",
             "real_money_execution": False,
+            "paper_book_sha256": paper_book_sha256,
+            "decision_ledger_sha256": decision_ledger_sha256,
+            "transaction_schema_version": 1,
+            "transaction_run_id": run_id,
             "outcome_lineage_trust": outcome_lineage_payload(binding),
         }
         summary_path.write_text(
@@ -63,15 +78,29 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
         )
         manifest_root = root / ".run-transactions" / run_id
         manifest_root.mkdir(parents=True)
+        expected_summary_hash = hashlib.sha256(summary_path.read_bytes()).hexdigest()
         manifest = {
+            "schema_version": 1,
+            "phase": "completed",
             "run_id": run_id,
-            "targets": {"summary": summary_path.name},
+            "experiment_key": experiment_key,
+            "market_sha256": market_sha256,
+            "sealed_results_sha256": results_sha256,
+            "strategy_id": "baseline-v1",
+            "real_money_execution": False,
+            "targets": {
+                "paper_book": "paper_book.json",
+                "decision_ledger": "decisions.jsonl",
+                "summary": summary_path.name,
+            },
             "new": {
+                "paper_book_sha256": paper_book_sha256,
+                "decision_ledger_sha256": decision_ledger_sha256,
                 "summary_sha256": (
                     expected_hash_override
                     if expected_hash_override is not None
-                    else sha256_file(summary_path)
-                )
+                    else expected_summary_hash
+                ),
             },
         }
         (manifest_root / "manifest.json").write_text(
@@ -100,9 +129,6 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
             self._accept(registry, accepted)
             self._write_bound_summary(root, accepted)
 
-            # Simulate the reviewer's downgrade attack: preserve durable completed
-            # run evidence but rewrite only the mutable registry as syntactically
-            # valid never-upgraded schema 1 with all lineage evidence removed.
             registry.path.write_text(
                 json.dumps({"schema_version": 1, "runs": {}}, sort_keys=True),
                 encoding="utf-8",
@@ -145,6 +171,51 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "run summary SHA-256 mismatch"):
                 RunRegistry(registry.path)
+
+    def test_marker_removal_cannot_bypass_manifest_hash_before_schema_downgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry(root / "run_registry.json")
+            accepted = self._binding("accepted-root")
+            self._accept(registry, accepted)
+            summary_path = self._write_bound_summary(root, accepted)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary.pop("outcome_lineage_trust")
+            summary_path.write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            registry.path.write_text(
+                json.dumps({"schema_version": 1, "runs": {}}, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "run summary SHA-256 mismatch"):
+                RunRegistry(registry.path)
+
+    def test_transaction_bound_summary_bytes_are_read_once_for_hash_and_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry(root / "run_registry.json")
+            accepted = self._binding("accepted-root")
+            self._accept(registry, accepted)
+            summary_path = self._write_bound_summary(root, accepted)
+            original_read_bytes = Path.read_bytes
+            summary_reads = 0
+
+            def tracked_read_bytes(path: Path) -> bytes:
+                nonlocal summary_reads
+                if path == summary_path:
+                    summary_reads += 1
+                    if summary_reads > 1:
+                        raise AssertionError("transaction-bound run summary path was reopened")
+                return original_read_bytes(path)
+
+            with patch.object(Path, "read_bytes", new=tracked_read_bytes):
+                RunRegistry(registry.path)
+
+            self.assertEqual(summary_reads, 1)
 
     def test_genuine_never_upgraded_schema_one_workspace_remains_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

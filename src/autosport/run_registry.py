@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 
 from .integrity import sha256_file
@@ -57,6 +58,11 @@ _FINAL_ONLY_FIELDS = frozenset(
 _LEGACY_SCHEMA_VERSION = 1
 _LINEAGE_TRUST_SCHEMA_VERSION = 2
 _LINEAGE_TRUST_FIELD = "outcome_lineage_trust"
+_TRANSACTION_SCHEMA_VERSION = 1
+_TRANSACTION_PHASES = frozenset(
+    {"staging", "precommitted", "canonical_committed", "completed", "aborted"}
+)
+_TERMINAL_SUMMARY_PHASES = frozenset({"canonical_committed", "completed"})
 
 
 def _is_canonical_sha256(value: object) -> bool:
@@ -97,6 +103,82 @@ def _reject_nonfinite_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON constant: {value}")
 
 
+def _strict_json_object_bytes(payload: bytes, *, context: str) -> dict[str, object]:
+    try:
+        raw = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise ValueError(f"{context} is invalid") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"{context} is invalid")
+    return raw
+
+
+def has_durable_workspace_history(workspace: str | Path) -> bool:
+    """Return whether recreating a missing registry would discard durable economic history.
+
+    The predicate is intentionally conservative. Unreadable or non-regular canonical
+    evidence fails closed, while a genuinely pristine workspace may contain an empty
+    transaction directory and a readable zero-byte Decision Ledger.
+    """
+
+    root = Path(workspace)
+    transaction_root = root / ".run-transactions"
+    try:
+        transaction_stat = transaction_root.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return True
+    else:
+        if not stat.S_ISDIR(transaction_stat.st_mode):
+            return True
+        try:
+            next(transaction_root.iterdir())
+        except StopIteration:
+            pass
+        except OSError:
+            return True
+        else:
+            return True
+
+    try:
+        if any(root.glob("run-*.json")):
+            return True
+    except OSError:
+        return True
+
+    paper_book = root / "paper_book.json"
+    try:
+        paper_book.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return True
+    else:
+        return True
+
+    decision_ledger = root / "decisions.jsonl"
+    try:
+        ledger_stat = decision_ledger.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if not stat.S_ISREG(ledger_stat.st_mode):
+        return True
+    if ledger_stat.st_size > 0:
+        return True
+    try:
+        with decision_ledger.open("rb") as handle:
+            return bool(handle.read(1))
+    except OSError:
+        return True
+
+
 class RepeatedExperimentError(RuntimeError):
     pass
 
@@ -120,12 +202,7 @@ class RunRegistry:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
-            transaction_root = self.path.parent / ".run-transactions"
-            if transaction_root.exists() and (
-                not transaction_root.is_dir() or any(transaction_root.iterdir())
-            ):
-                raise ValueError("run registry is missing while durable run history exists")
-            if any(self.path.parent.glob("run-*.json")):
+            if has_durable_workspace_history(self.path.parent):
                 raise ValueError("run registry is missing while durable run history exists")
             self._write({"schema_version": _LEGACY_SCHEMA_VERSION, "runs": {}})
         else:
@@ -409,63 +486,141 @@ class RunRegistry:
         self._write(state)
 
     def _durable_summary_lineage_bindings(self) -> tuple[OutcomeLineageBinding, ...]:
-        """Recover lineage trust duplicated into checksum-bound completed summaries.
+        """Recover trust only from manifest-bound terminal summary bytes.
 
-        Legacy summaries carry no such field and remain outside this check. A summary
-        that does carry the field must still be bound to its existing transaction
-        manifest SHA-256 so registry downgrade detection cannot trust an unbound copy.
+        The transaction manifest is the discovery authority. A terminal manifest
+        obligates validation of the exact summary bytes and transaction identity
+        before the optional lineage marker is inspected. This prevents marker removal
+        from bypassing hash validation and prevents parse-A/hash-B path-swap races.
         """
+
+        transaction_root = self.path.parent / ".run-transactions"
+        try:
+            transaction_root_stat = transaction_root.lstat()
+        except FileNotFoundError:
+            return ()
+        except OSError as exc:
+            raise ValueError("durable lineage-trust transaction root is unreadable") from exc
+        if not stat.S_ISDIR(transaction_root_stat.st_mode):
+            raise ValueError("durable lineage-trust transaction root is invalid")
+        try:
+            transaction_dirs = sorted(transaction_root.iterdir(), key=lambda path: path.name)
+        except OSError as exc:
+            raise ValueError("durable lineage-trust transaction root is unreadable") from exc
+
         bindings: list[OutcomeLineageBinding] = []
-        for summary_path in sorted(self.path.parent.glob("run-*.json")):
-            if not summary_path.is_file():
-                continue
+        for transaction_dir in transaction_dirs:
+            manifest_path = transaction_dir / "manifest.json"
             try:
-                text = summary_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
+                manifest_stat = manifest_path.lstat()
+            except FileNotFoundError:
                 continue
-            if f'"{_LINEAGE_TRUST_FIELD}"' not in text:
-                continue
+            except OSError as exc:
+                raise ValueError("durable lineage-trust transaction manifest is unreadable") from exc
+            if not stat.S_ISREG(manifest_stat.st_mode):
+                raise ValueError("durable lineage-trust transaction manifest is invalid")
             try:
-                summary = json.loads(
-                    text,
-                    object_pairs_hook=_reject_duplicate_json_keys,
-                    parse_constant=_reject_nonfinite_json_constant,
-                )
-            except (json.JSONDecodeError, ValueError) as exc:
-                raise ValueError("durable lineage-trust run summary is invalid") from exc
-            if not isinstance(summary, dict):
+                manifest_bytes = manifest_path.read_bytes()
+            except OSError as exc:
+                raise ValueError("durable lineage-trust transaction manifest is unreadable") from exc
+            manifest = _strict_json_object_bytes(
+                manifest_bytes,
+                context="durable lineage-trust transaction manifest",
+            )
+
+            manifest_schema = manifest.get("schema_version")
+            run_id = manifest.get("run_id")
+            phase = manifest.get("phase")
+            if type(manifest_schema) is not int or manifest_schema != _TRANSACTION_SCHEMA_VERSION:
+                raise ValueError("durable lineage-trust transaction manifest schema is invalid")
+            if not isinstance(run_id, str) or not run_id or transaction_dir.name != run_id:
+                raise ValueError("durable lineage-trust transaction manifest identity is invalid")
+            if not isinstance(phase, str) or phase not in _TRANSACTION_PHASES:
+                raise ValueError("durable lineage-trust transaction manifest phase is invalid")
+            if manifest.get("real_money_execution") is not False:
+                raise ValueError("durable lineage-trust transaction manifest truth boundary is invalid")
+            if phase not in _TERMINAL_SUMMARY_PHASES:
+                continue
+
+            experiment_key = manifest.get("experiment_key")
+            market_sha256 = manifest.get("market_sha256")
+            results_sha256 = manifest.get("sealed_results_sha256")
+            strategy_id = manifest.get("strategy_id")
+            if not isinstance(experiment_key, str) or not experiment_key:
+                raise ValueError("durable lineage-trust transaction manifest identity is invalid")
+            if not _is_canonical_sha256(market_sha256) or not _is_canonical_sha256(results_sha256):
+                raise ValueError("durable lineage-trust transaction manifest identity is invalid")
+            if not isinstance(strategy_id, str) or not strategy_id:
+                raise ValueError("durable lineage-trust transaction manifest identity is invalid")
+
+            targets = manifest.get("targets")
+            expected_summary_name = f"run-{run_id}.json"
+            if not isinstance(targets, dict) or targets.get("summary") != expected_summary_name:
+                raise ValueError("durable lineage-trust transaction summary target is invalid")
+            new_state = manifest.get("new")
+            if not isinstance(new_state, dict):
+                raise ValueError("durable lineage-trust transaction NEW evidence is invalid")
+            expected_summary_sha = new_state.get("summary_sha256")
+            expected_book_sha = new_state.get("paper_book_sha256")
+            expected_ledger_sha = new_state.get("decision_ledger_sha256")
+            if not all(
+                _is_canonical_sha256(value)
+                for value in (expected_summary_sha, expected_book_sha, expected_ledger_sha)
+            ):
+                raise ValueError("durable lineage-trust transaction NEW evidence is invalid")
+
+            summary_path = self.path.parent / expected_summary_name
+            try:
+                summary_stat = summary_path.lstat()
+            except FileNotFoundError as exc:
+                raise ValueError("durable lineage-trust run summary is missing") from exc
+            except OSError as exc:
+                raise ValueError("durable lineage-trust run summary is unreadable") from exc
+            if not stat.S_ISREG(summary_stat.st_mode):
                 raise ValueError("durable lineage-trust run summary is invalid")
+            try:
+                summary_bytes = summary_path.read_bytes()
+            except OSError as exc:
+                raise ValueError("durable lineage-trust run summary is unreadable") from exc
+            if hashlib.sha256(summary_bytes).hexdigest() != expected_summary_sha:
+                raise ValueError("durable lineage-trust run summary SHA-256 mismatch")
+            summary = _strict_json_object_bytes(
+                summary_bytes,
+                context="durable lineage-trust run summary",
+            )
+
+            summary_schema = summary.get("schema_version")
+            transaction_schema = summary.get("transaction_schema_version")
+            expected_identity = {
+                "run_id": run_id,
+                "transaction_run_id": run_id,
+                "experiment_key": experiment_key,
+                "market_sha256": market_sha256,
+                "sealed_results_sha256": results_sha256,
+                "strategy_id": strategy_id,
+                "paper_book_sha256": expected_book_sha,
+                "decision_ledger_sha256": expected_ledger_sha,
+            }
+            mismatches = [
+                field
+                for field, expected_value in expected_identity.items()
+                if summary.get(field) != expected_value
+            ]
+            if type(summary_schema) is not int or summary_schema != 2:
+                mismatches.append("schema_version")
+            if type(transaction_schema) is not int or transaction_schema != manifest_schema:
+                mismatches.append("transaction_schema_version")
+            if summary.get("real_money_execution") is not False:
+                mismatches.append("real_money_execution")
+            if mismatches:
+                raise ValueError(
+                    "durable lineage-trust run summary identity is invalid: "
+                    + ",".join(sorted(mismatches))
+                )
+
             raw_binding = summary.get(_LINEAGE_TRUST_FIELD)
             if raw_binding is None:
                 continue
-            run_id = summary.get("run_id")
-            if not isinstance(run_id, str) or not run_id or summary_path.name != f"run-{run_id}.json":
-                raise ValueError("durable lineage-trust run summary identity is invalid")
-
-            manifest_path = self.path.parent / ".run-transactions" / run_id / "manifest.json"
-            if not manifest_path.is_file():
-                raise ValueError("durable lineage-trust run summary lacks transaction manifest")
-            try:
-                manifest = json.loads(
-                    manifest_path.read_text(encoding="utf-8"),
-                    object_pairs_hook=_reject_duplicate_json_keys,
-                    parse_constant=_reject_nonfinite_json_constant,
-                )
-            except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-                raise ValueError("durable lineage-trust transaction manifest is invalid") from exc
-            if not isinstance(manifest, dict) or manifest.get("run_id") != run_id:
-                raise ValueError("durable lineage-trust transaction manifest identity is invalid")
-            targets = manifest.get("targets")
-            if not isinstance(targets, dict) or targets.get("summary") != summary_path.name:
-                raise ValueError("durable lineage-trust transaction summary target is invalid")
-            new_state = manifest.get("new")
-            expected_summary_sha = (
-                new_state.get("summary_sha256") if isinstance(new_state, dict) else None
-            )
-            if not _is_canonical_sha256(expected_summary_sha):
-                raise ValueError("durable lineage-trust transaction lacks summary SHA-256")
-            if sha256_file(summary_path) != expected_summary_sha:
-                raise ValueError("durable lineage-trust run summary SHA-256 mismatch")
             try:
                 binding = outcome_lineage_binding_from_payload(
                     raw_binding,

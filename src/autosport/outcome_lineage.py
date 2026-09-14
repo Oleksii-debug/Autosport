@@ -353,7 +353,7 @@ def _json_object_bytes(
             object_pairs_hook=_unique_object,
             parse_constant=_reject_nonstandard_constant,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ValueError(f"{context} is not readable valid JSON: {path}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"{context} must be a JSON object")

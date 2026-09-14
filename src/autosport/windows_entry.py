@@ -8,6 +8,8 @@ _MACHINE_MODE_ARITY = {
     "--accessibility-audit-output": 2,
     "--keyboard-audit-output": 2,
     "--restart-recovery-audit-output": 2,
+    "--restart-recovery-stage-child": 3,
+    "--restart-recovery-recover-child": 3,
     "--research-demo-audit-output": 3,
 }
 
@@ -42,9 +44,17 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_keyboard_audit(args[1])
     if args and args[0] == "--restart-recovery-audit-output":
-        from autosport.restart_recovery_audit import run_restart_recovery_audit
+        from autosport.process_recovery_audit import run_packaged_restart_recovery_audit
 
-        return run_restart_recovery_audit(args[1])
+        return run_packaged_restart_recovery_audit(args[1])
+    if args and args[0] == "--restart-recovery-stage-child":
+        from autosport.process_recovery_audit import run_process_kill_stage_child
+
+        return run_process_kill_stage_child(args[1], args[2])
+    if args and args[0] == "--restart-recovery-recover-child":
+        from autosport.process_recovery_audit import run_process_kill_recovery_child
+
+        return run_process_kill_recovery_child(args[1], args[2])
     if args and args[0] == "--research-demo-audit-output":
         from autosport.research_demo_audit import run_research_demo_audit
 

@@ -171,12 +171,100 @@ class LiveObservationTests(unittest.TestCase):
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
+    def test_worker_thread_constructor_non_runtime_failure_is_terminal_and_allows_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = self._observe(tmp)
+
+        worker = OneShotObservationWorker()
+        task_ran = threading.Event()
+
+        def task():
+            task_ran.set()
+            return expected
+
+        with patch(
+            "autosport.live_observation.threading.Thread",
+            side_effect=OSError("thread construction failed"),
+        ):
+            self.assertTrue(worker.start(task))
+
+        self.assertFalse(task_ran.is_set())
+        self.assertTrue(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertFalse(worker.start(task))
+        failed = self._wait_for_message(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(failed.error, "OSError: thread construction failed")
+        self.assertFalse(worker.busy)
+
+        self.assertTrue(worker.start(task))
+        message = self._wait_for_message(worker)
+        self.assertTrue(task_ran.is_set())
+        self.assertIs(message.result, expected)
+        self.assertIsNone(message.error)
+        self.assertFalse(worker.busy)
+
+    def test_worker_thread_start_non_runtime_failure_is_terminal_and_allows_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = self._observe(tmp)
+
+        worker = OneShotObservationWorker()
+        task_ran = threading.Event()
+
+        def task():
+            task_ran.set()
+            return expected
+
+        with patch.object(
+            threading.Thread,
+            "start",
+            side_effect=OSError("thread start failed"),
+        ):
+            self.assertTrue(worker.start(task))
+
+        self.assertFalse(task_ran.is_set())
+        self.assertTrue(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertFalse(worker.start(task))
+        failed = self._wait_for_message(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(failed.error, "OSError: thread start failed")
+        self.assertFalse(worker.busy)
+
+        self.assertTrue(worker.start(task))
+        message = self._wait_for_message(worker)
+        self.assertTrue(task_ran.is_set())
+        self.assertIs(message.result, expected)
+        self.assertIsNone(message.error)
+        self.assertFalse(worker.busy)
+
     def test_worker_converts_exception_to_terminal_error_message(self):
         worker = OneShotObservationWorker()
         self.assertTrue(worker.start(lambda: (_ for _ in ()).throw(RuntimeError("network-test"))))
         message = self._wait_for_message(worker)
         self.assertIsNone(message.result)
         self.assertEqual(message.error, "RuntimeError: network-test")
+        self.assertFalse(worker.busy)
+
+    def test_worker_converts_system_exit_to_terminal_error_and_allows_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = self._observe(tmp)
+
+        worker = OneShotObservationWorker()
+
+        def exit_task():
+            raise SystemExit("live-stop")
+
+        self.assertTrue(worker.start(exit_task))
+        failed = self._wait_for_message(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(failed.error, "SystemExit: live-stop")
+        self.assertFalse(worker.busy)
+
+        self.assertTrue(worker.start(lambda: expected))
+        completed = self._wait_for_message(worker)
+        self.assertIs(completed.result, expected)
+        self.assertIsNone(completed.error)
         self.assertFalse(worker.busy)
 
     def test_presentation_is_deterministic_text_for_screen_reader_surface(self):

@@ -65,13 +65,11 @@ class OneShotObservationWorker:
             )
             self._thread = thread
             thread.start()
-        except RuntimeError as exc:
-            # A request that won the single-flight slot must have exactly one
-            # terminal poll outcome. Preserve that contract even when CPython/OS
-            # cannot start the thread: publish a terminal error and let poll()
-            # restore idle state. False remains reserved for a genuinely busy
-            # worker, so GUI callers never misreport thread-start failure as
-            # "live snapshot already running" and can retry after consuming it.
+        except Exception as exc:
+            # The live-observation caller reserves False for a genuinely busy
+            # worker and schedules terminal polling whenever start() returns True.
+            # Preserve that contract for any ordinary Thread construction/start
+            # failure: publish one terminal error and let poll() restore idle state.
             self._thread = None
             self._messages.put(
                 ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
@@ -82,7 +80,11 @@ class OneShotObservationWorker:
     def _run(self, task: ObservationTask) -> None:
         try:
             message = ObservationWorkerMessage(result=task())
-        except Exception as exc:
+        except BaseException as exc:
+            # SystemExit/KeyboardInterrupt raised inside this background thread do
+            # not terminate the GUI process. Publish a terminal failure so poll()
+            # clears the single-flight state instead of leaving live observation
+            # permanently busy after the worker thread has already died.
             message = ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
         self._messages.put(message)
 

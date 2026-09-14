@@ -277,8 +277,15 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
                 "process-kill stage child failed before intentional parent kill: "
                 + str(ready.get("error", "unknown child failure"))
             )
+        if ready.get("run_id") != _PROCESS_RUN_ID:
+            raise RuntimeError("process-kill READY evidence run_id mismatch")
+        experiment_key = ready.get("experiment_key")
+        if not isinstance(experiment_key, str) or not experiment_key:
+            raise RuntimeError("process-kill READY evidence lacks experiment identity")
         if ready.get("transaction_phase") != "precommitted":
             raise RuntimeError("process-kill READY evidence is not bound to PRECOMMIT")
+        if ready.get("real_money_execution") is not False:
+            raise RuntimeError("process-kill READY evidence crossed the paper-only boundary")
         stage_pid = ready.get("pid")
         if isinstance(stage_pid, bool) or not isinstance(stage_pid, int) or stage_pid <= 0:
             raise RuntimeError("process-kill READY evidence has invalid pid")
@@ -339,6 +346,8 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
         raise RuntimeError("recovery did not execute in a distinct fresh process")
     if recovered.get("run_id") != _PROCESS_RUN_ID:
         raise RuntimeError("process-kill recovery run_id mismatch")
+    if recovered.get("experiment_key") != experiment_key:
+        raise RuntimeError("process-kill recovery experiment identity mismatch")
     if recovered.get("disposition") != "committed":
         raise RuntimeError("process-kill recovery disposition mismatch")
     if recovered.get("registry_status") != "completed":
@@ -356,6 +365,37 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
     if recovered.get("real_money_execution") is not False:
         raise RuntimeError("process-kill recovery crossed the paper-only boundary")
 
+    # Do not trust only the recovery child's self-reported JSON. Reopen the
+    # durable workspace from the parent process and independently prove that the
+    # canonical files and registry/transaction terminal states match READY's
+    # manifest-bound NEW identity after the fresh recovery process has exited.
+    parent_registry = RunRegistry(workspace / "run_registry.json")
+    if parent_registry.in_progress():
+        raise RuntimeError("parent verification found unresolved run after fresh recovery")
+    parent_registry_item = parent_registry.get(experiment_key)
+    if parent_registry_item.get("status") != "completed":
+        raise RuntimeError("parent verification did not observe completed registry state")
+    parent_transaction = RunTransaction(workspace, _PROCESS_RUN_ID)
+    parent_manifest = _decode_strict_json(
+        parent_transaction.manifest_path,
+        label="parent process-kill transaction manifest",
+    )
+    if parent_manifest.get("phase") != "completed":
+        raise RuntimeError("parent verification did not observe completed transaction phase")
+    parent_new = parent_manifest.get("new")
+    if not isinstance(parent_new, dict):
+        raise RuntimeError("parent verification transaction manifest lacks NEW identity")
+    actual_new_book_hash = sha256_file(workspace / "paper_book.json")
+    actual_new_ledger_hash = sha256_file(workspace / "decisions.jsonl")
+    if actual_new_book_hash != ready.get("new_paper_book_sha256"):
+        raise RuntimeError("parent verification found unexpected canonical PaperBook identity")
+    if actual_new_ledger_hash != ready.get("new_decision_ledger_sha256"):
+        raise RuntimeError("parent verification found unexpected canonical Decision Ledger identity")
+    if actual_new_book_hash != parent_new.get("paper_book_sha256"):
+        raise RuntimeError("parent verification PaperBook does not match transaction manifest")
+    if actual_new_ledger_hash != parent_new.get("decision_ledger_sha256"):
+        raise RuntimeError("parent verification Decision Ledger does not match transaction manifest")
+
     return {
         "status": "PASS",
         "stage_pid": stage_pid,
@@ -363,12 +403,12 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
         "recovery_pid": recovery_pid,
         "run_id": _PROCESS_RUN_ID,
         "disposition": recovered["disposition"],
-        "registry_status": recovered["registry_status"],
-        "manifest_phase": recovered["manifest_phase"],
+        "registry_status": parent_registry_item["status"],
+        "manifest_phase": parent_manifest["phase"],
         "base_paper_book_sha256": recovered["base_paper_book_sha256"],
         "base_decision_ledger_sha256": recovered["base_decision_ledger_sha256"],
-        "new_paper_book_sha256": recovered["new_paper_book_sha256"],
-        "new_decision_ledger_sha256": recovered["new_decision_ledger_sha256"],
+        "new_paper_book_sha256": actual_new_book_hash,
+        "new_decision_ledger_sha256": actual_new_ledger_hash,
         "real_money_execution": False,
     }
 

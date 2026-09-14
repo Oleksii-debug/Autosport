@@ -173,7 +173,12 @@ class RunTransaction:
             self._hash_field(manifest, "base", "decision_ledger_sha256"),
             "Decision Ledger",
         )
-        book.save(self.staged_book_path)
+        try:
+            book.save(self.staged_book_path)
+        except ValueError as exc:
+            raise RunTransactionError(
+                f"staged PaperBook semantic validation failed: {exc}"
+            ) from exc
         book_snapshot = self._verified_paper_book_snapshot(
             self.staged_book_path,
             "staged PaperBook",

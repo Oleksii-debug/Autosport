@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .agents import AgentContext, AgentOrchestrator
 from .dataset import ReplayDataset
-from .decision_ledger import JsonlDecisionLedger
+from .decision_ledger import JsonlDecisionLedger, VerifiedDecisionLedgerSnapshot
 from .domain import MarketEvent
 from .evaluation import EvaluationSummary, evaluate
 from .ingestion import IngestionEngine, IngestionStats
@@ -133,9 +133,9 @@ class AutosportSession:
         speed: float = 0.0,
         allow_repeat: bool = False,
     ) -> SessionResult:
-        self._ensure_canonical_economic_base()
+        base_ledger_snapshot = self._ensure_canonical_economic_base()
         base_book_hash = sha256_file(self.book_path)
-        base_ledger_hash = sha256_file(self.ledger.path)
+        base_ledger_hash = base_ledger_snapshot.sha256
 
         run_id = str(uuid.uuid4())
         experiment_key = self.registry.begin(
@@ -166,7 +166,7 @@ class AutosportSession:
                 experiment_key,
                 reason="transaction start failed before durable precommit",
                 paper_book_sha256=sha256_file(self.book_path),
-                decision_ledger_sha256=sha256_file(self.ledger.path),
+                decision_ledger_sha256=self.ledger.verified_snapshot().sha256,
             )
             raise
 
@@ -223,7 +223,7 @@ class AutosportSession:
                     "canonical economic state remained BASE"
                 ),
                 paper_book_sha256=sha256_file(self.book_path),
-                decision_ledger_sha256=sha256_file(self.ledger.path),
+                decision_ledger_sha256=self.ledger.verified_snapshot().sha256,
             )
             raise
 
@@ -245,7 +245,7 @@ class AutosportSession:
         transaction.mark_registry_completed()
         return result
 
-    def _ensure_canonical_economic_base(self) -> None:
+    def _ensure_canonical_economic_base(self) -> VerifiedDecisionLedgerSnapshot:
         if self.registry.in_progress():
             raise UnresolvedExperimentError(
                 "Workspace has an unresolved economic run; repair it before starting another paper experiment."
@@ -260,11 +260,10 @@ class AutosportSession:
                 f"({', '.join(foreign_strategy_ids)}). Use a separate workspace per strategy/plan "
                 "so PaperBook, decision-ledger, portfolio and evaluation evidence cannot be mixed."
             )
-        # Validate the append-only audit evidence under the economic lock before its
-        # file hash can become the BASE identity of a new transaction. This prevents
-        # pre-existing corruption from being legitimized by a later successful run.
+        # Validate the append-only audit evidence under the economic lock and bind
+        # its semantic proof to the exact bytes whose hash becomes transaction BASE.
         ensure_durable_file(self.ledger.path)
-        self.ledger.verify_integrity()
+        ledger_snapshot = self.ledger.verified_snapshot()
         # Session construction happens outside WorkspaceEconomicLock. Another process
         # or session may therefore have committed a newer canonical PaperBook while
         # this instance was waiting for the lock. Refresh under the lock instead of
@@ -273,6 +272,7 @@ class AutosportSession:
             self.book = PaperBook.load(self.book_path)
         else:
             self.book.save(self.book_path)
+        return ledger_snapshot
 
     def _run_summary_payload(
         self,

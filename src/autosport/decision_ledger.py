@@ -28,6 +28,15 @@ class DecisionRecord:
     recorded_at: str = field(default_factory=utc_now_iso)
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedDecisionLedgerSnapshot:
+    """One immutable ledger byte snapshot bound to its semantic proof and SHA-256."""
+
+    payload: bytes
+    sha256: str
+    record_count: int
+
+
 class JsonlDecisionLedger:
     """Append-only causal decision ledger. Result/outcome fields do not belong here."""
 
@@ -160,15 +169,9 @@ class JsonlDecisionLedger:
             os.fsync(handle.fileno())
         return digest
 
-    def verify_integrity(self) -> int:
-        """Validate every durable JSONL envelope and return the number of decisions."""
-
-        try:
-            raw = self.path.read_bytes()
-        except OSError as exc:
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger file is missing or unreadable"
-            ) from exc
+    @classmethod
+    def _verify_bytes(cls, raw: bytes) -> int:
+        """Validate one already-captured immutable JSONL byte snapshot."""
 
         if not raw:
             return 0
@@ -200,8 +203,8 @@ class JsonlDecisionLedger:
             try:
                 envelope = json.loads(
                     line,
-                    object_pairs_hook=self._json_object_without_duplicate_keys,
-                    parse_constant=self._reject_non_finite_json,
+                    object_pairs_hook=cls._json_object_without_duplicate_keys,
+                    parse_constant=cls._reject_non_finite_json,
                 )
             except json.JSONDecodeError as exc:
                 raise DecisionLedgerIntegrityError(
@@ -212,7 +215,7 @@ class JsonlDecisionLedger:
                     f"{exc} at line {line_number}"
                 ) from exc
 
-            if not isinstance(envelope, dict) or set(envelope) != self._ENVELOPE_FIELDS:
+            if not isinstance(envelope, dict) or set(envelope) != cls._ENVELOPE_FIELDS:
                 raise DecisionLedgerIntegrityError(
                     f"Decision Ledger envelope schema is invalid at line {line_number}"
                 )
@@ -227,8 +230,8 @@ class JsonlDecisionLedger:
                     f"Decision Ledger SHA-256 field is invalid at line {line_number}"
                 )
 
-            record = self._validate_record(envelope.get("record"), line_number=line_number)
-            canonical = self._canonical_record(record)
+            record = cls._validate_record(envelope.get("record"), line_number=line_number)
+            canonical = cls._canonical_record(record)
             actual_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
             if actual_digest != digest:
                 raise DecisionLedgerIntegrityError(
@@ -244,3 +247,24 @@ class JsonlDecisionLedger:
             line_count += 1
 
         return line_count
+
+    def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:
+        """Read once, then hash and semantically validate the exact same bytes."""
+
+        try:
+            raw = self.path.read_bytes()
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file is missing or unreadable"
+            ) from exc
+        record_count = self._verify_bytes(raw)
+        return VerifiedDecisionLedgerSnapshot(
+            payload=raw,
+            sha256=hashlib.sha256(raw).hexdigest(),
+            record_count=record_count,
+        )
+
+    def verify_integrity(self) -> int:
+        """Validate every durable JSONL envelope and return the number of decisions."""
+
+        return self.verified_snapshot().record_count

@@ -66,15 +66,35 @@ class StrategyRunEvidence:
         )
 
 
-def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
-    source = Path(path)
-    raw_bytes = source.read_bytes()
+def _decode_run_summary_json(raw_bytes: bytes, *, source: Path) -> dict[str, Any]:
+    def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"{source}: run summary contains duplicate JSON object key: {key}")
+            value[key] = item
+        return value
+
+    def _reject_nonstandard_constant(value: str) -> None:
+        raise ValueError(f"{source}: run summary contains non-standard JSON constant: {value}")
+
     try:
-        payload = json.loads(raw_bytes.decode("utf-8"))
+        payload = json.loads(
+            raw_bytes.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_nonstandard_constant,
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{source}: run summary must be valid UTF-8 JSON") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"{source}: run summary root must be an object")
+    return payload
+
+
+def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
+    source = Path(path)
+    raw_bytes = source.read_bytes()
+    payload = _decode_run_summary_json(raw_bytes, source=source)
     if payload.get("schema_version") != 2:
         raise ValueError(f"{source}: run summary schema_version must be 2")
     if payload.get("transaction_schema_version") != RunTransaction.SCHEMA_VERSION:

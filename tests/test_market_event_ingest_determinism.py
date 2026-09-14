@@ -87,6 +87,39 @@ def test_deserialization_rejects_coerced_sequence_identity(sequence: object) -> 
         MarketEvent.from_dict(payload)
 
 
+@pytest.mark.parametrize(
+    "decimal_odds",
+    ["NaN", "Infinity", "-Infinity", float("nan"), float("inf"), float("-inf"), "1", "0", "-1", None, True],
+)
+def test_deserialization_rejects_non_executable_decimal_odds(decimal_odds: object) -> None:
+    payload = _event_payload()
+    payload["decimal_odds"] = decimal_odds
+
+    with pytest.raises(ValueError, match="decimal_odds must be a finite decimal greater than 1"):
+        MarketEvent.from_dict(payload)
+
+
+def test_deserialization_rejects_missing_decimal_odds() -> None:
+    payload = _event_payload()
+    del payload["decimal_odds"]
+
+    with pytest.raises(ValueError, match="decimal_odds must be a finite decimal greater than 1"):
+        MarketEvent.from_dict(payload)
+
+
+def test_replay_jsonl_rejects_nonfinite_serialized_decimal_odds(tmp_path) -> None:
+    payload = _event_payload()
+    payload["decimal_odds"] = float("nan")
+    replay_path = tmp_path / "nonfinite-replay.jsonl"
+    replay_path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="decimal_odds must be a finite decimal greater than 1"):
+        ReplayEngine.from_jsonl(replay_path)
+
+
 @pytest.mark.parametrize("ingest_ts", [7, True, "", " 2026-09-12T10:00:05+00:00 "])
 def test_deserialization_rejects_noncanonical_explicit_ingest_timestamp(ingest_ts: object) -> None:
     payload = _event_payload()

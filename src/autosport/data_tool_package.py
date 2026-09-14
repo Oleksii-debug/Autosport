@@ -76,8 +76,40 @@ def _write_deterministic(package_zip: Path, members: dict[str, bytes]) -> None:
             tmp.unlink()
 
 
+def _verified_base_members(package: Path) -> tuple[dict[str, bytes], dict[str, Any]]:
+    """Verify and return members from one immutable read of the base ZIP bytes."""
+
+    base_bytes = package.read_bytes()
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{package.name}.verify.",
+        suffix=".zip",
+        dir=package.parent,
+    )
+    snapshot = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(base_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        members = _read_members(snapshot)
+        for required in (_BUILD_INFO, _MANIFEST, _SUMS, "Autosport.exe"):
+            if required not in members:
+                raise ValueError(f"base release package is missing required member: {required}")
+
+        build_info = _decode_json_object(members[_BUILD_INFO], _BUILD_INFO)
+        verify_windows_package(
+            snapshot,
+            expected_source_sha=build_info.get("source_sha"),
+        )
+        return members, build_info
+    finally:
+        if snapshot.exists():
+            snapshot.unlink()
+
+
 def bind_portable_data_tool(package_zip: str | Path, data_exe: str | Path) -> dict[str, str]:
-    """Add the console data tool only after the base release package verifies cleanly."""
+    """Add the console data tool only after the exact captured base package verifies cleanly."""
 
     package = Path(package_zip)
     data_path = Path(data_exe)
@@ -85,16 +117,7 @@ def bind_portable_data_tool(package_zip: str | Path, data_exe: str | Path) -> di
     if not data_bytes:
         raise ValueError("portable data tool executable is empty")
 
-    members = _read_members(package)
-    for required in (_BUILD_INFO, _MANIFEST, _SUMS, "Autosport.exe"):
-        if required not in members:
-            raise ValueError(f"base release package is missing required member: {required}")
-
-    build_info = _decode_json_object(members[_BUILD_INFO], _BUILD_INFO)
-    verify_windows_package(
-        package,
-        expected_source_sha=build_info.get("source_sha"),
-    )
+    members, build_info = _verified_base_members(package)
 
     members[_DATA_TOOL] = data_bytes
     data_sha = _sha256_bytes(data_bytes)

@@ -139,13 +139,13 @@ def _resolved(path: Path, *, strict: bool) -> Path:
         raise ValueError(f"cannot resolve path {path}: {exc}") from exc
 
 
-def _reject_output_collision(workspace: Path, output: Path) -> None:
+def _resolve_output_destination(workspace: Path, output: Path) -> Path:
     workspace_root = _resolved(workspace, strict=True)
     output_path = _resolved(output, strict=False)
     try:
         output_path.relative_to(workspace_root)
     except ValueError:
-        return
+        return output_path
     raise ValueError(
         "output path must be outside the Autosport workspace; "
         "must not overwrite canonical workspace evidence"
@@ -262,10 +262,10 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
     """
 
     root = Path(workspace)
-    destination = Path(output)
+    requested_destination = Path(output)
     if not root.exists() or not root.is_dir():
         raise ValueError("workspace must be an existing directory")
-    _reject_output_collision(root, destination)
+    _resolve_output_destination(root, requested_destination)
 
     # Refuse an empty/non-evidence directory before taking the economic lock so an
     # export attempt does not create lock metadata in an unrelated empty directory.
@@ -313,7 +313,10 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
 
     # Re-resolve immediately before publication so a destination symlink/ancestor
     # redirected into the workspace while evidence was being snapshotted fails closed.
-    _reject_output_collision(root, destination)
+    # Publish through the same resolved path that passed the boundary check: os.replace()
+    # replaces a final symlink entry rather than following it, so using the original
+    # lexical path here could otherwise mutate an in-workspace symlink itself.
+    destination = _resolve_output_destination(root, requested_destination)
     atomic_write_json(destination, payload)
     return payload
 

@@ -4,20 +4,12 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import Any
 
-from .causal_integrity import contains_forbidden_future_key
-
-
-def _freeze_payload(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return MappingProxyType(
-            {key: _freeze_payload(child) for key, child in value.items()}
-        )
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_payload(child) for child in value)
-    return value
+from .causal_integrity import (
+    contains_forbidden_future_key,
+    freeze_canonical_json_object,
+)
 
 
 def _json_payload(value: Any) -> Any:
@@ -38,7 +30,9 @@ class EvidenceItem:
     source_hash: str | None = None
 
     def __post_init__(self) -> None:
-        payload = _freeze_payload(self.payload)
+        payload = freeze_canonical_json_object(
+            self.payload, field_name="strategy/research evidence payload"
+        )
         if contains_forbidden_future_key(payload):
             raise ValueError("strategy/research evidence must not contain future-result fields")
         object.__setattr__(self, "payload", payload)
@@ -53,7 +47,13 @@ class EvidenceItem:
             "payload": _json_payload(self.payload),
             "source_hash": self.source_hash,
         }
-        canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        canonical = json.dumps(
+            raw,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

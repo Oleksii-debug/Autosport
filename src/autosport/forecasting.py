@@ -10,10 +10,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, Iterable
 
-from .causal_integrity import contains_forbidden_future_key
+from .causal_integrity import (
+    contains_forbidden_future_key,
+    freeze_canonical_json_object,
+)
 
 
 _ALLOWED_SPLITS = {"validation", "holdout"}
@@ -28,16 +30,6 @@ def parse_iso_timestamp(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("timestamps must include timezone")
     return parsed
-
-
-def _freeze_provenance(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return MappingProxyType(
-            {key: _freeze_provenance(child) for key, child in value.items()}
-        )
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_provenance(child) for child in value)
-    return value
 
 
 def _json_provenance(value: Any) -> Any:
@@ -96,7 +88,9 @@ class ForecastRecord:
             raise ValueError("model training cutoff cannot be after forecast input cutoff")
         if input_cutoff > generated:
             raise ValueError("input cutoff cannot be after forecast generation")
-        provenance = _freeze_provenance(self.provenance)
+        provenance = freeze_canonical_json_object(
+            self.provenance, field_name="forecast provenance"
+        )
         if contains_forbidden_future_key(provenance):
             raise ValueError("forecast provenance must not contain future-result fields")
         object.__setattr__(self, "provenance", provenance)
@@ -123,7 +117,11 @@ class ForecastRecord:
     @property
     def canonical_hash(self) -> str:
         canonical = json.dumps(
-            self.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            self.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -156,7 +154,10 @@ class JsonlForecastLedger:
         payload = record.to_dict()
         digest = record.canonical_hash
         envelope = json.dumps(
-            {"sha256": digest, "record": payload}, ensure_ascii=False, sort_keys=True
+            {"sha256": digest, "record": payload},
+            ensure_ascii=False,
+            sort_keys=True,
+            allow_nan=False,
         )
         with self.path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(envelope + "\n")

@@ -10,6 +10,54 @@ from .dataset import ReplayDataset
 from .forecasting import ForecastRecord, parse_iso_timestamp
 
 
+class _DuplicateJsonKeyError(ValueError):
+    pass
+
+
+class _NonStandardJsonConstantError(ValueError):
+    pass
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateJsonKeyError(key)
+        value[key] = item
+    return value
+
+
+def _reject_nonstandard_json_constant(value: str) -> None:
+    raise _NonStandardJsonConstantError(value)
+
+
+def _strict_json_text(text: str, *, context: str) -> Any:
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_nonstandard_json_constant,
+        )
+    except _DuplicateJsonKeyError as exc:
+        raise ValueError(
+            f"{context} contains duplicate JSON object key: {exc.args[0]}"
+        ) from exc
+    except _NonStandardJsonConstantError as exc:
+        raise ValueError(
+            f"{context} contains non-standard JSON constant: {exc.args[0]}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{context} is invalid JSON") from exc
+
+
+def _strict_json_bytes(payload: bytes, *, context: str) -> Any:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{context} contains invalid UTF-8 JSON") from exc
+    return _strict_json_text(text, context=context)
+
+
 @dataclass(frozen=True, slots=True)
 class ForecastOriginBinding:
     """Local durable artifacts used to bind forecasts to canonical research decisions."""
@@ -168,19 +216,23 @@ def _resolve_relative_file(parent: Path, value: Any, label: str) -> Path:
 
 def _load_summary(path: Path, dataset: ReplayDataset) -> dict[str, Any]:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = path.read_bytes()
+    except OSError as exc:
         raise ValueError(f"forecast origin run summary is unreadable or invalid JSON: {path}") from exc
-    if not isinstance(raw, dict) or raw.get("schema_version") != 2:
+    raw = _strict_json_bytes(payload, context=f"forecast origin run summary {path}")
+    schema_version = raw.get("schema_version") if isinstance(raw, dict) else None
+    if not isinstance(raw, dict) or type(schema_version) is not int or schema_version != 2:
         raise ValueError("forecast origin run summary must use schema_version 2")
-    if raw.get("transaction_schema_version") != 1:
+    transaction_schema_version = raw.get("transaction_schema_version")
+    if type(transaction_schema_version) is not int or transaction_schema_version != 1:
         raise ValueError("forecast origin run summary lacks canonical transaction precommit evidence")
     run_id = _required_text(raw, "run_id", "forecast origin run summary")
     if raw.get("transaction_run_id") != run_id:
         raise ValueError("forecast origin run summary transaction_run_id mismatch")
     if raw.get("real_money_execution") is not False:
         raise ValueError("forecast origin run summary violates REAL_MONEY_EXECUTION=false")
-    if raw.get("dataset_schema_version") != 2:
+    dataset_schema_version = raw.get("dataset_schema_version")
+    if type(dataset_schema_version) is not int or dataset_schema_version != 2:
         raise ValueError("forecast origin run summary is not bound to governed dataset schema v2")
     if raw.get("historical_import_identity") != dataset.import_identity:
         raise ValueError("forecast origin run summary historical import identity mismatch")
@@ -207,10 +259,10 @@ def _validated_ledger_prefixes(path: Path, expected_hashes: set[str]) -> dict[st
                 hasher.update(raw_line)
                 if not raw_line.endswith(b"\n"):
                     raise ValueError("canonical decision ledger contains a non-terminated line")
-                try:
-                    envelope = json.loads(raw_line.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise ValueError("canonical decision ledger contains invalid UTF-8 JSON") from exc
+                envelope = _strict_json_bytes(
+                    raw_line,
+                    context="canonical decision ledger line",
+                )
                 _validate_envelope(envelope)
                 records.append(envelope)
                 digest = hasher.hexdigest()
@@ -227,7 +279,16 @@ def _validate_envelope(envelope: Any) -> None:
     record = envelope.get("record")
     if not isinstance(record, dict):
         raise ValueError("canonical decision ledger record must be an object")
-    canonical = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    try:
+        canonical = json.dumps(
+            record,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("canonical decision ledger record is not standard JSON") from exc
     expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     if envelope.get("sha256") != expected:
         raise ValueError("canonical decision ledger record SHA mismatch")

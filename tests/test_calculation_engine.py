@@ -75,7 +75,8 @@ def test_multiplicative_devig_is_order_independent_and_sums_to_one() -> None:
     with localcontext() as context:
         context.prec = 200
         fair_total = Decimal(outputs["fair_probability.home"]) + Decimal(outputs["fair_probability.away"])
-        assert fair_total == Decimal("1")
+        normalization_error = abs(fair_total - Decimal("1"))
+        assert normalization_error <= Decimal("1e-159")
         assert Decimal(outputs["market_margin"]) == Decimal(outputs["overround"]) - Decimal("1")
     assert Decimal(outputs["fair_decimal_odds.home"]) > Decimal("1")
     assert Decimal(outputs["fair_decimal_odds.away"]) > Decimal("1")

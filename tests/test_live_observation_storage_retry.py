@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from autosport.ingestion_health import SourceHealthStore

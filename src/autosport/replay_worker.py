@@ -25,6 +25,17 @@ class ReplayWorkerMessage:
             raise ValueError("worker message must contain exactly one of result or error")
 
 
+def _terminal_error(exc: BaseException) -> str:
+    """Render a caught failure without trusting arbitrary exception stringification."""
+
+    exception_type = type(exc).__name__
+    try:
+        detail = str(exc)
+    except BaseException:
+        return f"{exception_type}: exception details unavailable"
+    return f"{exception_type}: {detail}"
+
+
 class OneShotReplayWorker:
     """Run one economic replay away from Tk without abandoning it on process shutdown."""
 
@@ -64,9 +75,7 @@ class OneShotReplayWorker:
             # reserved for a genuinely busy worker, so GUI callers never confuse
             # setup failure with another replay already running.
             self._thread = None
-            self._messages.put(
-                ReplayWorkerMessage(error=f"{type(exc).__name__}: {exc}")
-            )
+            self._messages.put(ReplayWorkerMessage(error=_terminal_error(exc)))
             return True
         return True
 
@@ -78,7 +87,7 @@ class OneShotReplayWorker:
             # thread do not provide a GUI terminal outcome by themselves. Publish
             # one so poll() clears the single-flight state instead of leaving the
             # application permanently busy after the worker thread has died.
-            message = ReplayWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+            message = ReplayWorkerMessage(error=_terminal_error(exc))
         self._messages.put(message)
 
     def poll(self) -> ReplayWorkerMessage | None:

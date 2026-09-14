@@ -84,11 +84,14 @@ class OneShotRecoveryWorker:
         try:
             message = RecoveryWorkerMessage(result=task())
         except BaseException as exc:
-            # SystemExit/KeyboardInterrupt raised inside a worker thread terminate
-            # only that thread. Publish a terminal failure so the GUI can quarantine
-            # or recover the workspace and clear busy instead of deadlocking the
-            # recovery control path until the whole process is restarted.
-            message = RecoveryWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+            # Error rendering is itself an untrusted boundary: arbitrary exception
+            # classes may implement a broken __str__. Never let that secondary
+            # failure kill the worker before the terminal message reaches poll().
+            try:
+                error = f"{type(exc).__name__}: {exc}"
+            except BaseException:
+                error = "BaseException: recovery task failed; exception details unavailable"
+            message = RecoveryWorkerMessage(error=error)
         self._messages.put(message)
 
     def poll(self) -> RecoveryWorkerMessage | None:

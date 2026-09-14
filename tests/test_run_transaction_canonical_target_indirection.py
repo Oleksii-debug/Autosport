@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -126,6 +127,36 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
             manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["phase"], "precommitted")
             self.assertTrue(summary_path.is_symlink())
+            self.assertEqual(external.read_bytes(), expected_external)
+
+    def test_commit_preflight_rejects_hardlinked_run_summary_with_exact_new_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx = self._prepare_precommitted(root)
+            summary_path = tx.workspace / f"run-{tx.run_id}.json"
+            book_path = tx.workspace / "paper_book.json"
+            ledger_path = tx.workspace / "decisions.jsonl"
+            base_book_bytes = book_path.read_bytes()
+            base_ledger_bytes = ledger_path.read_bytes()
+            external = root / "external-run-summary.json"
+            expected_external = tx.staged_summary_path.read_bytes()
+            external.write_bytes(expected_external)
+            try:
+                os.link(external, summary_path)
+            except OSError as exc:
+                self.skipTest(f"hard links are unavailable on this platform: {exc}")
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "canonical run summary canonical path must not have hard-link aliases",
+            ):
+                tx.commit()
+
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["phase"], "precommitted")
+            self.assertEqual(book_path.read_bytes(), base_book_bytes)
+            self.assertEqual(ledger_path.read_bytes(), base_ledger_bytes)
+            self.assertEqual(summary_path.read_bytes(), expected_external)
             self.assertEqual(external.read_bytes(), expected_external)
 
     def test_regular_already_new_commit_retry_remains_idempotent(self):

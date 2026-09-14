@@ -52,14 +52,13 @@ class BetfairAvailableBackBook:
         self._batb.clear()
 
     def apply(self, runner_change: dict[str, Any], *, image: bool = False) -> AvailableBackUpdate:
-        if image:
-            self.reset()
-
         has_atb = "atb" in runner_change
         has_batb = "batb" in runner_change
         if has_atb and has_batb:
             raise ValueError("runner change contains both atb and batb ladder encodings")
         if not has_atb and not has_batb:
+            if image:
+                self.reset()
             current = self.current_quote()
             # The ladder cache remains provider state until a ladder delta/image changes it.
             # If the provider emits only a new LTP while that cache exists, surface the
@@ -72,19 +71,28 @@ class BetfairAvailableBackBook:
             )
 
         mode = "atb" if has_atb else "batb"
-        if self._mode is not None and self._mode != mode:
+        if not image and self._mode is not None and self._mode != mode:
             raise ValueError("Betfair available-to-back ladder encoding changed without a new image")
-        self._mode = mode
-        if image:
-            self._initialized = True
 
         raw = runner_change[mode]
         if not isinstance(raw, list):
             raise ValueError(f"{mode} must be a list")
+
+        # Apply each provider message transactionally. A late malformed ladder row must
+        # not leave earlier rows (or an image reset/mode switch) in the cache: rejected
+        # evidence cannot become the basis of a later reconstructed executable quote.
+        next_atb = {} if image else self._atb.copy()
+        next_batb = {} if image else self._batb.copy()
         if mode == "atb":
-            self._apply_atb(raw)
+            self._apply_atb(raw, next_atb)
         else:
-            self._apply_batb(raw)
+            self._apply_batb(raw, next_batb)
+
+        self._atb = next_atb
+        self._batb = next_batb
+        self._mode = mode
+        if image:
+            self._initialized = True
         return AvailableBackUpdate(True, self.current_quote())
 
     def current_quote(self) -> AvailableBackQuote | None:
@@ -116,7 +124,8 @@ class BetfairAvailableBackBook:
             )
         return None
 
-    def _apply_atb(self, rows: list[Any]) -> None:
+    @staticmethod
+    def _apply_atb(rows: list[Any], ladder: dict[Decimal, Decimal]) -> None:
         for index, row in enumerate(rows):
             if not isinstance(row, list) or len(row) != 2:
                 raise ValueError(f"atb[{index}] must be [price,size]")
@@ -125,11 +134,12 @@ class BetfairAvailableBackBook:
                 raise ValueError(f"atb[{index}].price must be decimal odds > 1")
             size = _decimal_number(row[1], field=f"atb[{index}].size", non_negative=True)
             if size == 0:
-                self._atb.pop(price, None)
+                ladder.pop(price, None)
             else:
-                self._atb[price] = size
+                ladder[price] = size
 
-    def _apply_batb(self, rows: list[Any]) -> None:
+    @staticmethod
+    def _apply_batb(rows: list[Any], ladder: dict[int, tuple[Decimal, Decimal]]) -> None:
         for index, row in enumerate(rows):
             if not isinstance(row, list) or len(row) != 3:
                 raise ValueError(f"batb[{index}] must be [level,price,size]")
@@ -140,12 +150,12 @@ class BetfairAvailableBackBook:
             if size == 0:
                 # Betfair removal deltas may carry a zero/sentinel price. The level is
                 # the identity for batb, so no price assertion is needed for removal.
-                self._batb.pop(level_raw, None)
+                ladder.pop(level_raw, None)
                 continue
             price = _decimal_number(row[1], field=f"batb[{index}].price", positive=True)
             if price <= 1:
                 raise ValueError(f"batb[{index}].price must be decimal odds > 1")
-            self._batb[level_raw] = (price, size)
+            ladder[level_raw] = (price, size)
 
 
 def _decimal_number(

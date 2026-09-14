@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import secrets
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -19,17 +22,57 @@ class FutureLeakageError(RuntimeError):
 class ReplayLeakageFirewall:
     """Results remain physically inaccessible to strategy code until replay completion."""
 
+    _SEALED = "sealed"
+    _IN_USE = "in_use"
+    _UNLOCKED = "unlocked"
+
     def __init__(self, final_results: dict[str, str] | None = None) -> None:
         self._results = dict(final_results or {})
-        self._unlocked = False
+        self._state = self._SEALED
+        self._state_lock = threading.Lock()
+        self._active_completion_digest: bytes | None = None
 
     def result_for(self, event_id: str) -> str | None:
-        if not self._unlocked:
-            raise FutureLeakageError("Final result is sealed until replay completion")
-        return self._results.get(event_id)
+        with self._state_lock:
+            if self._state != self._UNLOCKED:
+                raise FutureLeakageError("Final result is sealed until replay completion")
+            return self._results.get(event_id)
 
-    def unlock(self) -> None:
-        self._unlocked = True
+    def _claim_for_replay(self) -> bytes:
+        """Atomically claim this firewall and return the engine-only completion capability."""
+        with self._state_lock:
+            if self._state == self._UNLOCKED:
+                raise FutureLeakageError(
+                    "Final result firewall was already unlocked by a completed replay; "
+                    "use a fresh firewall for each replay"
+                )
+            if self._state == self._IN_USE:
+                raise FutureLeakageError(
+                    "Final result firewall was already claimed by another or failed replay; "
+                    "use a fresh firewall for each replay"
+                )
+            completion_capability = secrets.token_bytes(32)
+            self._active_completion_digest = hashlib.sha256(completion_capability).digest()
+            self._state = self._IN_USE
+            return completion_capability
+
+    def _complete_replay(self, completion_capability: bytes) -> None:
+        """Unlock only for the exact capability returned to the owning replay run."""
+        with self._state_lock:
+            if self._state != self._IN_USE:
+                raise FutureLeakageError(
+                    "Final result firewall can only complete after its claimed replay runs"
+                )
+            if not isinstance(completion_capability, bytes):
+                raise FutureLeakageError("invalid replay completion capability")
+            candidate_digest = hashlib.sha256(completion_capability).digest()
+            expected_digest = self._active_completion_digest
+            if expected_digest is None or not hmac.compare_digest(
+                candidate_digest, expected_digest
+            ):
+                raise FutureLeakageError("invalid replay completion capability")
+            self._active_completion_digest = None
+            self._state = self._UNLOCKED
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +108,10 @@ class ReplayEngine:
         speed: float = 0.0,
         run_id: str | None = None,
     ) -> ReplayRun:
+        # Claim before any strategy-visible callback. The raw completion capability
+        # remains local to this run; the firewall stores only its digest. A failed
+        # run deliberately leaves the firewall retired IN_USE and therefore sealed.
+        completion_capability = self.firewall._claim_for_replay()
         previous: float | None = None
         started = utc_now_iso()
         count = 0
@@ -76,7 +123,7 @@ class ReplayEngine:
                 previous = current
             on_event(event)
             count += 1
-        self.firewall.unlock()
+        self.firewall._complete_replay(completion_capability)
         return ReplayRun(
             run_id=run_id or str(uuid.uuid4()),
             dataset_hash=self.dataset_hash,

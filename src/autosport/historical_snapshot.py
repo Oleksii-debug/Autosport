@@ -67,6 +67,11 @@ def capture_historical_snapshot(
     if provider.public_preview or not provider.api_key:
         raise ValueError("historical snapshot capture requires an authenticated API key")
 
+    output = Path(output_path)
+    evidence = Path(evidence_path) if evidence_path is not None else output.with_suffix(output.suffix + ".evidence.json")
+    if _paths_alias(output, evidence):
+        raise ValueError("output_path and evidence_path must refer to different files")
+
     requested_dt = _parse_timestamp(requested_at, field="requested_at")
     query = urlencode(
         {
@@ -87,6 +92,21 @@ def capture_historical_snapshot(
     payload = response.payload
     if not isinstance(payload, dict):
         raise ProviderPayloadError("historical odds response must be an object")
+    try:
+        canonical_response = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        canonical_response_bytes = canonical_response.encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ProviderPayloadError(
+            "historical odds response must contain strict UTF-8 JSON values"
+        ) from exc
+    response_sha256 = hashlib.sha256(canonical_response_bytes).hexdigest()
+
     snapshot_at = _required_text(payload, "timestamp")
     snapshot_dt = _parse_timestamp(snapshot_at, field="historical response timestamp")
     if snapshot_dt > requested_dt:
@@ -128,12 +148,8 @@ def capture_historical_snapshot(
             events.append(event)
 
     events.sort(key=lambda item: (item.observed_ts, item.sequence, item.event_id, item.market_id, item.selection_id))
-    output = Path(output_path)
-    evidence = Path(evidence_path) if evidence_path is not None else output.with_suffix(output.suffix + ".evidence.json")
     _atomic_write_jsonl(output, (event.to_dict() for event in events))
     market_sha256 = _sha256(output)
-    canonical_response = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    response_sha256 = hashlib.sha256(canonical_response.encode("utf-8")).hexdigest()
     market_types = tuple(sorted({event.market_type.value for event in events}))
 
     evidence_payload = {
@@ -206,6 +222,15 @@ def _bind_quote_to_snapshot(
     metadata["source_time_semantics"] = "provider_quote_last_update"
     metadata["provider_quote_last_update_present"] = True
     return replace(quote, metadata=metadata), False
+
+
+def _paths_alias(first: Path, second: Path) -> bool:
+    if first.resolve(strict=False) == second.resolve(strict=False):
+        return True
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False
 
 
 def _required_text(payload: dict[str, Any], field: str) -> str:

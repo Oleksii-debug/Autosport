@@ -1,10 +1,13 @@
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from autosport.ingestion import IngestionEngine
+from autosport.live_observation import observe_workspace_once
 from autosport.market_bus import MarketEventBus
 from autosport.parlayapi_provider import HttpJsonResponse, ParlayApiTableTennisProvider
+from autosport.providers import ProviderBatch, ProviderQuote
 from autosport.storage import SQLiteMarketStore
 
 
@@ -159,6 +162,56 @@ class ParlayApiBoundedSnapshotDrainTests(unittest.TestCase):
                 )
             finally:
                 store.close()
+
+    def test_live_drain_preserves_earlier_substantive_degradation_in_durable_health(self):
+        class ChunkedProvider:
+            source_id = "chunked-health-test"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.calls += 1
+                if self.calls > 2:
+                    raise AssertionError("snapshot drain fetched beyond terminal chunk")
+                quote = ProviderQuote(
+                    provider_event_id=f"event-{self.calls}",
+                    provider_market_id="market",
+                    provider_selection_id=f"selection-{self.calls}",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-14T08:00:10+00:00",
+                    source_ts="2026-09-14T08:00:10+00:00",
+                    sequence=self.calls,
+                )
+                flags = (
+                    ("UPSTREAM_PARTIAL", "TRUNCATED_BATCH")
+                    if self.calls == 1
+                    else ()
+                )
+                return ProviderBatch(
+                    self.source_id,
+                    (quote,),
+                    cursor=f"chunk-{self.calls}",
+                    quality_flags=flags,
+                )
+
+        provider = ChunkedProvider()
+        with tempfile.TemporaryDirectory() as tmp:
+            result = observe_workspace_once(
+                tmp,
+                provider,
+                max_items=1,
+                clock=lambda: "2026-09-14T08:00:10+00:00",
+            )
+
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(result.stats.quality_flags, ("UPSTREAM_PARTIAL",))
+        self.assertEqual(result.stats.health_status, "degraded")
+        self.assertEqual(result.health.status, "degraded")
+        self.assertEqual(result.health.quality_flags, ("UPSTREAM_PARTIAL",))
+        self.assertEqual(result.health.poll_count, 2)
+        self.assertEqual(result.health.total_received, 2)
+        self.assertNotIn("TRUNCATED_BATCH", result.health.quality_flags)
 
 
 if __name__ == "__main__":

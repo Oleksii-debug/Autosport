@@ -103,6 +103,7 @@ class _ReplayableBatchProvider:
         self.source_id = provider.source_id
         self._inflight: ProviderBatch | None = None
         self._inflight_max_items: int | None = None
+        self._carried_quality_flags: tuple[str, ...] = ()
 
     @property
     def has_inflight(self) -> bool:
@@ -110,11 +111,30 @@ class _ReplayableBatchProvider:
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         if self._inflight is None:
-            self._inflight = self._provider.read_batch(max_items=max_items)
+            batch = self._provider.read_batch(max_items=max_items)
+            if self._carried_quality_flags:
+                batch = ProviderBatch(
+                    source_id=batch.source_id,
+                    quotes=batch.quotes,
+                    cursor=batch.cursor,
+                    quality_flags=tuple(
+                        dict.fromkeys((*batch.quality_flags, *self._carried_quality_flags))
+                    ),
+                )
+            self._inflight = batch
             self._inflight_max_items = max_items
         elif max_items != self._inflight_max_items:
             raise RuntimeError("cannot change live batch bound before durable acknowledgement")
         return self._inflight
+
+    def carry_quality_flags(self, quality_flags: tuple[str, ...]) -> None:
+        """Carry snapshot-wide degradation into later chunks, not pagination control state."""
+
+        substantive = tuple(flag for flag in quality_flags if flag != "TRUNCATED_BATCH")
+        if substantive:
+            self._carried_quality_flags = tuple(
+                dict.fromkeys((*self._carried_quality_flags, *substantive))
+            )
 
     def acknowledge(self) -> None:
         if self._inflight is None:
@@ -164,8 +184,9 @@ def _combined_stats(parts: list[IngestionStats]) -> IngestionStats:
         rejected=sum(item.rejected for item in parts),
         elapsed_seconds=sum(item.elapsed_seconds for item in parts),
         cursor=last.cursor,
-        # A completed snapshot must report the terminal quality truth. In
-        # particular, intermediate TRUNCATED_BATCH flags are resolved by the drain.
+        # Intermediate TRUNCATED_BATCH is resolved by the drain, while substantive
+        # snapshot-wide degradation is carried into the terminal batch before it is
+        # persisted and therefore remains truthful in both stats and source health.
         quality_flags=last.quality_flags,
         health_status=last.health_status,
     )
@@ -184,6 +205,7 @@ def _drain_snapshot(
         parts.append(stats)
         if "TRUNCATED_BATCH" not in stats.quality_flags:
             return _combined_stats(parts)
+        replayable.carry_quality_flags(stats.quality_flags)
         if stats.received <= 0:
             raise RuntimeError(
                 "provider reported TRUNCATED_BATCH without quote progress; "

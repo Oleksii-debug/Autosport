@@ -21,6 +21,46 @@ from .forecasting import (
 )
 
 
+class _DuplicateJsonKeyError(ValueError):
+    pass
+
+
+class _NonStandardJsonConstantError(ValueError):
+    pass
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateJsonKeyError(key)
+        value[key] = item
+    return value
+
+
+def _reject_nonstandard_json_constant(value: str) -> None:
+    raise _NonStandardJsonConstantError(value)
+
+
+def _decode_bundle_json(payload: bytes) -> Any:
+    try:
+        return json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_nonstandard_json_constant,
+        )
+    except _DuplicateJsonKeyError as exc:
+        raise ValueError(
+            f"walk-forward bundle contains duplicate JSON object key: {exc.args[0]}"
+        ) from exc
+    except _NonStandardJsonConstantError as exc:
+        raise ValueError(
+            f"walk-forward bundle contains non-standard JSON constant: {exc.args[0]}"
+        ) from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("walk-forward bundle must be valid UTF-8 JSON") from exc
+
+
 @dataclass(frozen=True, slots=True)
 class WalkForwardBundle:
     forecasts: tuple[ForecastRecord, ...]
@@ -36,15 +76,16 @@ class WalkForwardBundle:
     def from_path(cls, path: str | Path) -> "WalkForwardBundle":
         source = Path(path)
         raw_bytes = source.read_bytes()
-        try:
-            raw = json.loads(raw_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("walk-forward bundle must be valid UTF-8 JSON") from exc
+        raw = _decode_bundle_json(raw_bytes)
         canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         governed_dataset = None
         forecast_origin_binding = None
-        if isinstance(raw, dict) and raw.get("schema_version") == 2:
+        if (
+            isinstance(raw, dict)
+            and type(raw.get("schema_version")) is int
+            and raw.get("schema_version") == 2
+        ):
             governed_dataset = _load_declared_governed_dataset(raw, source)
             if raw.get("forecast_origin") is not None:
                 forecast_origin_binding = load_forecast_origin_binding(raw["forecast_origin"], source)
@@ -67,7 +108,7 @@ class WalkForwardBundle:
         if not isinstance(raw, dict):
             raise ValueError("walk-forward bundle root must be an object")
         schema_version = raw.get("schema_version")
-        if schema_version not in {1, 2}:
+        if type(schema_version) is not int or schema_version not in {1, 2}:
             raise ValueError("walk-forward bundle schema_version must be 1 or 2")
         if schema_version == 1:
             if raw.get("dataset") is not None:
@@ -101,9 +142,9 @@ class WalkForwardBundle:
         forecasts = tuple(_forecast_from_dict(item) for item in forecast_values)
         outcomes = tuple(_outcome_from_dict(item) for item in outcome_values)
         windows = tuple(_window_from_dict(item) for item in window_values)
-        bins = int(raw.get("bins", 10))
-        if bins <= 0:
-            raise ValueError("walk-forward bundle bins must be positive")
+        bins = raw.get("bins", 10)
+        if type(bins) is not int or bins <= 0:
+            raise ValueError("walk-forward bundle bins must be a positive integer")
 
         _validate_global_identity(forecasts, outcomes, windows)
         if source_sha256 is None:
@@ -117,7 +158,7 @@ class WalkForwardBundle:
             source_sha256.lower(),
             governed_dataset=governed_dataset,
             forecast_origin_binding=forecast_origin_binding,
-            bundle_schema_version=int(schema_version),
+            bundle_schema_version=schema_version,
         )
 
 

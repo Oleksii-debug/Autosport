@@ -35,6 +35,17 @@ def _canonical_string_value(value: object, field_name: str) -> str:
     return value
 
 
+def _timezone_aware_iso8601_value(value: object, field_name: str) -> str:
+    timestamp = _canonical_string_value(value, field_name)
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be valid ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware ISO-8601")
+    return timestamp
+
+
 def _required_canonical_string(raw: dict[str, Any], field_name: str) -> str:
     return _canonical_string_value(raw.get(field_name), field_name)
 
@@ -44,6 +55,13 @@ def _optional_canonical_string(raw: dict[str, Any], field_name: str) -> str | No
     if value is None:
         return None
     return _canonical_string_value(value, field_name)
+
+
+def _optional_canonical_timestamp(raw: dict[str, Any], field_name: str) -> str | None:
+    value = raw.get(field_name)
+    if value is None:
+        return None
+    return _timezone_aware_iso8601_value(value, field_name)
 
 
 def _required_sequence(raw: dict[str, Any]) -> int:
@@ -160,7 +178,7 @@ class MarketEvent:
             raise ValueError("market_type must be a supported market type") from exc
 
         status = _canonical_string_value(raw.get("status", "open"), "status")
-        source_ts = _optional_canonical_string(raw, "source_ts")
+        source_ts = _optional_canonical_timestamp(raw, "source_ts")
         score_state = _optional_canonical_string(raw, "score_state")
         metadata = _serialized_metadata(raw)
 

@@ -14,6 +14,7 @@ from .ingestion import IngestionEngine, IngestionStats
 from .ingestion_health import IngestionPolicy, SourceHealthState, SourceHealthStore
 from .integrity import ensure_durable_file, sha256_file
 from .market_bus import MarketEventBus
+from .outcome_trust import bind_dataset_outcome_lineage
 from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
 from .price_truth import market_price_truth_from_events
@@ -134,6 +135,10 @@ class AutosportSession:
 
     def run_dataset(self, dataset: ReplayDataset, speed: float = 0.0, allow_repeat: bool = False) -> SessionResult:
         with WorkspaceEconomicLock(self.workspace):
+            # A schema-v2 authoritative outcome history becomes durable workspace
+            # trust before any PaperBook, ledger or run-registry mutation.  Later
+            # imports may only repeat or extend that exact root-to-head lineage.
+            bind_dataset_outcome_lineage(self.workspace, dataset)
             # Research-plan market binding is deterministic from the sealed causal
             # stream, so reject a stale/forged plan before registry/PaperBook mutation.
             if self.research_plan is not None:

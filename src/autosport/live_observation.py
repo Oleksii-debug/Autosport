@@ -269,12 +269,13 @@ def observe_workspace_once(
             clock=clock,
         )
         stats = _drain_snapshot(engine, provider, max_items=max_items)
+        source_id = stats.source_id
         current = tuple(
             sorted(
-                (event for event in store.current().values() if event.source_id == provider.source_id),
+                (event for event in store.current().values() if event.source_id == source_id),
                 key=lambda event: (event.event_id, event.market_id, event.selection_id),
             )
         )
-        return ObservationResult(stats, health_store.get(provider.source_id), current)
+        return ObservationResult(stats, health_store.get(source_id), current)
     finally:
         store.close()

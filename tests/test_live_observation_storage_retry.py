@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from autosport.ingestion_health import SourceHealthStore
 from autosport.live_observation import observe_workspace_once
 from autosport.parlayapi_provider import (
     HttpJsonResponse,
@@ -146,6 +147,65 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
             ["C"],
         )
         self.assertEqual(recovered.cursor, "2026-09-14T08:00:20+00:00")
+
+    def test_post_commit_source_health_failure_is_not_replayed(self):
+        transport_calls: list[str] = []
+        payload = [self._event("event-1", ["A"])]
+
+        def transport(url, headers, timeout):
+            transport_calls.append(url)
+            return HttpJsonResponse(payload, 200, {})
+
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=transport,
+            clock=lambda: "2026-09-14T08:00:10+00:00",
+        )
+
+        original_append = SQLiteMarketStore.append_batch_accepted
+        append_attempts = 0
+        health_success_attempts = 0
+
+        def track_append(store, events):
+            nonlocal append_attempts
+            append_attempts += 1
+            return original_append(store, tuple(events))
+
+        def fail_health_success(health_store, *args, **kwargs):
+            nonlocal health_success_attempts
+            health_success_attempts += 1
+            raise OSError("injected post-market-commit source-health failure")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            market_path = Path(tmp) / "market.db"
+            with patch.object(
+                SQLiteMarketStore,
+                "append_batch_accepted",
+                new=track_append,
+            ), patch.object(
+                SourceHealthStore,
+                "record_success",
+                new=fail_health_success,
+            ):
+                with self.assertRaises(OSError):
+                    observe_workspace_once(
+                        tmp,
+                        provider,
+                        max_items=2,
+                        clock=lambda: "2026-09-14T08:00:10+00:00",
+                    )
+
+            store = SQLiteMarketStore(market_path)
+            try:
+                persisted = store.events()
+            finally:
+                store.close()
+
+        self.assertEqual(len(transport_calls), 1)
+        self.assertEqual(append_attempts, 1)
+        self.assertEqual(health_success_attempts, 1)
+        self.assertEqual(len(persisted), 1)
+        self.assertEqual(persisted[0].selection_id, "parlayapi:table_tennis:A")
 
 
 if __name__ == "__main__":

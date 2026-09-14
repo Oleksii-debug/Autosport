@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import uuid
 from dataclasses import asdict
 from decimal import Decimal
@@ -15,6 +16,7 @@ from .endurance import EnduranceConfig, run_endurance
 from .evaluation_bundle import WalkForwardBundle, evaluate_walk_forward_bundle
 from .historical_snapshot import capture_historical_snapshot
 from .integrity import atomic_write_json
+from .live_observation import observe_workspace_once
 from .paper import PaperBook
 from .parlayapi_provider import (
     ParlayApiTableTennisProvider,
@@ -218,21 +220,23 @@ def run_observe_table_tennis(
     show: int,
     provider_factory: ProviderFactory = ParlayApiTableTennisProvider,
 ) -> int:
-    if show < 0:
-        raise ValueError("show must be non-negative")
-    api_key = None if public_preview else os.environ.get("AUTOSPORT_PARLAYAPI_KEY")
-    if not public_preview and not api_key:
-        print(
-            "AUTOSPORT_PARLAYAPI_KEY is not set. Set it in the environment or use --public-preview.",
-        )
-        return 2
-    provider = provider_factory(api_key, public_preview=public_preview)
-    session = AutosportSession(workspace)
     try:
-        result = session.observe_provider_once(provider, max_items=max_items)
-        _print_observation(result, show)
-    finally:
-        session.close()
+        if show < 0:
+            raise ValueError("show must be non-negative")
+        if max_items <= 0:
+            raise ValueError("max_items must be positive")
+        api_key = None if public_preview else os.environ.get("AUTOSPORT_PARLAYAPI_KEY")
+        if not public_preview and not api_key:
+            print(
+                "AUTOSPORT_PARLAYAPI_KEY is not set. Set it in the environment or use --public-preview.",
+            )
+            return 2
+        provider = provider_factory(api_key, public_preview=public_preview)
+        result = observe_workspace_once(workspace, provider, max_items=max_items)
+    except (ProviderTransportError, ProviderPayloadError, sqlite3.Error, ValueError, OSError) as exc:
+        print(f"observation=FAIL_CLOSED error={exc}")
+        return 3
+    _print_observation(result, show)
     return 0
 
 

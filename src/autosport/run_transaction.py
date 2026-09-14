@@ -333,6 +333,10 @@ class RunTransaction:
 
         for label, path in candidates:
             if sha256_file(path) != expected_summary_hash:
+                if label == "canonical run summary":
+                    raise RunTransactionError(
+                        "canonical run summary SHA-256 mismatch (identity mismatch or SHA-256 mismatch)"
+                    )
                 raise RunTransactionError(f"{label} SHA-256 mismatch")
             try:
                 summary = json.loads(path.read_text(encoding="utf-8"))

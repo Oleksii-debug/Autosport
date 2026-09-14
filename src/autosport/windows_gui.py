@@ -293,9 +293,6 @@ class WindowsAutosportApp(AutosportApp):
             messagebox.showerror("Автоспорт", detail)
             return
 
-        self._recovery_view = result.session_view
-        self.bank.set(self._bank_text())
-        self._refresh_tickets()
         report = result.report
         summary = (
             "Workspace recovery: "
@@ -306,17 +303,25 @@ class WindowsAutosportApp(AutosportApp):
         )
         self._append_log(summary)
         if report.unresolved_without_summary:
+            self._recovery_view = None
+            self.session = None
+            self._block_workspace_for_recovery(expected_workspace)
+            self.bank.set(self._bank_text())
+            self._refresh_tickets()
             self.status.set(
                 summary
-                + ". Є unresolved legacy run без достатнього summary proof; economic replay лишається fail-closed для цього workspace."
+                + ". Є unresolved legacy run без достатнього summary proof; economic state лишається прихованим і replay fail-closed для цього workspace."
             )
             messagebox.showwarning(
                 "Автоспорт",
                 "Recovery завершив перевірку, але залишив unresolved run без достатнього доказу completion. "
-                "Не обходьте цей стан через allow-repeat.",
+                "Economic state не публікується; не обходьте цей стан через allow-repeat.",
             )
             return
 
+        self._recovery_view = result.session_view
+        self.bank.set(self._bank_text())
+        self._refresh_tickets()
         self._unblock_workspace_after_recovery(result.session_view.workspace)
         self.status.set(summary + ". Workspace готовий до наступного перевіреного paper replay.")
         messagebox.showinfo("Автоспорт", "Workspace recovery завершено без unresolved runs.")

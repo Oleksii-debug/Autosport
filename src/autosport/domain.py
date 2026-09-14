@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
@@ -39,6 +39,16 @@ def _required_sequence(raw: dict[str, Any]) -> int:
     return value
 
 
+def _required_decimal_odds(raw: dict[str, Any]) -> Decimal:
+    try:
+        value = Decimal(str(raw["decimal_odds"]))
+    except (KeyError, InvalidOperation, ValueError) as exc:
+        raise ValueError("decimal_odds must be a finite decimal greater than 1") from exc
+    if not value.is_finite() or value <= 1:
+        raise ValueError("decimal_odds must be a finite decimal greater than 1")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class MarketEvent:
     event_id: str
@@ -71,6 +81,7 @@ class MarketEvent:
         observed_ts = _required_canonical_string(raw, "observed_ts")
         source_id = _required_canonical_string(raw, "source_id")
         sequence = _required_sequence(raw)
+        decimal_odds = _required_decimal_odds(raw)
 
         ingest_ts = raw.get("ingest_ts", observed_ts)
         if not isinstance(ingest_ts, str) or not ingest_ts or ingest_ts.strip() != ingest_ts:
@@ -80,7 +91,7 @@ class MarketEvent:
             event_id=event_id,
             market_id=market_id,
             selection_id=selection_id,
-            decimal_odds=Decimal(str(raw["decimal_odds"])),
+            decimal_odds=decimal_odds,
             observed_ts=observed_ts,
             source_id=source_id,
             sequence=sequence,

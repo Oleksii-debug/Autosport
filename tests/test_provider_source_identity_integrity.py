@@ -44,7 +44,7 @@ class ProviderSourceIdentityIntegrityTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, field_name):
                         self._quote(**{field_name: value})
 
-    def test_reserved_provider_delimiters_are_canonically_escaped(self):
+    def test_reserved_provider_delimiters_are_canonically_escaped_without_rekeying_source(self):
         quote = self._quote(
             provider_event_id="match|1",
             provider_market_id="book:winner|main",
@@ -52,16 +52,22 @@ class ProviderSourceIdentityIntegrityTests(unittest.TestCase):
         )
         event = CanonicalNormalizer().normalize("parlayapi:table_tennis", quote)
         self.assertEqual(event.source_id, "parlayapi:table_tennis")
-        self.assertEqual(event.event_id, "parlayapi%3Atable_tennis:match%7C1")
+        self.assertEqual(event.event_id, "parlayapi:table_tennis:match%7C1")
         self.assertEqual(
             event.market_id,
-            "parlayapi%3Atable_tennis:book%3Awinner%7Cmain",
+            "parlayapi:table_tennis:book%3Awinner%7Cmain",
         )
-        self.assertEqual(event.selection_id, "parlayapi%3Atable_tennis:player%25%7Ca")
+        self.assertEqual(event.selection_id, "parlayapi:table_tennis:player%25%7Ca")
         self.assertNotIn("|", event.event_id)
         self.assertNotIn("|", event.market_id)
         self.assertNotIn("|", event.selection_id)
         self.assertEqual(event.quote_key.count("|"), 2)
+
+    def test_deployed_colon_source_prefix_is_stable_for_safe_provider_components(self):
+        event = CanonicalNormalizer().normalize("parlayapi:table_tennis", self._quote())
+        self.assertEqual(event.event_id, "parlayapi:table_tennis:match-1")
+        self.assertEqual(event.market_id, "parlayapi:table_tennis:winner")
+        self.assertEqual(event.selection_id, "parlayapi:table_tennis:player-a")
 
     def test_cross_source_colon_alias_is_not_possible(self):
         normalizer = CanonicalNormalizer()
@@ -74,18 +80,20 @@ class ProviderSourceIdentityIntegrityTests(unittest.TestCase):
                 provider_selection_id="b:player-a",
             ),
         )
+        self.assertEqual(first.event_id, "a:b:match-1")
+        self.assertEqual(second.event_id, "a:b%3Amatch-1")
         self.assertNotEqual(first.event_id, second.event_id)
         self.assertNotEqual(first.market_id, second.market_id)
         self.assertNotEqual(first.selection_id, second.selection_id)
         self.assertNotEqual(first.quote_key, second.quote_key)
         self.assertNotEqual(first.dedupe_key, second.dedupe_key)
 
-    def test_literal_escape_text_cannot_alias_reserved_character(self):
+    def test_literal_escape_text_in_source_cannot_alias_raw_source_character(self):
         normalizer = CanonicalNormalizer()
         colon_source = normalizer.normalize("a:b", self._quote())
         literal_escape_source = normalizer.normalize("a%3Ab", self._quote())
-        self.assertEqual(colon_source.event_id, "a%3Ab:match-1")
-        self.assertEqual(literal_escape_source.event_id, "a%253Ab:match-1")
+        self.assertEqual(colon_source.event_id, "a:b:match-1")
+        self.assertEqual(literal_escape_source.event_id, "a%3Ab:match-1")
         self.assertNotEqual(colon_source.quote_key, literal_escape_source.quote_key)
 
     def test_valid_safe_source_identity_is_preserved_exactly_in_canonical_ids(self):

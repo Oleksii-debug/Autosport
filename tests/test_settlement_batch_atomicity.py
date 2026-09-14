@@ -138,6 +138,48 @@ class SettlementBatchAtomicityTests(unittest.TestCase):
         self.assertEqual(second.payout, Decimal("0"))
         self.assertEqual(book._lifecycle, before_lifecycle)
 
+    def test_instance_shadowed_settle_cannot_reenter_apply_phase(self) -> None:
+        book = PaperBook("100")
+        first_leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        second_leg = TicketLeg("event-2", "winner", "bob", Decimal("2"))
+        first = book.open_ticket(
+            [first_leg],
+            "10",
+            placed_at="2026-09-14T19:30:00+00:00",
+        )
+        second = book.open_ticket(
+            [second_leg],
+            "10",
+            placed_at="2026-09-14T19:31:00+00:00",
+        )
+        settle_calls = 0
+
+        def poisoned_settle(ticket_id, winning_quote_keys, void_quote_keys=None):
+            nonlocal settle_calls
+            settle_calls += 1
+            if settle_calls == 2:
+                raise RuntimeError("instance shadow interrupted batch apply")
+            return PaperBook.settle(book, ticket_id, winning_quote_keys, void_quote_keys)
+
+        book.settle = poisoned_settle  # type: ignore[method-assign]
+        settlement = SettlementEngine(
+            {
+                first_leg.quote_key: "win",
+                second_leg.quote_key: "win",
+            }
+        )
+
+        self.assertEqual(
+            settlement.settle_ready(book),
+            [first.ticket_id, second.ticket_id],
+        )
+        self.assertEqual(settle_calls, 0)
+        self.assertIs(first.status, TicketStatus.WON)
+        self.assertEqual(first.payout, Decimal("20"))
+        self.assertIs(second.status, TicketStatus.WON)
+        self.assertEqual(second.payout, Decimal("20"))
+        self.assertEqual(book.balance, Decimal("120"))
+
     def test_invalid_public_outcome_state_cannot_become_false_loss(self) -> None:
         book, leg, ticket = self._single_ticket_book()
         settlement = SettlementEngine({leg.quote_key: "corrupt"})

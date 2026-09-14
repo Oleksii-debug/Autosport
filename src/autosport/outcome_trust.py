@@ -3,20 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, TYPE_CHECKING
-
-from .integrity import atomic_write_json
 
 if TYPE_CHECKING:
     from .dataset import ReplayDataset
 
 
-_TRUST_FILE = "outcome_lineage_trust.json"
-
-
 class OutcomeLineageTrustError(ValueError):
-    """Raised when a governed workspace observes a conflicting outcome history."""
+    """Raised when authoritative outcome lineage trust is malformed or conflicts."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,81 +33,17 @@ class OutcomeLineageBinding:
         return self.revisions[-1]
 
 
-def bind_dataset_outcome_lineage(
-    workspace: str | Path,
+def outcome_lineage_binding_from_dataset(
     dataset: ReplayDataset,
 ) -> OutcomeLineageBinding | None:
-    """Bind one verified schema-v2 outcome chain to a durable workspace.
+    """Recover verified lineage identity from checksum-bound released results.
 
-    The caller must own the workspace's cross-process writer lock.  This routine
-    deliberately performs trust-on-first-use only for the already checksum-bound
-    sealed ``results.json`` bytes.  Once a ``(source_identity, record_id)`` has
-    been accepted, a later import may only repeat a verified prefix or extend the
-    exact same root-to-head chain.  A restarted revision-1 root or any divergent
-    revision therefore fails before paper/economic mutation.
+    Schema-v1 provenance deliberately carries no cross-import correction claim.
+    Schema-v2 provenance must contain the complete verifier-derived root-to-head
+    descriptor emitted by the canonical corpus assembler.  The results bytes are
+    re-hashed here so trust cannot be bound from a post-load file swap.
     """
 
-    binding = _binding_from_dataset(dataset)
-    if binding is None:
-        return None
-
-    workspace_path = Path(workspace)
-    workspace_path.mkdir(parents=True, exist_ok=True)
-    trust_path = workspace_path / _TRUST_FILE
-    records = _load_registry(trust_path)
-
-    matches = [
-        record
-        for record in records
-        if record.source_identity == binding.source_identity
-        and record.record_id == binding.record_id
-    ]
-    if len(matches) > 1:
-        raise OutcomeLineageTrustError(
-            "outcome lineage trust registry contains duplicate source/record identities"
-        )
-
-    changed = False
-    if not matches:
-        records.append(binding)
-        changed = True
-    else:
-        trusted = matches[0]
-        if (
-            trusted.root_revision_id != binding.root_revision_id
-            or trusted.root_record_sha256 != binding.root_record_sha256
-        ):
-            raise OutcomeLineageTrustError(
-                "outcome lineage trust conflict: accepted source/record identity restarted from a different root"
-            )
-
-        overlap = min(len(trusted.revisions), len(binding.revisions))
-        for index in range(overlap):
-            accepted = trusted.revisions[index]
-            incoming = binding.revisions[index]
-            if accepted != incoming:
-                raise OutcomeLineageTrustError(
-                    "outcome lineage trust conflict: accepted source/record identity diverged at "
-                    f"revision {index + 1}"
-                )
-
-        if len(binding.revisions) > len(trusted.revisions):
-            records[records.index(trusted)] = binding
-            changed = True
-
-    if changed:
-        records.sort(key=lambda item: (item.source_identity, item.record_id))
-        atomic_write_json(
-            trust_path,
-            {
-                "schema_version": 1,
-                "records": [_record_payload(record) for record in records],
-            },
-        )
-    return binding
-
-
-def _binding_from_dataset(dataset: ReplayDataset) -> OutcomeLineageBinding | None:
     if dataset.schema_version != 2:
         return None
 
@@ -121,11 +51,11 @@ def _binding_from_dataset(dataset: ReplayDataset) -> OutcomeLineageBinding | Non
         payload = dataset.results_path.read_bytes()
     except OSError as exc:
         raise OutcomeLineageTrustError(
-            "sealed results are not readable while binding outcome lineage trust"
+            "sealed results are not readable while recovering outcome lineage trust"
         ) from exc
     if hashlib.sha256(payload).hexdigest() != dataset.results_sha256:
         raise OutcomeLineageTrustError(
-            "sealed results hash changed before outcome lineage trust binding"
+            "sealed results hash changed before outcome lineage trust recovery"
         )
 
     raw = _strict_json_object(payload, context="sealed results trust payload")
@@ -134,7 +64,7 @@ def _binding_from_dataset(dataset: ReplayDataset) -> OutcomeLineageBinding | Non
         return None
     if not isinstance(provenance, dict):
         raise OutcomeLineageTrustError(
-            "sealed results outcome_provenance must be an object for trust binding"
+            "sealed results outcome_provenance must be an object for trust recovery"
         )
 
     schema_version = provenance.get("schema_version")
@@ -291,90 +221,62 @@ def _binding_from_dataset(dataset: ReplayDataset) -> OutcomeLineageBinding | Non
     )
 
 
-def _load_registry(path: Path) -> list[OutcomeLineageBinding]:
-    if not path.exists():
-        return []
-    try:
-        payload = path.read_bytes()
-    except OSError as exc:
-        raise OutcomeLineageTrustError(
-            "outcome lineage trust registry is not readable"
-        ) from exc
-    raw = _strict_json_object(payload, context="outcome lineage trust registry")
-    schema_version = raw.get("schema_version")
-    if type(schema_version) is not int or schema_version != 1:
-        raise OutcomeLineageTrustError(
-            "outcome lineage trust registry schema_version must be exact integer 1"
-        )
-    raw_records = raw.get("records")
-    if not isinstance(raw_records, list):
-        raise OutcomeLineageTrustError(
-            "outcome lineage trust registry records must be a list"
-        )
-
-    records: list[OutcomeLineageBinding] = []
-    identities: set[tuple[str, str]] = set()
-    for record_index, raw_record in enumerate(raw_records, start=1):
-        if not isinstance(raw_record, dict):
-            raise OutcomeLineageTrustError(
-                f"outcome lineage trust registry record {record_index} must be an object"
-            )
-        source_identity = _canonical_text(
-            raw_record.get("source_identity"),
-            field=f"trust registry record {record_index} source_identity",
-        )
-        record_id = _canonical_text(
-            raw_record.get("record_id"),
-            field=f"trust registry record {record_index} record_id",
-        )
-        identity = (source_identity, record_id)
-        if identity in identities:
-            raise OutcomeLineageTrustError(
-                "outcome lineage trust registry contains duplicate source/record identities"
-            )
-        identities.add(identity)
-        root_revision_id = _canonical_text(
-            raw_record.get("root_revision_id"),
-            field=f"trust registry record {record_index} root_revision_id",
-        )
-        root_record_sha256 = _digest(
-            raw_record.get("root_record_sha256"),
-            field=f"trust registry record {record_index} root record SHA-256",
-        )
-        revisions = _registry_revisions(
-            raw_record.get("revisions"),
-            context=f"trust registry record {record_index}",
-        )
-        if (
-            revisions[0].revision_id != root_revision_id
-            or revisions[0].record_sha256 != root_record_sha256
-        ):
-            raise OutcomeLineageTrustError(
-                "outcome lineage trust registry root summary does not match revision history"
-            )
-        records.append(
-            OutcomeLineageBinding(
-                source_identity=source_identity,
-                record_id=record_id,
-                root_revision_id=root_revision_id,
-                root_record_sha256=root_record_sha256,
-                revisions=revisions,
-            )
-        )
-    return records
+def outcome_lineage_payload(binding: OutcomeLineageBinding) -> dict[str, Any]:
+    return {
+        "source_identity": binding.source_identity,
+        "record_id": binding.record_id,
+        "root_revision_id": binding.root_revision_id,
+        "root_record_sha256": binding.root_record_sha256,
+        "revisions": [
+            {
+                "revision": revision.revision,
+                "revision_id": revision.revision_id,
+                "record_sha256": revision.record_sha256,
+            }
+            for revision in binding.revisions
+        ],
+    }
 
 
-def _registry_revisions(value: object, *, context: str) -> tuple[TrustedOutcomeRevision, ...]:
-    if not isinstance(value, list) or not value:
+def outcome_lineage_binding_from_payload(
+    value: object,
+    *,
+    context: str,
+) -> OutcomeLineageBinding:
+    if not isinstance(value, dict):
+        raise OutcomeLineageTrustError(f"{context} must be an object")
+    source_identity = _canonical_text(
+        value.get("source_identity"), field=f"{context} source_identity"
+    )
+    record_id = _canonical_text(value.get("record_id"), field=f"{context} record_id")
+    root_revision_id = _canonical_text(
+        value.get("root_revision_id"), field=f"{context} root_revision_id"
+    )
+    root_record_sha256 = _digest(
+        value.get("root_record_sha256"), field=f"{context} root record SHA-256"
+    )
+    raw_revisions = value.get("revisions")
+    if not isinstance(raw_revisions, list) or not raw_revisions:
         raise OutcomeLineageTrustError(f"{context} revisions must be a non-empty list")
+
     revisions: list[TrustedOutcomeRevision] = []
     seen_ids: set[str] = set()
-    for index, raw in enumerate(value, start=1):
-        if not isinstance(raw, dict):
-            raise OutcomeLineageTrustError(f"{context} revision {index} must be an object")
-        revision = _positive_int(raw.get("revision"), field=f"{context} revision {index} number")
+    for index, raw in enumerate(raw_revisions, start=1):
+        if not isinstance(raw, dict) or set(raw) != {
+            "revision",
+            "revision_id",
+            "record_sha256",
+        }:
+            raise OutcomeLineageTrustError(
+                f"{context} revision {index} must contain only revision identity fields"
+            )
+        revision = _positive_int(
+            raw.get("revision"), field=f"{context} revision {index} number"
+        )
         if revision != index:
-            raise OutcomeLineageTrustError(f"{context} revisions must be contiguous from revision 1")
+            raise OutcomeLineageTrustError(
+                f"{context} revisions must be contiguous from revision 1"
+            )
         revision_id = _canonical_text(
             raw.get("revision_id"), field=f"{context} revision {index} revision_id"
         )
@@ -391,24 +293,43 @@ def _registry_revisions(value: object, *, context: str) -> tuple[TrustedOutcomeR
                 ),
             )
         )
-    return tuple(revisions)
+
+    if (
+        revisions[0].revision_id != root_revision_id
+        or revisions[0].record_sha256 != root_record_sha256
+    ):
+        raise OutcomeLineageTrustError(
+            f"{context} root summary does not match revision history"
+        )
+    return OutcomeLineageBinding(
+        source_identity=source_identity,
+        record_id=record_id,
+        root_revision_id=root_revision_id,
+        root_record_sha256=root_record_sha256,
+        revisions=tuple(revisions),
+    )
 
 
-def _record_payload(binding: OutcomeLineageBinding) -> dict[str, Any]:
-    return {
-        "source_identity": binding.source_identity,
-        "record_id": binding.record_id,
-        "root_revision_id": binding.root_revision_id,
-        "root_record_sha256": binding.root_record_sha256,
-        "revisions": [
-            {
-                "revision": revision.revision,
-                "revision_id": revision.revision_id,
-                "record_sha256": revision.record_sha256,
-            }
-            for revision in binding.revisions
-        ],
-    }
+def assert_compatible_outcome_lineages(
+    trusted: OutcomeLineageBinding,
+    incoming: OutcomeLineageBinding,
+) -> None:
+    if trusted.source_identity != incoming.source_identity or trusted.record_id != incoming.record_id:
+        return
+    if (
+        trusted.root_revision_id != incoming.root_revision_id
+        or trusted.root_record_sha256 != incoming.root_record_sha256
+    ):
+        raise OutcomeLineageTrustError(
+            "outcome lineage trust conflict: accepted source/record identity restarted from a different root"
+        )
+    overlap = min(len(trusted.revisions), len(incoming.revisions))
+    for index in range(overlap):
+        if trusted.revisions[index] != incoming.revisions[index]:
+            raise OutcomeLineageTrustError(
+                "outcome lineage trust conflict: accepted source/record identity diverged at "
+                f"revision {index + 1}"
+            )
 
 
 def _strict_json_object(payload: bytes, *, context: str) -> dict[str, Any]:

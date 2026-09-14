@@ -109,21 +109,53 @@ class PaperBaselineAgent:
 
 class AgentOrchestrator:
     def __init__(self, agents: list[Agent], context: AgentContext) -> None:
-        self.agents = list(agents)
-        self.agent_names = validate_agent_names(
-            getattr(agent, "name", None) for agent in self.agents
+        self._agents: tuple[Agent, ...] = tuple(agents)
+        self._bound_agent_names = validate_agent_names(
+            getattr(agent, "name", None) for agent in self._agents
         )
-        self.agent_composition_sha256 = agent_composition_sha256(self.agent_names)
+        self._bound_agent_composition_sha256 = agent_composition_sha256(self._bound_agent_names)
         self.context = context
 
+    @property
+    def agents(self) -> tuple[Agent, ...]:
+        """Expose the bound runtime composition without a mutable list surface."""
+
+        self._assert_bound_composition()
+        return self._agents
+
+    @property
+    def agent_names(self) -> tuple[str, ...]:
+        self._assert_bound_composition()
+        return self._bound_agent_names
+
+    @property
+    def agent_composition_sha256(self) -> str:
+        self._assert_bound_composition()
+        return self._bound_agent_composition_sha256
+
+    def _assert_bound_composition(self) -> None:
+        current_names = validate_agent_names(
+            getattr(agent, "name", None) for agent in self._agents
+        )
+        if current_names != self._bound_agent_names:
+            raise RuntimeError(
+                "agent runtime composition changed after provenance binding: "
+                f"expected={self._bound_agent_names!r} actual={current_names!r}"
+            )
+        current_hash = agent_composition_sha256(current_names)
+        if current_hash != self._bound_agent_composition_sha256:
+            raise RuntimeError("agent runtime composition hash changed after provenance binding")
+
     def on_market_event(self, event: MarketEvent) -> None:
-        for agent in self.agents:
+        self._assert_bound_composition()
+        for agent in self._agents:
             agent.on_market_event(event, self.context)
 
     def finalize_replay(self) -> None:
         """Allow causal agents to fail closed on unconsumed replay-time work before outcomes unlock."""
 
-        for agent in self.agents:
+        self._assert_bound_composition()
+        for agent in self._agents:
             finalize = getattr(agent, "finalize_replay", None)
             if finalize is not None:
                 finalize(self.context)

@@ -135,6 +135,37 @@ class PortableDataToolSnapshotBindingTests(unittest.TestCase):
             with zipfile.ZipFile(package, "r") as archive:
                 self.assertNotIn("Autosport-V1/Autosport-Data.exe", archive.namelist())
 
+    def test_binding_rejects_temp_snapshot_swap_between_member_read_and_verification(self) -> None:
+        """The temp pathname cannot switch member bytes A to independently valid bytes B."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package, data_exe = self._build_base(root / "candidate", "candidate")
+            valid_swap, _ = self._build_base(root / "swap", "swap")
+            original_bytes = package.read_bytes()
+            valid_swap_bytes = valid_swap.read_bytes()
+            real_read_members = data_tool_package._read_members
+
+            def read_members_then_swap_snapshot(snapshot: Path):
+                members = real_read_members(snapshot)
+                snapshot.write_bytes(valid_swap_bytes)
+                return members
+
+            with patch.object(
+                data_tool_package,
+                "_read_members",
+                side_effect=read_members_then_swap_snapshot,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "verification snapshot does not match captured package bytes",
+                ):
+                    data_tool_package.bind_portable_data_tool(package, data_exe)
+
+            self.assertEqual(package.read_bytes(), original_bytes)
+            with zipfile.ZipFile(package, "r") as archive:
+                self.assertNotIn("Autosport-V1/Autosport-Data.exe", archive.namelist())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -148,6 +148,11 @@ class RunTransaction:
             self.run_ledger_path,
             "staged run Decision Ledger",
         )
+        self._require_run_decision_identity(
+            run_snapshot,
+            expected_run_id=self.run_id,
+            label="staged run Decision Ledger",
+        )
         self._write_combined_ledger(
             canonical_snapshot.payload,
             run_snapshot.payload,
@@ -416,6 +421,28 @@ class RunTransaction:
             raise RunTransactionError(
                 f"{label} integrity validation failed: {exc}"
             ) from exc
+
+    @classmethod
+    def _require_run_decision_identity(
+        cls,
+        snapshot: VerifiedDecisionLedgerSnapshot,
+        *,
+        expected_run_id: str,
+        label: str,
+    ) -> None:
+        """Bind every run-local decision in an immutable verified snapshot to this transaction."""
+
+        if snapshot.record_count == 0:
+            return
+        for line_number, line in enumerate(snapshot.payload.decode("utf-8").splitlines(), start=1):
+            envelope = cls._decode_strict_json(line, label=f"{label} line {line_number}")
+            record = envelope.get("record") if isinstance(envelope, dict) else None
+            actual_run_id = record.get("replay_run_id") if isinstance(record, dict) else None
+            if actual_run_id != expected_run_id:
+                raise RunTransactionError(
+                    f"{label} replay_run_id mismatch at line {line_number}: "
+                    f"expected {expected_run_id!r}, got {actual_run_id!r}"
+                )
 
     @classmethod
     def _require_decision_ledger_snapshot(

@@ -90,13 +90,17 @@ def log_loss(observations: Iterable[ForecastObservation], epsilon: float = 1e-15
         raise ValueError("observations required")
     if isinstance(epsilon, bool) or not isinstance(epsilon, (int, float)):
         raise ValueError("epsilon must be a finite number strictly between 0 and 0.5")
-    epsilon = float(epsilon)
-    if not math.isfinite(epsilon) or not 0.0 < epsilon < 0.5:
+    try:
+        epsilon = float(epsilon)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError("epsilon must be a finite number strictly between 0 and 0.5") from exc
+    upper = 1.0 - epsilon
+    if not math.isfinite(epsilon) or not 0.0 < epsilon < upper < 1.0:
         raise ValueError("epsilon must be a finite number strictly between 0 and 0.5")
     losses = []
     for item in values:
         if not 0.0 <= item.probability <= 1.0 or item.outcome not in (0, 1):
             raise ValueError("invalid forecast observation")
-        p = min(1.0 - epsilon, max(epsilon, item.probability))
+        p = min(upper, max(epsilon, item.probability))
         losses.append(-(item.outcome * math.log(p) + (1 - item.outcome) * math.log(1 - p)))
     return sum(losses) / len(losses)

@@ -68,6 +68,28 @@ class AtomicWriteJsonTests(unittest.TestCase):
             self.assertEqual(json.loads(destination.read_text(encoding="utf-8")), {"stable": True})
             self.assertEqual(list(destination.parent.glob(f".{destination.name}.*.tmp")), [])
 
+    def test_non_finite_number_preserves_destination_and_never_publishes_temp(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "state.json"
+            integrity.atomic_write_json(destination, {"stable": True})
+            stable_bytes = destination.read_bytes()
+
+            for invalid in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(value=repr(invalid)):
+                    with patch.object(integrity.os, "replace", wraps=integrity.os.replace) as replace:
+                        with self.assertRaises(ValueError):
+                            integrity.atomic_write_json(
+                                destination,
+                                {"nested": {"invalid": invalid}},
+                            )
+                        replace.assert_not_called()
+
+                    self.assertEqual(destination.read_bytes(), stable_bytes)
+                    self.assertEqual(
+                        list(destination.parent.glob(f".{destination.name}.*.tmp")),
+                        [],
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

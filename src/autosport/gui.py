@@ -323,6 +323,17 @@ class AutosportApp(tk.Tk):
             f"workspace: {self.session.workspace}"
         )
 
+    def _hide_uncertain_economic_state(self, ticket_message: str) -> None:
+        if self.session is not None:
+            self.session.close()
+        self.session = None
+        self.bank.set(
+            "Віртуальний банк: недоступний до підтвердженого terminal state/recovery; "
+            f"workspace: {self._active_workspace}"
+        )
+        self.tickets.delete(0, "end")
+        self.tickets.insert("end", ticket_message)
+
     def choose_dataset(self) -> None:
         if self.replay_worker.busy:
             self.status.set("Replay уже виконується; вибір іншого dataset доступний після завершення поточного run.")
@@ -456,31 +467,20 @@ class AutosportApp(tk.Tk):
 
         try:
             report = reconcile_late_crashes(replay_workspace)
-            self.session = self._open_session(strategy_id, research_plan)
         except Exception as exc:
             self._recovery_required_workspaces.add(replay_workspace)
-            reopen_error: Exception | None = None
-            if self.session is None:
-                try:
-                    self.session = self._open_session(strategy_id, research_plan)
-                except Exception as reopen_exc:
-                    reopen_error = reopen_exc
-            self.bank.set(self._bank_text())
-            if self.session is not None:
-                self._refresh_tickets()
-            else:
-                self.tickets.delete(0, "end")
-                self.tickets.insert("end", "Workspace recovery не завершено; session state недоступний.")
+            self._hide_uncertain_economic_state(
+                "Workspace recovery не завершено; economic session state недоступний."
+            )
             detail = f"Workspace recovery відхилено fail-closed: {exc}"
-            if reopen_error is not None:
-                detail += f"; session reopen також відхилено: {reopen_error}"
-            self.status.set("Workspace recovery не завершено; новий economic replay не запускайте до усунення причини.")
+            self.status.set(
+                "Workspace recovery не завершено; economic state лишається недоступним, "
+                "а новий replay заблоковано до усунення причини."
+            )
             self._append_log(detail)
             messagebox.showerror("Автоспорт", detail)
             return
 
-        self.bank.set(self._bank_text())
-        self._refresh_tickets()
         summary = (
             "Workspace recovery: "
             f"reconciled={len(report.reconciled_keys)}; "
@@ -491,16 +491,42 @@ class AutosportApp(tk.Tk):
         self._append_log(summary)
         if report.unresolved_without_summary:
             self._recovery_required_workspaces.add(replay_workspace)
+            self._hide_uncertain_economic_state(
+                "Workspace recovery має unresolved run; economic session state недоступний."
+            )
             self.status.set(
                 summary
-                + ". Є unresolved legacy run без достатнього summary proof; economic replay лишається fail-closed для конфліктного experiment."
+                + ". Є unresolved legacy run без достатнього summary proof; economic state приховано, "
+                "а replay лишається fail-closed для конфліктного experiment."
             )
             messagebox.showwarning(
                 "Автоспорт",
                 "Recovery завершив перевірку, але залишив unresolved run без достатнього доказу completion. "
-                "Не обходьте цей стан через allow-repeat.",
+                "Economic state не публікується; не обходьте цей стан через allow-repeat.",
             )
             return
+
+        try:
+            self.session = self._open_session(strategy_id, research_plan)
+        except Exception as exc:
+            self._recovery_required_workspaces.add(replay_workspace)
+            self._hide_uncertain_economic_state(
+                "Recovery завершено, але economic session state не пройшов reopen validation."
+            )
+            detail = (
+                "Post-recovery workspace reopen відхилено fail-closed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            self.status.set(
+                "Recovery reconciliation завершено, але economic session state лишається недоступним; "
+                "новий replay заблоковано до успішного recovery/reopen."
+            )
+            self._append_log(detail)
+            messagebox.showerror("Автоспорт", detail)
+            return
+
+        self.bank.set(self._bank_text())
+        self._refresh_tickets()
         self._recovery_required_workspaces.discard(replay_workspace)
         self.status.set(summary + ". Workspace готовий до наступного перевіреного paper replay.")
         messagebox.showinfo("Автоспорт", "Workspace recovery завершено без unresolved runs.")
@@ -588,46 +614,20 @@ class AutosportApp(tk.Tk):
 
         self._set_replay_controls_busy(False)
         active_workspace = Path(self._active_workspace)
-        try:
-            self.session = self._open_session(
-                self._active_strategy_id,
-                self._active_research_plan,
-            )
-        except Exception as exc:
-            self._recovery_required_workspaces.add(active_workspace)
-            self.session = None
-            self.bank.set(self._bank_text())
-            self.tickets.delete(0, "end")
-            self.tickets.insert(
-                "end",
-                "Replay завершено, але economic session state недоступний; виконайте recovery workspace.",
-            )
-            self._set_evaluation_lines([
-                "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
-            ])
-            detail = f"Post-replay workspace reopen відхилено fail-closed: {type(exc).__name__}: {exc}"
-            if message.error is not None:
-                detail = f"Paper replay помилка: {message.error}; {detail}"
-            self.status.set(
-                "Replay terminal state не можна безпечно підтвердити; economic session state недоступний. "
-                "Виконайте «Відновити workspace» або Control+Shift+R перед наступним economic run."
-            )
-            self._append_log(detail)
-            messagebox.showerror("Автоспорт", detail)
-            return
-        self.bank.set(self._bank_text())
-        self._refresh_tickets()
-
         if message.error is not None:
             self._recovery_required_workspaces.add(active_workspace)
+            self._hide_uncertain_economic_state(
+                "Replay завершився помилкою; economic session state недоступний до recovery."
+            )
             text = f"Paper replay помилка: {message.error}"
             self._append_log(text)
             self._set_evaluation_lines([
                 "Evaluation недоступна: replay не досяг terminal settlement/evaluation boundary."
             ])
             self.status.set(
-                "Replay завершився помилкою; economic workspace механічно заблоковано до recovery. "
-                "Натисніть «Відновити workspace» або Control+Shift+R перед наступним economic run."
+                "Replay завершився помилкою; economic state приховано, а workspace механічно "
+                "заблоковано до recovery. Натисніть «Відновити workspace» або Control+Shift+R "
+                "перед наступним economic run."
             )
             messagebox.showerror("Автоспорт", text)
             return
@@ -635,14 +635,44 @@ class AutosportApp(tk.Tk):
         result = message.result
         if result is None:
             self._recovery_required_workspaces.add(active_workspace)
+            self._hide_uncertain_economic_state(
+                "Replay worker не повернув terminal result; economic session state недоступний до recovery."
+            )
             self._set_evaluation_lines([
                 "Evaluation недоступна: worker не повернув terminal SessionResult."
             ])
-            self.status.set(
-                "Replay worker завершився без terminal result; economic workspace механічно заблоковано "
-                "до успішного recovery."
+            text = (
+                "Replay worker завершився без terminal result; economic state приховано, а workspace "
+                "механічно заблоковано до успішного recovery."
             )
+            self.status.set(text)
+            self._append_log(text)
             return
+
+        try:
+            self.session = self._open_session(
+                self._active_strategy_id,
+                self._active_research_plan,
+            )
+        except Exception as exc:
+            self._recovery_required_workspaces.add(active_workspace)
+            self._hide_uncertain_economic_state(
+                "Replay завершено, але economic session state недоступний; виконайте recovery workspace."
+            )
+            self._set_evaluation_lines([
+                "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
+            ])
+            detail = f"Post-replay workspace reopen відхилено fail-closed: {type(exc).__name__}: {exc}"
+            self.status.set(
+                "Replay terminal state не можна безпечно підтвердити; economic session state недоступний. "
+                "Виконайте «Відновити workspace» або Control+Shift+R перед наступним economic run."
+            )
+            self._append_log(detail)
+            messagebox.showerror("Автоспорт", detail)
+            return
+
+        self.bank.set(self._bank_text())
+        self._refresh_tickets()
         summary = result_summary(result)
         self._set_evaluation_lines(evaluation_lines(result))
         self.status.set(summary)

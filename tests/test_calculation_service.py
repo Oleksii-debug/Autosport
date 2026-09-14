@@ -89,7 +89,7 @@ class CalculationServiceTests(unittest.TestCase):
         )
         second = self.service.implied_probability_for_event(
             event,
-            causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+            causal_cutoff_ts="2026-09-14T14:00:00+02:00",
         )
 
         self.assertEqual(first.result.result_hash, second.result.result_hash)

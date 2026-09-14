@@ -5,6 +5,11 @@ from decimal import Decimal
 from pathlib import Path
 
 from autosport.dataset import load_dataset
+from autosport.decision_ledger import (
+    DecisionLedgerIntegrityError,
+    DecisionRecord,
+    JsonlDecisionLedger,
+)
 from autosport.integrity import sha256_file
 from autosport.session import AutosportSession
 
@@ -69,6 +74,40 @@ class DatasetSessionTests(unittest.TestCase):
                 handle.write("{}\n")
             with self.assertRaisesRegex(ValueError, "market dataset hash mismatch"):
                 load_dataset(target)
+
+    def test_corrupt_decision_ledger_fails_before_new_economic_base(self):
+        dataset = load_dataset(Path("examples/tt_demo"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ledger = JsonlDecisionLedger(root / "decisions.jsonl")
+            ledger.append(
+                DecisionRecord(
+                    "prior-run",
+                    "agent",
+                    "2026-01-01T00:00:00+00:00",
+                    "OBSERVE",
+                    {"x": 1},
+                    "ctx",
+                )
+            )
+            envelope = json.loads(ledger.path.read_text(encoding="utf-8"))
+            envelope["record"]["payload"]["x"] = 2
+            ledger.path.write_text(
+                json.dumps(envelope, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            session = AutosportSession(root, "10000")
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "SHA-256 mismatch at line 1",
+            ):
+                session.run_dataset(dataset)
+            session.close()
+
+            self.assertFalse((root / "paper_book.json").exists())
+            registry = json.loads((root / "run_registry.json").read_text(encoding="utf-8"))
+            self.assertEqual(registry["runs"], {})
 
 
 if __name__ == "__main__":

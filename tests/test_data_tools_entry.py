@@ -126,6 +126,27 @@ class DataToolsEntryTests(unittest.TestCase):
         )
         self.assertNotIn("Traceback", stderr.getvalue())
 
+    def test_expected_failure_with_broken_stringifier_is_still_fail_closed(self):
+        class BrokenStringValueError(ValueError):
+            def __str__(self):
+                raise RuntimeError("diagnostic formatter failed")
+
+        stderr = io.StringIO()
+        with patch(
+            "autosport.cli.main",
+            side_effect=BrokenStringValueError(),
+        ):
+            with redirect_stderr(stderr):
+                result = data_tools_entry.main(["verify-dataset", "broken-dataset"])
+
+        self.assertEqual(result, 3)
+        self.assertEqual(
+            stderr.getvalue().strip(),
+            "Autosport-Data: verify-dataset=FAIL_CLOSED error=BrokenStringValueError: "
+            "BrokenStringValueError",
+        )
+        self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_unexpected_programming_failure_is_not_mislabeled_as_expected_input_error(self):
         with patch(
             "autosport.cli.main",

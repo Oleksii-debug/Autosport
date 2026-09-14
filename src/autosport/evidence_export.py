@@ -22,6 +22,32 @@ _FIXED_EVIDENCE_NAMES = (
     "run_registry.json",
     "source_health.json",
 )
+_MANIFEST_KEYS = {
+    "schema_version",
+    "kind",
+    "file_count",
+    "files",
+    "expected_fixed_evidence_paths",
+    "missing_fixed_evidence_paths",
+    "fixed_evidence_set_complete",
+    "run_summary_count",
+    "file_contents_included",
+    "market_database_included",
+    "raw_historical_or_provider_bytes_included",
+    "environment_or_credential_values_included",
+    "arbitrary_workspace_files_included",
+    "real_money_execution",
+    "manifest_sha256",
+}
+_FILE_KEYS = {"path", "size_bytes", "sha256"}
+_FALSE_TRUTH_FIELDS = (
+    "file_contents_included",
+    "market_database_included",
+    "raw_historical_or_provider_bytes_included",
+    "environment_or_credential_values_included",
+    "arbitrary_workspace_files_included",
+    "real_money_execution",
+)
 
 
 def _is_canonical_run_summary_name(name: str) -> bool:
@@ -33,6 +59,10 @@ def _is_canonical_run_summary_name(name: str) -> bool:
     except (ValueError, AttributeError):
         return False
     return parsed.version == 4 and str(parsed) == raw_id
+
+
+def _is_canonical_evidence_name(name: str) -> bool:
+    return name in _FIXED_EVIDENCE_NAMES or _is_canonical_run_summary_name(name)
 
 
 def _canonical_source_names(workspace: Path) -> tuple[str, ...]:
@@ -114,8 +144,108 @@ def _reject_output_collision(workspace: Path, output: Path) -> None:
     output_path = _resolved(output, strict=False)
     if output_path.parent != workspace_root:
         return
-    if output_path.name in _FIXED_EVIDENCE_NAMES or _is_canonical_run_summary_name(output_path.name):
+    if _is_canonical_evidence_name(output_path.name):
         raise ValueError("output path must not overwrite canonical workspace evidence")
+
+
+def _reject_duplicate_manifest_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("evidence manifest contains duplicate JSON object keys")
+        result[key] = value
+    return result
+
+
+def _reject_manifest_constant(value: str) -> None:
+    raise ValueError("evidence manifest contains non-standard JSON constants")
+
+
+def _is_sha256_text(value: object) -> bool:
+    if type(value) is not str or len(value) != 64:
+        return False
+    return all(character in "0123456789abcdef" for character in value)
+
+
+def _validate_manifest_payload(raw: object) -> dict[str, Any]:
+    if type(raw) is not dict:
+        raise ValueError("evidence manifest root must be a JSON object")
+    if set(raw) != _MANIFEST_KEYS:
+        raise ValueError("evidence manifest fields do not match schema version 1")
+    if type(raw["schema_version"]) is not int or raw["schema_version"] != _SCHEMA_VERSION:
+        raise ValueError("evidence manifest schema_version must be exact integer 1")
+    if raw["kind"] != _KIND or type(raw["kind"]) is not str:
+        raise ValueError("evidence manifest kind is invalid")
+    if type(raw["file_count"]) is not int or raw["file_count"] <= 0:
+        raise ValueError("evidence manifest file_count must be a positive integer")
+    if type(raw["run_summary_count"]) is not int or raw["run_summary_count"] < 0:
+        raise ValueError("evidence manifest run_summary_count must be a non-negative integer")
+    if type(raw["files"]) is not list:
+        raise ValueError("evidence manifest files must be a JSON array")
+    if raw["expected_fixed_evidence_paths"] != list(_FIXED_EVIDENCE_NAMES):
+        raise ValueError("evidence manifest expected fixed paths are invalid")
+    if type(raw["missing_fixed_evidence_paths"]) is not list:
+        raise ValueError("evidence manifest missing fixed paths must be a JSON array")
+    if type(raw["fixed_evidence_set_complete"]) is not bool:
+        raise ValueError("evidence manifest fixed completeness flag must be boolean")
+    for field in _FALSE_TRUTH_FIELDS:
+        if raw[field] is not False:
+            raise ValueError(f"evidence manifest truth field must be false: {field}")
+    if not _is_sha256_text(raw["manifest_sha256"]):
+        raise ValueError("evidence manifest manifest_sha256 is invalid")
+
+    files = raw["files"]
+    if len(files) != raw["file_count"]:
+        raise ValueError("evidence manifest file_count does not match files")
+
+    paths: list[str] = []
+    for item in files:
+        if type(item) is not dict or set(item) != _FILE_KEYS:
+            raise ValueError("evidence manifest file record is invalid")
+        path = item["path"]
+        if type(path) is not str or not _is_canonical_evidence_name(path):
+            raise ValueError("evidence manifest contains a noncanonical evidence path")
+        if type(item["size_bytes"]) is not int or item["size_bytes"] < 0:
+            raise ValueError("evidence manifest file size must be a non-negative integer")
+        if not _is_sha256_text(item["sha256"]):
+            raise ValueError("evidence manifest file SHA-256 is invalid")
+        paths.append(path)
+
+    if paths != sorted(paths) or len(paths) != len(set(paths)):
+        raise ValueError("evidence manifest file paths must be unique and sorted")
+
+    missing_fixed = [name for name in _FIXED_EVIDENCE_NAMES if name not in paths]
+    if raw["missing_fixed_evidence_paths"] != missing_fixed:
+        raise ValueError("evidence manifest missing fixed paths do not match files")
+    if raw["fixed_evidence_set_complete"] is not (not missing_fixed):
+        raise ValueError("evidence manifest fixed completeness flag does not match files")
+    run_summary_count = sum(_is_canonical_run_summary_name(name) for name in paths)
+    if raw["run_summary_count"] != run_summary_count:
+        raise ValueError("evidence manifest run_summary_count does not match files")
+
+    payload_without_hash = dict(raw)
+    manifest_digest = payload_without_hash.pop("manifest_sha256")
+    if _manifest_sha256(payload_without_hash) != manifest_digest:
+        raise ValueError("evidence manifest manifest_sha256 does not match payload")
+    return raw
+
+
+def _load_manifest(path: Path) -> dict[str, Any]:
+    try:
+        raw_bytes = path.read_bytes()
+        text = raw_bytes.decode("utf-8")
+        raw = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_manifest_keys,
+            parse_constant=_reject_manifest_constant,
+        )
+    except UnicodeDecodeError as exc:
+        raise ValueError("evidence manifest is not valid UTF-8") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError("evidence manifest is not valid JSON") from exc
+    except RecursionError as exc:
+        raise ValueError("evidence manifest JSON nesting is too deep") from exc
+    return _validate_manifest_payload(raw)
 
 
 def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[str, Any]:
@@ -181,6 +311,29 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
     return payload
 
 
+def verify_evidence_manifest(manifest: str | Path, workspace: str | Path) -> dict[str, Any]:
+    """Fail closed unless one manifest exactly matches current canonical workspace evidence."""
+
+    manifest_path = Path(manifest)
+    root = Path(workspace)
+    payload = _load_manifest(manifest_path)
+    if not root.exists() or not root.is_dir():
+        raise ValueError("workspace must be an existing directory")
+
+    expected_files = {item["path"]: item for item in payload["files"]}
+    expected_names = tuple(expected_files)
+    with WorkspaceEconomicLock(root):
+        current_names = _canonical_source_names(root)
+        if current_names != expected_names:
+            raise ValueError("workspace canonical evidence set does not match manifest")
+        for name in current_names:
+            size, digest = _open_and_hash_regular_file(root / name)
+            expected = expected_files[name]
+            if size != expected["size_bytes"] or digest != expected["sha256"]:
+                raise ValueError(f"workspace evidence does not match manifest: {name}")
+    return payload
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autosport-export-evidence",
@@ -188,6 +341,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("workspace", type=Path, help="existing Autosport workspace")
     parser.add_argument("--output", type=Path, required=True, help="destination JSON manifest")
+    return parser
+
+
+def build_verify_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="autosport-verify-evidence",
+        description="Verify an Autosport evidence manifest against current workspace evidence",
+    )
+    parser.add_argument("manifest", type=Path, help="evidence manifest JSON")
+    parser.add_argument("--workspace", type=Path, required=True, help="existing Autosport workspace")
     return parser
 
 
@@ -211,6 +374,23 @@ def main(argv: list[str] | None = None) -> int:
         "environment_or_credential_values_included=false real_money_execution=false"
     )
     print(f"output={args.output}")
+    return 0
+
+
+def verify_main(argv: list[str] | None = None) -> int:
+    args = build_verify_parser().parse_args(argv)
+    try:
+        report = verify_evidence_manifest(args.manifest, args.workspace)
+    except (OSError, ValueError, WorkspaceEconomicLockError) as exc:
+        print(f"evidence_verify=FAIL_CLOSED error={exc}")
+        return 3
+
+    print(
+        f"evidence_verify=PASS workspace_match=true files={report['file_count']} "
+        f"run_summaries={report['run_summary_count']} "
+        f"fixed_evidence_set_complete={str(report['fixed_evidence_set_complete']).lower()} "
+        f"manifest_sha256={report['manifest_sha256']} real_money_execution=false"
+    )
     return 0
 
 

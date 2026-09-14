@@ -9,7 +9,12 @@ from pathlib import Path
 import pytest
 
 import autosport.evidence_export as evidence_export
-from autosport.evidence_export import export_evidence_manifest, main
+from autosport.evidence_export import (
+    export_evidence_manifest,
+    main,
+    verify_evidence_manifest,
+    verify_main,
+)
 
 
 def _sha256(path: Path) -> str:
@@ -29,7 +34,14 @@ def _manifest_hash(report: dict[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def test_export_is_deterministic_metadata_only_and_secret_safe(tmp_path: Path) -> None:
+def _write_manifest(path: Path, payload: dict[str, object]) -> None:
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_export_is_deterministic_metadata_only_secret_safe_and_verifiable(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace with ünicode"
     workspace.mkdir()
     run_name = f"run-{uuid.uuid4()}.json"
@@ -61,6 +73,7 @@ def test_export_is_deterministic_metadata_only_and_secret_safe(tmp_path: Path) -
     assert first == second
     assert json.loads(first_output.read_text(encoding="utf-8")) == first
     assert json.loads(second_output.read_text(encoding="utf-8")) == second
+    assert verify_evidence_manifest(first_output, workspace) == first
     assert first["manifest_sha256"] == _manifest_hash(first)
     assert first["expected_fixed_evidence_paths"] == [
         "decisions.jsonl",
@@ -242,6 +255,80 @@ def test_manifest_publication_occurs_after_snapshot_lock_is_released(
     assert output.exists()
 
 
+def test_verify_rejects_tampered_manifest_digest(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "paper_book.json").write_bytes(b"paper-state")
+    manifest = tmp_path / "manifest.json"
+    report = export_evidence_manifest(workspace, manifest)
+    tampered = json.loads(json.dumps(report))
+    tampered["files"][0]["sha256"] = "0" * 64
+    _write_manifest(manifest, tampered)
+
+    with pytest.raises(ValueError, match="manifest_sha256 does not match payload"):
+        verify_evidence_manifest(manifest, workspace)
+
+
+def test_verify_rejects_changed_workspace_even_if_manifest_is_internally_valid(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    paper = workspace / "paper_book.json"
+    paper.write_bytes(b"paper-state-v1")
+    manifest = tmp_path / "manifest.json"
+    export_evidence_manifest(workspace, manifest)
+
+    paper.write_bytes(b"paper-state-v2")
+
+    with pytest.raises(ValueError, match="workspace evidence does not match manifest"):
+        verify_evidence_manifest(manifest, workspace)
+
+
+def test_verify_rejects_changed_canonical_file_set(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "paper_book.json").write_bytes(b"paper-state")
+    manifest = tmp_path / "manifest.json"
+    export_evidence_manifest(workspace, manifest)
+
+    new_run = workspace / f"run-{uuid.uuid4()}.json"
+    new_run.write_text('{"real_money_execution":false}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="canonical evidence set does not match manifest"):
+        verify_evidence_manifest(manifest, workspace)
+
+
+def test_verify_rejects_noncanonical_path_even_with_recomputed_manifest_hash(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "paper_book.json").write_bytes(b"paper-state")
+    manifest = tmp_path / "manifest.json"
+    report = export_evidence_manifest(workspace, manifest)
+    forged = json.loads(json.dumps(report))
+    forged["files"].append(
+        {
+            "path": "token.json",
+            "size_bytes": 6,
+            "sha256": hashlib.sha256(b"secret").hexdigest(),
+        }
+    )
+    forged["file_count"] = 2
+    forged["manifest_sha256"] = _manifest_hash(forged)
+    _write_manifest(manifest, forged)
+
+    with pytest.raises(ValueError, match="noncanonical evidence path"):
+        verify_evidence_manifest(manifest, workspace)
+
+
+def test_verify_rejects_duplicate_json_keys_before_schema_validation(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"schema_version":1,"schema_version":1}\n', encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with pytest.raises(ValueError, match="duplicate JSON object keys"):
+        verify_evidence_manifest(manifest, workspace)
+
+
 def test_cli_reports_fail_closed_and_success_without_traceback(tmp_path: Path, capsys) -> None:
     missing = tmp_path / "missing"
     failed_output = tmp_path / "failed.json"
@@ -252,7 +339,8 @@ def test_cli_reports_fail_closed_and_success_without_traceback(tmp_path: Path, c
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (workspace / "paper_book.json").write_text('{"balance":"10000"}\n', encoding="utf-8")
+    paper = workspace / "paper_book.json"
+    paper.write_text('{"balance":"10000"}\n', encoding="utf-8")
     output = tmp_path / "ok.json"
     assert main([str(workspace), "--output", str(output)]) == 0
     success_text = capsys.readouterr().out
@@ -262,3 +350,14 @@ def test_cli_reports_fail_closed_and_success_without_traceback(tmp_path: Path, c
     assert "environment_or_credential_values_included=false" in success_text
     assert "real_money_execution=false" in success_text
     assert output.exists()
+
+    assert verify_main([str(output), "--workspace", str(workspace)]) == 0
+    verify_success = capsys.readouterr().out
+    assert "evidence_verify=PASS" in verify_success
+    assert "workspace_match=true" in verify_success
+    assert "real_money_execution=false" in verify_success
+
+    paper.write_text('{"balance":"99999"}\n', encoding="utf-8")
+    assert verify_main([str(output), "--workspace", str(workspace)]) == 3
+    verify_failure = capsys.readouterr().out
+    assert "evidence_verify=FAIL_CLOSED" in verify_failure

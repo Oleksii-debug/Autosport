@@ -16,6 +16,7 @@ test = ["pytest>=8,<9"]
 [project.scripts]
 autosport = "autosport.cli:main"
 autosport-export-evidence = "autosport.evidence_export:main"
+autosport-verify-evidence = "autosport.evidence_export:verify_main"
 autosport-build-historical-corpus = "autosport.historical_governance:corpus_main"
 autosport-build-historical-corpus-from-bundle = "autosport.historical_governance:bundle_corpus_main"
 autosport-capture-historical-matches = "autosport.historical_matches:main"

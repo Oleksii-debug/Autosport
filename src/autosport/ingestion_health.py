@@ -280,6 +280,12 @@ class SourceHealthStore:
             return SourceHealthState(source_id=source_id)
         value = dict(raw)
         value["quality_flags"] = tuple(value["quality_flags"])
+        if value.get("status") == "failed":
+            # Pre-fix stores may legitimately contain the preceding successful
+            # batch's flags on a later failed poll. Preserve that schema-v1 state
+            # as readable input, but never expose stale batch-scoped evidence as
+            # the current failed-state truth.
+            value["quality_flags"] = ()
         return SourceHealthState(**value)
 
     def record_success(

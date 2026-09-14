@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -160,14 +161,20 @@ def _poll_acknowledged(
             if provider.has_inflight:
                 provider.acknowledge()
             raise
-        except Exception:
-            # If acquisition returned a batch, keep that exact batch in-flight and
-            # retry it rather than reading/advancing to a later provider chunk. A
-            # deterministic validation failure simply fails again and propagates;
-            # a transient local persistence failure can recover without quote loss.
+        except sqlite3.Error:
+            # SQLiteMarketStore commits its batch transaction before poll_once can
+            # proceed to source-health publication. A sqlite3.Error escaping that
+            # market transaction is therefore the narrow failure class for which
+            # replaying the still-inflight batch is safe and prevents tail loss.
             if not provider.has_inflight or attempt + 1 >= _MAX_BATCH_ATTEMPTS:
                 raise
             continue
+        except Exception:
+            # Do not replay after an arbitrary later-stage failure (for example a
+            # source-health JSON write): market events may already be durable, and
+            # replaying them would turn a post-commit failure into misleading
+            # accepted/progress accounting. Surface the failure instead.
+            raise
         provider.acknowledge()
         return stats
     raise AssertionError("unreachable")

@@ -24,4 +24,5 @@ def test_process_kill_relaunch_recovers_precommit_in_fresh_process() -> None:
     assert len(evidence["new_paper_book_sha256"]) == 64
     assert len(evidence["new_decision_ledger_sha256"]) == 64
     assert evidence["new_paper_book_sha256"] != evidence["base_paper_book_sha256"]
+    assert evidence["new_decision_ledger_sha256"] != evidence["base_decision_ledger_sha256"]
     assert evidence["real_money_execution"] is False

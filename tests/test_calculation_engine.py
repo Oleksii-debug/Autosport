@@ -11,6 +11,25 @@ def _outputs(result) -> dict[str, str]:
     return dict(result.outputs)
 
 
+def test_odds_conversion_preserves_exact_fraction_and_unrounded_american_truth() -> None:
+    engine = CalculationEngine()
+
+    positive = engine.odds_conversion("2.5")
+    negative = engine.odds_conversion("1.5")
+
+    assert positive.exact
+    assert _outputs(positive) == {
+        "american_odds_unrounded": "150",
+        "decimal_odds": "2.5",
+        "fractional_denominator": "2",
+        "fractional_numerator": "3",
+    }
+    assert negative.classification == "approximate_decimal"
+    assert _outputs(negative)["american_odds_unrounded"] == "-200"
+    assert _outputs(negative)["fractional_numerator"] == "1"
+    assert _outputs(negative)["fractional_denominator"] == "2"
+
+
 def test_implied_probability_reports_approximation_and_stable_hashes() -> None:
     engine = CalculationEngine()
 
@@ -87,6 +106,82 @@ def test_performance_summary_reports_roi_yield_and_turnover() -> None:
     assert dict(result.output_units)["turnover"] == "paper_currency"
 
 
+def test_return_dispersion_distinguishes_population_and_sample_contracts() -> None:
+    engine = CalculationEngine()
+
+    population = engine.return_dispersion(["1", "2", "3"])
+    sample = engine.return_dispersion(["1", "2", "3"], sample=True)
+
+    population_outputs = _outputs(population)
+    assert population_outputs["count"] == "3"
+    assert population_outputs["mean"] == "2"
+    assert population_outputs["variance"].startswith("0.666666666666")
+    assert population_outputs["standard_deviation"].startswith("0.816496580927")
+    assert _outputs(sample)["variance"] == "1"
+    assert _outputs(sample)["standard_deviation"] == "1"
+    assert population.result_hash != sample.result_hash
+    assert population.classification == "approximate_decimal"
+
+
+def test_normal_confidence_interval_requires_explicit_model_acknowledgement() -> None:
+    engine = CalculationEngine()
+
+    with pytest.raises(ValueError, match="explicit assumption"):
+        engine.normal_confidence_interval("10", "2", "1.96")
+
+    result = engine.normal_confidence_interval(
+        "10",
+        "2",
+        "1.96",
+        assumption="normal_approximation_acknowledged",
+    )
+
+    assert result.classification == "approximate_decimal"
+    assert _outputs(result) == {
+        "lower_bound": "6.08",
+        "margin": "3.92",
+        "mean": "10",
+        "upper_bound": "13.92",
+    }
+    assert "normal-approximation" in result.assumptions[0]
+
+
+def test_paper_parlay_exact_payout_does_not_invent_joint_probability() -> None:
+    result = CalculationEngine().paper_parlay("10", ["2", "1.5"])
+
+    assert result.exact
+    assert _outputs(result) == {
+        "combined_decimal_odds": "3",
+        "payout": "30",
+        "profit": "20",
+    }
+    assert "joint probability" in result.assumptions[0]
+
+
+def test_paper_parlay_probability_requires_explicit_independence() -> None:
+    engine = CalculationEngine()
+
+    with pytest.raises(ValueError, match="probability_assumption='independent'"):
+        engine.paper_parlay("10", ["2", "1.5"], probabilities=["0.5", "0.4"])
+    with pytest.raises(ValueError, match="match the number"):
+        engine.paper_parlay(
+            "10",
+            ["2", "1.5", "3"],
+            probabilities=["0.5", "0.4"],
+            probability_assumption="independent",
+        )
+
+    result = engine.paper_parlay(
+        "10",
+        ["2", "1.5"],
+        probabilities=["0.5", "0.4"],
+        probability_assumption="independent",
+    )
+    assert result.classification == "approximate_decimal"
+    assert _outputs(result)["joint_probability"] == "0.2"
+    assert "independent" in result.assumptions[0]
+
+
 def test_maximum_drawdown_uses_chronological_running_peak() -> None:
     result = CalculationEngine().maximum_drawdown(["100", "120", "90", "110", "60", "130"])
 
@@ -140,6 +235,10 @@ def test_invalid_ranges_and_market_shapes_fail_closed() -> None:
         engine.maximum_drawdown([])
     with pytest.raises(ValueError, match="at least 0"):
         engine.maximum_drawdown(["100", "-1"])
+    with pytest.raises(ValueError, match="sample variance requires"):
+        engine.return_dispersion(["1"], sample=True)
+    with pytest.raises(ValueError, match="sample must be a boolean"):
+        engine.return_dispersion(["1", "2"], sample=1)
 
 
 def test_result_serialization_contains_full_truth_and_hashes() -> None:
@@ -148,6 +247,7 @@ def test_result_serialization_contains_full_truth_and_hashes() -> None:
 
     assert payload["calculation_id"] == "paper_payout"
     assert payload["version"] == 1
+    assert payload["engine_version"] == "calculation-engine-v1"
     assert payload["method"] == "decimal_odds_payout"
     assert payload["classification"] == "exact"
     assert payload["inputs"] == {"decimal_odds": "2.5", "stake": "10"}
@@ -163,6 +263,13 @@ def test_engine_does_not_mutate_callers_decimal_context() -> None:
 
     CalculationEngine().implied_probability("3")
     CalculationEngine().fractional_kelly("0.61", "2.35", "0.5", "0.1")
+    CalculationEngine().return_dispersion(["0.1", "0.2", "0.3"])
+    CalculationEngine().paper_parlay(
+        "10",
+        ["2", "1.5"],
+        probabilities=["0.5", "0.4"],
+        probability_assumption="independent",
+    )
 
     assert context.prec == original_precision
     assert context.flags == original_flags

@@ -166,7 +166,7 @@ class ReleasePackageJsonIntegrityTests(unittest.TestCase):
 
     def test_json_decoder_rejects_nonstandard_constants_recursively(self) -> None:
         for constant in ("NaN", "Infinity", "-Infinity"):
-            payload = f'{{"outer":{{"score":{constant}}}}'.encode("utf-8") + b"}"
+            payload = f'{{"outer":{{"score":{constant}}}}}'.encode("utf-8")
             with self.subTest(constant=constant):
                 with self.assertRaisesRegex(
                     ValueError,

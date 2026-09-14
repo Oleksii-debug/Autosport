@@ -66,3 +66,38 @@ def test_local_windows_build_fails_closed_on_release_native_steps() -> None:
     package_command = "python scripts/package_windows.py `"
     assert script.index(package_assignment) < script.index(package_cleanup) < script.index(package_command)
     assert script.index(verification_cleanup) < script.index(package_command)
+
+
+def test_local_windows_build_binds_real_process_recovery_before_and_after_packaging() -> None:
+    script = _build_script_text()
+
+    packaged_call = (
+        "Assert-ProcessRecoveryEvidence -Evidence $restartRecoveryEvidence "
+        "-Label 'Packaged restart/recovery audit'"
+    )
+    package_command = "python scripts/package_windows.py `"
+    fresh_call = (
+        "Assert-ProcessRecoveryEvidence -Evidence $freshRestartRecoveryEvidence "
+        "-Label 'Fresh-extracted restart/recovery audit'"
+    )
+    fresh_evidence_write = "dist/fresh-extraction-verification.json"
+
+    assert script.count("Assert-ProcessRecoveryEvidence -Evidence") == 2
+    assert script.index(packaged_call) < script.index(package_command)
+    assert script.index(package_command) < script.index(fresh_call) < script.index(fresh_evidence_write)
+
+    for required_binding in (
+        "process_kill_relaunch_status",
+        "process_kill_stage_pid",
+        "process_kill_return_code",
+        "process_recovery_pid",
+        "process_recovery_run_id",
+        "process_recovery_disposition",
+        "process_recovery_registry_status",
+        "process_recovery_manifest_phase",
+        "process_recovery_base_paper_book_sha256",
+        "process_recovery_base_decision_ledger_sha256",
+        "process_recovery_new_paper_book_sha256",
+        "process_recovery_new_decision_ledger_sha256",
+    ):
+        assert required_binding in script

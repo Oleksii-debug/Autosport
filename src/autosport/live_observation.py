@@ -143,6 +143,25 @@ class _ReplayableBatchProvider:
         self._inflight = None
         self._inflight_max_items = None
 
+    def abandon_uncommitted(self) -> None:
+        """Prevent a reusable stateful provider from advancing past a never-durable batch."""
+
+        if self._inflight is None:
+            raise RuntimeError("cannot abandon a live batch that was not read")
+        # The shipped Parlay provider owns an in-memory snapshot iterator. If both
+        # bounded SQLite attempts fail before market commit, this wrapper is about
+        # to unwind and lose its cached batch while that iterator already points at
+        # the tail. Reset that snapshot so reusing the same provider refetches from
+        # the beginning instead of silently skipping the never-durable prefix.
+        reset_snapshot = getattr(self._provider, "reset_pending_snapshot", None)
+        if not callable(reset_snapshot):
+            reset_snapshot = getattr(self._provider, "_clear_pending_snapshot", None)
+        if callable(reset_snapshot):
+            reset_snapshot()
+        self._inflight = None
+        self._inflight_max_items = None
+        self._carried_quality_flags = ()
+
 
 def _poll_acknowledged(
     engine: IngestionEngine,
@@ -166,7 +185,10 @@ def _poll_acknowledged(
             # proceed to source-health publication. A sqlite3.Error escaping that
             # market transaction is therefore the narrow failure class for which
             # replaying the still-inflight batch is safe and prevents tail loss.
-            if not provider.has_inflight or attempt + 1 >= _MAX_BATCH_ATTEMPTS:
+            if not provider.has_inflight:
+                raise
+            if attempt + 1 >= _MAX_BATCH_ATTEMPTS:
+                provider.abandon_uncommitted()
                 raise
             continue
         except Exception:

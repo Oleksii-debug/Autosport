@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from autosport.gui import AutosportApp
+from autosport.windows_gui import WindowsAutosportApp
 
 
 class _Value:
@@ -20,6 +21,31 @@ class _Value:
 
 class _HeadlessAutosportApp(AutosportApp):
     """Exercise product startup without requiring a display server."""
+
+    def title(self, _value: str) -> None:
+        return None
+
+    def geometry(self, _value: str) -> None:
+        return None
+
+    def minsize(self, _width: int, _height: int) -> None:
+        return None
+
+    def _build(self) -> None:
+        self.shell_built = True
+
+    def update_idletasks(self) -> None:
+        return None
+
+    def _configure_accessibility(self) -> None:
+        self.accessibility_configured = True
+
+    def protocol(self, _name: str, _callback) -> None:
+        self.close_protocol_bound = True
+
+
+class _HeadlessWindowsAutosportApp(WindowsAutosportApp):
+    """Exercise Windows recovery composition without creating real Tk controls."""
 
     def title(self, _value: str) -> None:
         return None
@@ -137,6 +163,31 @@ def test_corrupt_economic_startup_keeps_shell_and_live_observation_reachable(tmp
     assert replay_worker.start_calls == 0
     assert "непідтверджений terminal state" in app.status.value
     showwarning.assert_called_once()
+
+
+def test_windows_startup_uses_native_recovery_quarantine_without_dual_permanent_block(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+
+    with (
+        patch("autosport.gui.tk.Tk.__init__", return_value=None),
+        patch("autosport.gui.tk.StringVar", side_effect=_string_var),
+        patch("autosport.gui.default_workspace", return_value=workspace),
+        patch("autosport.gui.AutosportSession", side_effect=ValueError("corrupt paper state")),
+    ):
+        app = _HeadlessWindowsAutosportApp()
+
+    assert app.shell_built
+    assert app.session is None
+    assert app._recovery_required_workspaces == set()
+    assert app._workspace_requires_recovery(workspace)
+
+    # Windows recovery already owns this exact lifecycle. A successful terminal
+    # recovery clears its native quarantine; the base startup path must not leave
+    # a second hidden quarantine that would make super().run_dataset() block forever.
+    app._unblock_workspace_after_recovery(workspace)
+
+    assert not app._workspace_requires_recovery(workspace)
+    assert app._recovery_required_workspaces == set()
 
 
 def test_valid_economic_startup_preserves_existing_ready_state(tmp_path: Path) -> None:

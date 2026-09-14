@@ -27,6 +27,13 @@ def _validate_provider_component(value: object, name: str) -> str:
     return value
 
 
+def _validate_provider_event_id(value: object) -> str:
+    event_id = _validate_provider_component(value, "provider_event_id")
+    if ":" in event_id:
+        raise ValueError("provider_event_id must not contain reserved source-scope delimiter ':'")
+    return event_id
+
+
 def _validate_sequence(value: object) -> int:
     """Keep provider sequence identity stable across JSON/SQLite round trips."""
 
@@ -38,11 +45,12 @@ def _validate_sequence(value: object) -> int:
 def _scoped_identity(source_id: str, provider_component: str) -> str:
     """Preserve the deployed canonical ``source_id:provider_id`` representation.
 
-    Colon is intentionally data inside existing source/provider identifiers (the live
-    Parlay adapter emits market IDs such as ``book:h2h``). Re-encoding it would
-    silently re-key durable market state. The structural quote-key delimiter is
-    ``|`` instead, and both source and provider identity components reject that
-    delimiter before normalization.
+    Colon is intentionally data inside existing source IDs and market/selection IDs
+    (the live Parlay adapter emits market IDs such as ``book:h2h``). Provider event
+    IDs are colon-free, which makes the source-scoped event identity unambiguous and
+    therefore prevents cross-source quote-key aliasing without re-keying deployed
+    market/selection identities. The top-level quote-key delimiter ``|`` remains
+    forbidden in every identity component.
     """
 
     return f"{source_id}:{provider_component}"
@@ -63,7 +71,7 @@ class ProviderQuote:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _validate_provider_component(self.provider_event_id, "provider_event_id")
+        _validate_provider_event_id(self.provider_event_id)
         _validate_provider_component(self.provider_market_id, "provider_market_id")
         _validate_provider_component(self.provider_selection_id, "provider_selection_id")
         _validate_sequence(self.sequence)

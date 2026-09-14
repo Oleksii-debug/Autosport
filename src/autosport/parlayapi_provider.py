@@ -95,7 +95,7 @@ def _positive_nonboolean_int(value: object, *, field: str, maximum: int | None =
     return value
 
 
-def _provider_identity(value: object, *, field: str) -> str:
+def _provider_identity(value: object, *, field: str, allow_colon: bool = True) -> str:
     """Validate raw provider identity without normalizing away type or byte differences."""
 
     if not isinstance(value, str):
@@ -104,6 +104,8 @@ def _provider_identity(value: object, *, field: str) -> str:
         raise ProviderPayloadError(f"{field} must be a non-empty trimmed string")
     if "|" in value:
         raise ProviderPayloadError(f"{field} must not contain reserved identity delimiter '|'")
+    if not allow_colon and ":" in value:
+        raise ProviderPayloadError(f"{field} must not contain reserved source-scope delimiter ':'")
     return value
 
 
@@ -331,12 +333,13 @@ class ParlayApiTableTennisProvider:
         return events
 
     def _event_quotes(self, event: dict[str, Any], observed_ts: str, http_status: int) -> list[ProviderQuote]:
-        raw_event_id = event.get("id")
-        if raw_event_id is None or raw_event_id == "":
-            raw_event_id = event.get("canonical_event_id")
-        if raw_event_id is None or raw_event_id == "":
+        if "id" in event:
+            raw_event_id = event["id"]
+        elif "canonical_event_id" in event:
+            raw_event_id = event["canonical_event_id"]
+        else:
             raise ProviderPayloadError("event is missing id")
-        event_id = _provider_identity(raw_event_id, field="event id")
+        event_id = _provider_identity(raw_event_id, field="event id", allow_colon=False)
         bookmakers = event.get("bookmakers", [])
         if not isinstance(bookmakers, list):
             raise ProviderPayloadError("event bookmakers must be a list")
@@ -344,10 +347,11 @@ class ParlayApiTableTennisProvider:
         for bookmaker in bookmakers:
             if not isinstance(bookmaker, dict):
                 continue
-            raw_book_key = bookmaker.get("key")
-            if raw_book_key is None or raw_book_key == "":
-                raw_book_key = bookmaker.get("title")
-            if raw_book_key is None or raw_book_key == "":
+            if "key" in bookmaker:
+                raw_book_key = bookmaker["key"]
+            elif "title" in bookmaker:
+                raw_book_key = bookmaker["title"]
+            else:
                 raise ProviderPayloadError("bookmaker is missing key/title identity")
             book_key = _provider_identity(raw_book_key, field="bookmaker identity")
             markets = bookmaker.get("markets", [])

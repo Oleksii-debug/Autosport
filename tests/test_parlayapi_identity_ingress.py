@@ -45,10 +45,29 @@ class ParlayApiIdentityIngressTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderPayloadError, "event id must be a string"):
             self._read(event)
 
+    def test_empty_event_id_does_not_fall_back_to_canonical_id(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["id"] = ""
+        event["canonical_event_id"] = "fallback-id"
+        with self.assertRaisesRegex(ProviderPayloadError, "non-empty trimmed string"):
+            self._read(event)
+
+    def test_colon_bearing_event_id_fails_before_source_scope_can_alias(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["id"] = "scope:event"
+        with self.assertRaisesRegex(ProviderPayloadError, "source-scope delimiter"):
+            self._read(event)
+
     def test_non_string_bookmaker_key_does_not_fall_back_to_title(self):
         event = copy.deepcopy(_BASE_EVENT)
         event["bookmakers"][0]["key"] = 0
         with self.assertRaisesRegex(ProviderPayloadError, "bookmaker identity must be a string"):
+            self._read(event)
+
+    def test_empty_bookmaker_key_does_not_fall_back_to_title(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["bookmakers"][0]["key"] = ""
+        with self.assertRaisesRegex(ProviderPayloadError, "non-empty trimmed string"):
             self._read(event)
 
     def test_non_string_market_key_is_not_stringified_into_identity(self):
@@ -69,7 +88,7 @@ class ParlayApiIdentityIngressTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderPayloadError, "non-empty trimmed string"):
             self._read(event)
 
-    def test_existing_string_fallbacks_preserve_deployed_identity_bytes(self):
+    def test_missing_primary_string_fields_use_existing_fallbacks(self):
         event = copy.deepcopy(_BASE_EVENT)
         del event["id"]
         event["canonical_event_id"] = "canonical-100"

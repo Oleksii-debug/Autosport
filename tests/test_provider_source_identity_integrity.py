@@ -50,6 +50,27 @@ class ProviderSourceIdentityIntegrityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "reserved identity delimiter"):
                     self._quote(**{field_name: "left|right"})
 
+    def test_provider_event_id_rejects_source_scope_delimiter_to_prevent_cross_source_alias(self):
+        normalizer = CanonicalNormalizer()
+        first = normalizer.normalize(
+            "a:b",
+            self._quote(
+                provider_event_id="c",
+                provider_market_id="m",
+                provider_selection_id="s",
+            ),
+        )
+        self.assertEqual(first.quote_key, "a:b:c|a:b:m|a:b:s")
+
+        # Without this event-ID boundary, source="a" + event="b:c" could produce
+        # the same source-scoped event identity as source="a:b" + event="c".
+        with self.assertRaisesRegex(ValueError, "source-scope delimiter"):
+            self._quote(
+                provider_event_id="b:c",
+                provider_market_id="b:m",
+                provider_selection_id="b:s",
+            )
+
     def test_provider_sequence_identity_requires_non_boolean_integer(self):
         for value in (True, False, 1.0, "1", Decimal("1")):
             with self.subTest(value=value):

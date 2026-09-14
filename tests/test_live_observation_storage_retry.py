@@ -100,6 +100,75 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
             },
         )
 
+    def test_exhausted_storage_failures_refetch_before_tail_progress(self):
+        transport_calls: list[str] = []
+        payload = [self._event("event-1", ["A", "B", "C", "D", "E"])]
+
+        def transport(url, headers, timeout):
+            transport_calls.append(url)
+            return HttpJsonResponse(payload, 200, {})
+
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=transport,
+            clock=lambda: "2026-09-14T08:00:10+00:00",
+        )
+
+        original_append = SQLiteMarketStore.append_batch_accepted
+        append_attempts = 0
+
+        def fail_first_two_appends(store, events):
+            nonlocal append_attempts
+            materialized = tuple(events)
+            append_attempts += 1
+            if append_attempts <= 2:
+                raise sqlite3.OperationalError("injected repeated storage failure")
+            return original_append(store, materialized)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            market_path = Path(tmp) / "market.db"
+            with patch.object(
+                SQLiteMarketStore,
+                "append_batch_accepted",
+                new=fail_first_two_appends,
+            ):
+                with self.assertRaises(sqlite3.OperationalError):
+                    observe_workspace_once(
+                        tmp,
+                        provider,
+                        max_items=2,
+                        clock=lambda: "2026-09-14T08:00:10+00:00",
+                    )
+                recovered = observe_workspace_once(
+                    tmp,
+                    provider,
+                    max_items=2,
+                    clock=lambda: "2026-09-14T08:00:10+00:00",
+                )
+
+            store = SQLiteMarketStore(market_path)
+            try:
+                persisted = store.events()
+            finally:
+                store.close()
+
+        self.assertEqual(len(transport_calls), 2)
+        self.assertEqual(append_attempts, 5)
+        self.assertEqual(recovered.stats.received, 5)
+        self.assertEqual(recovered.stats.accepted, 5)
+        self.assertEqual(recovered.stats.rejected, 0)
+        self.assertEqual(len(persisted), 5)
+        self.assertEqual(
+            {event.selection_id for event in persisted},
+            {
+                "parlayapi:table_tennis:A",
+                "parlayapi:table_tennis:B",
+                "parlayapi:table_tennis:C",
+                "parlayapi:table_tennis:D",
+                "parlayapi:table_tennis:E",
+            },
+        )
+
     def test_deferred_payload_failure_clears_pending_snapshot_before_next_read(self):
         transport_calls: list[str] = []
         payloads = iter(

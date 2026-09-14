@@ -22,7 +22,8 @@ $expected = @(
     [ordered]@{ key = 'tickets'; automation_id = '201'; name = 'Paper tickets і результати'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
     [ordered]@{ key = 'log'; automation_id = '202'; name = 'Журнал виконання'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
     [ordered]@{ key = 'live_quotes'; automation_id = '203'; name = 'Live quotes'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
-    [ordered]@{ key = 'evaluation'; automation_id = '204'; name = 'Evaluation і portfolio evidence'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true }
+    [ordered]@{ key = 'evaluation'; automation_id = '204'; name = 'Evaluation і portfolio evidence'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
+    [ordered]@{ key = 'bankroll'; automation_id = '205'; name = 'Віртуальний банк'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false; require_value_read_only = $true }
 )
 
 function Test-Pattern {
@@ -189,6 +190,23 @@ try {
         $focusable = [bool]$element.Current.IsKeyboardFocusable
         $enabled = [bool]$element.Current.IsEnabled
         $patternOk = Test-Pattern -Element $element -PatternName $spec.required_pattern
+        $valueReadOnlyRequired = [bool]$spec.require_value_read_only
+        $valueReadOnly = $null
+        if ($valueReadOnlyRequired) {
+            $valuePatternObject = $null
+            try {
+                $valuePatternAvailable = $element.TryGetCurrentPattern(
+                    [System.Windows.Automation.ValuePattern]::Pattern,
+                    [ref]$valuePatternObject
+                )
+                if ($valuePatternAvailable -and $null -ne $valuePatternObject) {
+                    $valuePattern = [System.Windows.Automation.ValuePattern]$valuePatternObject
+                    $valueReadOnly = [bool]$valuePattern.Current.IsReadOnly
+                }
+            } catch {
+                $valueReadOnly = $null
+            }
+        }
         $namedRowCount = 0
         if ([bool]$spec.require_named_rows) {
             $namedRowCount = Get-NamedListItemCount -Element $element
@@ -206,6 +224,8 @@ try {
             enabled = $enabled
             required_pattern = $spec.required_pattern
             required_pattern_available = $patternOk
+            value_read_only_required = $valueReadOnlyRequired
+            value_read_only = $valueReadOnly
             named_list_item_count = $namedRowCount
         }
         $report.controls += $record
@@ -227,6 +247,9 @@ try {
         }
         if (-not $patternOk) {
             $report.failures += "automation_id=$($spec.automation_id): missing external UIA $($spec.required_pattern) pattern"
+        }
+        if ($valueReadOnlyRequired -and $valueReadOnly -ne $true) {
+            $report.failures += "automation_id=$($spec.automation_id): external UIA ValuePattern is writable or read-only state unavailable"
         }
     }
 

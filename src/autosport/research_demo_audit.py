@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 import tempfile
 from decimal import Decimal
 from pathlib import Path
 
 from .dataset import load_dataset
+from .integrity import atomic_write_json
 from .research_strategy import RESEARCH_STRATEGY_ID, ResearchStrategyPlan
 from .session import AutosportSession
 from .strategies import experiment_strategy_id
@@ -113,11 +113,7 @@ def run_research_demo_audit(
             "human_tested": False,
             "nvda_verified": False,
         }
-        destination.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        return 0
+        return_code = 0
     except Exception as exc:
         payload = {
             "status": "FAIL",
@@ -129,8 +125,10 @@ def run_research_demo_audit(
             "human_tested": False,
             "nvda_verified": False,
         }
-        destination.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        return 1
+        return_code = 1
+
+    # Evidence publication is a release gate in its own right. Keep it outside the
+    # audit exception boundary so serialization/durability failures cannot be
+    # mistaken for a successfully published semantic FAIL report.
+    atomic_write_json(destination, payload)
+    return return_code

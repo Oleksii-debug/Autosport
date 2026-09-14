@@ -17,7 +17,7 @@ class SettlementEngine:
 
     def record(self, quote_outcomes: dict[str, str]) -> None:
         for quote_key, outcome in quote_outcomes.items():
-            if outcome not in VALID_OUTCOMES:
+            if not isinstance(outcome, str) or outcome not in VALID_OUTCOMES:
                 raise ValueError(f"unsupported outcome: {outcome}")
             previous = self.outcomes.get(quote_key)
             if previous is not None and previous != outcome:
@@ -25,6 +25,14 @@ class SettlementEngine:
         self.outcomes.update(quote_outcomes)
 
     def settle_ready(self, book: PaperBook) -> list[str]:
+        # Snapshot and revalidate public mutable settlement state. Callers can
+        # construct SettlementEngine with a mapping or mutate outcomes directly,
+        # so record() is not the only ingress to this economic truth boundary.
+        outcomes = dict(self.outcomes)
+        for outcome in outcomes.values():
+            if not isinstance(outcome, str) or outcome not in VALID_OUTCOMES:
+                raise ValueError(f"unsupported outcome: {outcome}")
+
         # The commit phase below relies on stable canonical ticket identity and
         # lifecycle state. Reject caller-mutated PaperBook state before any
         # settlement mutation instead of discovering it after an earlier ticket
@@ -35,7 +43,6 @@ class SettlementEngine:
         # mutating the PaperBook. A later ticket can fail deterministic payout
         # validation even when an earlier ticket is valid; applying tickets as
         # they are discovered would leave a partially settled book.
-        outcomes = dict(self.outcomes)
         plan: list[tuple[str, set[str], set[str]]] = []
         simulated_balance = book.balance
 

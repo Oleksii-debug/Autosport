@@ -78,8 +78,7 @@ def _require_integer(value: int, *, field: str) -> int:
 
 
 def _require_positive_integer(value: int, *, field: str) -> int:
-    value = _require_integer(value, field=field)
-    if value <= 0:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{field} must be a positive non-boolean integer")
     return value
 

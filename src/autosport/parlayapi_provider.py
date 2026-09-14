@@ -419,7 +419,7 @@ class ParlayApiTableTennisProvider:
         output: list[ProviderQuote] = []
         for bookmaker in bookmakers:
             if not isinstance(bookmaker, dict):
-                continue
+                raise ProviderPayloadError("bookmaker entries must be objects")
             if "key" in bookmaker:
                 raw_book_key = bookmaker["key"]
             elif "title" in bookmaker:
@@ -429,29 +429,37 @@ class ParlayApiTableTennisProvider:
             book_key = _provider_identity(raw_book_key, field="bookmaker identity")
             markets = bookmaker.get("markets", [])
             if not isinstance(markets, list):
-                continue
+                raise ProviderPayloadError("bookmaker markets must be a list")
             for market in markets:
                 if not isinstance(market, dict):
-                    continue
+                    raise ProviderPayloadError("market entries must be objects")
                 raw_market_key = market.get("key")
                 if raw_market_key is None or raw_market_key == "":
-                    continue
+                    raise ProviderPayloadError("market is missing key")
                 market_key = _provider_identity(raw_market_key, field="market key")
                 source_ts = _first_nonempty(market.get("last_update"), bookmaker.get("last_update"))
                 outcomes = market.get("outcomes", [])
                 if not isinstance(outcomes, list):
-                    continue
+                    raise ProviderPayloadError("market outcomes must be a list")
                 for outcome in outcomes:
                     if not isinstance(outcome, dict):
-                        continue
+                        raise ProviderPayloadError("outcome entries must be objects")
                     raw_selection = outcome.get("name")
                     if raw_selection is None or raw_selection == "":
-                        continue
+                        raise ProviderPayloadError("outcome is missing name")
                     selection = _provider_identity(raw_selection, field="outcome name")
-                    price = _decimal_price(outcome.get("price"))
+                    raw_price = outcome.get("price")
+                    price = _decimal_price(raw_price)
+                    if raw_price is not None and price is None:
+                        raise ProviderPayloadError(
+                            "outcome price must be finite decimal odds greater than 1"
+                        )
                     if price is None:
                         continue
-                    point = _decimal_optional(outcome.get("point"))
+                    raw_point = outcome.get("point")
+                    point = _decimal_optional(raw_point)
+                    if raw_point is not None and point is None:
+                        raise ProviderPayloadError("outcome point must be a finite decimal")
                     provider_market_id = _market_identity(book_key, market_key, point)
                     sequence = _sequence_from_timestamp(source_ts or observed_ts)
                     output.append(

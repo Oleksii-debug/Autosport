@@ -148,6 +148,10 @@ class SourceHealthState:
                 raise ValueError("source health without successful polls cannot have received event totals")
             if self.quality_flags:
                 raise ValueError("source health without successful polls cannot have quality flags")
+            if self.last_cursor is not None:
+                raise ValueError("source health without successful polls cannot have last_cursor")
+            if self.latest_source_ts is not None:
+                raise ValueError("source health without successful polls cannot have latest_source_ts")
         elif self.last_success_at is None:
             raise ValueError("successful poll history requires last_success_at")
 

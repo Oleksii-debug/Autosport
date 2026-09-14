@@ -410,7 +410,10 @@ class WindowsAutosportApp(AutosportApp):
             self._set_evaluation_lines([
                 "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
             ])
-            detail = f"Post-replay workspace reopen відхилено fail-closed: {type(exc).__name__}: {exc}"
+            detail = (
+                "Post-replay workspace reopen відхилено fail-closed: "
+                f"{_safe_exception_detail(exc)}"
+            )
             self.status.set(
                 "Replay terminal state не можна безпечно підтвердити; цей economic workspace заблоковано fail-closed. "
                 "Виконайте «Відновити workspace» або Control+Shift+R перед наступним replay у цьому workspace."

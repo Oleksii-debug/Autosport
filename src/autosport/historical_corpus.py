@@ -15,6 +15,7 @@ from .dataset import load_dataset
 from .domain import MarketEvent
 from .historical_governance import verify_governance_authority_binding
 from .integrity import atomic_write_json
+from .outcome_revision import verify_outcome_revision_chain
 from .parlayapi_provider import ParlayApiTableTennisProvider
 
 
@@ -317,6 +318,36 @@ def _outcome_provenance(
     if imported_dt < verified_dt:
         raise ValueError("imported_at must not precede sealed outcome provenance verification")
 
+    revision_chain = verify_outcome_revision_chain(
+        source_root=source_root,
+        source_record_file=source_record_file,
+        source_record=source_record,
+        expected_source_identity=source_identity,
+        available_at=available_dt,
+    )
+    if revision_chain.quote_outcomes_sha256 != quote_outcomes_sha256:
+        raise ValueError(
+            "verified outcome revision quote_outcomes digest does not match sealed outcomes"
+        )
+    declared_revision_id = _text(
+        raw,
+        "outcome_revision_id",
+        context="sealed results outcome_provenance",
+    )
+    if declared_revision_id != revision_chain.revision_id:
+        raise ValueError(
+            "sealed results outcome_provenance.outcome_revision_id does not match verified source revision"
+        )
+    declared_root_revision_id = _text(
+        raw,
+        "outcome_lineage_root_revision_id",
+        context="sealed results outcome_provenance",
+    )
+    if declared_root_revision_id != revision_chain.root_revision_id:
+        raise ValueError(
+            "sealed results outcome_provenance.outcome_lineage_root_revision_id does not match verified revision chain"
+        )
+
     policy = _text(raw, "redistribution_policy", context="sealed results outcome_provenance")
     if policy not in _ALLOWED_REDISTRIBUTION:
         raise ValueError(
@@ -338,6 +369,15 @@ def _outcome_provenance(
         "source_record_file": source_record_file,
         "source_record_sha256": source_record_sha256,
         "quote_outcomes_sha256": quote_outcomes_sha256,
+        "outcome_revision_id": revision_chain.revision_id,
+        "outcome_revision_kind": revision_chain.revision_kind,
+        "outcome_revision_effective_at": revision_chain.revision_effective_at,
+        "outcome_revision_supersedes_revision_id": revision_chain.supersedes_revision_id,
+        "outcome_revision_predecessor_record_file": revision_chain.predecessor_record_file,
+        "outcome_revision_predecessor_record_sha256": revision_chain.predecessor_record_sha256,
+        "outcome_lineage_root_revision_id": revision_chain.root_revision_id,
+        "outcome_revision_chain_length": revision_chain.chain_length,
+        "outcome_revision_chain_verified": True,
         "terms_reference": terms_reference,
         "retention_basis": retention_basis,
         "authority_reference": authority_reference,
@@ -714,6 +754,27 @@ def assemble_historical_corpus(
                 "source_record_checksum_verified": True,
                 "quote_outcomes_bound_to_source_record": True,
                 "quote_outcomes_sha256": outcome_provenance["quote_outcomes_sha256"],
+                "outcome_revision_id": outcome_provenance["outcome_revision_id"],
+                "outcome_revision_kind": outcome_provenance["outcome_revision_kind"],
+                "outcome_revision_effective_at": outcome_provenance[
+                    "outcome_revision_effective_at"
+                ],
+                "outcome_revision_supersedes_revision_id": outcome_provenance[
+                    "outcome_revision_supersedes_revision_id"
+                ],
+                "outcome_revision_predecessor_record_file": outcome_provenance[
+                    "outcome_revision_predecessor_record_file"
+                ],
+                "outcome_revision_predecessor_record_sha256": outcome_provenance[
+                    "outcome_revision_predecessor_record_sha256"
+                ],
+                "outcome_lineage_root_revision_id": outcome_provenance[
+                    "outcome_lineage_root_revision_id"
+                ],
+                "outcome_revision_chain_length": outcome_provenance[
+                    "outcome_revision_chain_length"
+                ],
+                "outcome_revision_chain_verified": True,
                 "source_record_redistributed": False,
                 "terms_reference": outcome_provenance["terms_reference"],
                 "retention_basis": outcome_provenance["retention_basis"],
@@ -834,7 +895,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "scope=selected_point_in_time_snapshots_only historical_window_market_coverage_verified=false "
         "licensing_or_retention_verified=true outcome_source_checksum_verified=true "
-        "outcome_labels_source_bound=true profitability_claim=false real_money_execution=false"
+        "outcome_labels_source_bound=true outcome_revision_chain_verified=true "
+        "profitability_claim=false real_money_execution=false"
     )
     print(f"dataset={result.root}")
     return 0

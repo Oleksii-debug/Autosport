@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -72,6 +73,28 @@ Clock = Callable[[], str]
 Sleeper = Callable[[float], None]
 
 
+def _finite_runtime_float(value: object, *, field: str, allow_zero: bool) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a finite number")
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise ValueError(f"{field} must be a finite number")
+    if allow_zero:
+        if numeric < 0:
+            raise ValueError(f"{field} must be non-negative")
+    elif numeric <= 0:
+        raise ValueError(f"{field} must be positive")
+    return numeric
+
+
+def _positive_nonboolean_int(value: object, *, field: str, maximum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field} must be a positive non-boolean integer")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{field} must be between 1 and {maximum}")
+    return value
+
+
 def _default_transport(url: str, headers: Mapping[str, str], timeout: float) -> HttpJsonResponse:
     request = Request(url, headers=dict(headers), method="GET")
     try:
@@ -112,12 +135,13 @@ class ParlayApiTableTennisProvider:
     ) -> None:
         if not public_preview and not api_key:
             raise ValueError("api_key is required unless public_preview=True")
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive")
-        if max_attempts < 1 or max_attempts > 5:
-            raise ValueError("max_attempts must be between 1 and 5")
-        if max_backoff_seconds < 0:
-            raise ValueError("max_backoff_seconds must be non-negative")
+        timeout_seconds = _finite_runtime_float(timeout_seconds, field="timeout_seconds", allow_zero=False)
+        max_attempts = _positive_nonboolean_int(max_attempts, field="max_attempts", maximum=5)
+        max_backoff_seconds = _finite_runtime_float(
+            max_backoff_seconds,
+            field="max_backoff_seconds",
+            allow_zero=True,
+        )
         if not regions or not markets:
             raise ValueError("regions and markets must not be empty")
         if not base_url.startswith("https://"):
@@ -135,8 +159,7 @@ class ParlayApiTableTennisProvider:
         self.sleeper = sleeper
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
-        if max_items <= 0:
-            raise ValueError("max_items must be positive")
+        max_items = _positive_nonboolean_int(max_items, field="max_items")
         observed_ts = self.clock()
         response = self._fetch()
         events = self._event_list(response.payload)
@@ -261,7 +284,13 @@ class ParlayApiTableTennisProvider:
                 if not retryable or attempt >= self.max_attempts:
                     raise
                 requested = exc.retry_after if exc.retry_after is not None else 0.25 * attempt
-                self.sleeper(min(max(0.0, requested), self.max_backoff_seconds))
+                if (
+                    isinstance(requested, bool)
+                    or not isinstance(requested, (int, float))
+                    or not math.isfinite(float(requested))
+                ):
+                    requested = 0.25 * attempt
+                self.sleeper(min(max(0.0, float(requested)), self.max_backoff_seconds))
         raise AssertionError("unreachable")
 
     def _url(self) -> str:
@@ -419,9 +448,12 @@ def _parse_retry_after(value: str | None) -> float | None:
     if value is None:
         return None
     try:
-        return max(0.0, float(value))
+        parsed = float(value)
     except ValueError:
         return None
+    if not math.isfinite(parsed):
+        return None
+    return max(0.0, parsed)
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:

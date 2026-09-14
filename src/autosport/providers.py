@@ -25,6 +25,20 @@ def _validate_provider_component(value: object, name: str) -> str:
     return value
 
 
+def _escape_identity_component(value: str) -> str:
+    """Escape only canonical-ID delimiters so structured identity remains injective.
+
+    Percent is escaped first so literal escape-looking provider text cannot alias a
+    real reserved character. Values without reserved characters remain unchanged.
+    """
+
+    return value.replace("%", "%25").replace(":", "%3A").replace("|", "%7C")
+
+
+def _scoped_identity(source_id: str, provider_component: str) -> str:
+    return f"{_escape_identity_component(source_id)}:{_escape_identity_component(provider_component)}"
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderQuote:
     provider_event_id: str
@@ -65,7 +79,7 @@ class MarketProvider(Protocol):
 
 
 class CanonicalNormalizer:
-    """Provider IDs are scoped under source_id so provider-specific identifiers never collide locally."""
+    """Provider IDs are scoped under source_id with injective canonical escaping."""
 
     def normalize(self, source_id: str, quote: ProviderQuote) -> MarketEvent:
         source_id = _validate_source_id(source_id)
@@ -76,9 +90,9 @@ class CanonicalNormalizer:
         if quote.decimal_odds <= 1:
             raise ValueError("decimal odds must be greater than 1")
         return MarketEvent(
-            event_id=f"{source_id}:{quote.provider_event_id}",
-            market_id=f"{source_id}:{quote.provider_market_id}",
-            selection_id=f"{source_id}:{quote.provider_selection_id}",
+            event_id=_scoped_identity(source_id, quote.provider_event_id),
+            market_id=_scoped_identity(source_id, quote.provider_market_id),
+            selection_id=_scoped_identity(source_id, quote.provider_selection_id),
             decimal_odds=quote.decimal_odds,
             observed_ts=quote.observed_ts,
             source_id=source_id,

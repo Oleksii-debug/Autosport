@@ -229,7 +229,14 @@ class IngestionEngine:
                 )
         except Exception as exc:
             if self.health_store is not None:
-                self.health_store.record_failure(provider.source_id, now=now, error=exc)
+                try:
+                    self.health_store.record_failure(provider.source_id, now=now, error=exc)
+                except Exception as health_error:
+                    exc.add_note(
+                        "source health failure persistence also failed: "
+                        f"{type(health_error).__name__}: {health_error}"
+                    )
+                    raise exc from health_error
             raise
 
         health_before = None

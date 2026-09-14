@@ -60,27 +60,68 @@ class OneShotRecoveryWorker:
                 return False
             self._busy = True
         # Recovery can mutate transaction/registry state. Do not allow interpreter
-        # shutdown to kill it at an arbitrary persistence boundary.
+        # shutdown to kill it at an arbitrary persistence boundary. The worker waits
+        # behind a gate until Thread.start() has returned successfully, so an
+        # interrupted/failed start can cancel a partially-created OS thread without
+        # ever running the economic recovery task.
+        start_gate = threading.Event()
+        cancelled = threading.Event()
         try:
             thread = threading.Thread(
-                target=self._run,
-                args=(task,),
+                target=self._run_when_committed,
+                args=(task, start_gate, cancelled),
                 name="autosport-workspace-recovery",
                 daemon=False,
             )
-            self._thread = thread
-            thread.start()
         except BaseException as exc:
-            # Any setup unwind must release the single-flight slot. Ordinary
-            # construction/start failures preserve the existing fail-closed False
-            # contract; process-control BaseExceptions propagate after cleanup.
-            self._thread = None
-            with self._lock:
-                self._busy = False
+            self._release_unstarted_slot()
+            if isinstance(exc, Exception):
+                return False
+            raise
+
+        self._thread = thread
+        task_committed = False
+        try:
+            thread.start()
+            # Mark the request committed before releasing the worker. If a
+            # process-control BaseException arrives after this assignment, the
+            # handler must keep the single-flight slot occupied and ensure the
+            # already-authorized task is released exactly once.
+            task_committed = True
+            start_gate.set()
+        except BaseException as exc:
+            if task_committed:
+                start_gate.set()
+                if isinstance(exc, Exception):
+                    return True
+                raise
+
+            # Thread.start() can be interrupted after the OS thread exists but
+            # before it returns to the caller. Cancel before opening the gate so
+            # such a thread exits without touching recovery/economic state.
+            cancelled.set()
+            start_gate.set()
+            self._release_unstarted_slot()
             if isinstance(exc, Exception):
                 return False
             raise
         return True
+
+    def _release_unstarted_slot(self) -> None:
+        self._thread = None
+        with self._lock:
+            self._busy = False
+
+    def _run_when_committed(
+        self,
+        task: RecoveryTask,
+        start_gate: threading.Event,
+        cancelled: threading.Event,
+    ) -> None:
+        start_gate.wait()
+        if cancelled.is_set():
+            return
+        self._run(task)
 
     def _run(self, task: RecoveryTask) -> None:
         try:

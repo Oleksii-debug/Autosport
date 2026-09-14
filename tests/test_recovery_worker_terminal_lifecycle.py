@@ -114,6 +114,49 @@ class RecoveryWorkerTerminalLifecycleTests(unittest.TestCase):
         self.assertIsNone(worker.poll())
         self._assert_retry_succeeds(worker)
 
+    def test_partial_thread_start_exception_cancels_task_before_retry(self) -> None:
+        worker = OneShotRecoveryWorker()
+        original_start = __import__("threading").Thread.start
+        task_ran = __import__("threading").Event()
+
+        def start_then_fail(thread) -> None:
+            original_start(thread)
+            raise OSError("late start failure")
+
+        with patch(
+            "autosport.recovery_worker.threading.Thread.start",
+            new=start_then_fail,
+        ):
+            self.assertFalse(worker.start(lambda: task_ran.set()))
+
+        self.assertFalse(task_ran.wait(0.1))
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+        self._assert_retry_succeeds(worker)
+
+    def test_partial_thread_start_baseexception_cancels_task_before_reraise(self) -> None:
+        worker = OneShotRecoveryWorker()
+        original_start = __import__("threading").Thread.start
+        task_ran = __import__("threading").Event()
+
+        def start_then_interrupt(thread) -> None:
+            original_start(thread)
+            raise KeyboardInterrupt("late start interrupt")
+
+        with patch(
+            "autosport.recovery_worker.threading.Thread.start",
+            new=start_then_interrupt,
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "late start interrupt"):
+                worker.start(lambda: task_ran.set())
+
+        self.assertFalse(task_ran.wait(0.1))
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+        self._assert_retry_succeeds(worker)
+
 
 if __name__ == "__main__":
     unittest.main()

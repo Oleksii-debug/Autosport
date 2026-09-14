@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,6 +46,48 @@ class SourceHealthFailureQualityTruthTests(unittest.TestCase):
             reopened = SourceHealthStore(path).get("source")
             self.assertEqual(reopened, failed)
             self.assertEqual(reopened.quality_flags, ())
+
+    def test_legacy_failed_state_normalizes_stale_batch_flags_on_reopen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "source-health.json"
+            legacy = {
+                "schema_version": 1,
+                "sources": {
+                    "source": {
+                        "source_id": "source",
+                        "status": "failed",
+                        "poll_count": 2,
+                        "total_received": 2,
+                        "total_accepted": 1,
+                        "total_rejected": 1,
+                        "total_failures": 1,
+                        "consecutive_failures": 1,
+                        "last_success_at": "2026-09-14T08:00:00+00:00",
+                        "last_error_at": "2026-09-14T08:01:00+00:00",
+                        "last_error": "RuntimeError: provider unavailable",
+                        "last_cursor": "cursor-17",
+                        "latest_source_ts": "2026-09-14T07:59:58+00:00",
+                        "quality_flags": ["PROVIDER_SEQUENCE_GAP"],
+                    }
+                },
+            }
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+
+            reopened = SourceHealthStore(path).get("source")
+
+            self.assertEqual(reopened.status, "failed")
+            self.assertEqual(reopened.quality_flags, ())
+            self.assertEqual(reopened.poll_count, 2)
+            self.assertEqual(reopened.total_received, 2)
+            self.assertEqual(reopened.total_accepted, 1)
+            self.assertEqual(reopened.total_rejected, 1)
+            self.assertEqual(reopened.total_failures, 1)
+            self.assertEqual(reopened.consecutive_failures, 1)
+            self.assertEqual(reopened.last_success_at, "2026-09-14T08:00:00+00:00")
+            self.assertEqual(reopened.last_error_at, "2026-09-14T08:01:00+00:00")
+            self.assertEqual(reopened.last_error, "RuntimeError: provider unavailable")
+            self.assertEqual(reopened.last_cursor, "cursor-17")
+            self.assertEqual(reopened.latest_source_ts, "2026-09-14T07:59:58+00:00")
 
     def test_repeated_failures_do_not_resurrect_previous_batch_quality_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

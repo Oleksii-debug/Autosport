@@ -30,6 +30,22 @@ def test_odds_conversion_preserves_exact_fraction_and_unrounded_american_truth()
     assert _outputs(negative)["fractional_denominator"] == "2"
 
 
+def test_reverse_odds_conversion_is_typed_and_truth_labelled() -> None:
+    engine = CalculationEngine()
+
+    positive = engine.american_to_decimal_odds("150")
+    negative = engine.american_to_decimal_odds("-200")
+    fractional = engine.fractional_to_decimal_odds("3", "2")
+
+    assert positive.exact
+    assert _outputs(positive)["decimal_odds"] == "2.5"
+    assert negative.classification == "approximate_decimal"
+    assert _outputs(negative)["decimal_odds"] == "1.5"
+    assert _outputs(fractional)["decimal_odds"] == "2.5"
+    with pytest.raises(ValueError, match="at most -100 or at least 100"):
+        engine.american_to_decimal_odds("50")
+
+
 def test_implied_probability_reports_approximation_and_stable_hashes() -> None:
     engine = CalculationEngine()
 
@@ -58,6 +74,9 @@ def test_multiplicative_devig_is_order_independent_and_sums_to_one() -> None:
     fair_total = Decimal(outputs["fair_probability.home"]) + Decimal(outputs["fair_probability.away"])
     assert fair_total == Decimal("1")
     assert Decimal(outputs["overround"]) > Decimal("1")
+    assert Decimal(outputs["market_margin"]) == Decimal(outputs["overround"]) - Decimal("1")
+    assert Decimal(outputs["fair_decimal_odds.home"]) > Decimal("1")
+    assert Decimal(outputs["fair_decimal_odds.away"]) > Decimal("1")
     assert forward.classification == "approximate_decimal"
     assert dict(forward.input_units) == {
         "decimal_odds.away": "decimal_odds",
@@ -180,6 +199,30 @@ def test_paper_parlay_probability_requires_explicit_independence() -> None:
     assert result.classification == "approximate_decimal"
     assert _outputs(result)["joint_probability"] == "0.2"
     assert "independent" in result.assumptions[0]
+
+
+def test_finite_scenario_table_never_infers_completeness() -> None:
+    engine = CalculationEngine()
+
+    partial = engine.finite_scenario_table(
+        {"loss": "-10", "win": "15"},
+        completeness="partial",
+    )
+    complete = engine.finite_scenario_table(
+        {"win": "15", "loss": "-10"},
+        completeness="complete",
+    )
+
+    assert partial.exact
+    assert _outputs(partial)["scenario_count"] == "2"
+    assert _outputs(partial)["worst_case"] == "-10"
+    assert _outputs(partial)["best_case"] == "15"
+    assert _outputs(partial)["scenario_profit.loss"] == "-10"
+    assert "partial" in partial.method
+    assert "complete" in complete.method
+    assert partial.result_hash != complete.result_hash
+    with pytest.raises(ValueError, match="exactly 'complete' or 'partial'"):
+        engine.finite_scenario_table({"only": "1"}, completeness="unknown")
 
 
 def test_maximum_drawdown_uses_chronological_running_peak() -> None:

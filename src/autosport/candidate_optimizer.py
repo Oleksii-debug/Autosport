@@ -51,8 +51,12 @@ class PortfolioAwareCandidateOptimizer:
         scenario_engine: ScenarioSearchEngine | None = None,
         result_limit: int = 50,
     ) -> None:
-        if result_limit <= 0:
-            raise ValueError("result_limit must be positive")
+        if (
+            not isinstance(result_limit, int)
+            or isinstance(result_limit, bool)
+            or result_limit <= 0
+        ):
+            raise ValueError("result_limit must be a positive non-boolean integer")
         self.generator = generator or BeamParlayCandidateSearch()
         self.scenario_engine = scenario_engine or ScenarioSearchEngine()
         self.result_limit = result_limit
@@ -252,7 +256,34 @@ def _expected_change_mode(base: str | None, with_candidate: str | None) -> str |
     return f"base:{base};with-candidate:{with_candidate}"
 
 
-def _ranking_key(impact: CandidatePortfolioImpact) -> tuple[int, Decimal, int, Decimal, int, Decimal]:
+def _candidate_identity_key(
+    candidate: ParlayCandidate,
+) -> tuple[tuple[str, str, str, str, str], ...]:
+    """Canonical deterministic tie-break independent of caller candidate order."""
+
+    return tuple(
+        sorted(
+            (
+                *leg.ticket_identity(),
+                str(leg.decimal_odds),
+                str(leg.probability),
+            )
+            for leg in candidate.legs
+        )
+    )
+
+
+def _ranking_key(
+    impact: CandidatePortfolioImpact,
+) -> tuple[
+    int,
+    Decimal,
+    int,
+    Decimal,
+    int,
+    Decimal,
+    tuple[tuple[str, str, str, str, str], ...],
+]:
     proof_tier = 1 if impact.worst_case_change_proven else 0
     expected_available = 1 if impact.expected_case_change is not None else 0
     expected_change = impact.expected_case_change if impact.expected_case_change is not None else Decimal("-Infinity")
@@ -264,4 +295,5 @@ def _ranking_key(impact: CandidatePortfolioImpact) -> tuple[int, Decimal, int, D
         expected_change,
         dependency_preference,
         impact.standalone_expected_profit,
+        _candidate_identity_key(impact.candidate),
     )

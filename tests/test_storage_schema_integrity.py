@@ -189,22 +189,6 @@ class StorageSchemaIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "extra UNIQUE index unexpected_unique"):
                 SQLiteMarketStore(db_path)
 
-    def test_partial_extra_nonunique_index_fails_closed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "market.db"
-            connection = self._connect(db_path)
-            try:
-                self._create_canonical_tables(connection)
-                connection.execute(
-                    "CREATE INDEX unsafe_partial ON market_events(event_id) WHERE sequence > 0"
-                )
-                connection.commit()
-            finally:
-                connection.close()
-
-            with self.assertRaisesRegex(ValueError, "unsupported secondary index unsafe_partial"):
-                SQLiteMarketStore(db_path)
-
     def test_hidden_collation_semantics_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "market.db"

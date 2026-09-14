@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,43 @@ from autosport import restart_recovery_audit as restart_audit
 
 
 class RestartRecoveryAuditTests(unittest.TestCase):
+    @staticmethod
+    def _restart_stub() -> dict[str, object]:
+        return {
+            "status": "PASS",
+            "balance": "101",
+            "ticket_count": 1,
+            "paper_book_sha256": "a" * 64,
+            "decision_ledger_sha256": "b" * 64,
+        }
+
+    @staticmethod
+    def _recovery_stub() -> dict[str, object]:
+        return {
+            "status": "PASS",
+            "disposition": "aborted_uncommitted",
+        }
+
+    @staticmethod
+    def _endurance_stub() -> dict[str, object]:
+        replay_hash = "c" * 64
+        return {
+            "status": "PASS",
+            "history_events": 20_000,
+            "current_quotes": 2_000,
+            "accepted_duplicate_pass": 0,
+            "replay_dataset_hash": replay_hash,
+            "restart_hashes": [replay_hash] * 3,
+            "restart_projection_counts": [2_000] * 3,
+            "independent_reingest_hash_match": True,
+            "paper_tickets_settled_first_pass": 50,
+            "paper_tickets_settled_second_pass": 0,
+            "corrupt_health_rejected": True,
+            "corrupt_paper_book_rejected": True,
+            "stable_invariant_fingerprint": "d" * 64,
+            "real_money_execution": False,
+        }
+
     def test_packaged_endurance_profile_remains_release_scale(self):
         config = restart_audit._PACKAGED_ENDURANCE_CONFIG
         self.assertEqual(config.event_count, 20_000)
@@ -68,6 +106,49 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             self.assertFalse(payload["real_money_execution"])
             self.assertFalse(payload["human_tested"])
             self.assertFalse(payload["nvda_verified"])
+
+    def test_evidence_publication_replaces_hardlink_without_mutating_external_inode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            external = root / "external-sentinel.json"
+            output = root / "restart-recovery-audit.json"
+            sentinel = b"external-sentinel-must-not-change\n"
+            external.write_bytes(sentinel)
+            try:
+                os.link(external, output)
+            except OSError as exc:
+                self.skipTest(f"hard links unavailable: {exc}")
+
+            with (
+                patch.object(restart_audit, "_audit_session_restart", return_value=self._restart_stub()),
+                patch.object(restart_audit, "_audit_uncommitted_recovery", return_value=self._recovery_stub()),
+                patch.object(restart_audit, "_audit_bounded_endurance", return_value=self._endurance_stub()),
+            ):
+                self.assertEqual(restart_audit.run_restart_recovery_audit(output), 0)
+
+            self.assertEqual(external.read_bytes(), sentinel)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "PASS")
+            self.assertEqual(payload["recovery_disposition"], "aborted_uncommitted")
+
+    def test_replace_failure_preserves_previous_evidence_and_cleans_temp_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "restart-recovery-audit.json"
+            previous = b'{"status":"LAST_KNOWN"}\n'
+            output.write_bytes(previous)
+
+            with (
+                patch.object(restart_audit, "_audit_session_restart", return_value=self._restart_stub()),
+                patch.object(restart_audit, "_audit_uncommitted_recovery", return_value=self._recovery_stub()),
+                patch.object(restart_audit, "_audit_bounded_endurance", return_value=self._endurance_stub()),
+                patch("autosport.integrity.os.replace", side_effect=OSError("injected publication failure")),
+            ):
+                with self.assertRaisesRegex(OSError, "injected publication failure"):
+                    restart_audit.run_restart_recovery_audit(output)
+
+            self.assertEqual(output.read_bytes(), previous)
+            self.assertEqual([item.name for item in root.iterdir()], [output.name])
 
 
 if __name__ == "__main__":

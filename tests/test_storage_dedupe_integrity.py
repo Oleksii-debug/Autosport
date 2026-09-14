@@ -110,7 +110,10 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
             self.assertTrue(store.append(first))
             with self.assertRaisesRegex(ValueError, "stored market event payload is not canonical"):
                 store.append(conflicting)
-            self.assertEqual(len(store.events()), 1)
+            with self.assertRaisesRegex(ValueError, "stored market event payload is not canonical"):
+                store.events()
+            count = store.connection.execute("SELECT COUNT(*) FROM market_events").fetchone()[0]
+            self.assertEqual(count, 1)
             store.close()
 
     def test_conflicting_duplicate_rolls_back_earlier_insert_in_batch(self):

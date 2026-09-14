@@ -48,13 +48,11 @@ class PaperBook:
         ticket_legs = tuple(legs)
         if not ticket_legs:
             raise ValueError("ticket requires at least one leg")
+        for leg in ticket_legs:
+            self._validate_ticket_leg(leg)
         quote_keys = [leg.quote_key for leg in ticket_legs]
         if len(quote_keys) != len(set(quote_keys)):
             raise ValueError("ticket contains duplicate quote_key leg")
-        for leg in ticket_legs:
-            self._require_finite(leg.locked_odds, "locked_odds")
-            if leg.locked_odds <= 1:
-                raise ValueError("decimal odds must be greater than 1")
         ticket = PaperTicket(
             ticket_id=str(uuid.uuid4()), stake=amount, legs=ticket_legs, placed_at=placed_at or utc_now_iso(), strategy_reason=reason
         )
@@ -84,6 +82,11 @@ class PaperBook:
         return ticket
 
     def save(self, path: str | Path) -> None:
+        # PaperBook and PaperTicket are intentionally mutable during a paper run.
+        # Revalidate the complete economic/identity state immediately before any
+        # durable replacement so caller/agent mutation cannot persist a snapshot
+        # that a trusted fresh load would reject.
+        self._validate_loaded_state(self)
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         raw = {
@@ -113,9 +116,47 @@ class PaperBook:
         os.replace(temporary, destination)
 
     @staticmethod
-    def _require_finite(value: Decimal, label: str) -> None:
-        if not value.is_finite():
+    def _require_finite(value: object, label: str) -> None:
+        if not isinstance(value, Decimal) or not value.is_finite():
             raise ValueError(f"PaperBook snapshot contains non-finite {label}")
+
+    @staticmethod
+    def _require_canonical_text(
+        value: object,
+        label: str,
+        *,
+        forbid_quote_key_delimiter: bool = False,
+    ) -> str:
+        if not isinstance(value, str) or not value or value.strip() != value:
+            raise ValueError(f"PaperBook {label} must be a non-empty trimmed string")
+        if forbid_quote_key_delimiter and "|" in value:
+            raise ValueError(f"PaperBook {label} must not contain quote-key delimiter '|'")
+        return value
+
+    @classmethod
+    def _validate_ticket_leg(cls, leg: object, *, ticket_id: str | None = None) -> TicketLeg:
+        if type(leg) is not TicketLeg:
+            raise ValueError("PaperBook ticket legs must be canonical TicketLeg values")
+        suffix = f" for ticket {ticket_id}" if ticket_id is not None else ""
+        cls._require_canonical_text(
+            leg.event_id,
+            f"event_id{suffix}",
+            forbid_quote_key_delimiter=True,
+        )
+        cls._require_canonical_text(
+            leg.market_id,
+            f"market_id{suffix}",
+            forbid_quote_key_delimiter=True,
+        )
+        cls._require_canonical_text(
+            leg.selection_id,
+            f"selection_id{suffix}",
+            forbid_quote_key_delimiter=True,
+        )
+        cls._require_finite(leg.locked_odds, f"locked_odds{suffix}")
+        if leg.locked_odds <= 1:
+            raise ValueError("PaperBook snapshot decimal odds must be greater than 1")
+        return leg
 
     @classmethod
     def _validate_loaded_state(cls, book: "PaperBook") -> None:
@@ -125,24 +166,35 @@ class PaperBook:
             raise ValueError("PaperBook snapshot initial_bankroll must be positive")
         if book.balance < 0:
             raise ValueError("PaperBook snapshot balance cannot be negative")
+        if type(book.tickets) is not dict:
+            raise ValueError("PaperBook tickets must be a canonical ticket mapping")
 
         expected_balance = book.initial_bankroll
-        for ticket in book.tickets.values():
+        for ticket_key, ticket in book.tickets.items():
+            cls._require_canonical_text(ticket_key, "ticket mapping key")
+            if type(ticket) is not PaperTicket:
+                raise ValueError("PaperBook tickets must contain canonical PaperTicket values")
+            cls._require_canonical_text(ticket.ticket_id, "ticket_id")
+            if ticket_key != ticket.ticket_id:
+                raise ValueError("PaperBook ticket mapping key must match ticket_id")
+            cls._require_canonical_text(ticket.placed_at, f"placed_at for ticket {ticket.ticket_id}")
+            if not isinstance(ticket.strategy_reason, str):
+                raise ValueError("PaperBook snapshot strategy_reason must be a string")
+            if type(ticket.status) is not TicketStatus:
+                raise ValueError("PaperBook snapshot ticket status must be canonical TicketStatus")
             cls._require_finite(ticket.stake, f"stake for ticket {ticket.ticket_id}")
             cls._require_finite(ticket.payout, f"payout for ticket {ticket.ticket_id}")
             if ticket.stake <= 0:
                 raise ValueError("PaperBook snapshot ticket stake must be positive")
             if ticket.payout < 0:
                 raise ValueError("PaperBook snapshot ticket payout cannot be negative")
-            if not ticket.legs:
-                raise ValueError("PaperBook snapshot ticket requires at least one leg")
+            if type(ticket.legs) is not tuple or not ticket.legs:
+                raise ValueError("PaperBook snapshot ticket requires a canonical non-empty leg tuple")
+            for leg in ticket.legs:
+                cls._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
             quote_keys = [leg.quote_key for leg in ticket.legs]
             if len(quote_keys) != len(set(quote_keys)):
                 raise ValueError("PaperBook snapshot ticket contains duplicate quote_key leg")
-            for leg in ticket.legs:
-                cls._require_finite(leg.locked_odds, f"locked_odds for ticket {ticket.ticket_id}")
-                if leg.locked_odds <= 1:
-                    raise ValueError("PaperBook snapshot decimal odds must be greater than 1")
 
             if ticket.status in {TicketStatus.OPEN, TicketStatus.LOST} and ticket.payout != 0:
                 raise ValueError("PaperBook snapshot open/lost ticket payout must be zero")

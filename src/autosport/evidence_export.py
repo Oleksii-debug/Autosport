@@ -146,7 +146,10 @@ def _reject_output_collision(workspace: Path, output: Path) -> None:
         output_path.relative_to(workspace_root)
     except ValueError:
         return
-    raise ValueError("output path must be outside the Autosport workspace")
+    raise ValueError(
+        "output path must be outside the Autosport workspace; "
+        "must not overwrite canonical workspace evidence"
+    )
 
 
 def _reject_duplicate_manifest_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:

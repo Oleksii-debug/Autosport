@@ -173,6 +173,10 @@ class RunRegistry:
             key = f"{base_identity}:repeat:{run_id}"
         else:
             key = f"{base_identity}:retry:{run_id}"
+        if key in state["runs"]:
+            raise RepeatedExperimentError(
+                "This run_id already has durable history for this dataset/strategy."
+            )
 
         entry = {
             "base_identity": base_identity,
@@ -443,6 +447,16 @@ class RunRegistry:
         else:
             if "abort_reason" in fields:
                 raise ValueError("completed run registry entry contains abort evidence")
+            if base_book_present:
+                required_transaction_terminal_fields = {
+                    "result_path",
+                    "paper_book_sha256",
+                    "decision_ledger_sha256",
+                }
+                if not required_transaction_terminal_fields.issubset(fields):
+                    raise ValueError("completed transaction-aware run registry entry lacks terminal economic evidence")
+                if not isinstance(item.get("result_path"), str) or not item["result_path"]:
+                    raise ValueError("completed transaction-aware run registry entry lacks result_path evidence")
             if item.get("reconciled_from_summary") is True:
                 if not isinstance(item.get("result_path"), str):
                     raise ValueError("reconciled run registry entry lacks result_path evidence")

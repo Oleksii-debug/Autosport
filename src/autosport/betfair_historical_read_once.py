@@ -66,7 +66,7 @@ def _validate_strict_json_inputs(inputs: Iterable[Path]) -> None:
                             parse_constant=_reject_nonstandard_json_constant,
                             parse_float=_strict_json_float,
                         )
-                    except (json.JSONDecodeError, ValueError) as exc:
+                    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
                         raise ValueError(
                             f"{path}: line {line_number} is not strict unambiguous JSON: {exc}"
                         ) from exc

@@ -154,6 +154,33 @@ class BetfairHistoricalReadOnceTests(unittest.TestCase):
                 legacy_import.assert_not_called()
                 self.assertFalse(output.exists())
 
+    def test_deeply_nested_json_fails_closed_at_user_facing_boundary(self) -> None:
+        with TemporaryDirectory() as temporary:
+            tmp_path = Path(temporary)
+            source = tmp_path / "market.jsonl"
+            nested = "[" * 10_000 + "0" + "]" * 10_000
+            source.write_text(f'{{"op":"mcm","mc":{nested}}}\n', encoding="utf-8")
+            output = tmp_path / "dataset"
+
+            with patch.object(read_once, "import_betfair_historical") as legacy_import:
+                result = read_once.main(
+                    [
+                        str(source),
+                        "--output-dir",
+                        str(output),
+                        "--acquired-at",
+                        "2026-09-13T08:00:00Z",
+                        "--terms-reference",
+                        "terms",
+                        "--retention-basis",
+                        "basis",
+                    ]
+                )
+
+            self.assertEqual(result, 3)
+            legacy_import.assert_not_called()
+            self.assertFalse(output.exists())
+
     def test_windows_data_tool_routes_betfair_import_through_read_once_boundary(self) -> None:
         seen: list[list[str]] = []
 

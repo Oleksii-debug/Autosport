@@ -58,6 +58,21 @@ class CandidateSearchDecimalRangeTests(unittest.TestCase):
             ):
                 search.search(legs, minimum_legs=2)
 
+    def test_trapped_per_leg_underflow_is_normalized_before_ranking(self) -> None:
+        search = BeamParlayCandidateSearch(beam_width=4, max_legs=2, result_limit=4)
+        legs = [
+            self._leg("event-1", "2", "1E-999999999"),
+            self._leg("event-2", "2", "0.5"),
+        ]
+
+        with localcontext() as context:
+            context.traps[Underflow] = True
+            with self.assertRaisesRegex(
+                ValueError,
+                "candidate combined economics exceed Decimal range",
+            ):
+                search.search(legs, minimum_legs=2)
+
     def test_exact_zero_probability_is_not_mistaken_for_underflow(self) -> None:
         search = BeamParlayCandidateSearch(beam_width=4, max_legs=2, result_limit=4)
         legs = [

@@ -22,6 +22,8 @@ def _validate_provider_component(value: object, name: str) -> str:
         raise TypeError(f"{name} must be str")
     if not value or value != value.strip():
         raise ValueError(f"{name} must be non-empty and trimmed")
+    if "|" in value:
+        raise ValueError(f"{name} must not contain reserved identity delimiter '|'")
     return value
 
 
@@ -33,26 +35,17 @@ def _validate_sequence(value: object) -> int:
     return value
 
 
-def _escape_identity_component(value: str) -> str:
-    """Escape provider-component delimiters so structured identity remains injective.
-
-    Percent is escaped first so literal escape-looking provider text cannot alias a
-    real reserved character. Values without reserved characters remain unchanged.
-    """
-
-    return value.replace("%", "%25").replace(":", "%3A").replace("|", "%7C")
-
-
 def _scoped_identity(source_id: str, provider_component: str) -> str:
-    """Preserve the deployed source prefix while making the provider component unambiguous.
+    """Preserve the deployed canonical ``source_id:provider_id`` representation.
 
-    Provider components contain no raw colon after escaping, so the final raw colon
-    is an injective source/component boundary even when source_id itself contains
-    colons. Keeping source_id byte-for-byte stable avoids silently re-keying durable
-    market state for existing sources such as ``parlayapi:table_tennis``.
+    Colon is intentionally data inside existing source/provider identifiers (the live
+    Parlay adapter emits market IDs such as ``book:h2h``). Re-encoding it would
+    silently re-key durable market state. The structural quote-key delimiter is
+    ``|`` instead, and both source and provider identity components reject that
+    delimiter before normalization.
     """
 
-    return f"{source_id}:{_escape_identity_component(provider_component)}"
+    return f"{source_id}:{provider_component}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +89,7 @@ class MarketProvider(Protocol):
 
 
 class CanonicalNormalizer:
-    """Provider IDs are scoped under source_id with injective canonical escaping."""
+    """Provider IDs are scoped under a validated source without changing deployed IDs."""
 
     def normalize(self, source_id: str, quote: ProviderQuote) -> MarketEvent:
         source_id = _validate_source_id(source_id)

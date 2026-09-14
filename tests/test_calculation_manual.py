@@ -235,3 +235,40 @@ def test_manual_service_rejects_coercive_container_subclasses() -> None:
         service.return_dispersion(_ListSubclass(["1", "2"]))
     with pytest.raises(ValueError, match="must be a dict"):
         service.multiplicative_devig(_DictSubclass({"a": "2", "b": "2"}))
+
+
+def test_manual_evidence_constructor_rejects_forged_truth_fields() -> None:
+    valid = ManualCalculationService().implied_probability("2")
+
+    with pytest.raises(ValueError, match="service_version"):
+        ManualCalculationEvidence(
+            service_version="forged-service",
+            input_mode=valid.input_mode,
+            result=valid.result,
+            real_money_execution=valid.real_money_execution,
+            evidence_sha256=valid.evidence_sha256,
+        )
+    with pytest.raises(ValueError, match="input_mode"):
+        ManualCalculationEvidence(
+            service_version=valid.service_version,
+            input_mode="product_quote",
+            result=valid.result,
+            real_money_execution=valid.real_money_execution,
+            evidence_sha256=valid.evidence_sha256,
+        )
+    with pytest.raises(ValueError, match="real_money_execution"):
+        ManualCalculationEvidence(
+            service_version=valid.service_version,
+            input_mode=valid.input_mode,
+            result=valid.result,
+            real_money_execution=True,
+            evidence_sha256=valid.evidence_sha256,
+        )
+    with pytest.raises(ValueError, match="evidence_sha256"):
+        ManualCalculationEvidence(
+            service_version=valid.service_version,
+            input_mode=valid.input_mode,
+            result=valid.result,
+            real_money_execution=valid.real_money_execution,
+            evidence_sha256="0" * 64,
+        )

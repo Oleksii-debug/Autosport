@@ -24,6 +24,19 @@ class ManualCalculationEvidence:
     real_money_execution: bool
     evidence_sha256: str
 
+    def __post_init__(self) -> None:
+        if self.service_version != _SERVICE_VERSION:
+            raise ValueError(f"service_version must be {_SERVICE_VERSION!r}")
+        if self.input_mode != "manual":
+            raise ValueError("input_mode must be exactly 'manual'")
+        if self.real_money_execution is not False:
+            raise ValueError("real_money_execution must be exactly false")
+        if type(self.result) is not CalculationResult:
+            raise ValueError("result must be a CalculationResult")
+        expected = _sha256(_evidence_payload(self.result))
+        if self.evidence_sha256 != expected:
+            raise ValueError("evidence_sha256 does not match manual calculation evidence")
+
     def as_dict(self) -> dict[str, object]:
         return {
             "service_version": self.service_version,
@@ -312,12 +325,7 @@ class ManualCalculationService:
     def _bind(result: CalculationResult) -> ManualCalculationEvidence:
         if type(result) is not CalculationResult:
             raise ValueError("calculation engine must return CalculationResult")
-        payload = {
-            "service_version": _SERVICE_VERSION,
-            "input_mode": "manual",
-            "result": result.as_dict(),
-            "real_money_execution": False,
-        }
+        payload = _evidence_payload(result)
         digest = _sha256(payload)
         return ManualCalculationEvidence(
             service_version=_SERVICE_VERSION,
@@ -326,6 +334,15 @@ class ManualCalculationService:
             real_money_execution=False,
             evidence_sha256=digest,
         )
+
+
+def _evidence_payload(result: CalculationResult) -> dict[str, object]:
+    return {
+        "service_version": _SERVICE_VERSION,
+        "input_mode": "manual",
+        "result": result.as_dict(),
+        "real_money_execution": False,
+    }
 
 
 def _sha256(payload: dict[str, object]) -> str:

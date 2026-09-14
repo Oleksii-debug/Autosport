@@ -64,6 +64,22 @@ class CalculationEvidence:
             "evidence_sha256": self.evidence_sha256,
         }
 
+    def to_text(self) -> str:
+        """Return deterministic plain text suitable for keyboard copy/export.
+
+        JSON keeps identifiers and free-text assumptions unambiguous even if they
+        contain punctuation or line breaks. The presentation layer may expose this
+        string in a selectable read-only control without reformatting numeric truth.
+        """
+
+        return json.dumps(
+            self.as_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        ) + "\n"
+
 
 class CalculationService:
     """Application boundary for calculations bound to exact product quote evidence.

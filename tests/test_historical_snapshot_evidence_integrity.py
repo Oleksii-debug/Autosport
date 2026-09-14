@@ -154,6 +154,31 @@ class HistoricalSnapshotEvidenceIntegrityTests(unittest.TestCase):
             self.assertFalse(evidence.exists())
         self.assertEqual(len(transport.urls), 1)
 
+    def test_capture_does_not_clobber_legacy_fixed_temp_name(self) -> None:
+        transport = _Transport(_payload())
+        provider = self._provider(transport)
+        with tempfile.TemporaryDirectory() as temp:
+            market = Path(temp) / "snapshot.jsonl"
+            evidence = Path(temp) / "evidence.json"
+            legacy_temp = market.with_name(market.name + ".tmp")
+            legacy_temp.write_text("unrelated-sentinel\n", encoding="utf-8")
+
+            report = capture_historical_snapshot(
+                provider,
+                requested_at="2026-09-12T10:03:00Z",
+                output_path=market,
+                evidence_path=evidence,
+            )
+
+            self.assertTrue(report.has_data)
+            self.assertTrue(market.is_file())
+            self.assertTrue(evidence.is_file())
+            self.assertEqual(legacy_temp.read_text(encoding="utf-8"), "unrelated-sentinel\n")
+            self.assertEqual(
+                [path for path in Path(temp).iterdir() if path.name.startswith(f".{market.name}.")],
+                [],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

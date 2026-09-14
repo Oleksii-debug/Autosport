@@ -110,6 +110,20 @@ def _snapshot_json_value(value: object, field: str) -> Any:
     return snapshot(value, field, 0)
 
 
+def _scoped_identity(source_id: str, provider_component: str) -> str:
+    """Preserve the deployed canonical ``source_id:provider_id`` representation.
+
+    Colon is intentionally data inside existing source IDs and market/selection IDs
+    (the live Parlay adapter emits market IDs such as ``book:h2h``). Provider event
+    IDs are colon-free, which makes the source-scoped event identity unambiguous and
+    therefore prevents cross-source quote-key aliasing without re-keying deployed
+    market/selection identities. The top-level quote-key delimiter ``|`` remains
+    forbidden in every identity component.
+    """
+
+    return f"{source_id}:{provider_component}"
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderQuote:
     provider_event_id: str

@@ -50,6 +50,6 @@ def _contains_forbidden_key(value: Any) -> bool:
                 return True
             if _contains_forbidden_key(child):
                 return True
-    elif isinstance(value, list):
+    elif isinstance(value, (list, tuple)):
         return any(_contains_forbidden_key(child) for child in value)
     return False

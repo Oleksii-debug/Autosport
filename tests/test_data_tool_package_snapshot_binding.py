@@ -28,6 +28,7 @@ class PortableDataToolSnapshotBindingTests(unittest.TestCase):
         accessibility = root / f"{name}-accessibility.json"
         keyboard = root / f"{name}-keyboard.json"
         restart = root / f"{name}-restart.json"
+        process_recovery = root / f"{name}-process-recovery.json"
         package = root / f"{name}.zip"
 
         executable.write_bytes(f"{name}-autosport".encode("ascii"))
@@ -53,6 +54,21 @@ class PortableDataToolSnapshotBindingTests(unittest.TestCase):
                 "recovery_disposition": "aborted_uncommitted",
             },
         )
+        self._write_json(
+            process_recovery,
+            {
+                **common,
+                "audit_id": "real-process-kill-relaunch-recovery-v1",
+                "forced_process_kill_observed": True,
+                "crash_worker_returncode": -9,
+                "recovery_worker_returncode": 0,
+                "recovery_disposition": "aborted_uncommitted",
+                "run_status": "aborted",
+                "manifest_phase": "aborted",
+                "economic_base_preserved": True,
+                "v1_ready": False,
+            },
+        )
         build_windows_package(
             executable,
             start,
@@ -61,6 +77,7 @@ class PortableDataToolSnapshotBindingTests(unittest.TestCase):
             accessibility,
             keyboard,
             restart,
+            process_recovery,
             package,
             self.SOURCE_SHA,
         )

@@ -22,7 +22,7 @@ class SettlementEngine:
             previous = self.outcomes.get(quote_key)
             if previous is not None and previous != outcome:
                 raise ValueError(f"conflicting settlement for {quote_key}")
-            self.outcomes[quote_key] = outcome
+        self.outcomes.update(quote_outcomes)
 
     def settle_ready(self, book: PaperBook) -> list[str]:
         settled: list[str] = []

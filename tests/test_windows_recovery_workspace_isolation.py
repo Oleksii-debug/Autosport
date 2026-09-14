@@ -77,6 +77,9 @@ class WindowsRecoveryWorkspaceIsolationTests(unittest.TestCase):
 
             app = object.__new__(WindowsAutosportApp)
             app.workspace = root
+            app._active_workspace = workspace_b
+            app._active_strategy_id = "strategy-b"
+            app._active_research_plan = None
             app._recovery_view = None
             app._recovery_blocked_workspace = workspace_b
             app._recovery_blocked_workspaces = {workspace_a, workspace_b}
@@ -101,6 +104,91 @@ class WindowsRecoveryWorkspaceIsolationTests(unittest.TestCase):
 
             parent_run.assert_not_called()
             self.assertIn("заблоковано fail-closed", app.status.value)
+
+    def test_mismatched_terminal_workspace_never_unblocks_returned_workspace(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace_a = root / "strategies" / "strategy-a"
+            workspace_b = root / "strategies" / "strategy-b"
+            result_b = RecoveryTaskResult(
+                report=RecoveryReport((), (), ()),
+                session_view=SimpleNamespace(
+                    workspace=workspace_b,
+                    strategy_id="strategy-b",
+                    book=SimpleNamespace(balance=0, committed_stake=0),
+                ),
+            )
+
+            app = object.__new__(WindowsAutosportApp)
+            app.workspace = root
+            app._active_workspace = workspace_a
+            app._active_strategy_id = "strategy-a"
+            app._active_research_plan = None
+            app._recovery_view = None
+            app._recovery_blocked_workspace = workspace_a
+            app._recovery_blocked_workspaces = {workspace_a, workspace_b}
+            app.recovery_worker = _TerminalWorker(RecoveryWorkerMessage(result=result_b))
+            app.bank = _Value()
+            app.status = _Value()
+            app._logs = []
+            app._set_replay_controls_busy = lambda _busy: None
+            app._refresh_tickets = lambda: None
+            app._append_log = lambda text: app._logs.append(text)
+            app._bank_text = lambda: "bank"
+
+            with (
+                patch("autosport.windows_gui.messagebox.showerror") as error,
+                patch("autosport.windows_gui.messagebox.showinfo") as info,
+            ):
+                WindowsAutosportApp._poll_recovery_worker(app)
+
+            self.assertIsNone(app._recovery_view)
+            self.assertEqual(app._recovery_blocked_workspace, workspace_a)
+            self.assertIn(workspace_a, app._recovery_blocked_workspaces)
+            self.assertIn(workspace_b, app._recovery_blocked_workspaces)
+            self.assertIn("terminal result не відповідає", app.status.value)
+            self.assertTrue(any("terminal identity mismatch" in line for line in app._logs))
+            error.assert_called_once()
+            info.assert_not_called()
+
+    def test_mismatched_terminal_strategy_keeps_requested_workspace_blocked(self) -> None:
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            result = RecoveryTaskResult(
+                report=RecoveryReport((), (), ()),
+                session_view=SimpleNamespace(
+                    workspace=workspace,
+                    strategy_id="wrong-strategy",
+                    book=SimpleNamespace(balance=0, committed_stake=0),
+                ),
+            )
+
+            app = object.__new__(WindowsAutosportApp)
+            app.workspace = workspace
+            app._active_workspace = workspace
+            app._active_strategy_id = "baseline-v1"
+            app._active_research_plan = None
+            app._recovery_view = None
+            app._recovery_blocked_workspace = workspace
+            app._recovery_blocked_workspaces = {workspace}
+            app.recovery_worker = _TerminalWorker(RecoveryWorkerMessage(result=result))
+            app.bank = _Value()
+            app.status = _Value()
+            app._logs = []
+            app._set_replay_controls_busy = lambda _busy: None
+            app._refresh_tickets = lambda: None
+            app._append_log = lambda text: app._logs.append(text)
+            app._bank_text = lambda: "bank"
+
+            with patch("autosport.windows_gui.messagebox.showerror") as error:
+                WindowsAutosportApp._poll_recovery_worker(app)
+
+            self.assertIsNone(app._recovery_view)
+            self.assertEqual(app._recovery_blocked_workspace, workspace)
+            self.assertEqual(app._recovery_blocked_workspaces, {workspace})
+            self.assertIn("terminal result не відповідає", app.status.value)
+            self.assertTrue(any("wrong-strategy" in line for line in app._logs))
+            error.assert_called_once()
 
     def test_replay_error_quarantines_workspace_until_successful_recovery(self) -> None:
         with TemporaryDirectory() as temporary:

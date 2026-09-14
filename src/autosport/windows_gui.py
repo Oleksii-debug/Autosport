@@ -261,6 +261,34 @@ class WindowsAutosportApp(AutosportApp):
             )
             return
 
+        expected_workspace = Path(self._active_workspace)
+        expected_strategy_id = self._active_strategy_id
+        try:
+            result_workspace = Path(result.session_view.workspace)
+        except (TypeError, ValueError):
+            result_workspace = None
+        if (
+            result_workspace != expected_workspace
+            or result.session_view.strategy_id != expected_strategy_id
+        ):
+            self._recovery_view = None
+            self._block_workspace_for_recovery(expected_workspace)
+            self.bank.set(self._bank_text())
+            self._refresh_tickets()
+            detail = (
+                "Workspace recovery terminal identity mismatch: "
+                f"expected workspace={expected_workspace}, strategy={expected_strategy_id}; "
+                f"received workspace={result.session_view.workspace!r}, "
+                f"strategy={result.session_view.strategy_id!r}."
+            )
+            self.status.set(
+                "Workspace recovery terminal result не відповідає запущеному economic workspace/strategy; "
+                "стан лишається fail-closed і жоден workspace не розблоковано."
+            )
+            self._append_log(detail)
+            messagebox.showerror("Автоспорт", detail)
+            return
+
         self._recovery_view = result.session_view
         self.bank.set(self._bank_text())
         self._refresh_tickets()

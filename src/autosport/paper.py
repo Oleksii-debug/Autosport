@@ -45,6 +45,10 @@ class PaperBook:
             raise ValueError("stake must be positive")
         if amount > self.balance:
             raise ValueError("insufficient virtual bankroll")
+        ticket_placed_at = placed_at if placed_at is not None else utc_now_iso()
+        self._require_canonical_text(ticket_placed_at, "placed_at")
+        if not isinstance(reason, str):
+            raise ValueError("PaperBook strategy_reason must be a string")
         ticket_legs = tuple(legs)
         if not ticket_legs:
             raise ValueError("ticket requires at least one leg")
@@ -54,7 +58,7 @@ class PaperBook:
         if len(quote_keys) != len(set(quote_keys)):
             raise ValueError("ticket contains duplicate quote_key leg")
         ticket = PaperTicket(
-            ticket_id=str(uuid.uuid4()), stake=amount, legs=ticket_legs, placed_at=placed_at or utc_now_iso(), strategy_reason=reason
+            ticket_id=str(uuid.uuid4()), stake=amount, legs=ticket_legs, placed_at=ticket_placed_at, strategy_reason=reason
         )
         self.balance -= amount
         self.tickets[ticket.ticket_id] = ticket

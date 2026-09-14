@@ -77,6 +77,22 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
 
+    def test_open_ticket_rejects_unsaveable_metadata_before_bankroll_mutation(self) -> None:
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        cases = (
+            {"placed_at": " "},
+            {"placed_at": " 2026-09-14T00:00:00+00:00"},
+            {"reason": None},
+            {"reason": object()},
+        )
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs):
+                book = PaperBook("100")
+                with self.assertRaises(ValueError):
+                    book.open_ticket([leg], "10", **kwargs)
+                self.assertEqual(book.balance, Decimal("100"))
+                self.assertEqual(book.tickets, {})
+
     def test_load_rejects_noncanonical_or_noninjective_leg_identity(self) -> None:
         cases = (
             ("", "winner", "alice", "non-empty trimmed string"),

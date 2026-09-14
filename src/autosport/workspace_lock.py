@@ -37,8 +37,19 @@ class WorkspaceEconomicLock:
                 os.fsync(handle.fileno())
             handle.seek(0)
             self._lock_handle(handle)
-        except BaseException:
-            handle.close()
+        except BaseException as acquire_error:
+            try:
+                handle.close()
+            except BaseException as close_error:
+                # Closing the handle is the only generic cleanup that can prove any
+                # partially-acquired OS lock is gone. If that proof fails, retain
+                # the handle as a poisoned ownership marker so this object cannot
+                # silently reserve another writer slot.
+                self._handle = handle
+                acquire_error.add_note(
+                    "workspace economic lock handle close also failed while cleaning up acquisition failure: "
+                    f"{type(close_error).__name__}: {close_error}"
+                )
             raise
         self._handle = handle
 
@@ -48,8 +59,26 @@ class WorkspaceEconomicLock:
             return
         try:
             self._unlock_handle(handle)
-        finally:
+        except BaseException as unlock_error:
+            # Closing the handle is the final OS-level release fallback. Detach only
+            # if close succeeds. If both unlock and close fail, ownership is unknown
+            # and the retained handle keeps this object fail-closed/non-reusable.
+            try:
+                handle.close()
+            except BaseException as close_error:
+                unlock_error.add_note(
+                    "workspace economic lock handle close also failed after unlock failure: "
+                    f"{type(close_error).__name__}: {close_error}"
+                )
+                self._handle = handle
+            else:
+                self._handle = None
+            raise
+        try:
             handle.close()
+        finally:
+            # Explicit unlock succeeded, so OS lock release is proven even if
+            # closing the now-unlocked file handle itself reports an error.
             self._handle = None
 
     def __enter__(self) -> "WorkspaceEconomicLock":
@@ -57,7 +86,21 @@ class WorkspaceEconomicLock:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
-        self.release()
+        if exc_value is None:
+            # A release failure after a successful body is itself a run failure and
+            # must remain observable to the caller.
+            self.release()
+            return
+        try:
+            self.release()
+        except BaseException as release_error:
+            # Never replace the economic/replay failure that caused scope exit with
+            # a secondary lock-teardown failure. Keep both pieces of evidence on the
+            # primary exception so recovery diagnostics retain the actual root cause.
+            exc_value.add_note(
+                "WorkspaceEconomicLock release also failed while propagating the primary error: "
+                f"{type(release_error).__name__}: {release_error}"
+            )
 
     @staticmethod
     def _lock_handle(handle: BinaryIO) -> None:

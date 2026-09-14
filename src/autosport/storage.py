@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,40 @@ _HISTORY_COLUMNS = (
 _HISTORY_COLUMNS_SQL = ",".join(_HISTORY_COLUMNS)
 _CURRENT_COLUMNS = ("quote_key", "observed_ts", "sequence", "payload_json")
 _CURRENT_COLUMNS_SQL = ",".join(_CURRENT_COLUMNS)
+
+_EXPECTED_TABLE_XINFO = {
+    "market_events": (
+        (0, "dedupe_key", "TEXT", 0, None, 1, 0),
+        (1, "quote_key", "TEXT", 1, None, 0, 0),
+        (2, "event_id", "TEXT", 1, None, 0, 0),
+        (3, "market_id", "TEXT", 1, None, 0, 0),
+        (4, "selection_id", "TEXT", 1, None, 0, 0),
+        (5, "decimal_odds", "TEXT", 1, None, 0, 0),
+        (6, "observed_ts", "TEXT", 1, None, 0, 0),
+        (7, "source_id", "TEXT", 1, None, 0, 0),
+        (8, "sequence", "INTEGER", 1, None, 0, 0),
+        (9, "payload_json", "TEXT", 1, None, 0, 0),
+    ),
+    "current_quotes": (
+        (0, "quote_key", "TEXT", 0, None, 1, 0),
+        (1, "observed_ts", "TEXT", 1, None, 0, 0),
+        (2, "sequence", "INTEGER", 1, None, 0, 0),
+        (3, "payload_json", "TEXT", 1, None, 0, 0),
+    ),
+}
+_EXPECTED_PRIMARY_KEYS = {
+    "market_events": ("dedupe_key",),
+    "current_quotes": ("quote_key",),
+}
+_CANONICAL_SECONDARY_INDEXES = {
+    "idx_market_events_order": ("observed_ts", "sequence"),
+    "idx_market_events_event": ("event_id", "observed_ts", "sequence"),
+    "idx_market_events_quote": ("quote_key", "observed_ts", "sequence"),
+}
+_FORBIDDEN_TABLE_SQL = re.compile(
+    r"\b(?:CHECK|COLLATE|GENERATED|REFERENCES)\b|\bON\s+CONFLICT\b",
+    re.IGNORECASE,
+)
 
 
 def _observed_instant(value: str) -> datetime:
@@ -204,6 +239,136 @@ def _event_from_current_row(row: tuple[object, ...]) -> MarketEvent:
     return event
 
 
+def _quoted_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _canonical_index_terms(connection: sqlite3.Connection, index_name: str) -> tuple[str, ...] | None:
+    rows = connection.execute(f"PRAGMA index_xinfo({_quoted_identifier(index_name)})").fetchall()
+    key_rows = [row for row in rows if len(row) >= 6 and row[5] == 1]
+    terms: list[str] = []
+    for row in key_rows:
+        _seqno, cid, name, descending, collation, _key = row[:6]
+        if not isinstance(cid, int) or cid < 0:
+            return None
+        if not isinstance(name, str) or descending != 0 or collation != "BINARY":
+            return None
+        terms.append(name)
+    return tuple(terms)
+
+
+def _schema_object(connection: sqlite3.Connection, name: str) -> tuple[str, str] | None:
+    row = connection.execute(
+        "SELECT type, sql FROM sqlite_master WHERE name=?",
+        (name,),
+    ).fetchone()
+    if row is None:
+        return None
+    object_type, sql = row
+    if not isinstance(object_type, str) or not isinstance(sql, str):
+        raise ValueError(f"{name} schema object is malformed")
+    return object_type, sql
+
+
+def _validate_canonical_table(connection: sqlite3.Connection, table_name: str) -> None:
+    schema_object = _schema_object(connection, table_name)
+    if schema_object is None or schema_object[0] != "table":
+        raise ValueError(f"{table_name} schema is not canonical: expected table")
+    table_sql = schema_object[1]
+    if _FORBIDDEN_TABLE_SQL.search(table_sql):
+        raise ValueError(f"{table_name} schema is not canonical: semantic table constraint")
+
+    expected_xinfo = _EXPECTED_TABLE_XINFO[table_name]
+    rows = connection.execute(f"PRAGMA table_xinfo({_quoted_identifier(table_name)})").fetchall()
+    actual_xinfo = tuple(
+        (
+            int(row[0]),
+            row[1],
+            str(row[2]).upper(),
+            int(row[3]),
+            row[4],
+            int(row[5]),
+            int(row[6]),
+        )
+        for row in rows
+    )
+    if actual_xinfo != expected_xinfo:
+        raise ValueError(f"{table_name} schema is not canonical: column definition mismatch")
+
+    table_list_rows = connection.execute("PRAGMA table_list").fetchall()
+    table_rows = [row for row in table_list_rows if row[0] == "main" and row[1] == table_name]
+    if len(table_rows) != 1:
+        raise ValueError(f"{table_name} schema is not canonical: table metadata mismatch")
+    table_row = table_rows[0]
+    if table_row[2] != "table" or table_row[3] != len(expected_xinfo) or table_row[4] != 0 or table_row[5] != 0:
+        raise ValueError(f"{table_name} schema is not canonical: table mode mismatch")
+
+    if connection.execute(f"PRAGMA foreign_key_list({_quoted_identifier(table_name)})").fetchall():
+        raise ValueError(f"{table_name} schema is not canonical: foreign keys are not allowed")
+
+    triggers = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=? ORDER BY name",
+        (table_name,),
+    ).fetchall()
+    if triggers:
+        raise ValueError(f"{table_name} schema is not canonical: triggers are not allowed")
+
+    index_rows = connection.execute(f"PRAGMA index_list({_quoted_identifier(table_name)})").fetchall()
+    primary_indexes = [row for row in index_rows if len(row) >= 5 and row[3] == "pk"]
+    if len(primary_indexes) != 1:
+        raise ValueError(f"{table_name} schema is not canonical: primary-key index mismatch")
+    primary_index = primary_indexes[0]
+    if primary_index[2] != 1 or primary_index[4] != 0:
+        raise ValueError(f"{table_name} schema is not canonical: primary-key index mismatch")
+    primary_terms = _canonical_index_terms(connection, primary_index[1])
+    if primary_terms != _EXPECTED_PRIMARY_KEYS[table_name]:
+        raise ValueError(f"{table_name} schema is not canonical: primary-key definition mismatch")
+
+    for index_row in index_rows:
+        if len(index_row) < 5:
+            raise ValueError(f"{table_name} schema is not canonical: index metadata mismatch")
+        _seq, index_name, unique, origin, _partial = index_row[:5]
+        if unique and origin != "pk":
+            raise ValueError(
+                f"{table_name} schema is not canonical: extra UNIQUE index {index_name}"
+            )
+
+
+def _validate_existing_canonical_tables(connection: sqlite3.Connection) -> None:
+    for table_name in _EXPECTED_TABLE_XINFO:
+        schema_object = _schema_object(connection, table_name)
+        if schema_object is not None:
+            _validate_canonical_table(connection, table_name)
+
+
+def _ensure_canonical_secondary_indexes(connection: sqlite3.Connection) -> None:
+    index_rows = connection.execute("PRAGMA index_list(\"market_events\")").fetchall()
+    by_name = {row[1]: row for row in index_rows if len(row) >= 5 and isinstance(row[1], str)}
+
+    for index_name, expected_terms in _CANONICAL_SECONDARY_INDEXES.items():
+        existing = by_name.get(index_name)
+        recreate = existing is None
+        if existing is not None:
+            _seq, _name, unique, origin, partial = existing[:5]
+            if unique:
+                raise ValueError(
+                    f"market_events schema is not canonical: extra UNIQUE index {index_name}"
+                )
+            recreate = (
+                origin != "c"
+                or partial != 0
+                or _canonical_index_terms(connection, index_name) != expected_terms
+            )
+        if recreate:
+            if existing is not None:
+                connection.execute(f"DROP INDEX {_quoted_identifier(index_name)}")
+            columns = ", ".join(_quoted_identifier(column) for column in expected_terms)
+            connection.execute(
+                f"CREATE INDEX {_quoted_identifier(index_name)} "
+                f"ON market_events({columns})"
+            )
+
+
 class SQLiteMarketStore:
     """Crash-safe append-only normalized market history plus current quote projection."""
 
@@ -220,6 +385,11 @@ class SQLiteMarketStore:
             raise
 
     def _init_schema(self) -> None:
+        # Validate any pre-existing canonical tables before creating anything else.
+        # This keeps constructor failure fail-closed and prevents an unrelated
+        # missing projection table from being created beside corrupt history.
+        _validate_existing_canonical_tables(self.connection)
+
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS market_events (
@@ -234,12 +404,6 @@ class SQLiteMarketStore:
                 sequence INTEGER NOT NULL,
                 payload_json TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_market_events_order
-                ON market_events(observed_ts, sequence);
-            CREATE INDEX IF NOT EXISTS idx_market_events_event
-                ON market_events(event_id, observed_ts, sequence);
-            CREATE INDEX IF NOT EXISTS idx_market_events_quote
-                ON market_events(quote_key, observed_ts, sequence);
             CREATE TABLE IF NOT EXISTS current_quotes (
                 quote_key TEXT PRIMARY KEY,
                 observed_ts TEXT NOT NULL,
@@ -248,6 +412,10 @@ class SQLiteMarketStore:
             );
             """
         )
+
+        for table_name in _EXPECTED_TABLE_XINFO:
+            _validate_canonical_table(self.connection, table_name)
+        _ensure_canonical_secondary_indexes(self.connection)
         self.connection.commit()
 
     def _rebuild_current_quotes(self) -> None:

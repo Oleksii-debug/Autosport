@@ -122,6 +122,32 @@ class WalkForwardBundleInputIntegrityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, field):
                     WalkForwardBundle.from_dict(raw)
 
+    def test_forecast_decimal_fields_reject_type_coercion(self):
+        for field in ("probability", "uncertainty"):
+            for value in (True, False, 0, 1, 0.5, [], {}):
+                with self.subTest(field=field, value=value):
+                    raw = self._valid_raw()
+                    raw["forecasts"][0][field] = value
+                    with self.assertRaisesRegex(ValueError, field):
+                        WalkForwardBundle.from_dict(raw)
+
+    def test_forecast_decimal_fields_normalize_malformed_text_to_value_error(self):
+        for field in ("probability", "uncertainty"):
+            for value in ("not-a-decimal", "", " 0.5 "):
+                with self.subTest(field=field, value=value):
+                    raw = self._valid_raw()
+                    raw["forecasts"][0][field] = value
+                    with self.assertRaisesRegex(ValueError, field):
+                        WalkForwardBundle.from_dict(raw)
+
+    def test_missing_uncertainty_retains_canonical_default(self):
+        raw = self._valid_raw()
+        del raw["forecasts"][0]["uncertainty"]
+
+        bundle = WalkForwardBundle.from_dict(raw)
+
+        self.assertEqual(str(bundle.forecasts[0].uncertainty), "0")
+
     def test_forecast_provenance_requires_json_object(self):
         raw = self._valid_raw()
         raw["forecasts"][0]["provenance"] = [["source", "fixture"]]
@@ -177,6 +203,8 @@ class WalkForwardBundleInputIntegrityTests(unittest.TestCase):
 
         self.assertEqual(bundle.forecasts[0].forecast_id, "f-1")
         self.assertEqual(bundle.forecasts[0].quote_key, "m1|winner|a")
+        self.assertEqual(str(bundle.forecasts[0].probability), "0.70")
+        self.assertEqual(str(bundle.forecasts[0].uncertainty), "0.10")
         self.assertEqual(bundle.outcomes[0].forecast_id, "f-1")
         self.assertEqual(bundle.windows[0].window_id, "holdout-1")
         self.assertEqual(bundle.windows[0].split, "holdout")

@@ -9,6 +9,33 @@ from typing import Any
 _FORBIDDEN_FUTURE_KEYS = {"final_result", "result", "winner", "settled_outcome", "future_quote"}
 
 
+class _FrozenPayloadDict(dict[str, Any]):
+    """Dict-compatible immutable snapshot used for validated evidence payloads."""
+
+    @staticmethod
+    def _immutable(*_args: object, **_kwargs: object) -> None:
+        raise TypeError("EvidenceItem payload is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+    __ior__ = _immutable
+
+
+def _freeze_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _FrozenPayloadDict(
+            (key, _freeze_payload(child)) for key, child in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_payload(child) for child in value)
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class EvidenceItem:
     evidence_id: str
@@ -19,8 +46,10 @@ class EvidenceItem:
     source_hash: str | None = None
 
     def __post_init__(self) -> None:
-        if _contains_forbidden_key(self.payload):
+        payload = _freeze_payload(self.payload)
+        if _contains_forbidden_key(payload):
             raise ValueError("strategy/research evidence must not contain future-result fields")
+        object.__setattr__(self, "payload", payload)
 
     @property
     def canonical_hash(self) -> str:

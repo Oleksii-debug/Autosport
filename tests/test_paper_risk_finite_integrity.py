@@ -123,6 +123,32 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "virtual bankroll state is invalid")
 
+    def test_sub_precision_ledger_corruption_cannot_round_back_to_stored_balance(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket([self._leg()], "10")
+        ticket.stake = Decimal("10.000000000000000000000000001")
+
+        decision = self._permissive_policy().evaluate(book, "1")
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+
+    def test_inexact_risk_limit_rounding_cannot_relax_ticket_cap(self) -> None:
+        book = PaperBook("7")
+        policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("0.14285714285714285714285714295"),
+            max_committed_fraction=Decimal("1"),
+            minimum_cash_reserve_fraction=Decimal("0"),
+        )
+        # Exact cap is 1.00000000000000000000000000065. At prec=28 this product
+        # rounds upward to 1.000000000000000000000000001, which would admit this stake.
+        stake = Decimal("1.0000000000000000000000000008")
+
+        decision = policy.evaluate(book, stake)
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+
     def test_finite_operands_whose_derived_risk_arithmetic_overflows_are_denied(self) -> None:
         book = PaperBook("9E+999999")
         book.open_ticket([self._leg()], "9E+999999")

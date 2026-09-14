@@ -150,7 +150,9 @@ class AgentOrchestrator:
         self._assert_bound_composition()
         for agent in self._agents:
             agent.on_market_event(event, self.context)
-        self._assert_bound_composition()
+            # A callback can hold a reference to another bound agent. Revalidate
+            # immediately so peer identity drift cannot reach the next callback.
+            self._assert_bound_composition()
 
     def finalize_replay(self) -> None:
         """Allow causal agents to fail closed on unconsumed replay-time work before outcomes unlock."""
@@ -160,4 +162,6 @@ class AgentOrchestrator:
             finalize = getattr(agent, "finalize_replay", None)
             if finalize is not None:
                 finalize(self.context)
-        self._assert_bound_composition()
+                # Preserve the same callback boundary during finalization: one
+                # agent must not mutate a later agent's identity and let it run.
+                self._assert_bound_composition()

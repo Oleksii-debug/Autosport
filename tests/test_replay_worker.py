@@ -103,6 +103,42 @@ class ReplayWorkerTests(unittest.TestCase):
         self.assertEqual(failed.error, "OSError: thread allocation failed")
         self.assertFalse(worker.busy)
 
+    def test_worker_thread_construction_unprintable_exception_is_terminal_and_retryable(self):
+        worker = OneShotReplayWorker()
+        task_ran = threading.Event()
+
+        class BrokenStringError(Exception):
+            def __str__(self) -> str:
+                raise RuntimeError("broken exception formatter")
+
+        def task():
+            task_ran.set()
+            return object()
+
+        with patch(
+            "autosport.replay_worker.threading.Thread",
+            side_effect=BrokenStringError(),
+        ):
+            self.assertTrue(worker.start(task))
+
+        self.assertFalse(task_ran.is_set())
+        self.assertTrue(worker.busy)
+        self.assertIsNone(worker._thread)
+        failed = self._terminal(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(
+            failed.error,
+            "BrokenStringError: exception details unavailable",
+        )
+        self.assertFalse(worker.busy)
+
+        sentinel = object()
+        self.assertTrue(worker.start(lambda: sentinel))
+        completed = self._terminal(worker)
+        self.assertIs(completed.result, sentinel)
+        self.assertIsNone(completed.error)
+        self.assertFalse(worker.busy)
+
     def test_worker_reports_failure_without_raising_on_tk_poll_thread(self):
         worker = OneShotReplayWorker()
         self.assertTrue(worker.start(lambda: (_ for _ in ()).throw(RuntimeError("boom"))))
@@ -124,6 +160,32 @@ class ReplayWorkerTests(unittest.TestCase):
         message = self._terminal(worker)
         self.assertIs(message.result, sentinel)
         self.assertIsNone(message.error)
+        self.assertFalse(worker.busy)
+
+    def test_worker_terminalizes_unprintable_base_exception_and_allows_retry(self):
+        worker = OneShotReplayWorker()
+
+        class BrokenStringBaseError(BaseException):
+            def __str__(self) -> str:
+                raise RuntimeError("broken exception formatter")
+
+        def task():
+            raise BrokenStringBaseError()
+
+        self.assertTrue(worker.start(task))
+        failed = self._terminal(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(
+            failed.error,
+            "BrokenStringBaseError: exception details unavailable",
+        )
+        self.assertFalse(worker.busy)
+
+        sentinel = object()
+        self.assertTrue(worker.start(lambda: sentinel))
+        completed = self._terminal(worker)
+        self.assertIs(completed.result, sentinel)
+        self.assertIsNone(completed.error)
         self.assertFalse(worker.busy)
 
     def test_strategy_workspace_resolution_preserves_baseline_and_isolates_plan_identity(self):

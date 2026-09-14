@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from decimal import Decimal
 
@@ -98,6 +99,32 @@ class CalculationServiceTests(unittest.TestCase):
             first.quote_sources[0].quote_evidence_sha256,
             second.quote_sources[0].quote_evidence_sha256,
         )
+
+    def test_text_export_is_complete_deterministic_and_round_trippable(self) -> None:
+        event = self._event(metadata={"future_quote": "never serialize this"})
+        first = self.service.expected_return_for_event(
+            event,
+            Decimal("0.5"),
+            stake=Decimal("10"),
+            causal_cutoff_ts="2026-09-14T12:00:00Z",
+        )
+        second = self.service.expected_return_for_event(
+            event,
+            Decimal("0.5"),
+            stake=Decimal("10"),
+            causal_cutoff_ts="2026-09-14T14:00:00+02:00",
+        )
+
+        text = first.to_text()
+        self.assertTrue(text.endswith("\n"))
+        self.assertEqual(text, second.to_text())
+        self.assertEqual(json.loads(text), first.as_dict())
+        self.assertIn('"method": "bernoulli_expected_return"', text)
+        self.assertIn('"input_units"', text)
+        self.assertIn('"assumptions"', text)
+        self.assertIn('"quote_evidence_sha256"', text)
+        self.assertIn('"real_money_execution": false', text)
+        self.assertNotIn("never serialize this", text)
 
     def test_source_identity_changes_evidence_even_when_numeric_result_is_same(self) -> None:
         first = self.service.implied_probability_for_event(

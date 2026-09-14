@@ -125,6 +125,9 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
     if not _canonical_source_names(root):
         raise ValueError("workspace contains no canonical exportable evidence")
 
+    # Keep the exclusive critical section limited to source discovery + hashing.
+    # The manifest payload is immutable ordinary Python data after this block, so a
+    # slow/failing destination write must not unnecessarily block replay/settlement.
     with WorkspaceEconomicLock(root):
         names = _canonical_source_names(root)
         if not names:
@@ -154,8 +157,9 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
             "real_money_execution": False,
         }
         payload["manifest_sha256"] = _manifest_sha256(payload)
-        atomic_write_json(destination, payload)
-        return payload
+
+    atomic_write_json(destination, payload)
+    return payload
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.evidence_export as evidence_export
 from autosport.evidence_export import export_evidence_manifest, main
 
 
@@ -134,6 +135,49 @@ def test_export_rejects_canonical_symlink_instead_of_hashing_external_secret(tmp
         export_evidence_manifest(workspace, output)
 
     assert not output.exists()
+
+
+def test_manifest_publication_occurs_after_snapshot_lock_is_released(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "paper_book.json").write_text('{"balance":"100"}\n', encoding="utf-8")
+    output = tmp_path / "manifest.json"
+    lock_held = False
+    publication_observed = False
+
+    class TrackingLock:
+        def __init__(self, path: Path) -> None:
+            assert Path(path) == workspace
+
+        def __enter__(self):
+            nonlocal lock_held
+            assert lock_held is False
+            lock_held = True
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback) -> None:
+            nonlocal lock_held
+            lock_held = False
+
+    real_writer = evidence_export.atomic_write_json
+
+    def observing_writer(path: Path, payload: dict[str, object]) -> None:
+        nonlocal publication_observed
+        assert lock_held is False
+        publication_observed = True
+        real_writer(path, payload)
+
+    monkeypatch.setattr(evidence_export, "WorkspaceEconomicLock", TrackingLock)
+    monkeypatch.setattr(evidence_export, "atomic_write_json", observing_writer)
+
+    report = export_evidence_manifest(workspace, output)
+
+    assert publication_observed is True
+    assert report["file_count"] == 1
+    assert output.exists()
 
 
 def test_cli_reports_fail_closed_and_success_without_traceback(tmp_path: Path, capsys) -> None:

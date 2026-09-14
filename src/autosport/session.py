@@ -69,12 +69,26 @@ class AutosportSession:
         self.research_plan = research_plan
         self.strategy_id = experiment_strategy_id(strategy_id, research_plan)
         self.store = SQLiteMarketStore(self.workspace / "market.db")
-        self.source_health = SourceHealthStore(self.workspace / "source_health.json")
-        self.book_path = self.workspace / "paper_book.json"
-        self.book = PaperBook.load(self.book_path) if self.book_path.exists() else PaperBook(initial_bankroll)
-        self.ledger = JsonlDecisionLedger(self.workspace / "decisions.jsonl")
-        self.registry = RunRegistry(self.workspace / "run_registry.json")
-        self.portfolio_engine = PortfolioEngine()
+        try:
+            self.source_health = SourceHealthStore(self.workspace / "source_health.json")
+            self.book_path = self.workspace / "paper_book.json"
+            self.book = PaperBook.load(self.book_path) if self.book_path.exists() else PaperBook(initial_bankroll)
+            self.ledger = JsonlDecisionLedger(self.workspace / "decisions.jsonl")
+            self.registry = RunRegistry(self.workspace / "run_registry.json")
+            self.portfolio_engine = PortfolioEngine()
+        except BaseException as initialization_error:
+            # SQLiteMarketStore owns an OS file handle after construction. If any
+            # later durable/session component fails to initialize, the partially
+            # constructed session must make a best-effort close without replacing
+            # the primary initialization failure with a secondary cleanup failure.
+            try:
+                self.store.close()
+            except BaseException as cleanup_error:
+                initialization_error.add_note(
+                    "SQLiteMarketStore cleanup also failed during session initialization: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+            raise
 
     def _runtime(
         self,

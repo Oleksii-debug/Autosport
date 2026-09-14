@@ -215,31 +215,39 @@ class ParlayApiTableTennisProvider:
             self._pending_cursor = observed_ts
 
         cursor = self._pending_cursor
-        quotes: list[ProviderQuote] = []
-        if self._pending_quote is not None:
-            quotes.append(self._pending_quote)
-            self._pending_quote = None
+        try:
+            quotes: list[ProviderQuote] = []
+            if self._pending_quote is not None:
+                quotes.append(self._pending_quote)
+                self._pending_quote = None
 
-        while len(quotes) < max_items:
+            while len(quotes) < max_items:
+                try:
+                    quotes.append(next(self._pending_quotes))
+                except StopIteration:
+                    self._clear_pending_snapshot()
+                    return ProviderBatch(self.source_id, tuple(quotes), cursor=cursor)
+
             try:
-                quotes.append(next(self._pending_quotes))
+                self._pending_quote = next(self._pending_quotes)
             except StopIteration:
                 self._clear_pending_snapshot()
-                return ProviderBatch(self.source_id, tuple(quotes), cursor=cursor)
-
-        try:
-            self._pending_quote = next(self._pending_quotes)
-        except StopIteration:
+                quality_flags: tuple[str, ...] = ()
+            else:
+                quality_flags = ("TRUNCATED_BATCH",)
+            return ProviderBatch(
+                self.source_id,
+                tuple(quotes),
+                cursor=cursor,
+                quality_flags=quality_flags,
+            )
+        except Exception:
+            # The pending iterator may fail only when a deferred event is first
+            # materialized. Never leave a closed/poisoned generator installed: a
+            # later read must perform a fresh provider acquisition rather than
+            # falsely succeeding with an empty batch and the stale cursor.
             self._clear_pending_snapshot()
-            quality_flags: tuple[str, ...] = ()
-        else:
-            quality_flags = ("TRUNCATED_BATCH",)
-        return ProviderBatch(
-            self.source_id,
-            tuple(quotes),
-            cursor=cursor,
-            quality_flags=quality_flags,
-        )
+            raise
 
     def _snapshot_quotes(
         self,

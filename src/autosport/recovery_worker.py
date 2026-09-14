@@ -70,14 +70,16 @@ class OneShotRecoveryWorker:
             )
             self._thread = thread
             thread.start()
-        except Exception:
-            # If construction/start fails, no recovery task reached the worker
-            # boundary. Restore the single-flight state so the fail-closed GUI can
-            # report "not started" and allow a later explicit recovery retry.
+        except BaseException as exc:
+            # Any setup unwind must release the single-flight slot. Ordinary
+            # construction/start failures preserve the existing fail-closed False
+            # contract; process-control BaseExceptions propagate after cleanup.
             self._thread = None
             with self._lock:
                 self._busy = False
-            return False
+            if isinstance(exc, Exception):
+                return False
+            raise
         return True
 
     def _run(self, task: RecoveryTask) -> None:

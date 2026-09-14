@@ -17,6 +17,14 @@ class RecoveryWorkerTerminalLifecycleTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("recovery worker did not publish terminal message")
 
+    def _assert_retry_succeeds(self, worker: OneShotRecoveryWorker) -> None:
+        sentinel = object()
+        self.assertTrue(worker.start(lambda: sentinel))
+        completed = self._terminal(worker)
+        self.assertIs(completed.result, sentinel)
+        self.assertIsNone(completed.error)
+        self.assertFalse(worker.busy)
+
     def test_system_exit_is_terminal_and_worker_can_retry(self) -> None:
         worker = OneShotRecoveryWorker()
 
@@ -29,12 +37,7 @@ class RecoveryWorkerTerminalLifecycleTests(unittest.TestCase):
         self.assertEqual(failed.error, "SystemExit: recovery-stop")
         self.assertFalse(worker.busy)
 
-        sentinel = object()
-        self.assertTrue(worker.start(lambda: sentinel))
-        completed = self._terminal(worker)
-        self.assertIs(completed.result, sentinel)
-        self.assertIsNone(completed.error)
-        self.assertFalse(worker.busy)
+        self._assert_retry_succeeds(worker)
 
     def test_unprintable_base_exception_is_terminal_and_worker_can_retry(self) -> None:
         worker = OneShotRecoveryWorker()
@@ -55,12 +58,7 @@ class RecoveryWorkerTerminalLifecycleTests(unittest.TestCase):
         )
         self.assertFalse(worker.busy)
 
-        sentinel = object()
-        self.assertTrue(worker.start(lambda: sentinel))
-        completed = self._terminal(worker)
-        self.assertIs(completed.result, sentinel)
-        self.assertIsNone(completed.error)
-        self.assertFalse(worker.busy)
+        self._assert_retry_succeeds(worker)
 
     def test_thread_constructor_exception_rolls_back_busy_and_allows_retry(self) -> None:
         worker = OneShotRecoveryWorker()
@@ -73,6 +71,7 @@ class RecoveryWorkerTerminalLifecycleTests(unittest.TestCase):
         self.assertFalse(worker.busy)
         self.assertIsNone(worker._thread)
         self.assertIsNone(worker.poll())
+        self._assert_retry_succeeds(worker)
 
     def test_thread_start_non_runtime_exception_rolls_back_busy_and_allows_retry(self) -> None:
         worker = OneShotRecoveryWorker()
@@ -85,6 +84,35 @@ class RecoveryWorkerTerminalLifecycleTests(unittest.TestCase):
         self.assertFalse(worker.busy)
         self.assertIsNone(worker._thread)
         self.assertIsNone(worker.poll())
+        self._assert_retry_succeeds(worker)
+
+    def test_thread_constructor_baseexception_cleans_up_before_reraise(self) -> None:
+        worker = OneShotRecoveryWorker()
+        with patch(
+            "autosport.recovery_worker.threading.Thread",
+            side_effect=KeyboardInterrupt("constructor interrupted"),
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "constructor interrupted"):
+                worker.start(lambda: self.fail("task must not run"))
+
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+        self._assert_retry_succeeds(worker)
+
+    def test_thread_start_baseexception_cleans_up_before_reraise(self) -> None:
+        worker = OneShotRecoveryWorker()
+        with patch(
+            "autosport.recovery_worker.threading.Thread.start",
+            side_effect=SystemExit("start interrupted"),
+        ):
+            with self.assertRaisesRegex(SystemExit, "start interrupted"):
+                worker.start(lambda: self.fail("task must not run"))
+
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+        self._assert_retry_succeeds(worker)
 
 
 if __name__ == "__main__":

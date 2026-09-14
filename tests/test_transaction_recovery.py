@@ -399,6 +399,63 @@ class TransactionRecoveryTests(unittest.TestCase):
             self.assertEqual(PaperBook.load(root / "paper_book.json").balance, 10000)
             self.assertEqual((root / "decisions.jsonl").read_text(encoding="utf-8"), "")
 
+    def test_precommit_rejects_nonfinite_summary_before_manifest_precommit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book_path = root / "paper_book.json"
+            ledger_path = root / "decisions.jsonl"
+            book = PaperBook("10000")
+            book.save(book_path)
+            ledger_path.write_bytes(b"")
+            tx = RunTransaction.start(
+                root,
+                run_id="strict-summary-precommit",
+                experiment_key="experiment",
+                market_sha256="a" * 64,
+                results_sha256="b" * 64,
+                strategy_id="baseline-v1",
+                base_paper_book_sha256=sha256_file(book_path),
+                base_decision_ledger_sha256=sha256_file(ledger_path),
+            )
+            tx.stage_outputs(book, ledger_path)
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "staged run summary contains non-finite JSON value 'NaN'",
+            ):
+                tx.precommit({"ambiguous": float("nan")})
+
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["phase"], "staging")
+            self.assertEqual(manifest["new"], {})
+            self.assertEqual(PaperBook.load(book_path).balance, 10000)
+            self.assertEqual(ledger_path.read_text(encoding="utf-8"), "")
+
+    def test_commit_rejects_boolean_summary_schema_before_economic_promotion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx, _item = self._precommitted_transaction(root)
+            summary = json.loads(tx.staged_summary_path.read_text(encoding="utf-8"))
+            summary["transaction_schema_version"] = True
+            tx.staged_summary_path.write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            manifest["new"]["summary_sha256"] = sha256_file(tx.staged_summary_path)
+            tx.manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "transaction binding mismatch: transaction_schema_version",
+            ):
+                tx.commit()
+            self.assertEqual(PaperBook.load(root / "paper_book.json").balance, 10000)
+            self.assertEqual((root / "decisions.jsonl").read_text(encoding="utf-8"), "")
+
 
 if __name__ == "__main__":
     unittest.main()

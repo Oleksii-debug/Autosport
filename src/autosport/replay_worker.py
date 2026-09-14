@@ -56,14 +56,18 @@ class OneShotReplayWorker:
             )
             self._thread = thread
             thread.start()
-        except RuntimeError:
-            # CPython reports OS/runtime inability to start a new thread as
-            # RuntimeError. No economic task ran, so restore idle single-flight
-            # state and let the existing False start result keep the GUI fail-closed.
+        except RuntimeError as exc:
+            # A request that won the single-flight slot must have exactly one
+            # terminal poll outcome. Preserve that contract even when CPython/OS
+            # cannot start the thread: publish a terminal error and let poll()
+            # restore idle state. False remains reserved for a genuinely busy
+            # worker, so GUI callers never misreport thread-start failure as
+            # "replay already running" and can retry after consuming the error.
             self._thread = None
-            with self._lock:
-                self._busy = False
-            return False
+            self._messages.put(
+                ReplayWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+            )
+            return True
         return True
 
     def _run(self, task: ReplayTask) -> None:

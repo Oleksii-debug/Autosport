@@ -48,7 +48,7 @@ class ReplayWorkerTests(unittest.TestCase):
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
-    def test_worker_thread_start_failure_rolls_back_busy_and_allows_retry(self):
+    def test_worker_thread_start_failure_publishes_terminal_error_and_allows_retry(self):
         worker = OneShotReplayWorker()
         task_ran = threading.Event()
         sentinel = object()
@@ -62,12 +62,16 @@ class ReplayWorkerTests(unittest.TestCase):
             "start",
             side_effect=RuntimeError("can't start new thread"),
         ):
-            self.assertFalse(worker.start(task))
+            self.assertTrue(worker.start(task))
 
         self.assertFalse(task_ran.is_set())
-        self.assertFalse(worker.busy)
+        self.assertTrue(worker.busy)
         self.assertIsNone(worker._thread)
-        self.assertIsNone(worker.poll())
+        self.assertFalse(worker.start(task))
+        failed = self._terminal(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(failed.error, "RuntimeError: can't start new thread")
+        self.assertFalse(worker.busy)
 
         self.assertTrue(worker.start(task))
         message = self._terminal(worker)

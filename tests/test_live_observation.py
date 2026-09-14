@@ -137,7 +137,7 @@ class LiveObservationTests(unittest.TestCase):
         self.assertIs(message.result, expected)
         self.assertFalse(worker.busy)
 
-    def test_worker_thread_start_failure_rolls_back_busy_and_allows_retry(self):
+    def test_worker_thread_start_failure_publishes_terminal_error_and_allows_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
             expected = self._observe(tmp)
 
@@ -153,12 +153,16 @@ class LiveObservationTests(unittest.TestCase):
             "start",
             side_effect=RuntimeError("can't start new thread"),
         ):
-            self.assertFalse(worker.start(task))
+            self.assertTrue(worker.start(task))
 
         self.assertFalse(task_ran.is_set())
-        self.assertFalse(worker.busy)
+        self.assertTrue(worker.busy)
         self.assertIsNone(worker._thread)
-        self.assertIsNone(worker.poll())
+        self.assertFalse(worker.start(task))
+        failed = self._wait_for_message(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(failed.error, "RuntimeError: can't start new thread")
+        self.assertFalse(worker.busy)
 
         self.assertTrue(worker.start(task))
         message = self._wait_for_message(worker)

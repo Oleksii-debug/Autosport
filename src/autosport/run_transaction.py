@@ -187,6 +187,10 @@ class RunTransaction:
         summary["decision_ledger_sha256"] = ledger_hash
         summary["transaction_schema_version"] = self.SCHEMA_VERSION
         summary["transaction_run_id"] = self.run_id
+        self._decode_strict_json(
+            json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True),
+            label="staged run summary",
+        )
         atomic_write_json(self.staged_summary_path, summary)
         validated_summary = self._read_strict_json_file(
             self.staged_summary_path,

@@ -107,6 +107,13 @@ class ReleasePackageZipCanonicalityTests(unittest.TestCase):
             for index, (original, payload) in enumerate(entries):
                 info = zipfile.ZipInfo(original.filename, original.date_time)
                 info.compress_type = original.compress_type
+                info.create_system = original.create_system
+                info.create_version = original.create_version
+                info.extract_version = original.extract_version
+                info.reserved = original.reserved
+                info.flag_bits = original.flag_bits
+                info.volume = original.volume
+                info.internal_attr = original.internal_attr
                 info.external_attr = original.external_attr
                 info.extra = original.extra
                 info.comment = original.comment
@@ -147,6 +154,21 @@ class ReleasePackageZipCanonicalityTests(unittest.TestCase):
             package = self._build_candidate(Path(temporary))
             report = verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
             self.assertEqual(report["status"], "PASS")
+
+    def test_builder_pins_supported_zip_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(Path(temporary))
+            with zipfile.ZipFile(package, "r") as archive:
+                infos = archive.infolist()
+            self.assertTrue(infos)
+            for info in infos:
+                self.assertEqual(info.create_system, 3)
+                self.assertEqual(info.create_version, 20)
+                self.assertEqual(info.extract_version, 20)
+                self.assertEqual(info.reserved, 0)
+                self.assertEqual(info.flag_bits, 0)
+                self.assertEqual(info.volume, 0)
+                self.assertEqual(info.internal_attr, 0)
 
     def test_payload_equivalent_reordered_archive_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -190,7 +212,47 @@ class ReleasePackageZipCanonicalityTests(unittest.TestCase):
                     zipfile.ZIP_STORED,
                 ),
             )
-            with self.assertRaisesRegex(ValueError, "non-canonical compression"):
+            with self.assertRaisesRegex(ValueError, "non-canonical compression method"):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
+    def test_payload_equivalent_noncanonical_create_system_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(Path(temporary))
+            self._rewrite_archive(
+                package,
+                mutate_first=lambda info: setattr(info, "create_system", 0),
+            )
+            with self.assertRaisesRegex(ValueError, "non-canonical create system"):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
+    def test_payload_equivalent_noncanonical_create_version_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(Path(temporary))
+            self._rewrite_archive(
+                package,
+                mutate_first=lambda info: setattr(info, "create_version", 10),
+            )
+            with self.assertRaisesRegex(ValueError, "non-canonical create version"):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
+    def test_payload_equivalent_noncanonical_extract_version_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(Path(temporary))
+            self._rewrite_archive(
+                package,
+                mutate_first=lambda info: setattr(info, "extract_version", 10),
+            )
+            with self.assertRaisesRegex(ValueError, "non-canonical extract version"):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
+    def test_payload_equivalent_noncanonical_internal_attr_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(Path(temporary))
+            self._rewrite_archive(
+                package,
+                mutate_first=lambda info: setattr(info, "internal_attr", 1),
+            )
+            with self.assertRaisesRegex(ValueError, "non-canonical internal attributes"):
                 verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
 
     def test_payload_equivalent_archive_comment_is_rejected(self) -> None:

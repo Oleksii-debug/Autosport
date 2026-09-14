@@ -3,7 +3,9 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
+from autosport.domain import TicketStatus
 from autosport.endurance import EnduranceConfig, run_endurance
 from autosport.providers import CanonicalNormalizer, ProviderQuote
 
@@ -61,6 +63,11 @@ class EnduranceTests(unittest.TestCase):
             self.assertEqual(first.restart_projection_counts, (40, 40))
             self.assertEqual(first.paper_tickets_settled_first_pass, 10)
             self.assertEqual(first.paper_tickets_settled_second_pass, 0)
+            self.assertEqual(first.paper_tickets_won, 10)
+            self.assertEqual(first.paper_payout_total, "16.95")
+            self.assertEqual(first.paper_expected_balance, "100006.95")
+            self.assertEqual(first.paper_balance_after_restart, first.paper_expected_balance)
+            self.assertTrue(first.paper_economics_verified)
             self.assertTrue(first.corrupt_health_rejected)
             self.assertTrue(first.corrupt_paper_book_rejected)
             self.assertFalse(first.real_money_execution)
@@ -70,7 +77,42 @@ class EnduranceTests(unittest.TestCase):
             stored = json.loads(report_a_path.read_text(encoding="utf-8"))
             self.assertEqual(stored["status"], "PASS")
             self.assertEqual(stored["stable_invariant_fingerprint"], first.stable_invariant_fingerprint)
+            self.assertEqual(stored["paper_tickets_won"], 10)
+            self.assertEqual(stored["paper_expected_balance"], "100006.95")
+            self.assertTrue(stored["paper_economics_verified"])
             self.assertFalse(stored["real_money_execution"])
+
+    def test_endurance_fails_if_win_outcomes_settle_as_losses(self):
+        config = EnduranceConfig(
+            event_count=20,
+            quote_keys=10,
+            batch_size=10,
+            restart_cycles=1,
+            paper_tickets=5,
+        )
+
+        def settle_as_losses(_engine, book):
+            settled = []
+            for ticket in list(book.tickets.values()):
+                if ticket.status is TicketStatus.OPEN:
+                    book.settle(ticket.ticket_id, set())
+                    settled.append(ticket.ticket_id)
+            return settled
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch(
+                "autosport.endurance.SettlementEngine.settle_ready",
+                new=settle_as_losses,
+            ):
+                report = run_endurance(Path(tmp), config)
+
+        self.assertEqual(report.status, "FAIL")
+        self.assertEqual(report.paper_tickets_settled_first_pass, 5)
+        self.assertEqual(report.paper_tickets_settled_second_pass, 0)
+        self.assertEqual(report.paper_tickets_won, 0)
+        self.assertFalse(report.paper_economics_verified)
+        self.assertIn("PaperBook endurance tickets were not all WON", report.failures)
+        self.assertIn("PaperBook winning payouts do not match locked odds", report.failures)
 
     def test_config_and_workspace_are_bounded_fail_closed(self):
         with self.assertRaises(ValueError):

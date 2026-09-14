@@ -57,6 +57,7 @@ class DiagnosticCleanupTests(unittest.TestCase):
             payload = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "FAIL")
             self.assertEqual(payload["error"], "RuntimeError: diagnostic replay failed")
+            self.assertNotIn("error_notes", payload)
             self.assertFalse(payload["real_money_execution"])
             self.assertFalse(payload["human_tested"])
             self.assertFalse(payload["nvda_verified"])
@@ -74,6 +75,13 @@ class DiagnosticCleanupTests(unittest.TestCase):
             payload = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "FAIL")
             self.assertEqual(payload["error"], "RuntimeError: diagnostic replay failed")
+            self.assertEqual(
+                payload["error_notes"],
+                [
+                    "SQLiteMarketStore.close() also failed while preserving the primary diagnostic failure: "
+                    "OSError: diagnostic store close failed"
+                ],
+            )
 
     def test_close_failure_after_success_is_reported_as_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -85,6 +93,34 @@ class DiagnosticCleanupTests(unittest.TestCase):
             payload = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "FAIL")
             self.assertEqual(payload["error"], "OSError: diagnostic store close failed")
+            self.assertNotIn("error_notes", payload)
+            self.assertFalse(payload["real_money_execution"])
+            self.assertFalse(payload["human_tested"])
+            self.assertFalse(payload["nvda_verified"])
+
+    def test_pass_publication_failure_is_converted_to_atomic_fail_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = Path(temporary) / "diagnostic.json"
+            writes: list[dict[str, object]] = []
+
+            def flaky_atomic_write(path: str | Path, payload: dict[str, object]) -> None:
+                writes.append(dict(payload))
+                if len(writes) == 1:
+                    raise OSError("diagnostic evidence publication failed")
+                Path(path).write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+
+            with patch.object(diagnostic, "atomic_write_json", side_effect=flaky_atomic_write):
+                exit_code = diagnostic.run_machine_diagnostic(output_path)
+
+            self.assertEqual(exit_code, 1)
+            self.assertEqual([payload["status"] for payload in writes], ["PASS", "FAIL"])
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "FAIL")
+            self.assertEqual(payload["error"], "OSError: diagnostic evidence publication failed")
+            self.assertNotIn("error_notes", payload)
             self.assertFalse(payload["real_money_execution"])
             self.assertFalse(payload["human_tested"])
             self.assertFalse(payload["nvda_verified"])

@@ -45,6 +45,10 @@ def _validate_canonical_string(value: object, label: str) -> str:
         or value != value.strip()
     ):
         raise ValueError(f"{label} must be a non-empty canonical string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{label} must be valid UTF-8 text") from exc
     return value
 
 
@@ -101,11 +105,8 @@ class ResearchEvidence:
         if not isinstance(self.quality_flags, (tuple, list)):
             raise ValueError("evidence quality flags must be a tuple or list")
         flags = tuple(self.quality_flags)
-        if any(
-            not isinstance(flag, str) or not flag.strip() or flag != flag.strip()
-            for flag in flags
-        ):
-            raise ValueError("evidence quality flags must be non-empty canonical strings")
+        for flag in flags:
+            _validate_canonical_string(flag, "evidence quality flag")
         if len(flags) != len(set(flags)):
             raise ValueError("duplicate evidence quality flag")
         object.__setattr__(self, "quality_flags", flags)
@@ -144,18 +145,19 @@ class ResearchDecisionPolicy:
                 "blocked_quality_flags must be a tuple, list, set, or frozenset"
             )
         blocked_flags = tuple(self.blocked_quality_flags)
-        if any(
-            not isinstance(flag, str) or not flag.strip() or flag != flag.strip()
-            for flag in blocked_flags
-        ):
-            raise ValueError(
-                "blocked_quality_flags must contain non-empty canonical strings"
-            )
+        for flag in blocked_flags:
+            _validate_canonical_string(flag, "blocked_quality_flags item")
         object.__setattr__(
             self,
             "blocked_quality_flags",
             frozenset(blocked_flags),
         )
+        for label, value in (
+            ("require_market_snapshot_hash", self.require_market_snapshot_hash),
+            ("require_worst_case_proof", self.require_worst_case_proof),
+        ):
+            if not isinstance(value, bool):
+                raise ValueError(f"{label} must be boolean")
         if self.minimum_ranking_risk_change is not None:
             object.__setattr__(
                 self,

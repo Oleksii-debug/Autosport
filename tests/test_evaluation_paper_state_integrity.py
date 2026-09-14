@@ -31,6 +31,22 @@ class EvaluationPaperStateIntegrityTests(unittest.TestCase):
         ):
             evaluate(book)
 
+    def test_aliased_ticket_identity_is_rejected_before_durable_metrics(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-alias", "winner", "player-a", Decimal("2"))
+        ticket = book.open_ticket([leg], "10", reason="paper-only alias regression")
+        book.settle(ticket.ticket_id, {leg.quote_key})
+        self.assertEqual(book.balance, Decimal("110"))
+
+        book.tickets["alias"] = ticket
+        book.balance = Decimal("120")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "virtual bankroll state is invalid for evaluation",
+        ):
+            evaluate(book)
+
     def test_derived_roi_decimal_range_failure_is_fail_closed_and_context_isolated(self) -> None:
         book = PaperBook(Decimal("1E+999999"))
         leg = TicketLeg("event-1", "winner", "player-a", Decimal("2"))

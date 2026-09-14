@@ -148,3 +148,141 @@ def test_deserialization_preserves_canonical_identity_bytes() -> None:
     assert event.selection_id == payload["selection_id"]
     assert event.source_id == payload["source_id"]
     assert event.sequence == 42
+
+
+def test_deserialization_preserves_canonical_optional_fields() -> None:
+    payload = _event_payload()
+    metadata = {
+        "period": 2,
+        "live": True,
+        "probability": 0.5,
+        "tags": ["table-tennis", None],
+        "nested": {"court": "one"},
+    }
+    payload.update(
+        {
+            "market_type": "total",
+            "status": "suspended",
+            "source_ts": "2026-09-12T09:59:59+00:00",
+            "score_state": "2-1",
+            "metadata": metadata,
+        }
+    )
+
+    event = MarketEvent.from_dict(payload)
+
+    assert event.market_type.value == "total"
+    assert event.status == "suspended"
+    assert event.source_ts == "2026-09-12T09:59:59+00:00"
+    assert event.score_state == "2-1"
+    assert event.metadata == metadata
+    assert event.metadata is not metadata
+
+
+def test_deserialization_preserves_optional_defaults() -> None:
+    payload = _event_payload()
+    del payload["market_type"]
+
+    event = MarketEvent.from_dict(payload)
+
+    assert event.market_type.value == "other"
+    assert event.status == "open"
+    assert event.source_ts is None
+    assert event.score_state is None
+    assert event.metadata == {}
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("market_type", 7),
+        ("market_type", True),
+        ("market_type", ""),
+        ("market_type", " winner "),
+        ("status", 7),
+        ("status", False),
+        ("status", ""),
+        ("status", " open "),
+        ("source_ts", 7),
+        ("source_ts", False),
+        ("source_ts", ""),
+        ("source_ts", " 2026-09-12T09:59:59+00:00 "),
+        ("score_state", 7),
+        ("score_state", False),
+        ("score_state", ""),
+        ("score_state", " 2-1 "),
+    ],
+)
+def test_deserialization_rejects_noncanonical_optional_string_fields(
+    field_name: str,
+    value: object,
+) -> None:
+    payload = _event_payload()
+    payload[field_name] = value
+
+    with pytest.raises(ValueError, match=rf"{field_name} must be a non-empty trimmed string"):
+        MarketEvent.from_dict(payload)
+
+
+def test_deserialization_rejects_unknown_market_type() -> None:
+    payload = _event_payload()
+    payload["market_type"] = "moneyline"
+
+    with pytest.raises(ValueError, match="market_type must be a supported market type"):
+        MarketEvent.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        [["key", "value"]],
+        {"tuple": (1, 2)},
+        {1: "value"},
+        {"nonfinite": float("nan")},
+        {"infinite": float("inf")},
+    ],
+)
+def test_deserialization_rejects_noncanonical_metadata(metadata: object) -> None:
+    payload = _event_payload()
+    payload["metadata"] = metadata
+
+    with pytest.raises(ValueError):
+        MarketEvent.from_dict(payload)
+
+
+def test_deserialization_rejects_cyclic_metadata() -> None:
+    metadata: dict[str, object] = {}
+    metadata["self"] = metadata
+    payload = _event_payload()
+    payload["metadata"] = metadata
+
+    with pytest.raises(ValueError, match="cyclic JSON container"):
+        MarketEvent.from_dict(payload)
+
+
+def test_deserialization_rejects_excessive_metadata_nesting() -> None:
+    metadata: dict[str, object] = {}
+    cursor = metadata
+    for index in range(66):
+        child: dict[str, object] = {}
+        cursor[f"level-{index}"] = child
+        cursor = child
+    payload = _event_payload()
+    payload["metadata"] = metadata
+
+    with pytest.raises(ValueError, match="metadata exceeds maximum JSON nesting depth 64"):
+        MarketEvent.from_dict(payload)
+
+
+def test_replay_jsonl_rejects_coerced_optional_status(tmp_path) -> None:
+    payload = _event_payload()
+    payload["status"] = 7
+    replay_path = tmp_path / "coerced-status-replay.jsonl"
+    replay_path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="status must be a non-empty trimmed string"):
+        ReplayEngine.from_jsonl(replay_path)

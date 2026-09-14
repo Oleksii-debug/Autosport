@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 _DECIMAL_TEXT = re.compile(
@@ -27,7 +26,7 @@ class CalculationInputLimits:
             "collection_items",
         ):
             value = getattr(self, field)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if type(value) is not int or value <= 0:
                 raise ValueError(f"{field} must be a positive non-boolean integer")
 
 
@@ -42,13 +41,15 @@ class CalculationInputBoundary:
     """
 
     def __init__(self, limits: CalculationInputLimits | None = None) -> None:
+        if limits is not None and type(limits) is not CalculationInputLimits:
+            raise ValueError("limits must be a CalculationInputLimits value")
         self.limits = limits or CalculationInputLimits()
 
     def decimal_text(self, value: object, *, field: str) -> str:
         """Return bounded canonical ASCII decimal text without parsing it."""
 
         field_name = self._field_name(field)
-        if not isinstance(value, str):
+        if type(value) is not str:
             raise ValueError(f"{field_name} must be decimal text")
         if not value or value != value.strip():
             raise ValueError(f"{field_name} must be non-empty trimmed decimal text")
@@ -62,7 +63,7 @@ class CalculationInputBoundary:
         """Return a bounded, trimmed, UTF-8 encodable user identifier."""
 
         field_name = self._field_name(field)
-        if not isinstance(value, str) or not value or value != value.strip():
+        if type(value) is not str or not value or value != value.strip():
             raise ValueError(f"{field_name} must be a non-empty trimmed string")
         if len(value) > self.limits.identifier_chars:
             raise ValueError(f"{field_name} exceeds the manual-input character limit")
@@ -81,12 +82,12 @@ class CalculationInputBoundary:
         field: str,
         maximum_items: int | None = None,
     ) -> tuple[str, ...]:
-        """Validate a bounded sequence before Decimal construction."""
+        """Validate an exact list/tuple before Decimal construction."""
 
         field_name = self._field_name(field)
         limit = self._collection_limit(maximum_items)
-        if isinstance(values, (str, bytes, bytearray)) or not isinstance(values, Sequence):
-            raise ValueError(f"{field_name} must be a sequence")
+        if type(values) not in (list, tuple):
+            raise ValueError(f"{field_name} must be a list or tuple")
         if len(values) > limit:
             raise ValueError(f"{field_name} exceeds the manual-input item limit")
         return tuple(
@@ -101,12 +102,12 @@ class CalculationInputBoundary:
         field: str,
         maximum_items: int | None = None,
     ) -> dict[str, str]:
-        """Validate identifier -> decimal text input without sorting or hashing."""
+        """Validate an exact dict of identifier -> decimal text without sorting/hashing."""
 
         field_name = self._field_name(field)
         limit = self._collection_limit(maximum_items)
-        if not isinstance(values, Mapping):
-            raise ValueError(f"{field_name} must be a mapping")
+        if type(values) is not dict:
+            raise ValueError(f"{field_name} must be a dict")
         if len(values) > limit:
             raise ValueError(f"{field_name} exceeds the manual-input item limit")
 
@@ -122,17 +123,13 @@ class CalculationInputBoundary:
     def _collection_limit(self, maximum_items: int | None) -> int:
         if maximum_items is None:
             return self.limits.collection_items
-        if (
-            isinstance(maximum_items, bool)
-            or not isinstance(maximum_items, int)
-            or maximum_items <= 0
-        ):
+        if type(maximum_items) is not int or maximum_items <= 0:
             raise ValueError("maximum_items must be a positive non-boolean integer")
         return min(maximum_items, self.limits.collection_items)
 
     @staticmethod
     def _field_name(field: object) -> str:
-        if not isinstance(field, str) or not field or field != field.strip():
+        if type(field) is not str or not field or field != field.strip():
             raise ValueError("field must be a non-empty trimmed string")
         return field
 

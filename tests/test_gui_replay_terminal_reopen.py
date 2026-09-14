@@ -359,7 +359,12 @@ def test_resolved_recovery_reopens_before_publishing_and_clears_exact_workspace(
     )
     reopened = _Session(exact_workspace)
     app._open_session = lambda *_args, **_kwargs: reopened
-    app._refresh_tickets = lambda: app.tickets.insert("end", "FRESH RECOVERED TICKET")
+
+    def refresh_tickets() -> None:
+        app.tickets.delete(0, "end")
+        app.tickets.insert("end", "FRESH RECOVERED TICKET")
+
+    app._refresh_tickets = refresh_tickets
 
     with (
         patch("autosport.gui.workspace_for_strategy", return_value=exact_workspace),

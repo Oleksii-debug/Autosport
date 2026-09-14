@@ -1,5 +1,5 @@
 import unittest
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
@@ -14,6 +14,10 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
             max_committed_fraction=Decimal("0.90"),
             minimum_cash_reserve_fraction=Decimal("0"),
         )
+
+    @staticmethod
+    def _leg() -> TicketLeg:
+        return TicketLeg("event-1", "market-1", "selection-1", Decimal("2"))
 
     def test_non_finite_or_malformed_stake_is_denied_without_exception(self) -> None:
         book = PaperBook("100")
@@ -62,16 +66,91 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
 
     def test_corrupt_open_ticket_stake_is_denied_without_committed_stake_exception(self) -> None:
         book = PaperBook("100")
-        ticket = book.open_ticket(
-            [TicketLeg("event-1", "market-1", "selection-1", Decimal("2"))],
-            "10",
-        )
+        ticket = book.open_ticket([self._leg()], "10")
         ticket.stake = Decimal("sNaN")
 
         decision = self._permissive_policy().evaluate(book, "1")
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+
+    def test_corrupt_ticket_status_cannot_silently_remove_committed_exposure(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket([self._leg()], "40")
+        ticket.status = "open"  # type: ignore[assignment]
+        policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("0.50"),
+            max_committed_fraction=Decimal("0.50"),
+            minimum_cash_reserve_fraction=Decimal("0"),
+        )
+
+        decision = policy.evaluate(book, "20")
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+
+    def test_negative_ticket_stake_cannot_reduce_committed_exposure(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket([self._leg()], "10")
+        ticket.stake = Decimal("-9")
+
+        decision = self._permissive_policy().evaluate(book, "10")
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+
+    def test_malformed_ticket_object_is_denied_without_attribute_error(self) -> None:
+        book = PaperBook("100")
+        book.tickets["bad"] = object()  # type: ignore[assignment]
+
+        decision = self._permissive_policy().evaluate(book, "1")
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+
+    def test_inflated_balance_breaking_ledger_equation_is_denied(self) -> None:
+        book = PaperBook("100")
+        book.open_ticket([self._leg()], "50")
+        book.balance = Decimal("100")
+        policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("0.50"),
+            max_committed_fraction=Decimal("1.00"),
+            minimum_cash_reserve_fraction=Decimal("0.40"),
+        )
+
+        decision = policy.evaluate(book, "20")
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+
+    def test_finite_operands_whose_derived_risk_arithmetic_overflows_are_denied(self) -> None:
+        book = PaperBook("9E+999999")
+        book.open_ticket([self._leg()], "9E+999999")
+        policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("1"),
+            max_committed_fraction=Decimal("1"),
+            minimum_cash_reserve_fraction=Decimal("0"),
+        )
+
+        decision = policy.evaluate(book, "9E+999999")
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+
+    def test_risk_arithmetic_does_not_depend_on_or_mutate_caller_decimal_context(self) -> None:
+        book = PaperBook("100")
+        policy = self._permissive_policy()
+
+        with localcontext() as caller:
+            caller.prec = 3
+            caller.Emax = 1
+            caller.Emin = -1
+            caller.clear_flags()
+            decision = policy.evaluate(book, "10")
+            self.assertFalse(any(caller.flags.values()))
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed")
 
     def test_non_finite_policy_fraction_is_rejected_at_construction(self) -> None:
         defaults = {

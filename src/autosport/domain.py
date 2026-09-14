@@ -51,13 +51,21 @@ class MarketEvent:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "MarketEvent":
+        source_id = raw.get("source_id", "fixture")
+        if (
+            not isinstance(source_id, str)
+            or not source_id
+            or source_id.strip() != source_id
+        ):
+            raise ValueError("source_id must be a non-empty trimmed string")
+
         return cls(
             event_id=str(raw["event_id"]),
             market_id=str(raw["market_id"]),
             selection_id=str(raw["selection_id"]),
             decimal_odds=Decimal(str(raw["decimal_odds"])),
             observed_ts=str(raw["observed_ts"]),
-            source_id=str(raw.get("source_id", "fixture")),
+            source_id=source_id,
             sequence=int(raw["sequence"]),
             market_type=MarketType(str(raw.get("market_type", "other"))),
             status=str(raw.get("status", "open")),

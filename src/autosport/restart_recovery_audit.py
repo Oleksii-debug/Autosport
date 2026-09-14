@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .dataset import ReplayDataset
 from .endurance import EnduranceConfig, run_endurance
-from .integrity import ensure_durable_file, sha256_file
+from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
 from .run_registry import RunRegistry
 from .run_transaction import RunTransaction
@@ -204,6 +204,7 @@ def _audit_bounded_endurance(root: Path) -> dict[str, object]:
 def run_restart_recovery_audit(output_path: str | Path) -> int:
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    exit_code = 0
     try:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -236,11 +237,6 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
             "human_tested": False,
             "nvda_verified": False,
         }
-        destination.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        return 0
     except Exception as exc:
         payload = {
             "status": "FAIL",
@@ -249,8 +245,9 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
             "human_tested": False,
             "nvda_verified": False,
         }
-        destination.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        return 1
+        exit_code = 1
+
+    # Evidence publication is a separate durable boundary. A publication failure
+    # must not be reclassified as a semantic audit FAIL or destroy prior evidence.
+    atomic_write_json(destination, payload)
+    return exit_code

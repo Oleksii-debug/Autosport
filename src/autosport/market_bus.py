@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+from copy import deepcopy
 
 from .domain import MarketEvent
 from .storage import SQLiteMarketStore
@@ -50,13 +51,17 @@ class MarketEventBus:
         return len(accepted)
 
     def _notify(self, events: Iterable[MarketEvent]) -> None:
-        accepted_events = tuple(events)
+        # Persistence has already succeeded. Keep an independent value snapshot for
+        # delivery-error evidence and isolate every callback from mutable nested
+        # metadata so one subscriber cannot rewrite another subscriber's view of
+        # the durable accepted event.
+        accepted_events = tuple(deepcopy(event) for event in events)
         subscribers = tuple(self.subscribers)
         failures: list[Exception] = []
         for event in accepted_events:
             for callback in subscribers:
                 try:
-                    callback(event)
+                    callback(deepcopy(event))
                 except Exception as exc:
                     failures.append(exc)
         if failures:

@@ -93,7 +93,7 @@ class AutosportApp(tk.Tk):
         try:
             self.session = AutosportSession(self.workspace, "10000")
         except Exception as exc:
-            self._recovery_required_workspaces.add(Path(self.workspace))
+            self._block_workspace_for_recovery(Path(self.workspace))
             self._startup_economic_error = f"{type(exc).__name__}: {exc}"
         self.replay_worker = OneShotReplayWorker()
         self.live_worker = OneShotObservationWorker()
@@ -341,6 +341,9 @@ class AutosportApp(tk.Tk):
             f"strategy: {self.session.strategy_id}; "
             f"workspace: {self.session.workspace}"
         )
+
+    def _block_workspace_for_recovery(self, workspace: Path) -> None:
+        self._recovery_required_workspaces.add(Path(workspace))
 
     def _hide_uncertain_economic_state(self, ticket_message: str) -> bool:
         session = self.session

@@ -570,10 +570,32 @@ class AutosportApp(tk.Tk):
             return
 
         self._set_replay_controls_busy(False)
-        self.session = self._open_session(
-            self._active_strategy_id,
-            self._active_research_plan,
-        )
+        try:
+            self.session = self._open_session(
+                self._active_strategy_id,
+                self._active_research_plan,
+            )
+        except Exception as exc:
+            self.session = None
+            self.bank.set(self._bank_text())
+            self.tickets.delete(0, "end")
+            self.tickets.insert(
+                "end",
+                "Replay завершено, але economic session state недоступний; виконайте recovery workspace.",
+            )
+            self._set_evaluation_lines([
+                "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
+            ])
+            detail = f"Post-replay workspace reopen відхилено fail-closed: {type(exc).__name__}: {exc}"
+            if message.error is not None:
+                detail = f"Paper replay помилка: {message.error}; {detail}"
+            self.status.set(
+                "Replay terminal state не можна безпечно підтвердити; economic session state недоступний. "
+                "Виконайте «Відновити workspace» або Control+Shift+R перед наступним economic run."
+            )
+            self._append_log(detail)
+            messagebox.showerror("Автоспорт", detail)
+            return
         self.bank.set(self._bank_text())
         self._refresh_tickets()
 

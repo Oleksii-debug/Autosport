@@ -3,6 +3,7 @@ from __future__ import annotations
 import bz2
 import gzip
 import json
+import math
 import shutil
 import tempfile
 from contextlib import contextmanager
@@ -40,6 +41,15 @@ def _reject_nonstandard_json_constant(value: str) -> None:
     raise ValueError(f"non-standard JSON numeric constant {value}")
 
 
+def _strict_json_float(value: str) -> float:
+    """Match legacy float parsing but reject standard literals that become non-finite."""
+
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"JSON numeric literal is outside finite float range: {value}")
+    return parsed
+
+
 def _validate_strict_json_inputs(inputs: Iterable[Path]) -> None:
     """Reject ambiguous/non-standard raw JSON before the legacy decoder sees it."""
 
@@ -54,6 +64,7 @@ def _validate_strict_json_inputs(inputs: Iterable[Path]) -> None:
                             line,
                             object_pairs_hook=_unique_json_object,
                             parse_constant=_reject_nonstandard_json_constant,
+                            parse_float=_strict_json_float,
                         )
                     except (json.JSONDecodeError, ValueError) as exc:
                         raise ValueError(
@@ -65,6 +76,8 @@ def _validate_strict_json_inputs(inputs: Iterable[Path]) -> None:
                         )
         except UnicodeError as exc:
             raise ValueError(f"{path}: Betfair historical input must be UTF-8 text") from exc
+        except EOFError as exc:
+            raise ValueError(f"{path}: Betfair historical compressed input is truncated") from exc
 
 
 @contextmanager

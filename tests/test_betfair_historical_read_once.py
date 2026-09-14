@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bz2
+import gzip
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -101,6 +102,57 @@ class BetfairHistoricalReadOnceTests(unittest.TestCase):
 
             legacy_import.assert_not_called()
             self.assertFalse(output.exists())
+
+    def test_product_wrapper_rejects_standard_json_float_overflow_before_legacy_parse(self) -> None:
+        with TemporaryDirectory() as temporary:
+            tmp_path = Path(temporary)
+            source = tmp_path / "market.jsonl"
+            source.write_text(
+                '{"op":"mcm","mc":[{"id":1e999999}]}\n',
+                encoding="utf-8",
+            )
+            output = tmp_path / "dataset"
+
+            with patch.object(read_once, "import_betfair_historical") as legacy_import:
+                with self.assertRaisesRegex(ValueError, "outside finite float range"):
+                    read_once.import_betfair_historical_read_once(
+                        [source],
+                        output,
+                        acquired_at="2026-09-13T08:00:00Z",
+                        terms_reference="terms",
+                        retention_basis="basis",
+                    )
+
+            legacy_import.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def test_truncated_compressed_inputs_fail_closed_at_user_facing_boundary(self) -> None:
+        payload = b'{"op":"mcm","pt":1789372800000}\n'
+        for suffix, compress in ((".bz2", bz2.compress), (".gz", gzip.compress)):
+            with self.subTest(suffix=suffix), TemporaryDirectory() as temporary:
+                tmp_path = Path(temporary)
+                source = tmp_path / f"market{suffix}"
+                source.write_bytes(compress(payload)[:-1])
+                output = tmp_path / "dataset"
+
+                with patch.object(read_once, "import_betfair_historical") as legacy_import:
+                    result = read_once.main(
+                        [
+                            str(source),
+                            "--output-dir",
+                            str(output),
+                            "--acquired-at",
+                            "2026-09-13T08:00:00Z",
+                            "--terms-reference",
+                            "terms",
+                            "--retention-basis",
+                            "basis",
+                        ]
+                    )
+
+                self.assertEqual(result, 3)
+                legacy_import.assert_not_called()
+                self.assertFalse(output.exists())
 
     def test_windows_data_tool_routes_betfair_import_through_read_once_boundary(self) -> None:
         seen: list[list[str]] = []

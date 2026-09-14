@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from autosport.dataset import load_dataset
 from autosport.domain import MarketEvent, MarketType
 from autosport.replay import ReplayEngine
 from autosport.storage import SQLiteMarketStore
@@ -18,18 +19,28 @@ from autosport.storage import SQLiteMarketStore
 @dataclass(frozen=True, slots=True)
 class ReplayBenchmarkResult:
     event_count: int
-    interval_ms: int
+    input_mode: str
     source_duration_seconds: float
+    recording_span_is_synthetic: bool
+    input_load_elapsed_seconds: float | None
     engine_prepare_elapsed_seconds: float
     dispatch_elapsed_seconds: float
     measured_engine_total_elapsed_seconds: float
+    measured_input_pipeline_elapsed_seconds: float | None
     dispatch_events_per_second: float
     measured_engine_total_events_per_second: float
+    measured_input_pipeline_events_per_second: float | None
     dispatch_realtime_multiplier: float
     measured_engine_total_realtime_multiplier: float
+    measured_input_pipeline_realtime_multiplier: float | None
     accepted_events: int
     durable_history_events: int
     replay_dataset_hash: str
+    dataset_name: str | None = None
+    dataset_schema_version: int | None = None
+    dataset_market_sha256: str | None = None
+    dataset_import_identity: str | None = None
+    release_evidence_input: bool = False
     mode: str = "fastest-event-driven"
     consumer_scope: str = "sqlite-market-store"
     fixture_construction_included: bool = False
@@ -91,34 +102,36 @@ def _build_events(count: int, interval_ms: int) -> list[MarketEvent]:
 def _source_duration_seconds(events: list[MarketEvent]) -> float:
     if len(events) < 2:
         raise ValueError("at least two replay events are required")
-    first = datetime.fromisoformat(events[0].observed_ts.replace("Z", "+00:00"))
-    last = datetime.fromisoformat(events[-1].observed_ts.replace("Z", "+00:00"))
-    duration = (last - first).total_seconds()
+    instants: list[datetime] = []
+    for event in events:
+        try:
+            instant = datetime.fromisoformat(event.observed_ts.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("replay observed_ts must be valid ISO-8601") from exc
+        if instant.tzinfo is None or instant.utcoffset() is None:
+            raise ValueError("replay observed_ts must be timezone-aware ISO-8601")
+        instants.append(instant)
+    duration = (max(instants) - min(instants)).total_seconds()
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError("replay source duration must be positive and finite")
     return duration
 
 
-def run_replay_benchmark(
+def _measure_events(
+    events: list[MarketEvent],
     *,
-    count: int = 5_000,
-    interval_ms: int = 1_000,
+    input_mode: str,
+    recording_span_is_synthetic: bool,
+    input_load_elapsed_seconds: float | None = None,
+    dataset_name: str | None = None,
+    dataset_schema_version: int | None = None,
+    dataset_market_sha256: str | None = None,
+    dataset_import_identity: str | None = None,
+    release_evidence_input: bool = False,
 ) -> ReplayBenchmarkResult:
-    """Measure fastest event-driven replay into durable local market state.
-
-    Fixture construction and SQLite store opening are outside measurement. ReplayEngine
-    preparation (ordering + dataset hash) and event dispatch are measured separately. The
-    dispatch timer includes ReplayEngine.run(speed=0) plus synchronous
-    SQLiteMarketStore.append callbacks. A second metric sums engine preparation + dispatch,
-    so release evidence cannot silently present dispatch-only acceleration as total measured
-    engine work. Provider/network acquisition and strategy/agent callbacks are deliberately
-    excluded and surfaced as truth fields. This harness reports observations, not a V1 target
-    claim.
-    """
-
-    count = _positive_int("count", count, minimum=2)
-    interval_ms = _positive_int("interval_ms", interval_ms)
-    events = _build_events(count, interval_ms)
+    count = len(events)
+    if count < 2:
+        raise ValueError("at least two replay events are required")
     source_duration = _source_duration_seconds(events)
 
     prepare_started = time.perf_counter_ns()
@@ -166,41 +179,132 @@ def run_replay_benchmark(
             f"{durable_history_events} != {count}"
         )
 
-    measured_total_elapsed = _finite_positive_metric(
+    measured_engine_total = _finite_positive_metric(
         "measured engine total elapsed seconds",
         prepare_elapsed + dispatch_elapsed,
     )
+    measured_input_pipeline: float | None = None
+    if input_load_elapsed_seconds is not None:
+        measured_input_pipeline = _finite_positive_metric(
+            "measured input pipeline elapsed seconds",
+            input_load_elapsed_seconds + measured_engine_total,
+        )
+
     dispatch_throughput = _finite_positive_metric(
         "dispatch throughput",
         count / dispatch_elapsed,
     )
-    measured_total_throughput = _finite_positive_metric(
+    measured_engine_total_throughput = _finite_positive_metric(
         "measured engine total throughput",
-        count / measured_total_elapsed,
+        count / measured_engine_total,
+    )
+    measured_input_pipeline_throughput = (
+        None
+        if measured_input_pipeline is None
+        else _finite_positive_metric(
+            "measured input pipeline throughput",
+            count / measured_input_pipeline,
+        )
     )
     dispatch_multiplier = _finite_positive_metric(
         "dispatch realtime multiplier",
         source_duration / dispatch_elapsed,
     )
-    measured_total_multiplier = _finite_positive_metric(
+    measured_engine_total_multiplier = _finite_positive_metric(
         "measured engine total realtime multiplier",
-        source_duration / measured_total_elapsed,
+        source_duration / measured_engine_total,
+    )
+    measured_input_pipeline_multiplier = (
+        None
+        if measured_input_pipeline is None
+        else _finite_positive_metric(
+            "measured input pipeline realtime multiplier",
+            source_duration / measured_input_pipeline,
+        )
     )
 
     return ReplayBenchmarkResult(
         event_count=count,
-        interval_ms=interval_ms,
+        input_mode=input_mode,
         source_duration_seconds=source_duration,
+        recording_span_is_synthetic=recording_span_is_synthetic,
+        input_load_elapsed_seconds=input_load_elapsed_seconds,
         engine_prepare_elapsed_seconds=prepare_elapsed,
         dispatch_elapsed_seconds=dispatch_elapsed,
-        measured_engine_total_elapsed_seconds=measured_total_elapsed,
+        measured_engine_total_elapsed_seconds=measured_engine_total,
+        measured_input_pipeline_elapsed_seconds=measured_input_pipeline,
         dispatch_events_per_second=dispatch_throughput,
-        measured_engine_total_events_per_second=measured_total_throughput,
+        measured_engine_total_events_per_second=measured_engine_total_throughput,
+        measured_input_pipeline_events_per_second=measured_input_pipeline_throughput,
         dispatch_realtime_multiplier=dispatch_multiplier,
-        measured_engine_total_realtime_multiplier=measured_total_multiplier,
+        measured_engine_total_realtime_multiplier=measured_engine_total_multiplier,
+        measured_input_pipeline_realtime_multiplier=measured_input_pipeline_multiplier,
         accepted_events=accepted,
         durable_history_events=durable_history_events,
         replay_dataset_hash=run.dataset_hash,
+        dataset_name=dataset_name,
+        dataset_schema_version=dataset_schema_version,
+        dataset_market_sha256=dataset_market_sha256,
+        dataset_import_identity=dataset_import_identity,
+        release_evidence_input=release_evidence_input,
+    )
+
+
+def run_replay_benchmark(
+    *,
+    count: int = 5_000,
+    interval_ms: int = 1_000,
+) -> ReplayBenchmarkResult:
+    """Run a synthetic smoke/workload benchmark, never release-evidence input.
+
+    Synthetic fixture construction is outside measurement. Because ``interval_ms`` defines an
+    artificial recording span, the resulting realtime multiplier must not be presented as a
+    typical-recording release claim. Engine preparation and dispatch remain useful for CI
+    regression coverage and controlled machine-to-machine comparisons.
+    """
+
+    count = _positive_int("count", count, minimum=2)
+    interval_ms = _positive_int("interval_ms", interval_ms)
+    events = _build_events(count, interval_ms)
+    return _measure_events(
+        events,
+        input_mode="synthetic",
+        recording_span_is_synthetic=True,
+        release_evidence_input=False,
+    )
+
+
+def run_replay_dataset_benchmark(dataset_root: str | Path) -> ReplayBenchmarkResult:
+    """Measure a canonical SHA-verified dataset without inventing its recording span.
+
+    Dataset manifest/governance verification and market-event loading are measured as a
+    separate input phase through the production ``load_dataset`` boundary. Engine preparation
+    and fastest event-driven dispatch remain separately observable. Schema-v2 governed input
+    is marked as release-evidence-capable input, but ``target_claim`` remains false because the
+    final target still depends on the exact integrated build, target Windows laptop, corpus
+    representativeness, and published environment/result evidence.
+    """
+
+    load_started = time.perf_counter_ns()
+    dataset = load_dataset(dataset_root)
+    events = dataset.load_market_events()
+    load_ended = time.perf_counter_ns()
+    load_elapsed = _positive_elapsed_seconds(
+        load_started,
+        load_ended,
+        "input_load_elapsed_seconds",
+    )
+    governed_release_input = dataset.schema_version == 2 and dataset.governance is not None
+    return _measure_events(
+        events,
+        input_mode="canonical-dataset",
+        recording_span_is_synthetic=False,
+        input_load_elapsed_seconds=load_elapsed,
+        dataset_name=dataset.name,
+        dataset_schema_version=dataset.schema_version,
+        dataset_market_sha256=dataset.market_sha256,
+        dataset_import_identity=dataset.import_identity,
+        release_evidence_input=governed_release_input,
     )
 
 
@@ -211,10 +315,31 @@ def main() -> int:
             "SQLite market state. Output is evidence only, not a target claim."
         )
     )
-    parser.add_argument("--count", type=int, default=5_000)
-    parser.add_argument("--interval-ms", type=int, default=1_000)
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        help=(
+            "Canonical dataset directory. Uses production manifest/hash/governance loading "
+            "and the dataset's real observed timestamp span."
+        ),
+    )
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=5_000,
+        help="Synthetic smoke event count; ignored when --dataset is supplied.",
+    )
+    parser.add_argument(
+        "--interval-ms",
+        type=int,
+        default=1_000,
+        help="Synthetic smoke interval; ignored when --dataset is supplied.",
+    )
     args = parser.parse_args()
-    result = run_replay_benchmark(count=args.count, interval_ms=args.interval_ms)
+    if args.dataset is not None:
+        result = run_replay_dataset_benchmark(args.dataset)
+    else:
+        result = run_replay_benchmark(count=args.count, interval_ms=args.interval_ms)
     print(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
     return 0
 

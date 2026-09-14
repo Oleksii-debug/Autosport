@@ -1041,18 +1041,20 @@ class RunTransaction:
         summary_target = self.workspace / f"run-{self.run_id}.json"
 
         if summary_target.exists():
-            if not summary_target.is_file():
-                raise RunTransactionError("canonical run summary is not a file")
-            candidates = [("canonical run summary", summary_target)]
+            candidates = [("canonical run summary", summary_target, True)]
         elif self.staged_summary_path.exists():
             if not self.staged_summary_path.is_file():
                 raise RunTransactionError("staged run summary is not a file")
-            candidates = [("staged run summary", self.staged_summary_path)]
+            candidates = [("staged run summary", self.staged_summary_path, False)]
         else:
             raise RunTransactionError("run summary precommit artifact is missing")
 
-        for label, path in candidates:
-            snapshot = self._read_file_snapshot(path, label)
+        for label, path, canonical in candidates:
+            snapshot = (
+                self._read_canonical_file_snapshot(path, label)
+                if canonical
+                else self._read_file_snapshot(path, label)
+            )
             if snapshot.sha256 != expected_summary_hash:
                 if label == "canonical run summary":
                     raise RunTransactionError(
@@ -1163,7 +1165,8 @@ class RunTransaction:
     @classmethod
     def _promote_summary(cls, *, target: Path, staged: Path, expected_hash: str) -> None:
         if target.exists():
-            if not target.is_file() or sha256_file(target) != expected_hash:
+            current_snapshot = cls._read_canonical_file_snapshot(target, "run summary")
+            if current_snapshot.sha256 != expected_hash:
                 raise RunTransactionError("run summary identity mismatch or SHA-256 mismatch")
             return
         cls._replace_verified(staged, target, expected_hash, "run summary")

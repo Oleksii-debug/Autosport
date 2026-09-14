@@ -154,6 +154,15 @@ class ProviderBatch:
 
     def __post_init__(self) -> None:
         _validate_source_id(self.source_id)
+        if self.cursor is not None and not isinstance(self.cursor, str):
+            raise TypeError("provider batch cursor must be str or None")
+        if not isinstance(self.quality_flags, tuple):
+            raise TypeError("provider batch quality_flags must be a tuple of strings")
+        for flag in self.quality_flags:
+            if not isinstance(flag, str):
+                raise TypeError("provider batch quality flag must be str")
+            if not flag or flag != flag.strip():
+                raise ValueError("provider batch quality flag must be non-empty and trimmed")
         if len(set(self.quality_flags)) != len(self.quality_flags):
             raise ValueError("duplicate provider batch quality flag")
 

@@ -40,6 +40,47 @@ class _FinalizeRenamingAgent:
         self.name = "finalize-renamed-after-callback"
 
 
+class _LaterAgent:
+    name = "later-stable-agent"
+
+    def __init__(self) -> None:
+        self.event_calls = 0
+        self.finalize_calls = 0
+
+    def on_market_event(self, event, context) -> None:
+        del event, context
+        self.event_calls += 1
+
+    def finalize_replay(self, context) -> None:
+        del context
+        self.finalize_calls += 1
+
+
+class _PeerEventRenamingAgent:
+    name = "peer-event-mutator"
+
+    def __init__(self, target: _LaterAgent) -> None:
+        self.target = target
+
+    def on_market_event(self, event, context) -> None:
+        del event, context
+        self.target.name = "later-renamed-before-turn"
+
+
+class _PeerFinalizeRenamingAgent:
+    name = "peer-finalize-mutator"
+
+    def __init__(self, target: _LaterAgent) -> None:
+        self.target = target
+
+    def on_market_event(self, event, context) -> None:
+        del event, context
+
+    def finalize_replay(self, context) -> None:
+        del context
+        self.target.name = "later-renamed-before-finalize"
+
+
 class AgentCompositionIdentityTests(unittest.TestCase):
     def test_composition_hash_is_deterministic_and_order_sensitive(self):
         names = ("market-mirror", "paper-baseline")
@@ -94,6 +135,32 @@ class AgentCompositionIdentityTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "changed after provenance binding"):
             orchestrator.finalize_replay()
+
+    def test_peer_identity_drift_stops_before_later_market_callback(self):
+        context = AgentContext(PaperBook("100"))
+        later = _LaterAgent()
+        orchestrator = AgentOrchestrator(
+            [_PeerEventRenamingAgent(later), later],
+            context,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "changed after provenance binding"):
+            orchestrator.on_market_event(object())
+
+        self.assertEqual(later.event_calls, 0)
+
+    def test_peer_identity_drift_stops_before_later_finalize_callback(self):
+        context = AgentContext(PaperBook("100"))
+        later = _LaterAgent()
+        orchestrator = AgentOrchestrator(
+            [_PeerFinalizeRenamingAgent(later), later],
+            context,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "changed after provenance binding"):
+            orchestrator.finalize_replay()
+
+        self.assertEqual(later.finalize_calls, 0)
 
     def test_strategy_factory_drift_fails_closed(self):
         spec, original_factory = strategies._STRATEGIES["baseline-v1"]

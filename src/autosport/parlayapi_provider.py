@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -195,40 +196,64 @@ class ParlayApiTableTennisProvider:
         self.transport = transport
         self.clock = clock
         self.sleeper = sleeper
-        self._pending_quotes: tuple[ProviderQuote, ...] = ()
-        self._pending_offset = 0
+        self._pending_quotes: Iterator[ProviderQuote] | None = None
+        self._pending_quote: ProviderQuote | None = None
         self._pending_cursor: str | None = None
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         max_items = _positive_nonboolean_int(max_items, field="max_items")
-        if self._pending_offset >= len(self._pending_quotes):
+        if self._pending_quotes is None:
             observed_ts = self.clock()
             response = self._fetch()
             events = self._event_list(response.payload)
-            quotes: list[ProviderQuote] = []
-            for event in events:
-                quotes.extend(self._event_quotes(event, observed_ts, response.status_code))
-            self._pending_quotes = tuple(quotes)
-            self._pending_offset = 0
+            self._pending_quotes = self._snapshot_quotes(
+                events,
+                observed_ts,
+                response.status_code,
+            )
+            self._pending_quote = None
             self._pending_cursor = observed_ts
 
         cursor = self._pending_cursor
-        start = self._pending_offset
-        end = min(start + max_items, len(self._pending_quotes))
-        quotes = self._pending_quotes[start:end]
-        self._pending_offset = end
-        has_remainder = end < len(self._pending_quotes)
-        quality_flags = ("TRUNCATED_BATCH",) if has_remainder else ()
-        if not has_remainder:
-            self._pending_quotes = ()
-            self._pending_offset = 0
-            self._pending_cursor = None
+        quotes: list[ProviderQuote] = []
+        if self._pending_quote is not None:
+            quotes.append(self._pending_quote)
+            self._pending_quote = None
+
+        while len(quotes) < max_items:
+            try:
+                quotes.append(next(self._pending_quotes))
+            except StopIteration:
+                self._clear_pending_snapshot()
+                return ProviderBatch(self.source_id, tuple(quotes), cursor=cursor)
+
+        try:
+            self._pending_quote = next(self._pending_quotes)
+        except StopIteration:
+            self._clear_pending_snapshot()
+            quality_flags: tuple[str, ...] = ()
+        else:
+            quality_flags = ("TRUNCATED_BATCH",)
         return ProviderBatch(
             self.source_id,
-            quotes,
+            tuple(quotes),
             cursor=cursor,
             quality_flags=quality_flags,
         )
+
+    def _snapshot_quotes(
+        self,
+        events: list[dict[str, Any]],
+        observed_ts: str,
+        http_status: int,
+    ) -> Iterator[ProviderQuote]:
+        for event in events:
+            yield from self._event_quotes(event, observed_ts, http_status)
+
+    def _clear_pending_snapshot(self) -> None:
+        self._pending_quotes = None
+        self._pending_quote = None
+        self._pending_cursor = None
 
     def historical_coverage(self, date_from: str, date_to: str) -> HistoricalCoverageReport:
         """Verify the authenticated key's requested historical window and actual source coverage.
@@ -372,7 +397,7 @@ class ParlayApiTableTennisProvider:
             raise ProviderPayloadError("provider events must be objects")
         return events
 
-    def _event_quotes(self, event: dict[str, Any], observed_ts: str, http_status: int) -> list[ProviderQuote]:
+    def _event_quotes(self, event: dict[str, Any], observed_ts: str, http_status: int) -> Iterator[ProviderQuote]:
         if "id" in event:
             raw_event_id = event["id"]
         elif "canonical_event_id" in event:
@@ -383,7 +408,6 @@ class ParlayApiTableTennisProvider:
         bookmakers = event.get("bookmakers", [])
         if not isinstance(bookmakers, list):
             raise ProviderPayloadError("event bookmakers must be a list")
-        output: list[ProviderQuote] = []
         for bookmaker in bookmakers:
             if not isinstance(bookmaker, dict):
                 continue
@@ -421,35 +445,32 @@ class ParlayApiTableTennisProvider:
                     point = _decimal_optional(outcome.get("point"))
                     provider_market_id = _market_identity(book_key, market_key, point)
                     sequence = _sequence_from_timestamp(source_ts or observed_ts)
-                    output.append(
-                        ProviderQuote(
-                            provider_event_id=event_id,
-                            provider_market_id=provider_market_id,
-                            provider_selection_id=selection,
-                            decimal_odds=price,
-                            observed_ts=observed_ts,
-                            sequence=sequence,
-                            market_type=_market_type(market_key),
-                            status="open",
-                            source_ts=source_ts,
-                            metadata={
-                                "provider": "parlayapi",
-                                "sport_key": event.get("sport_key", "table_tennis"),
-                                "sport_title": event.get("sport_title"),
-                                "commence_time": event.get("commence_time"),
-                                "home_team": event.get("home_team"),
-                                "away_team": event.get("away_team"),
-                                "bookmaker_key": book_key,
-                                "bookmaker_title": bookmaker.get("title"),
-                                "market_key": market_key,
-                                "line": str(point) if point is not None else None,
-                                "requested_odds_format": "decimal",
-                                "public_preview": self.public_preview,
-                                "http_status": http_status,
-                            },
-                        )
+                    yield ProviderQuote(
+                        provider_event_id=event_id,
+                        provider_market_id=provider_market_id,
+                        provider_selection_id=selection,
+                        decimal_odds=price,
+                        observed_ts=observed_ts,
+                        sequence=sequence,
+                        market_type=_market_type(market_key),
+                        status="open",
+                        source_ts=source_ts,
+                        metadata={
+                            "provider": "parlayapi",
+                            "sport_key": event.get("sport_key", "table_tennis"),
+                            "sport_title": event.get("sport_title"),
+                            "commence_time": event.get("commence_time"),
+                            "home_team": event.get("home_team"),
+                            "away_team": event.get("away_team"),
+                            "bookmaker_key": book_key,
+                            "bookmaker_title": bookmaker.get("title"),
+                            "market_key": market_key,
+                            "line": str(point) if point is not None else None,
+                            "requested_odds_format": "decimal",
+                            "public_preview": self.public_preview,
+                            "http_status": http_status,
+                        },
                     )
-        return output
 
 
 def _market_type(key: str) -> MarketType:

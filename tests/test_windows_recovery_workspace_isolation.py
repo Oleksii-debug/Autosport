@@ -241,15 +241,19 @@ class WindowsRecoveryWorkspaceIsolationTests(unittest.TestCase):
                 workspace,
                 ReplayWorkerMessage(error="RuntimeError: replay failed after durable work may have started"),
             )
-            app._open_session = lambda *_args, **_kwargs: object()
+            app._open_session = lambda *_args, **_kwargs: self.fail(
+                "replay error must not reopen ambiguous economic state before recovery"
+            )
 
             with patch("autosport.windows_gui.messagebox.showerror") as error:
                 WindowsAutosportApp._poll_replay_worker(app)
 
+            self.assertIsNone(app.session)
             self.assertIn(workspace, app._recovery_blocked_workspaces)
             self.assertEqual(app._recovery_blocked_workspace, workspace)
-            self.assertIn("заблоковано fail-closed", app.status.value)
+            self.assertIn("прихованим до recovery", app.status.value)
             self.assertEqual(app._busy_states, [False])
+            self.assertEqual(app._ticket_refreshes, 1)
             error.assert_called_once()
 
             with patch.object(AutosportApp, "run_dataset") as parent_run:
@@ -264,14 +268,18 @@ class WindowsRecoveryWorkspaceIsolationTests(unittest.TestCase):
             # lightweight terminal-like object exercises the GUI's defensive path
             # if a future/alternate worker violates that contract.
             app = self._replay_app(workspace, SimpleNamespace(result=None, error=None))
-            app._open_session = lambda *_args, **_kwargs: object()
+            app._open_session = lambda *_args, **_kwargs: self.fail(
+                "missing terminal result must not reopen ambiguous economic state before recovery"
+            )
 
             WindowsAutosportApp._poll_replay_worker(app)
 
+            self.assertIsNone(app.session)
             self.assertIn(workspace, app._recovery_blocked_workspaces)
             self.assertEqual(app._recovery_blocked_workspace, workspace)
-            self.assertIn("без terminal result", app.status.value)
+            self.assertIn("прихованим до recovery", app.status.value)
             self.assertIn("worker не повернув terminal", app._evaluation[0])
+            self.assertEqual(app._ticket_refreshes, 1)
 
     def test_post_replay_reopen_failure_is_user_visible_and_quarantines_workspace(self) -> None:
         with TemporaryDirectory() as temporary:

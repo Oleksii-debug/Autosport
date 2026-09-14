@@ -333,6 +333,30 @@ class WindowsAutosportApp(AutosportApp):
         if message.error is not None or message.result is None:
             self._block_workspace_for_recovery(self._active_workspace)
             self._recovery_view = None
+            self.session = None
+            self.bank.set(self._bank_text())
+            self._refresh_tickets()
+            if message.error is not None:
+                text = f"Paper replay помилка: {message.error}"
+                self._append_log(text)
+                self._set_evaluation_lines([
+                    "Evaluation недоступна: replay не досяг terminal settlement/evaluation boundary."
+                ])
+                self.status.set(
+                    "Replay завершився помилкою; economic state цього workspace лишається прихованим до recovery. "
+                    "Виконайте «Відновити workspace» або Control+Shift+R перед наступним replay."
+                )
+                messagebox.showerror("Автоспорт", text)
+                return
+
+            self._set_evaluation_lines([
+                "Evaluation недоступна: worker не повернув terminal SessionResult."
+            ])
+            self.status.set(
+                "Replay worker завершився без terminal result; economic state цього workspace лишається прихованим до recovery. "
+                "Виконайте «Відновити workspace» перед наступним replay."
+            )
+            return
 
         try:
             self.session = self._open_session(
@@ -349,8 +373,6 @@ class WindowsAutosportApp(AutosportApp):
                 "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
             ])
             detail = f"Post-replay workspace reopen відхилено fail-closed: {type(exc).__name__}: {exc}"
-            if message.error is not None:
-                detail = f"Paper replay помилка: {message.error}; {detail}"
             self.status.set(
                 "Replay terminal state не можна безпечно підтвердити; цей economic workspace заблоковано fail-closed. "
                 "Виконайте «Відновити workspace» або Control+Shift+R перед наступним replay у цьому workspace."
@@ -362,29 +384,7 @@ class WindowsAutosportApp(AutosportApp):
         self.bank.set(self._bank_text())
         self._refresh_tickets()
 
-        if message.error is not None:
-            text = f"Paper replay помилка: {message.error}"
-            self._append_log(text)
-            self._set_evaluation_lines([
-                "Evaluation недоступна: replay не досяг terminal settlement/evaluation boundary."
-            ])
-            self.status.set(
-                "Replay завершився помилкою; цей economic workspace заблоковано fail-closed. "
-                "Виконайте «Відновити workspace» або Control+Shift+R перед наступним replay у цьому workspace."
-            )
-            messagebox.showerror("Автоспорт", text)
-            return
-
         result = message.result
-        if result is None:
-            self._set_evaluation_lines([
-                "Evaluation недоступна: worker не повернув terminal SessionResult."
-            ])
-            self.status.set(
-                "Replay worker завершився без terminal result; цей economic workspace заблоковано fail-closed. "
-                "Виконайте «Відновити workspace» перед наступним replay у цьому workspace."
-            )
-            return
         summary = result_summary(result)
         self._set_evaluation_lines(evaluation_lines(result))
         self.status.set(summary)

@@ -194,9 +194,13 @@ class WindowsAutosportApp(AutosportApp):
         session = self.session
         self.session = None
         if session is not None:
+            session_workspace: Path | None = None
             try:
+                session_workspace = Path(session.workspace)
                 session.close()
             except Exception as exc:
+                if session_workspace is not None:
+                    self._block_workspace_for_recovery(session_workspace)
                 detail = (
                     "Workspace recovery відхилено fail-closed: previous economic session teardown failed; "
                     f"{type(exc).__name__}: {exc}"

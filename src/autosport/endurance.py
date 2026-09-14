@@ -65,7 +65,11 @@ class EnduranceReport:
     paper_tickets_opened: int
     paper_tickets_settled_first_pass: int
     paper_tickets_settled_second_pass: int
+    paper_tickets_won: int
+    paper_payout_total: str
+    paper_expected_balance: str
     paper_balance_after_restart: str
+    paper_economics_verified: bool
     corrupt_health_rejected: bool
     corrupt_paper_book_rejected: bool
     stable_invariant_fingerprint: str
@@ -238,6 +242,14 @@ def run_endurance(
         )
         ticket_events = current_events[: cfg.paper_tickets]
         book = PaperBook("100000")
+        paper_initial_bankroll = book.initial_bankroll
+        expected_payout_by_quote_key = {
+            event.quote_key: event.decimal_odds for event in ticket_events
+        }
+        expected_payout_total = sum(expected_payout_by_quote_key.values(), Decimal("0"))
+        expected_paper_balance = (
+            paper_initial_bankroll - Decimal(cfg.paper_tickets) + expected_payout_total
+        )
         for event in ticket_events:
             book.open_ticket(
                 [TicketLeg(event.event_id, event.market_id, event.selection_id, event.decimal_odds)],
@@ -249,9 +261,45 @@ def run_endurance(
         settlement.record({event.quote_key: "win" for event in ticket_events})
         settled_first = settlement.settle_ready(book)
         settled_second = settlement.settle_ready(book)
+        runtime_all_won = all(
+            ticket.status is TicketStatus.WON for ticket in book.tickets.values()
+        )
+        runtime_payouts_match = all(
+            len(ticket.legs) == 1
+            and ticket.payout == expected_payout_by_quote_key.get(ticket.legs[0].quote_key)
+            for ticket in book.tickets.values()
+        )
+        runtime_balance_matches = book.balance == expected_paper_balance
+        paper_tickets_won = sum(
+            ticket.status is TicketStatus.WON for ticket in book.tickets.values()
+        )
+        paper_payout_total = sum(
+            (ticket.payout for ticket in book.tickets.values()), Decimal("0")
+        )
         paper_path = primary / "paper_book.json"
         book.save(paper_path)
         restored_book = PaperBook.load(paper_path)
+        restored_all_won = all(
+            ticket.status is TicketStatus.WON for ticket in restored_book.tickets.values()
+        )
+        restored_payouts_match = all(
+            len(ticket.legs) == 1
+            and ticket.payout == expected_payout_by_quote_key.get(ticket.legs[0].quote_key)
+            for ticket in restored_book.tickets.values()
+        )
+        restored_balance_matches = restored_book.balance == expected_paper_balance
+        paper_economics_verified = all(
+            (
+                len(book.tickets) == cfg.paper_tickets,
+                len(restored_book.tickets) == cfg.paper_tickets,
+                runtime_all_won,
+                runtime_payouts_match,
+                runtime_balance_matches,
+                restored_all_won,
+                restored_payouts_match,
+                restored_balance_matches,
+            )
+        )
         paper_balance = str(restored_book.balance)
 
         corrupt_health = root / "corrupt_source_health.json"
@@ -290,10 +338,22 @@ def run_endurance(
             (mirror_hash == replay_hash, "independent re-ingest replay hash changed"),
             (len(settled_first) == cfg.paper_tickets, f"first settlement count={len(settled_first)}"),
             (len(settled_second) == 0, f"second settlement count={len(settled_second)}"),
+            (runtime_all_won, "PaperBook endurance tickets were not all WON"),
+            (runtime_payouts_match, "PaperBook winning payouts do not match locked odds"),
             (
-                all(ticket.status is not TicketStatus.OPEN for ticket in restored_book.tickets.values()),
-                "restored PaperBook contains open endurance tickets",
+                runtime_balance_matches,
+                f"PaperBook balance={book.balance} expected={expected_paper_balance}",
             ),
+            (restored_all_won, "restored PaperBook endurance tickets were not all WON"),
+            (
+                restored_payouts_match,
+                "restored PaperBook winning payouts do not match locked odds",
+            ),
+            (
+                restored_balance_matches,
+                f"restored PaperBook balance={restored_book.balance} expected={expected_paper_balance}",
+            ),
+            (paper_economics_verified, "PaperBook winning economic invariant is not verified"),
             (restored_book.balance == book.balance, "PaperBook balance changed after restart"),
             (corrupt_health_rejected, "corrupt SourceHealthStore was accepted"),
             (corrupt_paper_rejected, "corrupt PaperBook was accepted"),
@@ -315,7 +375,11 @@ def run_endurance(
             "paper_tickets_opened": len(ticket_events),
             "paper_tickets_settled_first_pass": len(settled_first),
             "paper_tickets_settled_second_pass": len(settled_second),
+            "paper_tickets_won": paper_tickets_won,
+            "paper_payout_total": str(paper_payout_total),
+            "paper_expected_balance": str(expected_paper_balance),
             "paper_balance_after_restart": paper_balance,
+            "paper_economics_verified": paper_economics_verified,
             "corrupt_health_rejected": corrupt_health_rejected,
             "corrupt_paper_book_rejected": corrupt_paper_rejected,
             "real_money_execution": False,
@@ -340,7 +404,11 @@ def run_endurance(
             paper_tickets_opened=len(ticket_events),
             paper_tickets_settled_first_pass=len(settled_first),
             paper_tickets_settled_second_pass=len(settled_second),
+            paper_tickets_won=paper_tickets_won,
+            paper_payout_total=str(paper_payout_total),
+            paper_expected_balance=str(expected_paper_balance),
             paper_balance_after_restart=paper_balance,
+            paper_economics_verified=paper_economics_verified,
             corrupt_health_rejected=corrupt_health_rejected,
             corrupt_paper_book_rejected=corrupt_paper_rejected,
             stable_invariant_fingerprint=fingerprint,

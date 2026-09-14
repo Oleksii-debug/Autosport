@@ -930,12 +930,23 @@ class RunTransaction:
         if current_snapshot.sha256 == base_hash:
             if not self.staged_ledger_path.is_file():
                 raise RunTransactionError("staged Decision Ledger artifact is missing")
+            run_snapshot = self._verified_decision_ledger(
+                self.run_ledger_path,
+                "staged run Decision Ledger",
+            )
+            self._require_run_decision_identity(
+                run_snapshot,
+                expected_run_id=self.run_id,
+                label="staged run Decision Ledger",
+            )
             staged_snapshot = self._verified_decision_ledger(
                 self.staged_ledger_path,
                 "combined staged Decision Ledger",
             )
             if staged_snapshot.sha256 != new_hash:
                 raise RunTransactionError("staged Decision Ledger artifact hash mismatch")
+            if staged_snapshot.payload != current_snapshot.payload + run_snapshot.payload:
+                raise RunTransactionError("combined staged Decision Ledger exact snapshot mismatch")
 
     @classmethod
     def _promote_base_or_new(

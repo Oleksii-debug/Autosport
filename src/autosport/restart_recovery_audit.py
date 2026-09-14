@@ -45,9 +45,14 @@ def _safe_exception_detail(exc: Exception) -> str:
     """Render semantic-audit failure evidence without trusting exception formatting."""
 
     try:
-        return f"{type(exc).__name__}: {exc}"
+        exception_type = type.__getattribute__(type(exc), "__name__")
     except BaseException:
-        return f"{type(exc).__name__}: exception details unavailable"
+        exception_type = "Exception"
+    try:
+        rendered = str.__str__(str(exc))
+    except BaseException:
+        rendered = "exception details unavailable"
+    return f"{exception_type}: {rendered}"
 
 
 def _fixture_dataset(root: Path) -> ReplayDataset:

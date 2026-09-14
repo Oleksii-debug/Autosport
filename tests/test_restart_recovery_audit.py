@@ -14,6 +14,18 @@ class _BrokenStringError(Exception):
         raise RuntimeError("diagnostic rendering must not escape")
 
 
+class _BrokenNameMeta(type):
+    def __getattribute__(cls, name):
+        if name == "__name__":
+            raise RuntimeError("diagnostic type metadata must not escape")
+        return super().__getattribute__(name)
+
+
+class _BrokenMetadataError(Exception, metaclass=_BrokenNameMeta):
+    def __str__(self) -> str:
+        raise RuntimeError("diagnostic rendering must not escape")
+
+
 class RestartRecoveryAuditTests(unittest.TestCase):
     @staticmethod
     def _restart_stub() -> dict[str, object]:
@@ -129,6 +141,28 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             self.assertEqual(
                 payload["error"],
                 "_BrokenStringError: exception details unavailable",
+            )
+            self.assertFalse(payload["real_money_execution"])
+            self.assertFalse(payload["human_tested"])
+            self.assertFalse(payload["nvda_verified"])
+
+    def test_semantic_failure_with_hostile_type_metadata_still_publishes_fail_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "restart-recovery-audit.json"
+            output.write_text('{"status":"LAST_KNOWN"}\n', encoding="utf-8")
+
+            with patch.object(
+                restart_audit,
+                "_audit_session_restart",
+                side_effect=_BrokenMetadataError(),
+            ):
+                self.assertEqual(restart_audit.run_restart_recovery_audit(output), 1)
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "FAIL")
+            self.assertEqual(
+                payload["error"],
+                "_BrokenMetadataError: exception details unavailable",
             )
             self.assertFalse(payload["real_money_execution"])
             self.assertFalse(payload["human_tested"])

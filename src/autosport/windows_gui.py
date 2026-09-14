@@ -8,7 +8,7 @@ import tk_uia
 from .gui import AutosportApp
 from .recovery_worker import OneShotRecoveryWorker, RecoverySessionView, recover_workspace_once
 from .replay_worker import workspace_for_strategy
-from .ui_model import ticket_lines
+from .ui_model import evaluation_lines, result_summary, ticket_lines
 
 
 WINDOWS_BANKROLL_AUTOMATION_ID = 205
@@ -21,6 +21,10 @@ class WindowsAutosportApp(AutosportApp):
         self.recovery_worker: OneShotRecoveryWorker | None = None
         self._recovery_view: RecoverySessionView | None = None
         self._recovery_blocked_workspace: Path | None = None
+        # Keep fail-closed recovery state isolated per economic workspace. A later
+        # successful recovery for strategy/workspace B must never clear an earlier
+        # failed or unresolved recovery for workspace A.
+        self._recovery_blocked_workspaces: set[Path] = set()
         super().__init__()
         self.recovery_worker = OneShotRecoveryWorker()
 
@@ -70,6 +74,40 @@ class WindowsAutosportApp(AutosportApp):
     def _recovery_busy(self) -> bool:
         worker = self.recovery_worker
         return bool(worker is not None and worker.busy)
+
+    def _blocked_recovery_workspaces(self) -> set[Path]:
+        """Return every workspace that still requires successful recovery.
+
+        Some headless GUI contract tests instantiate the Tk subclass with
+        ``object.__new__``. Reading a missing attribute through ``getattr`` would
+        fall into ``tkinter.Misc.__getattr__`` and recurse without a Tk
+        interpreter, so internal process state is read directly from ``__dict__``.
+        The legacy single slot is lazily migrated into the canonical set so older
+        callers/tests cannot accidentally bypass a fail-closed recovery block.
+        """
+
+        blocked_workspaces = self.__dict__.get("_recovery_blocked_workspaces")
+        if blocked_workspaces is None:
+            blocked_workspaces = set()
+            self.__dict__["_recovery_blocked_workspaces"] = blocked_workspaces
+        legacy = self.__dict__.get("_recovery_blocked_workspace")
+        if legacy is not None:
+            blocked_workspaces.add(Path(legacy))
+        return blocked_workspaces
+
+    def _block_workspace_for_recovery(self, workspace: Path) -> None:
+        workspace = Path(workspace)
+        self._blocked_recovery_workspaces().add(workspace)
+        self._recovery_blocked_workspace = workspace
+
+    def _unblock_workspace_after_recovery(self, workspace: Path) -> None:
+        workspace = Path(workspace)
+        self._blocked_recovery_workspaces().discard(workspace)
+        if self.__dict__.get("_recovery_blocked_workspace") == workspace:
+            self._recovery_blocked_workspace = None
+
+    def _workspace_requires_recovery(self, workspace: Path) -> bool:
+        return Path(workspace) in self._blocked_recovery_workspaces()
 
     def _bank_text(self) -> str:
         source = (
@@ -151,7 +189,7 @@ class WindowsAutosportApp(AutosportApp):
         self._active_workspace = replay_workspace
         self._active_strategy_id = strategy_id
         self._active_research_plan = research_plan
-        self._recovery_blocked_workspace = replay_workspace
+        self._block_workspace_for_recovery(replay_workspace)
         self._recovery_view = None
         if self.session is not None:
             self.session.close()
@@ -223,9 +261,38 @@ class WindowsAutosportApp(AutosportApp):
             )
             return
 
-        self._recovery_view = result.session_view
-        self.bank.set(self._bank_text())
-        self._refresh_tickets()
+        expected_workspace = Path(self._active_workspace)
+        expected_strategy_id = (
+            self._active_research_plan.experiment_strategy_id
+            if self._active_research_plan is not None
+            else self._active_strategy_id
+        )
+        try:
+            result_workspace = Path(result.session_view.workspace)
+        except (TypeError, ValueError):
+            result_workspace = None
+        if (
+            result_workspace != expected_workspace
+            or result.session_view.strategy_id != expected_strategy_id
+        ):
+            self._recovery_view = None
+            self._block_workspace_for_recovery(expected_workspace)
+            self.bank.set(self._bank_text())
+            self._refresh_tickets()
+            detail = (
+                "Workspace recovery terminal identity mismatch: "
+                f"expected workspace={expected_workspace}, strategy={expected_strategy_id}; "
+                f"received workspace={result.session_view.workspace!r}, "
+                f"strategy={result.session_view.strategy_id!r}."
+            )
+            self.status.set(
+                "Workspace recovery terminal result не відповідає запущеному economic workspace/strategy; "
+                "стан лишається fail-closed і жоден workspace не розблоковано."
+            )
+            self._append_log(detail)
+            messagebox.showerror("Автоспорт", detail)
+            return
+
         report = result.report
         summary = (
             "Workspace recovery: "
@@ -236,32 +303,111 @@ class WindowsAutosportApp(AutosportApp):
         )
         self._append_log(summary)
         if report.unresolved_without_summary:
+            self._recovery_view = None
+            self.session = None
+            self._block_workspace_for_recovery(expected_workspace)
+            self.bank.set(self._bank_text())
+            self._refresh_tickets()
             self.status.set(
                 summary
-                + ". Є unresolved legacy run без достатнього summary proof; economic replay лишається fail-closed для цього workspace."
+                + ". Є unresolved legacy run без достатнього summary proof; economic state лишається прихованим і replay fail-closed для цього workspace."
             )
             messagebox.showwarning(
                 "Автоспорт",
                 "Recovery завершив перевірку, але залишив unresolved run без достатнього доказу completion. "
-                "Не обходьте цей стан через allow-repeat.",
+                "Economic state не публікується; не обходьте цей стан через allow-repeat.",
             )
             return
 
-        self._recovery_blocked_workspace = None
+        self._recovery_view = result.session_view
+        self.bank.set(self._bank_text())
+        self._refresh_tickets()
+        self._unblock_workspace_after_recovery(result.session_view.workspace)
         self.status.set(summary + ". Workspace готовий до наступного перевіреного paper replay.")
         messagebox.showinfo("Автоспорт", "Workspace recovery завершено без unresolved runs.")
+
+    def _poll_replay_worker(self) -> None:
+        """Consume replay terminal state and quarantine uncertain economic state."""
+
+        message = self.replay_worker.poll()
+        if message is None:
+            self.after(100, self._poll_replay_worker)
+            return
+
+        self._set_replay_controls_busy(False)
+        if message.error is not None or message.result is None:
+            self._block_workspace_for_recovery(self._active_workspace)
+            self._recovery_view = None
+            self.session = None
+            self.bank.set(self._bank_text())
+            self._refresh_tickets()
+            if message.error is not None:
+                text = f"Paper replay помилка: {message.error}"
+                self._append_log(text)
+                self._set_evaluation_lines([
+                    "Evaluation недоступна: replay не досяг terminal settlement/evaluation boundary."
+                ])
+                self.status.set(
+                    "Replay завершився помилкою; economic state цього workspace лишається прихованим до recovery. "
+                    "Виконайте «Відновити workspace» або Control+Shift+R перед наступним replay."
+                )
+                messagebox.showerror("Автоспорт", text)
+                return
+
+            self._set_evaluation_lines([
+                "Evaluation недоступна: worker не повернув terminal SessionResult."
+            ])
+            self.status.set(
+                "Replay worker завершився без terminal result; economic state цього workspace лишається прихованим до recovery. "
+                "Виконайте «Відновити workspace» перед наступним replay."
+            )
+            return
+
+        try:
+            self.session = self._open_session(
+                self._active_strategy_id,
+                self._active_research_plan,
+            )
+        except Exception as exc:
+            self.session = None
+            self._recovery_view = None
+            self._block_workspace_for_recovery(self._active_workspace)
+            self.bank.set(self._bank_text())
+            self._refresh_tickets()
+            self._set_evaluation_lines([
+                "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
+            ])
+            detail = f"Post-replay workspace reopen відхилено fail-closed: {type(exc).__name__}: {exc}"
+            self.status.set(
+                "Replay terminal state не можна безпечно підтвердити; цей economic workspace заблоковано fail-closed. "
+                "Виконайте «Відновити workspace» або Control+Shift+R перед наступним replay у цьому workspace."
+            )
+            self._append_log(detail)
+            messagebox.showerror("Автоспорт", detail)
+            return
+
+        self.bank.set(self._bank_text())
+        self._refresh_tickets()
+
+        result = message.result
+        summary = result_summary(result)
+        self._set_evaluation_lines(evaluation_lines(result))
+        self.status.set(summary)
+        self._append_log(summary)
 
     def run_dataset(self) -> None:
         if self._recovery_busy:
             self.status.set("Paper replay не запускається: workspace recovery ще виконується.")
             return
-        if self._recovery_blocked_workspace is not None:
+        if self._blocked_recovery_workspaces():
             try:
                 strategy_id, research_plan = self._selected_replay_configuration()
                 replay_workspace = workspace_for_strategy(self.workspace, strategy_id, research_plan)
             except Exception:
-                replay_workspace = self._recovery_blocked_workspace
-            if replay_workspace == self._recovery_blocked_workspace:
+                # Preserve the base GUI's canonical configuration validation path
+                # instead of masking it as an unrelated recovery quarantine.
+                return super().run_dataset()
+            if self._workspace_requires_recovery(replay_workspace):
                 self.status.set(
                     "Paper replay заблоковано fail-closed: поточний workspace не має успішного terminal recovery result."
                 )

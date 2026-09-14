@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,14 @@ from autosport.run_registry import (
     RunRegistry,
 )
 from autosport.session import AutosportSession
+from autosport.workspace_lock import WorkspaceEconomicLock
+
+
+def _hold_recovery_workspace_lock(workspace: str, ready, release) -> None:
+    with WorkspaceEconomicLock(workspace):
+        ready.set()
+        if not release.wait(20):
+            raise RuntimeError("test lock holder timed out waiting for release")
 
 
 class RecoveryReconciliationTests(unittest.TestCase):
@@ -38,6 +47,27 @@ class RecoveryReconciliationTests(unittest.TestCase):
         self.assertEqual(summary["paper_book_sha256"], sha256_file(session.book_path))
         session.close()
         return dataset, key, item, summary_path
+
+    def _start_lock_holder(self, root: Path):
+        context = multiprocessing.get_context("spawn")
+        ready = context.Event()
+        release = context.Event()
+        process = context.Process(
+            target=_hold_recovery_workspace_lock,
+            args=(str(root), ready, release),
+        )
+        process.start()
+        self.assertTrue(ready.wait(20), "child process did not acquire workspace lock")
+        return process, release
+
+    def _stop_lock_holder(self, process, release) -> None:
+        release.set()
+        process.join(20)
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+            self.fail("child lock-holder process did not exit")
+        self.assertEqual(process.exitcode, 0)
 
     def test_late_crash_reconciles_without_replaying_economic_effects(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -97,6 +127,22 @@ class RecoveryReconciliationTests(unittest.TestCase):
             self.assertEqual(report.unresolved_without_summary, ())
             self.assertFalse((root / "run_registry.json").exists())
             self.assertEqual(run_repair_workspace(root), 0)
+
+    def test_recovery_fails_closed_before_active_writer_creates_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertFalse((root / "run_registry.json").exists())
+            process, release = self._start_lock_holder(root)
+            try:
+                self.assertFalse((root / "run_registry.json").exists())
+                with self.assertRaisesRegex(
+                    ReconciliationError,
+                    "active economic writer",
+                ):
+                    reconcile_late_crashes(root)
+                self.assertFalse((root / "run_registry.json").exists())
+            finally:
+                self._stop_lock_holder(process, release)
 
     def test_missing_registry_with_durable_history_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

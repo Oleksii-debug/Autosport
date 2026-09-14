@@ -1,4 +1,59 @@
 $ErrorActionPreference = 'Stop'
+
+function Assert-ProcessRecoveryEvidence {
+  param(
+    [Parameter(Mandatory = $true)] $Evidence,
+    [Parameter(Mandatory = $true)] [string] $Label
+  )
+
+  if ($Evidence.process_kill_relaunch_status -ne 'PASS') {
+    throw "$Label did not prove real process kill/relaunch"
+  }
+  if ($null -eq $Evidence.process_kill_stage_pid -or [long]$Evidence.process_kill_stage_pid -le 0) {
+    throw "$Label has invalid process_kill_stage_pid"
+  }
+  if ($null -eq $Evidence.process_recovery_pid -or [long]$Evidence.process_recovery_pid -le 0) {
+    throw "$Label has invalid process_recovery_pid"
+  }
+  if ([long]$Evidence.process_kill_stage_pid -eq [long]$Evidence.process_recovery_pid) {
+    throw "$Label did not prove a distinct fresh recovery process"
+  }
+  if ($null -eq $Evidence.process_kill_return_code -or [long]$Evidence.process_kill_return_code -eq 0) {
+    throw "$Label did not prove non-clean process termination"
+  }
+  if ([string]::IsNullOrWhiteSpace([string]$Evidence.process_recovery_run_id)) {
+    throw "$Label has invalid process_recovery_run_id"
+  }
+  if ($Evidence.process_recovery_disposition -ne 'committed') {
+    throw "$Label did not prove process_recovery_disposition=committed"
+  }
+  if ($Evidence.process_recovery_registry_status -ne 'completed') {
+    throw "$Label did not prove process_recovery_registry_status=completed"
+  }
+  if ($Evidence.process_recovery_manifest_phase -ne 'completed') {
+    throw "$Label did not prove process_recovery_manifest_phase=completed"
+  }
+
+  $hashFields = @(
+    'process_recovery_base_paper_book_sha256',
+    'process_recovery_base_decision_ledger_sha256',
+    'process_recovery_new_paper_book_sha256',
+    'process_recovery_new_decision_ledger_sha256'
+  )
+  foreach ($field in $hashFields) {
+    $value = [string]$Evidence.$field
+    if ($value -notmatch '^[0-9a-f]{64}$') {
+      throw "$Label has invalid $field"
+    }
+  }
+  if ($Evidence.process_recovery_base_paper_book_sha256 -eq $Evidence.process_recovery_new_paper_book_sha256) {
+    throw "$Label did not prove promoted PaperBook state"
+  }
+  if ($Evidence.process_recovery_base_decision_ledger_sha256 -eq $Evidence.process_recovery_new_decision_ledger_sha256) {
+    throw "$Label did not prove promoted Decision Ledger state"
+  }
+}
+
 $sourceSha = $env:AUTOSPORT_SOURCE_SHA
 if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
 python scripts/verify_source_checkout.py --source-sha $sourceSha
@@ -54,6 +109,7 @@ if ($restartRecoveryEvidence.recovery_disposition -ne 'aborted_uncommitted') { t
 if ($restartRecoveryEvidence.real_money_execution -ne $false -or $restartRecoveryEvidence.human_tested -ne $false -or $restartRecoveryEvidence.nvda_verified -ne $false) {
   throw 'Machine restart/recovery audit violated release truth labels'
 }
+Assert-ProcessRecoveryEvidence -Evidence $restartRecoveryEvidence -Label 'Packaged restart/recovery audit'
 
 $dataExe = Join-Path $PWD 'dist/Autosport-Data.exe'
 if (-not (Test-Path $dataExe -PathType Leaf)) { throw 'Packaged build is missing Autosport-Data.exe' }
@@ -129,7 +185,7 @@ $walkForwardBundle = [ordered]@{
     [ordered]@{
       window_id = 'holdout-2'
       training_end_ts = '2026-02-28T23:59:59+00:00'
-      evaluation_start_ts = '2026-03-01T00:00:00+00:00'
+      evaluation_start_ts = '2026-03-01T12:00:00+00:00'
       evaluation_end_ts = '2026-03-31T23:59:59+00:00'
       split = 'holdout'
     }
@@ -261,6 +317,7 @@ if ($freshRestartRecoveryEvidence.recovery_disposition -ne 'aborted_uncommitted'
 if ($freshRestartRecoveryEvidence.real_money_execution -ne $false -or $freshRestartRecoveryEvidence.human_tested -ne $false -or $freshRestartRecoveryEvidence.nvda_verified -ne $false) {
   throw 'Machine restart/recovery audit violated release truth labels'
 }
+Assert-ProcessRecoveryEvidence -Evidence $freshRestartRecoveryEvidence -Label 'Fresh-extracted restart/recovery audit'
 
 $freshEvidence = [ordered]@{
   status = 'PASS'
@@ -285,6 +342,10 @@ $freshEvidence = [ordered]@{
   extracted_restart_recovery_status = $freshRestartRecoveryEvidence.status
   extracted_session_restart_status = $freshRestartRecoveryEvidence.session_restart_status
   extracted_transaction_recovery_status = $freshRestartRecoveryEvidence.transaction_recovery_status
+  extracted_process_kill_relaunch_status = $freshRestartRecoveryEvidence.process_kill_relaunch_status
+  extracted_process_recovery_disposition = $freshRestartRecoveryEvidence.process_recovery_disposition
+  extracted_process_recovery_registry_status = $freshRestartRecoveryEvidence.process_recovery_registry_status
+  extracted_process_recovery_manifest_phase = $freshRestartRecoveryEvidence.process_recovery_manifest_phase
   real_money_execution = $false
   human_tested = $false
   nvda_verified = $false

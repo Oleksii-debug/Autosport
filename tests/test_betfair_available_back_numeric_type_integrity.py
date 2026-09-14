@@ -41,6 +41,10 @@ class BetfairAvailableBackNumericTypeIntegrityTests(unittest.TestCase):
             book.apply({"batb": [[0, "0", 0.0]]})
         self.assertEqual(book.current_quote(), before)
 
+        with self.assertRaisesRegex(ValueError, "batb\[0\]\.price must be non-negative"):
+            book.apply({"batb": [[0, -1.0, 0.0]]})
+        self.assertEqual(book.current_quote(), before)
+
         update = book.apply({"batb": [[0, 0.0, 0.0]]})
         self.assertTrue(update.touched)
         self.assertIsNone(update.quote)

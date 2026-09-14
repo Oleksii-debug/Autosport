@@ -6,7 +6,12 @@ from math import isfinite
 from time import perf_counter
 from typing import Callable
 
-from .ingestion_health import IngestionPolicy, SourceHealthStore, parse_source_timestamp
+from .ingestion_health import (
+    IngestionPolicy,
+    SourceHealthState,
+    SourceHealthStore,
+    parse_source_timestamp,
+)
 from .market_bus import MarketEventBus, MarketEventDeliveryError
 from .providers import CanonicalNormalizer, MarketProvider
 
@@ -39,6 +44,63 @@ class IngestionStats:
         if not isfinite(rate):
             raise ValueError("accepted_per_second must be finite")
         return rate
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedIngestionOutcome:
+    """Exact market-commit result whose source-health projection is still pending."""
+
+    source_id: str
+    now: str
+    received: int
+    accepted: int
+    rejected: int
+    elapsed_seconds: float
+    cursor: str | None
+    latest_source_ts: str | None
+    quality_flags: tuple[str, ...]
+
+    def record_health(self, store: SourceHealthStore) -> SourceHealthState:
+        return store.record_success(
+            self.source_id,
+            now=self.now,
+            received=self.received,
+            accepted=self.accepted,
+            rejected=self.rejected,
+            cursor=self.cursor,
+            latest_source_ts=self.latest_source_ts,
+            quality_flags=self.quality_flags,
+        )
+
+    def stats(self, *, health_status: str | None = None) -> IngestionStats:
+        if health_status is None:
+            health_status = "degraded" if self.quality_flags else "healthy"
+        return IngestionStats(
+            self.source_id,
+            self.received,
+            self.accepted,
+            self.rejected,
+            self.elapsed_seconds,
+            self.cursor,
+            self.quality_flags,
+            health_status,
+        )
+
+
+class CommittedIngestionHealthError(RuntimeError):
+    """Market persistence succeeded, but durable source-health publication failed."""
+
+    def __init__(
+        self,
+        outcome: CommittedIngestionOutcome,
+        *,
+        delivery_error: MarketEventDeliveryError | None = None,
+    ) -> None:
+        super().__init__(
+            "market events were committed but source health persistence failed"
+        )
+        self.outcome = outcome
+        self.delivery_error = delivery_error
 
 
 class IngestionEngine:
@@ -132,47 +194,50 @@ class IngestionEngine:
         ordered_flags = tuple(sorted(flags))
         try:
             accepted = self.bus.publish_many(normalized)
-        except MarketEventDeliveryError as exc:
+        except MarketEventDeliveryError as delivery_error:
             # MarketEventDeliveryError can only be raised after transactional
             # persistence succeeds. Preserve the exact storage-derived outcome in
             # provider progress before re-raising the consumer delivery failure.
-            if self.health_store is not None:
-                self.health_store.record_success(
-                    batch.source_id,
-                    now=now,
-                    received=len(batch.quotes),
-                    accepted=exc.accepted_count,
-                    rejected=rejected,
-                    cursor=batch.cursor,
-                    latest_source_ts=latest_source_ts,
-                    quality_flags=ordered_flags,
-                )
-            raise
-
-        elapsed = perf_counter() - started
-        health_status = "degraded" if ordered_flags else "healthy"
-        if self.health_store is not None:
-            state = self.health_store.record_success(
-                batch.source_id,
+            outcome = CommittedIngestionOutcome(
+                source_id=batch.source_id,
                 now=now,
                 received=len(batch.quotes),
-                accepted=accepted,
+                accepted=delivery_error.accepted_count,
                 rejected=rejected,
+                elapsed_seconds=perf_counter() - started,
                 cursor=batch.cursor,
                 latest_source_ts=latest_source_ts,
                 quality_flags=ordered_flags,
             )
-            health_status = state.status
-        return IngestionStats(
-            batch.source_id,
-            len(batch.quotes),
-            accepted,
-            rejected,
-            elapsed,
-            batch.cursor,
-            ordered_flags,
-            health_status,
+            if self.health_store is not None:
+                try:
+                    outcome.record_health(self.health_store)
+                except Exception as health_error:
+                    raise CommittedIngestionHealthError(
+                        outcome,
+                        delivery_error=delivery_error,
+                    ) from health_error
+            raise
+
+        outcome = CommittedIngestionOutcome(
+            source_id=batch.source_id,
+            now=now,
+            received=len(batch.quotes),
+            accepted=accepted,
+            rejected=rejected,
+            elapsed_seconds=perf_counter() - started,
+            cursor=batch.cursor,
+            latest_source_ts=latest_source_ts,
+            quality_flags=ordered_flags,
         )
+        health_status = "degraded" if ordered_flags else "healthy"
+        if self.health_store is not None:
+            try:
+                state = outcome.record_health(self.health_store)
+            except Exception as health_error:
+                raise CommittedIngestionHealthError(outcome) from health_error
+            health_status = state.status
+        return outcome.stats(health_status=health_status)
 
 
 def _utc_now_iso() -> str:

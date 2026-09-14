@@ -67,6 +67,29 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
             ):
                 default_workspace()
 
+    def test_relative_home_fails_closed_instead_of_following_cwd(self) -> None:
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "autosport.paths.Path.home",
+            return_value=Path("relative-home"),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                r"home directory must be an absolute path",
+            ):
+                default_workspace()
+
+    def test_absolute_home_fallback_remains_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with patch.dict(os.environ, {}, clear=True), patch(
+                "autosport.paths.Path.home",
+                return_value=home,
+            ):
+                self.assertEqual(
+                    default_workspace(),
+                    home / ".autosport" / "workspace",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,4 +23,10 @@ def default_workspace() -> Path:
                 "does not depend on the process working directory"
             )
         return local_app_data_path / "Autosport" / "workspace"
-    return Path.home() / ".autosport" / "workspace"
+    home = Path.home()
+    if not home.is_absolute():
+        raise ValueError(
+            "home directory must be an absolute path so durable workspace identity "
+            "does not depend on the process working directory"
+        )
+    return home / ".autosport" / "workspace"

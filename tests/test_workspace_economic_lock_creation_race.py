@@ -24,18 +24,22 @@ class WorkspaceEconomicLockCreationRaceTests(unittest.TestCase):
             else:
                 probe.unlink()
 
-            original_open = Path.open
+            lock = WorkspaceEconomicLock(root)
+            original_open_new = lock._open_new_lock_handle
             inserted = False
 
-            def open_after_race(path_obj, *args, **kwargs):
+            def open_new_after_race():
                 nonlocal inserted
-                if path_obj == lock_path and not inserted:
+                if not inserted:
                     inserted = True
                     os.symlink(external, lock_path)
-                return original_open(path_obj, *args, **kwargs)
+                return original_open_new()
 
-            lock = WorkspaceEconomicLock(root)
-            with mock.patch.object(Path, "open", autospec=True, side_effect=open_after_race):
+            with mock.patch.object(
+                lock,
+                "_open_new_lock_handle",
+                side_effect=open_new_after_race,
+            ):
                 with self.assertRaisesRegex(
                     WorkspaceEconomicLockError,
                     "regular non-symlink file",

@@ -145,7 +145,7 @@ class WorkspaceEconomicLock:
         """Create or open the canonical lock without create-through-alias races."""
 
         try:
-            return self.path.open("x+b")
+            return self._open_new_lock_handle()
         except FileExistsError:
             pass
         except OSError as exc:
@@ -164,6 +164,80 @@ class WorkspaceEconomicLock:
             raise WorkspaceEconomicLockError(
                 "cannot open workspace economic lock path"
             ) from exc
+
+    def _open_new_lock_handle(self) -> BinaryIO:
+        """Exclusively create the canonical lock without following Windows reparse points."""
+
+        if os.name != "nt":
+            return self.path.open("x+b")
+
+        # Python's CRT-backed x+b can follow a Windows symlink/reparse point whose
+        # target does not exist, creating that external target before our identity
+        # checks run. CreateFileW with OPEN_REPARSE_POINT makes the final pathname
+        # component authoritative: an existing reparse point causes CREATE_NEW to
+        # fail instead of being traversed. Existing files are opened separately,
+        # without create/truncate semantics, after the no-follow path checks below.
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+
+        generic_read = 0x80000000
+        generic_write = 0x40000000
+        file_share_read = 0x00000001
+        file_share_write = 0x00000002
+        file_share_delete = 0x00000004
+        create_new = 1
+        file_attribute_normal = 0x00000080
+        file_flag_open_reparse_point = 0x00200000
+        invalid_handle_value = ctypes.c_void_p(-1).value
+
+        kernel_handle = create_file(
+            str(self.path),
+            generic_read | generic_write,
+            file_share_read | file_share_write | file_share_delete,
+            None,
+            create_new,
+            file_attribute_normal | file_flag_open_reparse_point,
+            None,
+        )
+        if kernel_handle == invalid_handle_value:
+            error_code = ctypes.get_last_error()
+            if error_code in (80, 183):  # ERROR_FILE_EXISTS / ERROR_ALREADY_EXISTS
+                raise FileExistsError(
+                    error_code,
+                    "workspace economic lock path already exists",
+                    str(self.path),
+                )
+            raise ctypes.WinError(error_code)
+
+        close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        try:
+            descriptor = msvcrt.open_osfhandle(
+                kernel_handle,
+                os.O_RDWR | os.O_BINARY,
+            )
+        except BaseException:
+            close_handle(kernel_handle)
+            raise
+        try:
+            return os.fdopen(descriptor, "r+b", closefd=True)
+        except BaseException:
+            os.close(descriptor)
+            raise
 
     def _validate_existing_lock_path(self) -> None:
         """Reject unsafe aliases before opening the canonical lock pathname."""

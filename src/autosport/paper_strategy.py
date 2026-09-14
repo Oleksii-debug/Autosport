@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from .agents import AgentContext
 from .decision_ledger import DecisionRecord
@@ -38,8 +38,22 @@ class PaperValueAgent:
         risk_policy: PaperRiskPolicy | None = None,
     ) -> None:
         self.forecasts = forecasts
-        self.stake = Decimal(str(stake))
-        self.minimum_edge = Decimal(str(minimum_expected_profit_per_unit))
+        try:
+            amount = Decimal(str(stake))
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError("paper value stake must be a finite decimal") from exc
+        if not amount.is_finite():
+            raise ValueError("paper value stake must be a finite decimal")
+        if amount <= 0:
+            raise ValueError("paper value stake must be positive")
+        try:
+            minimum_edge = Decimal(str(minimum_expected_profit_per_unit))
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError("minimum expected profit per unit must be a finite decimal") from exc
+        if not minimum_edge.is_finite():
+            raise ValueError("minimum expected profit per unit must be a finite decimal")
+        self.stake = amount
+        self.minimum_edge = minimum_edge
         self.risk_policy = risk_policy or PaperRiskPolicy()
         self._acted: set[str] = set()
 

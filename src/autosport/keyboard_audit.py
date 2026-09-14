@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .gui import AUTOMATION_IDS
-from .windows_gui import WindowsAutosportApp
+from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 
 
 _ACTION_BINDINGS = {
@@ -32,6 +32,7 @@ _FOCUSABLE_CONTROLS = (
     "tickets",
     "evaluation",
     "log",
+    "bankroll",
 )
 
 
@@ -51,6 +52,14 @@ def summarize_keyboard_contract(
     if missing_tab:
         failures.append("Tab traversal cannot reach: " + ", ".join(missing_tab))
 
+    expected_ids = {
+        name: (
+            WINDOWS_BANKROLL_AUTOMATION_ID
+            if name == "bankroll"
+            else AUTOMATION_IDS[name]
+        )
+        for name in _FOCUSABLE_CONTROLS
+    }
     return {
         "status": "PASS" if not failures else "FAIL",
         "action_shortcuts_bound": {
@@ -64,14 +73,13 @@ def summarize_keyboard_contract(
             for sequence, target in _FOCUS_BINDINGS.items()
         },
         "tab_reachable_controls": list(tab_reachable_controls),
-        "expected_automation_ids": {
-            name: AUTOMATION_IDS[name] for name in _FOCUSABLE_CONTROLS
-        },
+        "expected_automation_ids": expected_ids,
         "failures": failures,
         "evidence_scope": (
             "in-process packaged Windows GUI keyboard contract: action shortcuts are bound, "
-            "F6/F7/F8 focus shortcuts are executed, and critical controls are reachable "
-            "through Tk tab traversal; not physical keyboard or NVDA speech proof"
+            "F6/F7/F8 focus shortcuts are executed, and critical controls including the "
+            "read-only bankroll summary are reachable through Tk tab traversal; not physical "
+            "keyboard or NVDA speech proof"
         ),
         "human_tested": False,
         "nvda_verified": False,
@@ -93,6 +101,7 @@ def _critical_widgets(app: WindowsAutosportApp) -> dict[str, Any]:
         "tickets": app.tickets,
         "evaluation": app.evaluation,
         "log": app.log,
+        "bankroll": app.bank_summary,
     }
 
 

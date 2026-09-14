@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from autosport.accessibility_audit import summarize_description
 from autosport.gui import AUTOMATION_IDS, _SPEEDS, _STRATEGY_CHOICES, strategy_id_from_display
+from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
 
 
 class _Named:
@@ -40,10 +41,14 @@ class AccessibilityAuditTests(unittest.TestCase):
                 self._widget(AUTOMATION_IDS["evaluation"], "Evaluation і portfolio evidence", role="LIST", answers_rows=True),
                 self._widget(AUTOMATION_IDS["log"], "Журнал виконання", role="EDIT", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_quotes"], "Live quotes", role="LIST", answers_rows=True),
+                self._widget(WINDOWS_BANKROLL_AUTOMATION_ID, "Віртуальний банк", role="EDIT", patterns=("VALUE",)),
             ),
             provider_trouble=(),
             providers_stood_down_because=None,
         )
+
+    def _summarize(self, description, *, bankroll_readonly=True):
+        return summarize_description(description, bankroll_readonly=bankroll_readonly)
 
     def test_v1_replay_speed_contract_includes_event_jump_and_1000x(self):
         self.assertEqual(
@@ -65,12 +70,38 @@ class AccessibilityAuditTests(unittest.TestCase):
         for display, strategy_id in _STRATEGY_CHOICES.items():
             self.assertEqual(strategy_id_from_display(display), strategy_id)
 
-    def test_critical_contract_passes_with_names_roles_patterns_and_rows(self):
-        report = summarize_description(self._passing_description())
+    def test_critical_contract_passes_with_names_roles_patterns_rows_and_readonly(self):
+        report = self._summarize(self._passing_description())
         self.assertEqual(report["status"], "PASS")
-        self.assertEqual(len(report["critical_controls"]), 12)
+        self.assertEqual(len(report["critical_controls"]), 13)
+        bankroll = next(
+            item
+            for item in report["critical_controls"]
+            if item["automation_id"] == WINDOWS_BANKROLL_AUTOMATION_ID
+        )
+        self.assertTrue(bankroll["read_only"])
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
+
+    def test_editable_bankroll_summary_fails_closed(self):
+        report = self._summarize(self._passing_description(), bankroll_readonly=False)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(
+            any("bankroll summary is not runtime readonly" in item for item in report["failures"])
+        )
+        bankroll = next(
+            item
+            for item in report["critical_controls"]
+            if item["automation_id"] == WINDOWS_BANKROLL_AUTOMATION_ID
+        )
+        self.assertFalse(bankroll["read_only"])
+
+    def test_missing_bankroll_runtime_state_evidence_fails_closed(self):
+        report = summarize_description(self._passing_description())
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(
+            any("bankroll summary is not runtime readonly" in item for item in report["failures"])
+        )
 
     def test_missing_invoke_fails_closed(self):
         description = self._passing_description()
@@ -79,16 +110,32 @@ class AccessibilityAuditTests(unittest.TestCase):
             i for i, item in enumerate(widgets) if item.automation_id == AUTOMATION_IDS["research_plan"]
         )
         widgets[index] = self._widget(AUTOMATION_IDS["research_plan"], "Вибрати research plan", patterns=())
-        report = summarize_description(SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)}))
+        report = self._summarize(SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)}))
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("missing UIA patterns=INVOKE" in item for item in report["failures"]))
+
+    def test_bankroll_summary_requires_value_pattern(self):
+        description = self._passing_description()
+        widgets = list(description.widgets)
+        index = next(
+            i for i, item in enumerate(widgets) if item.automation_id == WINDOWS_BANKROLL_AUTOMATION_ID
+        )
+        widgets[index] = self._widget(
+            WINDOWS_BANKROLL_AUTOMATION_ID,
+            "Віртуальний банк",
+            role="EDIT",
+            patterns=(),
+        )
+        report = self._summarize(SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)}))
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(any("missing UIA patterns=VALUE" in item for item in report["failures"]))
 
     def test_missing_live_control_and_provider_trouble_fail_closed(self):
         description = self._passing_description()
         widgets = tuple(
             item for item in description.widgets if item.automation_id != AUTOMATION_IDS["live_refresh"]
         )
-        report = summarize_description(
+        report = self._summarize(
             SimpleNamespace(
                 **{
                     **description.__dict__,
@@ -110,7 +157,7 @@ class AccessibilityAuditTests(unittest.TestCase):
         widgets[index] = self._widget(
             AUTOMATION_IDS["evaluation"], "Evaluation і portfolio evidence", role="LIST", answers_rows=False
         )
-        report = summarize_description(SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)}))
+        report = self._summarize(SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)}))
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("list rows are not exposed" in item for item in report["failures"]))
 

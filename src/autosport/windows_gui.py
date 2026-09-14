@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import messagebox, ttk
+
+import tk_uia
 
 from .gui import AutosportApp
 from .recovery_worker import OneShotRecoveryWorker, RecoverySessionView, recover_workspace_once
 from .replay_worker import workspace_for_strategy
 from .ui_model import ticket_lines
+
+
+WINDOWS_BANKROLL_AUTOMATION_ID = 205
 
 
 class WindowsAutosportApp(AutosportApp):
@@ -18,6 +23,48 @@ class WindowsAutosportApp(AutosportApp):
         self._recovery_blocked_workspace: Path | None = None
         super().__init__()
         self.recovery_worker = OneShotRecoveryWorker()
+
+    def _build(self) -> None:
+        super()._build()
+        frame = next(iter(self.winfo_children()), None)
+        if frame is None:
+            raise RuntimeError("Windows GUI root frame is missing")
+
+        bank_label = None
+        bank_variable = str(self.bank)
+        for child in frame.winfo_children():
+            try:
+                if "textvariable" in child.keys() and str(child.cget("textvariable")) == bank_variable:
+                    bank_label = child
+                    break
+            except Exception:
+                continue
+        if bank_label is None:
+            raise RuntimeError("Virtual bankroll summary label is missing")
+
+        siblings = frame.winfo_children()
+        bank_index = siblings.index(bank_label)
+        before = siblings[bank_index + 1] if bank_index + 1 < len(siblings) else None
+        bank_label.destroy()
+        self.bank_summary = ttk.Entry(
+            frame,
+            textvariable=self.bank,
+            state="readonly",
+            takefocus=True,
+        )
+        if before is None:
+            self.bank_summary.pack(fill="x", pady=(12, 4))
+        else:
+            self.bank_summary.pack(fill="x", pady=(12, 4), before=before)
+
+    def _configure_accessibility(self) -> None:
+        super()._configure_accessibility()
+        tk_uia.set_acc_name(self.bank_summary, "Віртуальний банк")
+        tk_uia.set_acc_description(
+            self.bank_summary,
+            "Read-only summary поточного virtual bankroll, committed paper stake, canonical strategy та workspace. Доступний через Tab traversal.",
+        )
+        tk_uia.set_automation_id(self.bank_summary, WINDOWS_BANKROLL_AUTOMATION_ID)
 
     @property
     def _recovery_busy(self) -> bool:

@@ -1,7 +1,14 @@
 $ErrorActionPreference = 'Stop'
+$sourceSha = $env:AUTOSPORT_SOURCE_SHA
+if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
+python scripts/verify_source_checkout.py --source-sha $sourceSha
+if ($LASTEXITCODE -ne 0) { throw "Source checkout preflight exited $LASTEXITCODE" }
 python -m pip install --upgrade pip
-python -m pip install -e '.[build]'
-python -m unittest discover -s tests -v
+if ($LASTEXITCODE -ne 0) { throw "pip upgrade exited $LASTEXITCODE" }
+python -m pip install -e '.[build,test]'
+if ($LASTEXITCODE -ne 0) { throw "build/test dependency install exited $LASTEXITCODE" }
+python -m pytest -v tests
+if ($LASTEXITCODE -ne 0) { throw "Full pytest gate exited $LASTEXITCODE" }
 if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
 python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py

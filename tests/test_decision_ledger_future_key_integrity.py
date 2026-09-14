@@ -26,8 +26,10 @@ class DecisionLedgerFutureKeyIntegrityTests(unittest.TestCase):
         )
 
     def test_constructor_rejects_nested_future_result_fields(self):
-        with self.assertRaisesRegex(ValueError, "future-result fields"):
-            self._record({"nested": [{"winner": "selection-a"}]})
+        for key in ("result", "winner", "outcome"):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, "future-result fields"):
+                    self._record({"nested": [{key: "selection-a"}]})
 
     def test_payload_is_snapshotted_and_normal_mutation_is_blocked(self):
         original = {"nested": [{"feature": "serve-form"}]}
@@ -71,7 +73,7 @@ class DecisionLedgerFutureKeyIntegrityTests(unittest.TestCase):
             "agent": "agent-a",
             "observed_ts": "2026-01-01T00:00:00+00:00",
             "action": "OBSERVE",
-            "payload": {"nested": [{"result": "selection-a"}]},
+            "payload": {"nested": [{"outcome": "selection-a"}]},
             "context_hash": "context-a",
             "decision_id": "forged-decision",
             "recorded_at": "2026-01-01T00:00:01+00:00",

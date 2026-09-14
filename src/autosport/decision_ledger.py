@@ -12,7 +12,7 @@ from typing import Any
 from .domain import utc_now_iso
 
 
-_FORBIDDEN_FUTURE_KEYS = {"final_result", "result", "winner", "settled_outcome", "future_quote"}
+_FORBIDDEN_FUTURE_KEYS = {"final_result", "result", "winner", "outcome", "settled_outcome", "future_quote"}
 
 
 class DecisionLedgerIntegrityError(RuntimeError):

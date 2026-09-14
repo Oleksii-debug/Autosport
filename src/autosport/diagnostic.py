@@ -39,7 +39,16 @@ def run_machine_diagnostic(output_path: str | Path) -> int:
                 book.settle(ticket.ticket_id, {leg.quote_key})
                 if book.balance != Decimal("110.0"):
                     raise RuntimeError("paper settlement diagnostic failed")
-            finally:
+            except BaseException as primary_error:
+                try:
+                    store.close()
+                except BaseException as cleanup_error:
+                    primary_error.add_note(
+                        "SQLiteMarketStore.close() also failed while preserving the primary diagnostic failure: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
+                raise
+            else:
                 store.close()
         payload = {
             "status": "PASS",

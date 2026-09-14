@@ -24,6 +24,12 @@ class _TrackingStore:
         self.closed = True
 
 
+class _CloseFailingStore(diagnostic.SQLiteMarketStore):
+    def close(self) -> None:
+        super().close()
+        raise OSError("diagnostic store close failed")
+
+
 class _FailingReplayEngine:
     def __init__(self, events, firewall) -> None:
         del events, firewall
@@ -51,6 +57,34 @@ class DiagnosticCleanupTests(unittest.TestCase):
             payload = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "FAIL")
             self.assertEqual(payload["error"], "RuntimeError: diagnostic replay failed")
+            self.assertFalse(payload["real_money_execution"])
+            self.assertFalse(payload["human_tested"])
+            self.assertFalse(payload["nvda_verified"])
+
+    def test_primary_diagnostic_failure_is_not_masked_by_close_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = Path(temporary) / "diagnostic.json"
+            with (
+                patch.object(diagnostic, "SQLiteMarketStore", _CloseFailingStore),
+                patch.object(diagnostic, "ReplayEngine", _FailingReplayEngine),
+            ):
+                exit_code = diagnostic.run_machine_diagnostic(output_path)
+
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "FAIL")
+            self.assertEqual(payload["error"], "RuntimeError: diagnostic replay failed")
+
+    def test_close_failure_after_success_is_reported_as_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = Path(temporary) / "diagnostic.json"
+            with patch.object(diagnostic, "SQLiteMarketStore", _CloseFailingStore):
+                exit_code = diagnostic.run_machine_diagnostic(output_path)
+
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "FAIL")
+            self.assertEqual(payload["error"], "OSError: diagnostic store close failed")
             self.assertFalse(payload["real_money_execution"])
             self.assertFalse(payload["human_tested"])
             self.assertFalse(payload["nvda_verified"])

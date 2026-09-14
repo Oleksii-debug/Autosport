@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 import tempfile
 from decimal import Decimal
 from pathlib import Path
 
 from .domain import MarketEvent, TicketLeg
+from .integrity import atomic_write_json
 from .paper import PaperBook
 from .replay import ReplayEngine, ReplayLeakageFirewall
 from .storage import SQLiteMarketStore
@@ -13,7 +13,6 @@ from .storage import SQLiteMarketStore
 
 def run_machine_diagnostic(output_path: str | Path) -> int:
     destination = Path(output_path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
     try:
         event = MarketEvent.from_dict({
             "event_id": "diag-event",
@@ -57,7 +56,7 @@ def run_machine_diagnostic(output_path: str | Path) -> int:
             "human_tested": False,
             "nvda_verified": False,
         }
-        destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        atomic_write_json(destination, payload)
         return 0
     except Exception as exc:
         payload = {
@@ -67,5 +66,8 @@ def run_machine_diagnostic(output_path: str | Path) -> int:
             "human_tested": False,
             "nvda_verified": False,
         }
-        destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        error_notes = getattr(exc, "__notes__", None)
+        if error_notes:
+            payload["error_notes"] = list(error_notes)
+        atomic_write_json(destination, payload)
         return 1

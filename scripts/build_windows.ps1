@@ -11,8 +11,11 @@ python -m pytest -v tests
 if ($LASTEXITCODE -ne 0) { throw "Full pytest gate exited $LASTEXITCODE" }
 if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
 python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace
+if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
+if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
+if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }
 
 $diag = Join-Path $PWD 'dist/packaged-diagnostic.json'
 if (Test-Path $diag) { Remove-Item -Force $diag }
@@ -126,7 +129,7 @@ $walkForwardBundle = [ordered]@{
     [ordered]@{
       window_id = 'holdout-2'
       training_end_ts = '2026-02-28T23:59:59+00:00'
-      evaluation_start_ts = '2026-03-01T00:00:00+00:00'
+      evaluation_start_ts = '2026-03-01T12:00:00+00:00'
       evaluation_end_ts = '2026-03-31T23:59:59+00:00'
       split = 'holdout'
     }
@@ -145,10 +148,10 @@ if ([string]::IsNullOrWhiteSpace($walkForwardEvidence.source_sha256) -or $walkFo
 if ($walkForwardEvidence.profitability_claim -ne $false) { throw 'Packaged walk-forward smoke must not claim profitability' }
 if ($walkForwardEvidence.real_money_execution -ne $false) { throw 'Packaged walk-forward smoke must preserve REAL_MONEY_EXECUTION=false' }
 
-$sourceSha = $env:AUTOSPORT_SOURCE_SHA
-if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
 $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
 $packageVerification = Join-Path $PWD 'dist/package-verification.json'
+if (Test-Path $package) { Remove-Item -Force $package }
+if (Test-Path $packageVerification) { Remove-Item -Force $packageVerification }
 python scripts/package_windows.py `
   --exe dist/Autosport.exe `
   --data-exe dist/Autosport-Data.exe `
@@ -161,6 +164,7 @@ python scripts/package_windows.py `
   --output $package `
   --source-sha $sourceSha `
   --verification-output $packageVerification
+if ($LASTEXITCODE -ne 0) { throw "Windows package assembly exited $LASTEXITCODE" }
 
 # Binding release gate: verify the artifact after a clean extraction, not only the
 # pre-package executables. This catches archive/path/packaging defects that a

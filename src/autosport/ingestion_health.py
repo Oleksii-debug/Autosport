@@ -142,20 +142,30 @@ class SourceHealthState:
         # Bind persisted state to transitions the canonical record_success()/record_failure()
         # state machine can actually produce. This is durable operational truth, so impossible
         # combinations must fail closed instead of being interpreted as plausible telemetry.
+        successful_polls = self.poll_count - self.total_failures
+        if successful_polls == 0:
+            if self.last_success_at is not None:
+                raise ValueError("source health without successful polls cannot have last_success_at")
+            if self.total_received or self.total_accepted or self.total_rejected:
+                raise ValueError("source health without successful polls cannot have received event totals")
+            if self.quality_flags:
+                raise ValueError("source health without successful polls cannot have quality flags")
+        elif self.last_success_at is None:
+            raise ValueError("successful poll history requires last_success_at")
+
+        if self.total_failures == 0:
+            if self.last_error_at is not None:
+                raise ValueError("source health without failures cannot have last_error_at")
+        elif self.last_error_at is None:
+            raise ValueError("failure history requires last_error_at")
+
         if self.status == "unknown":
             if (
                 self.poll_count != 0
-                or self.total_received != 0
-                or self.total_accepted != 0
-                or self.total_rejected != 0
-                or self.total_failures != 0
                 or self.consecutive_failures != 0
-                or self.last_success_at is not None
-                or self.last_error_at is not None
                 or self.last_error is not None
                 or self.last_cursor is not None
                 or self.latest_source_ts is not None
-                or self.quality_flags
             ):
                 raise ValueError("unknown source health must be pristine")
             return
@@ -163,20 +173,16 @@ class SourceHealthState:
         if self.status == "failed":
             if self.consecutive_failures == 0:
                 raise ValueError("failed source health requires a positive consecutive failure count")
-            if self.last_error_at is None or self.last_error is None:
+            if self.last_error is None:
                 raise ValueError("failed source health requires last error evidence")
         else:
             if self.consecutive_failures != 0:
                 raise ValueError("successful source health cannot retain consecutive failures")
-            if self.last_success_at is None:
-                raise ValueError("successful source health requires last_success_at")
             if self.last_error is not None:
                 raise ValueError("successful source health cannot retain last_error")
-            if self.total_failures >= self.poll_count:
+            if successful_polls == 0:
                 raise ValueError("successful source health requires at least one successful poll")
 
-        if self.total_failures > 0 and self.last_error_at is None:
-            raise ValueError("failure history requires last_error_at")
         if self.status == "healthy" and self.quality_flags:
             raise ValueError("healthy source health cannot retain quality flags")
         if self.status == "degraded" and not self.quality_flags:

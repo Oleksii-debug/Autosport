@@ -41,6 +41,15 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _safe_exception_detail(exc: Exception) -> str:
+    """Render semantic-audit failure evidence without trusting exception formatting."""
+
+    try:
+        return f"{type(exc).__name__}: {exc}"
+    except BaseException:
+        return f"{type(exc).__name__}: exception details unavailable"
+
+
 def _fixture_dataset(root: Path) -> ReplayDataset:
     root.mkdir(parents=True, exist_ok=True)
     market = root / "market.jsonl"
@@ -240,7 +249,7 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
     except Exception as exc:
         payload = {
             "status": "FAIL",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": _safe_exception_detail(exc),
             "real_money_execution": False,
             "human_tested": False,
             "nvda_verified": False,

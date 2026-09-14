@@ -26,9 +26,15 @@ class ReplayWorkerMessage:
 
 
 def _terminal_error(exc: BaseException) -> str:
-    """Render a caught failure without trusting arbitrary exception stringification."""
+    """Render a caught failure without trusting arbitrary exception metadata."""
 
-    exception_type = type(exc).__name__
+    try:
+        # Bypass a custom metaclass __getattribute__: even exception type-name
+        # lookup must not be able to defeat terminal publication after the
+        # single-flight slot has been acquired.
+        exception_type = type.__getattribute__(type(exc), "__name__")
+    except BaseException:
+        exception_type = "BaseException"
     try:
         detail = str(exc)
     except BaseException:

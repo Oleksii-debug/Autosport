@@ -250,12 +250,52 @@ class RunTransaction:
         manifest["phase"] = "completed"
         atomic_write_json(self.manifest_path, manifest)
 
-    def _read_manifest(self) -> dict[str, Any]:
+    @staticmethod
+    def _decode_strict_json(text: str, *, label: str) -> Any:
+        def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            payload: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in payload:
+                    raise RunTransactionError(
+                        f"{label} contains duplicate JSON key {key!r}"
+                    )
+                payload[key] = value
+            return payload
+
+        def reject_non_finite(value: str) -> None:
+            raise RunTransactionError(
+                f"{label} contains non-finite JSON value {value!r}"
+            )
+
         try:
-            manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RunTransactionError("transaction manifest is unreadable or invalid JSON") from exc
-        if not isinstance(manifest, dict) or manifest.get("schema_version") != self.SCHEMA_VERSION:
+            return json.loads(
+                text,
+                object_pairs_hook=reject_duplicate_keys,
+                parse_constant=reject_non_finite,
+            )
+        except json.JSONDecodeError as exc:
+            raise RunTransactionError(f"{label} contains invalid JSON") from exc
+
+    @classmethod
+    def _read_strict_json_file(cls, path: Path, *, label: str) -> Any:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise RunTransactionError(f"{label} is unreadable or invalid UTF-8") from exc
+        return cls._decode_strict_json(text, label=label)
+
+    def _read_manifest(self) -> dict[str, Any]:
+        manifest = self._read_strict_json_file(
+            self.manifest_path,
+            label="transaction manifest",
+        )
+        schema_version = manifest.get("schema_version") if isinstance(manifest, dict) else None
+        if (
+            not isinstance(manifest, dict)
+            or isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != self.SCHEMA_VERSION
+        ):
             raise RunTransactionError("transaction manifest schema is invalid")
         if manifest.get("run_id") != self.run_id:
             raise RunTransactionError("transaction manifest run_id mismatch")
@@ -292,9 +332,14 @@ class RunTransaction:
 
     @staticmethod
     def _hash_field(manifest: dict[str, Any], section: str, field: str) -> str:
-        value = manifest.get(section, {}).get(field)
-        if not isinstance(value, str) or len(value) != 64:
-            raise RunTransactionError(f"transaction manifest lacks {section}.{field}")
+        section_payload = manifest.get(section)
+        value = section_payload.get(field) if isinstance(section_payload, dict) else None
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise RunTransactionError(f"transaction manifest lacks valid {section}.{field}")
         return value
 
     @staticmethod
@@ -338,10 +383,7 @@ class RunTransaction:
                         "canonical run summary SHA-256 mismatch (identity mismatch or SHA-256 mismatch)"
                     )
                 raise RunTransactionError(f"{label} SHA-256 mismatch")
-            try:
-                summary = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise RunTransactionError(f"{label} is unreadable or invalid JSON") from exc
+            summary = self._read_strict_json_file(path, label=label)
             if not isinstance(summary, dict):
                 raise RunTransactionError(f"{label} schema is invalid")
             expected_bindings = {

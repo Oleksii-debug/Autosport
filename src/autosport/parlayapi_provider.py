@@ -195,24 +195,40 @@ class ParlayApiTableTennisProvider:
         self.transport = transport
         self.clock = clock
         self.sleeper = sleeper
+        self._pending_quotes: tuple[ProviderQuote, ...] = ()
+        self._pending_offset = 0
+        self._pending_cursor: str | None = None
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         max_items = _positive_nonboolean_int(max_items, field="max_items")
-        observed_ts = self.clock()
-        response = self._fetch()
-        events = self._event_list(response.payload)
-        quotes: list[ProviderQuote] = []
-        for event in events:
-            for quote in self._event_quotes(event, observed_ts, response.status_code):
-                if len(quotes) >= max_items:
-                    return ProviderBatch(
-                        self.source_id,
-                        tuple(quotes),
-                        cursor=observed_ts,
-                        quality_flags=("TRUNCATED_BATCH",),
-                    )
-                quotes.append(quote)
-        return ProviderBatch(self.source_id, tuple(quotes), cursor=observed_ts)
+        if self._pending_offset >= len(self._pending_quotes):
+            observed_ts = self.clock()
+            response = self._fetch()
+            events = self._event_list(response.payload)
+            quotes: list[ProviderQuote] = []
+            for event in events:
+                quotes.extend(self._event_quotes(event, observed_ts, response.status_code))
+            self._pending_quotes = tuple(quotes)
+            self._pending_offset = 0
+            self._pending_cursor = observed_ts
+
+        cursor = self._pending_cursor
+        start = self._pending_offset
+        end = min(start + max_items, len(self._pending_quotes))
+        quotes = self._pending_quotes[start:end]
+        self._pending_offset = end
+        has_remainder = end < len(self._pending_quotes)
+        quality_flags = ("TRUNCATED_BATCH",) if has_remainder else ()
+        if not has_remainder:
+            self._pending_quotes = ()
+            self._pending_offset = 0
+            self._pending_cursor = None
+        return ProviderBatch(
+            self.source_id,
+            quotes,
+            cursor=cursor,
+            quality_flags=quality_flags,
+        )
 
     def historical_coverage(self, date_from: str, date_to: str) -> HistoricalCoverageReport:
         """Verify the authenticated key's requested historical window and actual source coverage.

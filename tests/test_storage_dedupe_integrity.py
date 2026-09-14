@@ -104,20 +104,33 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
             self.assertEqual(store.events(), [first])
             store.close()
 
-    def test_raw_persisted_type_disagreement_is_not_normalized_away(self):
-        first = replace(self._event(), event_id=7)  # type: ignore[arg-type]
-        conflicting = self._event(event_id="7")
-        self.assertEqual(first.dedupe_key, conflicting.dedupe_key)
+    def test_noncanonical_incoming_event_fails_before_persistence(self):
+        invalid = replace(self._event(event_id="7"), event_id=7)  # type: ignore[arg-type]
 
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteMarketStore(Path(tmp) / "market.db")
-            self.assertTrue(store.append(first))
-            with self.assertRaisesRegex(ValueError, "stored market event payload is not canonical"):
-                store.append(conflicting)
-            with self.assertRaisesRegex(ValueError, "stored market event payload is not canonical"):
-                store.events()
+            with self.assertRaisesRegex(ValueError, "market event payload is not canonical"):
+                store.append(invalid)
+
             count = store.connection.execute("SELECT COUNT(*) FROM market_events").fetchone()[0]
-            self.assertEqual(count, 1)
+            self.assertEqual(count, 0)
+            self.assertEqual(store.current(), {})
+            store.close()
+
+    def test_noncanonical_event_rolls_back_earlier_batch_insert(self):
+        valid = self._event(event_id="e2", sequence=2)
+        invalid = replace(
+            self._event(event_id="7", sequence=3),
+            event_id=7,  # type: ignore[arg-type]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            with self.assertRaisesRegex(ValueError, "market event payload is not canonical"):
+                store.append_batch_accepted([valid, invalid])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.current(), {})
             store.close()
 
     def test_conflicting_duplicate_rolls_back_earlier_insert_in_batch(self):
@@ -136,6 +149,38 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
             self.assertNotIn(new_event.quote_key, store.current())
             self.assertEqual(store.current()[existing.quote_key].decimal_odds, existing.decimal_odds)
             store.close()
+
+    def test_reopen_rejects_duplicate_keys_in_persisted_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "market.db"
+            event = self._event()
+            store = SQLiteMarketStore(db_path)
+            self.assertTrue(store.append(event))
+            store.close()
+
+            connection = sqlite3.connect(db_path)
+            try:
+                payload = connection.execute(
+                    "SELECT payload_json FROM market_events WHERE dedupe_key=?",
+                    (event.dedupe_key,),
+                ).fetchone()[0]
+                marker = '"event_id":"e1"'
+                self.assertIn(marker, payload)
+                ambiguous = payload.replace(
+                    marker,
+                    '"event_id":"tampered","event_id":"e1"',
+                    1,
+                )
+                connection.execute(
+                    "UPDATE market_events SET payload_json=? WHERE dedupe_key=?",
+                    (ambiguous, event.dedupe_key),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "duplicate object key: event_id"):
+                SQLiteMarketStore(db_path)
 
     def test_reopen_fails_closed_on_redundant_history_column_tamper(self):
         tamper_cases = (

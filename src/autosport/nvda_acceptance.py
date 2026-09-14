@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
+import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -76,6 +78,31 @@ def _strict_json_object_bytes(payload: bytes, *, context: str) -> dict[str, Any]
     return value
 
 
+def _snapshot_release_zip(release_zip: Path) -> tuple[Path, str]:
+    """Copy one already-open release file to a private snapshot while hashing those exact bytes."""
+
+    digest = hashlib.sha256()
+    fd, temporary_name = tempfile.mkstemp(prefix="autosport-nvda-candidate-", suffix=".zip")
+    snapshot = Path(temporary_name)
+    try:
+        with release_zip.open("rb") as source, os.fdopen(fd, "wb") as destination:
+            fd = -1
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+                destination.write(chunk)
+            destination.flush()
+            os.fsync(destination.fileno())
+        return snapshot, digest.hexdigest()
+    except Exception:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            snapshot.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def _load_candidate_identity(
     release_zip: str | Path,
     *,
@@ -83,6 +110,10 @@ def _load_candidate_identity(
     expected_package_sha256: str,
 ) -> dict[str, str]:
     """Bind one release ZIP to caller-supplied expected source/package identities.
+
+    The release path is opened once and copied to a private immutable snapshot while those
+    exact bytes are hashed. All subsequent structural/package verification uses only that
+    snapshot, preventing a path replacement from mixing identities across verification steps.
 
     This proves equality to the supplied anchors. It cannot prove where those anchors came
     from; physical-release procedure must obtain them independently from canonical control
@@ -100,39 +131,47 @@ def _load_candidate_identity(
         field="expected package SHA-256",
     )
     release_zip = Path(release_zip)
-    package_sha = sha256_file(release_zip)
-    if package_sha != expected_package_sha256:
-        raise ValueError("release ZIP SHA-256 does not match supplied expected package SHA-256")
+    snapshot: Path | None = None
+    try:
+        snapshot, package_sha = _snapshot_release_zip(release_zip)
+        if package_sha != expected_package_sha256:
+            raise ValueError("release ZIP SHA-256 does not match supplied expected package SHA-256")
 
-    with zipfile.ZipFile(release_zip, "r") as archive:
-        names = [item.filename for item in archive.infolist() if not item.is_dir()]
-        if len(names) != len(set(names)):
-            raise ValueError("release ZIP contains duplicate members")
-        for required in (_BUILD_INFO_MEMBER, _EXE_MEMBER):
-            if required not in names:
-                raise ValueError(f"release ZIP is missing {required}")
-        build_info = _strict_json_object_bytes(
-            archive.read(_BUILD_INFO_MEMBER),
-            context="release BUILD_INFO.json",
-        )
-        source_sha = build_info.get("source_sha")
-        exe_sha = build_info.get("autosport_exe_sha256")
-        if not isinstance(source_sha, str):
-            raise ValueError("release BUILD_INFO source_sha is missing")
-        source_sha = _require_hex_digest(source_sha, length=40, field="release BUILD_INFO source_sha")
-        if source_sha != expected_source_sha:
-            raise ValueError("release BUILD_INFO source_sha does not match supplied expected source SHA")
-        if not isinstance(exe_sha, str):
-            raise ValueError("release BUILD_INFO autosport_exe_sha256 is invalid")
-        exe_sha = _require_hex_digest(exe_sha, length=64, field="release BUILD_INFO autosport_exe_sha256")
+        with zipfile.ZipFile(snapshot, "r") as archive:
+            names = [item.filename for item in archive.infolist() if not item.is_dir()]
+            if len(names) != len(set(names)):
+                raise ValueError("release ZIP contains duplicate members")
+            for required in (_BUILD_INFO_MEMBER, _EXE_MEMBER):
+                if required not in names:
+                    raise ValueError(f"release ZIP is missing {required}")
+            build_info = _strict_json_object_bytes(
+                archive.read(_BUILD_INFO_MEMBER),
+                context="release BUILD_INFO.json",
+            )
+            source_sha = build_info.get("source_sha")
+            exe_sha = build_info.get("autosport_exe_sha256")
+            if not isinstance(source_sha, str):
+                raise ValueError("release BUILD_INFO source_sha is missing")
+            source_sha = _require_hex_digest(source_sha, length=40, field="release BUILD_INFO source_sha")
+            if source_sha != expected_source_sha:
+                raise ValueError("release BUILD_INFO source_sha does not match supplied expected source SHA")
+            if not isinstance(exe_sha, str):
+                raise ValueError("release BUILD_INFO autosport_exe_sha256 is invalid")
+            exe_sha = _require_hex_digest(exe_sha, length=64, field="release BUILD_INFO autosport_exe_sha256")
 
-    verify_windows_package(release_zip, expected_source_sha=expected_source_sha)
-    verify_portable_data_tool(release_zip)
-    return {
-        "package_sha256": package_sha,
-        "source_sha": source_sha,
-        "autosport_exe_sha256": exe_sha,
-    }
+        verify_windows_package(snapshot, expected_source_sha=expected_source_sha)
+        verify_portable_data_tool(snapshot)
+        return {
+            "package_sha256": package_sha,
+            "source_sha": source_sha,
+            "autosport_exe_sha256": exe_sha,
+        }
+    finally:
+        if snapshot is not None:
+            try:
+                snapshot.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def create_template(

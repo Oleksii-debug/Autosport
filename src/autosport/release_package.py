@@ -189,7 +189,13 @@ def verify_windows_package(
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")
 
     manifest = _decode_json_object(members["PACKAGE_MANIFEST.json"], "PACKAGE_MANIFEST.json")
-    if manifest.get("schema_version") != 1 or not isinstance(manifest.get("files"), dict):
+    schema_version = manifest.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != 1
+        or not isinstance(manifest.get("files"), dict)
+    ):
         raise ValueError("PACKAGE_MANIFEST schema is invalid")
     manifest_files = {str(key): str(value) for key, value in manifest["files"].items()}
     expected_manifest_files = set(members).difference({"PACKAGE_MANIFEST.json", "SHA256SUMS.txt"})

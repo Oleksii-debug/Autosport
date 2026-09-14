@@ -288,6 +288,10 @@ def _validate_market_binding(
         event = latest_quotes.get(leg.quote_key)
         if event is None:
             raise ValueError(f"research candidate quote absent from replay state: {leg.quote_key}")
+        if leg.ticket_identity() != (event.event_id, event.market_id, event.selection_id):
+            raise ValueError(
+                f"research candidate structured identity does not match replay state: {leg.quote_key}"
+            )
         if event.status != "open":
             raise ValueError(
                 f"research candidate quote is not open market state: {leg.quote_key}"
@@ -425,12 +429,61 @@ def _validate_scenario_space_binding(
                 f"{event_id}|{market_id}: missing={','.join(missing)}"
             )
 
+        market_prefix = f"{event_id}|{market_id}|"
         for quote_key in sorted(outcome_keys - replay_market_keys):
-            parts = quote_key.split("|", 2)
-            if len(parts) == 3 and parts[0] == event_id and parts[1] == market_id:
+            if quote_key.startswith(market_prefix) and quote_key[len(market_prefix) :]:
                 raise ValueError(
                     f"research scenario outcome absent from replay state: {quote_key}"
                 )
+
+
+def _canonical_identity_field(raw: dict[str, Any], field_name: str) -> str:
+    value = raw.get(field_name)
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise ValueError(
+            f"research candidate {field_name} must be a non-empty canonical string"
+        )
+    return value
+
+
+def _candidate_leg_from_dict(raw: Any) -> CandidateLeg:
+    if not isinstance(raw, dict):
+        raise ValueError("research candidate leg must be an object")
+    quote_key = raw.get("quote_key")
+    if not isinstance(quote_key, str) or not quote_key or quote_key.strip() != quote_key:
+        raise ValueError("research candidate quote_key must be a non-empty canonical string")
+
+    present = [field in raw for field in ("event_id", "market_id", "selection_id")]
+    if any(present) and not all(present):
+        raise ValueError(
+            "research candidate event_id, market_id, and selection_id must be provided together"
+        )
+    if all(present):
+        event_id = _canonical_identity_field(raw, "event_id")
+        market_id = _canonical_identity_field(raw, "market_id")
+        selection_id = _canonical_identity_field(raw, "selection_id")
+        if quote_key != f"{event_id}|{market_id}|{selection_id}":
+            raise ValueError(
+                "research candidate structured event/market/selection identity does not match quote_key"
+            )
+    else:
+        parts = quote_key.split("|")
+        if len(parts) != 3 or not all(parts):
+            raise ValueError(
+                "research candidate with ambiguous quote_key requires structured event_id, market_id, and selection_id"
+            )
+        event_id, market_id, selection_id = parts
+
+    odds = Decimal(str(raw["decimal_odds"]))
+    probability = Decimal(str(raw["probability"]))
+    return CandidateLeg(
+        quote_key,
+        event_id,
+        odds,
+        probability,
+        market_id,
+        selection_id,
+    )
 
 
 def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
@@ -446,18 +499,10 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
     combined_odds = Decimal("1")
     combined_probability = Decimal("1")
     for item in legs_raw:
-        if not isinstance(item, dict):
-            raise ValueError("research candidate leg must be an object")
-        quote_key = str(item["quote_key"])
-        parts = quote_key.split("|", 2)
-        if len(parts) != 3 or not all(parts):
-            raise ValueError("research candidate quote_key must be event|market|selection")
-        odds = Decimal(str(item["decimal_odds"]))
-        probability = Decimal(str(item["probability"]))
-        leg = CandidateLeg(quote_key, parts[0], odds, probability)
+        leg = _candidate_leg_from_dict(item)
         legs.append(leg)
-        combined_odds *= odds
-        combined_probability *= probability
+        combined_odds *= leg.decimal_odds
+        combined_probability *= leg.probability
     candidate = ParlayCandidate(
         tuple(legs),
         combined_odds,

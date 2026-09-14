@@ -6,7 +6,7 @@ from time import perf_counter
 from typing import Callable
 
 from .ingestion_health import IngestionPolicy, SourceHealthStore, parse_source_timestamp
-from .market_bus import MarketEventBus
+from .market_bus import MarketEventBus, MarketEventDeliveryError
 from .providers import CanonicalNormalizer, MarketProvider
 
 
@@ -107,10 +107,18 @@ class IngestionEngine:
                 self.health_store.record_failure(provider.source_id, now=now, error=exc)
             raise
 
-        # Persistence and subscriber delivery are local pipeline stages. A failure here
-        # must still propagate, but it must not be attributed to provider health after
-        # acquisition/validation/normalization already succeeded.
-        accepted = self.bus.publish_many(normalized)
+        # Persistence failures are local pipeline failures and must escape without
+        # fabricating provider success. A MarketEventDeliveryError is different: its
+        # accepted_count is the exact storage-derived durable outcome, and delivery
+        # failed only after persistence. Record the provider's successful poll before
+        # re-raising that consumer failure.
+        delivery_error: MarketEventDeliveryError | None = None
+        try:
+            accepted = self.bus.publish_many(normalized)
+        except MarketEventDeliveryError as exc:
+            accepted = exc.accepted_count
+            delivery_error = exc
+
         elapsed = perf_counter() - started
         ordered_flags = tuple(sorted(flags))
         health_status = "degraded" if ordered_flags else "healthy"
@@ -126,6 +134,10 @@ class IngestionEngine:
                 quality_flags=ordered_flags,
             )
             health_status = state.status
+
+        if delivery_error is not None:
+            raise delivery_error
+
         return IngestionStats(
             batch.source_id,
             len(batch.quotes),

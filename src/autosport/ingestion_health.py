@@ -142,6 +142,10 @@ class SourceHealthState:
 
         successful_polls = self.poll_count - self.total_failures
         if successful_polls == 0:
+            if self.total_failures > 0 and self.consecutive_failures != self.total_failures:
+                raise ValueError(
+                    "source health without successful polls requires all failures to be consecutive"
+                )
             if self.last_success_at is not None:
                 raise ValueError("source health without successful polls cannot have last_success_at")
             if self.total_received or self.total_accepted or self.total_rejected:

@@ -80,6 +80,41 @@ class ParlayApiBoundedSnapshotDrainTests(unittest.TestCase):
         self.assertEqual(next_snapshot.cursor, "2026-09-14T08:00:20+00:00")
         self.assertEqual(next_snapshot.quality_flags, ())
 
+    def test_exact_limit_completes_snapshot_without_false_truncation(self):
+        calls: list[str] = []
+        payloads = iter(
+            [
+                [self._event("event-1", ["A", "B"])],
+                [self._event("event-2", ["C"])],
+            ]
+        )
+        clock_values = iter(
+            [
+                "2026-09-14T08:00:10+00:00",
+                "2026-09-14T08:00:20+00:00",
+            ]
+        )
+
+        def transport(url, headers, timeout):
+            calls.append(url)
+            return HttpJsonResponse(next(payloads), 200, {})
+
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=transport,
+            clock=lambda: next(clock_values),
+        )
+
+        exact = provider.read_batch(max_items=2)
+        self.assertEqual(len(exact.quotes), 2)
+        self.assertEqual(exact.quality_flags, ())
+        self.assertEqual(len(calls), 1)
+
+        next_snapshot = provider.read_batch(max_items=2)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([quote.provider_event_id for quote in next_snapshot.quotes], ["event-2"])
+        self.assertEqual(next_snapshot.cursor, "2026-09-14T08:00:20+00:00")
+
     def test_ingestion_persists_every_quote_from_bounded_snapshot(self):
         calls: list[str] = []
         payload = [self._event("event-1", ["A", "B", "C", "D", "E"])]

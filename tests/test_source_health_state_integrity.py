@@ -46,7 +46,7 @@ class SourceHealthStateIntegrityTests(unittest.TestCase):
             self.assertEqual(state.poll_count, 2)
             self.assertEqual(state.quality_flags, ("PROVIDER_SEQUENCE_GAP",))
 
-    def test_scalar_quality_flags_fail_closed(self):
+    def test_existing_corrupt_state_fails_during_store_initialization(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "source-health.json"
             state = self._valid_state()
@@ -54,7 +54,7 @@ class SourceHealthStateIntegrityTests(unittest.TestCase):
             self._write_state(path, state)
 
             with self.assertRaisesRegex(ValueError, "invalid source health state"):
-                SourceHealthStore(path).get("source")
+                SourceHealthStore(path)
 
     def test_persisted_source_identity_must_match_map_key(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,7 +64,7 @@ class SourceHealthStateIntegrityTests(unittest.TestCase):
             self._write_state(path, state)
 
             with self.assertRaisesRegex(ValueError, "invalid source health state"):
-                SourceHealthStore(path).get("source")
+                SourceHealthStore(path)
 
     def test_malformed_counters_and_cross_field_totals_fail_closed(self):
         cases = (
@@ -82,7 +82,7 @@ class SourceHealthStateIntegrityTests(unittest.TestCase):
                     self._write_state(path, state)
 
                     with self.assertRaisesRegex(ValueError, "invalid source health state"):
-                        SourceHealthStore(path).get("source")
+                        SourceHealthStore(path)
 
     def test_invalid_persisted_status_and_timestamps_fail_closed(self):
         cases = (
@@ -100,7 +100,7 @@ class SourceHealthStateIntegrityTests(unittest.TestCase):
                     self._write_state(path, state)
 
                     with self.assertRaisesRegex(ValueError, "invalid source health state"):
-                        SourceHealthStore(path).get("source")
+                        SourceHealthStore(path)
 
     def test_schema_drift_in_persisted_state_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -109,13 +109,25 @@ class SourceHealthStateIntegrityTests(unittest.TestCase):
             missing.pop("last_cursor")
             self._write_state(path, missing)
             with self.assertRaisesRegex(ValueError, "invalid source health state"):
-                SourceHealthStore(path).get("source")
+                SourceHealthStore(path)
 
             extra = self._valid_state()
             extra["unexpected"] = "value"
             self._write_state(path, extra)
             with self.assertRaisesRegex(ValueError, "invalid source health state"):
-                SourceHealthStore(path).get("source")
+                SourceHealthStore(path)
+
+    def test_schema_version_requires_exact_non_boolean_integer(self):
+        for version in (True, 1.0, "1"):
+            with self.subTest(version=version):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "source-health.json"
+                    path.write_text(
+                        json.dumps({"schema_version": version, "sources": {}}),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, "invalid source health store"):
+                        SourceHealthStore(path)
 
     def test_duplicate_and_nonfinite_json_evidence_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -125,13 +137,13 @@ class SourceHealthStateIntegrityTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "invalid source health store"):
-                SourceHealthStore(path).get("source")
+                SourceHealthStore(path)
 
             state = self._valid_state()
             state["total_received"] = float("nan")
             self._write_state(path, state)
             with self.assertRaisesRegex(ValueError, "invalid source health store"):
-                SourceHealthStore(path).get("source")
+                SourceHealthStore(path)
 
     def test_runtime_record_success_rejects_ambiguous_inputs_before_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:

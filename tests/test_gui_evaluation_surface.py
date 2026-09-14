@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,8 +36,26 @@ def _result(*, mode: str, result_path: Path):
     )
 
 
+def _write_run_summary(path: Path) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "market_price_truth": {
+                    "price_semantics": "unspecified_or_mixed_observation",
+                    "executable_quote_verified": False,
+                    "paper_fill_fidelity_verified": False,
+                    "source_ids": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_evaluation_lines_publish_terminal_paper_metrics_and_truth_boundary(tmp_path: Path):
-    lines = evaluation_lines(_result(mode="exact", result_path=tmp_path / "missing-run-summary.json"))
+    result_path = _write_run_summary(tmp_path / "run-summary.json")
+    lines = evaluation_lines(_result(mode="exact", result_path=result_path))
 
     assert lines[0] == "Replay 12345678 | events 17 | settled tickets 2"
     assert "initial 10000" in lines[1]
@@ -54,7 +73,8 @@ def test_evaluation_lines_publish_terminal_paper_metrics_and_truth_boundary(tmp_
 
 
 def test_approximate_portfolio_never_presents_sampled_bounds_as_guarantees(tmp_path: Path):
-    lines = evaluation_lines(_result(mode="approximate", result_path=tmp_path / "missing-run-summary.json"))
+    result_path = _write_run_summary(tmp_path / "run-summary.json")
+    lines = evaluation_lines(_result(mode="approximate", result_path=result_path))
 
     assert "approximate — сценарії sampled" in lines[3]
     assert "гарантії worst/best не заявляються" in lines[3]
@@ -62,6 +82,57 @@ def test_approximate_portfolio_never_presents_sampled_bounds_as_guarantees(tmp_p
     assert "executable quote verified=false" in lines[4]
     assert "paper fill fidelity verified=false" in lines[4]
     assert "не є доказом майбутньої profitability" in lines[5]
+
+
+def test_evaluation_lines_fail_closed_when_run_summary_evidence_is_missing(tmp_path: Path):
+    lines = evaluation_lines(_result(mode="exact", result_path=tmp_path / "missing-run-summary.json"))
+
+    assert lines[4] == "Price truth | ERROR — run summary evidence is missing or unreadable."
+
+
+def test_evaluation_lines_fail_closed_when_run_summary_evidence_is_unreadable(tmp_path: Path):
+    lines = evaluation_lines(_result(mode="exact", result_path=tmp_path))
+
+    assert lines[4] == "Price truth | ERROR — run summary evidence is missing or unreadable."
+
+
+def test_evaluation_lines_fail_closed_when_run_summary_is_not_utf8(tmp_path: Path):
+    result_path = tmp_path / "corrupt-run-summary.json"
+    result_path.write_bytes(b"\xff\xfe\x00\x80")
+
+    lines = evaluation_lines(_result(mode="exact", result_path=result_path))
+
+    assert lines[4] == "Price truth | ERROR — run summary evidence is missing or unreadable."
+
+
+def test_evaluation_lines_reject_duplicate_run_summary_keys(tmp_path: Path):
+    result_path = tmp_path / "duplicate-run-summary.json"
+    result_path.write_text(
+        '{"market_price_truth": {}, "market_price_truth": {}}',
+        encoding="utf-8",
+    )
+
+    lines = evaluation_lines(_result(mode="exact", result_path=result_path))
+
+    assert lines[4] == (
+        "Price truth | ERROR — run summary JSON is ambiguous or non-canonical: "
+        "duplicate object key: market_price_truth."
+    )
+
+
+def test_evaluation_lines_reject_nonfinite_json_constants(tmp_path: Path):
+    result_path = tmp_path / "nonfinite-run-summary.json"
+    result_path.write_text(
+        '{"market_price_truth": {"price_semantics": NaN}}',
+        encoding="utf-8",
+    )
+
+    lines = evaluation_lines(_result(mode="exact", result_path=result_path))
+
+    assert lines[4] == (
+        "Price truth | ERROR — run summary JSON is ambiguous or non-canonical: "
+        "non-finite JSON constant: NaN."
+    )
 
 
 def test_gui_wires_evaluation_to_keyboard_uia_and_terminal_result_without_tk_startup():

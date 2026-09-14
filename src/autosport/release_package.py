@@ -278,9 +278,9 @@ def build_windows_package(
 
     lines = []
     for path in _sorted_package_files(package_dir):
-        if path.name == "SHA256SUMS.txt":
-            continue
         relative = path.relative_to(package_dir).as_posix()
+        if relative == "SHA256SUMS.txt":
+            continue
         lines.append(f"{sha256_file(path)}  {relative}")
     (package_dir / "SHA256SUMS.txt").write_text(
         "\n".join(lines) + "\n",

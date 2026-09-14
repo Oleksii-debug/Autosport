@@ -95,6 +95,7 @@ def _verified_base_members(
     """Verify and return members plus evidence from one immutable ZIP snapshot."""
 
     base_bytes = package.read_bytes()
+    captured_sha = _sha256_bytes(base_bytes)
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{package.name}.verify.",
         suffix=".zip",
@@ -117,6 +118,10 @@ def _verified_base_members(
             snapshot,
             expected_source_sha=build_info.get("source_sha"),
         )
+        if verification.get("package_sha256") != captured_sha:
+            raise ValueError(
+                "release package verification snapshot does not match captured package bytes"
+            )
         return members, build_info, verification
     finally:
         if snapshot.exists():

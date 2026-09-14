@@ -94,7 +94,7 @@ class ReplayJsonlIntegrityTests(unittest.TestCase):
             payload = json.dumps(self._event_payload())
             payload = payload.replace(
                 '"provider_sequence": 7',
-                r'"provider_sequence": "\ud800"',
+                r'"provider_sequence": "\ud800"'.replace(r'\"', '"'),
             )
             path.write_text(payload + "\n", encoding="utf-8")
 

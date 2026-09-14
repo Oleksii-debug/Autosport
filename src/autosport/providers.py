@@ -25,6 +25,14 @@ def _validate_provider_component(value: object, name: str) -> str:
     return value
 
 
+def _validate_sequence(value: object) -> int:
+    """Keep provider sequence identity stable across JSON/SQLite round trips."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("sequence must be a non-boolean int")
+    return value
+
+
 def _escape_identity_component(value: str) -> str:
     """Escape provider-component delimiters so structured identity remains injective.
 
@@ -65,6 +73,7 @@ class ProviderQuote:
         _validate_provider_component(self.provider_event_id, "provider_event_id")
         _validate_provider_component(self.provider_market_id, "provider_market_id")
         _validate_provider_component(self.provider_selection_id, "provider_selection_id")
+        _validate_sequence(self.sequence)
 
 
 @dataclass(frozen=True, slots=True)

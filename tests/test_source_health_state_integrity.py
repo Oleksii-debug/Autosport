@@ -106,11 +106,70 @@ class SourceHealthStateIntegrityTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "invalid source health state"):
                         SourceHealthStore(path)
 
-    def test_canonical_failed_state_is_accepted(self):
+    def test_poll_history_evidence_must_match_success_and_failure_counts(self):
+        cases = (
+            {
+                "poll_count": 1,
+                "total_failures": 1,
+                "consecutive_failures": 1,
+                "status": "failed",
+                "last_success_at": "2026-09-14T00:00:00+00:00",
+                "last_error": "RuntimeError: boom",
+                "total_received": 0,
+                "total_accepted": 0,
+                "total_rejected": 0,
+                "quality_flags": [],
+            },
+            {
+                "poll_count": 1,
+                "total_failures": 1,
+                "consecutive_failures": 1,
+                "status": "failed",
+                "last_success_at": None,
+                "last_error": "RuntimeError: boom",
+                "total_received": 1,
+                "total_accepted": 1,
+                "total_rejected": 0,
+                "quality_flags": [],
+            },
+            {
+                "poll_count": 1,
+                "total_failures": 1,
+                "consecutive_failures": 1,
+                "status": "failed",
+                "last_success_at": None,
+                "last_error": "RuntimeError: boom",
+                "total_received": 0,
+                "total_accepted": 0,
+                "total_rejected": 0,
+                "quality_flags": ["GAP"],
+            },
+            {
+                "poll_count": 1,
+                "total_failures": 0,
+                "consecutive_failures": 0,
+                "status": "healthy",
+                "last_error_at": "2026-09-13T23:59:00+00:00",
+                "quality_flags": [],
+            },
+            {"last_success_at": None},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "source-health.json"
+                    state = self._valid_state()
+                    state.update(changes)
+                    self._write_state(path, state)
+
+                    with self.assertRaisesRegex(ValueError, "invalid source health state"):
+                        SourceHealthStore(path)
+
+    def test_canonical_failed_states_are_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "source-health.json"
-            state = self._valid_state()
-            state.update(
+            after_success = self._valid_state()
+            after_success.update(
                 {
                     "status": "failed",
                     "poll_count": 3,
@@ -120,13 +179,37 @@ class SourceHealthStateIntegrityTests(unittest.TestCase):
                     "last_error": "RuntimeError: provider unavailable",
                 }
             )
-            self._write_state(path, state)
-
+            self._write_state(path, after_success)
             reopened = SourceHealthStore(path).get("source")
-
             self.assertEqual(reopened.status, "failed")
             self.assertEqual(reopened.consecutive_failures, 1)
             self.assertEqual(reopened.total_failures, 2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "source-health.json"
+            first_poll_failed = self._valid_state()
+            first_poll_failed.update(
+                {
+                    "status": "failed",
+                    "poll_count": 1,
+                    "total_received": 0,
+                    "total_accepted": 0,
+                    "total_rejected": 0,
+                    "total_failures": 1,
+                    "consecutive_failures": 1,
+                    "last_success_at": None,
+                    "last_error_at": "2026-09-14T00:01:00+00:00",
+                    "last_error": "RuntimeError: provider unavailable",
+                    "last_cursor": None,
+                    "latest_source_ts": None,
+                    "quality_flags": [],
+                }
+            )
+            self._write_state(path, first_poll_failed)
+            reopened = SourceHealthStore(path).get("source")
+            self.assertEqual(reopened.status, "failed")
+            self.assertEqual(reopened.poll_count, 1)
+            self.assertEqual(reopened.total_failures, 1)
 
     def test_invalid_persisted_status_and_timestamps_fail_closed(self):
         cases = (

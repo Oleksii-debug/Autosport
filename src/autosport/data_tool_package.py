@@ -8,7 +8,11 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from autosport.release_package import _decode_json_object, _validate_windows_member
+from autosport.release_package import (
+    _decode_json_object,
+    _validate_windows_member,
+    verify_windows_package,
+)
 
 
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
@@ -73,7 +77,7 @@ def _write_deterministic(package_zip: Path, members: dict[str, bytes]) -> None:
 
 
 def bind_portable_data_tool(package_zip: str | Path, data_exe: str | Path) -> dict[str, str]:
-    """Add the console data tool and rebuild release integrity metadata deterministically."""
+    """Add the console data tool only after the base release package verifies cleanly."""
 
     package = Path(package_zip)
     data_path = Path(data_exe)
@@ -85,9 +89,14 @@ def bind_portable_data_tool(package_zip: str | Path, data_exe: str | Path) -> di
     for required in (_BUILD_INFO, _MANIFEST, _SUMS, "Autosport.exe"):
         if required not in members:
             raise ValueError(f"base release package is missing required member: {required}")
-    members[_DATA_TOOL] = data_bytes
 
     build_info = _decode_json_object(members[_BUILD_INFO], _BUILD_INFO)
+    verify_windows_package(
+        package,
+        expected_source_sha=build_info.get("source_sha"),
+    )
+
+    members[_DATA_TOOL] = data_bytes
     data_sha = _sha256_bytes(data_bytes)
     build_info["autosport_data_exe_sha256"] = data_sha
     build_info["portable_historical_data_tools"] = True

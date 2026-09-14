@@ -133,21 +133,16 @@ class SQLiteMarketStore:
         self.path = Path(path)
         self.connection = sqlite3.connect(self.path)
         try:
-            self.connection.execute("PRAGMA journal_mode=WAL").close()
-            self.connection.execute("PRAGMA synchronous=FULL").close()
+            self.connection.execute("PRAGMA journal_mode=WAL")
+            self.connection.execute("PRAGMA synchronous=FULL")
             self._init_schema()
             self._rebuild_current_quotes()
         except Exception:
-            # A constructor failure can stay reachable through the caller's
-            # exception traceback. Release both SQLite's native handle and the
-            # partially-built object's reference so Windows can immediately
-            # reopen/remove the database after a fail-closed integrity check.
             self.connection.close()
-            del self.connection
             raise
 
     def _init_schema(self) -> None:
-        cursor = self.connection.executescript(
+        self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS market_events (
                 dedupe_key TEXT PRIMARY KEY,
@@ -175,22 +170,16 @@ class SQLiteMarketStore:
             );
             """
         )
-        cursor.close()
         self.connection.commit()
 
     def _rebuild_current_quotes(self) -> None:
         """Repair current projection from one write-locked physical-time history snapshot."""
         latest: dict[str, tuple[tuple[datetime, int, str], MarketEvent]] = {}
-        self.connection.execute("BEGIN IMMEDIATE").close()
+        self.connection.execute("BEGIN IMMEDIATE")
         try:
-            cursor = self.connection.execute(
+            rows = self.connection.execute(
                 f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
-            )
-            try:
-                rows = cursor.fetchall()
-            finally:
-                cursor.close()
-
+            ).fetchall()
             for row in rows:
                 event = _event_from_history_row(row)
                 order_key = _event_order_key(event)
@@ -198,14 +187,14 @@ class SQLiteMarketStore:
                 if previous is None or order_key > previous[0]:
                     latest[event.quote_key] = (order_key, event)
 
-            self.connection.execute("DELETE FROM current_quotes").close()
+            self.connection.execute("DELETE FROM current_quotes")
             for quote_key in sorted(latest):
                 event = latest[quote_key][1]
                 payload = _canonical_payload(event)
                 self.connection.execute(
                     "INSERT INTO current_quotes(quote_key,observed_ts,sequence,payload_json) VALUES (?,?,?,?)",
                     (quote_key, event.observed_ts, event.sequence, payload),
-                ).close()
+                )
         except Exception:
             self.connection.rollback()
             raise
@@ -233,19 +222,11 @@ class SQLiteMarketStore:
                 payload,
             ),
         )
-        try:
-            inserted = cursor.rowcount != 0
-        finally:
-            cursor.close()
-        if not inserted:
-            cursor = self.connection.execute(
+        if cursor.rowcount == 0:
+            existing = self.connection.execute(
                 f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE dedupe_key=?",
                 (event.dedupe_key,),
-            )
-            try:
-                existing = cursor.fetchone()
-            finally:
-                cursor.close()
+            ).fetchone()
             if existing is None:
                 raise RuntimeError("market event dedupe conflict row disappeared")
             existing_event = _event_from_history_row(existing)
@@ -255,14 +236,10 @@ class SQLiteMarketStore:
                     f"{event.dedupe_key}"
                 )
             return False
-        cursor = self.connection.execute(
+        previous = self.connection.execute(
             "SELECT payload_json FROM current_quotes WHERE quote_key=?",
             (event.quote_key,),
-        )
-        try:
-            previous = cursor.fetchone()
-        finally:
-            cursor.close()
+        ).fetchone()
         previous_event = MarketEvent.from_dict(json.loads(previous[0])) if previous is not None else None
         if previous_event is None or incoming_key > _event_order_key(previous_event):
             self.connection.execute(
@@ -271,7 +248,7 @@ class SQLiteMarketStore:
                    ON CONFLICT(quote_key) DO UPDATE SET
                    observed_ts=excluded.observed_ts, sequence=excluded.sequence, payload_json=excluded.payload_json""",
                 (event.quote_key, event.observed_ts, event.sequence, payload),
-            ).close()
+            )
         return True
 
     def append(self, event: MarketEvent) -> bool:
@@ -292,27 +269,19 @@ class SQLiteMarketStore:
 
     def events(self, event_id: str | None = None) -> list[MarketEvent]:
         if event_id is None:
-            cursor = self.connection.execute(
+            rows = self.connection.execute(
                 f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
-            )
+            ).fetchall()
         else:
-            cursor = self.connection.execute(
+            rows = self.connection.execute(
                 f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE event_id=?",
                 (event_id,),
-            )
-        try:
-            rows = cursor.fetchall()
-        finally:
-            cursor.close()
+            ).fetchall()
         events = [_event_from_history_row(row) for row in rows]
         return sorted(events, key=_event_order_key)
 
     def current(self) -> dict[str, MarketEvent]:
-        cursor = self.connection.execute("SELECT quote_key,payload_json FROM current_quotes")
-        try:
-            rows = cursor.fetchall()
-        finally:
-            cursor.close()
+        rows = self.connection.execute("SELECT quote_key,payload_json FROM current_quotes").fetchall()
         current: dict[str, MarketEvent] = {}
         for quote_key, payload_json in rows:
             event = MarketEvent.from_dict(json.loads(payload_json))

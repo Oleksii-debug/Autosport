@@ -36,7 +36,15 @@ def _evaluation_decimal_context() -> Context:
 
 def _validated_evaluation_state(
     book: PaperBook,
-) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal, tuple[PaperTicket, ...]]:
+) -> tuple[
+    Decimal,
+    Decimal,
+    Decimal,
+    Decimal,
+    Decimal,
+    tuple[PaperTicket, ...],
+    Decimal,
+]:
     """Validate the mutable paper ledger and derive finite evaluation economics.
 
     Evaluation is durable product evidence, so it must not trust a mutable
@@ -58,7 +66,9 @@ def _validated_evaluation_state(
             initial_bankroll = book.initial_bankroll
             final_balance = book.balance
             committed_stake = book.committed_stake
-            settled = tuple(ticket for ticket in tickets.values() if ticket.status is not TicketStatus.OPEN)
+            settled = tuple(
+                ticket for ticket in tickets.values() if ticket.status is not TicketStatus.OPEN
+            )
             settled_stake = sum((ticket.stake for ticket in settled), Decimal("0"))
             net_profit = final_balance + committed_stake - initial_bankroll
             roi = (net_profit / settled_stake) if settled_stake else Decimal("0")
@@ -85,7 +95,8 @@ def _validated_evaluation_state(
         settled_stake,
         net_profit,
         settled,
-    ) + (roi,)
+        roi,
+    )
 
 
 def evaluate(book: PaperBook) -> EvaluationSummary:

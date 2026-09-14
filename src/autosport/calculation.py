@@ -17,8 +17,12 @@ from typing import Mapping, Sequence
 
 
 _CALCULATION_VERSION = 1
+_ENGINE_VERSION = "calculation-engine-v1"
 _MAX_SIGNIFICANT_DIGITS = 80
 _MAX_ADJUSTED_EXPONENT = 100
+_MAX_MARKET_SELECTIONS = 1_000
+_MAX_SERIES_ITEMS = 10_000
+_MAX_PARLAY_LEGS = 100
 _CONTEXT = Context(prec=160, Emin=-999, Emax=999)
 _CONTEXT.traps[InvalidOperation] = True
 _CONTEXT.traps[Overflow] = True
@@ -29,6 +33,7 @@ _CONTEXT.traps[Underflow] = True
 class CalculationResult:
     calculation_id: str
     version: int
+    engine_version: str
     method: str
     classification: str
     inputs: tuple[tuple[str, str], ...]
@@ -48,6 +53,7 @@ class CalculationResult:
         return {
             "calculation_id": self.calculation_id,
             "version": self.version,
+            "engine_version": self.engine_version,
             "method": self.method,
             "classification": self.classification,
             "inputs": dict(self.inputs),
@@ -66,9 +72,56 @@ class CalculationEngine:
 
     Inputs deliberately reject binary floats and booleans. Money-like values are
     represented as Decimal text and exact calculations fail closed if the private
-    Decimal context would round. Division-based calculations are explicitly
-    labelled approximate_decimal rather than being presented as exact arithmetic.
+    Decimal context would round. Division/statistical-model calculations are
+    explicitly labelled approximate_decimal rather than being presented as exact.
     """
+
+    def odds_conversion(self, decimal_odds: Decimal | str | int) -> CalculationResult:
+        """Convert decimal odds without silently applying bookmaker rounding conventions."""
+
+        odds = _decimal(decimal_odds, field="decimal_odds", greater_than=Decimal("1"))
+        net = odds - Decimal("1")
+        numerator, denominator = net.as_integer_ratio()
+        fractional_numerator = Decimal(numerator)
+        fractional_denominator = Decimal(denominator)
+        if odds >= Decimal("2"):
+            with localcontext(_CONTEXT) as ctx:
+                ctx.clear_flags()
+                american = net * Decimal("100")
+                if ctx.flags[Inexact]:
+                    raise ValueError("odds conversion would require rounding")
+            classification = "exact"
+            warnings: tuple[str, ...] = (
+                "American output is the unrounded mathematical conversion; bookmaker display conventions may round it",
+            )
+        else:
+            american = _divide(Decimal("-100"), net)
+            classification = "approximate_decimal"
+            warnings = (
+                "American output is the unrounded mathematical conversion in the deterministic decimal context",
+                "bookmaker display conventions may round American odds",
+            )
+        return _result(
+            calculation_id="odds_conversion",
+            method="decimal_to_fractional_and_american_unrounded",
+            classification=classification,
+            inputs={"decimal_odds": odds},
+            input_units={"decimal_odds": "decimal_odds"},
+            assumptions=("decimal odds are the supplied analysis input",),
+            outputs={
+                "decimal_odds": odds,
+                "fractional_numerator": fractional_numerator,
+                "fractional_denominator": fractional_denominator,
+                "american_odds_unrounded": american,
+            },
+            output_units={
+                "decimal_odds": "decimal_odds",
+                "fractional_numerator": "fractional_odds_numerator",
+                "fractional_denominator": "fractional_odds_denominator",
+                "american_odds_unrounded": "american_odds",
+            },
+            warnings=warnings,
+        )
 
     def implied_probability(self, decimal_odds: Decimal | str | int) -> CalculationResult:
         odds = _decimal(decimal_odds, field="decimal_odds", greater_than=Decimal("1"))
@@ -97,6 +150,8 @@ class CalculationEngine:
     ) -> CalculationResult:
         if not isinstance(selection_odds, Mapping) or len(selection_odds) < 2:
             raise ValueError("multiplicative de-vig requires at least two selections")
+        if len(selection_odds) > _MAX_MARKET_SELECTIONS:
+            raise ValueError("multiplicative de-vig selection count exceeds the supported limit")
         normalized: dict[str, Decimal] = {}
         for raw_key, raw_odds in selection_odds.items():
             key = _text_key(raw_key, field="selection")
@@ -152,13 +207,16 @@ class CalculationEngine:
         )
         odds = _decimal(decimal_odds, field="decimal_odds", greater_than=Decimal("1"))
         stake_value = _decimal(stake, field="stake", minimum=Decimal("0"))
-        with localcontext(_CONTEXT) as ctx:
-            ctx.clear_flags()
-            expected_return_per_unit = p * odds
-            expected_profit_per_unit = expected_return_per_unit - Decimal("1")
-            expected_profit = expected_profit_per_unit * stake_value
-            if ctx.flags[Inexact]:
-                raise ValueError("expected-return arithmetic would require rounding")
+        try:
+            with localcontext(_CONTEXT) as ctx:
+                ctx.clear_flags()
+                expected_return_per_unit = p * odds
+                expected_profit_per_unit = expected_return_per_unit - Decimal("1")
+                expected_profit = expected_profit_per_unit * stake_value
+                if ctx.flags[Inexact]:
+                    raise ValueError("expected-return arithmetic would require rounding")
+        except DecimalException as exc:
+            raise ValueError("expected-return arithmetic is outside the supported decimal range") from exc
         return _result(
             calculation_id="expected_return",
             method="bernoulli_expected_return",
@@ -189,12 +247,15 @@ class CalculationEngine:
     ) -> CalculationResult:
         stake_value = _decimal(stake, field="stake", minimum=Decimal("0"))
         odds = _decimal(decimal_odds, field="decimal_odds", greater_than=Decimal("1"))
-        with localcontext(_CONTEXT) as ctx:
-            ctx.clear_flags()
-            payout = stake_value * odds
-            profit = payout - stake_value
-            if ctx.flags[Inexact]:
-                raise ValueError("paper payout arithmetic would require rounding")
+        try:
+            with localcontext(_CONTEXT) as ctx:
+                ctx.clear_flags()
+                payout = stake_value * odds
+                profit = payout - stake_value
+                if ctx.flags[Inexact]:
+                    raise ValueError("paper payout arithmetic would require rounding")
+        except DecimalException as exc:
+            raise ValueError("paper payout arithmetic is outside the supported decimal range") from exc
         return _result(
             calculation_id="paper_payout",
             method="decimal_odds_payout",
@@ -232,11 +293,14 @@ class CalculationEngine:
             minimum=Decimal("0"),
             maximum=Decimal("1"),
         )
-        with localcontext(_CONTEXT):
-            edge = p * odds - Decimal("1")
-            raw_kelly = Decimal("0") if edge <= 0 else _divide(edge, odds - Decimal("1"))
-            fractional = raw_kelly * fraction_value
-            recommended = min(fractional, cap_value)
+        try:
+            with localcontext(_CONTEXT):
+                edge = p * odds - Decimal("1")
+                raw_kelly = Decimal("0") if edge <= 0 else _divide(edge, odds - Decimal("1"))
+                fractional = raw_kelly * fraction_value
+                recommended = min(fractional, cap_value)
+        except DecimalException as exc:
+            raise ValueError("Kelly arithmetic is outside the supported decimal range") from exc
         return _result(
             calculation_id="fractional_kelly",
             method="capped_fractional_kelly",
@@ -308,16 +372,222 @@ class CalculationEngine:
             warnings=("ratio division is rounded in the deterministic decimal context",),
         )
 
+    def return_dispersion(
+        self,
+        values: Sequence[Decimal | str | int],
+        *,
+        sample: bool = False,
+    ) -> CalculationResult:
+        series = _decimal_series(values, field="return", minimum=None)
+        if not isinstance(sample, bool):
+            raise ValueError("sample must be a boolean")
+        if sample and len(series) < 2:
+            raise ValueError("sample variance requires at least two observations")
+        denominator = len(series) - 1 if sample else len(series)
+        try:
+            with localcontext(_CONTEXT):
+                total = sum(series, Decimal("0"))
+                mean = total / Decimal(len(series))
+                squared = sum(((value - mean) * (value - mean) for value in series), Decimal("0"))
+                variance = squared / Decimal(denominator)
+                standard_deviation = variance.sqrt()
+        except DecimalException as exc:
+            raise ValueError("dispersion arithmetic is outside the supported decimal range") from exc
+        method = "sample_variance_n_minus_1" if sample else "population_variance_n"
+        assumptions = (
+            "the supplied return series is the complete population of interest",
+        ) if not sample else (
+            "the supplied return series is treated as a sample and uses the n-1 variance denominator",
+        )
+        return _result(
+            calculation_id="return_dispersion",
+            method=method,
+            classification="approximate_decimal",
+            inputs={f"return.{index}": value for index, value in enumerate(series)},
+            input_units={f"return.{index}": "return_value" for index in range(len(series))},
+            assumptions=assumptions,
+            outputs={
+                "count": Decimal(len(series)),
+                "mean": mean,
+                "variance": variance,
+                "standard_deviation": standard_deviation,
+            },
+            output_units={
+                "count": "count",
+                "mean": "return_value",
+                "variance": "return_value_squared",
+                "standard_deviation": "return_value",
+            },
+            warnings=("division and square-root operations are rounded in the deterministic decimal context",),
+        )
+
+    def normal_confidence_interval(
+        self,
+        mean: Decimal | str | int,
+        standard_error: Decimal | str | int,
+        z_multiplier: Decimal | str | int,
+        *,
+        assumption: str | None = None,
+    ) -> CalculationResult:
+        if assumption != "normal_approximation_acknowledged":
+            raise ValueError(
+                "normal confidence interval requires explicit assumption='normal_approximation_acknowledged'"
+            )
+        mean_value = _decimal(mean, field="mean")
+        standard_error_value = _decimal(
+            standard_error,
+            field="standard_error",
+            minimum=Decimal("0"),
+        )
+        z_value = _decimal(z_multiplier, field="z_multiplier", greater_than=Decimal("0"))
+        try:
+            with localcontext(_CONTEXT) as ctx:
+                ctx.clear_flags()
+                margin = standard_error_value * z_value
+                lower = mean_value - margin
+                upper = mean_value + margin
+                if ctx.flags[Inexact]:
+                    raise ValueError("confidence-interval arithmetic would require rounding")
+        except DecimalException as exc:
+            raise ValueError("confidence-interval arithmetic is outside the supported decimal range") from exc
+        return _result(
+            calculation_id="normal_confidence_interval",
+            method="caller_supplied_normal_z_interval",
+            classification="approximate_decimal",
+            inputs={
+                "mean": mean_value,
+                "standard_error": standard_error_value,
+                "z_multiplier": z_value,
+            },
+            input_units={
+                "mean": "analysis_value",
+                "standard_error": "analysis_value",
+                "z_multiplier": "standard_normal_multiplier",
+            },
+            assumptions=(
+                "caller explicitly acknowledges that a normal-approximation interval is appropriate for the supplied statistic",
+                "standard_error and z_multiplier are caller-supplied evidence and are not inferred by this calculator",
+            ),
+            outputs={
+                "lower_bound": lower,
+                "upper_bound": upper,
+                "margin": margin,
+                "mean": mean_value,
+            },
+            output_units={
+                "lower_bound": "analysis_value",
+                "upper_bound": "analysis_value",
+                "margin": "analysis_value",
+                "mean": "analysis_value",
+            },
+            warnings=(
+                "interval coverage is a modelling claim and is valid only when the caller's stated normal-approximation assumptions are justified",
+            ),
+        )
+
+    def paper_parlay(
+        self,
+        stake: Decimal | str | int,
+        decimal_odds: Sequence[Decimal | str | int],
+        *,
+        probabilities: Sequence[Decimal | str | int] | None = None,
+        probability_assumption: str | None = None,
+    ) -> CalculationResult:
+        odds_values = _decimal_series(
+            decimal_odds,
+            field="decimal_odds",
+            minimum=None,
+            greater_than=Decimal("1"),
+            minimum_items=2,
+            maximum_items=_MAX_PARLAY_LEGS,
+        )
+        stake_value = _decimal(stake, field="stake", minimum=Decimal("0"))
+        combined_odds = _exact_product(odds_values, context="parlay odds")
+        try:
+            with localcontext(_CONTEXT) as ctx:
+                ctx.clear_flags()
+                payout = stake_value * combined_odds
+                profit = payout - stake_value
+                if ctx.flags[Inexact]:
+                    raise ValueError("paper parlay payout arithmetic would require rounding")
+        except DecimalException as exc:
+            raise ValueError("paper parlay payout is outside the supported decimal range") from exc
+
+        inputs: dict[str, Decimal] = {"stake": stake_value}
+        input_units: dict[str, str] = {"stake": "paper_currency"}
+        for index, odds in enumerate(odds_values):
+            inputs[f"decimal_odds.{index}"] = odds
+            input_units[f"decimal_odds.{index}"] = "decimal_odds"
+        outputs: dict[str, Decimal] = {
+            "combined_decimal_odds": combined_odds,
+            "payout": payout,
+            "profit": profit,
+        }
+        output_units: dict[str, str] = {
+            "combined_decimal_odds": "decimal_odds",
+            "payout": "paper_currency",
+            "profit": "paper_currency",
+        }
+        if probabilities is None:
+            if probability_assumption is not None:
+                raise ValueError("probability_assumption requires supplied leg probabilities")
+            classification = "exact"
+            assumptions = (
+                "paper-only payout calculation; no joint probability or dependence model is applied",
+                "no real-money execution authority",
+            )
+            warnings: tuple[str, ...] = ()
+        else:
+            probability_values = _decimal_series(
+                probabilities,
+                field="probability",
+                minimum=Decimal("0"),
+                maximum=Decimal("1"),
+                minimum_items=2,
+                maximum_items=_MAX_PARLAY_LEGS,
+            )
+            if len(probability_values) != len(odds_values):
+                raise ValueError("parlay probabilities must match the number of odds legs")
+            if probability_assumption != "independent":
+                raise ValueError(
+                    "parlay joint probability requires explicit probability_assumption='independent'"
+                )
+            joint_probability = _approximate_product(probability_values, context="parlay probability")
+            outputs["joint_probability"] = joint_probability
+            output_units["joint_probability"] = "probability"
+            for index, probability in enumerate(probability_values):
+                inputs[f"probability.{index}"] = probability
+                input_units[f"probability.{index}"] = "probability"
+            classification = "approximate_decimal"
+            assumptions = (
+                "caller explicitly assumes all supplied parlay leg outcomes are mutually independent",
+                "paper research only; the independence assumption is not inferred or verified by this calculator",
+                "no real-money execution authority",
+            )
+            warnings = (
+                "joint probability is model-dependent and must not be used when material dependence exists between legs",
+            )
+        return _result(
+            calculation_id="paper_parlay",
+            method="decimal_odds_parlay_with_optional_independent_probability",
+            classification=classification,
+            inputs=inputs,
+            input_units=input_units,
+            assumptions=assumptions,
+            outputs=outputs,
+            output_units=output_units,
+            warnings=warnings,
+        )
+
     def maximum_drawdown(
         self,
         balances: Sequence[Decimal | str | int],
     ) -> CalculationResult:
-        if isinstance(balances, (str, bytes)) or not isinstance(balances, Sequence) or not balances:
-            raise ValueError("at least one balance is required")
-        values = [
-            _decimal(value, field=f"balance[{index}]", minimum=Decimal("0"))
-            for index, value in enumerate(balances)
-        ]
+        values = _decimal_series(
+            balances,
+            field="balance",
+            minimum=Decimal("0"),
+        )
         peak = values[0]
         max_absolute = Decimal("0")
         max_fraction = Decimal("0")
@@ -391,6 +661,36 @@ def _decimal(
     return parsed
 
 
+def _decimal_series(
+    values: Sequence[Decimal | str | int],
+    *,
+    field: str,
+    minimum: Decimal | None = None,
+    maximum: Decimal | None = None,
+    greater_than: Decimal | None = None,
+    minimum_items: int = 1,
+    maximum_items: int = _MAX_SERIES_ITEMS,
+) -> list[Decimal]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise ValueError(f"{field} series must be a sequence")
+    if len(values) < minimum_items:
+        if minimum_items == 1:
+            raise ValueError(f"at least one {field} is required")
+        raise ValueError(f"at least {minimum_items} {field} values are required")
+    if len(values) > maximum_items:
+        raise ValueError(f"{field} series exceeds the supported item limit")
+    return [
+        _decimal(
+            value,
+            field=f"{field}[{index}]",
+            minimum=minimum,
+            maximum=maximum,
+            greater_than=greater_than,
+        )
+        for index, value in enumerate(values)
+    ]
+
+
 def _divide(numerator: Decimal, denominator: Decimal) -> Decimal:
     if denominator == 0:
         raise ValueError("division by zero")
@@ -401,6 +701,35 @@ def _divide(numerator: Decimal, denominator: Decimal) -> Decimal:
         raise ValueError("calculation is outside the supported decimal range") from exc
     if not result.is_finite():
         raise ValueError("calculation produced a non-finite result")
+    return result
+
+
+def _exact_product(values: Sequence[Decimal], *, context: str) -> Decimal:
+    try:
+        with localcontext(_CONTEXT) as ctx:
+            ctx.clear_flags()
+            result = Decimal("1")
+            for value in values:
+                result *= value
+            if ctx.flags[Inexact]:
+                raise ValueError(f"{context} arithmetic would require rounding")
+    except DecimalException as exc:
+        raise ValueError(f"{context} is outside the supported decimal range") from exc
+    if not result.is_finite():
+        raise ValueError(f"{context} produced a non-finite result")
+    return result
+
+
+def _approximate_product(values: Sequence[Decimal], *, context: str) -> Decimal:
+    try:
+        with localcontext(_CONTEXT):
+            result = Decimal("1")
+            for value in values:
+                result *= value
+    except DecimalException as exc:
+        raise ValueError(f"{context} is outside the supported decimal range") from exc
+    if not result.is_finite():
+        raise ValueError(f"{context} produced a non-finite result")
     return result
 
 
@@ -451,6 +780,7 @@ def _result(
     input_payload = {
         "calculation_id": calculation_id,
         "version": _CALCULATION_VERSION,
+        "engine_version": _ENGINE_VERSION,
         "method": method,
         "inputs": dict(canonical_inputs),
         "input_units": dict(canonical_input_units),
@@ -469,6 +799,7 @@ def _result(
     return CalculationResult(
         calculation_id=calculation_id,
         version=_CALCULATION_VERSION,
+        engine_version=_ENGINE_VERSION,
         method=method,
         classification=classification,
         inputs=canonical_inputs,

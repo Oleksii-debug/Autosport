@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, DecimalException
+from decimal import Decimal, DecimalException, Overflow, Underflow, localcontext
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,15 +204,23 @@ class BeamParlayCandidateSearch:
     @staticmethod
     def _to_candidate(legs: tuple[CandidateLeg, ...]) -> ParlayCandidate:
         try:
-            odds = Decimal("1")
-            probability = Decimal("1")
-            for leg in legs:
-                odds *= leg.decimal_odds
-                probability *= leg.probability
-            expected_profit = probability * odds - Decimal("1")
+            with localcontext() as context:
+                context.clear_flags()
+                odds = Decimal("1")
+                probability = Decimal("1")
+                for leg in legs:
+                    odds *= leg.decimal_odds
+                    probability *= leg.probability
+                expected_profit = probability * odds - Decimal("1")
+                range_lost = context.flags[Overflow] or context.flags[Underflow]
         except DecimalException as exc:
             raise ValueError("candidate combined economics exceed Decimal range") from exc
-        if not odds.is_finite() or not probability.is_finite() or not expected_profit.is_finite():
+        if (
+            range_lost
+            or not odds.is_finite()
+            or not probability.is_finite()
+            or not expected_profit.is_finite()
+        ):
             raise ValueError("candidate combined economics exceed Decimal range")
         return ParlayCandidate(legs, odds, probability, expected_profit)
 

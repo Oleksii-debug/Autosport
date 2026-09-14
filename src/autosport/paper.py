@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from pathlib import Path
 
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
@@ -69,20 +69,27 @@ class PaperBook:
         if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")
         voids = void_quote_keys or set()
-        effective_odds = Decimal("1")
-        all_void = True
-        for leg in ticket.legs:
-            if leg.quote_key in voids:
-                continue
-            all_void = False
-            if leg.quote_key not in winning_quote_keys:
-                ticket.status = TicketStatus.LOST
-                ticket.payout = Decimal("0")
-                return ticket
-            effective_odds *= leg.locked_odds
-        ticket.payout = ticket.stake if all_void else ticket.stake * effective_odds
-        ticket.status = TicketStatus.VOID if all_void else TicketStatus.WON
-        self.balance += ticket.payout
+        effective_legs = tuple(leg for leg in ticket.legs if leg.quote_key not in voids)
+        if any(leg.quote_key not in winning_quote_keys for leg in effective_legs):
+            ticket.status = TicketStatus.LOST
+            ticket.payout = Decimal("0")
+            return ticket
+
+        status = TicketStatus.VOID if not effective_legs else TicketStatus.WON
+        try:
+            effective_odds = Decimal("1")
+            for leg in effective_legs:
+                effective_odds *= leg.locked_odds
+            payout = ticket.stake if status is TicketStatus.VOID else ticket.stake * effective_odds
+            self._require_finite(payout, f"settlement payout for ticket {ticket.ticket_id}")
+            new_balance = self.balance + payout
+            self._require_finite(new_balance, f"balance after settling ticket {ticket.ticket_id}")
+        except DecimalException as exc:
+            raise ValueError("PaperBook settlement arithmetic is not representable") from exc
+
+        ticket.payout = payout
+        ticket.status = status
+        self.balance = new_balance
         return ticket
 
     def save(self, path: str | Path) -> None:

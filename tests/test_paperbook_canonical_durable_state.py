@@ -4,7 +4,7 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
-from autosport.domain import TicketLeg
+from autosport.domain import TicketLeg, TicketStatus
 from autosport.paper import PaperBook
 
 
@@ -115,6 +115,34 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(ValueError, message):
                     PaperBook.load(self.path)
+
+    def test_settlement_arithmetic_failure_does_not_partially_mutate_ticket_or_balance(self) -> None:
+        book = PaperBook("9E+999999")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "4.5E+999999")
+        before_balance = book.balance
+
+        with self.assertRaisesRegex(ValueError, "settlement arithmetic is not representable"):
+            book.settle(ticket.ticket_id, {leg.quote_key})
+
+        self.assertEqual(book.balance, before_balance)
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+
+    def test_losing_ticket_does_not_evaluate_irrelevant_overflowing_win_product(self) -> None:
+        book = PaperBook("100")
+        legs = (
+            TicketLeg("event-1", "winner", "a", Decimal("9E+999999")),
+            TicketLeg("event-2", "winner", "b", Decimal("2")),
+            TicketLeg("event-3", "winner", "c", Decimal("2")),
+        )
+        ticket = book.open_ticket(legs, "10")
+
+        settled = book.settle(ticket.ticket_id, {legs[0].quote_key, legs[1].quote_key})
+
+        self.assertIs(settled.status, TicketStatus.LOST)
+        self.assertEqual(settled.payout, Decimal("0"))
+        self.assertEqual(book.balance, Decimal("90"))
 
     def test_save_revalidates_mutable_leg_identity_and_preserves_last_good_snapshot(self) -> None:
         book, ticket = self._valid_book()

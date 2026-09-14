@@ -54,6 +54,13 @@ class SettlementEngine:
         # directly, so record() is not the only ingress to this economic truth boundary.
         outcomes = self._validated_outcomes_snapshot(self.outcomes)
 
+        # The commit phase must not dispatch through caller-overridable PaperBook
+        # mutation behavior after a successful canonical preflight. A subclass can
+        # otherwise apply an earlier ticket and fail a later settle() call, recreating
+        # the partial-batch state this boundary exists to prevent.
+        if type(book) is not PaperBook:
+            raise ValueError("settlement book must be an exact PaperBook")
+
         # The commit phase below relies on stable canonical ticket identity and
         # lifecycle state. Reject caller-mutated PaperBook state before any
         # settlement mutation instead of discovering it after an earlier ticket

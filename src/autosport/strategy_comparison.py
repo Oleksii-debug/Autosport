@@ -8,9 +8,11 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable
 
+from .agents import agent_composition_sha256, validate_agent_names
 from .integrity import atomic_write_json
 from .price_truth import market_price_truth_from_run_summary
 from .run_transaction import RunTransaction
+from .strategies import strategy_spec
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +30,8 @@ class StrategyRunEvidence:
     event_count: int
     strategy_id: str
     canonical_strategy_id: str
+    agent_names: tuple[str, ...]
+    agent_composition_sha256: str
     research_plan_sha256: str | None
     price_semantics: str
     executable_quote_verified: bool
@@ -94,6 +98,25 @@ def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
     if runtime.get("strategy_id") != strategy_id:
         raise ValueError(f"{source}: strategy runtime identity mismatch")
     canonical_strategy_id = _required_text(runtime, "canonical_strategy_id", source)
+    try:
+        canonical_spec = strategy_spec(canonical_strategy_id)
+    except ValueError as exc:
+        raise ValueError(
+            f"{source}: canonical_strategy_id is not a registered canonical strategy"
+        ) from exc
+    raw_agent_names = runtime.get("agent_names")
+    if not isinstance(raw_agent_names, list):
+        raise ValueError(f"{source}: strategy_runtime.agent_names must be an ordered JSON array")
+    try:
+        agent_names = validate_agent_names(raw_agent_names)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{source}: strategy_runtime.agent_names is invalid: {exc}") from exc
+    if agent_names != canonical_spec.agent_names:
+        raise ValueError(
+            f"{source}: strategy runtime agent composition does not match canonical StrategySpec: "
+            f"expected={canonical_spec.agent_names!r} actual={agent_names!r}"
+        )
+    composition_sha256 = agent_composition_sha256(agent_names)
     research_plan_sha256 = _optional_hash(runtime.get("research_plan_sha256"), "research_plan_sha256", source)
 
     dataset_schema_version = _required_int(payload, "dataset_schema_version", source, minimum=1)
@@ -142,6 +165,8 @@ def load_strategy_run_summary(path: str | Path) -> StrategyRunEvidence:
         event_count=_required_int(payload, "event_count", source, minimum=1),
         strategy_id=strategy_id,
         canonical_strategy_id=canonical_strategy_id,
+        agent_names=agent_names,
+        agent_composition_sha256=composition_sha256,
         research_plan_sha256=research_plan_sha256,
         price_semantics=price_truth.price_semantics,
         executable_quote_verified=price_truth.executable_quote_verified,
@@ -200,6 +225,8 @@ def compare_strategy_runs(
             {
                 "strategy_id": item.strategy_id,
                 "canonical_strategy_id": item.canonical_strategy_id,
+                "agent_names": list(item.agent_names),
+                "agent_composition_sha256": item.agent_composition_sha256,
                 "research_plan_sha256": item.research_plan_sha256,
                 "run_id": item.run_id,
                 "summary_path": item.source_path,

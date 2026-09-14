@@ -57,21 +57,30 @@ def evaluate(book: PaperBook) -> EvaluationSummary:
             if not isinstance(ticket, PaperTicket) or not isinstance(ticket.status, TicketStatus):
                 raise TypeError("PaperBook contains a noncanonical ticket/status")
 
-        # Evaluation becomes durable run evidence. Re-prove the mutable PaperBook
-        # invariant immediately before calculating it, independent of caller
-        # Decimal traps/flags. Ledger aggregates and net profit must not be
-        # silently rounded; non-terminating ROI division may use normal rounding.
-        with localcontext(_evaluation_decimal_context(exact=True)):
+        # Re-prove the mutable PaperBook invariant immediately before evaluation,
+        # independent of caller Decimal traps/flags. The validator intentionally
+        # keeps canonical 28-digit rounding because PaperBook settlement/balance
+        # mutation uses that arithmetic and valid persisted books can contain its
+        # rounded results.
+        with localcontext(_evaluation_decimal_context()):
             PaperBook._validate_loaded_state(book)
             initial_bankroll = book.initial_bankroll
             final_balance = book.balance
-            committed_stake = book.committed_stake
             settled = tuple(
                 ticket for ticket in tickets.values() if ticket.status is not TicketStatus.OPEN
             )
+
+        # Newly published aggregate/profit evidence must not acquire additional
+        # silent rounding. If the canonical precision cannot represent these
+        # derived values exactly, fail closed instead of publishing path-dependent
+        # economic truth.
+        with localcontext(_evaluation_decimal_context(exact=True)):
+            committed_stake = book.committed_stake
             settled_stake = sum((ticket.stake for ticket in settled), Decimal("0"))
             net_profit = final_balance + committed_stake - initial_bankroll
 
+        # ROI is a ratio and can legitimately be non-terminating (for example
+        # -1 / 3), so canonical Decimal rounding is permitted only at this step.
         with localcontext(_evaluation_decimal_context()):
             roi = (net_profit / settled_stake) if settled_stake else Decimal("0")
     except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:

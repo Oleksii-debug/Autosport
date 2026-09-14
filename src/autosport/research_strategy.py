@@ -19,6 +19,19 @@ from .scenario_search import ScenarioGroup, ScenarioOutcome
 RESEARCH_STRATEGY_ID = "research-replay-v1"
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError(f"research strategy plan contains duplicate JSON key {key!r}")
+        payload[key] = value
+    return payload
+
+
+def _reject_non_finite_json(value: str) -> None:
+    raise ValueError(f"research strategy plan contains non-finite JSON value {value!r}")
+
+
 def _stable_event_projection(event: MarketEvent) -> dict[str, Any]:
     """Stable causal quote projection used to bind offline research evidence to replay state."""
 
@@ -138,7 +151,11 @@ class ResearchStrategyPlan:
     def from_path(cls, path: str | Path) -> "ResearchStrategyPlan":
         raw_bytes = Path(path).read_bytes()
         try:
-            raw = json.loads(raw_bytes.decode("utf-8"))
+            raw = json.loads(
+                raw_bytes.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_non_finite_json,
+            )
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("research strategy plan must be valid UTF-8 JSON") from exc
         canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

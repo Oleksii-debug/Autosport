@@ -6,6 +6,13 @@ import os
 from pathlib import Path
 
 from .integrity import sha256_file
+from .outcome_trust import (
+    OutcomeLineageBinding,
+    OutcomeLineageTrustError,
+    assert_compatible_outcome_lineages,
+    outcome_lineage_binding_from_payload,
+    outcome_lineage_payload,
+)
 
 
 _HEX_DIGITS = frozenset("0123456789abcdef")
@@ -29,6 +36,7 @@ _OPTIONAL_ENTRY_FIELDS = frozenset(
         "decision_ledger_sha256",
         "abort_reason",
         "reconciled_from_summary",
+        "outcome_lineage",
     }
 )
 _HASH_EVIDENCE_FIELDS = (
@@ -134,6 +142,12 @@ class RunRegistry:
             values.add(item["strategy_id"])
         return tuple(sorted(values))
 
+    def assert_outcome_lineage_compatible(self, binding: OutcomeLineageBinding) -> None:
+        """Reject a restart/fork before any new economic base is materialized."""
+        if not isinstance(binding, OutcomeLineageBinding):
+            raise ValueError("outcome lineage binding must be an OutcomeLineageBinding")
+        self._assert_outcome_lineage_compatible_state(self._read(), binding)
+
     def begin(
         self,
         market_sha256: str,
@@ -144,6 +158,7 @@ class RunRegistry:
         *,
         base_paper_book_sha256: str | None = None,
         base_decision_ledger_sha256: str | None = None,
+        outcome_lineage: OutcomeLineageBinding | None = None,
     ) -> str:
         _require_canonical_sha256("market_sha256", market_sha256)
         _require_canonical_sha256("results_sha256", results_sha256)
@@ -156,8 +171,12 @@ class RunRegistry:
         if base_paper_book_sha256 is not None:
             _require_canonical_sha256("base_paper_book_sha256", base_paper_book_sha256)
             _require_canonical_sha256("base_decision_ledger_sha256", base_decision_ledger_sha256)
+        if outcome_lineage is not None and not isinstance(outcome_lineage, OutcomeLineageBinding):
+            raise ValueError("outcome_lineage must be an OutcomeLineageBinding or null")
 
         state = self._read()
+        if outcome_lineage is not None:
+            self._assert_outcome_lineage_compatible_state(state, outcome_lineage)
         base_identity = self.experiment_identity(market_sha256, results_sha256, strategy_id)
         existing_pairs = [
             (key, item)
@@ -205,7 +224,10 @@ class RunRegistry:
         if base_paper_book_sha256 is not None:
             entry["base_paper_book_sha256"] = base_paper_book_sha256
             entry["base_decision_ledger_sha256"] = base_decision_ledger_sha256
+        if outcome_lineage is not None:
+            entry["outcome_lineage"] = outcome_lineage_payload(outcome_lineage)
         state["runs"][key] = entry
+        self._validate_entry(key, entry)
         self._write(state)
         return key
 
@@ -382,6 +404,24 @@ class RunRegistry:
         self._validate_entry(key, item)
         self._write(state)
 
+    @staticmethod
+    def _assert_outcome_lineage_compatible_state(
+        state: dict,
+        incoming: OutcomeLineageBinding,
+    ) -> None:
+        for item in state["runs"].values():
+            raw_lineage = item.get("outcome_lineage")
+            if raw_lineage is None:
+                continue
+            try:
+                trusted = outcome_lineage_binding_from_payload(
+                    raw_lineage,
+                    context="run registry outcome_lineage",
+                )
+                assert_compatible_outcome_lineages(trusted, incoming)
+            except OutcomeLineageTrustError:
+                raise
+
     def _validate_entry(self, key: object, item: object) -> None:
         if not isinstance(key, str) or not key:
             raise ValueError("run registry contains an invalid experiment key")
@@ -418,6 +458,14 @@ class RunRegistry:
             if field_name in item and not _is_canonical_sha256(item[field_name]):
                 raise ValueError(f"run registry contains invalid {field_name}")
 
+        if "outcome_lineage" in item:
+            try:
+                outcome_lineage_binding_from_payload(
+                    item["outcome_lineage"],
+                    context="run registry outcome_lineage",
+                )
+            except OutcomeLineageTrustError as exc:
+                raise ValueError("run registry contains invalid outcome lineage evidence") from exc
         if "result_path" in item and item["result_path"] is not None and not isinstance(item["result_path"], str):
             raise ValueError("run registry contains an invalid result_path")
         if "abort_reason" in item and not isinstance(item["abort_reason"], str):
@@ -508,12 +556,29 @@ class RunRegistry:
         ):
             raise ValueError("invalid run registry")
         seen_run_ids: set[str] = set()
+        longest_lineage_by_identity: dict[tuple[str, str], OutcomeLineageBinding] = {}
         for key, item in raw["runs"].items():
             self._validate_entry(key, item)
             run_id = item["run_id"]
             if run_id in seen_run_ids:
                 raise ValueError("run registry contains duplicate run_id evidence")
             seen_run_ids.add(run_id)
+            raw_lineage = item.get("outcome_lineage")
+            if raw_lineage is None:
+                continue
+            try:
+                lineage = outcome_lineage_binding_from_payload(
+                    raw_lineage,
+                    context="run registry outcome_lineage",
+                )
+                identity = (lineage.source_identity, lineage.record_id)
+                trusted = longest_lineage_by_identity.get(identity)
+                if trusted is not None:
+                    assert_compatible_outcome_lineages(trusted, lineage)
+                if trusted is None or len(lineage.revisions) > len(trusted.revisions):
+                    longest_lineage_by_identity[identity] = lineage
+            except OutcomeLineageTrustError as exc:
+                raise ValueError("run registry contains conflicting outcome lineage evidence") from exc
         return raw
 
     def _write(self, raw: dict) -> None:

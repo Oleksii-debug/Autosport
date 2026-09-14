@@ -3,11 +3,41 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from decimal import Decimal, DecimalException
+from decimal import (
+    Context,
+    Decimal,
+    DecimalException,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    ROUND_HALF_EVEN,
+    Underflow,
+    localcontext,
+)
+from fractions import Fraction
 from pathlib import Path
 
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
 from .forecasting import parse_iso_timestamp
+
+
+_PAPER_DECIMAL_PRECISION = 28
+_PAPER_DECIMAL_EMIN = -999999
+_PAPER_DECIMAL_EMAX = 999999
+
+
+def _paper_decimal_context() -> Context:
+    context = Context(
+        prec=_PAPER_DECIMAL_PRECISION,
+        rounding=ROUND_HALF_EVEN,
+        Emin=_PAPER_DECIMAL_EMIN,
+        Emax=_PAPER_DECIMAL_EMAX,
+    )
+    context.traps[InvalidOperation] = True
+    context.traps[Overflow] = True
+    context.traps[Underflow] = True
+    context.clear_flags()
+    return context
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -42,10 +72,19 @@ class PaperBook:
     def open_ticket(self, legs, stake, reason: str = "", placed_at: str | None = None) -> PaperTicket:
         amount = Decimal(str(stake))
         self._require_finite(amount, "stake")
+        self._require_finite(self.balance, "balance")
         if amount <= 0:
             raise ValueError("stake must be positive")
         if amount > self.balance:
             raise ValueError("insufficient virtual bankroll")
+        try:
+            with localcontext(_paper_decimal_context()) as context:
+                new_balance = self.balance - amount
+                if context.flags[Inexact]:
+                    raise ValueError("PaperBook stake debit loses Decimal precision")
+        except DecimalException as exc:
+            raise ValueError("PaperBook stake debit arithmetic is not representable") from exc
+
         ticket_placed_at = self._validate_placed_at(
             placed_at if placed_at is not None else utc_now_iso()
         )
@@ -62,7 +101,7 @@ class PaperBook:
         ticket = PaperTicket(
             ticket_id=str(uuid.uuid4()), stake=amount, legs=ticket_legs, placed_at=ticket_placed_at, strategy_reason=reason
         )
-        self.balance -= amount
+        self.balance = new_balance
         self.tickets[ticket.ticket_id] = ticket
         return ticket
 
@@ -70,6 +109,7 @@ class PaperBook:
         ticket = self.tickets[ticket_id]
         if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")
+        self._require_finite(self.balance, "balance")
         voids = void_quote_keys or set()
         effective_legs = tuple(leg for leg in ticket.legs if leg.quote_key not in voids)
         if any(leg.quote_key not in winning_quote_keys for leg in effective_legs):
@@ -79,13 +119,16 @@ class PaperBook:
 
         status = TicketStatus.VOID if not effective_legs else TicketStatus.WON
         try:
-            effective_odds = Decimal("1")
-            for leg in effective_legs:
-                effective_odds *= leg.locked_odds
-            payout = ticket.stake if status is TicketStatus.VOID else ticket.stake * effective_odds
-            self._require_finite(payout, f"settlement payout for ticket {ticket.ticket_id}")
-            new_balance = self.balance + payout
-            self._require_finite(new_balance, f"balance after settling ticket {ticket.ticket_id}")
+            with localcontext(_paper_decimal_context()):
+                effective_odds = Decimal("1")
+                for leg in effective_legs:
+                    effective_odds *= leg.locked_odds
+                payout = ticket.stake if status is TicketStatus.VOID else ticket.stake * effective_odds
+                self._require_finite(payout, f"settlement payout for ticket {ticket.ticket_id}")
+                new_balance = self.balance + payout
+                self._require_finite(new_balance, f"balance after settling ticket {ticket.ticket_id}")
+                if payout != 0 and new_balance == self.balance:
+                    raise ValueError("PaperBook settlement payout loses all Decimal balance effect")
         except DecimalException as exc:
             raise ValueError("PaperBook settlement arithmetic is not representable") from exc
 
@@ -183,6 +226,55 @@ class PaperBook:
             raise ValueError("PaperBook snapshot decimal odds must be greater than 1")
         return leg
 
+    @staticmethod
+    def _balance_rounding_tolerance(
+        values: tuple[Decimal, ...],
+        operation_count: int,
+    ) -> Decimal:
+        if operation_count <= 0:
+            return Decimal("0")
+        max_adjusted = max(
+            (value.copy_abs().adjusted() for value in values if value != 0),
+            default=0,
+        )
+        # A snapshot records final ticket state, not settlement chronology. Every
+        # possible chronology sums the same finite cash-flow terms, but 28-digit
+        # Decimal addition is not associative. Bound every intermediate magnitude
+        # by (operation_count + 1) terms one decade above the largest observed term,
+        # then allow one full ULP per cash-flow operation. This is deliberately
+        # conservative (twice the usual half-ULP bound) while remaining many orders
+        # below a material balance mutation.
+        intermediate_adjusted_bound = (
+            max_adjusted + len(str(operation_count + 1)) + 1
+        )
+        ulp_exponent = (
+            intermediate_adjusted_bound - _PAPER_DECIMAL_PRECISION + 1
+        )
+        return Decimal(f"{operation_count}e{ulp_exponent}")
+
+    @classmethod
+    def _validate_balance_consistency(
+        cls,
+        book: "PaperBook",
+        cashflow_values: tuple[Decimal, ...],
+        operation_count: int,
+    ) -> None:
+        exact_balance = Fraction(book.initial_bankroll)
+        for ticket in book.tickets.values():
+            exact_balance -= Fraction(ticket.stake)
+            if ticket.status is not TicketStatus.OPEN:
+                exact_balance += Fraction(ticket.payout)
+
+        observed_balance = Fraction(book.balance)
+        difference = abs(observed_balance - exact_balance)
+        tolerance = Fraction(
+            cls._balance_rounding_tolerance(cashflow_values, operation_count)
+        )
+        if difference > tolerance:
+            raise ValueError(
+                "PaperBook snapshot balance is inconsistent with ticket stakes and settled payouts"
+            )
+
     @classmethod
     def _validate_loaded_state(cls, book: "PaperBook") -> None:
         cls._require_finite(book.initial_bankroll, "initial_bankroll")
@@ -194,7 +286,8 @@ class PaperBook:
         if type(book.tickets) is not dict:
             raise ValueError("PaperBook tickets must be a canonical ticket mapping")
 
-        expected_balance = book.initial_bankroll
+        cashflow_values: list[Decimal] = [book.initial_bankroll, book.balance]
+        operation_count = 0
         for ticket_key, ticket in book.tickets.items():
             cls._require_canonical_text(ticket_key, "ticket mapping key")
             if type(ticket) is not PaperTicket:
@@ -228,14 +321,17 @@ class PaperBook:
             if ticket.status is TicketStatus.WON and ticket.payout <= ticket.stake:
                 raise ValueError("PaperBook snapshot won ticket payout must exceed stake")
 
-            expected_balance -= ticket.stake
+            cashflow_values.append(ticket.stake)
+            operation_count += 1
             if ticket.status is not TicketStatus.OPEN:
-                expected_balance += ticket.payout
+                cashflow_values.append(ticket.payout)
+                operation_count += 1
 
-        if expected_balance != book.balance:
-            raise ValueError(
-                "PaperBook snapshot balance is inconsistent with ticket stakes and settled payouts"
-            )
+        cls._validate_balance_consistency(
+            book,
+            tuple(cashflow_values),
+            operation_count,
+        )
 
     @classmethod
     def load(cls, path: str | Path) -> "PaperBook":

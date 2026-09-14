@@ -250,6 +250,10 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
         except OSError as exc:
             raise RuntimeError("parent could not terminate process-kill stage payload") from exc
         killed_return_code = stage.wait(timeout=10.0)
+        if killed_return_code == 0:
+            raise RuntimeError(
+                "process-kill stage exited cleanly after intentional parent termination"
+            )
     finally:
         if stage.poll() is None:
             stage.kill()

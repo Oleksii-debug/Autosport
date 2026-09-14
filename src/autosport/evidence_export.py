@@ -76,14 +76,50 @@ def _canonical_source_names(workspace: Path) -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
-def _stable_stat_identity(left: os.stat_result, right: os.stat_result) -> bool:
+def _stable_stat_metadata(left: os.stat_result, right: os.stat_result) -> bool:
     return (
-        os.path.samestat(left, right)
-        and left.st_mode == right.st_mode
+        left.st_mode == right.st_mode
         and left.st_size == right.st_size
         and left.st_mtime_ns == right.st_mtime_ns
         and left.st_ctime_ns == right.st_ctime_ns
     )
+
+
+def _read_only_open_flags() -> int:
+    return os.O_RDONLY | getattr(os, "O_BINARY", 0)
+
+
+def _path_still_matches_open_file(
+    path: Path,
+    descriptor: int,
+    expected_path_stat: os.stat_result,
+) -> bool:
+    """Bind one lexical regular-file path to an already-open file handle.
+
+    Windows 3.12+ may obtain pathname stat data through a different filesystem
+    API than fstat(), and that path API can omit identity fields such as st_dev.
+    Comparing those two stat domains with os.path.samestat() can therefore reject
+    an unchanged file. Compare path metadata only with fresh path metadata, and
+    use two open handles for file identity instead.
+    """
+
+    current = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISREG(current.st_mode):
+        return False
+    if not _stable_stat_metadata(expected_path_stat, current):
+        return False
+
+    verification_descriptor = os.open(path, _read_only_open_flags())
+    try:
+        if not os.path.sameopenfile(descriptor, verification_descriptor):
+            return False
+        current_after_open = os.stat(path, follow_symlinks=False)
+        return stat.S_ISREG(current_after_open.st_mode) and _stable_stat_metadata(
+            expected_path_stat,
+            current_after_open,
+        )
+    finally:
+        os.close(verification_descriptor)
 
 
 def _open_and_hash_regular_file(path: Path) -> tuple[int, str]:
@@ -93,12 +129,15 @@ def _open_and_hash_regular_file(path: Path) -> tuple[int, str]:
     if not stat.S_ISREG(before.st_mode):
         raise ValueError(f"canonical evidence path is not a regular file: {path.name}")
 
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-    descriptor = os.open(path, flags)
+    descriptor = os.open(path, _read_only_open_flags())
     try:
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             opened = os.fstat(handle.fileno())
-            if not _stable_stat_identity(before, opened):
+            if not stat.S_ISREG(opened.st_mode) or not _path_still_matches_open_file(
+                path,
+                handle.fileno(),
+                before,
+            ):
                 raise ValueError(f"canonical evidence path changed before snapshot: {path.name}")
 
             digest = hashlib.sha256()
@@ -111,10 +150,9 @@ def _open_and_hash_regular_file(path: Path) -> tuple[int, str]:
                 digest.update(chunk)
 
             opened_after = os.fstat(handle.fileno())
-            if not _stable_stat_identity(opened, opened_after):
+            if not _stable_stat_metadata(opened, opened_after):
                 raise ValueError(f"canonical evidence file mutated during snapshot: {path.name}")
-            path_after = os.stat(path, follow_symlinks=False)
-            if not _stable_stat_identity(opened_after, path_after):
+            if not _path_still_matches_open_file(path, handle.fileno(), before):
                 raise ValueError(f"canonical evidence path changed during snapshot: {path.name}")
             return size, digest.hexdigest()
     finally:

@@ -160,6 +160,29 @@ class RunTransactionDecisionBindingTests(unittest.TestCase):
             self.assertEqual(manifest["phase"], "staging")
             self.assertFalse(tx.staged_summary_path.exists())
 
+    def test_precommit_rejects_semantically_invalid_post_stage_paper_book_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx, book_path, ledger_path = self._start_transaction(root, "current-run")
+            tx.stage_outputs(PaperBook.load(book_path), ledger_path)
+
+            replacement = json.loads(tx.staged_book_path.read_text(encoding="utf-8"))
+            replacement["balance"] = "-1"
+            tx.staged_book_path.write_text(
+                json.dumps(replacement, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "staged PaperBook semantic validation failed",
+            ):
+                tx.precommit(self._summary_payload())
+
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["phase"], "staging")
+            self.assertFalse(tx.staged_summary_path.exists())
+
     def test_precommit_rejects_post_stage_foreign_combined_ledger_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -258,6 +281,48 @@ class RunTransactionDecisionBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 RunTransactionError,
                 "staged run summary transaction identity mismatch: strategy_id",
+            ):
+                tx.commit()
+
+            self.assertEqual(sha256_file(book_path), base_book_hash)
+            self.assertEqual(sha256_file(ledger_path), base_ledger_hash)
+            self.assertFalse((root / "run-current-run.json").exists())
+
+    def test_commit_rejects_rehashed_semantically_invalid_paper_book_before_promotion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx, book_path, ledger_path = self._start_transaction(root, "current-run")
+            base_book_hash = sha256_file(book_path)
+            base_ledger_hash = sha256_file(ledger_path)
+            tx.stage_outputs(PaperBook.load(book_path), ledger_path)
+            tx.precommit(self._summary_payload())
+
+            tampered_book = json.loads(tx.staged_book_path.read_text(encoding="utf-8"))
+            tampered_book["balance"] = "-1"
+            tx.staged_book_path.write_text(
+                json.dumps(tampered_book, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            tampered_book_hash = sha256_file(tx.staged_book_path)
+
+            summary = json.loads(tx.staged_summary_path.read_text(encoding="utf-8"))
+            summary["paper_book_sha256"] = tampered_book_hash
+            tx.staged_summary_path.write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            manifest["new"]["paper_book_sha256"] = tampered_book_hash
+            manifest["new"]["summary_sha256"] = sha256_file(tx.staged_summary_path)
+            tx.manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "staged PaperBook semantic validation failed",
             ):
                 tx.commit()
 

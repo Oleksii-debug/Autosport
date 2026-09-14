@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 from typing import BinaryIO
 
@@ -28,8 +29,13 @@ class WorkspaceEconomicLock:
         if self._handle is not None:
             raise WorkspaceEconomicLockError("workspace economic lock is already held by this lock object")
         self.workspace.mkdir(parents=True, exist_ok=True)
+        self._validate_existing_lock_path()
         handle = self.path.open("a+b")
         try:
+            # Path.open() follows symlinks. Bind the opened handle back to the exact
+            # canonical workspace pathname before any sentinel byte is written so an
+            # unsafe alias cannot mutate an external file during lock initialization.
+            self._validate_open_handle_identity(handle)
             handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:
                 handle.write(b"\0")
@@ -37,6 +43,10 @@ class WorkspaceEconomicLock:
                 os.fsync(handle.fileno())
             handle.seek(0)
             self._lock_handle(handle)
+            # A pathname can be replaced between open and OS-lock acquisition. Recheck
+            # immediately after locking so successful acquire() never reports ownership
+            # of a different inode than the canonical workspace lock pathname.
+            self._validate_open_handle_identity(handle)
         except BaseException as acquire_error:
             try:
                 handle.close()
@@ -100,6 +110,47 @@ class WorkspaceEconomicLock:
             exc_value.add_note(
                 "WorkspaceEconomicLock release also failed while propagating the primary error: "
                 f"{type(release_error).__name__}: {release_error}"
+            )
+
+    def _validate_existing_lock_path(self) -> None:
+        """Reject unsafe aliases before opening the canonical lock pathname."""
+
+        try:
+            path_stat = os.stat(self.path, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise WorkspaceEconomicLockError(
+                "cannot inspect workspace economic lock path"
+            ) from exc
+        self._require_single_regular_file(path_stat)
+
+    def _validate_open_handle_identity(self, handle: BinaryIO) -> None:
+        """Prove the opened handle is the current canonical single-link lock file."""
+
+        try:
+            opened_stat = os.fstat(handle.fileno())
+            path_stat = os.stat(self.path, follow_symlinks=False)
+        except OSError as exc:
+            raise WorkspaceEconomicLockError(
+                "workspace economic lock path changed during acquisition"
+            ) from exc
+        self._require_single_regular_file(opened_stat)
+        self._require_single_regular_file(path_stat)
+        if not os.path.samestat(opened_stat, path_stat):
+            raise WorkspaceEconomicLockError(
+                "workspace economic lock path changed during acquisition"
+            )
+
+    @staticmethod
+    def _require_single_regular_file(path_stat: os.stat_result) -> None:
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise WorkspaceEconomicLockError(
+                "workspace economic lock path must be a regular non-symlink file"
+            )
+        if path_stat.st_nlink != 1:
+            raise WorkspaceEconomicLockError(
+                "workspace economic lock path must not have hard-link aliases"
             )
 
     @staticmethod

@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Context, Decimal, DecimalException, Overflow, ROUND_HALF_EVEN, Underflow, localcontext
+from decimal import (
+    Context,
+    Decimal,
+    DecimalException,
+    DivisionByZero,
+    InvalidOperation,
+    Overflow,
+    ROUND_HALF_EVEN,
+    Underflow,
+    localcontext,
+)
 
 
-# Candidate economics must not inherit precision, exponent range, rounding, or traps
-# from unrelated caller code. These values deliberately match Python's ordinary
-# Decimal default arithmetic so existing default-path economics stay unchanged.
+# Candidate economics must not inherit precision, exponent range, rounding, traps,
+# or flags from unrelated caller/default-context configuration. These values match
+# Python's standard Decimal defaults while remaining explicit and process-stable.
 _CANDIDATE_DECIMAL_CONTEXT = Context(
     prec=28,
     rounding=ROUND_HALF_EVEN,
@@ -14,6 +24,8 @@ _CANDIDATE_DECIMAL_CONTEXT = Context(
     Emax=999999,
     capitals=1,
     clamp=0,
+    flags=[],
+    traps=[InvalidOperation, DivisionByZero, Overflow],
 )
 
 

@@ -221,6 +221,22 @@ python scripts/package_windows.py `
   --source-sha $sourceSha `
   --verification-output $packageVerification
 if ($LASTEXITCODE -ne 0) { throw "Windows package assembly exited $LASTEXITCODE" }
+if (-not (Test-Path $packageVerification -PathType Leaf)) { throw 'Windows package assembly did not publish package-verification.json' }
+try {
+  $packageVerificationEvidence = Get-Content $packageVerification -Raw | ConvertFrom-Json
+} catch {
+  throw 'Windows package verification evidence is not readable JSON'
+}
+if ($packageVerificationEvidence.status -ne 'PASS') { throw 'Windows package verification evidence did not PASS' }
+if ($packageVerificationEvidence.source_sha -ne $sourceSha) { throw 'Windows package verification source_sha mismatch' }
+if ([string]$packageVerificationEvidence.package_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Windows package verification package_sha256 is invalid' }
+if ([string]$packageVerificationEvidence.autosport_exe_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Windows package verification Autosport.exe hash is invalid' }
+if ([string]$packageVerificationEvidence.autosport_data_exe_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Windows package verification Autosport-Data.exe hash is invalid' }
+if ($packageVerificationEvidence.portable_historical_data_tools -ne $true) { throw 'Windows package verification does not bind portable historical data tools' }
+if ($packageVerificationEvidence.real_money_execution -ne $false -or $packageVerificationEvidence.human_tested -ne $false -or $packageVerificationEvidence.nvda_verified -ne $false) {
+  throw 'Windows package verification violated release truth labels'
+}
+$verifiedPackageSha = [string]$packageVerificationEvidence.package_sha256
 
 # Binding release gate: verify the artifact after a clean extraction, not only the
 # pre-package executables. This catches archive/path/packaging defects that a
@@ -245,6 +261,8 @@ $extractedExeSha = (Get-FileHash -LiteralPath $extractedExe -Algorithm SHA256).H
 $extractedDataExeSha = (Get-FileHash -LiteralPath $extractedDataExe -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($extractedExeSha -ne $buildInfo.autosport_exe_sha256) { throw 'Fresh extraction Autosport.exe hash mismatch' }
 if ($extractedDataExeSha -ne $buildInfo.autosport_data_exe_sha256) { throw 'Fresh extraction Autosport-Data.exe hash mismatch' }
+if ($extractedExeSha -ne $packageVerificationEvidence.autosport_exe_sha256) { throw 'Fresh extraction Autosport.exe does not match package verification evidence' }
+if ($extractedDataExeSha -ne $packageVerificationEvidence.autosport_data_exe_sha256) { throw 'Fresh extraction Autosport-Data.exe does not match package verification evidence' }
 
 & $extractedDataExe --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe help exited $LASTEXITCODE" }
@@ -319,10 +337,14 @@ if ($freshRestartRecoveryEvidence.real_money_execution -ne $false -or $freshRest
 }
 Assert-ProcessRecoveryEvidence -Evidence $freshRestartRecoveryEvidence -Label 'Fresh-extracted restart/recovery audit'
 
+$finalPackageSha = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($finalPackageSha -ne $verifiedPackageSha) {
+  throw 'Final release package bytes do not match package verification evidence'
+}
 $freshEvidence = [ordered]@{
   status = 'PASS'
   source_sha = $sourceSha
-  package_sha256 = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+  package_sha256 = $finalPackageSha
   autosport_exe_sha256 = $extractedExeSha
   autosport_data_exe_sha256 = $extractedDataExeSha
   portable_historical_data_tools = $true

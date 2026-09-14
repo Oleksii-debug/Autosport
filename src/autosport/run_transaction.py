@@ -398,10 +398,31 @@ class RunTransaction:
         raise RunTransactionError(f"unsupported transaction phase: {phase}")
 
     def mark_registry_completed(self) -> None:
+        registry_item = self._completed_registry_item()
         self._require_complete_identity_anchor()
         manifest = self._read_manifest()
-        if manifest["phase"] != "canonical_committed":
+        if manifest["phase"] not in {"canonical_committed", "completed"}:
             raise RunTransactionError("canonical artifacts are not fully committed")
+        self._validate_manifest_paths(manifest)
+        self._validate_completed_registry_evidence(manifest, registry_item)
+        expected_book_hash = self._hash_field(manifest, "new", "paper_book_sha256")
+        expected_ledger_hash = self._hash_field(manifest, "new", "decision_ledger_sha256")
+        book_snapshot = self._verified_paper_book_snapshot(
+            self.workspace / "paper_book.json",
+            "canonical PaperBook",
+        )
+        if book_snapshot.sha256 != expected_book_hash:
+            raise RunTransactionError(
+                "completed registry PaperBook does not match transaction NEW"
+            )
+        self._require_decision_ledger_snapshot(
+            self.workspace / "decisions.jsonl",
+            expected_ledger_hash,
+            "Decision Ledger",
+        )
+        self._validate_precommit_evidence(manifest)
+        if manifest["phase"] == "completed":
+            return
         manifest["phase"] = "completed"
         atomic_write_json(self.manifest_path, manifest)
 
@@ -553,6 +574,68 @@ class RunTransaction:
             raise RunTransactionError("transaction commit lacks unique in-progress registry identity")
         experiment_key, item = matches[0]
         self._identity = self._identity_from_registry(item, experiment_key)
+
+    def _completed_registry_item(self) -> dict[str, Any]:
+        try:
+            from .run_registry import RunRegistry
+
+            registry = RunRegistry(self.workspace / "run_registry.json")
+            if self._identity is None:
+                manifest = self._read_manifest()
+                experiment_key = manifest.get("experiment_key")
+                if not isinstance(experiment_key, str) or not experiment_key:
+                    raise RunTransactionError(
+                        "transaction completion manifest lacks experiment identity"
+                    )
+            else:
+                experiment_key = self._identity.experiment_key
+            item = registry.get(experiment_key)
+        except RunTransactionError:
+            raise
+        except Exception as exc:
+            raise RunTransactionError(
+                "transaction completion cannot validate terminal registry identity"
+            ) from exc
+        if item.get("status") != "completed":
+            raise RunTransactionError(
+                "transaction completion requires a completed registry identity"
+            )
+        candidate_identity = self._identity_from_registry(item, experiment_key)
+        if self._identity is not None and candidate_identity != self._identity:
+            raise RunTransactionError("transaction completion registry identity mismatch")
+        self._identity = candidate_identity
+        return item
+
+    def _validate_completed_registry_evidence(
+        self,
+        manifest: dict[str, Any],
+        registry_item: dict[str, Any],
+    ) -> None:
+        expected = {
+            "paper_book_sha256": self._hash_field(manifest, "new", "paper_book_sha256"),
+            "decision_ledger_sha256": self._hash_field(
+                manifest,
+                "new",
+                "decision_ledger_sha256",
+            ),
+        }
+        mismatches = [
+            field
+            for field, expected_value in expected.items()
+            if registry_item.get(field) != expected_value
+        ]
+        result_path = registry_item.get("result_path")
+        expected_summary_name = f"run-{self.run_id}.json"
+        if (
+            not isinstance(result_path, str)
+            or not result_path
+            or result_path.replace("\\", "/").rsplit("/", 1)[-1] != expected_summary_name
+        ):
+            mismatches.append("result_path")
+        if mismatches:
+            raise RunTransactionError(
+                "completed registry evidence mismatch: " + ",".join(sorted(mismatches))
+            )
 
     def _validate_manifest_identity(
         self,

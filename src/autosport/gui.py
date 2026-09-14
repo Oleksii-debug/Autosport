@@ -323,7 +323,7 @@ class AutosportApp(tk.Tk):
             f"workspace: {self.session.workspace}"
         )
 
-    def _hide_uncertain_economic_state(self, ticket_message: str) -> None:
+    def _hide_uncertain_economic_state(self, ticket_message: str) -> bool:
         session = self.session
         self.session = None
         self.bank.set(
@@ -333,7 +333,7 @@ class AutosportApp(tk.Tk):
         self.tickets.delete(0, "end")
         self.tickets.insert("end", ticket_message)
         if session is None:
-            return
+            return True
         try:
             session.close()
         except Exception as exc:
@@ -343,6 +343,8 @@ class AutosportApp(tk.Tk):
                 "Economic session teardown після quarantine завершився помилкою; "
                 f"workspace={session_workspace}; secondary={type(exc).__name__}: {exc}"
             )
+            return False
+        return True
 
     def choose_dataset(self) -> None:
         if self.replay_worker.busy:
@@ -472,9 +474,21 @@ class AutosportApp(tk.Tk):
         self._active_strategy_id = strategy_id
         self._active_research_plan = research_plan
         self._recovery_required_workspaces.add(replay_workspace)
-        self._hide_uncertain_economic_state(
+        teardown_succeeded = self._hide_uncertain_economic_state(
             "Workspace recovery виконується; economic session state недоступний до завершення перевірки."
         )
+        if not teardown_succeeded:
+            detail = (
+                "Workspace recovery відхилено fail-closed: previous economic session teardown failed; "
+                "reconciliation/reopen не запускаються."
+            )
+            self.status.set(
+                "Workspace recovery не завершено: previous economic session teardown failed; "
+                "economic state лишається недоступним, а новий replay заблоковано."
+            )
+            self._append_log(detail)
+            messagebox.showerror("Автоспорт", detail)
+            return
 
         try:
             report = reconcile_late_crashes(replay_workspace)

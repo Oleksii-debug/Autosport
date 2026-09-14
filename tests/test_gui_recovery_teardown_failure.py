@@ -72,10 +72,14 @@ def test_uncertain_state_is_hidden_before_raising_session_teardown() -> None:
     app = _base_partial_app()
     stale = app.session
 
-    AutosportApp._hide_uncertain_economic_state(app, "ECONOMIC STATE QUARANTINED")
+    teardown_succeeded = AutosportApp._hide_uncertain_economic_state(
+        app,
+        "ECONOMIC STATE QUARANTINED",
+    )
 
     assert stale is not None
     assert stale.closed
+    assert teardown_succeeded is False
     assert app.session is None
     assert "9999" not in app.bank.value
     assert "недоступний" in app.bank.value
@@ -114,30 +118,30 @@ def test_replay_primary_error_survives_raising_session_teardown() -> None:
     )
 
 
-def test_recovery_continues_fail_closed_after_pre_reconcile_teardown_failure() -> None:
+def test_recovery_stops_before_reconcile_after_pre_reconcile_teardown_failure() -> None:
     app = _base_partial_app()
     app.replay_worker = SimpleNamespace(busy=False)
     app.live_worker = SimpleNamespace(busy=False)
     app._selected_replay_configuration = lambda: ("baseline-v1", None)
+    app._open_session = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("recovery must not reopen after teardown failure")
+    )
 
     exact_workspace = Path("economic-workspace")
     with (
         patch("autosport.gui.workspace_for_strategy", return_value=exact_workspace),
-        patch(
-            "autosport.gui.reconcile_late_crashes",
-            side_effect=RuntimeError("recovery validation failed"),
-        ) as reconcile,
+        patch("autosport.gui.reconcile_late_crashes") as reconcile,
         patch("autosport.gui.messagebox.showerror") as showerror,
     ):
         AutosportApp.repair_workspace(app)
 
-    reconcile.assert_called_once_with(exact_workspace)
+    reconcile.assert_not_called()
     assert app.session is None
     assert "9999" not in app.bank.value
     assert "недоступний" in app.bank.value
     assert exact_workspace in app._recovery_required_workspaces
     assert any("secondary=OSError: simulated session close failure" in line for line in app._logs)
-    assert any("Workspace recovery відхилено fail-closed: recovery validation failed" in line for line in app._logs)
+    assert any("session teardown" in line for line in app._logs)
     assert "не завершено" in app.status.value
-    assert showerror.call_count == 1
-    assert "recovery validation failed" in showerror.call_args.args[1]
+    showerror.assert_called_once()
+    assert "session teardown" in showerror.call_args.args[1]

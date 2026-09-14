@@ -6,7 +6,7 @@ import time
 import tracemalloc
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,11 @@ from .providers import InMemoryProvider, ProviderQuote
 from .replay import ReplayEngine
 from .settlement import SettlementEngine
 from .storage import SQLiteMarketStore
+
+
+_ENDURANCE_PAPER_DECIMAL_PRECISION = 28
+_ENDURANCE_PAPER_DECIMAL_EMIN = -999999
+_ENDURANCE_PAPER_DECIMAL_EMAX = 999999
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +135,34 @@ def _drain_provider(engine: IngestionEngine, provider: InMemoryProvider, batch_s
 def _fingerprint(payload: dict[str, Any]) -> str:
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _paper_economic_oracle_context() -> Context:
+    context = Context(
+        prec=_ENDURANCE_PAPER_DECIMAL_PRECISION,
+        rounding=ROUND_HALF_EVEN,
+        Emin=_ENDURANCE_PAPER_DECIMAL_EMIN,
+        Emax=_ENDURANCE_PAPER_DECIMAL_EMAX,
+    )
+    context.clear_flags()
+    return context
+
+
+def _expected_paper_economics(
+    initial_bankroll: Decimal,
+    payouts: tuple[Decimal, ...],
+) -> tuple[Decimal, Decimal]:
+    """Independently replay the endurance unit-stake economics under canonical precision."""
+
+    with localcontext(_paper_economic_oracle_context()):
+        payout_total = Decimal("0")
+        expected_balance = initial_bankroll
+        for _payout in payouts:
+            expected_balance -= Decimal("1")
+        for payout in payouts:
+            payout_total += payout
+            expected_balance += payout
+    return payout_total, expected_balance
 
 
 def run_endurance(
@@ -246,9 +279,9 @@ def run_endurance(
         expected_payout_by_quote_key = {
             event.quote_key: event.decimal_odds for event in ticket_events
         }
-        expected_payout_total = sum(expected_payout_by_quote_key.values(), Decimal("0"))
-        expected_paper_balance = (
-            paper_initial_bankroll - Decimal(cfg.paper_tickets) + expected_payout_total
+        expected_payout_total, expected_paper_balance = _expected_paper_economics(
+            paper_initial_bankroll,
+            tuple(expected_payout_by_quote_key.values()),
         )
         for event in ticket_events:
             book.open_ticket(
@@ -273,9 +306,11 @@ def run_endurance(
         paper_tickets_won = sum(
             ticket.status is TicketStatus.WON for ticket in book.tickets.values()
         )
-        paper_payout_total = sum(
-            (ticket.payout for ticket in book.tickets.values()), Decimal("0")
-        )
+        with localcontext(_paper_economic_oracle_context()):
+            paper_payout_total = sum(
+                (ticket.payout for ticket in book.tickets.values()), Decimal("0")
+            )
+        paper_payout_total_matches = paper_payout_total == expected_payout_total
         paper_path = primary / "paper_book.json"
         book.save(paper_path)
         restored_book = PaperBook.load(paper_path)
@@ -295,6 +330,7 @@ def run_endurance(
                 runtime_all_won,
                 runtime_payouts_match,
                 runtime_balance_matches,
+                paper_payout_total_matches,
                 restored_all_won,
                 restored_payouts_match,
                 restored_balance_matches,
@@ -343,6 +379,10 @@ def run_endurance(
             (
                 runtime_balance_matches,
                 f"PaperBook balance={book.balance} expected={expected_paper_balance}",
+            ),
+            (
+                paper_payout_total_matches,
+                f"PaperBook payout total={paper_payout_total} expected={expected_payout_total}",
             ),
             (restored_all_won, "restored PaperBook endurance tickets were not all WON"),
             (

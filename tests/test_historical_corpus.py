@@ -6,6 +6,7 @@ from pathlib import Path
 
 from autosport.dataset import load_dataset
 from autosport.historical_corpus import assemble_historical_corpus
+from autosport.outcome_revision import canonical_outcome_revision_id
 from autosport.parlayapi_provider import ParlayApiTableTennisProvider
 
 
@@ -79,6 +80,17 @@ def _write_results(
     quote_outcomes = {
         f"{event_id}|winner|alice": "win" for event_id in event_ids
     }
+    effective_at = "2026-01-01T10:59:00Z"
+    revision_id = (
+        canonical_outcome_revision_id(
+            source_identity="official-results:test-fixture",
+            kind="initial",
+            effective_at=effective_at,
+            quote_outcomes=quote_outcomes,
+        )
+        if quote_outcomes
+        else "0" * 64
+    )
     source_record.write_text(
         json.dumps(
             {
@@ -86,6 +98,15 @@ def _write_results(
                 "events": list(event_ids),
                 "quote_outcomes": quote_outcomes,
                 "fixture_only": True,
+                "revision": {
+                    "schema_version": 1,
+                    "kind": "initial",
+                    "effective_at": effective_at,
+                    "revision_id": revision_id,
+                    "supersedes_revision_id": None,
+                    "predecessor_record_file": None,
+                    "predecessor_record_sha256": None,
+                },
             },
             sort_keys=True,
         ),
@@ -97,6 +118,8 @@ def _write_results(
         "source_identity": "official-results:test-fixture",
         "source_record_file": source_record.name,
         "source_record_sha256": _sha256(source_record),
+        "outcome_revision_id": revision_id,
+        "outcome_lineage_root_revision_id": revision_id,
         "terms_reference": "https://example.test/results-terms",
         "retention_basis": "verified internal research retention for test outcome record",
         "authority_reference": "test-outcome-authority-record",
@@ -218,6 +241,13 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
             )
             self.assertTrue(outcome_evidence["source_record_checksum_verified"])
             self.assertTrue(outcome_evidence["quote_outcomes_bound_to_source_record"])
+            self.assertTrue(outcome_evidence["outcome_revision_chain_verified"])
+            self.assertEqual(outcome_evidence["outcome_revision_kind"], "initial")
+            self.assertEqual(outcome_evidence["outcome_revision_chain_length"], 1)
+            self.assertEqual(
+                outcome_evidence["outcome_revision_id"],
+                outcome_evidence["outcome_lineage_root_revision_id"],
+            )
             self.assertFalse(outcome_evidence["source_record_redistributed"])
             self.assertEqual(outcome_evidence["available_at"], "2026-01-01T11:00:00+00:00")
             self.assertTrue(outcome_evidence["licensing_or_retention_verified"])
@@ -228,6 +258,10 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
             self.assertEqual(
                 sealed["outcome_provenance"]["quote_outcomes_sha256"],
                 outcome_evidence["quote_outcomes_sha256"],
+            )
+            self.assertEqual(
+                sealed["outcome_provenance"]["outcome_revision_id"],
+                outcome_evidence["outcome_revision_id"],
             )
             self.assertEqual(manifest["import_identity"], dataset.import_identity)
 
@@ -390,7 +424,7 @@ class HistoricalCorpusAssemblerTests(unittest.TestCase):
             root = Path(tmp)
             snapshot = _write_snapshot(root)
             output = root / "corpus"
-            with self.assertRaisesRegex(ValueError, "missing quote outcomes"):
+            with self.assertRaisesRegex(ValueError, "quote_outcomes must be a non-empty object"):
                 assemble_historical_corpus(
                     [snapshot],
                     results_path=_write_results(root),

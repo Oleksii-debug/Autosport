@@ -245,6 +245,15 @@ def _outcome_provenance(
         path=source_record_path,
         context="sealed outcome source record",
     )
+    source_record_identity = _text(
+        source_record,
+        "source",
+        context="sealed outcome source record",
+    )
+    if source_record_identity != source_identity:
+        raise ValueError(
+            "sealed outcome source record.source must match sealed results outcome_provenance.source_identity"
+        )
     source_record_outcomes = source_record.get("quote_outcomes")
     if not isinstance(source_record_outcomes, dict):
         raise ValueError("sealed outcome source record quote_outcomes must be an object")

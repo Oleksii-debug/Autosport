@@ -14,6 +14,20 @@ from .ui_model import evaluation_lines, result_summary, ticket_lines
 WINDOWS_BANKROLL_AUTOMATION_ID = 205
 
 
+def _safe_exception_detail(exc: BaseException) -> str:
+    """Render fail-closed GUI diagnostics without trusting exception metadata."""
+
+    try:
+        exception_type = type.__getattribute__(type(exc), "__name__")
+    except BaseException:
+        exception_type = "BaseException"
+    try:
+        detail = str(exc)
+    except BaseException:
+        return f"{exception_type}: exception details unavailable"
+    return f"{exception_type}: {detail}"
+
+
 class WindowsAutosportApp(AutosportApp):
     """Windows product GUI with recovery orchestration kept off the Tk/UIA thread."""
 
@@ -202,7 +216,7 @@ class WindowsAutosportApp(AutosportApp):
                     self._block_workspace_for_recovery(prior_workspace)
                 detail = (
                     "Workspace recovery відхилено fail-closed: previous economic session teardown failed; "
-                    f"{type(exc).__name__}: {exc}"
+                    f"{_safe_exception_detail(exc)}"
                 )
                 self.status.set(
                     "Workspace recovery не запущено: previous economic session teardown failed; "

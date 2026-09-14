@@ -100,6 +100,9 @@ class SettlementEngine:
 
         settled: list[str] = []
         for ticket_id, winning, voids in plan:
-            book.settle(ticket_id, winning, voids)
+            # Dispatch through the canonical class boundary so an exact PaperBook
+            # instance cannot shadow ``settle`` in ``__dict__`` after preflight and
+            # reintroduce a partial batch during apply.
+            PaperBook.settle(book, ticket_id, winning, voids)
             settled.append(ticket_id)
         return settled

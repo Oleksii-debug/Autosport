@@ -7,6 +7,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from autosport.data_tool_package import bind_portable_data_tool
 from autosport.release_package import build_windows_package, verify_windows_package
 
 
@@ -14,10 +15,11 @@ class ReleasePackageNestedChecksumPayloadTests(unittest.TestCase):
     SOURCE_SHA = "a" * 40
     PREFIX = "Autosport-V1/"
 
-    def test_nested_sha256sums_payload_is_hashed_and_verifies(self) -> None:
+    def test_nested_sha256sums_payload_is_hashed_through_final_package_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             exe = root / "Autosport.exe"
+            data_exe = root / "Autosport-Data.exe"
             start = root / "WINDOWS_START_HERE.txt"
             diagnostic = root / "diagnostic.json"
             accessibility = root / "accessibility.json"
@@ -28,6 +30,7 @@ class ReleasePackageNestedChecksumPayloadTests(unittest.TestCase):
             package = root / "candidate.zip"
 
             exe.write_bytes(b"autosport-exe")
+            data_exe.write_bytes(b"autosport-data-exe")
             start.write_text("start\n", encoding="utf-8")
             nested.parent.mkdir(parents=True)
             nested.write_text("reference payload, not the package root checksum list\n", encoding="utf-8")
@@ -76,9 +79,18 @@ class ReleasePackageNestedChecksumPayloadTests(unittest.TestCase):
                 package,
                 self.SOURCE_SHA,
             )
+            base_report = verify_windows_package(
+                package,
+                expected_source_sha=self.SOURCE_SHA,
+            )
+            self.assertEqual(base_report["status"], "PASS")
 
-            report = verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
-            self.assertEqual(report["status"], "PASS")
+            bind_portable_data_tool(package, data_exe)
+            final_report = verify_windows_package(
+                package,
+                expected_source_sha=self.SOURCE_SHA,
+            )
+            self.assertEqual(final_report["status"], "PASS")
 
             nested_relative = "examples/example/reference/SHA256SUMS.txt"
             with zipfile.ZipFile(package, "r") as archive:

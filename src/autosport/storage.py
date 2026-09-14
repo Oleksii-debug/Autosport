@@ -71,6 +71,50 @@ def _typed_equal(left: object, right: object) -> bool:
     return type(left) is type(right) and left == right
 
 
+def _typed_payload_equal(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        if left.keys() != right.keys():
+            return False
+        return all(_typed_payload_equal(left[key], right[key]) for key in left)
+    if isinstance(left, (list, tuple)):
+        if len(left) != len(right):
+            return False
+        return all(_typed_payload_equal(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+def _reject_duplicate_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"stored market event payload contains duplicate object key: {key}")
+        result[key] = value
+    return result
+
+
+def _load_history_payload(payload_json: str) -> dict[str, object]:
+    try:
+        raw = json.loads(payload_json, object_pairs_hook=_reject_duplicate_object_pairs)
+    except json.JSONDecodeError as exc:
+        raise ValueError("stored market event payload must be valid JSON") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("stored market event payload must be a JSON object")
+    return raw
+
+
+def _validate_incoming_event(event: MarketEvent) -> str:
+    raw = event.to_dict()
+    try:
+        round_tripped = MarketEvent.from_dict(raw).to_dict()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("market event payload is not canonical") from exc
+    if not _typed_payload_equal(raw, round_tripped):
+        raise ValueError("market event payload is not canonical")
+    return _canonical_payload(event)
+
+
 def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
     """Decode one persisted history row while proving redundant identity columns agree."""
     if len(row) != len(_HISTORY_COLUMNS):
@@ -91,12 +135,7 @@ def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
 
     if not isinstance(payload_json, str):
         raise ValueError("stored market event payload must be JSON text")
-    try:
-        raw = json.loads(payload_json)
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ValueError("stored market event payload must be valid JSON") from exc
-    if not isinstance(raw, dict):
-        raise ValueError("stored market event payload must be a JSON object")
+    raw = _load_history_payload(payload_json)
 
     event = MarketEvent.from_dict(raw)
     canonical_raw = json.dumps(
@@ -202,8 +241,8 @@ class SQLiteMarketStore:
             self.connection.commit()
 
     def _insert_one(self, event: MarketEvent) -> bool:
+        payload = _validate_incoming_event(event)
         incoming_key = _event_order_key(event)
-        payload = _canonical_payload(event)
         cursor = self.connection.execute(
             """INSERT INTO market_events
                (dedupe_key,quote_key,event_id,market_id,selection_id,decimal_odds,observed_ts,source_id,sequence,payload_json)

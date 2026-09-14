@@ -493,12 +493,12 @@ class RunTransaction:
         )
 
     @classmethod
-    def _verified_paper_book_snapshot(
+    def _validate_paper_book_snapshot(
         cls,
+        snapshot: VerifiedFileSnapshot,
         path: Path,
         label: str,
-    ) -> VerifiedFileSnapshot:
-        snapshot = cls._read_file_snapshot(path, label)
+    ) -> None:
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -535,6 +535,15 @@ class RunTransaction:
                     temporary.unlink()
                 except FileNotFoundError:
                     pass
+
+    @classmethod
+    def _verified_paper_book_snapshot(
+        cls,
+        path: Path,
+        label: str,
+    ) -> VerifiedFileSnapshot:
+        snapshot = cls._read_file_snapshot(path, label)
+        cls._validate_paper_book_snapshot(snapshot, path, label)
         return snapshot
 
     @staticmethod
@@ -684,12 +693,17 @@ class RunTransaction:
         if current_snapshot.sha256 == base_hash:
             if not self.staged_book_path.is_file():
                 raise RunTransactionError("staged PaperBook artifact is missing")
-            staged_snapshot = self._verified_paper_book_snapshot(
+            staged_snapshot = self._read_file_snapshot(
                 self.staged_book_path,
                 "staged PaperBook",
             )
             if staged_snapshot.sha256 != new_hash:
                 raise RunTransactionError("staged PaperBook artifact hash mismatch")
+            self._validate_paper_book_snapshot(
+                staged_snapshot,
+                self.staged_book_path,
+                "staged PaperBook",
+            )
 
     def _validate_decision_ledger_commit_state(self, manifest: dict[str, Any]) -> None:
         target = self.workspace / "decisions.jsonl"

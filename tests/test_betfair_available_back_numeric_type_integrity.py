@@ -22,6 +22,7 @@ class BetfairAvailableBackNumericTypeIntegrityTests(unittest.TestCase):
             {"atb": [[2.0, "10.0"]]},
             {"batb": [[0, "2.0", 10.0]]},
             {"batb": [[0, 2.0, "10.0"]]},
+            {"batb": [[0, "0", 0.0]]},
         )
         for change in bad_changes:
             with self.subTest(change=change):
@@ -29,6 +30,21 @@ class BetfairAvailableBackNumericTypeIntegrityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "must be a finite number"):
                     book.apply(change, image=True)
                 self.assertIsNone(book.current_quote())
+
+    def test_rejected_batb_removal_is_transactional_but_numeric_zero_sentinel_still_removes(self) -> None:
+        book = BetfairAvailableBackBook()
+        book.apply({"batb": [[0, 2.0, 10.0]]}, image=True)
+        before = book.current_quote()
+        self.assertIsNotNone(before)
+
+        with self.assertRaisesRegex(ValueError, "batb\[0\]\.price must be a finite number"):
+            book.apply({"batb": [[0, "0", 0.0]]})
+        self.assertEqual(book.current_quote(), before)
+
+        update = book.apply({"batb": [[0, 0.0, 0.0]]})
+        self.assertTrue(update.touched)
+        self.assertIsNone(update.quote)
+        self.assertIsNone(book.current_quote())
 
     def test_raw_historical_json_string_price_cannot_become_executable_quote_evidence(self) -> None:
         message = {

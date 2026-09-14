@@ -16,7 +16,7 @@ class _Named:
 
 
 class AccessibilityAuditTests(unittest.TestCase):
-    def _widget(self, automation_id, name, role="BUTTON", patterns=(), gaps=(), answers_rows=False):
+    def _widget(self, automation_id, name, role="PUSH_BUTTON", patterns=(), gaps=(), answers_rows=False):
         return SimpleNamespace(
             path=f".!widget{automation_id}",
             tk_class="Widget",
@@ -33,19 +33,19 @@ class AccessibilityAuditTests(unittest.TestCase):
         return SimpleNamespace(
             strategy=_Named("PROVIDER"),
             widgets=(
-                self._widget(AUTOMATION_IDS["strategy"], "Стратегія replay", role="COMBOBOX", patterns=("VALUE",)),
+                self._widget(AUTOMATION_IDS["strategy"], "Стратегія replay", role="COMBO_BOX", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["research_plan"], "Вибрати research plan", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["choose_dataset"], "Вибрати replay dataset", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["run_replay"], "Запустити paper replay", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["repair_workspace"], "Відновити workspace", patterns=("INVOKE",)),
-                self._widget(AUTOMATION_IDS["replay_speed"], "Швидкість replay", role="COMBOBOX", patterns=("VALUE",)),
-                self._widget(AUTOMATION_IDS["live_mode"], "Режим live observation", role="COMBOBOX", patterns=("VALUE",)),
+                self._widget(AUTOMATION_IDS["replay_speed"], "Швидкість replay", role="COMBO_BOX", patterns=("VALUE",)),
+                self._widget(AUTOMATION_IDS["live_mode"], "Режим live observation", role="COMBO_BOX", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_refresh"], "Оновити live snapshot", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["tickets"], "Paper tickets і результати", role="LIST", answers_rows=True),
                 self._widget(AUTOMATION_IDS["evaluation"], "Evaluation і portfolio evidence", role="LIST", answers_rows=True),
-                self._widget(AUTOMATION_IDS["log"], "Журнал виконання", role="EDIT", patterns=("VALUE",)),
+                self._widget(AUTOMATION_IDS["log"], "Журнал виконання", role="TEXT", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_quotes"], "Live quotes", role="LIST", answers_rows=True),
-                self._widget(WINDOWS_BANKROLL_AUTOMATION_ID, "Віртуальний банк", role="EDIT", patterns=("VALUE",)),
+                self._widget(WINDOWS_BANKROLL_AUTOMATION_ID, "Віртуальний банк", role="TEXT", patterns=("VALUE",)),
             ),
             provider_trouble=(),
             providers_stood_down_because=None,
@@ -89,11 +89,11 @@ class AccessibilityAuditTests(unittest.TestCase):
 
     def test_wrong_semantic_roles_fail_closed(self):
         cases = (
-            (AUTOMATION_IDS["choose_dataset"], "EDIT", "BUTTON"),
-            (AUTOMATION_IDS["replay_speed"], "BUTTON", "COMBOBOX"),
-            (AUTOMATION_IDS["tickets"], "EDIT", "LIST"),
-            (AUTOMATION_IDS["log"], "BUTTON", "EDIT"),
-            (WINDOWS_BANKROLL_AUTOMATION_ID, "BUTTON", "EDIT"),
+            (AUTOMATION_IDS["choose_dataset"], "BUTTON", "PUSH_BUTTON"),
+            (AUTOMATION_IDS["replay_speed"], "COMBOBOX", "COMBO_BOX"),
+            (AUTOMATION_IDS["tickets"], "TEXT", "LIST"),
+            (AUTOMATION_IDS["log"], "EDIT", "TEXT"),
+            (WINDOWS_BANKROLL_AUTOMATION_ID, "EDIT", "TEXT"),
         )
         for automation_id, wrong_role, expected_role in cases:
             with self.subTest(automation_id=automation_id):
@@ -161,7 +161,7 @@ class AccessibilityAuditTests(unittest.TestCase):
         widgets[index] = self._widget(
             WINDOWS_BANKROLL_AUTOMATION_ID,
             "Віртуальний банк",
-            role="EDIT",
+            role="TEXT",
             patterns=(),
         )
         report = self._summarize(SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)}))

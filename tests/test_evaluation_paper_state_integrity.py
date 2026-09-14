@@ -126,25 +126,80 @@ class EvaluationPaperStateIntegrityTests(unittest.TestCase):
     def test_canonical_parlay_settlement_rounding_remains_valid(self) -> None:
         book = PaperBook("10000")
         legs = tuple(
-            TicketLeg(f"event-{index}", "winner", f"player-{index}", Decimal("1.23456789"))
+            TicketLeg(
+                f"event-{index}",
+                "winner",
+                f"player-{index}",
+                Decimal("1.23456789"),
+            )
             for index in range(10)
         )
-        ticket = book.open_ticket(legs, "123.45", reason="rounded canonical parlay")
+        ticket = book.open_ticket(
+            legs,
+            "123.45",
+            reason="rounded canonical parlay",
+        )
         book.settle(ticket.ticket_id, {leg.quote_key for leg in legs})
 
         summary = evaluate(book)
 
         self.assertEqual(summary.final_balance, book.balance)
         self.assertEqual(summary.settled_stake, Decimal("123.45"))
-        self.assertEqual(summary.net_profit, Decimal("891.95866691709813439862763"))
+        self.assertEqual(
+            summary.net_profit,
+            Decimal("891.95866691709813439862763"),
+        )
         self.assertEqual(summary.won, 1)
+
+    def test_reverse_settlement_chronology_uses_canonical_paper_lifecycle(self) -> None:
+        book = PaperBook("10000")
+        odds = Decimal("1.234567891234567891234567891")
+        first_leg = TicketLeg("event-1", "winner", "alice", odds)
+        second_leg = TicketLeg("event-2", "winner", "bob", odds)
+        first = book.open_ticket(
+            [first_leg],
+            "123.45",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        second = book.open_ticket(
+            [second_leg],
+            "123.45",
+            placed_at="2026-09-14T09:01:00+00:00",
+        )
+
+        # Canonical PaperBook lifecycle records settlement in the opposite order
+        # from ticket insertion. Replaying ticket insertion as settlement chronology
+        # differs by one ULP under the product's 28-digit Decimal policy.
+        book.settle(second.ticket_id, {second_leg.quote_key})
+        book.settle(first.ticket_id, {first_leg.quote_key})
+        self.assertEqual(
+            book.balance,
+            Decimal("10057.91481234581481234581481"),
+        )
+
+        summary = evaluate(book)
+
+        self.assertEqual(summary.final_balance, book.balance)
+        self.assertEqual(summary.committed_stake, Decimal("0"))
+        self.assertEqual(summary.settled_stake, Decimal("246.90"))
+        self.assertEqual(
+            summary.net_profit,
+            Decimal("57.91481234581481234581481"),
+        )
+        self.assertEqual(summary.won, 2)
+        self.assertEqual(summary.lost, 0)
+        self.assertEqual(summary.void, 0)
 
     def test_valid_open_and_settled_economics_are_preserved(self) -> None:
         book = PaperBook("100")
         open_leg = TicketLeg("event-open", "winner", "player-a", Decimal("2"))
         book.open_ticket([open_leg], "10", reason="open paper exposure")
         settled_leg = TicketLeg("event-settled", "winner", "player-b", Decimal("3"))
-        settled_ticket = book.open_ticket([settled_leg], "5", reason="settled paper exposure")
+        settled_ticket = book.open_ticket(
+            [settled_leg],
+            "5",
+            reason="settled paper exposure",
+        )
         book.settle(settled_ticket.ticket_id, {settled_leg.quote_key})
 
         summary = evaluate(book)

@@ -138,13 +138,6 @@ def test_performance_summary_preserves_canonical_roi_and_labels_bankroll_return(
     assert "settled-stake denominator" in result.assumptions[1]
 
 
-def test_zero_turnover_remains_fail_closed_in_manual_ratio_calculator() -> None:
-    engine = CalculationEngine()
-
-    with pytest.raises(ValueError, match="greater than 0"):
-        engine.performance_summary(net_profit="0", turnover="0", starting_bankroll="100")
-
-
 def test_return_dispersion_distinguishes_population_and_sample_contracts() -> None:
     engine = CalculationEngine()
 

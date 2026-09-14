@@ -84,6 +84,22 @@ class EvaluationPaperStateIntegrityTests(unittest.TestCase):
         self.assertEqual(summary.settled_stake, Decimal("3"))
         self.assertEqual(summary.roi, Decimal("-0.3333333333333333333333333333"))
 
+    def test_canonical_parlay_settlement_rounding_remains_valid(self) -> None:
+        book = PaperBook("10000")
+        legs = tuple(
+            TicketLeg(f"event-{index}", "winner", f"player-{index}", Decimal("1.23456789"))
+            for index in range(10)
+        )
+        ticket = book.open_ticket(legs, "123.45", reason="rounded canonical parlay")
+        book.settle(ticket.ticket_id, {leg.quote_key for leg in legs})
+
+        summary = evaluate(book)
+
+        self.assertEqual(summary.final_balance, book.balance)
+        self.assertEqual(summary.settled_stake, Decimal("123.45"))
+        self.assertEqual(summary.net_profit, Decimal("891.95866691709813439862763"))
+        self.assertEqual(summary.won, 1)
+
     def test_valid_open_and_settled_economics_are_preserved(self) -> None:
         book = PaperBook("100")
         open_leg = TicketLeg("event-open", "winner", "player-a", Decimal("2"))

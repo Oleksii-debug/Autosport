@@ -117,6 +117,8 @@ class SourceHealthState:
             raise ValueError("invalid source health status")
         for field_name in _COUNTER_FIELDS:
             _validate_nonnegative_count(field_name, getattr(self, field_name))
+        if self.total_failures > self.poll_count:
+            raise ValueError("total_failures cannot exceed poll_count")
         if self.consecutive_failures > self.total_failures:
             raise ValueError("consecutive_failures cannot exceed total_failures")
         if self.total_accepted + self.total_rejected > self.total_received:
@@ -136,6 +138,49 @@ class SourceHealthState:
                 raise ValueError(f"{field_name} must be a string or null")
 
         _validate_quality_flags(self.quality_flags)
+
+        # Bind persisted state to transitions the canonical record_success()/record_failure()
+        # state machine can actually produce. This is durable operational truth, so impossible
+        # combinations must fail closed instead of being interpreted as plausible telemetry.
+        if self.status == "unknown":
+            if (
+                self.poll_count != 0
+                or self.total_received != 0
+                or self.total_accepted != 0
+                or self.total_rejected != 0
+                or self.total_failures != 0
+                or self.consecutive_failures != 0
+                or self.last_success_at is not None
+                or self.last_error_at is not None
+                or self.last_error is not None
+                or self.last_cursor is not None
+                or self.latest_source_ts is not None
+                or self.quality_flags
+            ):
+                raise ValueError("unknown source health must be pristine")
+            return
+
+        if self.status == "failed":
+            if self.consecutive_failures == 0:
+                raise ValueError("failed source health requires a positive consecutive failure count")
+            if self.last_error_at is None or self.last_error is None:
+                raise ValueError("failed source health requires last error evidence")
+        else:
+            if self.consecutive_failures != 0:
+                raise ValueError("successful source health cannot retain consecutive failures")
+            if self.last_success_at is None:
+                raise ValueError("successful source health requires last_success_at")
+            if self.last_error is not None:
+                raise ValueError("successful source health cannot retain last_error")
+            if self.total_failures >= self.poll_count:
+                raise ValueError("successful source health requires at least one successful poll")
+
+        if self.total_failures > 0 and self.last_error_at is None:
+            raise ValueError("failure history requires last_error_at")
+        if self.status == "healthy" and self.quality_flags:
+            raise ValueError("healthy source health cannot retain quality flags")
+        if self.status == "degraded" and not self.quality_flags:
+            raise ValueError("degraded source health requires quality flags")
 
 
 _SOURCE_STATE_FIELDS = frozenset(item.name for item in fields(SourceHealthState))

@@ -37,14 +37,21 @@ def _validate_sha256(value: str, label: str) -> str:
     return value.lower()
 
 
-def _validate_canonical_string(value: object, label: str) -> str:
+def _validate_canonical_string(
+    value: object,
+    label: str,
+    *,
+    canonical_error: str | None = None,
+) -> str:
     if (
         not isinstance(value, str)
         or not value
         or not value.strip()
         or value != value.strip()
     ):
-        raise ValueError(f"{label} must be a non-empty canonical string")
+        raise ValueError(
+            canonical_error or f"{label} must be a non-empty canonical string"
+        )
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -106,7 +113,11 @@ class ResearchEvidence:
             raise ValueError("evidence quality flags must be a tuple or list")
         flags = tuple(self.quality_flags)
         for flag in flags:
-            _validate_canonical_string(flag, "evidence quality flag")
+            _validate_canonical_string(
+                flag,
+                "evidence quality flag",
+                canonical_error="evidence quality flags must be non-empty canonical strings",
+            )
         if len(flags) != len(set(flags)):
             raise ValueError("duplicate evidence quality flag")
         object.__setattr__(self, "quality_flags", flags)
@@ -146,7 +157,11 @@ class ResearchDecisionPolicy:
             )
         blocked_flags = tuple(self.blocked_quality_flags)
         for flag in blocked_flags:
-            _validate_canonical_string(flag, "blocked_quality_flags item")
+            _validate_canonical_string(
+                flag,
+                "blocked_quality_flags item",
+                canonical_error="blocked_quality_flags must contain non-empty canonical strings",
+            )
         object.__setattr__(
             self,
             "blocked_quality_flags",

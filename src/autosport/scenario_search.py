@@ -71,6 +71,12 @@ class PortfolioDependencyIndex:
         return affected
 
 
+def _require_positive_integer(value: int, *, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{field} must be a positive non-boolean integer")
+    return value
+
+
 class ScenarioSearchEngine:
     """Portfolio scenario search with exact enumeration, bounded branch-and-bound and explicitly labeled approximation."""
 
@@ -81,9 +87,9 @@ class ScenarioSearchEngine:
         sample_count: int = 50_000,
         seed: int = 17,
     ) -> None:
-        self.exact_state_limit = exact_state_limit
-        self.branch_node_limit = branch_node_limit
-        self.sample_count = sample_count
+        self.exact_state_limit = _require_positive_integer(exact_state_limit, field="exact_state_limit")
+        self.branch_node_limit = _require_positive_integer(branch_node_limit, field="branch_node_limit")
+        self.sample_count = _require_positive_integer(sample_count, field="sample_count")
         self.seed = seed
 
     def analyse(self, tickets: list[PaperTicket], groups: list[ScenarioGroup]) -> ScenarioSearchReport:

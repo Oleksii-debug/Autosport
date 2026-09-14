@@ -2,6 +2,7 @@ import multiprocessing
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from autosport.dataset import load_dataset
 from autosport.recovery import reconcile_late_crashes
@@ -83,6 +84,134 @@ class WorkspaceEconomicLockTests(unittest.TestCase):
                     reconcile_late_crashes(root)
             finally:
                 self._stop_holder(process, release)
+
+    def test_acquire_preserves_primary_failure_when_cleanup_close_also_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = WorkspaceEconomicLock(root)
+            handle = mock.MagicMock()
+            handle.tell.return_value = 1
+            handle.close.side_effect = OSError("simulated close failure")
+            primary = WorkspaceEconomicLockError(
+                "another Autosport process owns the workspace economic-writer lock"
+            )
+
+            with (
+                mock.patch.object(Path, "open", return_value=handle),
+                mock.patch.object(WorkspaceEconomicLock, "_lock_handle", side_effect=primary),
+            ):
+                with self.assertRaisesRegex(
+                    WorkspaceEconomicLockError,
+                    "another Autosport process owns",
+                ) as caught:
+                    lock.acquire()
+
+            self.assertIs(caught.exception, primary)
+            notes = getattr(caught.exception, "__notes__", ())
+            self.assertTrue(
+                any(
+                    "cleaning up acquisition failure" in note
+                    and "simulated close failure" in note
+                    for note in notes
+                ),
+                f"secondary acquisition-cleanup evidence missing from primary exception notes: {notes!r}",
+            )
+            self.assertIs(lock._handle, handle)
+            with self.assertRaisesRegex(WorkspaceEconomicLockError, "already held"):
+                lock.acquire()
+
+    def test_unlock_failure_does_not_leave_lock_object_logically_held(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = WorkspaceEconomicLock(root)
+            lock.acquire()
+
+            with mock.patch.object(
+                WorkspaceEconomicLock,
+                "_unlock_handle",
+                side_effect=OSError("simulated unlock failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "simulated unlock failure"):
+                    lock.release()
+
+            self.assertIsNone(lock._handle)
+            # Closing the handle is the final OS-level release fallback. The same
+            # object must therefore be reusable rather than falsely reporting that
+            # it still owns the previous, already-closed handle.
+            lock.acquire()
+            lock.release()
+
+    def test_dual_unlock_and_close_failure_keeps_lock_object_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = WorkspaceEconomicLock(root)
+            handle = mock.MagicMock()
+            handle.close.side_effect = OSError("simulated close failure")
+            lock._handle = handle
+
+            with mock.patch.object(
+                WorkspaceEconomicLock,
+                "_unlock_handle",
+                side_effect=OSError("simulated unlock failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "simulated unlock failure") as caught:
+                    lock.release()
+
+            notes = getattr(caught.exception, "__notes__", ())
+            self.assertTrue(
+                any(
+                    "handle close also failed after unlock failure" in note
+                    and "simulated close failure" in note
+                    for note in notes
+                ),
+                f"secondary close evidence missing from unlock exception notes: {notes!r}",
+            )
+            self.assertIs(lock._handle, handle)
+            with self.assertRaisesRegex(WorkspaceEconomicLockError, "already held"):
+                lock.acquire()
+
+    def test_context_manager_preserves_primary_failure_when_release_also_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = WorkspaceEconomicLock(root)
+
+            with mock.patch.object(
+                WorkspaceEconomicLock,
+                "_unlock_handle",
+                side_effect=OSError("simulated unlock failure"),
+            ):
+                with self.assertRaisesRegex(ValueError, "primary economic failure") as caught:
+                    with lock:
+                        raise ValueError("primary economic failure")
+
+            notes = getattr(caught.exception, "__notes__", ())
+            self.assertTrue(
+                any(
+                    "WorkspaceEconomicLock release also failed" in note
+                    and "simulated unlock failure" in note
+                    for note in notes
+                ),
+                f"secondary release evidence missing from primary exception notes: {notes!r}",
+            )
+            self.assertIsNone(lock._handle)
+
+    def test_context_manager_surfaces_release_failure_after_successful_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = WorkspaceEconomicLock(root)
+
+            with mock.patch.object(
+                WorkspaceEconomicLock,
+                "_unlock_handle",
+                side_effect=OSError("simulated unlock failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "simulated unlock failure"):
+                    with lock:
+                        pass
+
+            self.assertIsNone(lock._handle)
+            lock.acquire()
+            lock.release()
 
 
 if __name__ == "__main__":

@@ -139,6 +139,44 @@ class ReplayWorkerTests(unittest.TestCase):
         self.assertIsNone(completed.error)
         self.assertFalse(worker.busy)
 
+    def test_worker_thread_construction_broken_type_name_is_terminal_and_retryable(self):
+        worker = OneShotReplayWorker()
+        task_ran = threading.Event()
+
+        class BrokenNameMeta(type):
+            def __getattribute__(cls, name: str):
+                if name == "__name__":
+                    raise RuntimeError("broken exception type formatter")
+                return super().__getattribute__(name)
+
+        class BrokenNameError(Exception, metaclass=BrokenNameMeta):
+            pass
+
+        def task():
+            task_ran.set()
+            return object()
+
+        with patch(
+            "autosport.replay_worker.threading.Thread",
+            side_effect=BrokenNameError("thread metadata failed"),
+        ):
+            self.assertTrue(worker.start(task))
+
+        self.assertFalse(task_ran.is_set())
+        self.assertTrue(worker.busy)
+        self.assertIsNone(worker._thread)
+        failed = self._terminal(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(failed.error, "BrokenNameError: thread metadata failed")
+        self.assertFalse(worker.busy)
+
+        sentinel = object()
+        self.assertTrue(worker.start(lambda: sentinel))
+        completed = self._terminal(worker)
+        self.assertIs(completed.result, sentinel)
+        self.assertIsNone(completed.error)
+        self.assertFalse(worker.busy)
+
     def test_worker_reports_failure_without_raising_on_tk_poll_thread(self):
         worker = OneShotReplayWorker()
         self.assertTrue(worker.start(lambda: (_ for _ in ()).throw(RuntimeError("boom"))))
@@ -179,6 +217,34 @@ class ReplayWorkerTests(unittest.TestCase):
             failed.error,
             "BrokenStringBaseError: exception details unavailable",
         )
+        self.assertFalse(worker.busy)
+
+        sentinel = object()
+        self.assertTrue(worker.start(lambda: sentinel))
+        completed = self._terminal(worker)
+        self.assertIs(completed.result, sentinel)
+        self.assertIsNone(completed.error)
+        self.assertFalse(worker.busy)
+
+    def test_worker_terminalizes_broken_type_name_base_exception_and_allows_retry(self):
+        worker = OneShotReplayWorker()
+
+        class BrokenNameMeta(type):
+            def __getattribute__(cls, name: str):
+                if name == "__name__":
+                    raise RuntimeError("broken exception type formatter")
+                return super().__getattribute__(name)
+
+        class BrokenNameBaseError(BaseException, metaclass=BrokenNameMeta):
+            pass
+
+        def task():
+            raise BrokenNameBaseError("task metadata failed")
+
+        self.assertTrue(worker.start(task))
+        failed = self._terminal(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(failed.error, "BrokenNameBaseError: task metadata failed")
         self.assertFalse(worker.busy)
 
         sentinel = object()

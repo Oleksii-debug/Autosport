@@ -4,6 +4,7 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 
 
@@ -24,12 +25,19 @@ class IngestionPolicy:
     max_future_skew_seconds: float = 5.0
 
     def __post_init__(self) -> None:
-        if self.max_batch_size <= 0:
-            raise ValueError("max_batch_size must be positive")
-        if self.stale_after_seconds < 0:
-            raise ValueError("stale_after_seconds must be non-negative")
-        if self.max_future_skew_seconds < 0:
-            raise ValueError("max_future_skew_seconds must be non-negative")
+        if isinstance(self.max_batch_size, bool) or not isinstance(self.max_batch_size, int) or self.max_batch_size <= 0:
+            raise ValueError("max_batch_size must be a positive integer")
+        for field_name, value in (
+            ("stale_after_seconds", self.stale_after_seconds),
+            ("max_future_skew_seconds", self.max_future_skew_seconds),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"{field_name} must be a finite non-negative number")
 
 
 @dataclass(slots=True)

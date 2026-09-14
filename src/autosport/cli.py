@@ -35,6 +35,13 @@ from .strategies import available_strategies
 ProviderFactory = Callable[..., ParlayApiTableTennisProvider]
 
 
+def _print_paper_truth_boundary(*, mode: str, sample_fixture: bool = False) -> None:
+    print(
+        f"mode={mode} paper_only=true real_money_execution=false "
+        f"profitability_claim=false sample_fixture={str(sample_fixture).lower()}"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="autosport", description="Autosport paper/replay laboratory")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -116,6 +123,7 @@ def run_replay(path: Path, bankroll: str) -> int:
     engine = ReplayEngine.from_jsonl(path)
     run = engine.run(orchestrator.on_market_event, run_id=run_id)
     report = PortfolioEngine().analyse(list(book.tickets.values()))
+    _print_paper_truth_boundary(mode="replay")
     print(f"run_id={run.run_id}\ndataset_hash={run.dataset_hash}\nevents={run.event_count}\nvirtual_balance={book.balance}")
     print(f"scenario_mode={report.mode} worst={report.worst_case} best={report.best_case}")
     return 0
@@ -142,6 +150,7 @@ def run_dataset(
     )
     try:
         result = session.run_dataset(dataset)
+        _print_paper_truth_boundary(mode="dataset")
         print(f"run_id={result.replay.run_id}")
         print(f"strategy_id={session.strategy_id}")
         print(f"canonical_strategy_id={session.strategy.strategy_id}")
@@ -433,6 +442,7 @@ def run_demo() -> int:
     context = AgentContext(book, replay_run_id="demo-run")
     orchestrator = AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent("50")], context)
     run = ReplayEngine(events).run(orchestrator.on_market_event, run_id="demo-run")
+    _print_paper_truth_boundary(mode="demo", sample_fixture=True)
     print(f"run={run.run_id} dataset={run.dataset_hash[:12]} events={context.event_count} balance={book.balance} tickets={len(book.tickets)}")
     return 0
 

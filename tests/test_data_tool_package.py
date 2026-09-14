@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -63,13 +64,17 @@ class PortableDataToolPackageTests(unittest.TestCase):
             return archive.read(f"Autosport-V1/{relative}")
 
     @staticmethod
-    def _rewrite_member(package: Path, relative: str, payload: bytes) -> None:
-        target = f"Autosport-V1/{relative}"
+    def _rewrite_members(package: Path, replacements: dict[str, bytes]) -> None:
+        targets = {f"Autosport-V1/{relative}": payload for relative, payload in replacements.items()}
         with zipfile.ZipFile(package, "r") as archive:
             members = [(item.filename, archive.read(item.filename)) for item in archive.infolist()]
         with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for name, current in members:
-                archive.writestr(name, payload if name == target else current)
+                archive.writestr(name, targets.get(name, current))
+
+    @classmethod
+    def _rewrite_member(cls, package: Path, relative: str, payload: bytes) -> None:
+        cls._rewrite_members(package, {relative: payload})
 
     def test_data_tool_is_hash_bound_and_base_verifier_stays_green(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -115,6 +120,67 @@ class PortableDataToolPackageTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ValueError,
                 "BUILD_INFO.json contains duplicate JSON object key: human_tested",
+            ):
+                bind_portable_data_tool(package, data_exe)
+
+            self.assertEqual(package.read_bytes(), before)
+
+    def test_binding_rejects_ambiguous_manifest_before_mutating_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package, data_exe = self._build_base(Path(tmp), "f" * 40)
+            manifest = self._read_member(package, "PACKAGE_MANIFEST.json").decode("utf-8")
+            ambiguous = manifest.replace(
+                '  "schema_version": 1',
+                '  "schema_version": 1,\n  "schema_version": 1',
+            )
+            self.assertNotEqual(manifest, ambiguous)
+            ambiguous_bytes = ambiguous.encode("utf-8")
+
+            sums = self._read_member(package, "SHA256SUMS.txt").decode("utf-8")
+            manifest_sha = hashlib.sha256(ambiguous_bytes).hexdigest()
+            rewritten_sums = []
+            for line in sums.splitlines():
+                digest, separator, relative = line.partition("  ")
+                if relative == "PACKAGE_MANIFEST.json":
+                    digest = manifest_sha
+                rewritten_sums.append(f"{digest}{separator}{relative}")
+            self._rewrite_members(
+                package,
+                {
+                    "PACKAGE_MANIFEST.json": ambiguous_bytes,
+                    "SHA256SUMS.txt": ("\n".join(rewritten_sums) + "\n").encode("utf-8"),
+                },
+            )
+            before = package.read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "PACKAGE_MANIFEST.json contains duplicate JSON object key: schema_version",
+            ):
+                bind_portable_data_tool(package, data_exe)
+
+            self.assertEqual(package.read_bytes(), before)
+
+    def test_binding_rejects_stale_sums_before_mutating_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package, data_exe = self._build_base(Path(tmp), "g" * 40)
+            sums = self._read_member(package, "SHA256SUMS.txt").decode("utf-8")
+            rewritten_sums = []
+            for line in sums.splitlines():
+                digest, separator, relative = line.partition("  ")
+                if relative == "BUILD_INFO.json":
+                    digest = "0" * 64
+                rewritten_sums.append(f"{digest}{separator}{relative}")
+            self._rewrite_member(
+                package,
+                "SHA256SUMS.txt",
+                ("\n".join(rewritten_sums) + "\n").encode("utf-8"),
+            )
+            before = package.read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "SHA256SUMS hash mismatch: BUILD_INFO.json",
             ):
                 bind_portable_data_tool(package, data_exe)
 

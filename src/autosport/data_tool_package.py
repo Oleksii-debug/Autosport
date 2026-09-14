@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from autosport.release_package import (
     _FIXED_ZIP_TIME,
@@ -27,6 +28,7 @@ _DATA_TOOL = "Autosport-Data.exe"
 _BUILD_INFO = "BUILD_INFO.json"
 _MANIFEST = "PACKAGE_MANIFEST.json"
 _SUMS = "SHA256SUMS.txt"
+_WRITER_SNAPSHOT_MEMORY_LIMIT = 8 * 1024 * 1024
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -37,7 +39,7 @@ def _json_bytes(payload: dict[str, Any]) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def _read_members(package_zip: Path) -> dict[str, bytes]:
+def _read_members(package_zip: str | Path | BinaryIO) -> dict[str, bytes]:
     members: dict[str, bytes] = {}
     windows_keys: dict[str, str] = {}
     with zipfile.ZipFile(package_zip, "r") as archive:
@@ -59,13 +61,26 @@ def _read_members(package_zip: Path) -> dict[str, bytes]:
     return members
 
 
-def _write_deterministic(package_zip: Path, members: dict[str, bytes]) -> None:
+def _write_deterministic(package_zip: Path, members: dict[str, bytes]) -> str:
+    """Publish one canonical ZIP and return the SHA of the exact bytes authored.
+
+    ZIP construction happens in a private seekable stream. The digest is accumulated
+    while those same completed bytes are copied into a same-directory publication
+    temp file. The mutable destination path is never reread to establish writer
+    identity; later semantic verification must independently match this digest.
+    """
+
     package_zip.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{package_zip.name}.", suffix=".tmp", dir=package_zip.parent)
-    os.close(fd)
-    tmp = Path(tmp_name)
-    try:
-        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+    with tempfile.SpooledTemporaryFile(
+        max_size=_WRITER_SNAPSHOT_MEMORY_LIMIT,
+        mode="w+b",
+    ) as authored:
+        with zipfile.ZipFile(
+            authored,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+        ) as archive:
             for relative in sorted(members):
                 info = zipfile.ZipInfo((_PREFIX + relative), _FIXED_ZIP_TIME)
                 info.compress_type = zipfile.ZIP_DEFLATED
@@ -83,19 +98,46 @@ def _write_deterministic(package_zip: Path, members: dict[str, bytes]) -> None:
                     compress_type=zipfile.ZIP_DEFLATED,
                     compresslevel=9,
                 )
-        os.replace(tmp, package_zip)
-    finally:
-        if tmp.exists():
-            tmp.unlink()
+
+        authored.seek(0)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{package_zip.name}.",
+            suffix=".tmp",
+            dir=package_zip.parent,
+        )
+        publication = Path(tmp_name)
+        digest = hashlib.sha256()
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                for chunk in iter(lambda: authored.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+            writer_sha = digest.hexdigest()
+            os.replace(publication, package_zip)
+            return writer_sha
+        finally:
+            if publication.exists():
+                publication.unlink()
 
 
 def _verified_base_members(
     package: Path,
 ) -> tuple[dict[str, bytes], dict[str, Any], dict[str, Any]]:
-    """Verify and return members plus evidence from one immutable ZIP snapshot."""
+    """Verify and return members plus evidence from one immutable byte capture."""
 
     base_bytes = package.read_bytes()
     captured_sha = _sha256_bytes(base_bytes)
+
+    # Member extraction is from the immutable in-memory capture, never from the
+    # temporary pathname used only to adapt the path-based package verifier.
+    members = _read_members(io.BytesIO(base_bytes))
+    for required in (_BUILD_INFO, _MANIFEST, _SUMS, "Autosport.exe"):
+        if required not in members:
+            raise ValueError(f"base release package is missing required member: {required}")
+    build_info = _decode_json_object(members[_BUILD_INFO], _BUILD_INFO)
+
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{package.name}.verify.",
         suffix=".zip",
@@ -108,12 +150,6 @@ def _verified_base_members(
             handle.flush()
             os.fsync(handle.fileno())
 
-        members = _read_members(snapshot)
-        for required in (_BUILD_INFO, _MANIFEST, _SUMS, "Autosport.exe"):
-            if required not in members:
-                raise ValueError(f"base release package is missing required member: {required}")
-
-        build_info = _decode_json_object(members[_BUILD_INFO], _BUILD_INFO)
         verification = verify_windows_package(
             snapshot,
             expected_source_sha=build_info.get("source_sha"),
@@ -158,8 +194,8 @@ def bind_portable_data_tool(package_zip: str | Path, data_exe: str | Path) -> di
         if relative != _SUMS
     ]
     members[_SUMS] = ("\n".join(sums) + "\n").encode("utf-8")
-    _write_deterministic(package, members)
-    return {"autosport_data_exe_sha256": data_sha, "package_sha256": _sha256_bytes(package.read_bytes())}
+    writer_sha = _write_deterministic(package, members)
+    return {"autosport_data_exe_sha256": data_sha, "package_sha256": writer_sha}
 
 
 def verify_portable_data_tool(package_zip: str | Path) -> dict[str, Any]:

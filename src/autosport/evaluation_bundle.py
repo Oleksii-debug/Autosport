@@ -443,6 +443,13 @@ def _validate_global_identity(
         raise ValueError("walk-forward bundle contains duplicate window_id")
 
 
+def _required_canonical_text(raw: dict[str, Any], key: str, *, context: str) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise ValueError(f"{context}.{key} must be a non-empty trimmed string")
+    return value
+
+
 def _forecast_from_dict(raw: Any) -> ForecastRecord:
     if not isinstance(raw, dict):
         raise ValueError("walk-forward forecast entry must be an object")
@@ -451,15 +458,22 @@ def _forecast_from_dict(raw: Any) -> ForecastRecord:
         raise ValueError("walk-forward forecast evidence_hashes must be a JSON array")
     if any(not isinstance(item, str) for item in evidence_hashes_raw):
         raise ValueError("walk-forward forecast evidence_hashes must contain strings")
+    provenance = raw.get("provenance", {})
+    if not isinstance(provenance, dict):
+        raise ValueError("walk-forward forecast provenance must be a JSON object")
     return ForecastRecord(
-        quote_key=str(raw["quote_key"]),
+        quote_key=_required_canonical_text(raw, "quote_key", context="walk-forward forecast"),
         probability=raw["probability"],
-        model_id=str(raw["model_id"]),
-        model_version=str(raw["model_version"]),
-        strategy_version=str(raw["strategy_version"]),
-        model_training_cutoff_ts=str(raw["model_training_cutoff_ts"]),
-        input_cutoff_ts=str(raw["input_cutoff_ts"]),
-        generated_at=str(raw["generated_at"]),
+        model_id=_required_canonical_text(raw, "model_id", context="walk-forward forecast"),
+        model_version=_required_canonical_text(raw, "model_version", context="walk-forward forecast"),
+        strategy_version=_required_canonical_text(raw, "strategy_version", context="walk-forward forecast"),
+        model_training_cutoff_ts=_required_canonical_text(
+            raw, "model_training_cutoff_ts", context="walk-forward forecast"
+        ),
+        input_cutoff_ts=_required_canonical_text(
+            raw, "input_cutoff_ts", context="walk-forward forecast"
+        ),
+        generated_at=_required_canonical_text(raw, "generated_at", context="walk-forward forecast"),
         uncertainty=raw.get("uncertainty", "0"),
         evidence_hashes=tuple(evidence_hashes_raw),
         market_snapshot_hash=(
@@ -467,30 +481,42 @@ def _forecast_from_dict(raw: Any) -> ForecastRecord:
             if raw.get("market_snapshot_hash") is not None
             else None
         ),
-        provenance=dict(raw.get("provenance", {})),
-        forecast_id=str(raw["forecast_id"]),
+        provenance=dict(provenance),
+        forecast_id=_required_canonical_text(raw, "forecast_id", context="walk-forward forecast"),
     )
 
 
 def _outcome_from_dict(raw: Any) -> ForecastOutcomeFact:
     if not isinstance(raw, dict):
         raise ValueError("walk-forward outcome entry must be an object")
+    outcome = raw.get("outcome")
+    if type(outcome) is not int or outcome not in {0, 1}:
+        raise ValueError("walk-forward outcome.outcome must be the integer 0 or 1")
     return ForecastOutcomeFact(
-        forecast_id=str(raw["forecast_id"]),
-        outcome=int(raw["outcome"]),
-        revealed_at=str(raw["revealed_at"]),
+        forecast_id=_required_canonical_text(raw, "forecast_id", context="walk-forward outcome"),
+        outcome=outcome,
+        revealed_at=_required_canonical_text(raw, "revealed_at", context="walk-forward outcome"),
     )
 
 
 def _window_from_dict(raw: Any) -> TemporalEvaluationWindow:
     if not isinstance(raw, dict):
         raise ValueError("walk-forward window entry must be an object")
+    split = raw.get("split", "holdout")
+    if not isinstance(split, str) or not split or split.strip() != split:
+        raise ValueError("walk-forward window.split must be a non-empty trimmed string")
     return TemporalEvaluationWindow(
-        window_id=str(raw["window_id"]),
-        training_end_ts=str(raw["training_end_ts"]),
-        evaluation_start_ts=str(raw["evaluation_start_ts"]),
-        evaluation_end_ts=str(raw["evaluation_end_ts"]),
-        split=str(raw.get("split", "holdout")),
+        window_id=_required_canonical_text(raw, "window_id", context="walk-forward window"),
+        training_end_ts=_required_canonical_text(
+            raw, "training_end_ts", context="walk-forward window"
+        ),
+        evaluation_start_ts=_required_canonical_text(
+            raw, "evaluation_start_ts", context="walk-forward window"
+        ),
+        evaluation_end_ts=_required_canonical_text(
+            raw, "evaluation_end_ts", context="walk-forward window"
+        ),
+        split=split,
     )
 
 

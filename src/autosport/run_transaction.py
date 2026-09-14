@@ -192,6 +192,11 @@ class RunTransaction:
         summary["decision_ledger_sha256"] = ledger_hash
         summary["transaction_schema_version"] = self.SCHEMA_VERSION
         summary["transaction_run_id"] = self.run_id
+        self._validate_summary_identity(
+            summary,
+            manifest,
+            label="staged run summary",
+        )
         self._decode_strict_json(
             json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True),
             label="staged run summary",
@@ -444,6 +449,34 @@ class RunTransaction:
                     f"expected {expected_run_id!r}, got {actual_run_id!r}"
                 )
 
+    def _validate_summary_identity(
+        self,
+        summary: dict[str, Any],
+        manifest: dict[str, Any],
+        *,
+        label: str,
+    ) -> None:
+        """Bind run-summary truth to the durable transaction identity."""
+
+        expected = {
+            "run_id": self.run_id,
+            "experiment_key": manifest.get("experiment_key"),
+            "market_sha256": manifest.get("market_sha256"),
+            "sealed_results_sha256": manifest.get("sealed_results_sha256"),
+            "strategy_id": manifest.get("strategy_id"),
+        }
+        mismatches = [
+            field_name
+            for field_name, expected_value in expected.items()
+            if summary.get(field_name) != expected_value
+        ]
+        if summary.get("real_money_execution") is not False:
+            mismatches.append("real_money_execution")
+        if mismatches:
+            raise RunTransactionError(
+                f"{label} transaction identity mismatch: " + ",".join(sorted(mismatches))
+            )
+
     @classmethod
     def _require_decision_ledger_snapshot(
         cls,
@@ -491,6 +524,7 @@ class RunTransaction:
             summary = self._read_strict_json_file(path, label=label)
             if not isinstance(summary, dict):
                 raise RunTransactionError(f"{label} schema is invalid")
+            self._validate_summary_identity(summary, manifest, label=label)
             expected_bindings = {
                 "paper_book_sha256": expected_book_hash,
                 "decision_ledger_sha256": expected_ledger_hash,

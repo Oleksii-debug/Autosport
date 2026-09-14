@@ -57,6 +57,17 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def _assert_invalid_event_not_persisted(self, invalid: MarketEvent) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            with self.assertRaisesRegex(ValueError, "market event payload is not canonical"):
+                store.append(invalid)
+
+            count = store.connection.execute("SELECT COUNT(*) FROM market_events").fetchone()[0]
+            self.assertEqual(count, 0)
+            self.assertEqual(store.current(), {})
+            store.close()
+
     def test_exact_source_duplicate_is_idempotent_across_local_observation_times(self):
         first = self._event(
             observed_ts="2026-01-01T00:00:01+00:00",
@@ -106,22 +117,47 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
 
     def test_noncanonical_incoming_event_fails_before_persistence(self):
         invalid = replace(self._event(event_id="7"), event_id=7)  # type: ignore[arg-type]
+        self._assert_invalid_event_not_persisted(invalid)
 
-        with tempfile.TemporaryDirectory() as tmp:
-            store = SQLiteMarketStore(Path(tmp) / "market.db")
-            with self.assertRaisesRegex(ValueError, "market event payload is not canonical"):
-                store.append(invalid)
+    def test_tuple_metadata_fails_before_json_type_drift_can_persist(self):
+        invalid = replace(
+            self._event(),
+            metadata={"coordinates": (1, 2)},  # type: ignore[dict-item]
+        )
+        self._assert_invalid_event_not_persisted(invalid)
 
-            count = store.connection.execute("SELECT COUNT(*) FROM market_events").fetchone()[0]
-            self.assertEqual(count, 0)
-            self.assertEqual(store.current(), {})
-            store.close()
+    def test_non_string_metadata_key_fails_before_json_key_coercion_can_persist(self):
+        invalid = replace(
+            self._event(),
+            metadata={7: "seven"},  # type: ignore[dict-item]
+        )
+        self._assert_invalid_event_not_persisted(invalid)
+
+    def test_non_finite_metadata_number_fails_before_persistence(self):
+        invalid = replace(self._event(), metadata={"signal": float("inf")})
+        self._assert_invalid_event_not_persisted(invalid)
 
     def test_noncanonical_event_rolls_back_earlier_batch_insert(self):
         valid = self._event(event_id="e2", sequence=2)
         invalid = replace(
             self._event(event_id="7", sequence=3),
             event_id=7,  # type: ignore[arg-type]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            with self.assertRaisesRegex(ValueError, "market event payload is not canonical"):
+                store.append_batch_accepted([valid, invalid])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.current(), {})
+            store.close()
+
+    def test_json_type_drift_event_rolls_back_earlier_batch_insert(self):
+        valid = self._event(event_id="e2", sequence=2)
+        invalid = replace(
+            self._event(event_id="e3", sequence=3),
+            metadata={"coordinates": (1, 2)},  # type: ignore[dict-item]
         )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,6 +229,34 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
                 connection.close()
 
             with self.assertRaisesRegex(ValueError, "duplicate object key: event_id"):
+                SQLiteMarketStore(db_path)
+
+    def test_reopen_rejects_non_finite_persisted_json_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "market.db"
+            event = self._event()
+            store = SQLiteMarketStore(db_path)
+            self.assertTrue(store.append(event))
+            store.close()
+
+            connection = sqlite3.connect(db_path)
+            try:
+                payload = connection.execute(
+                    "SELECT payload_json FROM market_events WHERE dedupe_key=?",
+                    (event.dedupe_key,),
+                ).fetchone()[0]
+                marker = '"metadata":{}'
+                self.assertIn(marker, payload)
+                nonstandard = payload.replace(marker, '"metadata":{"signal":Infinity}', 1)
+                connection.execute(
+                    "UPDATE market_events SET payload_json=? WHERE dedupe_key=?",
+                    (nonstandard, event.dedupe_key),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "non-finite JSON number: Infinity"):
                 SQLiteMarketStore(db_path)
 
     def test_reopen_fails_closed_on_redundant_history_column_tamper(self):

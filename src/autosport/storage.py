@@ -38,13 +38,18 @@ def _event_order_key(event: MarketEvent) -> tuple[datetime, int, str]:
     return (_observed_instant(event.observed_ts), event.sequence, event.dedupe_key)
 
 
-def _canonical_payload(event: MarketEvent) -> str:
+def _canonical_json(raw: object) -> str:
     return json.dumps(
-        event.to_dict(),
+        raw,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+        allow_nan=False,
     )
+
+
+def _canonical_payload(event: MarketEvent) -> str:
+    return _canonical_json(event.to_dict())
 
 
 def _source_payload_from_raw(raw: object) -> str:
@@ -55,12 +60,7 @@ def _source_payload_from_raw(raw: object) -> str:
     # sequence is polled again. They are not source-snapshot identity.
     normalized.pop("observed_ts", None)
     normalized.pop("ingest_ts", None)
-    return json.dumps(
-        normalized,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    return _canonical_json(normalized)
 
 
 def _source_payload(event: MarketEvent) -> str:
@@ -94,9 +94,17 @@ def _reject_duplicate_object_pairs(pairs: list[tuple[str, object]]) -> dict[str,
     return result
 
 
+def _reject_non_finite_json_constant(value: str) -> object:
+    raise ValueError(f"stored market event payload contains non-finite JSON number: {value}")
+
+
 def _load_history_payload(payload_json: str) -> dict[str, object]:
     try:
-        raw = json.loads(payload_json, object_pairs_hook=_reject_duplicate_object_pairs)
+        raw = json.loads(
+            payload_json,
+            object_pairs_hook=_reject_duplicate_object_pairs,
+            parse_constant=_reject_non_finite_json_constant,
+        )
     except json.JSONDecodeError as exc:
         raise ValueError("stored market event payload must be valid JSON") from exc
     if not isinstance(raw, dict):
@@ -105,14 +113,19 @@ def _load_history_payload(payload_json: str) -> dict[str, object]:
 
 
 def _validate_incoming_event(event: MarketEvent) -> str:
-    raw = event.to_dict()
+    """Prove an event survives the exact durable JSON representation without type drift."""
     try:
-        round_tripped = MarketEvent.from_dict(raw).to_dict()
-    except (KeyError, TypeError, ValueError) as exc:
+        raw = event.to_dict()
+        payload = _canonical_json(raw)
+        persisted_raw = _load_history_payload(payload)
+        if not _typed_payload_equal(raw, persisted_raw):
+            raise ValueError("market event JSON representation changes payload types")
+        round_tripped = MarketEvent.from_dict(persisted_raw).to_dict()
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("market event payload is not canonical") from exc
-    if not _typed_payload_equal(raw, round_tripped):
+    if not _typed_payload_equal(persisted_raw, round_tripped):
         raise ValueError("market event payload is not canonical")
-    return _canonical_payload(event)
+    return payload
 
 
 def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
@@ -138,12 +151,7 @@ def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
     raw = _load_history_payload(payload_json)
 
     event = MarketEvent.from_dict(raw)
-    canonical_raw = json.dumps(
-        raw,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    canonical_raw = _canonical_json(raw)
     if canonical_raw != _canonical_payload(event):
         raise ValueError("stored market event payload is not canonical")
 
@@ -279,7 +287,11 @@ class SQLiteMarketStore:
             "SELECT payload_json FROM current_quotes WHERE quote_key=?",
             (event.quote_key,),
         ).fetchone()
-        previous_event = MarketEvent.from_dict(json.loads(previous[0])) if previous is not None else None
+        previous_event = (
+            MarketEvent.from_dict(_load_history_payload(previous[0]))
+            if previous is not None
+            else None
+        )
         if previous_event is None or incoming_key > _event_order_key(previous_event):
             self.connection.execute(
                 """INSERT INTO current_quotes(quote_key,observed_ts,sequence,payload_json)
@@ -323,7 +335,7 @@ class SQLiteMarketStore:
         rows = self.connection.execute("SELECT quote_key,payload_json FROM current_quotes").fetchall()
         current: dict[str, MarketEvent] = {}
         for quote_key, payload_json in rows:
-            event = MarketEvent.from_dict(json.loads(payload_json))
+            event = MarketEvent.from_dict(_load_history_payload(payload_json))
             _event_order_key(event)
             if event.quote_key != quote_key:
                 raise ValueError("current quote projection identity mismatch")

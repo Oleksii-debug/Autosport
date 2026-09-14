@@ -139,7 +139,7 @@ class CommittedIngestionOutcome:
         )
 
     def record_health(self, store: SourceHealthStore) -> SourceHealthState:
-        """Safely repair a failed post-commit health projection without double counting."""
+        """Repair health only when durable state proves that one retry is safe."""
         if self.health_before is None:
             raise RuntimeError(
                 "committed ingestion outcome lacks pre-health state for a safe retry"
@@ -147,8 +147,17 @@ class CommittedIngestionOutcome:
         current = store.get(self.source_id)
         current_snapshot = _SourceHealthSnapshot.from_state(current)
         expected = self.health_before.after_success(self)
+
+        # Equality with the expected post-state cannot identify which committed
+        # outcome produced it. Two concurrent same-source outcomes may capture the
+        # same pre-state and project identical health fields. Treating value equality
+        # as idempotency would silently under-count one market commit. Without a
+        # durable operation identity, this state is inherently ambiguous.
         if current_snapshot == expected:
-            return current
+            raise RuntimeError(
+                "source health matches the expected post-state but this outcome "
+                "cannot prove it performed that durable mutation; refusing ambiguous retry"
+            )
         if current_snapshot != self.health_before:
             raise RuntimeError(
                 "source health changed since the committed ingestion outcome; "

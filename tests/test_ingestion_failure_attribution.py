@@ -205,7 +205,7 @@ class IngestionFailureAttributionTests(unittest.TestCase):
         self.assertEqual(health.success_calls, 1)
         self.assertEqual(health.failure_calls, 0)
 
-    def test_retry_after_post_publish_unlock_failure_does_not_double_count(self):
+    def test_post_publish_unlock_failure_is_ambiguous_without_operation_identity(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             health = SourceHealthStore(Path(temporary_directory) / "source-health.json")
             bus = _CommittedBus()
@@ -242,14 +242,79 @@ class IngestionFailureAttributionTests(unittest.TestCase):
             with mock.patch.object(
                 health,
                 "record_success",
-                side_effect=AssertionError("already-applied health must not be written twice"),
+                side_effect=AssertionError("ambiguous state must not be written twice"),
             ):
-                recovered = error.outcome.record_health(health)
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "cannot prove it performed that durable mutation",
+                ):
+                    error.outcome.record_health(health)
 
-            self.assertEqual(recovered.poll_count, 1)
-            self.assertEqual(recovered.total_received, 1)
-            self.assertEqual(recovered.total_accepted, 1)
-            self.assertEqual(recovered.total_rejected, 0)
+            after_retry = health.get("source")
+            self.assertEqual(after_retry.poll_count, 1)
+            self.assertEqual(after_retry.total_received, 1)
+            self.assertEqual(after_retry.total_accepted, 1)
+            self.assertEqual(after_retry.total_rejected, 0)
+            self.assertEqual(bus.calls, 1)
+
+    def test_identical_concurrent_health_projection_does_not_alias_as_this_outcome(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            health = SourceHealthStore(Path(temporary_directory) / "source-health.json")
+            bus = _CommittedBus()
+            provider = _SuccessfulProvider(
+                ProviderBatch("source", (self._quote(),), cursor="cursor-1")
+            )
+            engine = IngestionEngine(
+                bus,  # type: ignore[arg-type]
+                health_store=health,
+                clock=lambda: "2026-09-14T08:00:01+00:00",
+            )
+
+            # Outcome A commits market bytes but fails before health publication.
+            with mock.patch.object(
+                health,
+                "record_success",
+                side_effect=OSError("health write failed before publication"),
+            ):
+                with self.assertRaises(CommittedIngestionHealthError) as raised:
+                    engine.poll_once(provider, max_items=10)
+
+            outcome_a = raised.exception.outcome
+            self.assertEqual(health.get("source").poll_count, 0)
+
+            # Distinct outcome B, with the same captured S0 and field-for-field
+            # identical health projection, wins the durable health write.
+            health.record_success(
+                "source",
+                now="2026-09-14T08:00:01+00:00",
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="cursor-1",
+                latest_source_ts=None,
+                quality_flags=(),
+            )
+            state_from_b = health.get("source")
+            self.assertEqual(state_from_b.poll_count, 1)
+
+            with mock.patch.object(
+                health,
+                "record_success",
+                side_effect=AssertionError(
+                    "A must neither claim B's state nor apply a second increment"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "cannot prove it performed that durable mutation",
+                ):
+                    outcome_a.record_health(health)
+
+            after_a_recovery = health.get("source")
+            self.assertEqual(after_a_recovery.poll_count, 1)
+            self.assertEqual(after_a_recovery.total_received, 1)
+            self.assertEqual(after_a_recovery.total_accepted, 1)
+            self.assertEqual(after_a_recovery.total_rejected, 0)
             self.assertEqual(bus.calls, 1)
 
     def test_retry_fails_closed_when_health_state_diverged(self):

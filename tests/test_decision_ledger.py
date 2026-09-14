@@ -93,7 +93,27 @@ class DecisionLedgerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 DecisionLedgerIntegrityError,
-                "not canonical JSON",
+                "non-finite",
+            ):
+                ledger.append(record)
+            self.assertFalse(path.exists())
+
+    def test_append_rejects_non_string_mapping_keys_before_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            record = DecisionRecord(
+                "run-1",
+                "agent",
+                "2026-01-01T00:00:00+00:00",
+                "OBSERVE",
+                {1: "numeric", "1": "string"},
+                "ctx",
+            )
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "object keys at payload must be strings",
             ):
                 ledger.append(record)
             self.assertFalse(path.exists())

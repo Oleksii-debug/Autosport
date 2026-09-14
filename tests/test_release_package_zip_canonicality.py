@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from autosport.release_package import build_windows_package, verify_windows_pack
 
 class ReleasePackageZipCanonicalityTests(unittest.TestCase):
     SOURCE_SHA = "a" * 40
+    PREFIX = "Autosport-V1/"
 
     def _build_candidate(self, root: Path) -> Path:
         exe = root / "Autosport.exe"
@@ -72,13 +74,23 @@ class ReleasePackageZipCanonicalityTests(unittest.TestCase):
         return package
 
     @staticmethod
+    def _read_members(package: Path) -> dict[str, bytes]:
+        with zipfile.ZipFile(package, "r") as archive:
+            return {
+                info.filename: archive.read(info.filename)
+                for info in archive.infolist()
+            }
+
+    @staticmethod
     def _rewrite_archive(
         package: Path,
         *,
         reverse: bool = False,
         mutate_first=None,
         archive_comment: bytes = b"",
+        replacements: dict[str, bytes] | None = None,
     ) -> None:
+        replacements = replacements or {}
         with zipfile.ZipFile(package, "r") as archive:
             entries = [
                 (info, archive.read(info.filename))
@@ -102,11 +114,33 @@ class ReleasePackageZipCanonicalityTests(unittest.TestCase):
                     mutate_first(info)
                 archive.writestr(
                     info,
-                    payload,
+                    replacements.get(original.filename, payload),
                     compress_type=info.compress_type,
                     compresslevel=9,
                 )
             archive.comment = archive_comment
+
+    @staticmethod
+    def _canonical_json_bytes(payload: dict) -> bytes:
+        return (
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+
+    @staticmethod
+    def _parse_sums(payload: bytes) -> dict[str, str]:
+        return {
+            relative: digest
+            for line in payload.decode("utf-8").splitlines()
+            for digest, separator, relative in [line.partition("  ")]
+            if separator
+        }
+
+    @staticmethod
+    def _canonical_sums_bytes(sums: dict[str, str]) -> bytes:
+        return "".join(
+            f"{sums[relative]}  {relative}\n"
+            for relative in sorted(sums)
+        ).encode("utf-8")
 
     def test_builder_emits_verifier_accepted_canonical_zip(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -126,7 +160,11 @@ class ReleasePackageZipCanonicalityTests(unittest.TestCase):
             package = self._build_candidate(Path(temporary))
             self._rewrite_archive(
                 package,
-                mutate_first=lambda info: setattr(info, "date_time", (2026, 9, 14, 9, 0, 0)),
+                mutate_first=lambda info: setattr(
+                    info,
+                    "date_time",
+                    (2026, 9, 14, 9, 0, 0),
+                ),
             )
             with self.assertRaisesRegex(ValueError, "non-canonical timestamp"):
                 verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
@@ -141,6 +179,20 @@ class ReleasePackageZipCanonicalityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-canonical permissions"):
                 verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
 
+    def test_payload_equivalent_noncanonical_compression_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(Path(temporary))
+            self._rewrite_archive(
+                package,
+                mutate_first=lambda info: setattr(
+                    info,
+                    "compress_type",
+                    zipfile.ZIP_STORED,
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "non-canonical compression"):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
     def test_payload_equivalent_archive_comment_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             package = self._build_candidate(Path(temporary))
@@ -153,9 +205,94 @@ class ReleasePackageZipCanonicalityTests(unittest.TestCase):
             package = self._build_candidate(Path(temporary))
             self._rewrite_archive(
                 package,
-                mutate_first=lambda info: setattr(info, "extra", b"\x01\x00\x00\x00"),
+                mutate_first=lambda info: setattr(
+                    info,
+                    "extra",
+                    b"\x01\x00\x00\x00",
+                ),
             )
             with self.assertRaisesRegex(ValueError, "member metadata"):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
+    def test_semantically_equivalent_manifest_serialization_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(Path(temporary))
+            members = self._read_members(package)
+            manifest_name = self.PREFIX + "PACKAGE_MANIFEST.json"
+            sums_name = self.PREFIX + "SHA256SUMS.txt"
+            manifest = json.loads(members[manifest_name].decode("utf-8"))
+            compact_manifest = (
+                json.dumps(manifest, ensure_ascii=False, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            sums = self._parse_sums(members[sums_name])
+            sums["PACKAGE_MANIFEST.json"] = hashlib.sha256(
+                compact_manifest
+            ).hexdigest()
+            self._rewrite_archive(
+                package,
+                replacements={
+                    manifest_name: compact_manifest,
+                    sums_name: self._canonical_sums_bytes(sums),
+                },
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "PACKAGE_MANIFEST.json is not in canonical JSON representation",
+            ):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
+    def test_semantically_equivalent_build_info_serialization_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(Path(temporary))
+            members = self._read_members(package)
+            build_info_name = self.PREFIX + "BUILD_INFO.json"
+            manifest_name = self.PREFIX + "PACKAGE_MANIFEST.json"
+            sums_name = self.PREFIX + "SHA256SUMS.txt"
+
+            build_info = json.loads(members[build_info_name].decode("utf-8"))
+            compact_build_info = (
+                json.dumps(build_info, ensure_ascii=False, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            build_info_sha = hashlib.sha256(compact_build_info).hexdigest()
+
+            manifest = json.loads(members[manifest_name].decode("utf-8"))
+            manifest["files"]["BUILD_INFO.json"] = build_info_sha
+            canonical_manifest = self._canonical_json_bytes(manifest)
+            manifest_sha = hashlib.sha256(canonical_manifest).hexdigest()
+
+            sums = self._parse_sums(members[sums_name])
+            sums["BUILD_INFO.json"] = build_info_sha
+            sums["PACKAGE_MANIFEST.json"] = manifest_sha
+            self._rewrite_archive(
+                package,
+                replacements={
+                    build_info_name: compact_build_info,
+                    manifest_name: canonical_manifest,
+                    sums_name: self._canonical_sums_bytes(sums),
+                },
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "BUILD_INFO.json is not in canonical JSON representation",
+            ):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
+    def test_semantically_equivalent_checksum_order_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(Path(temporary))
+            members = self._read_members(package)
+            sums_name = self.PREFIX + "SHA256SUMS.txt"
+            lines = members[sums_name].decode("utf-8").splitlines()
+            self.assertGreater(len(lines), 1)
+            reordered = ("\n".join(reversed(lines)) + "\n").encode("utf-8")
+            self._rewrite_archive(
+                package,
+                replacements={sums_name: reordered},
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "SHA256SUMS.txt is not in canonical sorted representation",
+            ):
                 verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
 
 

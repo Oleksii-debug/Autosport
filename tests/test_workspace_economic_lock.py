@@ -1,4 +1,6 @@
+import io
 import multiprocessing
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -85,6 +87,110 @@ class WorkspaceEconomicLockTests(unittest.TestCase):
             finally:
                 self._stop_holder(process, release)
 
+    def test_symlink_lock_path_is_rejected_without_touching_external_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "workspace"
+            root.mkdir()
+            external = base / "external-lock-target.bin"
+            external.write_bytes(b"")
+            lock_path = root / WorkspaceEconomicLock.FILE_NAME
+            try:
+                os.symlink(external, lock_path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation is unavailable on this platform: {exc}")
+
+            lock = WorkspaceEconomicLock(root)
+            with self.assertRaisesRegex(
+                WorkspaceEconomicLockError,
+                "regular non-symlink file",
+            ):
+                lock.acquire()
+
+            self.assertEqual(external.read_bytes(), b"")
+            self.assertTrue(lock_path.is_symlink())
+            self.assertIsNone(lock._handle)
+
+    def test_hardlinked_lock_path_is_rejected_without_touching_alias_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "workspace"
+            root.mkdir()
+            external = base / "external-lock-target.bin"
+            external.write_bytes(b"external-state")
+            lock_path = root / WorkspaceEconomicLock.FILE_NAME
+            try:
+                os.link(external, lock_path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"hard-link creation is unavailable on this platform: {exc}")
+
+            lock = WorkspaceEconomicLock(root)
+            with self.assertRaisesRegex(
+                WorkspaceEconomicLockError,
+                "hard-link aliases",
+            ):
+                lock.acquire()
+
+            self.assertEqual(external.read_bytes(), b"external-state")
+            self.assertEqual(lock_path.read_bytes(), b"external-state")
+            self.assertIsNone(lock._handle)
+
+    def test_path_swap_after_open_is_rejected_before_acquisition_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / WorkspaceEconomicLock.FILE_NAME
+            lock_path.write_bytes(b"\0")
+            lock = WorkspaceEconomicLock(root)
+            original_open = Path.open
+
+            def open_then_replace(path_obj, *args, **kwargs):
+                handle = original_open(path_obj, *args, **kwargs)
+                os.unlink(path_obj)
+                with io.open(path_obj, "wb") as replacement:
+                    replacement.write(b"replacement")
+                return handle
+
+            with mock.patch.object(Path, "open", autospec=True, side_effect=open_then_replace):
+                with self.assertRaisesRegex(
+                    WorkspaceEconomicLockError,
+                    "changed during acquisition",
+                ):
+                    lock.acquire()
+
+            self.assertEqual(lock_path.read_bytes(), b"replacement")
+            self.assertIsNone(lock._handle)
+
+    def test_path_swap_after_os_lock_is_rejected_before_acquisition_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / WorkspaceEconomicLock.FILE_NAME
+            lock = WorkspaceEconomicLock(root)
+            original_lock = WorkspaceEconomicLock._lock_handle
+
+            def lock_then_replace(handle):
+                original_lock(handle)
+                os.unlink(lock_path)
+                lock_path.write_bytes(b"replacement-after-lock")
+
+            with mock.patch.object(
+                WorkspaceEconomicLock,
+                "_lock_handle",
+                side_effect=lock_then_replace,
+            ):
+                with self.assertRaisesRegex(
+                    WorkspaceEconomicLockError,
+                    "changed during acquisition",
+                ):
+                    lock.acquire()
+
+            self.assertEqual(lock_path.read_bytes(), b"replacement-after-lock")
+            self.assertIsNone(lock._handle)
+
+            # Cleanup closed the old locked inode, so the replacement canonical path
+            # can be acquired normally rather than leaving hidden ownership behind.
+            with WorkspaceEconomicLock(root):
+                pass
+
     def test_acquire_preserves_primary_failure_when_cleanup_close_also_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -98,6 +204,7 @@ class WorkspaceEconomicLockTests(unittest.TestCase):
 
             with (
                 mock.patch.object(Path, "open", return_value=handle),
+                mock.patch.object(lock, "_validate_open_handle_identity"),
                 mock.patch.object(WorkspaceEconomicLock, "_lock_handle", side_effect=primary),
             ):
                 with self.assertRaisesRegex(

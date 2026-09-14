@@ -10,6 +10,12 @@ from typing import Any
 
 _ALLOWED_OUTCOMES = frozenset({"win", "loss", "void"})
 _MAX_LINEAGE_DEPTH = 1024
+_CORRECTION_FIELDS = (
+    "predecessor_record_file",
+    "predecessor_record_sha256",
+    "supersedes_revision_id",
+    "correction_reason",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,9 +65,14 @@ def validate_outcome_source_lineage(
         raise ValueError("sealed outcome source record must be a JSON object")
 
     source_root_resolved = source_root.resolve()
+    current_resolved = (source_root / current_file).resolve()
+    if current_resolved.parent != source_root_resolved:
+        raise ValueError(
+            "sealed outcome source record must resolve to a direct sibling artifact"
+        )
     current_record = source_record
     visited_files: set[str] = set()
-    visited_paths: set[Path] = {(source_root / current_file).resolve()}
+    visited_paths: set[Path] = {current_resolved}
     visited_revision_ids: set[str] = set()
     head: dict[str, Any] | None = None
     head_predecessor_sha: str | None = None
@@ -146,15 +157,7 @@ def validate_outcome_source_lineage(
                 raise ValueError(
                     "sealed outcome source record revision 1 must set revision_kind=initial"
                 )
-            if any(
-                value is not None
-                for value in (
-                    predecessor_file_raw,
-                    predecessor_sha_raw,
-                    supersedes_raw,
-                    correction_reason_raw,
-                )
-            ):
+            if any(field in current_record for field in _CORRECTION_FIELDS):
                 raise ValueError(
                     "sealed outcome source record revision 1 must not declare correction lineage fields"
                 )

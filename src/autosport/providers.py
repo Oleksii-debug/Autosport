@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -40,6 +42,47 @@ def _validate_sequence(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError("sequence must be a non-boolean int")
     return value
+
+
+def _validate_provider_text(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be str")
+    if not value or value != value.strip():
+        raise ValueError(f"{name} must be non-empty and trimmed")
+    return value
+
+
+def _validate_provider_timestamp(value: object, name: str) -> str:
+    timestamp = _validate_provider_text(value, name)
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be valid ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware ISO-8601")
+    return timestamp
+
+
+def _validate_json_value(value: object, field: str) -> None:
+    """Require a value to survive durable JSON without type drift or non-finite numbers."""
+
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{field} contains non-finite JSON number")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_json_value(item, f"{field}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{field} contains non-string JSON object key")
+            _validate_json_value(item, f"{field}.{key}")
+        return
+    raise TypeError(f"{field} contains non-canonical JSON value type {type(value).__name__}")
 
 
 def _scoped_identity(source_id: str, provider_component: str) -> str:
@@ -107,19 +150,32 @@ class CanonicalNormalizer:
             raise ValueError("decimal odds must be finite")
         if quote.decimal_odds <= 1:
             raise ValueError("decimal odds must be greater than 1")
+        observed_ts = _validate_provider_timestamp(quote.observed_ts, "observed_ts")
+        if not isinstance(quote.market_type, MarketType):
+            raise TypeError("market_type must be MarketType")
+        status = _validate_provider_text(quote.status, "status")
+        source_ts = quote.source_ts
+        if source_ts is not None:
+            source_ts = _validate_provider_timestamp(source_ts, "source_ts")
+        score_state = quote.score_state
+        if score_state is not None:
+            score_state = _validate_provider_text(score_state, "score_state")
+        if not isinstance(quote.metadata, dict):
+            raise TypeError("metadata must be dict")
+        _validate_json_value(quote.metadata, "metadata")
         return MarketEvent(
             event_id=_scoped_identity(source_id, quote.provider_event_id),
             market_id=_scoped_identity(source_id, quote.provider_market_id),
             selection_id=_scoped_identity(source_id, quote.provider_selection_id),
             decimal_odds=quote.decimal_odds,
-            observed_ts=quote.observed_ts,
+            observed_ts=observed_ts,
             source_id=source_id,
             sequence=quote.sequence,
             market_type=quote.market_type,
-            status=quote.status,
-            source_ts=quote.source_ts,
-            ingest_ts=quote.observed_ts,
-            score_state=quote.score_state,
+            status=status,
+            source_ts=source_ts,
+            ingest_ts=observed_ts,
+            score_state=score_state,
             metadata=dict(quote.metadata),
         )
 

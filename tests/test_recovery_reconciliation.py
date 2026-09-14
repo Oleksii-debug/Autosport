@@ -98,6 +98,44 @@ class RecoveryReconciliationTests(unittest.TestCase):
             self.assertFalse((root / "run_registry.json").exists())
             self.assertEqual(run_repair_workspace(root), 0)
 
+    def test_missing_registry_with_durable_history_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transaction_dir = root / ".run-transactions" / "run-1"
+            transaction_dir.mkdir(parents=True)
+            (transaction_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ReconciliationError,
+                "run registry is missing while durable run history exists",
+            ):
+                reconcile_late_crashes(root)
+            self.assertEqual(run_repair_workspace(root), 3)
+            self.assertFalse((root / "run_registry.json").exists())
+
+    def test_non_file_registry_path_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "run_registry.json").mkdir()
+
+            with self.assertRaisesRegex(ReconciliationError, "run registry path is not a file"):
+                reconcile_late_crashes(root)
+            self.assertEqual(run_repair_workspace(root), 3)
+
+    def test_invalid_registry_json_is_controlled_recovery_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry_path = root / "run_registry.json"
+            registry_path.write_text('{"schema_version":1,"runs":', encoding="utf-8")
+
+            with self.assertRaisesRegex(ReconciliationError, "invalid run registry"):
+                reconcile_late_crashes(root)
+            self.assertEqual(run_repair_workspace(root), 3)
+            self.assertEqual(
+                registry_path.read_text(encoding="utf-8"),
+                '{"schema_version":1,"runs":',
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

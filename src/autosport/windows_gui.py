@@ -8,7 +8,7 @@ import tk_uia
 from .gui import AutosportApp
 from .recovery_worker import OneShotRecoveryWorker, RecoverySessionView, recover_workspace_once
 from .replay_worker import workspace_for_strategy
-from .ui_model import ticket_lines
+from .ui_model import evaluation_lines, result_summary, ticket_lines
 
 
 WINDOWS_BANKROLL_AUTOMATION_ID = 205
@@ -21,6 +21,7 @@ class WindowsAutosportApp(AutosportApp):
         self.recovery_worker: OneShotRecoveryWorker | None = None
         self._recovery_view: RecoverySessionView | None = None
         self._recovery_blocked_workspace: Path | None = None
+        self._recovery_blocked_workspaces: set[Path] = set()
         super().__init__()
         self.recovery_worker = OneShotRecoveryWorker()
 
@@ -70,6 +71,40 @@ class WindowsAutosportApp(AutosportApp):
     def _recovery_busy(self) -> bool:
         worker = self.recovery_worker
         return bool(worker is not None and worker.busy)
+
+    def _blocked_recovery_workspaces(self) -> set[Path]:
+        """Return the in-process quarantine set, migrating the legacy single slot lazily.
+
+        The Windows GUI may host multiple isolated strategy/plan workspaces in one
+        process. A failed recovery or uncertain replay in one workspace must not
+        poison every strategy, but failure in a second workspace must not erase the
+        first quarantine either. The legacy single-path attribute is retained as a
+        compatibility/display hint for existing callers and tests; enforcement uses
+        the set.
+        """
+
+        blocked = getattr(self, "_recovery_blocked_workspaces", None)
+        if blocked is None:
+            blocked = set()
+            self._recovery_blocked_workspaces = blocked
+        legacy = getattr(self, "_recovery_blocked_workspace", None)
+        if legacy is not None:
+            blocked.add(Path(legacy))
+        return blocked
+
+    def _block_workspace_for_recovery(self, workspace: Path) -> None:
+        workspace = Path(workspace)
+        self._blocked_recovery_workspaces().add(workspace)
+        self._recovery_blocked_workspace = workspace
+
+    def _unblock_workspace_after_recovery(self, workspace: Path) -> None:
+        workspace = Path(workspace)
+        self._blocked_recovery_workspaces().discard(workspace)
+        if getattr(self, "_recovery_blocked_workspace", None) == workspace:
+            self._recovery_blocked_workspace = None
+
+    def _workspace_requires_recovery(self, workspace: Path) -> bool:
+        return Path(workspace) in self._blocked_recovery_workspaces()
 
     def _bank_text(self) -> str:
         source = (
@@ -151,7 +186,7 @@ class WindowsAutosportApp(AutosportApp):
         self._active_workspace = replay_workspace
         self._active_strategy_id = strategy_id
         self._active_research_plan = research_plan
-        self._recovery_blocked_workspace = replay_workspace
+        self._block_workspace_for_recovery(replay_workspace)
         self._recovery_view = None
         if self.session is not None:
             self.session.close()
@@ -247,21 +282,99 @@ class WindowsAutosportApp(AutosportApp):
             )
             return
 
-        self._recovery_blocked_workspace = None
+        self._unblock_workspace_after_recovery(result.session_view.workspace)
         self.status.set(summary + ". Workspace готовий до наступного перевіреного paper replay.")
         messagebox.showinfo("Автоспорт", "Workspace recovery завершено без unresolved runs.")
+
+    def _poll_replay_worker(self) -> None:
+        """Consume replay terminal state and quarantine any uncertain workspace.
+
+        A replay exception does not prove that no durable mutation happened before
+        the exception. Likewise, a failure to reopen/validate the workspace after a
+        nominally successful worker result makes its economic state uncertain. The
+        packaged Windows product therefore requires an explicit successful recovery
+        before another replay can mutate that same workspace.
+        """
+
+        message = self.replay_worker.poll()
+        if message is None:
+            self.after(100, self._poll_replay_worker)
+            return
+
+        self._set_replay_controls_busy(False)
+        if message.error is not None or message.result is None:
+            self._block_workspace_for_recovery(self._active_workspace)
+            self._recovery_view = None
+
+        try:
+            self.session = self._open_session(
+                self._active_strategy_id,
+                self._active_research_plan,
+            )
+        except Exception as exc:
+            self.session = None
+            self._recovery_view = None
+            self._block_workspace_for_recovery(self._active_workspace)
+            self.bank.set(self._bank_text())
+            self._refresh_tickets()
+            self._set_evaluation_lines([
+                "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
+            ])
+            detail = f"Post-replay workspace reopen відхилено fail-closed: {type(exc).__name__}: {exc}"
+            if message.error is not None:
+                detail = f"Paper replay помилка: {message.error}; {detail}"
+            self.status.set(
+                "Replay terminal state не можна безпечно підтвердити; цей economic workspace заблоковано fail-closed. "
+                "Виконайте «Відновити workspace» або Control+Shift+R перед наступним replay у цьому workspace."
+            )
+            self._append_log(detail)
+            messagebox.showerror("Автоспорт", detail)
+            return
+
+        self.bank.set(self._bank_text())
+        self._refresh_tickets()
+
+        if message.error is not None:
+            text = f"Paper replay помилка: {message.error}"
+            self._append_log(text)
+            self._set_evaluation_lines([
+                "Evaluation недоступна: replay не досяг terminal settlement/evaluation boundary."
+            ])
+            self.status.set(
+                "Replay завершився помилкою; цей economic workspace заблоковано fail-closed. "
+                "Виконайте «Відновити workspace» або Control+Shift+R перед наступним replay у цьому workspace."
+            )
+            messagebox.showerror("Автоспорт", text)
+            return
+
+        result = message.result
+        if result is None:
+            self._set_evaluation_lines([
+                "Evaluation недоступна: worker не повернув terminal SessionResult."
+            ])
+            self.status.set(
+                "Replay worker завершився без terminal result; цей economic workspace заблоковано fail-closed. "
+                "Виконайте «Відновити workspace» перед наступним replay у цьому workspace."
+            )
+            return
+        summary = result_summary(result)
+        self._set_evaluation_lines(evaluation_lines(result))
+        self.status.set(summary)
+        self._append_log(summary)
 
     def run_dataset(self) -> None:
         if self._recovery_busy:
             self.status.set("Paper replay не запускається: workspace recovery ще виконується.")
             return
-        if self._recovery_blocked_workspace is not None:
+        if self._blocked_recovery_workspaces():
             try:
                 strategy_id, research_plan = self._selected_replay_configuration()
                 replay_workspace = workspace_for_strategy(self.workspace, strategy_id, research_plan)
             except Exception:
-                replay_workspace = self._recovery_blocked_workspace
-            if replay_workspace == self._recovery_blocked_workspace:
+                # Let the base implementation render the canonical configuration
+                # validation error rather than masking it as a recovery quarantine.
+                return super().run_dataset()
+            if self._workspace_requires_recovery(replay_workspace):
                 self.status.set(
                     "Paper replay заблоковано fail-closed: поточний workspace не має успішного terminal recovery result."
                 )

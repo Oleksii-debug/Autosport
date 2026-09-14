@@ -191,9 +191,25 @@ class WindowsAutosportApp(AutosportApp):
         self._active_research_plan = research_plan
         self._block_workspace_for_recovery(replay_workspace)
         self._recovery_view = None
-        if self.session is not None:
-            self.session.close()
-            self.session = None
+        session = self.session
+        self.session = None
+        if session is not None:
+            try:
+                session.close()
+            except Exception as exc:
+                detail = (
+                    "Workspace recovery відхилено fail-closed: previous economic session teardown failed; "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                self.status.set(
+                    "Workspace recovery не запущено: previous economic session teardown failed; "
+                    "economic state лишається прихованим, а workspace заблоковано fail-closed."
+                )
+                self._append_log(detail)
+                self.bank.set(self._bank_text())
+                self._refresh_tickets()
+                messagebox.showerror("Автоспорт", detail)
+                return
 
         def task():
             return recover_workspace_once(

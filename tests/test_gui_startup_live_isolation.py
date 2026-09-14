@@ -65,6 +65,7 @@ class _HeadlessWindowsAutosportApp(WindowsAutosportApp):
 
     def _build(self) -> None:
         self.shell_built = True
+        self.tickets = SimpleNamespace(delete=lambda *_args: None)
 
     def update_idletasks(self) -> None:
         return None

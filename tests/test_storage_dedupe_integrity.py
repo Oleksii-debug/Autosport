@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -53,6 +54,18 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
         connection = sqlite3.connect(db_path)
         try:
             connection.execute(f"UPDATE market_events SET {column}=?", (value,))
+            connection.commit()
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _tamper_current(db_path: Path, column: str, value: object) -> None:
+        allowed = {"quote_key", "observed_ts", "sequence"}
+        if column not in allowed:
+            raise ValueError("unsupported current projection tamper column")
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute(f"UPDATE current_quotes SET {column}=?", (value,))
             connection.commit()
         finally:
             connection.close()
@@ -198,6 +211,102 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
             self.assertEqual(db_path.read_bytes(), corrupt_bytes)
             db_path.unlink()
             self.assertFalse(db_path.exists())
+
+    def test_current_rejects_redundant_projection_column_tamper(self):
+        tamper_cases = (
+            ("quote_key", "tampered|quote|key"),
+            ("observed_ts", "2026-01-01T00:00:09+00:00"),
+            ("sequence", 99),
+        )
+
+        for column, value in tamper_cases:
+            with self.subTest(column=column), tempfile.TemporaryDirectory() as tmp:
+                db_path = Path(tmp) / "market.db"
+                store = SQLiteMarketStore(db_path)
+                self.assertTrue(store.append(self._event()))
+
+                self._tamper_current(db_path, column, value)
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"current quote projection row identity mismatch: {column}",
+                ):
+                    store.current()
+                store.close()
+
+    def test_current_rejects_noncanonical_projection_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "market.db"
+            event = self._event()
+            store = SQLiteMarketStore(db_path)
+            self.assertTrue(store.append(event))
+
+            connection = sqlite3.connect(db_path)
+            try:
+                payload_json = connection.execute(
+                    "SELECT payload_json FROM current_quotes WHERE quote_key=?",
+                    (event.quote_key,),
+                ).fetchone()[0]
+                raw = json.loads(payload_json)
+                raw["event_id"] = 7
+                connection.execute(
+                    "UPDATE current_quotes SET payload_json=? WHERE quote_key=?",
+                    (json.dumps(raw, sort_keys=True, separators=(",", ":")), event.quote_key),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "current quote projection payload is not canonical"):
+                store.current()
+            store.close()
+
+    def test_corrupt_projection_cannot_suppress_legitimate_advance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "market.db"
+            first = self._event()
+            second = self._event(
+                observed_ts="2026-01-01T00:00:02+00:00",
+                sequence=2,
+                ingest_ts="2026-01-01T00:00:02+00:00",
+            )
+            store = SQLiteMarketStore(db_path)
+            self.assertTrue(store.append(first))
+
+            connection = sqlite3.connect(db_path)
+            try:
+                payload_json = connection.execute(
+                    "SELECT payload_json FROM current_quotes WHERE quote_key=?",
+                    (first.quote_key,),
+                ).fetchone()[0]
+                raw = json.loads(payload_json)
+                raw["observed_ts"] = "2099-01-01T00:00:00+00:00"
+                connection.execute(
+                    "UPDATE current_quotes SET payload_json=? WHERE quote_key=?",
+                    (json.dumps(raw, sort_keys=True, separators=(",", ":")), first.quote_key),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "current quote projection row identity mismatch: observed_ts",
+            ):
+                store.append(second)
+
+            self.assertEqual(store.events(), [first])
+            with self.assertRaisesRegex(
+                ValueError,
+                "current quote projection row identity mismatch: observed_ts",
+            ):
+                store.current()
+            store.close()
+
+            reopened = SQLiteMarketStore(db_path)
+            self.assertEqual(reopened.events(), [first])
+            self.assertEqual(reopened.current()[first.quote_key], first)
+            reopened.close()
 
     def test_reopen_rejects_duplicate_keys_in_persisted_payload(self):
         with tempfile.TemporaryDirectory() as tmp:

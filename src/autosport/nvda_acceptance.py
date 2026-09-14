@@ -48,6 +48,34 @@ def _require_hex_digest(value: str, *, length: int, field: str) -> str:
     return value.lower()
 
 
+def _strict_json_object_bytes(payload: bytes, *, context: str) -> dict[str, Any]:
+    """Parse one trust-boundary JSON object without lossy/ambiguous JSON extensions."""
+
+    def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"{context} contains duplicate JSON object key: {key}")
+            value[key] = item
+        return value
+
+    def _reject_nonstandard_constant(value: str) -> None:
+        raise ValueError(f"{context} contains non-standard JSON constant: {value}")
+
+    try:
+        decoded = payload.decode("utf-8")
+        value = json.loads(
+            decoded,
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_nonstandard_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{context} is not valid UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must contain an object")
+    return value
+
+
 def _load_candidate_identity(
     release_zip: str | Path,
     *,
@@ -83,12 +111,10 @@ def _load_candidate_identity(
         for required in (_BUILD_INFO_MEMBER, _EXE_MEMBER):
             if required not in names:
                 raise ValueError(f"release ZIP is missing {required}")
-        try:
-            build_info = json.loads(archive.read(_BUILD_INFO_MEMBER).decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("release BUILD_INFO.json is not valid UTF-8 JSON") from exc
-        if not isinstance(build_info, dict):
-            raise ValueError("release BUILD_INFO.json must contain an object")
+        build_info = _strict_json_object_bytes(
+            archive.read(_BUILD_INFO_MEMBER),
+            context="release BUILD_INFO.json",
+        )
         source_sha = build_info.get("source_sha")
         exe_sha = build_info.get("autosport_exe_sha256")
         if not isinstance(source_sha, str):
@@ -169,12 +195,13 @@ def write_template(
 
 def _read_evidence(path: str | Path) -> dict[str, Any]:
     try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = Path(path).read_bytes()
+    except OSError as exc:
         raise ValueError("NVDA acceptance evidence is not readable UTF-8 JSON") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("NVDA acceptance evidence must contain an object")
-    return payload
+    try:
+        return _strict_json_object_bytes(payload, context="NVDA acceptance evidence")
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def validate_evidence(
@@ -190,7 +217,13 @@ def validate_evidence(
         expected_package_sha256=expected_package_sha256,
     )
     evidence = _read_evidence(evidence_path)
-    if evidence.get("schema_version") != _SCHEMA_VERSION or evidence.get("kind") != _KIND:
+    schema_version = evidence.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != _SCHEMA_VERSION
+        or evidence.get("kind") != _KIND
+    ):
         raise ValueError("NVDA acceptance evidence schema/kind mismatch")
     candidate = evidence.get("candidate")
     if not isinstance(candidate, dict):
@@ -239,8 +272,12 @@ def validate_evidence(
         raise ValueError(f"NVDA acceptance evidence check set mismatch; missing={missing}, extra={extra}")
 
     failed: list[str] = []
-    for check_id, _description in _REQUIRED_CHECKS:
+    for check_id, expected_description in _REQUIRED_CHECKS:
         item = by_id[check_id]
+        if item.get("description") != expected_description:
+            raise ValueError(
+                f"NVDA acceptance evidence check {check_id} description does not match the canonical physical test contract"
+            )
         status = item.get("status")
         if status not in {"PASS", "FAIL"}:
             raise ValueError(f"NVDA acceptance evidence check {check_id} must be PASS or FAIL")

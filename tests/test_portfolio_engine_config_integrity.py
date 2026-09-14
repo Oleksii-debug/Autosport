@@ -13,10 +13,16 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
             ("max_exact_states", -1),
             ("max_exact_states", True),
             ("max_exact_states", "10"),
+            ("max_exact_states", 1.5),
+            ("max_exact_states", Decimal("2")),
+            ("max_exact_states", None),
             ("sample_count", 0),
             ("sample_count", -1),
             ("sample_count", False),
             ("sample_count", "10"),
+            ("sample_count", 1.5),
+            ("sample_count", Decimal("2")),
+            ("sample_count", None),
         )
         for field, value in cases:
             with self.subTest(field=field, value=value):
@@ -24,7 +30,7 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
                     PortfolioEngine(**{field: value})
 
     def test_engine_rejects_non_integer_or_boolean_seed(self) -> None:
-        for value in (True, False, "7", Decimal("7"), 7.0):
+        for value in (True, False, "7", Decimal("7"), 7.0, None):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "seed must be an integer"):
                     PortfolioEngine(seed=value)
@@ -111,7 +117,7 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
             TicketLeg("event-a", "winner", "a2", Decimal("10")),
             TicketLeg("event-b", "winner", "b1", Decimal("3")),
             TicketLeg("event-b", "winner", "b2", Decimal("30")),
-            TicketLeg("event-b", "winnner", "b3", Decimal("300")),
+            TicketLeg("event-b", "winner", "b3", Decimal("300")),
         )
         tickets = [book.open_ticket([leg], "1") for leg in legs]
         group_a = {legs[0].quote_key, legs[1].quote_key}

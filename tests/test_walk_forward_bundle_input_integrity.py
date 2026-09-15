@@ -118,6 +118,23 @@ class WalkForwardBundleInputIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "JSON nesting is too deep"):
                 WalkForwardBundle.from_path(source)
 
+    def test_from_path_rejects_deep_parsable_provenance_before_forecast_construction(self):
+        raw = self._valid_raw()
+        nested = "leaf"
+        for _ in range(160):
+            nested = [nested]
+        raw["forecasts"][0]["provenance"] = {"nested": nested}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "bundle.json"
+            source.write_text(
+                json.dumps(raw, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "JSON nesting is too deep"):
+                WalkForwardBundle.from_path(source)
+
     def test_from_path_preserves_finite_nested_numbers_and_valid_unicode(self):
         raw = self._valid_raw()
         raw["forecasts"][0]["provenance"] = {

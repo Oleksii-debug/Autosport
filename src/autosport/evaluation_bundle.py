@@ -23,6 +23,9 @@ from .forecasting import (
 )
 
 
+_MAX_DECODED_JSON_DEPTH = 128
+
+
 class _DuplicateJsonKeyError(ValueError):
     pass
 
@@ -45,9 +48,11 @@ def _reject_nonstandard_json_constant(value: str) -> None:
 
 
 def _validate_decoded_json_domain(root: Any) -> None:
-    pending = [root]
+    pending: list[tuple[Any, int]] = [(root, 0)]
     while pending:
-        value = pending.pop()
+        value, depth = pending.pop()
+        if depth > _MAX_DECODED_JSON_DEPTH:
+            raise ValueError("walk-forward bundle JSON nesting is too deep")
         if type(value) is float:
             if not math.isfinite(value):
                 raise ValueError("walk-forward bundle contains non-finite JSON number")
@@ -59,7 +64,7 @@ def _validate_decoded_json_domain(root: Any) -> None:
                 raise ValueError("walk-forward bundle contains invalid UTF-8 text") from exc
             continue
         if isinstance(value, list):
-            pending.extend(value)
+            pending.extend((item, depth + 1) for item in value)
             continue
         if isinstance(value, dict):
             for key, item in value.items():
@@ -67,7 +72,7 @@ def _validate_decoded_json_domain(root: Any) -> None:
                     key.encode("utf-8")
                 except UnicodeEncodeError as exc:
                     raise ValueError("walk-forward bundle contains invalid UTF-8 text") from exc
-                pending.append(item)
+                pending.append((item, depth + 1))
 
 
 def _decode_bundle_json(payload: bytes) -> Any:

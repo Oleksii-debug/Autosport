@@ -99,6 +99,8 @@ def test_security_authority_source_audits_preexisting_mutation_handles() -> None
     assert "pre-existing competing mutation-capable handle(s)" in source
     assert source.count("_require_no_competing_mutation_handles(") >= 3
     assert "allow_current_process_data_mutators=True" in source
+    assert "directory=True" in source
+    assert "directory=False" in source
     assert "trusted expected-snapshot parent security fence" in source
     assert "trusted expected-snapshot file security fence" in source
 
@@ -129,6 +131,7 @@ def test_mutation_handle_audit_rejects_cross_process_direct_writer(
         security._require_no_competing_mutation_handles(
             trusted_handle,
             label="cross-process retained direct writer",
+            directory=False,
             allow_current_process_data_mutators=True,
         )
 
@@ -159,6 +162,7 @@ def test_mutation_handle_audit_allows_only_current_process_data_mutator(
     security._require_no_competing_mutation_handles(
         trusted_handle,
         label="trusted native resource writer",
+        directory=False,
         allow_current_process_data_mutators=True,
     )
 
@@ -166,6 +170,7 @@ def test_mutation_handle_audit_allows_only_current_process_data_mutator(
         security._require_no_competing_mutation_handles(
             trusted_handle,
             label="untrusted current-process writer",
+            directory=False,
             allow_current_process_data_mutators=False,
         )
 
@@ -191,7 +196,42 @@ def test_mutation_handle_audit_never_exempts_security_mutator(
         security._require_no_competing_mutation_handles(
             trusted_handle,
             label="current-process retained security mutator",
+            directory=False,
             allow_current_process_data_mutators=True,
+        )
+
+
+def test_mutation_handle_audit_scopes_delete_child_bit_to_directories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    security = _load_security_authority()
+    current_pid = os.getpid()
+    target_object = 0x44556677
+    trusted_handle = 0x777
+
+    monkeypatch.setattr(
+        security,
+        "_query_system_handles",
+        lambda: [
+            (target_object, current_pid, trusted_handle, security._WRITE_DAC),
+            (target_object, current_pid + 1, 0x888, security._FILE_DELETE_CHILD),
+        ],
+    )
+
+    # The 0x40 bit is FILE_EXECUTE for a regular file, so it is not a mutation right.
+    security._require_no_competing_mutation_handles(
+        trusted_handle,
+        label="regular-file execute handle",
+        directory=False,
+        allow_current_process_data_mutators=True,
+    )
+
+    # The same bit is FILE_DELETE_CHILD for a directory and must fail closed.
+    with pytest.raises(RuntimeError, match="pre-existing competing mutation-capable handle"):
+        security._require_no_competing_mutation_handles(
+            trusted_handle,
+            label="directory delete-child handle",
+            directory=True,
         )
 
 
@@ -272,6 +312,7 @@ def test_preopened_write_dac_handle_survives_deny_but_is_detected(tmp_path: Path
             security._require_no_competing_mutation_handles(
                 trusted,
                 label="retained WRITE_DAC regression",
+                directory=False,
             )
 
         assert close_handle(competing)
@@ -280,6 +321,7 @@ def test_preopened_write_dac_handle_survives_deny_but_is_detected(tmp_path: Path
         security._require_no_competing_mutation_handles(
             trusted,
             label="retained WRITE_DAC regression",
+            directory=False,
         )
     finally:
         if competing is not None:

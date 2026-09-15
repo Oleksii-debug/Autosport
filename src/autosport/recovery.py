@@ -89,11 +89,82 @@ def _remove_empty_pre_manifest_transaction_dir(transaction: RunTransaction) -> N
         ) from exc
 
 
+def _validate_terminal_history_identity(
+    transaction: RunTransaction,
+    manifest: dict,
+    registry_item: dict,
+    experiment_key: str,
+) -> None:
+    """Validate immutable historical evidence without comparing against later live state."""
+
+    try:
+        identity = transaction._identity_from_registry(registry_item, experiment_key)
+        transaction._validate_manifest_identity(manifest, identity)
+        transaction._validate_manifest_paths(manifest)
+    except RunTransactionError as exc:
+        raise ReconciliationError(str(exc)) from exc
+
+
+def _validate_completed_historical_summary(
+    root: Path,
+    transaction: RunTransaction,
+    manifest: dict,
+) -> None:
+    """Validate immutable per-run summary evidence without replaying old economic state."""
+
+    summary_path = root / f"run-{transaction.run_id}.json"
+    try:
+        snapshot = RunTransaction._read_canonical_file_snapshot(
+            summary_path,
+            "historical run summary",
+        )
+        expected_summary_hash = transaction._hash_field(
+            manifest,
+            "new",
+            "summary_sha256",
+        )
+        if snapshot.sha256 != expected_summary_hash:
+            raise ReconciliationError(
+                "completed transaction historical summary SHA-256 mismatch"
+            )
+        summary = RunTransaction._decode_file_snapshot_json(
+            snapshot,
+            label="historical run summary",
+        )
+        if not isinstance(summary, dict):
+            raise ReconciliationError(
+                "completed transaction historical summary schema is invalid"
+            )
+        transaction._validate_summary_identity(
+            summary,
+            manifest,
+            label="historical run summary",
+        )
+        if summary.get("paper_book_sha256") != transaction._hash_field(
+            manifest,
+            "new",
+            "paper_book_sha256",
+        ):
+            raise ReconciliationError(
+                "completed transaction historical summary PaperBook hash mismatch"
+            )
+        if summary.get("decision_ledger_sha256") != transaction._hash_field(
+            manifest,
+            "new",
+            "decision_ledger_sha256",
+        ):
+            raise ReconciliationError(
+                "completed transaction historical summary Decision Ledger hash mismatch"
+            )
+    except RunTransactionError as exc:
+        raise ReconciliationError(str(exc)) from exc
+
+
 def _finalize_terminal_transaction_manifests(
     root: Path,
     registry: RunRegistry,
 ) -> tuple[str, ...]:
-    """Validate terminal transaction history and finish the second-crash state."""
+    """Validate terminal history and finish only the recoverable second-crash state."""
 
     transaction_root = root / RunTransaction.ROOT_NAME
     transaction_stat = _lstat_or_none(transaction_root)
@@ -144,9 +215,23 @@ def _finalize_terminal_transaction_manifests(
 
         phase = manifest.get("phase")
         registry_status = registry_item.get("status")
+        _validate_terminal_history_identity(
+            transaction,
+            manifest,
+            registry_item,
+            experiment_key,
+        )
+
         try:
             if registry_status == "completed":
-                if phase not in {"canonical_committed", "completed"}:
+                if phase == "completed":
+                    _validate_completed_historical_summary(
+                        root,
+                        transaction,
+                        manifest,
+                    )
+                    continue
+                if phase != "canonical_committed":
                     raise ReconciliationError(
                         "completed registry is incompatible with transaction phase "
                         f"{phase!r}"
@@ -162,8 +247,7 @@ def _finalize_terminal_transaction_manifests(
                         "terminal registry transaction recovery returned an unsupported disposition"
                     )
                 transaction.mark_registry_completed()
-                if phase == "canonical_committed":
-                    finalized.append(experiment_key)
+                finalized.append(experiment_key)
                 continue
 
             if registry_status == "aborted":
@@ -172,15 +256,9 @@ def _finalize_terminal_transaction_manifests(
                         "aborted registry is incompatible with transaction phase "
                         f"{phase!r}"
                     )
-                outcome = RunTransaction.recover(
-                    root,
-                    run_id=entry.name,
-                    registry_item=registry_item,
-                    experiment_key=experiment_key,
-                )
-                if outcome.disposition != "aborted_uncommitted":
+                if _lstat_or_none(root / f"run-{entry.name}.json") is not None:
                     raise ReconciliationError(
-                        "aborted registry transaction recovery returned an unsupported disposition"
+                        "aborted transaction unexpectedly has a canonical run summary"
                     )
                 continue
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import tempfile
@@ -61,24 +62,32 @@ def _read_members(package_zip: Path) -> dict[str, bytes]:
     return members
 
 
-def _write_deterministic(package_zip: Path, members: dict[str, bytes]) -> None:
+def _write_deterministic(package_zip: Path, members: dict[str, bytes]) -> str:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for relative in sorted(members):
+            info = zipfile.ZipInfo((_PREFIX + relative), _FIXED_ZIP_TIME)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = (0o755 if relative.lower().endswith(".exe") else 0o644) << 16
+            archive.writestr(
+                info,
+                members[relative],
+                compress_type=zipfile.ZIP_DEFLATED,
+                compresslevel=9,
+            )
+    payload = buffer.getvalue()
+    package_sha = _sha256_bytes(payload)
+
     package_zip.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{package_zip.name}.", suffix=".tmp", dir=package_zip.parent)
-    os.close(fd)
     tmp = Path(tmp_name)
     try:
-        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-            for relative in sorted(members):
-                info = zipfile.ZipInfo((_PREFIX + relative), _FIXED_ZIP_TIME)
-                info.compress_type = zipfile.ZIP_DEFLATED
-                info.external_attr = (0o755 if relative.lower().endswith(".exe") else 0o644) << 16
-                archive.writestr(
-                    info,
-                    members[relative],
-                    compress_type=zipfile.ZIP_DEFLATED,
-                    compresslevel=9,
-                )
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, package_zip)
+        return package_sha
     finally:
         if tmp.exists():
             tmp.unlink()
@@ -185,8 +194,8 @@ def bind_portable_data_tool(
         if relative != _SUMS
     ]
     members[_SUMS] = ("\n".join(sums) + "\n").encode("utf-8")
-    _write_deterministic(package, members)
-    return {"autosport_data_exe_sha256": data_sha, "package_sha256": _sha256_bytes(package.read_bytes())}
+    package_sha = _write_deterministic(package, members)
+    return {"autosport_data_exe_sha256": data_sha, "package_sha256": package_sha}
 
 
 def verify_portable_data_tool(package_zip: str | Path) -> dict[str, Any]:

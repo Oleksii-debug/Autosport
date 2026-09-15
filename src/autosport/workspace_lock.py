@@ -290,6 +290,7 @@ class WorkspaceEconomicLock:
                 "workspace economic lock path changed during acquisition"
             ) from exc
 
+        final_verification_descriptor: int | None = None
         validation_error: BaseException | None = None
         try:
             try:
@@ -299,10 +300,16 @@ class WorkspaceEconomicLock:
                     handle.fileno(),
                     verification_descriptor,
                 )
-                # This pathname read must be after the descriptor identity proof.
-                # Otherwise a replacement that lands during sameopenfile() can leave
-                # both descriptors bound to the old file and escape the checkpoint.
+                # This pathname read must be after the first descriptor identity proof.
+                # A final fresh descriptor is then opened from that pathname and bound
+                # back to the primary handle, so same-metadata replacement cannot pass.
                 path_after = os.stat(self.path, follow_symlinks=False)
+                final_verification_descriptor = _open_read_only_descriptor(self.path)
+                final_verification_stat = os.fstat(final_verification_descriptor)
+                same_final_open_file = os.path.sameopenfile(
+                    handle.fileno(),
+                    final_verification_descriptor,
+                )
             except OSError as exc:
                 raise WorkspaceEconomicLockError(
                     "workspace economic lock path changed during acquisition"
@@ -311,9 +318,11 @@ class WorkspaceEconomicLock:
             self._require_regular_file(verification_stat)
             self._require_regular_file(opened_after)
             self._require_regular_file(path_after)
+            self._require_regular_file(final_verification_stat)
 
             if (
                 not same_open_file
+                or not same_final_open_file
                 or not _stable_stat_metadata(opened_before, opened_after)
                 or not _stable_stat_metadata(path_before, path_after)
             ):
@@ -321,32 +330,45 @@ class WorkspaceEconomicLock:
                     "workspace economic lock path changed during acquisition"
                 )
 
-            # Link counts become alias evidence only after the verification handle has
-            # proved that the current pathname and the primary handle are the same file.
-            # Checking an already-unlinked old handle earlier would misclassify a path
-            # replacement race (st_nlink == 0) as a hard-link-alias failure.
+            # Link counts become alias evidence only after descriptor proofs establish
+            # that both the earlier and final canonical-path opens identify the primary
+            # handle. Checking an already-unlinked old handle earlier would misclassify
+            # a pathname replacement race (st_nlink == 0) as a hard-link-alias failure.
             self._require_single_link(opened_before)
             self._require_single_link(path_before)
             self._require_single_link(verification_stat)
             self._require_single_link(opened_after)
             self._require_single_link(path_after)
+            self._require_single_link(final_verification_stat)
         except BaseException as exc:
             validation_error = exc
             raise
         finally:
-            try:
-                os.close(verification_descriptor)
-            except BaseException as close_error:
-                if validation_error is not None:
-                    _add_secondary_failure_note(
-                        validation_error,
-                        "workspace economic lock verification handle close also failed",
-                        close_error,
-                    )
-                else:
-                    raise WorkspaceEconomicLockError(
-                        "cannot close workspace economic lock verification handle"
-                    ) from close_error
+            cleanup_error: BaseException | None = None
+            for descriptor in (final_verification_descriptor, verification_descriptor):
+                if descriptor is None:
+                    continue
+                try:
+                    os.close(descriptor)
+                except BaseException as close_error:
+                    if validation_error is not None:
+                        _add_secondary_failure_note(
+                            validation_error,
+                            "workspace economic lock verification handle close also failed",
+                            close_error,
+                        )
+                    elif cleanup_error is None:
+                        cleanup_error = close_error
+                    else:
+                        _add_secondary_failure_note(
+                            cleanup_error,
+                            "another workspace economic lock verification handle close also failed",
+                            close_error,
+                        )
+            if validation_error is None and cleanup_error is not None:
+                raise WorkspaceEconomicLockError(
+                    "cannot close workspace economic lock verification handle"
+                ) from cleanup_error
 
     @staticmethod
     def _require_regular_file(path_stat: os.stat_result) -> None:

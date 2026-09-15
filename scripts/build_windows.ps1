@@ -238,7 +238,9 @@ python $sourceVerifier --verify-artifact $boundDataExe --expected-sha256 $dataEx
 if ($LASTEXITCODE -ne 0) { throw "Bound Autosport-Data.exe verification exited $LASTEXITCODE" }
 python scripts/package_windows.py `
   --exe $boundAutosportExe `
+  --exe-sha256 $autosportExeSha256 `
   --data-exe $boundDataExe `
+  --data-exe-sha256 $dataExeSha256 `
   --start-file WINDOWS_START_HERE.txt `
   --example-dir examples/tt_demo `
   --diagnostic $diag `

@@ -30,6 +30,8 @@ _SDDL_REVISION_1 = 1
 _TOKEN_DUPLICATE = 0x0002
 _TOKEN_QUERY = 0x0008
 _DISABLE_MAX_PRIVILEGE = 0x00000001
+_SE_GROUP_ENABLED = 0x00000004
+_EVERYONE_SID = "S-1-1-0"
 _PROTECTED_MARKER_MODULE = "_autosport_birth_protected_worker"
 _PROTECTED_WORKER_ARG = "--autosport-birth-protected-worker"
 _BARRIER_ENV = "AUTOSPORT_BINDER_LAUNCH_BARRIER"
@@ -198,7 +200,10 @@ def _current_process_token_is_restricted() -> bool:
 
 
 def _create_restricted_primary_token() -> Any:
-    """Create a privilege-stripped primary token that cannot be forged in-place later."""
+    """Create a privilege-stripped primary token with explicit restricting SIDs."""
+
+    class _SidAndAttributes(ctypes.Structure):
+        _fields_ = (("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD))
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -225,39 +230,63 @@ def _create_restricted_primary_token() -> Any:
         ctypes.POINTER(wintypes.HANDLE),
     )
     create_restricted_token.restype = wintypes.BOOL
+    convert_sid = advapi32.ConvertStringSidToSidW
+    convert_sid.argtypes = (wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p))
+    convert_sid.restype = wintypes.BOOL
     is_token_restricted = advapi32.IsTokenRestricted
     is_token_restricted.argtypes = (wintypes.HANDLE,)
     is_token_restricted.restype = wintypes.BOOL
 
-    current = wintypes.HANDLE()
-    if not open_process_token(
-        get_current_process(),
-        _TOKEN_QUERY | _TOKEN_DUPLICATE,
-        ctypes.byref(current),
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    restricted = wintypes.HANDLE()
+    # IsTokenRestricted only reports a token as restricted when it contains a
+    # restricting-SID list. Keep normal user/system read reachability by using
+    # both the concrete user SID and Everyone as restricting SIDs while still
+    # deleting nonessential privileges. This is a creation-time token property;
+    # it cannot be retrofitted onto the already-running ordinary creator.
+    sid_values = (_current_user_sid(), _EVERYONE_SID)
+    sid_storage: list[ctypes.c_void_p] = []
+    restricting_sids = (_SidAndAttributes * len(sid_values))()
     try:
-        ctypes.set_last_error(0)
-        if not create_restricted_token(
-            current,
-            _DISABLE_MAX_PRIVILEGE,
-            0,
-            None,
-            0,
-            None,
-            0,
-            None,
-            ctypes.byref(restricted),
+        for index, sid_value in enumerate(sid_values):
+            sid = ctypes.c_void_p()
+            if not convert_sid(sid_value, ctypes.byref(sid)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            sid_storage.append(sid)
+            restricting_sids[index].Sid = sid
+            restricting_sids[index].Attributes = _SE_GROUP_ENABLED
+
+        current = wintypes.HANDLE()
+        if not open_process_token(
+            get_current_process(),
+            _TOKEN_QUERY | _TOKEN_DUPLICATE,
+            ctypes.byref(current),
         ):
             raise ctypes.WinError(ctypes.get_last_error())
+        restricted = wintypes.HANDLE()
+        try:
+            ctypes.set_last_error(0)
+            if not create_restricted_token(
+                current,
+                _DISABLE_MAX_PRIVILEGE,
+                0,
+                None,
+                0,
+                None,
+                len(sid_values),
+                ctypes.cast(restricting_sids, ctypes.c_void_p),
+                ctypes.byref(restricted),
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            _close_handle(current)
     finally:
-        _close_handle(current)
+        for sid in sid_storage:
+            kernel32.LocalFree(sid)
+
     if not _raw_handle_value(restricted):
         raise RuntimeError("CreateRestrictedToken returned an empty protected-worker token")
     if not is_token_restricted(restricted):
         _close_handle(restricted)
-        raise RuntimeError("protected-worker primary token is not restricted")
+        raise RuntimeError("protected-worker primary token lacks restricting SIDs")
     return restricted
 
 

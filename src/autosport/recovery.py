@@ -9,7 +9,11 @@ from .decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
 from .integrity import sha256_file
 from .run_registry import ReconciliationError, RunRegistry, has_durable_workspace_history
 from .run_transaction import RunTransaction, RunTransactionError
-from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,9 +46,13 @@ def reconcile_late_crashes(workspace: str | Path) -> RecoveryReport:
                 raise
             except (OSError, ValueError) as exc:
                 raise ReconciliationError(f"run registry recovery failed: {exc}") from exc
-    except WorkspaceEconomicLockError as exc:
+    except WorkspaceEconomicLockBusyError as exc:
         raise ReconciliationError(
             "workspace has an active economic writer; recovery cannot run concurrently"
+        ) from exc
+    except WorkspaceEconomicLockError as exc:
+        raise ReconciliationError(
+            f"workspace economic lock validation failed: {exc}"
         ) from exc
     except OSError as exc:
         raise ReconciliationError(f"workspace recovery failed: {exc}") from exc

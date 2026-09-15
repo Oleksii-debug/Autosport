@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from autosport.ingestion import CommittedIngestionHealthError
 from autosport.ingestion_health import SourceHealthStore
 from autosport.live_observation import observe_workspace_once
 from autosport.parlayapi_provider import (
@@ -257,7 +258,7 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
                 "record_success",
                 new=fail_health_success,
             ):
-                with self.assertRaises(OSError):
+                with self.assertRaises(CommittedIngestionHealthError) as caught:
                     observe_workspace_once(
                         tmp,
                         provider,
@@ -271,6 +272,12 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
             finally:
                 store.close()
 
+        error = caught.exception
+        self.assertEqual(error.outcome.source_id, "parlayapi:table_tennis")
+        self.assertEqual(error.outcome.received, 1)
+        self.assertEqual(error.outcome.accepted, 1)
+        self.assertEqual(error.outcome.rejected, 0)
+        self.assertIsNone(error.delivery_error)
         self.assertEqual(len(transport_calls), 1)
         self.assertEqual(append_attempts, 1)
         self.assertEqual(health_success_attempts, 1)

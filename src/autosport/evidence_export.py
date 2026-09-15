@@ -1325,6 +1325,11 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
     requested_destination = Path(output)
     if not root.exists() or not root.is_dir():
         raise ValueError("workspace must be an existing directory")
+    # Bind the caller's workspace alias to one concrete target before acquiring the
+    # economic lock/watcher. Every later discovery/open/reproof/publication check uses
+    # this authoritative root, so retargeting a symlink/junction cannot switch the
+    # evidence namespace away from the directory object protected by the snapshot.
+    root = _resolved(root, strict=True)
     _resolve_output_destination(root, requested_destination)
 
     # Refuse an empty/non-evidence directory before taking the economic lock so an
@@ -1427,6 +1432,10 @@ def verify_evidence_manifest(manifest: str | Path, workspace: str | Path) -> dic
     payload = _load_manifest(manifest_path)
     if not root.exists() or not root.is_dir():
         raise ValueError("workspace must be an existing directory")
+    # Verification must bind the same caller-visible alias once, before the watcher
+    # is acquired, so a later junction/symlink retarget cannot switch the namespace
+    # whose membership and file digests are being compared with the manifest.
+    root = _resolved(root, strict=True)
 
     expected_files = {item["path"]: item for item in payload["files"]}
     expected_names = tuple(expected_files)

@@ -287,14 +287,16 @@ def _require_no_competing_mutation_handles(
     a live handle. Bind the trusted security-authority handle to stable filesystem
     identity and reject every other mutation-capable handle. The kernel-object pointer
     remains a fast path, but separate CreateFile opens are compared by FileIdInfo.
-    If stable identity inspection is unavailable, a still-live exact row fails closed;
-    a vanished row triggers a bounded full handle-table rescan so mutation authority
-    cannot survive by duplicating to a new handle during the inspection race. Churn
-    that prevents a complete scan within the bound also fails closed. During a native
-    PyInstaller resource update, current-process data/delete handles are the trusted
-    mutator and may remain; security-descriptor mutation authority is never exempted.
-    FILE_DELETE_CHILD is directory-only: the same access bit is FILE_EXECUTE on regular
-    files.
+    Uninspectable same-type candidates are deferred until the full snapshot has been
+    scanned so a proven same-kernel-object competitor cannot be masked by unrelated
+    hosted-runner authority. If no competitor is proven, a still-live deferred row
+    fails closed; vanished rows trigger a bounded full handle-table rescan so mutation
+    authority cannot survive by duplicating to a new handle during the inspection
+    race. Churn that prevents a complete scan within the bound also fails closed.
+    During a native PyInstaller resource update, current-process data/delete handles
+    are the trusted mutator and may remain; security-descriptor mutation authority is
+    never exempted. FILE_DELETE_CHILD is directory-only: the same access bit is
+    FILE_EXECUTE on regular files.
     """
 
     trusted_handle = _raw_handle_value(raw_handle)
@@ -316,6 +318,13 @@ def _require_no_competing_mutation_handles(
 
     mutation_mask = _MUTATION_CAPABLE_ACCESS | (_FILE_DELETE_CHILD if directory else 0)
     competing: list[tuple[int, int, int, int]] = []
+    uninspectable: list[
+        tuple[
+            tuple[int, int, int, int],
+            int,
+            _CandidateFileIdentityUnavailable,
+        ]
+    ] = []
     for row in snapshot:
         object_id, pid, handle_value, granted_access = row
         if pid == current_pid and handle_value == trusted_handle:
@@ -338,26 +347,9 @@ def _require_no_competing_mutation_handles(
             try:
                 candidate_identity = _candidate_file_identity(pid, handle_value)
             except _CandidateFileIdentityUnavailable as exc:
-                if competing:
-                    break
-                if _snapshot_row_still_present(row, object_type=candidate_type):
-                    raise RuntimeError(
-                        f"{label} has live uninspectable mutation-capable handle"
-                    ) from exc
-                if _uninspectable_handle_rescans_remaining <= 0:
-                    raise RuntimeError(
-                        f"{label} mutation-capable handle audit did not quiesce after "
-                        "uninspectable candidate churn"
-                    ) from exc
-                return _require_no_competing_mutation_handles(
-                    raw_handle,
-                    label=label,
-                    directory=directory,
-                    allow_current_process_data_mutators=allow_current_process_data_mutators,
-                    _uninspectable_handle_rescans_remaining=(
-                        _uninspectable_handle_rescans_remaining - 1
-                    ),
-                )
+                assert candidate_type is not None
+                uninspectable.append((row, candidate_type, exc))
+                continue
             same_file = candidate_identity == target_identity
         if same_file:
             competing.append(row)
@@ -365,6 +357,28 @@ def _require_no_competing_mutation_handles(
     if competing:
         raise RuntimeError(
             f"{label} has {len(competing)} pre-existing competing mutation-capable handle(s)"
+        )
+
+    if uninspectable:
+        for row, candidate_type, exc in uninspectable:
+            if _snapshot_row_still_present(row, object_type=candidate_type):
+                raise RuntimeError(
+                    f"{label} has live uninspectable mutation-capable handle"
+                ) from exc
+        exc = uninspectable[-1][2]
+        if _uninspectable_handle_rescans_remaining <= 0:
+            raise RuntimeError(
+                f"{label} mutation-capable handle audit did not quiesce after "
+                "uninspectable candidate churn"
+            ) from exc
+        return _require_no_competing_mutation_handles(
+            raw_handle,
+            label=label,
+            directory=directory,
+            allow_current_process_data_mutators=allow_current_process_data_mutators,
+            _uninspectable_handle_rescans_remaining=(
+                _uninspectable_handle_rescans_remaining - 1
+            ),
         )
 
 

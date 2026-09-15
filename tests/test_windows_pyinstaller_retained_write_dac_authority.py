@@ -239,8 +239,56 @@ def test_mutation_handle_audit_scopes_delete_child_bit_to_directories(
         )
 
 
+def test_mutation_handle_audit_prefers_proven_competitor_over_uninspectable_noise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    security = _load_security_authority()
+    current_pid = os.getpid()
+    target_object = 0x55667788
+    uninspectable_object = 0x66778899
+    trusted_handle = 0x999
+    uninspectable_handle = 0xAAA
+    competing_handle = 0xBBB
+    object_type = 37
+
+    snapshot = security._SystemHandleSnapshot()
+    rows = [
+        (target_object, current_pid, trusted_handle, security._WRITE_DAC),
+        (uninspectable_object, current_pid + 1, uninspectable_handle, security._WRITE_DAC),
+        (target_object, current_pid + 2, competing_handle, security._WRITE_DAC),
+    ]
+    for row in rows:
+        snapshot.append(row)
+        snapshot.object_types[(row[0], row[1], row[2])] = object_type
+
+    monkeypatch.setattr(security, "_query_system_handles", lambda: snapshot)
+    monkeypatch.setattr(security, "_file_identity", lambda _handle: (1, b"A" * 16))
+
+    def candidate_identity(pid: int, handle_value: int) -> tuple[int, bytes]:
+        assert pid == current_pid + 1
+        assert handle_value == uninspectable_handle
+        raise security._CandidateFileIdentityUnavailable("synthetic uninspectable noise")
+
+    monkeypatch.setattr(security, "_candidate_file_identity", candidate_identity)
+
+    def unexpected_revalidation(*_args, **_kwargs) -> bool:
+        pytest.fail("proven exact competitor must take precedence over deferred noise")
+
+    monkeypatch.setattr(security, "_snapshot_row_still_present", unexpected_revalidation)
+
+    with pytest.raises(RuntimeError, match="pre-existing competing mutation-capable handle"):
+        security._require_no_competing_mutation_handles(
+            trusted_handle,
+            label="diagnostic ordering regression",
+            directory=False,
+        )
+
+
 @pytest.mark.skipif(os.name != "nt", reason="real Windows retained-WRITE_DAC regression")
-def test_preopened_write_dac_handle_survives_deny_but_is_detected(tmp_path: Path) -> None:
+def test_preopened_write_dac_handle_survives_deny_but_is_detected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     security = _load_security_authority()
     icacls = shutil.which("icacls.exe")
     assert icacls is not None
@@ -291,6 +339,26 @@ def test_preopened_write_dac_handle_survives_deny_but_is_detected(tmp_path: Path
     competing, competing_value, competing_error = open_write_dac()
     assert competing_value not in {None, invalid_handle_value}, competing_error
 
+    real_query_system_handles = security._query_system_handles
+    tracked_handle_values = {int(trusted_value), int(competing_value)}
+
+    def query_focused_handles():
+        snapshot = real_query_system_handles()
+        current_pid = os.getpid()
+        object_types = getattr(snapshot, "object_types", {})
+        focused = security._SystemHandleSnapshot()
+        for row in snapshot:
+            if row[1] != current_pid or row[2] not in tracked_handle_values:
+                continue
+            focused.append(row)
+            key = (row[0], row[1], row[2])
+            object_type = object_types.get(key)
+            if object_type is not None:
+                focused.object_types[key] = object_type
+        return focused
+
+    monkeypatch.setattr(security, "_query_system_handles", query_focused_handles)
+
     try:
         completed = subprocess.run(
             [
@@ -312,13 +380,7 @@ def test_preopened_write_dac_handle_survives_deny_but_is_detected(tmp_path: Path
             close_handle(fresh)
             pytest.fail("OWNER RIGHTS deny did not block a fresh WRITE_DAC open")
 
-        with pytest.raises(
-            RuntimeError,
-            match=(
-                "pre-existing competing mutation-capable handle"
-                "|live uninspectable mutation-capable handle"
-            ),
-        ):
+        with pytest.raises(RuntimeError, match="pre-existing competing mutation-capable handle"):
             security._require_no_competing_mutation_handles(
                 trusted,
                 label="retained WRITE_DAC regression",

@@ -11,13 +11,20 @@ from .replay import ReplayEngine, ReplayLeakageFirewall
 from .storage import SQLiteMarketStore
 
 
+def _sanitize_utf8_text(text: str) -> str:
+    return "".join(
+        "�" if 0xD800 <= ord(character) <= 0xDFFF else character
+        for character in text
+    )
+
+
 def _render_exception(exc: BaseException) -> str:
     exception_type = type(exc).__name__
     try:
         details = str(exc)
     except BaseException:
         return f"{exception_type}: exception details unavailable"
-    return f"{exception_type}: {details}"
+    return _sanitize_utf8_text(f"{exception_type}: {details}")
 
 
 def run_machine_diagnostic(output_path: str | Path) -> int:
@@ -77,6 +84,6 @@ def run_machine_diagnostic(output_path: str | Path) -> int:
         }
         error_notes = getattr(exc, "__notes__", None)
         if error_notes:
-            payload["error_notes"] = list(error_notes)
+            payload["error_notes"] = [_sanitize_utf8_text(note) for note in error_notes]
         atomic_write_json(destination, payload)
         return 1

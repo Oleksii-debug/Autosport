@@ -35,10 +35,21 @@ class _BrokenStringError(RuntimeError):
         raise RuntimeError("exception stringification failed")
 
 
+class _SurrogateStringError(RuntimeError):
+    def __str__(self) -> str:
+        return chr(0xD800)
+
+
 class _BrokenStringCloseFailingStore(diagnostic.SQLiteMarketStore):
     def close(self) -> None:
         super().close()
         raise _BrokenStringError()
+
+
+class _SurrogateStringCloseFailingStore(diagnostic.SQLiteMarketStore):
+    def close(self) -> None:
+        super().close()
+        raise _SurrogateStringError()
 
 
 class _FailingReplayEngine:
@@ -57,6 +68,15 @@ class _BrokenStringReplayEngine:
     def run(self, sink, *, run_id: str):
         del sink, run_id
         raise _BrokenStringError()
+
+
+class _SurrogateStringReplayEngine:
+    def __init__(self, events, firewall) -> None:
+        del events, firewall
+
+    def run(self, sink, *, run_id: str):
+        del sink, run_id
+        raise _SurrogateStringError()
 
 
 class DiagnosticCleanupTests(unittest.TestCase):
@@ -133,6 +153,39 @@ class DiagnosticCleanupTests(unittest.TestCase):
                 [
                     "SQLiteMarketStore.close() also failed while preserving the primary diagnostic failure: "
                     "_BrokenStringError: exception details unavailable"
+                ],
+            )
+
+    def test_primary_failure_with_surrogate_stringification_publishes_utf8_fail_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = Path(temporary) / "diagnostic.json"
+            with patch.object(diagnostic, "ReplayEngine", _SurrogateStringReplayEngine):
+                exit_code = diagnostic.run_machine_diagnostic(output_path)
+
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "FAIL")
+            self.assertEqual(payload["error"], "_SurrogateStringError: �")
+            self.assertNotIn("error_notes", payload)
+
+    def test_cleanup_failure_with_surrogate_stringification_preserves_primary_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = Path(temporary) / "diagnostic.json"
+            with (
+                patch.object(diagnostic, "SQLiteMarketStore", _SurrogateStringCloseFailingStore),
+                patch.object(diagnostic, "ReplayEngine", _FailingReplayEngine),
+            ):
+                exit_code = diagnostic.run_machine_diagnostic(output_path)
+
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "FAIL")
+            self.assertEqual(payload["error"], "RuntimeError: diagnostic replay failed")
+            self.assertEqual(
+                payload["error_notes"],
+                [
+                    "SQLiteMarketStore.close() also failed while preserving the primary diagnostic failure: "
+                    "_SurrogateStringError: �"
                 ],
             )
 

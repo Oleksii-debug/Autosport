@@ -592,8 +592,32 @@ if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-sm
 python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace
 if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }
 if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
+
+# The editable project install is needed only for tests and the pre-release smoke.
+# Remove its site authority before the final source boundary so uninstall side
+# effects remain inside that boundary and cannot steer either PyInstaller graph.
+python -m pip uninstall --yes autosport-lab
+if ($LASTEXITCODE -ne 0) { throw "editable autosport-lab removal exited $LASTEXITCODE" }
+
 python $sourceVerifier --source-sha $sourceSha --late-build-boundary
 if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport.exe exited $LASTEXITCODE" }
+
+# A successful uninstall alone is not evidence: pip may leave stale .pth/finder
+# authority. A fresh isolated interpreter must prove that no installed autosport
+# package is import-resolvable before the exact Git snapshot is materialized.
+$autosportResolutionProbe = @'
+import importlib.util
+
+spec = importlib.util.find_spec("autosport")
+if spec is not None:
+    locations = list(spec.submodule_search_locations or ())
+    raise SystemExit(
+        "installed autosport remains import-resolvable after editable distribution removal: "
+        f"origin={spec.origin!r}, locations={locations!r}"
+    )
+'@
+& $pythonExecutable -I -c $autosportResolutionProbe
+if ($LASTEXITCODE -ne 0) { throw "Editable Autosport source isolation proof exited $LASTEXITCODE" }
 
 # Derive the expected snapshot identity directly from exact Git blob objects
 # before archive extraction. This is deliberately independent of git archive and
@@ -898,7 +922,7 @@ if ($restartRecoveryProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe rest
 python $sourceVerifier --bind-artifact $restartRecovery --bound-output $boundRestartRecoveryAudit --digest-output $restartRecoveryDigestPath
 if ($LASTEXITCODE -ne 0) { throw "Restart/recovery evidence binding exited $LASTEXITCODE" }
 $restartRecoverySha256 = (Get-Content -LiteralPath $restartRecoveryDigestPath -Raw).Trim()
-$restartRecoveryEvidence = Get-Content $boundRestartRecoveryAudit -Raw | ConvertFrom-Json
+$restartRecoveryEvidence = Get-Content $boundRestartRecovery -Raw | ConvertFrom-Json
 if ($restartRecoveryEvidence.status -ne 'PASS') { throw 'Packaged restart/recovery audit did not PASS' }
 if ($restartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Packaged restart audit did not prove persistent session reopen' }
 if ($restartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Packaged recovery audit did not prove transaction recovery' }
@@ -982,7 +1006,7 @@ $walkForwardBundle = [ordered]@{
     [ordered]@{
       window_id = 'holdout-2'
       training_end_ts = '2026-02-28T23:59:59+00:00'
-      evaluation_start_ts = '2026-03-01T00:00:00+00:00'
+      evaluation_start_ts = '2026-03-01T12:00:00+00:00'
       evaluation_end_ts = '2026-03-31T23:59:59+00:00'
       split = 'holdout'
     }

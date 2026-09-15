@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from .agents import Agent, MarketMirrorAgent, PaperBaselineAgent
+from .agents import (
+    Agent,
+    MarketMirrorAgent,
+    PaperBaselineAgent,
+    agent_composition_sha256,
+    validate_agent_names,
+)
 from .research_strategy import (
     RESEARCH_STRATEGY_ID,
     ResearchReplayAgent,
@@ -21,6 +27,13 @@ class StrategySpec:
     agent_names: tuple[str, ...]
     opens_paper_tickets: bool
     requires_research_plan: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "agent_names", validate_agent_names(self.agent_names))
+
+    @property
+    def agent_composition_sha256(self) -> str:
+        return agent_composition_sha256(self.agent_names)
 
 
 StrategyFactory = Callable[[ResearchStrategyPlan | None], list[Agent]]
@@ -116,4 +129,11 @@ def build_strategy_agents(
     research_plan: ResearchStrategyPlan | None = None,
 ) -> list[Agent]:
     spec = validate_strategy_configuration(strategy_id, research_plan)
-    return _STRATEGIES[spec.strategy_id][1](research_plan)
+    agents = _STRATEGIES[spec.strategy_id][1](research_plan)
+    actual_names = validate_agent_names(getattr(agent, "name", None) for agent in agents)
+    if actual_names != spec.agent_names:
+        raise RuntimeError(
+            "strategy runtime agent composition does not match canonical StrategySpec: "
+            f"expected={spec.agent_names!r} actual={actual_names!r}"
+        )
+    return agents

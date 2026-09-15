@@ -116,8 +116,11 @@ def test_replay_jsonl_rejects_nonfinite_serialized_decimal_odds(tmp_path) -> Non
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="decimal_odds must be a finite decimal greater than 1"):
+    with pytest.raises(ValueError, match="invalid replay JSONL at line 1") as exc_info:
         ReplayEngine.from_jsonl(replay_path)
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ValueError)
+    assert str(cause) == "non-finite JSON constant: NaN"
 
 
 @pytest.mark.parametrize("ingest_ts", [7, True, "", " 2026-09-12T10:00:05+00:00 "])

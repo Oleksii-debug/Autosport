@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 import tempfile
 from decimal import Decimal
 from pathlib import Path
 
 from .dataset import load_dataset
+from .integrity import atomic_write_json
 from .research_strategy import RESEARCH_STRATEGY_ID, ResearchStrategyPlan
 from .session import AutosportSession
 from .strategies import experiment_strategy_id
@@ -15,6 +15,20 @@ _EXPECTED_EVENT_COUNT = 4
 _EXPECTED_BALANCE = Decimal("990")
 _EXPECTED_NET_PROFIT = Decimal("-10")
 _EXPECTED_TICKET_COUNT = 1
+
+
+def _safe_exception_detail(exc: Exception) -> str:
+    """Render audit failure evidence without trusting exception formatting."""
+
+    try:
+        exception_type = type.__getattribute__(type(exc), "__name__")
+    except BaseException:
+        exception_type = "Exception"
+    try:
+        rendered = str.__str__(str(exc))
+    except BaseException:
+        rendered = "exception details unavailable"
+    return f"{exception_type}: {rendered}"
 
 
 def run_research_demo_audit(
@@ -113,15 +127,11 @@ def run_research_demo_audit(
             "human_tested": False,
             "nvda_verified": False,
         }
-        destination.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        return 0
+        return_code = 0
     except Exception as exc:
         payload = {
             "status": "FAIL",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": _safe_exception_detail(exc),
             "sample_fixture": True,
             "real_historical_market_proof": False,
             "profitability_claim": False,
@@ -129,8 +139,10 @@ def run_research_demo_audit(
             "human_tested": False,
             "nvda_verified": False,
         }
-        destination.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        return 1
+        return_code = 1
+
+    # Evidence publication is a release gate in its own right. Keep it outside the
+    # audit exception boundary so serialization/durability failures cannot be
+    # mistaken for a successfully published semantic FAIL report.
+    atomic_write_json(destination, payload)
+    return return_code

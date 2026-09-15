@@ -38,7 +38,9 @@ def test_release_build_moves_guarded_binder_creation_to_trusted_orchestrator() -
     assert "private const uint DANGEROUS_PROCESS_ACCESS = 0x000C006A;" in launcher
     assert "private const uint DANGEROUS_THREAD_ACCESS = 0x000C17B3;" in launcher
     assert "RequireSeDebugNotAssigned();" in launcher
-    assert "CreateProcessW(" in launcher
+    assert "CreateRestrictedToken(" in launcher
+    assert "Attributes = 0" in launcher
+    assert "CreateProcessAsUserW(" in launcher
     assert "RequireFreshProcessAccessDenied(processInfo.dwProcessId);" in launcher
     assert "RequireFreshThreadAccessDenied(processInfo.dwThreadId);" in launcher
     assert "RunHostileSiblingProbe(pythonExecutable, processInfo.dwProcessId);" in launcher
@@ -47,8 +49,13 @@ def test_release_build_moves_guarded_binder_creation_to_trusted_orchestrator() -
     assert "SetEvent(barrier)" in launcher
 
     run = launcher.split("public static int Run(", 1)[1]
-    assert run.index("RequireSeDebugNotAssigned();") < run.index("CreateProcessW(")
-    assert run.index("CreateProcessW(") < run.index(
+    assert run.index("RequireSeDebugNotAssigned();") < run.index(
+        "CreateRestrictedPrimaryToken(currentUserSid)"
+    )
+    assert run.index("CreateRestrictedPrimaryToken(currentUserSid)") < run.index(
+        "CreateProcessAsUserW("
+    )
+    assert run.index("CreateProcessAsUserW(") < run.index(
         "RequireFreshProcessAccessDenied(processInfo.dwProcessId);"
     )
     assert run.index(
@@ -57,10 +64,16 @@ def test_release_build_moves_guarded_binder_creation_to_trusted_orchestrator() -
     assert run.index("CloseHandle(processInfo.hThread)") < run.index("SetEvent(barrier)")
     assert run.index("CloseHandle(processInfo.hProcess)") < run.index("SetEvent(barrier)")
 
-    # The native creator reuses the existing exact-source bootstrap protocol rather
-    # than creating a second Python release architecture.
-    assert "_PROTECTED_BOOTSTRAP" in launcher
-    assert "_PROTECTED_BOOTSTRAP" in boundary
+    # The native creator executes the existing exact-source launch-boundary file
+    # directly. No creator-memory python -c bootstrap may redefine the child code.
+    assert "_PROTECTED_BOOTSTRAP" not in launcher
+    assert "_PROTECTED_BOOTSTRAP" not in boundary
+    assert 'values.Add(launchBoundary);' in launcher
+    assert 'values.Add(ProtectedWorkerArgument);' in launcher
+    assert 'values.Add(binder);' in launcher
+    assert "--autosport-birth-protected-worker" in launcher
+    assert "--autosport-birth-protected-worker" in boundary
+    assert "runpy.run_path(str(binder), run_name=\"__main__\")" in boundary
     assert "AUTOSPORT_BINDER_LAUNCH_BARRIER" in launcher
     assert "AUTOSPORT_BINDER_LAUNCH_NONCE" in launcher
 
@@ -79,11 +92,27 @@ def test_real_windows_orchestrator_denies_hostile_prebarrier_process_authority(
     output = tmp_path / "trusted-worker-reached.txt"
     probe = tmp_path / "protected_probe.py"
     probe.write_text(
-        "import pathlib,sys\n"
+        "import ctypes,pathlib,sys\n"
+        "from ctypes import wintypes\n"
         "marker=sys.modules.get('_autosport_birth_protected_worker')\n"
         "nonce=getattr(marker,'nonce',None)\n"
         "if not isinstance(nonce,str) or len(nonce)<32:\n"
         "    raise SystemExit('birth-protected marker missing')\n"
+        "k=ctypes.WinDLL('kernel32',use_last_error=True)\n"
+        "a=ctypes.WinDLL('advapi32',use_last_error=True)\n"
+        "k.GetCurrentProcess.restype=wintypes.HANDLE\n"
+        "a.OpenProcessToken.argtypes=(wintypes.HANDLE,wintypes.DWORD,ctypes.POINTER(wintypes.HANDLE))\n"
+        "a.IsTokenRestricted.argtypes=(wintypes.HANDLE,)\n"
+        "a.IsTokenRestricted.restype=wintypes.BOOL\n"
+        "k.CloseHandle.argtypes=(wintypes.HANDLE,)\n"
+        "token=wintypes.HANDLE()\n"
+        "if not a.OpenProcessToken(k.GetCurrentProcess(),0x8,ctypes.byref(token)):\n"
+        "    raise SystemExit(f'token open failed: {ctypes.get_last_error()}')\n"
+        "try:\n"
+        "    if not a.IsTokenRestricted(token):\n"
+        "        raise SystemExit('worker token is not restricted')\n"
+        "finally:\n"
+        "    k.CloseHandle(token)\n"
         "pathlib.Path(sys.argv[1]).write_text('REACHED\\n',encoding='utf-8')\n",
         encoding="utf-8",
     )

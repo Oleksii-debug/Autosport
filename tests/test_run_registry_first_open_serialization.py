@@ -180,6 +180,37 @@ def test_read_constructor_missing_registry_is_non_mutating(tmp_path: Path) -> No
     assert not registry_path.exists()
 
 
+def test_existing_registry_read_rejects_redirected_primary_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_path = tmp_path / "run_registry.json"
+    RunRegistry.initialize_pristine(registry_path)
+    canonical_before = registry_path.read_bytes()
+
+    redirected_path = tmp_path / "redirected-registry.json"
+    redirected_path.write_text(
+        json.dumps({"schema_version": 1, "runs": {}}) + "\n",
+        encoding="utf-8",
+    )
+    real_open = run_registry._open_read_only_descriptor
+    open_calls = 0
+
+    def redirect_first_open(path: Path) -> int:
+        nonlocal open_calls
+        open_calls += 1
+        if open_calls == 1:
+            return real_open(redirected_path)
+        return real_open(path)
+
+    monkeypatch.setattr(run_registry, "_open_read_only_descriptor", redirect_first_open)
+
+    with pytest.raises(ValueError, match="changed while validating"):
+        RunRegistry(registry_path)
+
+    assert registry_path.read_bytes() == canonical_before
+
+
 def test_durable_workspace_history_predicate_covers_release_evidence(tmp_path: Path) -> None:
     pristine = tmp_path / "pristine"
     pristine.mkdir()

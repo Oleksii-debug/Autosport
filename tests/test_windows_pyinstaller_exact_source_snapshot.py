@@ -106,6 +106,19 @@ def test_exact_source_archive_ignores_post_proof_live_entry_mutation(tmp_path: P
     _git(repo, "commit", "-m", "canonical exact source")
     source_sha = _git(repo, "rev-parse", "HEAD")
 
+    # Bind the oracle to archive materialization of the exact commit itself.
+    # Archive EOL materialization may differ by platform/attributes, so a literal
+    # LF byte string is not a portable oracle for the Windows release path.
+    baseline_archive = tmp_path / "baseline-trusted-build-source.zip"
+    subprocess.run(
+        ["git", "archive", "--format=zip", f"--output={baseline_archive}", source_sha],
+        cwd=repo,
+        check=True,
+    )
+    with zipfile.ZipFile(baseline_archive) as handle:
+        canonical_gui = handle.read("src/autosport/windows_entry.py")
+        canonical_data = handle.read("src/autosport/data_tools_entry.py")
+
     # Reproduce the reviewed race after source proof: both tracked entry files are
     # replaced and an untracked hook is introduced before the source consumer runs.
     gui_entry.write_bytes(b"GUI = 'hostile replacement'\n")

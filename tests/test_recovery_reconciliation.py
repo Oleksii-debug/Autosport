@@ -69,6 +69,18 @@ class RecoveryReconciliationTests(unittest.TestCase):
             self.fail("child lock-holder process did not exit")
         self.assertEqual(process.exitcode, 0)
 
+    def _symlink_or_skip(
+        self,
+        link: Path,
+        target: Path,
+        *,
+        target_is_directory: bool = False,
+    ) -> None:
+        try:
+            link.symlink_to(target, target_is_directory=target_is_directory)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlink creation unavailable: {exc}")
+
     def test_late_crash_reconciles_without_replaying_economic_effects(self):
         with tempfile.TemporaryDirectory() as tmp:
             dataset, key, _item, _summary = self._create_late_crash(tmp)
@@ -159,12 +171,46 @@ class RecoveryReconciliationTests(unittest.TestCase):
             self.assertEqual(run_repair_workspace(root), 3)
             self.assertFalse((root / "run_registry.json").exists())
 
+    def test_broken_registry_symlink_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry_path = root / "run_registry.json"
+            self._symlink_or_skip(registry_path, root / "missing-registry-target.json")
+
+            with self.assertRaisesRegex(
+                ReconciliationError,
+                "run registry path is not a regular file",
+            ):
+                reconcile_late_crashes(root)
+            self.assertTrue(registry_path.is_symlink())
+            self.assertFalse((root / "missing-registry-target.json").exists())
+            self.assertEqual(run_repair_workspace(root), 3)
+
+    def test_transaction_root_symlink_counts_as_durable_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transaction_root = root / ".run-transactions"
+            self._symlink_or_skip(
+                transaction_root,
+                root / "missing-transaction-root",
+                target_is_directory=True,
+            )
+
+            with self.assertRaisesRegex(
+                ReconciliationError,
+                "run registry is missing while durable run history exists",
+            ):
+                reconcile_late_crashes(root)
+            self.assertTrue(transaction_root.is_symlink())
+            self.assertFalse((root / "run_registry.json").exists())
+            self.assertEqual(run_repair_workspace(root), 3)
+
     def test_non_file_registry_path_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "run_registry.json").mkdir()
 
-            with self.assertRaisesRegex(ReconciliationError, "run registry path is not a file"):
+            with self.assertRaisesRegex(ReconciliationError, "run registry path is not a regular file"):
                 reconcile_late_crashes(root)
             self.assertEqual(run_repair_workspace(root), 3)
 

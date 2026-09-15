@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,14 +28,15 @@ def reconcile_late_crashes(workspace: str | Path) -> RecoveryReport:
     try:
         with WorkspaceEconomicLock(root):
             try:
-                if not registry_path.exists():
+                registry_stat = _lstat_or_none(registry_path)
+                if registry_stat is None:
                     if _has_durable_run_history(root):
                         raise ReconciliationError(
                             "run registry is missing while durable run history exists"
                         )
                     return RecoveryReport((), (), ())
-                if not registry_path.is_file():
-                    raise ReconciliationError("run registry path is not a file")
+                if not stat.S_ISREG(registry_stat.st_mode):
+                    raise ReconciliationError("run registry path is not a regular file")
                 return _reconcile_late_crashes_locked(root, registry_path)
             except ReconciliationError:
                 raise
@@ -47,10 +50,18 @@ def reconcile_late_crashes(workspace: str | Path) -> RecoveryReport:
         raise ReconciliationError(f"workspace recovery failed: {exc}") from exc
 
 
+def _lstat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
 def _has_durable_run_history(root: Path) -> bool:
     transaction_root = root / RunTransaction.ROOT_NAME
-    if transaction_root.exists():
-        if not transaction_root.is_dir() or any(transaction_root.iterdir()):
+    transaction_stat = _lstat_or_none(transaction_root)
+    if transaction_stat is not None:
+        if not stat.S_ISDIR(transaction_stat.st_mode) or any(transaction_root.iterdir()):
             return True
     return any(root.glob("run-*.json"))
 

@@ -79,6 +79,62 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "not pristine before"):
                     verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
 
+    def test_late_boundary_rejects_tracked_mutation_after_clean_initial_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_sha = self._clean_repo(root)
+            with self._without_github_event_environment():
+                verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
+                (root / "tracked.py").write_text("VALUE = 999\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "changed after initial preflight"):
+                    verify_source_checkout.verify_source_checkout(
+                        source_sha,
+                        repo_root=root,
+                        late_build_boundary=True,
+                    )
+
+    def test_late_boundary_rejects_staged_index_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_sha = self._clean_repo(root)
+            with self._without_github_event_environment():
+                verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
+                (root / "tracked.py").write_text("VALUE = 2\n", encoding="utf-8")
+                self._run_git(root, "add", "tracked.py")
+                with self.assertRaisesRegex(ValueError, "changed after initial preflight"):
+                    verify_source_checkout.verify_source_checkout(
+                        source_sha,
+                        repo_root=root,
+                        late_build_boundary=True,
+                    )
+
+    def test_late_boundary_allows_expected_ignored_build_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_sha = self._clean_repo(root)
+            with self._without_github_event_environment():
+                verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
+                (root / "cache.ignored.py").write_text("generated\n", encoding="utf-8")
+                verify_source_checkout.verify_source_checkout(
+                    source_sha,
+                    repo_root=root,
+                    late_build_boundary=True,
+                )
+
+    def test_late_boundary_still_rejects_nonignored_untracked_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_sha = self._clean_repo(root)
+            with self._without_github_event_environment():
+                verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
+                (root / "late_shadow.py").write_text("raise RuntimeError('shadow')\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "changed after initial preflight"):
+                    verify_source_checkout.verify_source_checkout(
+                        source_sha,
+                        repo_root=root,
+                        late_build_boundary=True,
+                    )
+
     def test_windows_workflow_checks_out_and_preflights_exact_candidate_before_build(self) -> None:
         workflow = Path(".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         exact_ref = "ref: ${{ github.event.pull_request.head.sha || github.sha }}"

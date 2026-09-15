@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from decimal import Decimal, Overflow, Underflow, localcontext
+from decimal import DefaultContext, Decimal, Inexact, Overflow, Underflow, localcontext
 
 from autosport.domain import PaperTicket, TicketLeg, TicketStatus
 from autosport.evaluation import evaluate
@@ -118,6 +118,36 @@ class EvaluationPaperStateIntegrityTests(unittest.TestCase):
         book.settle(won_ticket.ticket_id, {won_leg.quote_key})
 
         summary = evaluate(book)
+
+        self.assertEqual(summary.net_profit, Decimal("-1"))
+        self.assertEqual(summary.settled_stake, Decimal("3"))
+        self.assertEqual(summary.roi, Decimal("-0.3333333333333333333333333333"))
+
+    def test_process_default_inexact_trap_cannot_change_valid_roi(self) -> None:
+        book = PaperBook("10")
+        lost_leg = TicketLeg("event-default-lost", "winner", "player-a", Decimal("2"))
+        lost_ticket = book.open_ticket([lost_leg], "2", reason="paper-only loss")
+        book.settle(lost_ticket.ticket_id, set())
+        won_leg = TicketLeg("event-default-won", "winner", "player-b", Decimal("2"))
+        won_ticket = book.open_ticket([won_leg], "1", reason="paper-only win")
+        book.settle(won_ticket.ticket_id, {won_leg.quote_key})
+
+        previous_inexact_trap = DefaultContext.traps[Inexact]
+        previous_capitals = DefaultContext.capitals
+        previous_clamp = DefaultContext.clamp
+        try:
+            # Context(...) inherits unspecified policy fields from DefaultContext.
+            # A valid non-terminating ROI must remain governed only by Autosport's
+            # pinned policy even if another library mutates process-global defaults.
+            DefaultContext.traps[Inexact] = True
+            DefaultContext.capitals = 0
+            DefaultContext.clamp = 1
+
+            summary = evaluate(book)
+        finally:
+            DefaultContext.traps[Inexact] = previous_inexact_trap
+            DefaultContext.capitals = previous_capitals
+            DefaultContext.clamp = previous_clamp
 
         self.assertEqual(summary.net_profit, Decimal("-1"))
         self.assertEqual(summary.settled_stake, Decimal("3"))

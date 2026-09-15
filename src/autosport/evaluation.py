@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from decimal import (
     Context,
     Decimal,
+    DivisionByZero,
     Inexact,
     InvalidOperation,
     Overflow,
@@ -35,13 +36,21 @@ class EvaluationSummary:
 def _evaluation_decimal_context(*, exact: bool = False) -> Context:
     """Return the deterministic context used for durable evaluation economics."""
 
+    # Context() inherits every unspecified policy field from mutable process-global
+    # decimal.DefaultContext. Pin the complete policy so unrelated library/caller
+    # changes cannot alter durable evaluation results or failure behavior.
     context = Context(
         prec=28,
         rounding=ROUND_HALF_EVEN,
         Emin=-999999,
         Emax=999999,
+        capitals=1,
+        clamp=0,
+        flags=[],
+        traps=[],
     )
     context.traps[InvalidOperation] = True
+    context.traps[DivisionByZero] = True
     context.traps[Overflow] = True
     context.traps[Underflow] = True
     if exact:

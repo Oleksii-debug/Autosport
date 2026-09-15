@@ -13,9 +13,16 @@ from scripts import verify_source_checkout
 class WindowsBuildReplacementRefTests(unittest.TestCase):
     @staticmethod
     def _run_git(root: Path, *args: str) -> str:
+        # The hardened Windows build intentionally exports GIT_NO_REPLACE_OBJECTS=1
+        # before running pytest.  This helper is the test fixture's *ordinary Git*
+        # oracle, so it must not inherit that production hardening switch; otherwise
+        # the positive control cannot observe the replacement ref it just created.
+        env = os.environ.copy()
+        env.pop("GIT_NO_REPLACE_OBJECTS", None)
         completed = subprocess.run(
             ["git", *args],
             cwd=root,
+            env=env,
             check=True,
             capture_output=True,
             text=True,

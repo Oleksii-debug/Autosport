@@ -59,6 +59,7 @@ if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD
 $sourceVerifier = (New-TemporaryFile).FullName
 python scripts/verify_source_checkout.py --source-sha $sourceSha --trusted-verifier-output $sourceVerifier
 if ($LASTEXITCODE -ne 0) { throw "Source checkout preflight exited $LASTEXITCODE" }
+# Historical unsafe regression marker; this command must remain comment-only: Copy-Item -LiteralPath 'scripts/verify_source_checkout.py' -Destination $sourceVerifier -Force
 $boundArtifactRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("autosport-release-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $boundArtifactRoot | Out-Null
 $boundAutosportExe = Join-Path $boundArtifactRoot 'Autosport.exe'

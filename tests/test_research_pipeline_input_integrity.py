@@ -143,6 +143,29 @@ class ResearchPipelineInputIntegrityTests(unittest.TestCase):
         policy = ResearchDecisionPolicy(minimum_evidence_per_leg=2)
         self.assertEqual(policy.minimum_evidence_per_leg, 2)
 
+    def test_policy_rejects_hostile_int_subclass_without_comparison_dispatch(self):
+        class HostileMinimumEvidence(int):
+            less_than_calls = 0
+            greater_than_calls = 0
+
+            def __lt__(self, other):
+                type(self).less_than_calls += 1
+                return False
+
+            def __gt__(self, other):
+                type(self).greater_than_calls += 1
+                return False
+
+        hostile = HostileMinimumEvidence(2)
+        with self.assertRaisesRegex(
+            ValueError,
+            "minimum_evidence_per_leg must be a positive integer",
+        ):
+            ResearchDecisionPolicy(minimum_evidence_per_leg=hostile)
+
+        self.assertEqual(HostileMinimumEvidence.less_than_calls, 0)
+        self.assertEqual(HostileMinimumEvidence.greater_than_calls, 0)
+
     def test_policy_requires_real_booleans_for_boolean_gates(self):
         for field in ("require_market_snapshot_hash", "require_worst_case_proof"):
             for value in ("false", "true", 0, 1, None):

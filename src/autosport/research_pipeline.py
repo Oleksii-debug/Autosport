@@ -146,8 +146,7 @@ class ResearchDecisionPolicy:
             raise ValueError("max_forecast_uncertainty must be between 0 and 1")
         object.__setattr__(self, "max_forecast_uncertainty", uncertainty)
         if (
-            isinstance(self.minimum_evidence_per_leg, bool)
-            or not isinstance(self.minimum_evidence_per_leg, int)
+            type(self.minimum_evidence_per_leg) is not int
             or self.minimum_evidence_per_leg < 1
         ):
             raise ValueError("minimum_evidence_per_leg must be a positive integer")

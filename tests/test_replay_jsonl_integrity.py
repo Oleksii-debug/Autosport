@@ -104,6 +104,28 @@ class ReplayJsonlIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"invalid replay JSONL at line 1"):
                 ReplayEngine.from_jsonl(path)
 
+    def test_oversized_json_integer_is_rejected_with_physical_line_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "market.jsonl"
+            payload = json.dumps(self._event_payload())
+            payload = payload.replace(
+                '"provider_sequence": 7',
+                '"provider_sequence": ' + ("1" * 641),
+            )
+            path.write_text(payload + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"invalid replay JSONL at line 1",
+            ) as raised:
+                ReplayEngine.from_jsonl(path)
+
+            self.assertIsInstance(raised.exception.__cause__, ValueError)
+            self.assertEqual(
+                str(raised.exception.__cause__),
+                "JSON integer exceeds 640 digits",
+            )
+
     def test_escaped_lone_surrogate_is_rejected_before_dataset_hashing(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "market.jsonl"

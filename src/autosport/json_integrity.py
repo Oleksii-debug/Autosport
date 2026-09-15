@@ -6,6 +6,7 @@ from typing import Any
 
 
 _JSON_WHITESPACE_BYTES = b" \t\r\n"
+_JSON_INTEGER_MAX_DIGITS = 640
 
 
 class DuplicateJsonKeyError(ValueError):
@@ -35,6 +36,20 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _reject_nonstandard_json_constant(value: str) -> None:
     raise NonStandardJsonConstantError(value)
+
+
+def _parse_bounded_json_integer(value: str) -> int:
+    negative = value.startswith("-")
+    digits = value[1:] if negative else value
+    if len(digits) > _JSON_INTEGER_MAX_DIGITS:
+        raise InvalidJsonDomainError(
+            f"JSON integer exceeds {_JSON_INTEGER_MAX_DIGITS} digits"
+        )
+
+    parsed = 0
+    for character in digits:
+        parsed = (parsed * 10) + (ord(character) - ord("0"))
+    return -parsed if negative else parsed
 
 
 def _validate_strict_json_value(root: object) -> None:
@@ -76,6 +91,7 @@ def strict_json_loads(text: str) -> Any:
         text,
         object_pairs_hook=_unique_json_object,
         parse_constant=_reject_nonstandard_json_constant,
+        parse_int=_parse_bounded_json_integer,
     )
     _validate_strict_json_value(raw)
     return raw

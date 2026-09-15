@@ -177,6 +177,23 @@ class DatasetJsonInputIntegrityTests(unittest.TestCase):
             ):
                 dataset.load_market_events()
 
+    def test_market_jsonl_rejects_oversized_integer_with_deterministic_context(self):
+        event_text = json.dumps(_event(), sort_keys=True)
+        event_text = event_text.replace(
+            '"metadata": {}',
+            '"metadata": {"oversized": ' + ("1" * 641) + "}",
+            1,
+        ) + "\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = load_dataset(
+                _write_schema1_dataset(Path(tmp), market_text=event_text)
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "market line 1 contains invalid JSON value: JSON integer exceeds 640 digits",
+            ):
+                dataset.load_market_events()
+
     def test_market_jsonl_rejects_escaped_lone_surrogate(self):
         event_text = json.dumps(_event(), sort_keys=True)
         surrogate_escape = "\\" + "ud800"

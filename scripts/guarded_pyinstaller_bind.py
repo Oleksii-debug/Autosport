@@ -316,6 +316,14 @@ def _install_expected_snapshot_namespace_fence(
         errors="replace",
     )
     if completed.returncode != 0:
+        try:
+            _restore_windows_dacl(parent, parent_dacl)
+        except BaseException as exc:
+            raise RuntimeError(
+                "trusted expected-snapshot parent namespace fence could not be installed "
+                "and the original parent DACL could not be restored: "
+                f"icacls exited {completed.returncode}"
+            ) from exc
         raise RuntimeError(
             "trusted expected-snapshot parent namespace fence could not be installed: "
             f"icacls exited {completed.returncode}"

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
+from autosport import historical_matches
 from autosport.historical_matches import capture_historical_matches
 from autosport.parlayapi_provider import HttpJsonResponse, ParlayApiTableTennisProvider, ProviderPayloadError
 
@@ -49,13 +52,15 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
                 output_path=output,
                 evidence_path=evidence_path,
             )
-            capture = json.loads(output.read_text(encoding="utf-8"))
+            capture_bytes = output.read_bytes()
+            capture = json.loads(capture_bytes.decode("utf-8"))
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
 
         self.assertEqual(capture["payload"], payload)
         self.assertEqual(capture["request"], {"date": "2026-09-10", "priced_only": False})
         self.assertEqual(evidence["requested_date"], "2026-09-10")
         self.assertFalse(evidence["priced_only"])
+        self.assertEqual(report.capture_sha256, hashlib.sha256(capture_bytes).hexdigest())
         self.assertEqual(evidence["capture_sha256"], report.capture_sha256)
         self.assertEqual(evidence["coverage_hint"], "source=test-source")
         self.assertFalse(evidence["provider_result_schema_parsed"])
@@ -73,6 +78,41 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
         self.assertEqual(query["date"], ["2026-09-10"])
         self.assertEqual(query["pricedOnly"], ["false"])
         self.assertNotIn("unit-test-key", transport.urls[0])
+
+    def test_capture_digest_stays_bound_to_published_bytes_after_path_replacement(self) -> None:
+        payload = [{"provider_defined_id": "match-1", "opaque": {"value": 1}}]
+        transport = _Transport(payload)
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "matches.json"
+            evidence_path = Path(temp) / "matches.evidence.json"
+            published: dict[str, bytes] = {}
+            real_atomic_write_json = historical_matches.atomic_write_json
+
+            def replace_output_before_evidence(path, evidence_payload):
+                if Path(path) == evidence_path:
+                    published["capture"] = output.read_bytes()
+                    output.write_bytes(b'{"foreign":"replacement"}\n')
+                return real_atomic_write_json(path, evidence_payload)
+
+            with patch.object(
+                historical_matches,
+                "atomic_write_json",
+                side_effect=replace_output_before_evidence,
+            ):
+                report = capture_historical_matches(
+                    self._provider(transport),
+                    requested_date="2026-09-10",
+                    output_path=output,
+                    evidence_path=evidence_path,
+                )
+
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            published_digest = hashlib.sha256(published["capture"]).hexdigest()
+            replacement_digest = hashlib.sha256(output.read_bytes()).hexdigest()
+
+        self.assertEqual(report.capture_sha256, published_digest)
+        self.assertEqual(evidence["capture_sha256"], published_digest)
+        self.assertNotEqual(report.capture_sha256, replacement_digest)
 
     def test_priced_only_maps_to_documented_boolean_parameter(self) -> None:
         transport = _Transport([])

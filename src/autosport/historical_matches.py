@@ -4,13 +4,15 @@ import argparse
 import hashlib
 import json
 import os
+import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-from .integrity import atomic_write_json, sha256_file
+from .integrity import atomic_write_json
 from .parlayapi_provider import (
     ParlayApiTableTennisProvider,
     ProviderPayloadError,
@@ -19,6 +21,7 @@ from .parlayapi_provider import (
 
 TERMS_REFERENCE = "https://parlay-api.com/terms"
 REQUEST_CONTRACT_REFERENCE = "https://api.parlay-api.com/docs"
+_CAPTURE_PUBLISH_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,8 +121,7 @@ def capture_historical_matches(
         "canonical_response_sha256": canonical_response_sha256,
         "payload": payload,
     }
-    atomic_write_json(output, capture_payload)
-    capture_sha256 = sha256_file(output)
+    capture_sha256 = _atomic_write_capture_json(output, capture_payload)
 
     evidence_payload = {
         "schema_version": 1,
@@ -161,6 +163,47 @@ def capture_historical_matches(
         output_path=str(output),
         evidence_path=str(evidence),
     )
+
+
+def _atomic_write_capture_json(path: str | Path, payload: dict[str, Any]) -> str:
+    """Publish one deterministic JSON byte snapshot and return that snapshot's SHA-256."""
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    serialized = (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    digest = hashlib.sha256(serialized).hexdigest()
+
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        with _CAPTURE_PUBLISH_LOCK:
+            os.replace(temporary, destination)
+        return digest
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _paths_alias(first: Path, second: Path) -> bool:

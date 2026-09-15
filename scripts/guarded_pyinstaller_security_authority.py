@@ -44,6 +44,7 @@ _TEST_DACL_REWRITE_ENV = "AUTOSPORT_TEST_REWRITE_EXPECTED_DACL_AFTER_RESOURCE_EN
 _FILE_ID_INFO_CLASS = 18
 _PROCESS_DUP_HANDLE = 0x00000040
 _DUPLICATE_SAME_ACCESS = 0x00000002
+_MAX_UNINSPECTABLE_HANDLE_RESCANS = 4
 
 
 class _SystemHandleTableEntryInfoEx(ctypes.Structure):
@@ -278,6 +279,7 @@ def _require_no_competing_mutation_handles(
     label: str,
     directory: bool,
     allow_current_process_data_mutators: bool = False,
+    _uninspectable_handle_rescans_remaining: int = _MAX_UNINSPECTABLE_HANDLE_RESCANS,
 ) -> None:
     """Reject retained mutation authority that predates the filesystem deny fences.
 
@@ -285,12 +287,14 @@ def _require_no_competing_mutation_handles(
     a live handle. Bind the trusted security-authority handle to stable filesystem
     identity and reject every other mutation-capable handle. The kernel-object pointer
     remains a fast path, but separate CreateFile opens are compared by FileIdInfo.
-    If stable identity inspection is unavailable, the exact candidate row is recaptured:
-    only a positively vanished candidate may be ignored; a live uninspectable mutator
-    fails closed. During a native PyInstaller resource update, current-process
-    data/delete handles are the trusted mutator and may remain; security-descriptor
-    mutation authority is never exempted. FILE_DELETE_CHILD is directory-only: the
-    same access bit is FILE_EXECUTE on regular files.
+    If stable identity inspection is unavailable, a still-live exact row fails closed;
+    a vanished row triggers a bounded full handle-table rescan so mutation authority
+    cannot survive by duplicating to a new handle during the inspection race. Churn
+    that prevents a complete scan within the bound also fails closed. During a native
+    PyInstaller resource update, current-process data/delete handles are the trusted
+    mutator and may remain; security-descriptor mutation authority is never exempted.
+    FILE_DELETE_CHILD is directory-only: the same access bit is FILE_EXECUTE on regular
+    files.
     """
 
     trusted_handle = _raw_handle_value(raw_handle)
@@ -334,11 +338,26 @@ def _require_no_competing_mutation_handles(
             try:
                 candidate_identity = _candidate_file_identity(pid, handle_value)
             except _CandidateFileIdentityUnavailable as exc:
+                if competing:
+                    break
                 if _snapshot_row_still_present(row, object_type=candidate_type):
                     raise RuntimeError(
                         f"{label} has live uninspectable mutation-capable handle"
                     ) from exc
-                continue
+                if _uninspectable_handle_rescans_remaining <= 0:
+                    raise RuntimeError(
+                        f"{label} mutation-capable handle audit did not quiesce after "
+                        "uninspectable candidate churn"
+                    ) from exc
+                return _require_no_competing_mutation_handles(
+                    raw_handle,
+                    label=label,
+                    directory=directory,
+                    allow_current_process_data_mutators=allow_current_process_data_mutators,
+                    _uninspectable_handle_rescans_remaining=(
+                        _uninspectable_handle_rescans_remaining - 1
+                    ),
+                )
             same_file = candidate_identity == target_identity
         if same_file:
             competing.append(row)

@@ -147,7 +147,7 @@ def test_uninspectable_candidate_may_be_ignored_only_after_positive_disappearanc
     refreshed.object_types[
         (trusted_row[0], trusted_row[1], trusted_row[2])
     ] = snapshot.object_types[(trusted_row[0], trusted_row[1], trusted_row[2])]
-    snapshots = iter([snapshot, refreshed])
+    snapshots = iter([snapshot, refreshed, refreshed])
 
     monkeypatch.setattr(security, "_query_system_handles", lambda: next(snapshots))
     monkeypatch.setattr(
@@ -166,3 +166,58 @@ def test_uninspectable_candidate_may_be_ignored_only_after_positive_disappearanc
         label="disappeared retained handle",
         directory=False,
     )
+
+
+def test_uninspectable_disappearance_rescans_and_rejects_surviving_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    security = _load_security_authority()
+    snapshot, trusted_handle, candidate_pid, candidate_handle = _snapshot(
+        security,
+        trusted_object=0xAAA4,
+        candidate_object=0xBBB4,
+    )
+    trusted_row = snapshot[0]
+    duplicate_handle = 0x333
+    duplicate_row = (
+        snapshot[1][0],
+        candidate_pid,
+        duplicate_handle,
+        security._WRITE_DAC,
+    )
+    refreshed = security._SystemHandleSnapshot()
+    refreshed.extend([trusted_row, duplicate_row])
+    object_type = snapshot.object_types[(snapshot[1][0], candidate_pid, candidate_handle)]
+    refreshed.object_types[
+        (trusted_row[0], trusted_row[1], trusted_row[2])
+    ] = snapshot.object_types[(trusted_row[0], trusted_row[1], trusted_row[2])]
+    refreshed.object_types[(duplicate_row[0], duplicate_row[1], duplicate_row[2])] = object_type
+    snapshots = iter([snapshot, refreshed, refreshed])
+
+    monkeypatch.setattr(security, "_query_system_handles", lambda: next(snapshots))
+    identity = (0x1234, b"A" * 16)
+    monkeypatch.setattr(security, "_file_identity", lambda _handle: identity)
+    inspected: list[tuple[int, int]] = []
+
+    def candidate_identity(pid: int, handle: int):
+        inspected.append((pid, handle))
+        if handle == candidate_handle:
+            raise security._CandidateFileIdentityUnavailable(
+                "original handle closed after duplicate"
+            )
+        assert handle == duplicate_handle
+        return identity
+
+    monkeypatch.setattr(security, "_candidate_file_identity", candidate_identity)
+
+    with pytest.raises(RuntimeError, match="pre-existing competing mutation-capable handle"):
+        security._require_no_competing_mutation_handles(
+            trusted_handle,
+            label="duplicated retained handle",
+            directory=False,
+        )
+
+    assert inspected == [
+        (candidate_pid, candidate_handle),
+        (candidate_pid, duplicate_handle),
+    ]

@@ -27,6 +27,9 @@ _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_RESOURCE_API_TRANSITIONS = frozenset(
+    {"remove-resources", "icon", "version-info", "resource", "manifest"}
+)
 
 _TRUSTED_VERIFIER_LAUNCHER = r'''
 import hashlib
@@ -146,11 +149,13 @@ def _require_regular_nonreparse(path: pathlib.Path, *, label: str) -> os.stat_re
 def _open_delete_denial_continuity_anchor(
     path: pathlib.Path,
 ) -> tuple[Any, tuple[int, int]]:
-    """Pin the producer pathname while allowing one bounded trusted mutation.
+    """Pin the producer pathname outside Win32 resource commit windows.
 
     The zero-access handle shares READ/WRITE but deliberately not DELETE. It is
-    retained across every transition so rename/delete replacement cannot occur
-    while the byte-exclusive producer handle is temporarily released.
+    retained whenever the producer API permits another handle. Win32 resource
+    commits require every unrelated file handle to be closed, so those bounded
+    transitions instead re-prove the same object identity and expected digest
+    immediately after the resource API returns.
     """
 
     if os.name != "nt":
@@ -204,7 +209,8 @@ def _create_initial_producer_copy(
     The creating handle requests READ/WRITE and shares only READ. Consequently no
     second writer or deleter can touch the producer between initial creation and
     the first trusted mutation transition. A separate zero-access no-DELETE handle
-    is also retained so pathname identity survives the bounded transition windows.
+    pins the pathname except during Win32 resource commits, whose API contract
+    requires all unrelated file handles to be closed before commit.
     """
 
     if os.name != "nt":
@@ -547,12 +553,16 @@ def run(argv: list[str] | None = None) -> int:
             )
 
         snapshot = _make_expected_snapshot(anchor_stream, label)
+        release_creation_anchor = label in _RESOURCE_API_TRANSITIONS
         try:
             expected_mutator(snapshot)
             expected_digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
 
             anchor_stream.close()
             state["producer_anchor_stream"] = None
+            if release_creation_anchor:
+                _close_windows_handle(creation_anchor)
+                state["creation_anchor_handle"] = None
 
             live_error: BaseException | None = None
             live_result = None
@@ -570,7 +580,33 @@ def run(argv: list[str] | None = None) -> int:
                 )
             state["producer_anchor_stream"] = next_anchor
 
+            next_creation_anchor = None
+            if release_creation_anchor:
+                try:
+                    next_creation_anchor, next_creation_identity = (
+                        _open_delete_denial_continuity_anchor(artifact)
+                    )
+                except BaseException as exc:
+                    next_anchor.close()
+                    state["producer_anchor_stream"] = None
+                    raise poison_guard(
+                        f"PyInstaller {label} transition could not restore pathname continuity fence: {exc}",
+                        exc,
+                    )
+                state["creation_anchor_handle"] = next_creation_anchor
+                if next_creation_identity != next_identity:
+                    _close_windows_handle(next_creation_anchor)
+                    state["creation_anchor_handle"] = None
+                    next_anchor.close()
+                    state["producer_anchor_stream"] = None
+                    raise poison_guard(
+                        f"PyInstaller {label} transition raced while restoring producer fences"
+                    )
+
             if next_identity != producer_identity:
+                if next_creation_anchor is not None:
+                    _close_windows_handle(next_creation_anchor)
+                    state["creation_anchor_handle"] = None
                 next_anchor.close()
                 state["producer_anchor_stream"] = None
                 raise poison_guard(

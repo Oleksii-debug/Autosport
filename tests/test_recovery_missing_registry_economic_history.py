@@ -4,9 +4,11 @@ from pathlib import Path
 
 import pytest
 
+import autosport.recovery as recovery_module
 from autosport.recovery import RecoveryReport, reconcile_late_crashes
 from autosport.run_registry import ReconciliationError
 from autosport.run_transaction import RunTransaction
+from autosport.workspace_lock import WorkspaceEconomicLockError
 
 
 def test_missing_registry_with_paper_book_fails_closed(tmp_path: Path) -> None:
@@ -53,3 +55,30 @@ def test_pristine_zero_byte_ledger_and_empty_transaction_root_are_recovery_compa
 
     assert reconcile_late_crashes(tmp_path) == RecoveryReport((), (), ())
     assert not (tmp_path / "run_registry.json").exists()
+
+
+def test_lock_integrity_failure_is_not_misreported_as_active_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_lock_integrity(_lock) -> None:
+        raise WorkspaceEconomicLockError(
+            "workspace economic lock path changed during acquisition"
+        )
+
+    monkeypatch.setattr(
+        recovery_module.WorkspaceEconomicLock,
+        "acquire",
+        reject_lock_integrity,
+    )
+
+    with pytest.raises(
+        ReconciliationError,
+        match=(
+            "workspace economic lock validation failed: "
+            "workspace economic lock path changed during acquisition"
+        ),
+    ) as caught:
+        reconcile_late_crashes(tmp_path)
+
+    assert "active economic writer" not in str(caught.value)

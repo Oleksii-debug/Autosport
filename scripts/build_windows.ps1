@@ -60,6 +60,12 @@ python scripts/verify_source_checkout.py --source-sha $sourceSha
 if ($LASTEXITCODE -ne 0) { throw "Source checkout preflight exited $LASTEXITCODE" }
 $sourceVerifier = (New-TemporaryFile).FullName
 Copy-Item -LiteralPath 'scripts/verify_source_checkout.py' -Destination $sourceVerifier -Force
+$boundArtifactRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("autosport-release-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $boundArtifactRoot | Out-Null
+$boundAutosportExe = Join-Path $boundArtifactRoot 'Autosport.exe'
+$boundDataExe = Join-Path $boundArtifactRoot 'Autosport-Data.exe'
+$autosportDigestPath = Join-Path $boundArtifactRoot 'Autosport.sha256'
+$dataDigestPath = Join-Path $boundArtifactRoot 'Autosport-Data.sha256'
 $env:PYTHONDONTWRITEBYTECODE = '1'
 python -m pip install --upgrade pip
 if ($LASTEXITCODE -ne 0) { throw "pip upgrade exited $LASTEXITCODE" }
@@ -71,27 +77,33 @@ if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-sm
 python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace
 if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }
 if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
-python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary
-if ($LASTEXITCODE -ne 0) { throw "Late source checkout integrity gate exited $LASTEXITCODE" }
 python $sourceVerifier --source-sha $sourceSha --late-build-boundary
-if ($LASTEXITCODE -ne 0) { throw "Snapshot late source checkout integrity gate exited $LASTEXITCODE" }
+if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport.exe exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
 if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
-python $sourceVerifier --source-sha $sourceSha --late-build-boundary
-if ($LASTEXITCODE -ne 0) { throw "Snapshot late source checkout integrity gate exited $LASTEXITCODE" }
+$builtAutosportExe = Join-Path $PWD 'dist/Autosport.exe'
+python $sourceVerifier --bind-artifact $builtAutosportExe --bound-output $boundAutosportExe --digest-output $autosportDigestPath
+if ($LASTEXITCODE -ne 0) { throw "Autosport.exe artifact binding exited $LASTEXITCODE" }
+$autosportExeSha256 = (Get-Content -LiteralPath $autosportDigestPath -Raw).Trim()
+python $sourceVerifier --source-sha $sourceSha --late-build-boundary --allow-release-outputs
+if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport-Data.exe exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
 if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }
+$builtDataExe = Join-Path $PWD 'dist/Autosport-Data.exe'
+python $sourceVerifier --bind-artifact $builtDataExe --bound-output $boundDataExe --digest-output $dataDigestPath
+if ($LASTEXITCODE -ne 0) { throw "Autosport-Data.exe artifact binding exited $LASTEXITCODE" }
+$dataExeSha256 = (Get-Content -LiteralPath $dataDigestPath -Raw).Trim()
 
 $diag = Join-Path $PWD 'dist/packaged-diagnostic.json'
 if (Test-Path $diag) { Remove-Item -Force $diag }
-$process = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--diagnostic-output', $diag -Wait -PassThru
+$process = Start-Process -FilePath $boundAutosportExe -ArgumentList '--diagnostic-output', $diag -Wait -PassThru
 if ($process.ExitCode -ne 0) { throw "Packaged Autosport.exe diagnostic exited $($process.ExitCode)" }
 $diagnostic = Get-Content $diag -Raw | ConvertFrom-Json
 if ($diagnostic.status -ne 'PASS') { throw 'Packaged Autosport.exe diagnostic did not PASS' }
 
 $a11y = Join-Path $PWD 'dist/accessibility-audit.json'
 if (Test-Path $a11y) { Remove-Item -Force $a11y }
-$a11yProcess = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--accessibility-audit-output', $a11y -Wait -PassThru
+$a11yProcess = Start-Process -FilePath $boundAutosportExe -ArgumentList '--accessibility-audit-output', $a11y -Wait -PassThru
 if ($a11yProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe accessibility audit exited $($a11yProcess.ExitCode)" }
 $accessibility = Get-Content $a11y -Raw | ConvertFrom-Json
 if ($accessibility.status -ne 'PASS') { throw 'Packaged accessibility audit did not PASS' }
@@ -99,7 +111,7 @@ if ($accessibility.nvda_verified -ne $false) { throw 'Machine accessibility audi
 
 $keyboard = Join-Path $PWD 'dist/keyboard-audit.json'
 if (Test-Path $keyboard) { Remove-Item -Force $keyboard }
-$keyboardProcess = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--keyboard-audit-output', $keyboard -Wait -PassThru
+$keyboardProcess = Start-Process -FilePath $boundAutosportExe -ArgumentList '--keyboard-audit-output', $keyboard -Wait -PassThru
 if ($keyboardProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe keyboard audit exited $($keyboardProcess.ExitCode)" }
 $keyboardEvidence = Get-Content $keyboard -Raw | ConvertFrom-Json
 if ($keyboardEvidence.status -ne 'PASS') { throw 'Packaged keyboard audit did not PASS' }
@@ -109,7 +121,7 @@ if ($keyboardEvidence.human_tested -ne $false -or $keyboardEvidence.nvda_verifie
 
 $restartRecovery = Join-Path $PWD 'dist/restart-recovery-audit.json'
 if (Test-Path $restartRecovery) { Remove-Item -Force $restartRecovery }
-$restartRecoveryProcess = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--restart-recovery-audit-output', $restartRecovery -Wait -PassThru
+$restartRecoveryProcess = Start-Process -FilePath $boundAutosportExe -ArgumentList '--restart-recovery-audit-output', $restartRecovery -Wait -PassThru
 if ($restartRecoveryProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe restart/recovery audit exited $($restartRecoveryProcess.ExitCode)" }
 $restartRecoveryEvidence = Get-Content $restartRecovery -Raw | ConvertFrom-Json
 if ($restartRecoveryEvidence.status -ne 'PASS') { throw 'Packaged restart/recovery audit did not PASS' }
@@ -121,7 +133,7 @@ if ($restartRecoveryEvidence.real_money_execution -ne $false -or $restartRecover
 }
 Assert-ProcessRecoveryEvidence -Evidence $restartRecoveryEvidence -Label 'Packaged restart/recovery audit'
 
-$dataExe = Join-Path $PWD 'dist/Autosport-Data.exe'
+$dataExe = $boundDataExe
 if (-not (Test-Path $dataExe -PathType Leaf)) { throw 'Packaged build is missing Autosport-Data.exe' }
 & $dataExe --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe help exited $LASTEXITCODE" }
@@ -218,11 +230,15 @@ $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
 $packageVerification = Join-Path $PWD 'dist/package-verification.json'
 if (Test-Path $package) { Remove-Item -Force $package }
 if (Test-Path $packageVerification) { Remove-Item -Force $packageVerification }
-python $sourceVerifier --source-sha $sourceSha --late-build-boundary
-if ($LASTEXITCODE -ne 0) { throw "Snapshot late source checkout integrity gate exited $LASTEXITCODE" }
+python $sourceVerifier --source-sha $sourceSha --late-build-boundary --allow-release-outputs
+if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before package assembly exited $LASTEXITCODE" }
+python $sourceVerifier --verify-artifact $boundAutosportExe --expected-sha256 $autosportExeSha256
+if ($LASTEXITCODE -ne 0) { throw "Bound Autosport.exe verification exited $LASTEXITCODE" }
+python $sourceVerifier --verify-artifact $boundDataExe --expected-sha256 $dataExeSha256
+if ($LASTEXITCODE -ne 0) { throw "Bound Autosport-Data.exe verification exited $LASTEXITCODE" }
 python scripts/package_windows.py `
-  --exe dist/Autosport.exe `
-  --data-exe dist/Autosport-Data.exe `
+  --exe $boundAutosportExe `
+  --data-exe $boundDataExe `
   --start-file WINDOWS_START_HERE.txt `
   --example-dir examples/tt_demo `
   --diagnostic $diag `
@@ -310,7 +326,7 @@ if ($freshAccessibility.real_money_execution -ne $false -or $freshAccessibility.
 $freshKeyboard = Join-Path $PWD 'dist/fresh-extraction-keyboard-audit.json'
 if (Test-Path $freshKeyboard) { Remove-Item -Force $freshKeyboard }
 $freshKeyboardProcess = Start-Process -FilePath $extractedExe -ArgumentList '--keyboard-audit-output', $freshKeyboard -Wait -PassThru
-if ($freshKeyboardProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe keyboard audit exited $($freshKeyboardProcess.ExitCode)" }
+if ($freshKeyboardProcess.ExitCode -ne 0) { throw "Fresh-extracted keyboard audit exited $($freshKeyboardProcess.ExitCode)" }
 $freshKeyboardEvidence = Get-Content $freshKeyboard -Raw | ConvertFrom-Json
 if ($freshKeyboardEvidence.status -ne 'PASS') { throw 'Fresh-extracted keyboard audit did not PASS' }
 if ($freshKeyboardEvidence.real_money_execution -ne $false -or $freshKeyboardEvidence.human_tested -ne $false -or $freshKeyboardEvidence.nvda_verified -ne $false) {
@@ -364,3 +380,4 @@ $freshEvidence = [ordered]@{
 }
 $freshEvidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $PWD 'dist/fresh-extraction-verification.json') -Encoding utf8
 Remove-Item -LiteralPath $sourceVerifier -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $boundArtifactRoot -Recurse -Force -ErrorAction SilentlyContinue

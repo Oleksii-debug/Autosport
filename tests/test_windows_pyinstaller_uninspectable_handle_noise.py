@@ -206,6 +206,46 @@ def test_uninspectable_unknown_owner_fails_closed(
         )
 
 
+def test_uninspectable_owner_scope_lookup_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    security = _load_security_authority()
+    current_pid = os.getpid()
+    candidate_pid = current_pid + 202
+    snapshot, trusted_handle, candidate_handle, target_identity = _uninspectable_case(
+        security,
+        candidate_pid=candidate_pid,
+    )
+
+    monkeypatch.setattr(security, "_query_system_handles", lambda: snapshot)
+    monkeypatch.setattr(security, "_file_identity", lambda _handle: target_identity)
+
+    def candidate_identity(pid: int, handle_value: int) -> tuple[int, bytes]:
+        assert pid == candidate_pid
+        assert handle_value == candidate_handle
+        raise security._CandidateFileIdentityUnavailable("synthetic owner-scope candidate")
+
+    def unavailable_owner_scope() -> dict[int, bool]:
+        raise OSError("synthetic owner-scope lookup failure")
+
+    monkeypatch.setattr(security, "_candidate_file_identity", candidate_identity)
+    monkeypatch.setattr(
+        security,
+        "_snapshot_row_still_present",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(security, "_process_same_user_scope", unavailable_owner_scope)
+
+    with pytest.raises(RuntimeError, match="unknown process owner") as exc_info:
+        security._require_no_competing_mutation_handles(
+            trusted_handle,
+            label="owner-scope lookup failure candidate",
+            directory=False,
+        )
+
+    assert isinstance(exc_info.value.__cause__, OSError)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="real Windows unfiltered handle-table regression")
 def test_unfiltered_windows_handle_table_passes_after_proven_competitor_closes(
     tmp_path: Path,

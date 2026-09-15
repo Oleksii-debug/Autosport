@@ -11,19 +11,19 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 
 $expected = @(
-    [ordered]@{ key = 'choose_dataset'; automation_id = '101'; name = 'Вибрати replay dataset'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
-    [ordered]@{ key = 'run_replay'; automation_id = '102'; name = 'Запустити paper replay'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
-    [ordered]@{ key = 'replay_speed'; automation_id = '103'; name = 'Швидкість replay'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
-    [ordered]@{ key = 'live_mode'; automation_id = '104'; name = 'Режим live observation'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
-    [ordered]@{ key = 'live_refresh'; automation_id = '105'; name = 'Оновити live snapshot'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
-    [ordered]@{ key = 'strategy'; automation_id = '106'; name = 'Стратегія replay'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
-    [ordered]@{ key = 'research_plan'; automation_id = '107'; name = 'Вибрати research plan'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
-    [ordered]@{ key = 'repair_workspace'; automation_id = '108'; name = 'Відновити workspace'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
+    [ordered]@{ key = 'choose_dataset'; automation_id = '101'; name = 'Вибрати replay dataset'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
+    [ordered]@{ key = 'run_replay'; automation_id = '102'; name = 'Запустити paper replay'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
+    [ordered]@{ key = 'replay_speed'; automation_id = '103'; name = 'Швидкість replay'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; require_named_rows = $false },
+    [ordered]@{ key = 'live_mode'; automation_id = '104'; name = 'Режим live observation'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; require_named_rows = $false },
+    [ordered]@{ key = 'live_refresh'; automation_id = '105'; name = 'Оновити live snapshot'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
+    [ordered]@{ key = 'strategy'; automation_id = '106'; name = 'Стратегія replay'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; require_named_rows = $false },
+    [ordered]@{ key = 'research_plan'; automation_id = '107'; name = 'Вибрати research plan'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
+    [ordered]@{ key = 'repair_workspace'; automation_id = '108'; name = 'Відновити workspace'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
     [ordered]@{ key = 'tickets'; automation_id = '201'; name = 'Paper tickets і результати'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
-    [ordered]@{ key = 'log'; automation_id = '202'; name = 'Журнал виконання'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false },
+    [ordered]@{ key = 'log'; automation_id = '202'; name = 'Журнал виконання'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false },
     [ordered]@{ key = 'live_quotes'; automation_id = '203'; name = 'Live quotes'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
     [ordered]@{ key = 'evaluation'; automation_id = '204'; name = 'Evaluation і portfolio evidence'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
-    [ordered]@{ key = 'bankroll'; automation_id = '205'; name = 'Віртуальний банк'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = $null; require_named_rows = $false; require_value_read_only = $true }
+    [ordered]@{ key = 'bankroll'; automation_id = '205'; name = 'Віртуальний банк'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false; require_value_read_only = $true }
 )
 
 function Test-Pattern {

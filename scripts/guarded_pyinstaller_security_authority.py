@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import importlib.util
 import os
 import pathlib
 import shutil
@@ -307,11 +308,35 @@ def install(wrapper: ModuleType) -> None:
     base_remove_file_fence = core._remove_expected_snapshot_write_fence
     base_require_access_denied = core._require_windows_access_denied
 
+    process_authority_path = pathlib.Path(__file__).with_name(
+        "guarded_pyinstaller_process_authority.py"
+    )
+    process_authority_spec = importlib.util.spec_from_file_location(
+        "_autosport_guarded_pyinstaller_process_authority",
+        process_authority_path,
+    )
+    if process_authority_spec is None or process_authority_spec.loader is None:
+        raise RuntimeError(
+            f"could not load guarded PyInstaller process authority: {process_authority_path}"
+        )
+    process_authority = importlib.util.module_from_spec(process_authority_spec)
+    sys.modules[process_authority_spec.name] = process_authority
+    process_authority_spec.loader.exec_module(process_authority)
+    process_fence = process_authority.ProcessDuplicationFence(_query_system_handles)
+
     parent_authorities: dict[str, dict[str, Any]] = {}
     file_authorities: dict[str, dict[str, Any]] = {}
 
     def normalized(path: pathlib.Path) -> str:
         return core._normalized_path(path)
+
+    def release_process_fence_if_idle() -> None:
+        if (
+            process_fence.installed
+            and not parent_authorities
+            and not file_authorities
+        ):
+            process_fence.release()
 
     def open_security_authority(
         path: pathlib.Path,
@@ -476,11 +501,15 @@ def install(wrapper: ModuleType) -> None:
             return
         if authority["descriptor"] != descriptor:
             core._close_windows_handle(authority["handle"])
+            release_process_fence_if_idle()
             raise RuntimeError("expected-snapshot parent DACL restore descriptor changed")
         try:
             restore_dacl_through_handle(authority["handle"], descriptor)
         finally:
-            core._close_windows_handle(authority["handle"])
+            try:
+                core._close_windows_handle(authority["handle"])
+            finally:
+                release_process_fence_if_idle()
 
     def hardened_namespace_fence(path: pathlib.Path, sid: str) -> dict[str, Any]:
         parent = pathlib.Path(path).parent
@@ -491,11 +520,17 @@ def install(wrapper: ModuleType) -> None:
         key = normalized(parent)
         if key in parent_authorities:
             raise RuntimeError("expected-snapshot parent security authority was installed twice")
-        raw_handle = open_security_authority(parent, directory=True, pin_delete=True)
+        process_fence.acquire(sid)
+        try:
+            raw_handle = open_security_authority(parent, directory=True, pin_delete=True)
+        except BaseException:
+            release_process_fence_if_idle()
+            raise
         try:
             descriptor = wrapper._capture_windows_dacl(parent)
         except BaseException:
             core._close_windows_handle(raw_handle)
+            release_process_fence_if_idle()
             raise
         parent_authorities[key] = {
             "handle": raw_handle,
@@ -532,11 +567,17 @@ def install(wrapper: ModuleType) -> None:
         key = normalized(path)
         if key in file_authorities:
             raise RuntimeError("expected-snapshot file security authority was installed twice")
-        raw_handle = open_security_authority(path, directory=False, pin_delete=False)
+        process_fence.acquire(sid)
+        try:
+            raw_handle = open_security_authority(path, directory=False, pin_delete=False)
+        except BaseException:
+            release_process_fence_if_idle()
+            raise
         try:
             descriptor = wrapper._capture_windows_dacl(path)
         except BaseException:
             core._close_windows_handle(raw_handle)
+            release_process_fence_if_idle()
             raise
         file_authorities[key] = {
             "handle": raw_handle,
@@ -563,7 +604,10 @@ def install(wrapper: ModuleType) -> None:
                 try:
                     restore_dacl_through_handle(authority["handle"], descriptor)
                 finally:
-                    core._close_windows_handle(authority["handle"])
+                    try:
+                        core._close_windows_handle(authority["handle"])
+                    finally:
+                        release_process_fence_if_idle()
             raise
 
     def hardened_remove_file_fence(path: pathlib.Path, sid: str) -> None:
@@ -576,7 +620,10 @@ def install(wrapper: ModuleType) -> None:
         try:
             restore_dacl_through_handle(authority["handle"], authority["descriptor"])
         finally:
-            core._close_windows_handle(authority["handle"])
+            try:
+                core._close_windows_handle(authority["handle"])
+            finally:
+                release_process_fence_if_idle()
 
     def run_hostile_child_probe(path: pathlib.Path, authority: dict[str, Any]) -> None:
         if authority["probe_exercised"]:

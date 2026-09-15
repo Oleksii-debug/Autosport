@@ -90,15 +90,109 @@ def _load_security_authority():
     return module
 
 
-def test_security_authority_source_audits_preexisting_write_dac_handles() -> None:
+def test_security_authority_source_audits_preexisting_mutation_handles() -> None:
     source = _SECURITY_AUTHORITY.read_text(encoding="utf-8")
 
     assert "NtQuerySystemInformation" in source
     assert "_SYSTEM_EXTENDED_HANDLE_INFORMATION = 64" in source
-    assert "pre-existing competing WRITE_DAC handle(s)" in source
-    assert source.count("_require_no_competing_write_dac_handles(") >= 3
+    assert "_MUTATION_CAPABLE_ACCESS" in source
+    assert "pre-existing competing mutation-capable handle(s)" in source
+    assert source.count("_require_no_competing_mutation_handles(") >= 3
+    assert "allow_current_process_data_mutators=True" in source
     assert "trusted expected-snapshot parent security fence" in source
     assert "trusted expected-snapshot file security fence" in source
+
+
+def test_mutation_handle_audit_rejects_cross_process_direct_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    security = _load_security_authority()
+    current_pid = os.getpid()
+    target_object = 0x12345678
+    trusted_handle = 0x111
+
+    monkeypatch.setattr(
+        security,
+        "_query_system_handles",
+        lambda: [
+            (target_object, current_pid, trusted_handle, security._WRITE_DAC),
+            (
+                target_object,
+                current_pid + 1,
+                0x222,
+                security._FILE_WRITE_DATA | security._FILE_WRITE_ATTRIBUTES,
+            ),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="pre-existing competing mutation-capable handle"):
+        security._require_no_competing_mutation_handles(
+            trusted_handle,
+            label="cross-process retained direct writer",
+            allow_current_process_data_mutators=True,
+        )
+
+
+def test_mutation_handle_audit_allows_only_current_process_data_mutator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    security = _load_security_authority()
+    current_pid = os.getpid()
+    target_object = 0x22334455
+    trusted_handle = 0x333
+    native_writer = 0x444
+
+    monkeypatch.setattr(
+        security,
+        "_query_system_handles",
+        lambda: [
+            (target_object, current_pid, trusted_handle, security._WRITE_DAC),
+            (
+                target_object,
+                current_pid,
+                native_writer,
+                security._FILE_WRITE_DATA | security._DELETE_ACCESS,
+            ),
+        ],
+    )
+
+    security._require_no_competing_mutation_handles(
+        trusted_handle,
+        label="trusted native resource writer",
+        allow_current_process_data_mutators=True,
+    )
+
+    with pytest.raises(RuntimeError, match="pre-existing competing mutation-capable handle"):
+        security._require_no_competing_mutation_handles(
+            trusted_handle,
+            label="untrusted current-process writer",
+            allow_current_process_data_mutators=False,
+        )
+
+
+def test_mutation_handle_audit_never_exempts_security_mutator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    security = _load_security_authority()
+    current_pid = os.getpid()
+    target_object = 0x33445566
+    trusted_handle = 0x555
+
+    monkeypatch.setattr(
+        security,
+        "_query_system_handles",
+        lambda: [
+            (target_object, current_pid, trusted_handle, security._WRITE_DAC),
+            (target_object, current_pid, 0x666, security._WRITE_DAC),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="pre-existing competing mutation-capable handle"):
+        security._require_no_competing_mutation_handles(
+            trusted_handle,
+            label="current-process retained security mutator",
+            allow_current_process_data_mutators=True,
+        )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real Windows retained-WRITE_DAC regression")
@@ -174,8 +268,8 @@ def test_preopened_write_dac_handle_survives_deny_but_is_detected(tmp_path: Path
             close_handle(fresh)
             pytest.fail("OWNER RIGHTS deny did not block a fresh WRITE_DAC open")
 
-        with pytest.raises(RuntimeError, match="pre-existing competing WRITE_DAC handle"):
-            security._require_no_competing_write_dac_handles(
+        with pytest.raises(RuntimeError, match="pre-existing competing mutation-capable handle"):
+            security._require_no_competing_mutation_handles(
                 trusted,
                 label="retained WRITE_DAC regression",
             )
@@ -183,7 +277,7 @@ def test_preopened_write_dac_handle_survives_deny_but_is_detected(tmp_path: Path
         assert close_handle(competing)
         competing = None
 
-        security._require_no_competing_write_dac_handles(
+        security._require_no_competing_mutation_handles(
             trusted,
             label="retained WRITE_DAC regression",
         )
@@ -234,7 +328,7 @@ def test_production_namespace_fence_rejects_preopened_cross_process_write_dac(
         assert completed.returncode != 0
         combined = completed.stdout + "\n" + completed.stderr
         assert "trusted expected-snapshot parent security fence has" in combined
-        assert "pre-existing competing WRITE_DAC handle" in combined
+        assert "pre-existing competing mutation-capable handle" in combined
         assert not bound.exists()
         assert not digest.exists()
     finally:

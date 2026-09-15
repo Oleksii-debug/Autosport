@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import ctypes
 import hashlib
 import os
@@ -17,8 +18,8 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _EXPECTED_PYINSTALLER_VERSION = "6.22.3"
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _GENERIC_READ = 0x80000000
+_GENERIC_WRITE = 0x40000000
 _FILE_SHARE_READ = 0x00000001
-_FILE_SHARE_WRITE = 0x00000002
 _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
@@ -46,6 +47,23 @@ exec(compile(data, str(path), "exec"), namespace)
 '''
 
 
+class _RetainedArtifactWriter:
+    """Expose PyInstaller's pinned final ``wb`` rewrite without releasing our file fence."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def __enter__(self) -> Any:
+        self._stream.seek(0)
+        self._stream.truncate(0)
+        return self._stream
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self._stream.flush()
+        os.fsync(self._stream.fileno())
+        return False
+
+
 def _normalized_path(path: str | os.PathLike[str]) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(path))))
 
@@ -63,8 +81,22 @@ def _stable_identity(value: os.stat_result) -> tuple[int, int, int, int]:
     )
 
 
+def _sha256_stream(stream: Any) -> str:
+    position = stream.tell()
+    try:
+        stream.seek(0)
+        digest = hashlib.sha256()
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                return digest.hexdigest()
+            digest.update(chunk)
+    finally:
+        stream.seek(position)
+
+
 def _require_expected_pyinstaller_version(actual: str) -> None:
-    if actual != _EXPECTED_PYINSTALLER_VERSION:
+    if actual != _EXPECTEDED_PYINSTALLER_VERSION:
         raise RuntimeError(
             "guarded PyInstaller producer version mismatch: "
             f"expected {_EXPECTED_PYINSTALLER_VERSION}, got {actual}"
@@ -98,12 +130,12 @@ def _require_regular_nonreparse(path: pathlib.Path, *, label: str) -> os.stat_re
 def _open_producer_continuity_anchor(
     path: pathlib.Path,
 ) -> tuple[Any, tuple[int, int]]:
-    """Retain the producer object across its final legitimate Windows mutation.
+    """Retain one read/write producer handle and deny every second writer/deleter.
 
-    The anchor permits additional READ/WRITE opens so PyInstaller can perform its
-    final checksum rewrite, but intentionally omits DELETE sharing. A same-path
-    rename/replacement therefore cannot swap the object between that producer
-    mutation and acquisition of the stricter final binding fence.
+    PyInstaller 6.22.3 performs its final checksum rewrite with ``open(path, 'wb')``.
+    The caller redirects only that exact pinned rewrite through this retained handle.
+    Because the handle itself requests WRITE access while sharing READ only, Windows
+    rejects any concurrent or later WRITE/DELETE opener until trusted binding ends.
     """
 
     if os.name != "nt":
@@ -130,82 +162,7 @@ def _open_producer_continuity_anchor(
     ctypes.set_last_error(0)
     raw_handle = create_file(
         str(path),
-        _GENERIC_READ,
-        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
-        None,
-        _OPEN_EXISTING,
-        _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
-        None,
-    )
-    handle_value = (
-        raw_handle
-        if isinstance(raw_handle, int)
-        else ctypes.cast(raw_handle, ctypes.c_void_p).value
-    )
-    if handle_value in {None, _INVALID_HANDLE_VALUE}:
-        raise ctypes.WinError(ctypes.get_last_error())
-
-    try:
-        descriptor = msvcrt.open_osfhandle(
-            int(handle_value),
-            os.O_RDONLY | getattr(os, "O_BINARY", 0),
-        )
-    except BaseException:
-        close_handle(raw_handle)
-        raise
-
-    try:
-        stream = os.fdopen(descriptor, "rb", closefd=True)
-    except BaseException:
-        os.close(descriptor)
-        raise
-
-    try:
-        opened = os.fstat(stream.fileno())
-        if not stat.S_ISREG(opened.st_mode):
-            raise RuntimeError(f"PyInstaller producer anchor is not a regular file: {path}")
-        producer_identity = _object_identity(opened)
-        after_path = _require_regular_nonreparse(path, label="PyInstaller producer output")
-        if _object_identity(after_path) != producer_identity:
-            raise RuntimeError(
-                "PyInstaller output path changed while acquiring producer continuity anchor"
-            )
-        return stream, producer_identity
-    except BaseException:
-        stream.close()
-        raise
-
-
-def _open_final_retained_read_fence(
-    path: pathlib.Path,
-) -> tuple[Any, tuple[int, int]]:
-    """Establish the final no-write/no-delete binding fence from an open handle."""
-
-    if os.name != "nt":
-        raise RuntimeError("guarded PyInstaller artifact binding is Windows-only")
-
-    import msvcrt
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    create_file = kernel32.CreateFileW
-    create_file.argtypes = (
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        ctypes.c_void_p,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.HANDLE,
-    )
-    create_file.restype = wintypes.HANDLE
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = (wintypes.HANDLE,)
-    close_handle.restype = wintypes.BOOL
-
-    ctypes.set_last_error(0)
-    raw_handle = create_file(
-        str(path),
-        _GENERIC_READ,
+        _GENERIC_READ | _GENERIC_WRITE,
         _FILE_SHARE_READ,
         None,
         _OPEN_EXISTING,
@@ -223,14 +180,14 @@ def _open_final_retained_read_fence(
     try:
         descriptor = msvcrt.open_osfhandle(
             int(handle_value),
-            os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            os.O_RDWR | getattr(os, "O_BINARY", 0),
         )
     except BaseException:
         close_handle(raw_handle)
         raise
 
     try:
-        stream = os.fdopen(descriptor, "rb", closefd=True)
+        stream = os.fdopen(descriptor, "r+b", buffering=0, closefd=True)
     except BaseException:
         os.close(descriptor)
         raise
@@ -238,14 +195,14 @@ def _open_final_retained_read_fence(
     try:
         opened = os.fstat(stream.fileno())
         if not stat.S_ISREG(opened.st_mode):
-            raise RuntimeError(f"final PyInstaller output handle is not a regular file: {path}")
-        final_identity = _object_identity(opened)
-        after_path = _require_regular_nonreparse(path, label="final PyInstaller output")
-        if _object_identity(after_path) != final_identity:
+            raise RuntimeError(f"PyInstaller producer anchor is not a regular file: {path}")
+        producer_identity = _object_identity(opened)
+        after_path = _require_regular_nonreparse(path, label="PyInstaller producer output")
+        if _object_identity(after_path) != producer_identity:
             raise RuntimeError(
-                "PyInstaller output path changed while acquiring final retained binding fence"
+                "PyInstaller output path changed while acquiring producer continuity anchor"
             )
-        return stream, final_identity
+        return stream, producer_identity
     except BaseException:
         stream.close()
         raise
@@ -337,10 +294,12 @@ def run(argv: list[str] | None = None) -> int:
         "producer_active": False,
         "producer_anchor_stream": None,
         "producer_identity": None,
+        "producer_digest": None,
         "final_identity": None,
         "guard_stream": None,
         "guard_error": None,
         "bound": False,
+        "test_pre_fence_write_result": None,
         "test_pre_fence_replacement_result": None,
         "test_replacement_result": None,
     }
@@ -385,8 +344,36 @@ def run(argv: list[str] | None = None) -> int:
                     "PyInstaller producer output lost continuity before checksum retry"
                 )
 
+        missing = object()
+        original_winutils_open = getattr(building_api.winutils, "open", missing)
+
+        def retained_winutils_open(file, mode="r", *open_args, **open_kwargs):
+            if mode == "wb" and _normalized_path(file) == artifact_key:
+                if open_args or open_kwargs:
+                    raise RuntimeError(
+                        "unexpected arguments for pinned PyInstaller final checksum rewrite"
+                    )
+                return _RetainedArtifactWriter(anchor_stream)
+            opener = builtins.open if original_winutils_open is missing else original_winutils_open
+            return opener(file, mode, *open_args, **open_kwargs)
+
         try:
+            building_api.winutils.open = retained_winutils_open
             result = original_update_checksum(path, *checksum_args, **checksum_kwargs)
+        except BaseException as exc:
+            if state["guard_error"] is not None:
+                raise
+            raise poison_guard(f"PyInstaller retained checksum rewrite failed: {exc}", exc)
+        finally:
+            if original_winutils_open is missing:
+                try:
+                    delattr(building_api.winutils, "open")
+                except AttributeError:
+                    pass
+            else:
+                building_api.winutils.open = original_winutils_open
+
+        try:
             anchor_after = os.fstat(anchor_stream.fileno())
             current_after = _require_regular_nonreparse(
                 artifact,
@@ -396,14 +383,13 @@ def run(argv: list[str] | None = None) -> int:
                 _object_identity(anchor_after) != producer_identity
                 or _object_identity(current_after) != producer_identity
             ):
-                raise poison_guard(
+                raise RuntimeError(
                     "PyInstaller producer output lost continuity during final checksum"
                 )
+            state["producer_digest"] = _sha256_stream(anchor_stream)
             return result
-        except RuntimeError as exc:
-            if state["guard_error"] is not None:
-                raise
-            raise exc
+        except BaseException as exc:
+            raise poison_guard(f"PyInstaller final checksum binding failed: {exc}", exc)
 
     def guarded_mtime(path):
         if (
@@ -416,10 +402,26 @@ def run(argv: list[str] | None = None) -> int:
 
             anchor_stream = state["producer_anchor_stream"]
             producer_identity = state["producer_identity"]
-            if anchor_stream is None or producer_identity is None:
+            producer_digest = state["producer_digest"]
+            if anchor_stream is None or producer_identity is None or producer_digest is None:
                 raise poison_guard(
-                    "PyInstaller reached final fence without a producer continuity anchor"
+                    "PyInstaller reached final fence without a byte-bound producer anchor"
                 )
+
+            if (
+                os.environ.get("AUTOSPORT_TEST_WRITE_BEFORE_FINAL_FENCE") == "1"
+                and state["test_pre_fence_write_result"] is None
+            ):
+                try:
+                    with artifact.open("r+b") as writer:
+                        writer.seek(0, os.SEEK_END)
+                        writer.write(b"AUTOSPORT_PRE_FENCE_SAME_OBJECT_WRITE")
+                        writer.flush()
+                        os.fsync(writer.fileno())
+                except OSError:
+                    state["test_pre_fence_write_result"] = "blocked"
+                else:
+                    state["test_pre_fence_write_result"] = "succeeded"
 
             if (
                 os.environ.get("AUTOSPORT_TEST_REPLACE_BEFORE_FINAL_FENCE") == "1"
@@ -445,15 +447,18 @@ def run(argv: list[str] | None = None) -> int:
                         pass
 
             try:
-                guard_stream, final_identity = _open_final_retained_read_fence(artifact)
                 anchor_now = os.fstat(anchor_stream.fileno())
+                current_path = _require_regular_nonreparse(
+                    artifact,
+                    label="final PyInstaller output",
+                )
                 if (
                     _object_identity(anchor_now) != producer_identity
-                    or final_identity != producer_identity
+                    or _object_identity(current_path) != producer_identity
+                    or _sha256_stream(anchor_stream) != producer_digest
                 ):
-                    guard_stream.close()
                     raise RuntimeError(
-                        "final PyInstaller fence object does not match producer continuity anchor"
+                        "final PyInstaller bytes do not match the retained producer output"
                     )
             except BaseException as exc:
                 raise poison_guard(
@@ -461,8 +466,8 @@ def run(argv: list[str] | None = None) -> int:
                     exc,
                 )
 
-            state["guard_stream"] = guard_stream
-            state["final_identity"] = final_identity
+            state["guard_stream"] = anchor_stream
+            state["final_identity"] = producer_identity
 
             if (
                 os.environ.get("AUTOSPORT_TEST_REPLACE_PYINSTALLER_OUTPUT") == "1"
@@ -485,7 +490,7 @@ def run(argv: list[str] | None = None) -> int:
                     except FileNotFoundError:
                         pass
 
-            return os.fstat(guard_stream.fileno()).st_mtime
+            return os.fstat(anchor_stream.fileno()).st_mtime
         if state["guard_error"] is not None and state["producer_active"]:
             raise RuntimeError(str(state["guard_error"]))
         return original_mtime(path)
@@ -505,6 +510,18 @@ def run(argv: list[str] | None = None) -> int:
 
         if state["guard_error"] is not None:
             raise RuntimeError(str(state["guard_error"]))
+
+        if os.environ.get("AUTOSPORT_TEST_WRITE_BEFORE_FINAL_FENCE") == "1":
+            write_result = state["test_pre_fence_write_result"]
+            if write_result == "blocked":
+                raise RuntimeError(
+                    "PyInstaller same-object write blocked by retained producer artifact fence"
+                )
+            if write_result == "succeeded":
+                raise RuntimeError(
+                    "PyInstaller same-object write unexpectedly succeeded before trusted bind"
+                )
+            raise RuntimeError("PyInstaller pre-fence write test hook was not exercised")
 
         if os.environ.get("AUTOSPORT_TEST_REPLACE_BEFORE_FINAL_FENCE") == "1":
             replacement_result = state["test_pre_fence_replacement_result"]
@@ -535,12 +552,13 @@ def run(argv: list[str] | None = None) -> int:
             )
 
         producer_identity = state["producer_identity"]
+        producer_digest = state["producer_digest"]
         anchor_stream = state["producer_anchor_stream"]
         final_identity = state["final_identity"]
         guard_stream = state["guard_stream"]
-        if producer_identity is None or anchor_stream is None:
+        if producer_identity is None or producer_digest is None or anchor_stream is None:
             raise RuntimeError(
-                "PyInstaller producer completed without retained producer continuity anchor"
+                "PyInstaller producer completed without retained byte-bound producer anchor"
             )
         if final_identity is None or guard_stream is None:
             raise RuntimeError(
@@ -553,9 +571,10 @@ def run(argv: list[str] | None = None) -> int:
             _object_identity(anchor_before) != producer_identity
             or _object_identity(opened_before) != final_identity
             or final_identity != producer_identity
+            or _sha256_stream(anchor_stream) != producer_digest
         ):
             raise RuntimeError(
-                "retained PyInstaller producer/final artifact identity changed before trusted bind"
+                "retained PyInstaller producer/final artifact bytes changed before trusted bind"
             )
         current_path = _require_regular_nonreparse(
             artifact,
@@ -582,6 +601,7 @@ def run(argv: list[str] | None = None) -> int:
             _object_identity(anchor_after) != producer_identity
             or _stable_identity(opened_after) != _stable_identity(opened_before)
             or _object_identity(current_after) != final_identity
+            or _sha256_stream(anchor_stream) != producer_digest
         ):
             raise RuntimeError("PyInstaller output changed across trusted artifact binding")
         state["bound"] = True
@@ -603,9 +623,9 @@ def run(argv: list[str] | None = None) -> int:
         building_api.winutils.update_exe_pe_checksum = original_update_checksum
         miscutils.mtime = original_mtime
         guard_stream = state.get("guard_stream")
-        if guard_stream is not None:
-            guard_stream.close()
         anchor_stream = state.get("producer_anchor_stream")
+        if guard_stream is not None and guard_stream is not anchor_stream:
+            guard_stream.close()
         if anchor_stream is not None:
             anchor_stream.close()
 

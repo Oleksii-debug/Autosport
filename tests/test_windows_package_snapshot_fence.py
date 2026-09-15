@@ -109,15 +109,21 @@ def test_final_package_consumers_are_inside_private_snapshot_fence() -> None:
     script = _PACKAGE_SCRIPT.read_text(encoding="utf-8")
     fence = "with _package_input_write_fence(snapshot_dir, expected_snapshot_sha256):"
     build = "            output, _base_digest = build_windows_package("
-    bind = "            binding = bind_portable_data_tool(output, trusted_data_exe)"
+    bind = "            binding = bind_portable_data_tool("
+    expected_base_digest = "                expected_base_package_sha256=_base_digest,"
+    expected_exe_digest = (
+        "                expected_autosport_exe_sha256=expected_snapshot_sha256[trusted_exe],"
+    )
     static_manifest = "expected_sha256=expected_snapshot_sha256,"
 
     fence_index = script.index(fence)
     build_index = script.index(build, fence_index)
     bind_index = script.index(bind, build_index)
+    base_digest_index = script.index(expected_base_digest, bind_index)
+    exe_digest_index = script.index(expected_exe_digest, base_digest_index)
 
     assert static_manifest in script
-    assert fence_index < build_index < bind_index
+    assert fence_index < build_index < bind_index < base_digest_index < exe_digest_index
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ACL/share-mode fence")

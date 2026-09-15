@@ -39,7 +39,7 @@ def _require_utf8_encodable(value: str, field_name: str) -> str:
 
 
 def _canonical_string_value(value: object, field_name: str) -> str:
-    if not isinstance(value, str) or not value or value.strip() != value:
+    if type(value) is not str or not value or value.strip() != value:
         raise ValueError(f"{field_name} must be a non-empty trimmed string")
     return _require_utf8_encodable(value, field_name)
 
@@ -83,7 +83,7 @@ def _required_sequence(raw: dict[str, Any]) -> int:
 def _required_decimal_odds(raw: dict[str, Any]) -> Decimal:
     raw_value = raw.get("decimal_odds")
     if (
-        not isinstance(raw_value, str)
+        type(raw_value) is not str
         or not raw_value
         or raw_value.strip() != raw_value
     ):
@@ -112,7 +112,7 @@ def _validate_serialized_json_value(value: object, field_name: str) -> None:
 
         if current is None or isinstance(current, (bool, int)):
             continue
-        if isinstance(current, str):
+        if type(current) is str:
             _require_utf8_encodable(current, path)
             continue
         if isinstance(current, float):
@@ -136,7 +136,7 @@ def _validate_serialized_json_value(value: object, field_name: str) -> None:
                     stack.append((item, f"{path}[{index}]", depth + 1, False))
             else:
                 for key, item in current.items():
-                    if not isinstance(key, str):
+                    if type(key) is not str:
                         raise ValueError(f"{path} contains non-string JSON object key")
                     _require_utf8_encodable(key, f"{path} object key")
                     stack.append((item, f"{path}.{key}", depth + 1, False))

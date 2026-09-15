@@ -71,6 +71,15 @@ class _FileIdInfo(ctypes.Structure):
     )
 
 
+class _WtsProcessInfoW(ctypes.Structure):
+    _fields_ = (
+        ("SessionId", wintypes.DWORD),
+        ("ProcessId", wintypes.DWORD),
+        ("pProcessName", wintypes.LPWSTR),
+        ("pUserSid", ctypes.c_void_p),
+    )
+
+
 class _SystemHandleSnapshot(list[tuple[int, int, int, int]]):
     def __init__(self) -> None:
         super().__init__()
@@ -122,7 +131,7 @@ def _candidate_file_identity(pid: int, handle_value: int) -> tuple[int, bytes]:
     """Inspect a snapshotted handle without trusting its FILE_OBJECT pointer.
 
     Inspection failure is not evidence that the candidate disappeared. The caller
-    must not convert missing identity evidence into target-file evidence.
+    revalidates the exact handle-table row and only ignores a positively vanished row.
     """
 
     current_pid = os.getpid()
@@ -194,6 +203,78 @@ def _candidate_file_identity(pid: int, handle_value: int) -> tuple[int, bytes]:
         close_handle(process)
 
 
+def _process_same_user_scope() -> dict[int, bool]:
+    """Classify active Windows PIDs against the current user's SID without opening them.
+
+    This is used only for different-object candidates whose file identity cannot be
+    inspected. A missing/unknown owner remains fail-closed; a positively different-user
+    process is outside the same-user mutation threat boundary and is not target-file
+    evidence merely because its handle has the same kernel object type.
+    """
+
+    if os.name != "nt":
+        raise RuntimeError("process user-scope classification requires Windows")
+
+    wtsapi32 = ctypes.WinDLL("Wtsapi32", use_last_error=True)
+    enumerate_processes = wtsapi32.WTSEnumerateProcessesW
+    enumerate_processes.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.POINTER(_WtsProcessInfoW)),
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    enumerate_processes.restype = wintypes.BOOL
+    free_memory = wtsapi32.WTSFreeMemory
+    free_memory.argtypes = (ctypes.c_void_p,)
+    free_memory.restype = None
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    equal_sid = advapi32.EqualSid
+    equal_sid.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    equal_sid.restype = wintypes.BOOL
+
+    processes = ctypes.POINTER(_WtsProcessInfoW)()
+    count = wintypes.DWORD(0)
+    ctypes.set_last_error(0)
+    if not enumerate_processes(
+        None,
+        0,
+        1,
+        ctypes.byref(processes),
+        ctypes.byref(count),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    try:
+        current_pid = os.getpid()
+        current_sid: int | None = None
+        for index in range(int(count.value)):
+            info = processes[index]
+            if int(info.ProcessId) == current_pid:
+                current_sid = int(info.pUserSid or 0)
+                break
+        if not current_sid:
+            raise RuntimeError(
+                "current process user SID is unavailable from Windows process enumeration"
+            )
+
+        scope: dict[int, bool] = {}
+        for index in range(int(count.value)):
+            info = processes[index]
+            pid = int(info.ProcessId)
+            sid = int(info.pUserSid or 0)
+            if not sid:
+                continue
+            scope[pid] = bool(equal_sid(ctypes.c_void_p(sid), ctypes.c_void_p(current_sid)))
+        if scope.get(current_pid) is not True:
+            raise RuntimeError("current process user SID classification was not self-consistent")
+        return scope
+    finally:
+        if processes:
+            free_memory(ctypes.cast(processes, ctypes.c_void_p))
+
+
 def _query_system_handles() -> list[tuple[int, int, int, int]]:
     """Capture the Windows extended handle table or fail closed."""
 
@@ -263,7 +344,7 @@ def _snapshot_row_still_present(
     *,
     object_type: int,
 ) -> bool:
-    """Compatibility helper for exact handle-table row revalidation tests."""
+    """Revalidate an uninspectable candidate by exact handle-table identity."""
 
     refreshed = _query_system_handles()
     if row not in refreshed:
@@ -281,28 +362,23 @@ def _require_no_competing_mutation_handles(
     allow_current_process_data_mutators: bool = False,
     _uninspectable_handle_rescans_remaining: int = _MAX_UNINSPECTABLE_HANDLE_RESCANS,
 ) -> None:
-    """Reject proven retained mutation authority that predates filesystem deny fences.
+    """Reject retained mutation authority that predates the filesystem deny fences.
 
     DACL denies prevent fresh opens, but they do not revoke access already granted to
     a live handle. Bind the trusted security-authority handle to stable filesystem
-    identity and reject every mutation-capable handle proven to reference the target.
-    The kernel-object pointer remains a fast path; separate CreateFile opens are
-    compared by FileIdInfo. A same-object-type row whose stable file identity cannot be
-    inspected is not target-file evidence merely because it is live: unrelated
-    privileged/system handles can be inaccessible on hosted Windows runners. Such rows
-    are ignored unless target identity is independently established. Proven same-object
-    or FileId competitors still fail closed. Fresh same-token acquisition and process
-    handle duplication are separately fenced by the surrounding DACL/process authority.
-    During a native PyInstaller resource update, current-process data/delete handles
-    are the trusted mutator and may remain; security-descriptor mutation authority is
-    never exempted. FILE_DELETE_CHILD is directory-only: the same access bit is
-    FILE_EXECUTE on regular files.
+    identity and reject every other mutation-capable handle. The kernel-object pointer
+    remains a fast path, but separate CreateFile opens are compared by FileIdInfo.
+    Uninspectable same-type candidates are deferred until the full snapshot has been
+    scanned so a proven same-kernel-object competitor cannot be masked by unrelated
+    hosted-runner authority. A live uninspectable current-user candidate fails closed;
+    a positively different-user process is not promoted to target-file evidence solely
+    from object type. Unknown owner classification and vanished-row churn fail closed.
+    Proven same-file competitors remain fatal regardless of user. During a native
+    PyInstaller resource update, current-process data/delete handles are the trusted
+    mutator and may remain; security-descriptor mutation authority is never exempted.
+    FILE_DELETE_CHILD is directory-only: the same access bit is FILE_EXECUTE on regular
+    files.
     """
-
-    # Retain the private compatibility parameter while the former retry policy is
-    # removed from the authority decision. An uninspectable row is unknown, not target
-    # evidence, so rescanning it cannot make the target identity more authoritative.
-    _ = _uninspectable_handle_rescans_remaining
 
     trusted_handle = _raw_handle_value(raw_handle)
     current_pid = os.getpid()
@@ -323,6 +399,13 @@ def _require_no_competing_mutation_handles(
 
     mutation_mask = _MUTATION_CAPABLE_ACCESS | (_FILE_DELETE_CHILD if directory else 0)
     competing: list[tuple[int, int, int, int]] = []
+    uninspectable: list[
+        tuple[
+            tuple[int, int, int, int],
+            int,
+            _CandidateFileIdentityUnavailable,
+        ]
+    ] = []
     for row in snapshot:
         object_id, pid, handle_value, granted_access = row
         if pid == current_pid and handle_value == trusted_handle:
@@ -344,7 +427,9 @@ def _require_no_competing_mutation_handles(
                 target_identity = _file_identity(raw_handle)
             try:
                 candidate_identity = _candidate_file_identity(pid, handle_value)
-            except _CandidateFileIdentityUnavailable:
+            except _CandidateFileIdentityUnavailable as exc:
+                assert candidate_type is not None
+                uninspectable.append((row, candidate_type, exc))
                 continue
             same_file = candidate_identity == target_identity
         if same_file:
@@ -353,6 +438,44 @@ def _require_no_competing_mutation_handles(
     if competing:
         raise RuntimeError(
             f"{label} has {len(competing)} pre-existing competing mutation-capable handle(s)"
+        )
+
+    if uninspectable:
+        process_scope: dict[int, bool] | None = None
+        needs_rescan = False
+        last_exc = uninspectable[-1][2]
+        for row, candidate_type, exc in uninspectable:
+            if not _snapshot_row_still_present(row, object_type=candidate_type):
+                needs_rescan = True
+                last_exc = exc
+                continue
+            if process_scope is None:
+                process_scope = _process_same_user_scope()
+            pid = row[1]
+            same_user = process_scope.get(pid)
+            if same_user is None:
+                raise RuntimeError(
+                    f"{label} has live uninspectable mutation-capable handle with unknown process owner"
+                ) from exc
+            if same_user:
+                raise RuntimeError(
+                    f"{label} has live same-user uninspectable mutation-capable handle"
+                ) from exc
+        if not needs_rescan:
+            return
+        if _uninspectable_handle_rescans_remaining <= 0:
+            raise RuntimeError(
+                f"{label} mutation-capable handle audit did not quiesce after "
+                "uninspectable candidate churn"
+            ) from last_exc
+        return _require_no_competing_mutation_handles(
+            raw_handle,
+            label=label,
+            directory=directory,
+            allow_current_process_data_mutators=allow_current_process_data_mutators,
+            _uninspectable_handle_rescans_remaining=(
+                _uninspectable_handle_rescans_remaining - 1
+            ),
         )
 
 

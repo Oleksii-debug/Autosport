@@ -34,6 +34,25 @@ def _snapshot(security, rows: list[tuple[int, int, int, int]], object_type: int)
     return snapshot
 
 
+def _uninspectable_case(security, *, candidate_pid: int):
+    current_pid = os.getpid()
+    target_object = 0x40404040
+    candidate_object = 0x50505050
+    trusted_handle = 0x444
+    candidate_handle = 0x555
+    object_type = 37
+    target_identity = (0xABCDEF, b"T" * 16)
+    snapshot = _snapshot(
+        security,
+        [
+            (target_object, current_pid, trusted_handle, security._WRITE_DAC),
+            (candidate_object, candidate_pid, candidate_handle, security._WRITE_DAC),
+        ],
+        object_type,
+    )
+    return snapshot, trusted_handle, candidate_handle, target_identity
+
+
 def test_uninspectable_same_type_noise_is_not_target_evidence_but_fileid_match_is(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -79,11 +98,20 @@ def test_uninspectable_same_type_noise_is_not_target_evidence_but_fileid_match_i
         return target_identity
 
     monkeypatch.setattr(security, "_candidate_file_identity", candidate_identity)
-
-    def unexpected_revalidation(*_args, **_kwargs) -> bool:
-        pytest.fail("unknown same-type rows must not be promoted to target evidence")
-
-    monkeypatch.setattr(security, "_snapshot_row_still_present", unexpected_revalidation)
+    monkeypatch.setattr(
+        security,
+        "_snapshot_row_still_present",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        security,
+        "_process_same_user_scope",
+        lambda: {
+            current_pid: True,
+            current_pid + 100: False,
+            current_pid + 101: True,
+        },
+    )
 
     with pytest.raises(RuntimeError, match="pre-existing competing mutation-capable handle"):
         security._require_no_competing_mutation_handles(
@@ -95,9 +123,87 @@ def test_uninspectable_same_type_noise_is_not_target_evidence_but_fileid_match_i
     with_competitor = False
     security._require_no_competing_mutation_handles(
         trusted_handle,
-        label="uninspectable noise without target evidence",
+        label="uninspectable different-user noise without target evidence",
         directory=False,
     )
+
+
+def test_uninspectable_same_user_candidate_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    security = _load_security_authority()
+    current_pid = os.getpid()
+    candidate_pid = current_pid + 200
+    snapshot, trusted_handle, candidate_handle, target_identity = _uninspectable_case(
+        security,
+        candidate_pid=candidate_pid,
+    )
+
+    monkeypatch.setattr(security, "_query_system_handles", lambda: snapshot)
+    monkeypatch.setattr(security, "_file_identity", lambda _handle: target_identity)
+
+    def candidate_identity(pid: int, handle_value: int) -> tuple[int, bytes]:
+        assert pid == candidate_pid
+        assert handle_value == candidate_handle
+        raise security._CandidateFileIdentityUnavailable("synthetic same-user candidate")
+
+    monkeypatch.setattr(security, "_candidate_file_identity", candidate_identity)
+    monkeypatch.setattr(
+        security,
+        "_snapshot_row_still_present",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        security,
+        "_process_same_user_scope",
+        lambda: {current_pid: True, candidate_pid: True},
+    )
+
+    with pytest.raises(RuntimeError, match="same-user uninspectable mutation-capable handle"):
+        security._require_no_competing_mutation_handles(
+            trusted_handle,
+            label="same-user uninspectable candidate",
+            directory=False,
+        )
+
+
+def test_uninspectable_unknown_owner_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    security = _load_security_authority()
+    current_pid = os.getpid()
+    candidate_pid = current_pid + 201
+    snapshot, trusted_handle, candidate_handle, target_identity = _uninspectable_case(
+        security,
+        candidate_pid=candidate_pid,
+    )
+
+    monkeypatch.setattr(security, "_query_system_handles", lambda: snapshot)
+    monkeypatch.setattr(security, "_file_identity", lambda _handle: target_identity)
+
+    def candidate_identity(pid: int, handle_value: int) -> tuple[int, bytes]:
+        assert pid == candidate_pid
+        assert handle_value == candidate_handle
+        raise security._CandidateFileIdentityUnavailable("synthetic unknown-owner candidate")
+
+    monkeypatch.setattr(security, "_candidate_file_identity", candidate_identity)
+    monkeypatch.setattr(
+        security,
+        "_snapshot_row_still_present",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        security,
+        "_process_same_user_scope",
+        lambda: {current_pid: True},
+    )
+
+    with pytest.raises(RuntimeError, match="unknown process owner"):
+        security._require_no_competing_mutation_handles(
+            trusted_handle,
+            label="unknown-owner uninspectable candidate",
+            directory=False,
+        )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real Windows unfiltered handle-table regression")
@@ -164,8 +270,8 @@ def test_unfiltered_windows_handle_table_passes_after_proven_competitor_closes(
         assert close_handle(competing)
         competing = None
 
-        # Ambient inaccessible same-type handles are not evidence that they reference
-        # this target. The trusted target handle remains present and authoritative.
+        # Ambient inaccessible different-user/system handles are not evidence that they
+        # reference this target. Same-user or unknown-owner candidates remain fail-closed.
         security._require_no_competing_mutation_handles(
             trusted,
             label="unfiltered retained WRITE_DAC regression",

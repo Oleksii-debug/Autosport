@@ -84,27 +84,22 @@ def _exact_decimal_sum(values: tuple[Decimal, ...]) -> Decimal:
         )
         adjusted_exponent = normalized_exponent + len(significant_digits) - 1
 
-        # Every raw economic value consumed here must be exactly representable by
-        # the canonical 28-digit PaperBook/evaluation envelope. Aggregate results
-        # may legitimately exceed 28 significant digits; only source operands are
-        # bounded before any Python-int 10**gap expansion can occur.
+        # Bound the exact accumulator by the canonical Decimal exponent envelope,
+        # not by working precision. The normalized/adjusted exponent pair jointly
+        # bounds both the significant coefficient length and every later 10**gap
+        # expansion, while still allowing canonical PaperBook values with more
+        # than 28 significant digits when no lossy Decimal arithmetic is required.
         if (
-            len(significant_digits) > policy.prec
-            or normalized_exponent < policy.Etiny()
+            normalized_exponent < policy.Etiny()
             or adjusted_exponent > policy.Emax
         ):
             raise ValueError(_INVALID_EVALUATION_STATE)
 
-        # Preserve ordinary <=precision Decimal representation (notably integral
-        # exponent zero used by durable JSON). If an exact source spelling exceeds
-        # precision only through trailing zeroes, normalize those zeroes first so
-        # the coefficient and exponent span remain bounded.
-        if len(parts.digits) <= policy.prec:
-            component_digits = parts.digits
-            component_exponent = original_exponent
-        else:
-            component_digits = significant_digits
-            component_exponent = normalized_exponent
+        # Representation-only trailing zeroes do not carry mathematical scale for
+        # exact addition. Strip them before integer accumulation to minimize the
+        # bounded coefficient and exponent work without changing the value.
+        component_digits = significant_digits
+        component_exponent = normalized_exponent
 
         coefficient = 0
         for digit in component_digits:

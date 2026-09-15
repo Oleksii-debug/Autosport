@@ -125,13 +125,14 @@ class AutosportSession:
             health_store=self.source_health,
         )
         stats = engine.poll_once(provider, max_items=max_items)
+        source_id = stats.source_id
         current = tuple(
             sorted(
-                (event for event in self.store.current().values() if event.source_id == provider.source_id),
+                (event for event in self.store.current().values() if event.source_id == source_id),
                 key=lambda event: (event.event_id, event.market_id, event.selection_id),
             )
         )
-        return ObservationResult(stats, self.source_health.get(provider.source_id), current)
+        return ObservationResult(stats, self.source_health.get(source_id), current)
 
     def run_dataset(self, dataset: ReplayDataset, speed: float = 0.0, allow_repeat: bool = False) -> SessionResult:
         with WorkspaceEconomicLock(self.workspace):

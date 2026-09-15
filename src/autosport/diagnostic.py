@@ -11,6 +11,15 @@ from .replay import ReplayEngine, ReplayLeakageFirewall
 from .storage import SQLiteMarketStore
 
 
+def _render_exception(exc: BaseException) -> str:
+    exception_type = type(exc).__name__
+    try:
+        details = str(exc)
+    except BaseException:
+        return f"{exception_type}: exception details unavailable"
+    return f"{exception_type}: {details}"
+
+
 def run_machine_diagnostic(output_path: str | Path) -> int:
     destination = Path(output_path)
     try:
@@ -44,7 +53,7 @@ def run_machine_diagnostic(output_path: str | Path) -> int:
                 except BaseException as cleanup_error:
                     primary_error.add_note(
                         "SQLiteMarketStore.close() also failed while preserving the primary diagnostic failure: "
-                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                        f"{_render_exception(cleanup_error)}"
                     )
                 raise
             else:
@@ -61,7 +70,7 @@ def run_machine_diagnostic(output_path: str | Path) -> int:
     except Exception as exc:
         payload = {
             "status": "FAIL",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": _render_exception(exc),
             "real_money_execution": False,
             "human_tested": False,
             "nvda_verified": False,

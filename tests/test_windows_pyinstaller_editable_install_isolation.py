@@ -66,7 +66,7 @@ def test_windows_release_removes_editable_autosport_before_trusted_pyinstaller()
         isolated_probe,
     )
     first_pyinstaller = script.index(
-        "& $pythonExecutable -I $trustedPyInstallerBinder `",
+        "& $packagingPython -I $trustedPyInstallerBinder `",
         trusted_snapshot,
     )
 

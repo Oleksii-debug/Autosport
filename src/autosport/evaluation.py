@@ -139,6 +139,29 @@ def _exact_decimal_sum(values: tuple[Decimal, ...]) -> Decimal:
         result_digits = result_digits[:-stripped]
     canonical_exponent = minimum_exponent + stripped
 
+    # Exact integer accumulation can carry a canonical set of operands outside
+    # the same Decimal exponent envelope that bounded those operands. Re-prove
+    # the constructed value itself before it becomes durable evaluation evidence.
+    # Derive a normalized exponent only for validation so representation-stability
+    # decisions above (for example preserving -10 instead of -1E+1) remain intact.
+    result_significant_end = len(result_digits)
+    while (
+        result_significant_end > 1
+        and result_digits[result_significant_end - 1] == 0
+    ):
+        result_significant_end -= 1
+    result_normalized_exponent = canonical_exponent + (
+        len(result_digits) - result_significant_end
+    )
+    result_adjusted_exponent = (
+        result_normalized_exponent + result_significant_end - 1
+    )
+    if (
+        result_normalized_exponent < policy.Etiny()
+        or result_adjusted_exponent > policy.Emax
+    ):
+        raise ValueError(_INVALID_EVALUATION_STATE)
+
     return Decimal((int(total < 0), result_digits, canonical_exponent))
 
 

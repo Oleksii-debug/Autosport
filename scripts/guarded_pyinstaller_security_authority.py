@@ -12,8 +12,29 @@ from typing import Any
 
 
 _OWNER_RIGHTS_SID = "S-1-3-4"
+_FILE_WRITE_DATA = 0x00000002
+_FILE_APPEND_DATA = 0x00000004
+_FILE_WRITE_EA = 0x00000010
+_FILE_DELETE_CHILD = 0x00000040
+_FILE_WRITE_ATTRIBUTES = 0x00000100
+_DELETE_ACCESS = 0x00010000
 _READ_CONTROL = 0x00020000
 _WRITE_DAC = 0x00040000
+_WRITE_OWNER = 0x00080000
+_GENERIC_ALL = 0x10000000
+_GENERIC_WRITE = 0x40000000
+_MUTATION_CAPABLE_ACCESS = (
+    _FILE_WRITE_DATA
+    | _FILE_APPEND_DATA
+    | _FILE_WRITE_EA
+    | _FILE_DELETE_CHILD
+    | _FILE_WRITE_ATTRIBUTES
+    | _DELETE_ACCESS
+    | _WRITE_DAC
+    | _WRITE_OWNER
+    | _GENERIC_ALL
+    | _GENERIC_WRITE
+)
 _DACL_SECURITY_INFORMATION = 0x00000004
 _SE_FILE_OBJECT = 1
 _SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
@@ -110,13 +131,19 @@ def _query_system_handles() -> list[tuple[int, int, int, int]]:
     raise RuntimeError("system handle authority snapshot exceeded bounded capture size")
 
 
-def _require_no_competing_write_dac_handles(raw_handle: Any, *, label: str) -> None:
-    """Reject WRITE_DAC handles that predate the OWNER RIGHTS deny.
+def _require_no_competing_mutation_handles(
+    raw_handle: Any,
+    *,
+    label: str,
+    allow_current_process_data_mutators: bool = False,
+) -> None:
+    """Reject retained mutation authority that predates the filesystem deny fences.
 
-    The deny ACE prevents fresh WRITE_DAC acquisition. A handle granted before that
-    deny keeps its access mask, so after installing the deny we bind the trusted
-    handle to its kernel object and reject every other live handle to that same
-    object that still carries WRITE_DAC.
+    DACL denies prevent fresh opens, but they do not revoke access already granted to
+    a live handle. Bind the trusted security-authority handle to its kernel object and
+    reject every other mutation-capable handle. During a native PyInstaller resource
+    update, current-process data/delete handles are the trusted mutator and may remain;
+    security-descriptor mutation authority is never exempted.
     """
 
     trusted_handle = _raw_handle_value(raw_handle)
@@ -133,16 +160,26 @@ def _require_no_competing_write_dac_handles(raw_handle: Any, *, label: str) -> N
     if target_object == 0 or trusted_access & _WRITE_DAC == 0:
         raise RuntimeError(f"{label} trusted handle lost WRITE_DAC authority")
 
-    competing = [
-        row
-        for row in snapshot
-        if row[0] == target_object
-        and row[3] & _WRITE_DAC
-        and not (row[1] == current_pid and row[2] == trusted_handle)
-    ]
+    competing: list[tuple[int, int, int, int]] = []
+    for row in snapshot:
+        object_id, pid, handle_value, granted_access = row
+        if object_id != target_object:
+            continue
+        if pid == current_pid and handle_value == trusted_handle:
+            continue
+        if granted_access & _MUTATION_CAPABLE_ACCESS == 0:
+            continue
+        if (
+            allow_current_process_data_mutators
+            and pid == current_pid
+            and granted_access & (_WRITE_DAC | _WRITE_OWNER) == 0
+        ):
+            continue
+        competing.append(row)
+
     if competing:
         raise RuntimeError(
-            f"{label} has {len(competing)} pre-existing competing WRITE_DAC handle(s)"
+            f"{label} has {len(competing)} pre-existing competing mutation-capable handle(s)"
         )
 
 
@@ -471,7 +508,7 @@ def install(wrapper: ModuleType) -> None:
                 raise RuntimeError(
                     "trusted expected-snapshot parent security fence still allows fresh WRITE_DAC"
                 )
-            _require_no_competing_write_dac_handles(
+            _require_no_competing_mutation_handles(
                 raw_handle,
                 label="trusted expected-snapshot parent security fence",
             )
@@ -511,9 +548,10 @@ def install(wrapper: ModuleType) -> None:
                 raise RuntimeError(
                     "trusted expected-snapshot file security fence still allows fresh WRITE_DAC"
                 )
-            _require_no_competing_write_dac_handles(
+            _require_no_competing_mutation_handles(
                 raw_handle,
                 label="trusted expected-snapshot file security fence",
+                allow_current_process_data_mutators=True,
             )
         except BaseException:
             authority = file_authorities.pop(key, None)

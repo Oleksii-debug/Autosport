@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _COPY_CHUNK_SIZE = 1024 * 1024
+_TRUSTED_VERIFIER_REPO_PATH = PurePosixPath("scripts/verify_source_checkout.py")
 
 
 def _require_git_commit_sha(value: object, *, field: str) -> str:
@@ -380,6 +381,55 @@ def _file_identity(value: os.stat_result) -> tuple[int, int, int, int]:
     )
 
 
+def materialize_trusted_verifier_snapshot(
+    repo_root: Path,
+    source_sha: str,
+    destination: Path,
+) -> str:
+    """Atomically publish verifier bytes from the exact source Git object."""
+
+    _require_git_commit_sha(source_sha, field="source_sha")
+    entries = _source_tree_entries(repo_root, source_sha)
+    repo_path_bytes = _TRUSTED_VERIFIER_REPO_PATH.as_posix().encode("utf-8")
+    entry = entries.get(repo_path_bytes)
+    if entry is None:
+        raise ValueError("exact source_sha is missing scripts/verify_source_checkout.py")
+    _mode, object_sha = entry
+    object_sha_text = object_sha.decode("ascii")
+    data = _git_bytes(repo_root, "cat-file", "blob", object_sha_text)
+    if _git_blob_sha1(data) != object_sha_text:
+        raise ValueError("trusted verifier Git blob bytes do not match exact source object identity")
+
+    try:
+        repo_resolved = repo_root.resolve(strict=True)
+        destination_parent = destination.parent.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("trusted verifier snapshot destination parent must already exist") from exc
+    if destination_parent == repo_resolved or repo_resolved in destination_parent.parents:
+        raise ValueError("trusted verifier snapshot must be outside the release source checkout")
+    if destination.is_symlink():
+        raise ValueError("trusted verifier snapshot destination must not be a symlink")
+
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination_parent,
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, destination)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+    return _sha256_bytes(data)
+
+
 def bind_release_artifact(source: Path, destination: Path) -> str:
     source = source.absolute()
     destination = destination.absolute()
@@ -454,6 +504,7 @@ def main() -> int:
     parser.add_argument("--source-sha")
     parser.add_argument("--late-build-boundary", action="store_true")
     parser.add_argument("--allow-release-outputs", action="store_true")
+    parser.add_argument("--trusted-verifier-output", type=Path)
     parser.add_argument("--bind-artifact", type=Path)
     parser.add_argument("--bound-output", type=Path)
     parser.add_argument("--digest-output", type=Path)
@@ -462,8 +513,16 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.bind_artifact is not None:
-        if args.source_sha or args.verify_artifact is not None or args.bound_output is None or args.digest_output is None:
-            parser.error("--bind-artifact requires --bound-output/--digest-output and no source/verify mode")
+        if (
+            args.source_sha
+            or args.verify_artifact is not None
+            or args.trusted_verifier_output is not None
+            or args.bound_output is None
+            or args.digest_output is None
+        ):
+            parser.error(
+                "--bind-artifact requires --bound-output/--digest-output and no source/verify/snapshot mode"
+            )
         digest = bind_release_artifact(args.bind_artifact, args.bound_output)
         args.digest_output.parent.mkdir(parents=True, exist_ok=True)
         args.digest_output.write_text(digest + "\n", encoding="utf-8")
@@ -471,8 +530,15 @@ def main() -> int:
         return 0
 
     if args.verify_artifact is not None:
-        if args.source_sha or args.bind_artifact is not None or args.expected_sha256 is None:
-            parser.error("--verify-artifact requires --expected-sha256 and no source/bind mode")
+        if (
+            args.source_sha
+            or args.bind_artifact is not None
+            or args.trusted_verifier_output is not None
+            or args.expected_sha256 is None
+        ):
+            parser.error(
+                "--verify-artifact requires --expected-sha256 and no source/bind/snapshot mode"
+            )
         require_artifact_sha256(args.verify_artifact, args.expected_sha256)
         print("ARTIFACT_SHA256=PASS")
         return 0
@@ -481,6 +547,8 @@ def main() -> int:
         parser.error("--source-sha is required for source checkout verification")
     if args.allow_release_outputs and not args.late_build_boundary:
         parser.error("--allow-release-outputs requires --late-build-boundary")
+    if args.trusted_verifier_output is not None and args.late_build_boundary:
+        parser.error("--trusted-verifier-output is only valid for the pristine initial preflight")
     if args.late_build_boundary:
         clean_late_generated_build_inputs(Path.cwd())
     verify_source_checkout(
@@ -489,6 +557,14 @@ def main() -> int:
         late_build_boundary=args.late_build_boundary,
         allow_release_outputs=args.allow_release_outputs,
     )
+    if args.trusted_verifier_output is not None:
+        digest = materialize_trusted_verifier_snapshot(
+            Path.cwd(),
+            args.source_sha,
+            args.trusted_verifier_output,
+        )
+        print(f"TRUSTED_VERIFIER_SHA256={digest}")
+        print("TRUSTED_VERIFIER_SNAPSHOT=PASS")
     print("SOURCE_CHECKOUT_LATE_BOUNDARY=PASS" if args.late_build_boundary else "SOURCE_CHECKOUT_PREFLIGHT=PASS")
     return 0
 

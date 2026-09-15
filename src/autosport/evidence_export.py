@@ -54,6 +54,10 @@ _BOUND_POSIX_OUTPUT: ContextVar[tuple[int, Path] | None] = ContextVar(
     "autosport_evidence_bound_posix_output",
     default=None,
 )
+_BOUND_WINDOWS_OUTPUT: ContextVar[tuple[int, Path] | None] = ContextVar(
+    "autosport_evidence_bound_windows_output",
+    default=None,
+)
 
 
 def _is_canonical_run_summary_name(name: str) -> bool:
@@ -331,23 +335,252 @@ def _atomic_write_json_at_directory(
                 pass
 
 
-def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
-    """Preserve the canonical writer API while honoring a bound POSIX parent.
+def _windows_api_path(path: Path) -> str:
+    text = str(path)
+    if text.startswith("\\\\?\\"):
+        return text
+    if text.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + text[2:]
+    return "\\\\?\\" + text
 
-    The context binding is set only by evidence export after it has proved that the
-    opened directory object is outside the workspace. Keeping this name as the public
-    seam also preserves existing fault-injection tests around publication.
-    """
+
+def _atomic_write_json_at_windows_directory(
+    parent_handle: int,
+    destination_name: str,
+    payload: dict[str, Any],
+) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    if destination_name in {"", ".", ".."} or Path(destination_name).name != destination_name:
+        raise ValueError("evidence export destination must name one file")
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        ]
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.POINTER(UnicodeString)),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", wintypes.LPVOID),
+            ("SecurityQualityOfService", wintypes.LPVOID),
+        ]
+
+    class IoStatusUnion(ctypes.Union):
+        _fields_ = [("Status", wintypes.LONG), ("Pointer", wintypes.LPVOID)]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("u", IoStatusUnion), ("Information", ctypes.c_size_t)]
+
+    class FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("DeleteFile", ctypes.c_ubyte)]
+
+    name_length = len(destination_name)
+
+    class FileRenameInfo(ctypes.Structure):
+        _fields_ = [
+            ("ReplaceOrFlags", wintypes.DWORD),
+            ("RootDirectory", wintypes.HANDLE),
+            ("FileNameLength", wintypes.DWORD),
+            ("FileName", wintypes.WCHAR * (name_length + 1)),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    nt_create_file = ntdll.NtCreateFile
+    nt_create_file.argtypes = (
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.ULONG,
+        ctypes.POINTER(ObjectAttributes),
+        ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        ctypes.c_void_p,
+        wintypes.ULONG,
+    )
+    nt_create_file.restype = wintypes.LONG
+    rtl_status_to_dos_error = ntdll.RtlNtStatusToDosError
+    rtl_status_to_dos_error.argtypes = (wintypes.LONG,)
+    rtl_status_to_dos_error.restype = wintypes.ULONG
+    write_file = kernel32.WriteFile
+    write_file.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPCVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    )
+    write_file.restype = wintypes.BOOL
+    flush_file_buffers = kernel32.FlushFileBuffers
+    flush_file_buffers.argtypes = (wintypes.HANDLE,)
+    flush_file_buffers.restype = wintypes.BOOL
+    set_file_information = kernel32.SetFileInformationByHandle
+    set_file_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    set_file_information.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    file_write_data = 0x00000002
+    delete_access = 0x00010000
+    synchronize = 0x00100000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    file_attribute_normal = 0x00000080
+    file_create = 2
+    file_synchronous_io_nonalert = 0x00000020
+    file_non_directory_file = 0x00000040
+    file_open_reparse_point = 0x00200000
+    obj_case_insensitive = 0x00000040
+    file_rename_info_class = 3
+    file_disposition_info_class = 4
+
+    def relative_name(name: str) -> tuple[object, UnicodeString, ObjectAttributes]:
+        buffer = ctypes.create_unicode_buffer(name)
+        encoded_length = len(name.encode("utf-16-le"))
+        unicode_name = UnicodeString(
+            encoded_length,
+            encoded_length + 2,
+            ctypes.cast(buffer, wintypes.LPWSTR),
+        )
+        attributes = ObjectAttributes(
+            ctypes.sizeof(ObjectAttributes),
+            parent_handle,
+            ctypes.pointer(unicode_name),
+            obj_case_insensitive,
+            None,
+            None,
+        )
+        return buffer, unicode_name, attributes
+
+    temporary_name = f".{destination_name}.{uuid.uuid4().hex}.tmp"
+    buffer, unicode_name, object_attributes = relative_name(temporary_name)
+    del buffer, unicode_name
+    io_status = IoStatusBlock()
+    temporary_handle = wintypes.HANDLE()
+    status = nt_create_file(
+        ctypes.byref(temporary_handle),
+        file_write_data | delete_access | synchronize,
+        ctypes.byref(object_attributes),
+        ctypes.byref(io_status),
+        None,
+        file_attribute_normal,
+        file_share_read | file_share_write | file_share_delete,
+        file_create,
+        file_synchronous_io_nonalert | file_non_directory_file | file_open_reparse_point,
+        None,
+        0,
+    )
+    if status < 0:
+        raise ctypes.WinError(int(rtl_status_to_dos_error(status)))
+
+    primary_error: BaseException | None = None
+    renamed = False
+    try:
+        encoded = (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        offset = 0
+        while offset < len(encoded):
+            chunk = encoded[offset : offset + _CHUNK_SIZE]
+            chunk_buffer = ctypes.create_string_buffer(chunk)
+            written = wintypes.DWORD()
+            if not write_file(
+                temporary_handle,
+                chunk_buffer,
+                len(chunk),
+                ctypes.byref(written),
+                None,
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if written.value <= 0:
+                raise OSError(errno.EIO, "Windows evidence publication wrote zero bytes")
+            offset += int(written.value)
+
+        if not flush_file_buffers(temporary_handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        rename_info = FileRenameInfo()
+        rename_info.ReplaceOrFlags = 1
+        rename_info.RootDirectory = parent_handle
+        rename_info.FileNameLength = len(destination_name.encode("utf-16-le"))
+        rename_info.FileName = destination_name
+        if not set_file_information(
+            temporary_handle,
+            file_rename_info_class,
+            ctypes.byref(rename_info),
+            ctypes.sizeof(rename_info),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        renamed = True
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        cleanup_error: BaseException | None = None
+        if not renamed:
+            disposition = FileDispositionInfo(1)
+            if not set_file_information(
+                temporary_handle,
+                file_disposition_info_class,
+                ctypes.byref(disposition),
+                ctypes.sizeof(disposition),
+            ):
+                cleanup_error = ctypes.WinError(ctypes.get_last_error())
+        if not close_handle(temporary_handle) and cleanup_error is None:
+            cleanup_error = ctypes.WinError(ctypes.get_last_error())
+        if primary_error is not None and cleanup_error is not None:
+            try:
+                primary_error.add_note(f"temporary evidence cleanup also failed: {cleanup_error}")
+            except BaseException:
+                pass
+        elif primary_error is None and cleanup_error is not None:
+            raise cleanup_error
+
+
+def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
+    """Preserve the canonical writer seam while honoring a bound output parent."""
 
     destination = Path(path)
-    binding = _BOUND_POSIX_OUTPUT.get()
-    if binding is None:
-        _path_atomic_write_json(destination, payload)
+    posix_binding = _BOUND_POSIX_OUTPUT.get()
+    if posix_binding is not None:
+        parent_descriptor, expected_destination = posix_binding
+        if destination != expected_destination:
+            raise RuntimeError("bound evidence output destination changed before publication")
+        _atomic_write_json_at_directory(parent_descriptor, destination.name, payload)
         return
-    parent_descriptor, expected_destination = binding
-    if destination != expected_destination:
-        raise RuntimeError("bound evidence output destination changed before publication")
-    _atomic_write_json_at_directory(parent_descriptor, destination.name, payload)
+
+    windows_binding = _BOUND_WINDOWS_OUTPUT.get()
+    if windows_binding is not None:
+        parent_handle, expected_destination = windows_binding
+        if destination != expected_destination:
+            raise RuntimeError("bound evidence output destination changed before publication")
+        _atomic_write_json_at_windows_directory(parent_handle, destination.name, payload)
+        return
+
+    _path_atomic_write_json(destination, payload)
 
 
 def _publish_posix_bound_output(
@@ -392,15 +625,6 @@ def _publish_posix_bound_output(
         os.close(workspace_descriptor)
 
 
-def _windows_api_path(path: Path) -> str:
-    text = str(path)
-    if text.startswith("\\\\?\\"):
-        return text
-    if text.startswith("\\\\"):
-        return "\\\\?\\UNC\\" + text[2:]
-    return "\\\\?\\" + text
-
-
 def _publish_windows_bound_output(
     workspace: Path,
     destination: Path,
@@ -408,6 +632,29 @@ def _publish_windows_bound_output(
 ) -> None:
     import ctypes
     from ctypes import wintypes
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        ]
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.POINTER(UnicodeString)),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", wintypes.LPVOID),
+            ("SecurityQualityOfService", wintypes.LPVOID),
+        ]
+
+    class IoStatusUnion(ctypes.Union):
+        _fields_ = [("Status", wintypes.LONG), ("Pointer", wintypes.LPVOID)]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("u", IoStatusUnion), ("Information", ctypes.c_size_t)]
 
     class ByHandleFileInformation(ctypes.Structure):
         _fields_ = [
@@ -424,6 +671,7 @@ def _publish_windows_bound_output(
         ]
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
     create_file = kernel32.CreateFileW
     create_file.argtypes = (
         wintypes.LPCWSTR,
@@ -441,117 +689,174 @@ def _publish_windows_bound_output(
         ctypes.POINTER(ByHandleFileInformation),
     )
     get_file_information.restype = wintypes.BOOL
-    create_directory = kernel32.CreateDirectoryW
-    create_directory.argtypes = (wintypes.LPCWSTR, ctypes.c_void_p)
-    create_directory.restype = wintypes.BOOL
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = (wintypes.HANDLE,)
     close_handle.restype = wintypes.BOOL
+    nt_create_file = ntdll.NtCreateFile
+    nt_create_file.argtypes = (
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.ULONG,
+        ctypes.POINTER(ObjectAttributes),
+        ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        ctypes.c_void_p,
+        wintypes.ULONG,
+    )
+    nt_create_file.restype = wintypes.LONG
+    rtl_status_to_dos_error = ntdll.RtlNtStatusToDosError
+    rtl_status_to_dos_error.argtypes = (wintypes.LONG,)
+    rtl_status_to_dos_error.restype = wintypes.ULONG
 
+    file_list_directory = 0x00000001
+    file_traverse = 0x00000020
+    file_read_attributes = 0x00000080
+    synchronize = 0x00100000
     file_share_read = 0x00000001
     file_share_write = 0x00000002
+    file_share_delete = 0x00000004
     open_existing = 3
+    file_open_if = 3
     file_attribute_directory = 0x00000010
     file_attribute_reparse_point = 0x00000400
     file_flag_open_reparse_point = 0x00200000
     file_flag_backup_semantics = 0x02000000
-    error_file_not_found = 2
-    error_path_not_found = 3
-    error_already_exists = 183
+    file_directory_file = 0x00000001
+    file_synchronous_io_nonalert = 0x00000020
+    file_open_reparse_point = 0x00200000
+    obj_case_insensitive = 0x00000040
     invalid_handle_value = ctypes.c_void_p(-1).value
+    directory_access = file_list_directory | file_traverse | file_read_attributes | synchronize
+    share_all = file_share_read | file_share_write | file_share_delete
 
-    def open_directory(path: Path, *, deny_delete: bool) -> tuple[object, tuple[int, int, int]]:
-        share_mode = file_share_read | file_share_write
-        if not deny_delete:
-            share_mode |= 0x00000004
+    def directory_identity(handle: int) -> tuple[int, int, int]:
+        information = ByHandleFileInformation()
+        if not get_file_information(handle, ctypes.byref(information)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not information.dwFileAttributes & file_attribute_directory:
+            raise ValueError("output path component is not a directory")
+        if information.dwFileAttributes & file_attribute_reparse_point:
+            raise ValueError("output directory ancestry contains a reparse point")
+        return (
+            int(information.dwVolumeSerialNumber),
+            int(information.nFileIndexHigh),
+            int(information.nFileIndexLow),
+        )
+
+    def open_directory_path(path: Path) -> tuple[int, tuple[int, int, int]]:
         handle = create_file(
             _windows_api_path(path),
-            0,
-            share_mode,
+            directory_access,
+            share_all,
             None,
             open_existing,
             file_flag_backup_semantics | file_flag_open_reparse_point,
             None,
         )
         if handle == invalid_handle_value:
-            error_code = ctypes.get_last_error()
-            if error_code in (error_file_not_found, error_path_not_found):
-                raise FileNotFoundError(error_code, "output directory path does not exist", str(path))
-            raise ctypes.WinError(error_code)
-        information = ByHandleFileInformation()
-        if not get_file_information(handle, ctypes.byref(information)):
-            error = ctypes.WinError(ctypes.get_last_error())
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return int(handle), directory_identity(handle)
+        except BaseException:
             close_handle(handle)
-            raise error
-        if not information.dwFileAttributes & file_attribute_directory:
-            close_handle(handle)
-            raise ValueError(f"output path component is not a directory: {path}")
-        if information.dwFileAttributes & file_attribute_reparse_point:
-            close_handle(handle)
-            raise ValueError(f"output directory ancestry contains a reparse point: {path}")
-        identity = (
-            int(information.dwVolumeSerialNumber),
-            int(information.nFileIndexHigh),
-            int(information.nFileIndexLow),
-        )
-        return handle, identity
+            raise
 
-    workspace_root = _resolved(workspace, strict=True)
-    workspace_handle, workspace_identity = open_directory(workspace_root, deny_delete=True)
-    handles: list[object] = [workspace_handle]
+    def open_or_create_child_directory(
+        parent_handle: int,
+        name: str,
+    ) -> tuple[int, tuple[int, int, int]]:
+        name_buffer = ctypes.create_unicode_buffer(name)
+        name_bytes = len(name.encode("utf-16-le"))
+        unicode_name = UnicodeString(
+            name_bytes,
+            name_bytes + 2,
+            ctypes.cast(name_buffer, wintypes.LPWSTR),
+        )
+        object_attributes = ObjectAttributes(
+            ctypes.sizeof(ObjectAttributes),
+            parent_handle,
+            ctypes.pointer(unicode_name),
+            obj_case_insensitive,
+            None,
+            None,
+        )
+        io_status = IoStatusBlock()
+        child = wintypes.HANDLE()
+        status = nt_create_file(
+            ctypes.byref(child),
+            directory_access,
+            ctypes.byref(object_attributes),
+            ctypes.byref(io_status),
+            None,
+            file_attribute_directory,
+            share_all,
+            file_open_if,
+            file_directory_file | file_synchronous_io_nonalert | file_open_reparse_point,
+            None,
+            0,
+        )
+        if status < 0:
+            raise ctypes.WinError(int(rtl_status_to_dos_error(status)))
+        child_value = int(child.value)
+        try:
+            return child_value, directory_identity(child_value)
+        except BaseException:
+            close_handle(child_value)
+            raise
+
+    workspace_handle, workspace_identity = open_directory_path(_resolved(workspace, strict=True))
+    current_handle: int | None = None
+    token = None
     primary_error: BaseException | None = None
     try:
         parent = destination.parent
         if not parent.is_absolute() or not parent.anchor:
             raise ValueError("evidence export destination must resolve to an absolute path")
-        current_path = Path(parent.anchor)
-        prefixes = [current_path]
-        for component in parent.parts[1:]:
-            current_path = current_path / component
-            prefixes.append(current_path)
 
-        for prefix in prefixes:
-            try:
-                handle, identity = open_directory(prefix, deny_delete=True)
-            except FileNotFoundError:
-                if not create_directory(_windows_api_path(prefix), None):
-                    error_code = ctypes.get_last_error()
-                    if error_code != error_already_exists:
-                        raise ctypes.WinError(error_code)
-                handle, identity = open_directory(prefix, deny_delete=True)
-            handles.append(handle)
-            if identity == workspace_identity:
+        current_handle, current_identity = open_directory_path(Path(parent.anchor))
+        if current_identity == workspace_identity:
+            raise ValueError(
+                "output path must be outside the Autosport workspace; "
+                "must not overwrite canonical workspace evidence"
+            )
+
+        for component in parent.parts[1:]:
+            next_handle, next_identity = open_or_create_child_directory(
+                current_handle,
+                component,
+            )
+            if not close_handle(current_handle):
+                close_handle(next_handle)
+                raise ctypes.WinError(ctypes.get_last_error())
+            current_handle = next_handle
+            if next_identity == workspace_identity:
                 raise ValueError(
                     "output path must be outside the Autosport workspace; "
                     "must not overwrite canonical workspace evidence"
                 )
 
-        # Every parent component now has an open handle that deliberately denies
-        # FILE_SHARE_DELETE, so Windows rename/delete/reparse substitution cannot
-        # reinterpret the pathname while the canonical atomic writer publishes.
-        checked_destination = _resolve_output_destination(workspace, destination)
-        if os.path.normcase(str(checked_destination)) != os.path.normcase(str(destination)):
-            raise ValueError("output path changed while binding publication ancestry")
+        token = _BOUND_WINDOWS_OUTPUT.set((current_handle, destination))
         atomic_write_json(destination, payload)
     except BaseException as exc:
         primary_error = exc
         raise
     finally:
+        if token is not None:
+            _BOUND_WINDOWS_OUTPUT.reset(token)
         cleanup_error: BaseException | None = None
-        for handle in reversed(handles):
-            if close_handle(handle):
-                continue
-            close_error = ctypes.WinError(ctypes.get_last_error())
-            if primary_error is not None:
-                try:
-                    primary_error.add_note(
-                        f"evidence output directory handle close also failed: {close_error}"
-                    )
-                except BaseException:
-                    pass
-            elif cleanup_error is None:
-                cleanup_error = close_error
-        if primary_error is None and cleanup_error is not None:
+        if current_handle is not None and not close_handle(current_handle):
+            cleanup_error = ctypes.WinError(ctypes.get_last_error())
+        if not close_handle(workspace_handle) and cleanup_error is None:
+            cleanup_error = ctypes.WinError(ctypes.get_last_error())
+        if primary_error is not None and cleanup_error is not None:
+            try:
+                primary_error.add_note(f"evidence directory handle cleanup also failed: {cleanup_error}")
+            except BaseException:
+                pass
+        elif primary_error is None and cleanup_error is not None:
             raise cleanup_error
 
 
@@ -728,11 +1033,10 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
         payload["manifest_sha256"] = _manifest_sha256(payload)
 
     # Publication remains outside WorkspaceEconomicLock, but its parent directory is
-    # now bound to a stable directory object before any temp file or replace happens.
-    # POSIX uses descriptor-relative mkdir/temp/replace; Windows keeps every resolved
-    # parent component open without FILE_SHARE_DELETE until canonical atomic publication
-    # finishes. A post-check ancestry substitution therefore cannot redirect bytes back
-    # into the Autosport workspace.
+    # bound before any temp file or replace happens. POSIX uses descriptor-relative
+    # mkdir/temp/replace; Windows uses RootDirectory-relative NtCreateFile traversal,
+    # temp creation and rename. Retargeting the pathname therefore cannot redirect the
+    # published manifest back into the Autosport workspace.
     _publish_bound_output(root, requested_destination, payload)
     return payload
 

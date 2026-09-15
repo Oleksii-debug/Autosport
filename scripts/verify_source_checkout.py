@@ -164,11 +164,16 @@ def _source_tree_entries(repo_root: Path, source_sha: str) -> dict[bytes, tuple[
             mode, object_type, object_sha = metadata.split(b" ", 2)
         except ValueError as exc:
             raise ValueError("unable to parse exact source tree") from exc
+        path = path_bytes.decode("utf-8", errors="surrogateescape")
         if object_type != b"blob":
-            path = path_bytes.decode("utf-8", errors="surrogateescape")
             raise ValueError(
                 "release build exact source contains unsupported tracked type: "
                 f"{path} ({object_type.decode('ascii', errors='replace')})"
+            )
+        if mode not in {b"100644", b"100755"}:
+            raise ValueError(
+                "release build exact source contains unsupported tracked mode: "
+                f"{path} ({mode.decode('ascii', errors='replace')})"
             )
         entries[path_bytes] = (mode, object_sha)
     return entries
@@ -216,8 +221,9 @@ def _require_raw_tracked_bytes_match_source(repo_root: Path, source_sha: str) ->
         target = repo_root.joinpath(*PurePosixPath(path).parts)
         try:
             if target.is_symlink():
-                data = os.fsencode(os.readlink(target))
-            elif target.is_file():
+                mismatches.append(f"{path} (symlink)")
+                continue
+            if target.is_file():
                 data = target.read_bytes()
             else:
                 mismatches.append(f"{path} (missing/non-file)")

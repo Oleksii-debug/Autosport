@@ -16,6 +16,7 @@ from ctypes import wintypes
 from typing import Any
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_WINDOWS_SID_RE = re.compile(r"S-\d-(?:\d+-)+\d+")
 _EXPECTED_PYINSTALLER_VERSION = "6.22.3"
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _GENERIC_READ = 0x80000000
@@ -33,6 +34,7 @@ _ERROR_ACCESS_DENIED = 5
 _ERROR_SHARING_VIOLATION = 32
 _ERROR_FILE_EXISTS = 80
 _ERROR_ALREADY_EXISTS = 183
+_EXPECTED_RESOURCE_DENY_RIGHTS = "(WD,AD,WEA,WA,DE)"
 _RESOURCE_API_TRANSITIONS = frozenset(
     {"remove-resources", "icon", "version-info", "resource", "manifest"}
 )
@@ -166,6 +168,78 @@ def _require_regular_nonreparse(path: pathlib.Path, *, label: str) -> os.stat_re
     if os.name == "nt" and _windows_attributes(path) & _FILE_ATTRIBUTE_REPARSE_POINT:
         raise RuntimeError(f"{label} must not be a Windows reparse point: {path}")
     return value
+
+
+def _windows_system_binary(name: str) -> pathlib.Path:
+    system_root = os.environ.get("SystemRoot")
+    if not system_root:
+        raise RuntimeError("SystemRoot is unavailable for trusted Windows system binary lookup")
+    candidate = pathlib.Path(system_root) / "System32" / name
+    _require_regular_nonreparse(candidate, label=f"trusted Windows system binary {name}")
+    return candidate
+
+
+def _current_windows_user_sid() -> str:
+    """Resolve the current token SID through the protected system ``whoami.exe``."""
+
+    whoami = _windows_system_binary("whoami.exe")
+    completed = subprocess.run(
+        [str(whoami), "/user", "/fo", "csv", "/nh"],
+        check=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"trusted current-user SID lookup exited {completed.returncode}"
+        )
+    match = _WINDOWS_SID_RE.search(completed.stdout)
+    if match is None:
+        raise RuntimeError("trusted current-user SID lookup returned no canonical SID")
+    return match.group(0)
+
+
+def _set_expected_snapshot_write_fence(path: pathlib.Path, sid: str) -> None:
+    """Deny new same-token data writes/deletes across native resource commit return."""
+
+    icacls = _windows_system_binary("icacls.exe")
+    completed = subprocess.run(
+        [
+            str(icacls),
+            str(path),
+            "/deny",
+            f"*{sid}:{_EXPECTED_RESOURCE_DENY_RIGHTS}",
+            "/Q",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "trusted expected-snapshot post-commit write fence could not be installed: "
+            f"icacls exited {completed.returncode}"
+        )
+
+
+def _remove_expected_snapshot_write_fence(path: pathlib.Path, sid: str) -> None:
+    """Remove only the temporary explicit deny ACE from the disposable snapshot."""
+
+    icacls = _windows_system_binary("icacls.exe")
+    completed = subprocess.run(
+        [str(icacls), str(path), "/remove:d", f"*{sid}", "/Q"],
+        check=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "trusted expected-snapshot post-commit write fence could not be removed: "
+            f"icacls exited {completed.returncode}"
+        )
 
 
 def _open_delete_denial_continuity_anchor(
@@ -474,7 +548,7 @@ def _require_windows_access_denied(
     *,
     label: str,
 ) -> None:
-    """Prove a live native update handle rejects a competing write/delete opener."""
+    """Prove a live native update handle or DACL rejects a competing opener."""
 
     kernel32 = _windows_kernel32()
     create_file = kernel32.CreateFileW
@@ -574,6 +648,7 @@ def run(argv: list[str] | None = None) -> int:
     digest_output = pathlib.Path(args.digest_output)
     verifier = pathlib.Path(args.verifier)
     artifact_key = _normalized_path(artifact)
+    current_user_sid = _current_windows_user_sid()
 
     verifier_bytes = verifier.read_bytes()
     verifier_actual = hashlib.sha256(verifier_bytes).hexdigest()
@@ -800,6 +875,7 @@ def run(argv: list[str] | None = None) -> int:
                     "native_handle": None,
                     "begin_count": 0,
                     "end_count": 0,
+                    "write_fenced": False,
                 }
                 expected_stream = None
 
@@ -853,6 +929,23 @@ def run(argv: list[str] | None = None) -> int:
                     authority_stream, authority_identity, authority_digest = (
                         _validate_resource_authority("before native BeginUpdateResource")
                     )
+                    if resource_context["write_fenced"]:
+                        try:
+                            _remove_expected_snapshot_write_fence(
+                                snapshot,
+                                current_user_sid,
+                            )
+                        except BaseException as exc:
+                            raise poison_guard(
+                                f"PyInstaller {label} could not release the prior post-commit ACL fence under retained oracle: {exc}",
+                                exc,
+                            )
+                        resource_context["write_fenced"] = False
+                        authority_stream, authority_identity, authority_digest = (
+                            _validate_resource_authority(
+                                "after releasing prior post-commit ACL fence"
+                            )
+                        )
                     authority_stream.close()
                     resource_context["stream"] = None
 
@@ -895,12 +988,14 @@ def run(argv: list[str] | None = None) -> int:
                             _DELETE_ACCESS,
                             label=f"PyInstaller {label} native resource delete exclusion",
                         )
+                        _set_expected_snapshot_write_fence(snapshot, current_user_sid)
+                        resource_context["write_fenced"] = True
                     except BaseException as exc:
                         try:
                             _discard_native_resource_update(native_handle)
                         finally:
                             raise poison_guard(
-                                f"PyInstaller {label} native resource handle failed authority proof: {exc}",
+                                f"PyInstaller {label} native resource handle failed authority proof/fence installation: {exc}",
                                 exc,
                             )
 
@@ -965,6 +1060,10 @@ def run(argv: list[str] | None = None) -> int:
                             *end_args,
                             **end_kwargs,
                         )
+                    if not resource_context["write_fenced"]:
+                        raise poison_guard(
+                            f"PyInstaller {label} native EndUpdateResource reached commit without post-commit ACL fence"
+                        )
                     if end_args:
                         discard_requested = bool(end_args[0])
                     else:
@@ -987,6 +1086,67 @@ def run(argv: list[str] | None = None) -> int:
                         raise poison_guard(
                             f"PyInstaller {label} trusted expected resource mutation discarded its update"
                         )
+
+                    try:
+                        _require_windows_access_denied(
+                            snapshot,
+                            _GENERIC_WRITE,
+                            label=f"PyInstaller {label} post-EndUpdateResource ACL write exclusion",
+                        )
+                        _require_windows_access_denied(
+                            snapshot,
+                            _DELETE_ACCESS,
+                            label=f"PyInstaller {label} post-EndUpdateResource ACL delete exclusion",
+                        )
+                    except BaseException as exc:
+                        raise poison_guard(
+                            f"PyInstaller {label} lost write/delete exclusion after native resource commit: {exc}",
+                            exc,
+                        )
+
+                    if os.environ.get("AUTOSPORT_TEST_WRITE_EXPECTED_AFTER_RESOURCE_END") == "1":
+                        try:
+                            with snapshot.open("r+b") as writer:
+                                writer.seek(0, os.SEEK_END)
+                                writer.write(b"AUTOSPORT_EXPECTED_POST_END_WRITE")
+                                writer.flush()
+                                os.fsync(writer.fileno())
+                        except OSError:
+                            raise RuntimeError(
+                                "PyInstaller post-EndUpdateResource ACL fence blocked hostile expected same-object write before oracle"
+                            )
+                        raise poison_guard(
+                            "PyInstaller hostile expected same-object write unexpectedly succeeded after native EndUpdateResource before oracle"
+                        )
+
+                    if os.environ.get("AUTOSPORT_TEST_REPLACE_EXPECTED_AFTER_RESOURCE_END") == "1":
+                        replacement = snapshot.with_name(
+                            f".{snapshot.name}.post-end-replacement-{os.getpid()}"
+                        )
+                        try:
+                            with builtins.open(snapshot, "rb") as reader, builtins.open(
+                                replacement,
+                                "wb",
+                            ) as writer:
+                                shutil.copyfileobj(reader, writer)
+                                writer.write(b"AUTOSPORT_EXPECTED_POST_END_REPLACEMENT")
+                                writer.flush()
+                                os.fsync(writer.fileno())
+                            try:
+                                os.replace(replacement, snapshot)
+                            except OSError:
+                                raise RuntimeError(
+                                    "PyInstaller post-EndUpdateResource ACL fence blocked hostile expected replacement before oracle"
+                                )
+                            raise poison_guard(
+                                "PyInstaller hostile expected replacement unexpectedly succeeded after native EndUpdateResource before oracle"
+                            )
+                        finally:
+                            try:
+                                replacement.unlink()
+                            except FileNotFoundError:
+                                pass
+
                     try:
                         next_oracle, next_identity = _open_expected_snapshot_oracle(
                             snapshot,
@@ -1027,6 +1187,23 @@ def run(argv: list[str] | None = None) -> int:
                 oracle_stream, expected_identity, expected_digest = (
                     _validate_resource_authority("after native EndUpdateResource")
                 )
+                if resource_context["write_fenced"]:
+                    try:
+                        _remove_expected_snapshot_write_fence(
+                            snapshot,
+                            current_user_sid,
+                        )
+                    except BaseException as exc:
+                        raise poison_guard(
+                            f"PyInstaller {label} could not release post-commit ACL fence under retained oracle: {exc}",
+                            exc,
+                        )
+                    resource_context["write_fenced"] = False
+                    oracle_stream, expected_identity, expected_digest = (
+                        _validate_resource_authority(
+                            "after releasing final post-commit ACL fence under retained oracle"
+                        )
+                    )
                 resource_context["stream"] = None
             else:
                 def retained_expected_building_open(file, mode="r", *open_args, **open_kwargs):
@@ -1254,9 +1431,30 @@ def run(argv: list[str] | None = None) -> int:
             state["trusted_transitions"].append(label)
             return live_result
         finally:
+            active_exception = sys.exc_info()[0] is not None
+            cleanup_error: BaseException | None = None
             resource_win32api.EndUpdateResource = original_end_update_resource
             resource_win32api.BeginUpdateResource = original_begin_update_resource
             if resource_context is not None:
+                dangling_native = resource_context.get("native_handle")
+                if dangling_native is not None:
+                    try:
+                        original_end_update_resource(dangling_native, True)
+                    except BaseException as exc:
+                        cleanup_error = exc
+                    finally:
+                        resource_context["native_handle"] = None
+                if resource_context.get("write_fenced"):
+                    try:
+                        _remove_expected_snapshot_write_fence(
+                            snapshot,
+                            current_user_sid,
+                        )
+                    except BaseException as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                    else:
+                        resource_context["write_fenced"] = False
                 dangling_stream = resource_context.get("stream")
                 if dangling_stream is not None and dangling_stream is not oracle_stream:
                     dangling_stream.close()
@@ -1268,6 +1466,14 @@ def run(argv: list[str] | None = None) -> int:
                 snapshot.unlink()
             except FileNotFoundError:
                 pass
+            except OSError as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+            if cleanup_error is not None and not active_exception:
+                raise poison_guard(
+                    f"PyInstaller {label} expected-snapshot authority cleanup failed: {cleanup_error}",
+                    cleanup_error,
+                )
 
     def _guarded_path_transition(label: str, original, path, *call_args, **call_kwargs):
         if not state["producer_active"] or _normalized_path(path) != artifact_key:

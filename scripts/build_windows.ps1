@@ -64,8 +64,16 @@ $boundArtifactRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("autosport-rel
 New-Item -ItemType Directory -Path $boundArtifactRoot | Out-Null
 $boundAutosportExe = Join-Path $boundArtifactRoot 'Autosport.exe'
 $boundDataExe = Join-Path $boundArtifactRoot 'Autosport-Data.exe'
+$boundDiagnostic = Join-Path $boundArtifactRoot 'packaged-diagnostic.json'
+$boundAccessibilityAudit = Join-Path $boundArtifactRoot 'accessibility-audit.json'
+$boundKeyboardAudit = Join-Path $boundArtifactRoot 'keyboard-audit.json'
+$boundRestartRecoveryAudit = Join-Path $boundArtifactRoot 'restart-recovery-audit.json'
 $autosportDigestPath = Join-Path $boundArtifactRoot 'Autosport.sha256'
 $dataDigestPath = Join-Path $boundArtifactRoot 'Autosport-Data.sha256'
+$diagnosticDigestPath = Join-Path $boundArtifactRoot 'packaged-diagnostic.sha256'
+$accessibilityDigestPath = Join-Path $boundArtifactRoot 'accessibility-audit.sha256'
+$keyboardDigestPath = Join-Path $boundArtifactRoot 'keyboard-audit.sha256'
+$restartRecoveryDigestPath = Join-Path $boundArtifactRoot 'restart-recovery-audit.sha256'
 $env:PYTHONDONTWRITEBYTECODE = '1'
 python -m pip install --upgrade pip
 if ($LASTEXITCODE -ne 0) { throw "pip upgrade exited $LASTEXITCODE" }
@@ -98,14 +106,20 @@ $diag = Join-Path $PWD 'dist/packaged-diagnostic.json'
 if (Test-Path $diag) { Remove-Item -Force $diag }
 $process = Start-Process -FilePath $boundAutosportExe -ArgumentList '--diagnostic-output', $diag -Wait -PassThru
 if ($process.ExitCode -ne 0) { throw "Packaged Autosport.exe diagnostic exited $($process.ExitCode)" }
-$diagnostic = Get-Content $diag -Raw | ConvertFrom-Json
+python $sourceVerifier --bind-artifact $diag --bound-output $boundDiagnostic --digest-output $diagnosticDigestPath
+if ($LASTEXITCODE -ne 0) { throw "Packaged diagnostic evidence binding exited $LASTEXITCODE" }
+$diagnosticSha256 = (Get-Content -LiteralPath $diagnosticDigestPath -Raw).Trim()
+$diagnostic = Get-Content $boundDiagnostic -Raw | ConvertFrom-Json
 if ($diagnostic.status -ne 'PASS') { throw 'Packaged Autosport.exe diagnostic did not PASS' }
 
 $a11y = Join-Path $PWD 'dist/accessibility-audit.json'
 if (Test-Path $a11y) { Remove-Item -Force $a11y }
 $a11yProcess = Start-Process -FilePath $boundAutosportExe -ArgumentList '--accessibility-audit-output', $a11y -Wait -PassThru
 if ($a11yProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe accessibility audit exited $($a11yProcess.ExitCode)" }
-$accessibility = Get-Content $a11y -Raw | ConvertFrom-Json
+python $sourceVerifier --bind-artifact $a11y --bound-output $boundAccessibilityAudit --digest-output $accessibilityDigestPath
+if ($LASTEXITCODE -ne 0) { throw "Accessibility evidence binding exited $LASTEXITCODE" }
+$accessibilitySha256 = (Get-Content -LiteralPath $accessibilityDigestPath -Raw).Trim()
+$accessibility = Get-Content $boundAccessibilityAudit -Raw | ConvertFrom-Json
 if ($accessibility.status -ne 'PASS') { throw 'Packaged accessibility audit did not PASS' }
 if ($accessibility.nvda_verified -ne $false) { throw 'Machine accessibility audit must not claim NVDA verification' }
 
@@ -113,7 +127,10 @@ $keyboard = Join-Path $PWD 'dist/keyboard-audit.json'
 if (Test-Path $keyboard) { Remove-Item -Force $keyboard }
 $keyboardProcess = Start-Process -FilePath $boundAutosportExe -ArgumentList '--keyboard-audit-output', $keyboard -Wait -PassThru
 if ($keyboardProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe keyboard audit exited $($keyboardProcess.ExitCode)" }
-$keyboardEvidence = Get-Content $keyboard -Raw | ConvertFrom-Json
+python $sourceVerifier --bind-artifact $keyboard --bound-output $boundKeyboardAudit --digest-output $keyboardDigestPath
+if ($LASTEXITCODE -ne 0) { throw "Keyboard evidence binding exited $LASTEXITCODE" }
+$keyboardSha256 = (Get-Content -LiteralPath $keyboardDigestPath -Raw).Trim()
+$keyboardEvidence = Get-Content $boundKeyboardAudit -Raw | ConvertFrom-Json
 if ($keyboardEvidence.status -ne 'PASS') { throw 'Packaged keyboard audit did not PASS' }
 if ($keyboardEvidence.human_tested -ne $false -or $keyboardEvidence.nvda_verified -ne $false) {
   throw 'Machine keyboard audit must not claim physical human/NVDA verification'
@@ -123,7 +140,10 @@ $restartRecovery = Join-Path $PWD 'dist/restart-recovery-audit.json'
 if (Test-Path $restartRecovery) { Remove-Item -Force $restartRecovery }
 $restartRecoveryProcess = Start-Process -FilePath $boundAutosportExe -ArgumentList '--restart-recovery-audit-output', $restartRecovery -Wait -PassThru
 if ($restartRecoveryProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe restart/recovery audit exited $($restartRecoveryProcess.ExitCode)" }
-$restartRecoveryEvidence = Get-Content $restartRecovery -Raw | ConvertFrom-Json
+python $sourceVerifier --bind-artifact $restartRecovery --bound-output $boundRestartRecoveryAudit --digest-output $restartRecoveryDigestPath
+if ($LASTEXITCODE -ne 0) { throw "Restart/recovery evidence binding exited $LASTEXITCODE" }
+$restartRecoverySha256 = (Get-Content -LiteralPath $restartRecoveryDigestPath -Raw).Trim()
+$restartRecoveryEvidence = Get-Content $boundRestartRecoveryAudit -Raw | ConvertFrom-Json
 if ($restartRecoveryEvidence.status -ne 'PASS') { throw 'Packaged restart/recovery audit did not PASS' }
 if ($restartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Packaged restart audit did not prove persistent session reopen' }
 if ($restartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Packaged recovery audit did not prove transaction recovery' }
@@ -236,6 +256,14 @@ python $sourceVerifier --verify-artifact $boundAutosportExe --expected-sha256 $a
 if ($LASTEXITCODE -ne 0) { throw "Bound Autosport.exe verification exited $LASTEXITCODE" }
 python $sourceVerifier --verify-artifact $boundDataExe --expected-sha256 $dataExeSha256
 if ($LASTEXITCODE -ne 0) { throw "Bound Autosport-Data.exe verification exited $LASTEXITCODE" }
+python $sourceVerifier --verify-artifact $boundDiagnostic --expected-sha256 $diagnosticSha256
+if ($LASTEXITCODE -ne 0) { throw "Bound diagnostic evidence verification exited $LASTEXITCODE" }
+python $sourceVerifier --verify-artifact $boundAccessibilityAudit --expected-sha256 $accessibilitySha256
+if ($LASTEXITCODE -ne 0) { throw "Bound accessibility evidence verification exited $LASTEXITCODE" }
+python $sourceVerifier --verify-artifact $boundKeyboardAudit --expected-sha256 $keyboardSha256
+if ($LASTEXITCODE -ne 0) { throw "Bound keyboard evidence verification exited $LASTEXITCODE" }
+python $sourceVerifier --verify-artifact $boundRestartRecoveryAudit --expected-sha256 $restartRecoverySha256
+if ($LASTEXITCODE -ne 0) { throw "Bound restart/recovery evidence verification exited $LASTEXITCODE" }
 python scripts/package_windows.py `
   --exe $boundAutosportExe `
   --exe-sha256 $autosportExeSha256 `
@@ -243,10 +271,14 @@ python scripts/package_windows.py `
   --data-exe-sha256 $dataExeSha256 `
   --start-file WINDOWS_START_HERE.txt `
   --example-dir examples/tt_demo `
-  --diagnostic $diag `
-  --accessibility-audit $a11y `
-  --keyboard-audit $keyboard `
-  --restart-recovery-audit $restartRecovery `
+  --diagnostic $boundDiagnostic `
+  --diagnostic-sha256 $diagnosticSha256 `
+  --accessibility-audit $boundAccessibilityAudit `
+  --accessibility-audit-sha256 $accessibilitySha256 `
+  --keyboard-audit $boundKeyboardAudit `
+  --keyboard-audit-sha256 $keyboardSha256 `
+  --restart-recovery-audit $boundRestartRecoveryAudit `
+  --restart-recovery-audit-sha256 $restartRecoverySha256 `
   --output $package `
   --source-sha $sourceSha `
   --verification-output $packageVerification

@@ -33,25 +33,75 @@ def test_local_windows_build_runs_canonical_full_pytest_gate() -> None:
     assert 'if ($LASTEXITCODE -ne 0) { throw "Full pytest gate exited $LASTEXITCODE" }' in script
 
 
-def test_local_windows_build_reproves_source_immediately_before_pyinstaller() -> None:
+def test_local_windows_build_uses_trusted_snapshot_immediately_before_pyinstaller() -> None:
     script = _build_script_text()
 
     dataset_smoke = "python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace"
     smoke_cleanup = "if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }"
-    late_gate = "python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary"
-    late_gate_check = 'if ($LASTEXITCODE -ne 0) { throw "Late source checkout integrity gate exited $LASTEXITCODE" }'
+    trusted_gate = "python $sourceVerifier --source-sha $sourceSha --late-build-boundary"
+    live_late_gate = "python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary"
+    gate_check = 'if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport.exe exited $LASTEXITCODE" }'
     first_build = "python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
 
     dataset_index = script.index(dataset_smoke)
     cleanup_index = script.index(smoke_cleanup, dataset_index)
-    late_gate_index = script.index(late_gate)
+    gate_index = script.index(trusted_gate)
     first_build_index = script.index(first_build)
 
-    assert dataset_index < cleanup_index < late_gate_index < first_build_index
-    assert script.index(late_gate_check) > late_gate_index
-    assert script.index(late_gate_check) < first_build_index
-    assert script.count(late_gate) == 1
+    assert live_late_gate not in script
+    assert dataset_index < cleanup_index < gate_index < first_build_index
+    assert script.index(gate_check) > gate_index
+    assert script.index(gate_check) < first_build_index
+    assert script.count(trusted_gate) == 3
     assert script.count(smoke_cleanup) == 2
+
+
+def test_local_windows_build_phase_separates_later_release_outputs() -> None:
+    script = _build_script_text()
+
+    strict_gate = "python $sourceVerifier --source-sha $sourceSha --late-build-boundary"
+    release_gate = strict_gate + " --allow-release-outputs"
+    first_build = "python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
+    second_build = "python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py"
+    package_command = "python scripts/package_windows.py `"
+
+    first_gate_index = script.index(strict_gate)
+    first_build_index = script.index(first_build)
+    second_gate_index = script.index(release_gate, first_build_index)
+    second_build_index = script.index(second_build)
+    package_gate_index = script.index(release_gate, second_build_index)
+    package_index = script.index(package_command)
+
+    assert script.count(release_gate) == 2
+    assert first_gate_index < first_build_index < second_gate_index < second_build_index
+    assert second_build_index < package_gate_index < package_index
+
+
+def test_local_windows_build_binds_pyinstaller_outputs_before_consumption() -> None:
+    script = _build_script_text()
+
+    first_build = "python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
+    first_bind = (
+        "python $sourceVerifier --bind-artifact $builtAutosportExe "
+        "--bound-output $boundAutosportExe --digest-output $autosportDigestPath"
+    )
+    second_build = "python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py"
+    second_bind = (
+        "python $sourceVerifier --bind-artifact $builtDataExe "
+        "--bound-output $boundDataExe --digest-output $dataDigestPath"
+    )
+    verify_gui = "python $sourceVerifier --verify-artifact $boundAutosportExe --expected-sha256 $autosportExeSha256"
+    verify_data = "python $sourceVerifier --verify-artifact $boundDataExe --expected-sha256 $dataExeSha256"
+    package_command = "python scripts/package_windows.py `"
+
+    assert script.index(first_build) < script.index(first_bind)
+    assert script.index(second_build) < script.index(second_bind)
+    assert "Start-Process -FilePath $boundAutosportExe" in script
+    assert "$dataExe = $boundDataExe" in script
+    assert script.index(verify_gui) < script.index(package_command)
+    assert script.index(verify_data) < script.index(package_command)
+    assert "--exe $boundAutosportExe `" in script
+    assert "--data-exe $boundDataExe `" in script
 
 
 def test_local_windows_build_fails_closed_on_release_native_steps() -> None:

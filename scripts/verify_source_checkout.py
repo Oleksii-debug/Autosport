@@ -42,6 +42,19 @@ def _git_output(repo_root: Path, *args: str, allow_empty: bool = False) -> str:
     return value
 
 
+def _git_bytes(repo_root: Path, *args: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"unable to prove raw build source with git {' '.join(args)}") from exc
+    return completed.stdout
+
+
 def _github_authoritative_source_sha() -> str | None:
     event_path_text = os.environ.get("GITHUB_EVENT_PATH")
     if not event_path_text:
@@ -95,6 +108,54 @@ def _require_unmasked_index(repo_root: Path) -> None:
         )
 
 
+def _git_blob_sha1(data: bytes) -> str:
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
+
+
+def _require_raw_tracked_bytes_match_source(repo_root: Path, source_sha: str) -> None:
+    """Bind every tracked worktree byte to the exact commit without Git clean filters."""
+    tree = _git_bytes(repo_root, "ls-tree", "-r", "-z", "--full-tree", source_sha)
+    mismatches: list[str] = []
+    for record in tree.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, path_bytes = record.split(b"\t", 1)
+            mode, object_type, object_sha = metadata.split(b" ", 2)
+        except ValueError as exc:
+            raise ValueError("unable to parse exact source tree for raw tracked-byte proof") from exc
+
+        path = path_bytes.decode("utf-8", errors="surrogateescape")
+        if object_type != b"blob":
+            mismatches.append(f"{path} (unsupported tracked type {object_type.decode('ascii', errors='replace')})")
+            continue
+
+        target = repo_root.joinpath(*PurePosixPath(path).parts)
+        try:
+            if target.is_symlink():
+                data = os.fsencode(os.readlink(target))
+            elif target.is_file():
+                data = target.read_bytes()
+            else:
+                mismatches.append(f"{path} (missing/non-file)")
+                continue
+        except OSError:
+            mismatches.append(f"{path} (unreadable)")
+            continue
+
+        actual_sha = _git_blob_sha1(data)
+        expected_sha = object_sha.decode("ascii")
+        if actual_sha != expected_sha:
+            mismatches.append(path)
+
+    if mismatches:
+        raise ValueError(
+            "release build raw tracked bytes do not match exact source_sha: "
+            f"{_format_dirty_preview(mismatches)}"
+        )
+
+
 def _is_expected_late_generated_ignored_path(path: str, *, allow_release_outputs: bool) -> bool:
     parts = PurePosixPath(path).parts
     if not parts:
@@ -145,8 +206,9 @@ def _format_dirty_preview(dirty: list[str]) -> str:
     return f"{preview}{suffix}"
 
 
-def _require_pristine_checkout(repo_root: Path) -> None:
+def _require_pristine_checkout(repo_root: Path, source_sha: str) -> None:
     _require_unmasked_index(repo_root)
+    _require_raw_tracked_bytes_match_source(repo_root, source_sha)
     dirty = _ordinary_checkout_changes(repo_root)
     dirty.extend(f"ignored:{line}" for line in _ignored_checkout_paths(repo_root))
     if dirty:
@@ -156,8 +218,14 @@ def _require_pristine_checkout(repo_root: Path) -> None:
         )
 
 
-def _require_late_build_boundary_unchanged(repo_root: Path, *, allow_release_outputs: bool) -> None:
+def _require_late_build_boundary_unchanged(
+    repo_root: Path,
+    source_sha: str,
+    *,
+    allow_release_outputs: bool,
+) -> None:
     _require_unmasked_index(repo_root)
+    _require_raw_tracked_bytes_match_source(repo_root, source_sha)
     dirty = _ordinary_checkout_changes(repo_root)
     unexpected_ignored = [
         path for path in _ignored_checkout_paths(repo_root)
@@ -189,11 +257,15 @@ def verify_source_checkout(
         raise ValueError("checked-out HEAD does not match the exact build source_sha")
 
     if late_build_boundary:
-        _require_late_build_boundary_unchanged(repo_root, allow_release_outputs=allow_release_outputs)
+        _require_late_build_boundary_unchanged(
+            repo_root,
+            source_sha,
+            allow_release_outputs=allow_release_outputs,
+        )
     else:
         if allow_release_outputs:
             raise ValueError("allow_release_outputs requires late_build_boundary")
-        _require_pristine_checkout(repo_root)
+        _require_pristine_checkout(repo_root, source_sha)
 
 
 def _sha256_bytes(data: bytes) -> str:

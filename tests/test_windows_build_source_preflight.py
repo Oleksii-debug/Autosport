@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -62,8 +63,33 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
             source_sha = self._clean_repo(root)
             (root / "tracked.py").write_text("VALUE = 999\n", encoding="utf-8")
             with self._without_github_event_environment():
-                with self.assertRaisesRegex(ValueError, "not pristine before"):
+                with self.assertRaisesRegex(ValueError, "raw tracked bytes"):
                     verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
+
+    def test_raw_tracked_bytes_reject_clean_filter_index_masking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_sha = self._clean_repo(root)
+            attributes = root / ".git" / "info" / "attributes"
+            attributes.write_text("tracked.py filter=mask\n", encoding="utf-8")
+            self._run_git(root, "config", "filter.mask.clean", "git show HEAD:tracked.py")
+            self._run_git(root, "config", "filter.mask.smudge", "cat")
+            (root / "tracked.py").write_text("VALUE = 999\n", encoding="utf-8")
+            self._run_git(root, "add", "tracked.py")
+
+            # The mutable clean filter plus refreshed index stat makes ordinary
+            # status look clean even though the raw executable source bytes differ.
+            self.assertEqual(
+                self._run_git(root, "status", "--porcelain=v1", "--untracked-files=all"),
+                "",
+            )
+            with self._without_github_event_environment():
+                with self.assertRaisesRegex(ValueError, "raw tracked bytes"):
+                    verify_source_checkout.verify_source_checkout(
+                        source_sha,
+                        repo_root=root,
+                        late_build_boundary=True,
+                    )
 
     def test_untracked_import_shadowing_file_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -90,7 +116,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
             with self._without_github_event_environment():
                 verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
                 (root / "tracked.py").write_text("VALUE = 999\n", encoding="utf-8")
-                with self.assertRaisesRegex(ValueError, "changed after initial preflight"):
+                with self.assertRaisesRegex(ValueError, "raw tracked bytes"):
                     verify_source_checkout.verify_source_checkout(
                         source_sha,
                         repo_root=root,
@@ -105,14 +131,30 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
                 verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
                 (root / "tracked.py").write_text("VALUE = 2\n", encoding="utf-8")
                 self._run_git(root, "add", "tracked.py")
-                with self.assertRaisesRegex(ValueError, "changed after initial preflight"):
+                with self.assertRaisesRegex(ValueError, "raw tracked bytes"):
                     verify_source_checkout.verify_source_checkout(
                         source_sha,
                         repo_root=root,
                         late_build_boundary=True,
                     )
 
-    def test_late_boundary_allows_only_non_source_release_outputs(self) -> None:
+    def test_first_late_boundary_rejects_premature_release_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_sha = self._clean_repo(root)
+            with self._without_github_event_environment():
+                verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
+                build = root / "build" / "Autosport"
+                build.mkdir(parents=True)
+                (build / "analysis.toc").write_text("premature\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, r"ignored:build/Autosport/analysis\.toc"):
+                    verify_source_checkout.verify_source_checkout(
+                        source_sha,
+                        repo_root=root,
+                        late_build_boundary=True,
+                    )
+
+    def test_later_boundary_allows_only_non_source_release_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source_sha = self._clean_repo(root)
@@ -132,6 +174,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
                     source_sha,
                     repo_root=root,
                     late_build_boundary=True,
+                    allow_release_outputs=True,
                 )
 
     def test_late_boundary_rejects_executable_bytecode_cache(self) -> None:
@@ -172,6 +215,40 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
                         late_build_boundary=True,
                     )
 
+    def test_cli_late_boundary_sanitizes_generated_inputs_before_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_sha = self._clean_repo(root)
+            cache = root / "src" / "autosport" / "__pycache__"
+            cache.mkdir(parents=True)
+            (cache / "module.pyc").write_bytes(b"generated bytecode")
+            egg_info = root / "src" / "autosport_lab.egg-info"
+            egg_info.mkdir(parents=True)
+            (egg_info / "entry_points.txt").write_text(
+                "[pyinstaller40]\nhook-dirs = hostile:hook_dirs\n",
+                encoding="utf-8",
+            )
+
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with self._without_github_event_environment(), patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "verify_source_checkout.py",
+                        "--source-sha",
+                        source_sha,
+                        "--late-build-boundary",
+                    ],
+                ):
+                    self.assertEqual(verify_source_checkout.main(), 0)
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertFalse(cache.exists())
+            self.assertFalse(egg_info.exists())
+
     def test_generated_build_input_cleanup_removes_cache_and_editable_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -206,16 +283,18 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
                     source_sha,
                     repo_root=root,
                     late_build_boundary=True,
+                    allow_release_outputs=True,
                 )
                 (root / "WINDOWS_START_HERE.txt").write_text(
                     "mutated after first build\n",
                     encoding="utf-8",
                 )
-                with self.assertRaisesRegex(ValueError, "changed after initial preflight"):
+                with self.assertRaisesRegex(ValueError, "raw tracked bytes"):
                     verify_source_checkout.verify_source_checkout(
                         source_sha,
                         repo_root=root,
                         late_build_boundary=True,
+                        allow_release_outputs=True,
                     )
 
     def test_late_boundary_rejects_unexpected_ignored_input(self) -> None:
@@ -246,21 +325,42 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
                         late_build_boundary=True,
                     )
 
+    def test_bound_release_artifact_detects_replacement_and_decouples_live_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            live = root / "dist" / "Autosport.exe"
+            bound = root / "bound" / "Autosport.exe"
+            live.parent.mkdir(parents=True)
+            live.write_bytes(b"pyinstaller output")
+
+            digest = verify_source_checkout.bind_release_artifact(live, bound)
+            live.write_bytes(b"replaced live output")
+            verify_source_checkout.require_artifact_sha256(bound, digest)
+            self.assertEqual(bound.read_bytes(), b"pyinstaller output")
+
+            bound.write_bytes(b"tampered bound output")
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                verify_source_checkout.require_artifact_sha256(bound, digest)
+
     def test_windows_build_reproves_trusted_snapshot_before_each_later_source_consumer(self) -> None:
         script = Path("scripts/build_windows.ps1").read_text(encoding="utf-8")
         snapshot_gate = "python $sourceVerifier --source-sha $sourceSha --late-build-boundary"
+        release_output_gate = snapshot_gate + " --allow-release-outputs"
+        live_late_gate = "python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary"
         first_build = "python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
         second_build = "python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py"
         package_build = "python scripts/package_windows.py `"
 
         first_gate = script.index(snapshot_gate)
         first_build_index = script.index(first_build)
-        second_gate = script.index(snapshot_gate, first_gate + 1)
+        second_gate = script.index(release_output_gate, first_build_index)
         second_build_index = script.index(second_build)
-        package_gate = script.index(snapshot_gate, second_gate + 1)
+        package_gate = script.index(release_output_gate, second_build_index)
         package_build_index = script.index(package_build)
 
+        self.assertNotIn(live_late_gate, script)
         self.assertEqual(script.count(snapshot_gate), 3)
+        self.assertEqual(script.count(release_output_gate), 2)
         self.assertLess(first_gate, first_build_index)
         self.assertLess(first_build_index, second_gate)
         self.assertLess(second_gate, second_build_index)
@@ -271,6 +371,31 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
             script,
         )
         self.assertIn("$env:PYTHONDONTWRITEBYTECODE = '1'", script)
+
+    def test_windows_build_binds_pyinstaller_outputs_before_audit_and_package(self) -> None:
+        script = Path("scripts/build_windows.ps1").read_text(encoding="utf-8")
+        first_build = "python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
+        first_bind = (
+            "python $sourceVerifier --bind-artifact $builtAutosportExe "
+            "--bound-output $boundAutosportExe --digest-output $autosportDigestPath"
+        )
+        second_build = "python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py"
+        second_bind = (
+            "python $sourceVerifier --bind-artifact $builtDataExe "
+            "--bound-output $boundDataExe --digest-output $dataDigestPath"
+        )
+        verify_gui = "python $sourceVerifier --verify-artifact $boundAutosportExe --expected-sha256 $autosportExeSha256"
+        verify_data = "python $sourceVerifier --verify-artifact $boundDataExe --expected-sha256 $dataExeSha256"
+        package_build = "python scripts/package_windows.py `"
+
+        self.assertLess(script.index(first_build), script.index(first_bind))
+        self.assertLess(script.index(second_build), script.index(second_bind))
+        self.assertIn("Start-Process -FilePath $boundAutosportExe", script)
+        self.assertIn("$dataExe = $boundDataExe", script)
+        self.assertLess(script.index(verify_gui), script.index(package_build))
+        self.assertLess(script.index(verify_data), script.index(package_build))
+        self.assertIn("--exe $boundAutosportExe `", script)
+        self.assertIn("--data-exe $boundDataExe `", script)
 
     def test_windows_workflow_checks_out_and_preflights_exact_candidate_before_build(self) -> None:
         workflow = Path(".github/workflows/windows-build.yml").read_text(encoding="utf-8")

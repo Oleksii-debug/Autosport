@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass
 from decimal import Decimal, DecimalException
 from pathlib import Path
@@ -43,9 +44,35 @@ def _reject_nonstandard_json_constant(value: str) -> None:
     raise _NonStandardJsonConstantError(value)
 
 
+def _validate_decoded_json_domain(root: Any) -> None:
+    pending = [root]
+    while pending:
+        value = pending.pop()
+        if type(value) is float:
+            if not math.isfinite(value):
+                raise ValueError("walk-forward bundle contains non-finite JSON number")
+            continue
+        if isinstance(value, str):
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError("walk-forward bundle contains invalid UTF-8 text") from exc
+            continue
+        if isinstance(value, list):
+            pending.extend(value)
+            continue
+        if isinstance(value, dict):
+            for key, item in value.items():
+                try:
+                    key.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise ValueError("walk-forward bundle contains invalid UTF-8 text") from exc
+                pending.append(item)
+
+
 def _decode_bundle_json(payload: bytes) -> Any:
     try:
-        return json.loads(
+        decoded = json.loads(
             payload.decode("utf-8"),
             object_pairs_hook=_unique_json_object,
             parse_constant=_reject_nonstandard_json_constant,
@@ -58,8 +85,12 @@ def _decode_bundle_json(payload: bytes) -> Any:
         raise ValueError(
             f"walk-forward bundle contains non-standard JSON constant: {exc.args[0]}"
         ) from exc
+    except RecursionError as exc:
+        raise ValueError("walk-forward bundle JSON nesting is too deep") from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("walk-forward bundle must be valid UTF-8 JSON") from exc
+    _validate_decoded_json_domain(decoded)
+    return decoded
 
 
 @dataclass(frozen=True, slots=True)

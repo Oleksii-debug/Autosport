@@ -62,6 +62,83 @@ class WalkForwardBundleInputIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-standard JSON constant: NaN"):
                 WalkForwardBundle.from_path(source)
 
+    def test_from_path_rejects_standard_numeric_overflow_before_hashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "bundle.json"
+            payload = json.dumps(
+                self._valid_raw(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).replace(
+                '"provenance":{"source":"fixture"}',
+                '"provenance":{"source":"fixture","weight":1e400}',
+            )
+            self.assertIn("1e400", payload)
+
+            source.write_text(payload, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "non-finite JSON number"):
+                WalkForwardBundle.from_path(source)
+
+    def test_from_path_rejects_escaped_lone_surrogate_in_value_or_key(self):
+        replacements = (
+            '"provenance":{"source":"\\ud800"}',
+            '"provenance":{"\\ud800":"fixture"}',
+        )
+        for replacement in replacements:
+            with self.subTest(replacement=replacement):
+                with tempfile.TemporaryDirectory() as tmp:
+                    source = Path(tmp) / "bundle.json"
+                    payload = json.dumps(
+                        self._valid_raw(),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).replace(
+                        '"provenance":{"source":"fixture"}',
+                        replacement,
+                    )
+
+                    source.write_text(payload, encoding="utf-8")
+
+                    with self.assertRaisesRegex(ValueError, "invalid UTF-8 text"):
+                        WalkForwardBundle.from_path(source)
+
+    def test_from_path_normalizes_excessive_json_nesting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "bundle.json"
+            payload = (
+                '{"schema_version":1,"nested":'
+                + "[" * 10000
+                + "0"
+                + "]" * 10000
+                + "}"
+            )
+            source.write_text(payload, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "JSON nesting is too deep"):
+                WalkForwardBundle.from_path(source)
+
+    def test_from_path_preserves_finite_nested_numbers_and_valid_unicode(self):
+        raw = self._valid_raw()
+        raw["forecasts"][0]["provenance"] = {
+            "source": "фікстура",
+            "weight": 1e300,
+            "nested": {"label": "✅"},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "bundle.json"
+            source.write_text(
+                json.dumps(raw, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            bundle = WalkForwardBundle.from_path(source)
+
+        self.assertEqual(bundle.forecasts[0].provenance["source"], "фікстура")
+        self.assertEqual(bundle.forecasts[0].provenance["weight"], 1e300)
+        self.assertEqual(bundle.forecasts[0].provenance["nested"]["label"], "✅")
+
     def test_schema_version_requires_exact_integer_type(self):
         for value in (True, 1.0, "1", 2.0):
             with self.subTest(value=value):

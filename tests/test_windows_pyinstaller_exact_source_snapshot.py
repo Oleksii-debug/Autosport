@@ -47,7 +47,10 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
         "Expand-Archive -LiteralPath $trustedBuildArchive "
         "-DestinationPath $trustedBuildRoot -Force"
     )
-    write_fence = '& icacls $trustedBuildRoot /deny "*${currentSid}:(OI)(CI)(W,D,DC)" /T /C'
+    write_fence = (
+        '& icacls $trustedBuildRoot /deny '
+        '"*${currentSid}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)" /T /C'
+    )
     read_lock_open = "$lockStream = [System.IO.File]::Open("
     read_lock_share = "[System.IO.FileShare]::Read"
     read_lock_add = "[void]$trustedBuildReadLocks.Add($lockStream)"
@@ -159,13 +162,18 @@ def test_snapshot_verifier_rejects_added_membership_after_materialization(tmp_pa
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ACL enforcement regression")
-def test_windows_snapshot_write_fence_blocks_post_proof_replacement_and_addition(
+def test_windows_snapshot_write_fence_preserves_verification_and_blocks_mutation(
     tmp_path: Path,
 ) -> None:
+    launcher = _trusted_snapshot_verifier_source()
     root = tmp_path / "trusted-source"
     root.mkdir()
     canonical = root / "canonical.py"
-    canonical.write_text("VALUE = 'canonical'\n", encoding="utf-8")
+    canonical_bytes = b"VALUE = 'canonical'\n"
+    canonical.write_bytes(canonical_bytes)
+    manifest = {
+        "canonical.py": hashlib.sha256(canonical_bytes).hexdigest(),
+    }
 
     sid_result = subprocess.run(
         [
@@ -187,7 +195,7 @@ def test_windows_snapshot_write_fence_blocks_post_proof_replacement_and_addition
             "icacls",
             str(root),
             "/deny",
-            f"{principal}:(OI)(CI)(W,D,DC)",
+            f"{principal}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)",
             "/T",
             "/C",
         ],
@@ -196,6 +204,17 @@ def test_windows_snapshot_write_fence_blocks_post_proof_replacement_and_addition
         text=True,
     )
     try:
+        readable = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", launcher, str(root)],
+            input=json.dumps(manifest, sort_keys=True),
+            capture_output=True,
+            text=True,
+        )
+        assert readable.returncode == 0, readable.stderr
+        assert "SOURCE_SNAPSHOT=PASS" in readable.stdout
+        assert canonical.read_bytes() == canonical_bytes
+        assert sorted(path.name for path in root.iterdir()) == ["canonical.py"]
+
         with pytest.raises(PermissionError):
             canonical.write_text("VALUE = 'hostile replacement'\n", encoding="utf-8")
         with pytest.raises(PermissionError):
@@ -204,6 +223,8 @@ def test_windows_snapshot_write_fence_blocks_post_proof_replacement_and_addition
         replacement.write_text("VALUE = 'replacement'\n", encoding="utf-8")
         with pytest.raises(PermissionError):
             os.replace(replacement, canonical)
+        with pytest.raises(PermissionError):
+            canonical.unlink()
     finally:
         subprocess.run(
             ["icacls", str(root), "/remove:d", principal, "/T", "/C"],
@@ -260,7 +281,7 @@ try {
             "icacls",
             str(root),
             "/deny",
-            f"{principal}:(OI)(CI)(W,D,DC)",
+            f"{principal}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)",
             "/T",
             "/C",
         ],
@@ -324,9 +345,6 @@ def test_exact_source_archive_ignores_post_proof_live_entry_mutation(tmp_path: P
     _git(repo, "commit", "-m", "canonical exact source")
     source_sha = _git(repo, "rev-parse", "HEAD")
 
-    # Bind the oracle to archive materialization of the exact commit itself.
-    # Archive EOL materialization may differ by platform/attributes, so a literal
-    # LF byte string is not a portable oracle for the Windows release path.
     baseline_archive = tmp_path / "baseline-trusted-build-source.zip"
     subprocess.run(
         ["git", "archive", "--format=zip", f"--output={baseline_archive}", source_sha],
@@ -337,8 +355,6 @@ def test_exact_source_archive_ignores_post_proof_live_entry_mutation(tmp_path: P
         canonical_gui = handle.read("src/autosport/windows_entry.py")
         canonical_data = handle.read("src/autosport/data_tools_entry.py")
 
-    # Reproduce the reviewed race after source proof: both tracked entry files are
-    # replaced and an untracked hook is introduced before the source consumer runs.
     gui_entry.write_bytes(b"GUI = 'hostile replacement'\n")
     data_entry.write_bytes(b"DATA = 'hostile replacement'\n")
     (package_dir / "hostile_hook.py").write_text("HOSTILE = True\n", encoding="utf-8")

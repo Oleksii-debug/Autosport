@@ -212,3 +212,51 @@ def test_export_fails_closed_if_bound_parent_moves_and_original_path_is_recreate
     assert expected_payload is not None
     assert json.loads(destination.read_text(encoding="utf-8")) == expected_payload
     assert json.loads((moved_parent / "manifest.json").read_text(encoding="utf-8")) == expected_payload
+
+
+def test_export_rejects_bound_parent_reparented_under_workspace_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bound external directory cannot become a workspace write target."""
+
+    workspace = _workspace_with_evidence(tmp_path)
+    future_parent = tmp_path / "future-parent"
+    captured_parent = workspace / "captured-parent"
+    destination = future_parent / "manifest.json"
+    real_writer = evidence_export.atomic_write_json
+    attack_attempted = False
+    rename_blocked = False
+
+    def reparent_under_workspace_then_publish(
+        path: Path,
+        payload: dict[str, object],
+    ) -> None:
+        nonlocal attack_attempted, rename_blocked
+        attack_attempted = True
+        try:
+            future_parent.rename(captured_parent)
+        except OSError:
+            rename_blocked = True
+        real_writer(path, payload)
+
+    monkeypatch.setattr(
+        evidence_export,
+        "atomic_write_json",
+        reparent_under_workspace_then_publish,
+    )
+
+    try:
+        report = export_evidence_manifest(workspace, destination)
+    except ValueError as exc:
+        assert attack_attempted is True
+        assert rename_blocked is False
+        assert "moved into Autosport workspace before publication" in str(exc)
+        assert captured_parent.is_dir()
+        assert list(captured_parent.iterdir()) == []
+        assert not future_parent.exists()
+    else:
+        assert attack_attempted is True
+        assert rename_blocked is True
+        assert json.loads(destination.read_text(encoding="utf-8")) == report
+        assert not captured_parent.exists()

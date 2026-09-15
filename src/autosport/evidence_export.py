@@ -50,11 +50,11 @@ _FALSE_TRUTH_FIELDS = (
     "arbitrary_workspace_files_included",
     "real_money_execution",
 )
-_BOUND_POSIX_OUTPUT: ContextVar[tuple[int, Path] | None] = ContextVar(
+_BOUND_POSIX_OUTPUT: ContextVar[tuple[int, int, Path] | None] = ContextVar(
     "autosport_evidence_bound_posix_output",
     default=None,
 )
-_BOUND_WINDOWS_OUTPUT: ContextVar[tuple[int, Path] | None] = ContextVar(
+_BOUND_WINDOWS_OUTPUT: ContextVar[tuple[int, int, Path] | None] = ContextVar(
     "autosport_evidence_bound_windows_output",
     default=None,
 )
@@ -291,6 +291,16 @@ def _posix_directory_is_within(candidate_descriptor: int, ancestor_descriptor: i
         os.close(current)
 
 
+def _require_posix_output_parent_outside_workspace(
+    parent_descriptor: int,
+    workspace_descriptor: int,
+) -> None:
+    if _posix_directory_is_within(parent_descriptor, workspace_descriptor):
+        raise ValueError(
+            "bound evidence output parent moved into Autosport workspace before publication"
+        )
+
+
 def _open_or_create_posix_child_directory(parent_descriptor: int, name: str) -> int:
     if os.mkdir not in os.supports_dir_fd:
         raise OSError(
@@ -309,6 +319,7 @@ def _open_or_create_posix_child_directory(parent_descriptor: int, name: str) -> 
 
 def _atomic_write_json_at_directory(
     parent_descriptor: int,
+    workspace_descriptor: int,
     destination_name: str,
     payload: dict[str, Any],
 ) -> None:
@@ -330,6 +341,10 @@ def _atomic_write_json_at_directory(
     descriptor: int | None = None
     temporary_exists = False
     try:
+        _require_posix_output_parent_outside_workspace(
+            parent_descriptor,
+            workspace_descriptor,
+        )
         descriptor = os.open(
             temporary_name,
             open_flags,
@@ -337,6 +352,10 @@ def _atomic_write_json_at_directory(
             dir_fd=parent_descriptor,
         )
         temporary_exists = True
+        _require_posix_output_parent_outside_workspace(
+            parent_descriptor,
+            workspace_descriptor,
+        )
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             descriptor = None
             json.dump(
@@ -350,6 +369,10 @@ def _atomic_write_json_at_directory(
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+        _require_posix_output_parent_outside_workspace(
+            parent_descriptor,
+            workspace_descriptor,
+        )
         try:
             os.replace(
                 temporary_name,
@@ -382,8 +405,57 @@ def _windows_api_path(path: Path) -> str:
     return "\\\\?\\" + text
 
 
+def _windows_final_path_from_handle(handle: int) -> Path:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_final_path_name = kernel32.GetFinalPathNameByHandleW
+    get_final_path_name.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    )
+    get_final_path_name.restype = wintypes.DWORD
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_final_path_name(handle, buffer, len(buffer), 0)
+    if length == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if length >= len(buffer):
+        raise OSError(errno.ENAMETOOLONG, "Windows evidence directory path is too long")
+
+    text = buffer.value
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[len("\\\\?\\UNC\\") :]
+    elif text.startswith("\\\\?\\"):
+        text = text[len("\\\\?\\") :]
+    return Path(text)
+
+
+def _windows_directory_is_within(candidate_handle: int, ancestor_handle: int) -> bool:
+    candidate = os.path.normcase(os.path.normpath(str(_windows_final_path_from_handle(candidate_handle))))
+    ancestor = os.path.normcase(os.path.normpath(str(_windows_final_path_from_handle(ancestor_handle))))
+    try:
+        return os.path.commonpath([candidate, ancestor]) == ancestor
+    except ValueError:
+        return False
+
+
+def _require_windows_output_parent_outside_workspace(
+    parent_handle: int,
+    workspace_handle: int,
+) -> None:
+    if _windows_directory_is_within(parent_handle, workspace_handle):
+        raise ValueError(
+            "bound evidence output parent moved into Autosport workspace before publication"
+        )
+
+
 def _atomic_write_json_at_windows_directory(
     parent_handle: int,
+    workspace_handle: int,
     destination_name: str,
     payload: dict[str, Any],
 ) -> None:
@@ -520,6 +592,7 @@ def _atomic_write_json_at_windows_directory(
     del buffer, unicode_name
     io_status = IoStatusBlock()
     temporary_handle = wintypes.HANDLE()
+    _require_windows_output_parent_outside_workspace(parent_handle, workspace_handle)
     status = nt_create_file(
         ctypes.byref(temporary_handle),
         file_write_data | delete_access | synchronize,
@@ -539,6 +612,7 @@ def _atomic_write_json_at_windows_directory(
     primary_error: BaseException | None = None
     renamed = False
     try:
+        _require_windows_output_parent_outside_workspace(parent_handle, workspace_handle)
         encoded = _manifest_file_bytes(payload)
         offset = 0
         while offset < len(encoded):
@@ -560,6 +634,7 @@ def _atomic_write_json_at_windows_directory(
         if not flush_file_buffers(temporary_handle):
             raise ctypes.WinError(ctypes.get_last_error())
 
+        _require_windows_output_parent_outside_workspace(parent_handle, workspace_handle)
         rename_info = FileRenameInfo()
         rename_info.ReplaceOrFlags = 1
         rename_info.RootDirectory = parent_handle
@@ -607,18 +682,28 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
     destination = Path(path)
     posix_binding = _BOUND_POSIX_OUTPUT.get()
     if posix_binding is not None:
-        parent_descriptor, expected_destination = posix_binding
+        parent_descriptor, workspace_descriptor, expected_destination = posix_binding
         if destination != expected_destination:
             raise RuntimeError("bound evidence output destination changed before publication")
-        _atomic_write_json_at_directory(parent_descriptor, destination.name, payload)
+        _atomic_write_json_at_directory(
+            parent_descriptor,
+            workspace_descriptor,
+            destination.name,
+            payload,
+        )
         return
 
     windows_binding = _BOUND_WINDOWS_OUTPUT.get()
     if windows_binding is not None:
-        parent_handle, expected_destination = windows_binding
+        parent_handle, workspace_handle, expected_destination = windows_binding
         if destination != expected_destination:
             raise RuntimeError("bound evidence output destination changed before publication")
-        _atomic_write_json_at_windows_directory(parent_handle, destination.name, payload)
+        _atomic_write_json_at_windows_directory(
+            parent_handle,
+            workspace_handle,
+            destination.name,
+            payload,
+        )
         return
 
     _path_atomic_write_json(destination, payload)
@@ -657,7 +742,9 @@ def _publish_posix_bound_output(
                 "must not overwrite canonical workspace evidence"
             )
 
-        token = _BOUND_POSIX_OUTPUT.set((current_descriptor, destination))
+        token = _BOUND_POSIX_OUTPUT.set(
+            (current_descriptor, workspace_descriptor, destination)
+        )
         atomic_write_json(destination, payload)
 
         caller_destination = _current_caller_visible_destination(
@@ -922,7 +1009,10 @@ def _publish_windows_bound_output(
                     "must not overwrite canonical workspace evidence"
                 )
 
-        token = _BOUND_WINDOWS_OUTPUT.set((current_handle, destination))
+        _require_windows_output_parent_outside_workspace(current_handle, workspace_handle)
+        token = _BOUND_WINDOWS_OUTPUT.set(
+            (current_handle, workspace_handle, destination)
+        )
         atomic_write_json(destination, payload)
 
         caller_destination = _current_caller_visible_destination(
@@ -1151,8 +1241,8 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
         payload["manifest_sha256"] = _manifest_sha256(payload)
 
     # Publication remains outside WorkspaceEconomicLock. Its parent directory is bound
-    # before temp creation/replace, and before PASS the caller-visible pathname is
-    # re-proved to identify that bound publication with the exact deterministic bytes.
+    # before temp creation/replace, and the live bound ancestry is re-proved at each
+    # create/content/replace boundary before PASS rebinds the caller-visible pathname.
     _publish_bound_output(root, requested_destination, payload)
     return payload
 

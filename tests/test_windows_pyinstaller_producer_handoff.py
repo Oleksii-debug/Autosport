@@ -27,6 +27,17 @@ def _trusted_snapshot_verifier_source() -> str:
     return tail.split(end_marker, 1)[0]
 
 
+def _load_guarded_pyinstaller_module():
+    spec = importlib.util.spec_from_file_location(
+        "autosport_guarded_pyinstaller_bind_test",
+        _GUARDED_PYINSTALLER,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows reparse-point regression")
 def test_trusted_snapshot_verifier_rejects_directory_junction(tmp_path: Path) -> None:
     launcher = _trusted_snapshot_verifier_source()
@@ -55,6 +66,29 @@ def test_trusted_snapshot_verifier_rejects_directory_junction(tmp_path: Path) ->
 
     assert verified.returncode != 0
     assert "reparse point" in verified.stderr.lower()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows producer-handle regression")
+def test_initial_artifact_copy_blocks_replacement_before_identity_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guarded = _load_guarded_pyinstaller_module()
+    source = tmp_path / "bootloader.exe"
+    artifact = tmp_path / "Probe.exe"
+    payload = b"canonical bootloader bytes\n"
+    source.write_bytes(payload)
+
+    identity = guarded._copy_artifact_and_capture_identity(source, artifact)
+    assert identity == guarded._object_identity(artifact.stat())
+    assert artifact.read_bytes() == payload
+
+    monkeypatch.setenv("AUTOSPORT_TEST_REPLACE_PYINSTALLER_OUTPUT_BEFORE_IDENTITY", "1")
+    with pytest.raises(OSError):
+        guarded._copy_artifact_and_capture_identity(source, artifact)
+
+    assert artifact.read_bytes() == payload
+    assert not list(tmp_path.glob(".Probe.exe.pre-identity-replacement-*"))
 
 
 @pytest.mark.skipif(

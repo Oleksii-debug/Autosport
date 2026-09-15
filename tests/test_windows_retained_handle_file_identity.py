@@ -107,7 +107,7 @@ def test_uninspectable_live_candidate_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     security = _load_security_authority()
-    snapshot, trusted_handle, _candidate_pid, _candidate_handle = _snapshot(
+    snapshot, trusted_handle, candidate_pid, _candidate_handle = _snapshot(
         security,
         trusted_object=0xAAA2,
         candidate_object=0xBBB2,
@@ -123,8 +123,16 @@ def test_uninspectable_live_candidate_fails_closed(
         raise security._CandidateFileIdentityUnavailable("duplication denied")
 
     monkeypatch.setattr(security, "_candidate_file_identity", unavailable)
+    monkeypatch.setattr(
+        security,
+        "_process_same_user_scope",
+        lambda: {os.getpid(): True, candidate_pid: True},
+    )
 
-    with pytest.raises(RuntimeError, match="live uninspectable mutation-capable handle"):
+    with pytest.raises(
+        RuntimeError,
+        match="live same-user uninspectable mutation-capable handle",
+    ):
         security._require_no_competing_mutation_handles(
             trusted_handle,
             label="uninspectable retained handle",

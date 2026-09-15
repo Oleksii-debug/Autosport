@@ -54,7 +54,10 @@ function Assert-ProcessRecoveryEvidence {
   }
 }
 
-$pythonExecutable = (Get-Command python -CommandType Application -ErrorAction Stop).Source
+$pythonCommands = @(Get-Command python -CommandType Application -ErrorAction Stop)
+if ($pythonCommands.Count -lt 1) { throw 'Unable to resolve Python application' }
+$pythonExecutable = [string]$pythonCommands[0].Source
+if ([string]::IsNullOrWhiteSpace($pythonExecutable)) { throw 'Resolved Python application has an empty source path' }
 $trustedVerifierLauncher = @'
 import hashlib
 import pathlib
@@ -172,7 +175,10 @@ Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' } | ForEach-Object {
   Remove-Item -LiteralPath ("Env:" + $_.Name) -ErrorAction SilentlyContinue
 }
 $env:GIT_NO_REPLACE_OBJECTS = '1'
-$gitExecutable = (Get-Command git -CommandType Application -ErrorAction Stop).Source
+$gitCommands = @(Get-Command git -CommandType Application -ErrorAction Stop)
+if ($gitCommands.Count -lt 1) { throw 'Unable to resolve Git application' }
+$gitExecutable = [string]$gitCommands[0].Source
+if ([string]::IsNullOrWhiteSpace($gitExecutable)) { throw 'Resolved Git application has an empty source path' }
 
 $checkoutHead = (& $gitExecutable rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw "Unable to resolve checkout HEAD; git exited $LASTEXITCODE" }
@@ -295,7 +301,7 @@ if ($restartRecoveryProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe rest
 python $sourceVerifier --bind-artifact $restartRecovery --bound-output $boundRestartRecoveryAudit --digest-output $restartRecoveryDigestPath
 if ($LASTEXITCODE -ne 0) { throw "Restart/recovery evidence binding exited $LASTEXITCODE" }
 $restartRecoverySha256 = (Get-Content -LiteralPath $restartRecoveryDigestPath -Raw).Trim()
-$restartRecoveryEvidence = Get-Content $boundRestartRecoveryAudit -Raw | ConvertFrom-Json
+$restartRecoveryEvidence = Get-Content $boundRestartRecovery -Raw | ConvertFrom-Json
 if ($restartRecoveryEvidence.status -ne 'PASS') { throw 'Packaged restart/recovery audit did not PASS' }
 if ($restartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Packaged restart audit did not prove persistent session reopen' }
 if ($restartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Packaged recovery audit did not prove transaction recovery' }

@@ -45,7 +45,7 @@ def _normalise_source_ids(
         raise ValueError(f"{field} must be an iterable of canonical source-id strings")
     normalized: set[str] = set()
     for value in source_ids:
-        if not isinstance(value, str) or not value or value != value.strip():
+        if type(value) is not str or not value or value != value.strip():
             raise ValueError(f"{field} must contain non-empty trimmed strings")
         normalized.add(value)
     return tuple(sorted(normalized))
@@ -88,7 +88,7 @@ def classify_market_price_truth(
 
     normalized = _normalise_source_ids(source_ids)
     if price_semantics is not None:
-        if not isinstance(price_semantics, str) or not price_semantics.strip():
+        if type(price_semantics) is not str or not price_semantics.strip():
             raise ValueError("price_semantics must be a non-empty string when explicit")
         if not isinstance(execution_quote_verified, bool):
             raise ValueError("explicit price semantics require boolean execution_quote_verified")
@@ -141,7 +141,7 @@ def market_price_truth_from_events(events: Iterable[Any]) -> MarketPriceTruth:
             )
         semantics = metadata.get("price_semantics")
         executable = metadata.get("execution_quote_verified")
-        if not isinstance(semantics, str) or not semantics.strip() or not isinstance(executable, bool):
+        if type(semantics) is not str or not semantics.strip() or not isinstance(executable, bool):
             return MarketPriceTruth(
                 price_semantics="unspecified_or_mixed_observation",
                 executable_quote_verified=False,
@@ -190,7 +190,7 @@ def market_price_truth_from_run_summary(payload: dict[str, Any]) -> MarketPriceT
         fill_fidelity = explicit.get("paper_fill_fidelity_verified")
         source_ids = explicit.get("source_ids")
         if not (
-            isinstance(semantics, str)
+            type(semantics) is str
             and semantics.strip()
             and isinstance(executable, bool)
             and isinstance(fill_fidelity, bool)

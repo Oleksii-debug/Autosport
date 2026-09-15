@@ -11,12 +11,35 @@ def _build_script_text() -> str:
 def test_local_windows_build_proves_pristine_source_before_mutation() -> None:
     script = _build_script_text()
 
+    git_sanitizer = "Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' }"
     source_sha = "$sourceSha = $env:AUTOSPORT_SOURCE_SHA"
-    preflight = "python scripts/verify_source_checkout.py --source-sha $sourceSha"
+    exact_tree_lookup = (
+        "$verifierTreeEntry = (& $gitExecutable ls-tree $sourceSha -- "
+        "'scripts/verify_source_checkout.py').Trim()"
+    )
+    exact_blob_capture = (
+        "Start-Process -FilePath $gitExecutable -ArgumentList "
+        "@('cat-file', 'blob', $verifierBlobSha)"
+    )
+    preflight = "python $sourceVerifier --source-sha $sourceSha"
     first_mutation = "python -m pip install --upgrade pip"
 
-    assert script.index(source_sha) < script.index(preflight) < script.index(first_mutation)
+    assert (
+        script.index(git_sanitizer)
+        < script.index(source_sha)
+        < script.index(exact_tree_lookup)
+        < script.index(exact_blob_capture)
+        < script.index(preflight)
+        < script.index(first_mutation)
+    )
     assert script.count(source_sha) == 1
+    assert "python scripts/verify_source_checkout.py --source-sha $sourceSha" not in script
+    assert "$env:GIT_NO_REPLACE_OBJECTS = '1'" in script
+    assert "hashlib.sha256(data).hexdigest()" in script
+    assert (
+        "& $script:pythonExecutable -I -S -c $script:trustedVerifierLauncher "
+        "$script:sourceVerifier $script:sourceVerifierSha256 @remaining"
+    ) in script
     assert 'if ($LASTEXITCODE -ne 0) { throw "Source checkout preflight exited $LASTEXITCODE" }' in script
 
 

@@ -31,6 +31,7 @@ def _run_real_pyinstaller_probe(
     tmp_path: Path,
     *,
     replace_before_checksum_anchor: bool = False,
+    write_before_checksum_anchor: bool = False,
     write_before_final_fence: bool = False,
     replace_before_final_fence: bool = False,
     replace_after_final_fence: bool = False,
@@ -48,6 +49,8 @@ def _run_real_pyinstaller_probe(
     env = os.environ.copy()
     if replace_before_checksum_anchor:
         env["AUTOSPORT_TEST_REPLACE_BEFORE_CHECKSUM_ANCHOR"] = "1"
+    if write_before_checksum_anchor:
+        env["AUTOSPORT_TEST_WRITE_BEFORE_CHECKSUM_ANCHOR"] = "1"
     if write_before_final_fence:
         env["AUTOSPORT_TEST_WRITE_BEFORE_FINAL_FENCE"] = "1"
     if replace_before_final_fence:
@@ -151,6 +154,26 @@ def test_real_pyinstaller_same_path_replacement_fails_before_checksum_anchor(tmp
     assert completed.returncode != 0
     combined = completed.stdout + "\n" + completed.stderr
     assert "pre-checksum output replacement blocked by creation continuity anchor" in combined
+    assert not bound.exists()
+    assert not digest.exists()
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or importlib.util.find_spec("PyInstaller") is None,
+    reason="real Windows PyInstaller regression",
+)
+def test_real_pyinstaller_same_object_write_fails_before_checksum_anchor(tmp_path: Path) -> None:
+    completed, _artifact, bound, digest = _run_real_pyinstaller_probe(
+        tmp_path,
+        write_before_checksum_anchor=True,
+    )
+
+    assert completed.returncode != 0
+    combined = completed.stdout + "\n" + completed.stderr
+    assert (
+        "pre-checksum same-object write blocked by authoritative producer byte progression"
+        in combined
+    )
     assert not bound.exists()
     assert not digest.exists()
 

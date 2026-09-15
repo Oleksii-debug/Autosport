@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from ctypes import wintypes
 from typing import Any
 
@@ -145,11 +146,11 @@ def _require_regular_nonreparse(path: pathlib.Path, *, label: str) -> os.stat_re
 def _open_delete_denial_continuity_anchor(
     path: pathlib.Path,
 ) -> tuple[Any, tuple[int, int]]:
-    """Pin the producer pathname without interfering with its legitimate reads/writes.
+    """Pin the producer pathname while allowing one bounded trusted mutation.
 
-    The zero-access handle shares READ/WRITE but deliberately not DELETE. It can
-    therefore remain open across PyInstaller's resource/appending mutations while
-    preventing rename/delete replacement of the object established at creation.
+    The zero-access handle shares READ/WRITE but deliberately not DELETE. It is
+    retained across every transition so rename/delete replacement cannot occur
+    while the byte-exclusive producer handle is temporarily released.
     """
 
     if os.name != "nt":
@@ -197,8 +198,14 @@ def _open_delete_denial_continuity_anchor(
 def _create_initial_producer_copy(
     source: str | os.PathLike[str],
     destination: pathlib.Path,
-) -> tuple[Any, tuple[int, int]]:
-    """Create the first producer object and pin it before its creating handle closes."""
+) -> tuple[Any, Any, tuple[int, int], str]:
+    """Create and retain the authoritative producer object from its first byte.
+
+    The creating handle requests READ/WRITE and shares only READ. Consequently no
+    second writer or deleter can touch the producer between initial creation and
+    the first trusted mutation transition. A separate zero-access no-DELETE handle
+    is also retained so pathname identity survives the bounded transition windows.
+    """
 
     if os.name != "nt":
         raise RuntimeError("guarded PyInstaller artifact binding is Windows-only")
@@ -221,8 +228,8 @@ def _create_initial_producer_copy(
     ctypes.set_last_error(0)
     raw_writer = create_file(
         str(destination),
-        _GENERIC_WRITE,
-        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        _GENERIC_READ | _GENERIC_WRITE,
+        _FILE_SHARE_READ,
         None,
         _CREATE_NEW,
         _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
@@ -239,56 +246,54 @@ def _create_initial_producer_copy(
     try:
         descriptor = msvcrt.open_osfhandle(
             int(writer_value),
-            os.O_WRONLY | getattr(os, "O_BINARY", 0),
+            os.O_RDWR | getattr(os, "O_BINARY", 0),
         )
     except BaseException:
         _close_windows_handle(raw_writer)
         raise
 
+    try:
+        writer = os.fdopen(descriptor, "r+b", buffering=0, closefd=True)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
     continuity_handle = None
     try:
-        with os.fdopen(descriptor, "wb", buffering=0, closefd=True) as writer:
-            with builtins.open(source, "rb") as reader:
-                while True:
-                    chunk = reader.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    writer.write(chunk)
-            writer.flush()
-            os.fsync(writer.fileno())
-            writer_identity = _object_identity(os.fstat(writer.fileno()))
+        with builtins.open(source, "rb") as reader:
+            while True:
+                chunk = reader.read(1024 * 1024)
+                if not chunk:
+                    break
+                writer.write(chunk)
+        writer.flush()
+        os.fsync(writer.fileno())
+        writer_identity = _object_identity(os.fstat(writer.fileno()))
 
-            # Open the no-delete continuity anchor while the creating writer is
-            # still alive, so there is no pathname-replacement interval at all.
-            continuity_handle, continuity_identity = _open_delete_denial_continuity_anchor(destination)
-            current = _require_regular_nonreparse(
-                destination,
-                label="initial PyInstaller producer output after bootloader copy",
+        continuity_handle, continuity_identity = _open_delete_denial_continuity_anchor(destination)
+        current = _require_regular_nonreparse(
+            destination,
+            label="initial PyInstaller producer output after bootloader copy",
+        )
+        if (
+            continuity_identity != writer_identity
+            or _object_identity(current) != writer_identity
+        ):
+            raise RuntimeError(
+                "PyInstaller producer output changed during authoritative initial creation"
             )
-            if (
-                continuity_identity != writer_identity
-                or _object_identity(current) != writer_identity
-            ):
-                raise RuntimeError(
-                    "PyInstaller producer output changed during authoritative initial creation"
-                )
-        return continuity_handle, writer_identity
+        return writer, continuity_handle, writer_identity, _sha256_stream(writer)
     except BaseException:
         if continuity_handle is not None:
             _close_windows_handle(continuity_handle)
+        writer.close()
         raise
 
 
 def _open_producer_continuity_anchor(
     path: pathlib.Path,
 ) -> tuple[Any, tuple[int, int]]:
-    """Upgrade continuity to one read/write handle that denies every second writer/deleter.
-
-    The earlier zero-access handle has already pinned the object from its creation.
-    Opening this handle while that no-delete anchor remains alive atomically upgrades
-    the boundary for PyInstaller 6.22.3's final checksum rewrite: any already-open or
-    later foreign WRITE/DELETE handle makes this acquisition fail closed.
-    """
+    """Open a read/write producer handle that denies every other writer/deleter."""
 
     if os.name != "nt":
         raise RuntimeError("guarded PyInstaller artifact binding is Windows-only")
@@ -439,17 +444,28 @@ def run(argv: list[str] | None = None) -> int:
     original_assemble = building_api.EXE.assemble
     original_update_checksum = building_api.winutils.update_exe_pe_checksum
     original_copyfile = shutil.copyfile
+    original_remove_all_resources = building_api.winresource.remove_all_resources
+    original_copy_icons = building_api.icon.CopyIcons
+    original_write_version_info = building_api.versioninfo.write_version_info_to_executable
+    original_copy_windows_resource = building_api.EXE._copy_windows_resource
+    original_write_manifest = building_api.winmanifest.write_manifest_to_executable
+    original_append_data = building_api.EXE._append_data_to_exe
+    original_set_build_timestamp = building_api.winutils.set_exe_build_timestamp
+
     state: dict[str, Any] = {
         "producer_active": False,
         "creation_anchor_handle": None,
         "producer_anchor_stream": None,
         "producer_identity": None,
+        "producer_progress_digest": None,
         "producer_digest": None,
+        "trusted_transitions": [],
         "final_identity": None,
         "guard_stream": None,
         "guard_error": None,
         "bound": False,
         "test_pre_checksum_replacement_result": None,
+        "test_pre_checksum_write_result": None,
         "test_pre_fence_write_result": None,
         "test_pre_fence_replacement_result": None,
         "test_replacement_result": None,
@@ -463,6 +479,219 @@ def run(argv: list[str] | None = None) -> int:
             error.__cause__ = exc
         return error
 
+    def _make_expected_snapshot(anchor_stream: Any, label: str) -> pathlib.Path:
+        fd, raw_name = tempfile.mkstemp(
+            prefix=f".{artifact.name}.{label}-",
+            suffix=".exe",
+            dir=str(artifact.parent),
+        )
+        snapshot = pathlib.Path(raw_name)
+        try:
+            with os.fdopen(fd, "w+b", buffering=0, closefd=True) as output:
+                position = anchor_stream.tell()
+                try:
+                    anchor_stream.seek(0)
+                    while True:
+                        chunk = anchor_stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                finally:
+                    anchor_stream.seek(position)
+                output.flush()
+                os.fsync(output.fileno())
+            _require_regular_nonreparse(snapshot, label=f"trusted {label} expected snapshot")
+            return snapshot
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                snapshot.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
+    def _trusted_byte_transition(label: str, expected_mutator, live_mutator):
+        if state["guard_error"] is not None:
+            raise RuntimeError(str(state["guard_error"]))
+
+        anchor_stream = state["producer_anchor_stream"]
+        producer_identity = state["producer_identity"]
+        progress_digest = state["producer_progress_digest"]
+        creation_anchor = state["creation_anchor_handle"]
+        if (
+            anchor_stream is None
+            or producer_identity is None
+            or progress_digest is None
+            or creation_anchor is None
+        ):
+            raise poison_guard(
+                f"PyInstaller {label} transition lacks authoritative producer continuity"
+            )
+
+        anchor_now = os.fstat(anchor_stream.fileno())
+        current_path = _require_regular_nonreparse(
+            artifact,
+            label=f"PyInstaller producer before {label} transition",
+        )
+        current_digest = _sha256_stream(anchor_stream)
+        if (
+            _object_identity(anchor_now) != producer_identity
+            or _object_identity(current_path) != producer_identity
+            or current_digest != progress_digest
+        ):
+            raise poison_guard(
+                f"PyInstaller producer bytes changed before trusted {label} transition"
+            )
+
+        snapshot = _make_expected_snapshot(anchor_stream, label)
+        try:
+            expected_mutator(snapshot)
+            expected_digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+
+            anchor_stream.close()
+            state["producer_anchor_stream"] = None
+
+            live_error: BaseException | None = None
+            live_result = None
+            try:
+                live_result = live_mutator()
+            except BaseException as exc:
+                live_error = exc
+
+            try:
+                next_anchor, next_identity = _open_producer_continuity_anchor(artifact)
+            except BaseException as exc:
+                raise poison_guard(
+                    f"PyInstaller {label} transition could not reacquire exclusive producer fence: {exc}",
+                    exc,
+                )
+            state["producer_anchor_stream"] = next_anchor
+
+            if next_identity != producer_identity:
+                next_anchor.close()
+                state["producer_anchor_stream"] = None
+                raise poison_guard(
+                    f"PyInstaller {label} transition changed authoritative producer identity"
+                )
+
+            actual_digest = _sha256_stream(next_anchor)
+            if live_error is not None:
+                if actual_digest != current_digest:
+                    raise poison_guard(
+                        f"PyInstaller {label} transition failed after changing producer bytes",
+                        live_error,
+                    )
+                raise live_error
+
+            if actual_digest != expected_digest:
+                raise poison_guard(
+                    f"PyInstaller {label} transition produced bytes outside the trusted expected progression"
+                )
+
+            state["producer_progress_digest"] = actual_digest
+            state["trusted_transitions"].append(label)
+            return live_result
+        finally:
+            try:
+                snapshot.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _guarded_path_transition(label: str, original, path, *call_args, **call_kwargs):
+        if not state["producer_active"] or _normalized_path(path) != artifact_key:
+            return original(path, *call_args, **call_kwargs)
+        return _trusted_byte_transition(
+            label,
+            lambda snapshot: original(str(snapshot), *call_args, **call_kwargs),
+            lambda: original(path, *call_args, **call_kwargs),
+        )
+
+    def guarded_remove_all_resources(path, *call_args, **call_kwargs):
+        return _guarded_path_transition(
+            "remove-resources",
+            original_remove_all_resources,
+            path,
+            *call_args,
+            **call_kwargs,
+        )
+
+    def guarded_copy_icons(path, *call_args, **call_kwargs):
+        return _guarded_path_transition(
+            "icon",
+            original_copy_icons,
+            path,
+            *call_args,
+            **call_kwargs,
+        )
+
+    def guarded_write_version_info(path, *call_args, **call_kwargs):
+        return _guarded_path_transition(
+            "version-info",
+            original_write_version_info,
+            path,
+            *call_args,
+            **call_kwargs,
+        )
+
+    def guarded_copy_windows_resource(exe_self, path, *call_args, **call_kwargs):
+        if not state["producer_active"] or _normalized_path(path) != artifact_key:
+            return original_copy_windows_resource(exe_self, path, *call_args, **call_kwargs)
+        return _trusted_byte_transition(
+            "resource",
+            lambda snapshot: original_copy_windows_resource(
+                exe_self,
+                str(snapshot),
+                *call_args,
+                **call_kwargs,
+            ),
+            lambda: original_copy_windows_resource(
+                exe_self,
+                path,
+                *call_args,
+                **call_kwargs,
+            ),
+        )
+
+    def guarded_write_manifest(path, *call_args, **call_kwargs):
+        return _guarded_path_transition(
+            "manifest",
+            original_write_manifest,
+            path,
+            *call_args,
+            **call_kwargs,
+        )
+
+    def guarded_append_data(exe_self, path, *call_args, **call_kwargs):
+        if not state["producer_active"] or _normalized_path(path) != artifact_key:
+            return original_append_data(exe_self, path, *call_args, **call_kwargs)
+        return _trusted_byte_transition(
+            "append",
+            lambda snapshot: original_append_data(
+                exe_self,
+                str(snapshot),
+                *call_args,
+                **call_kwargs,
+            ),
+            lambda: original_append_data(
+                exe_self,
+                path,
+                *call_args,
+                **call_kwargs,
+            ),
+        )
+
+    def guarded_set_build_timestamp(path, *call_args, **call_kwargs):
+        return _guarded_path_transition(
+            "timestamp",
+            original_set_build_timestamp,
+            path,
+            *call_args,
+            **call_kwargs,
+        )
+
     def guarded_copyfile(source, destination, *copy_args, **copy_kwargs):
         if not state["producer_active"] or _normalized_path(destination) != artifact_key:
             return original_copyfile(source, destination, *copy_args, **copy_kwargs)
@@ -472,18 +701,26 @@ def run(argv: list[str] | None = None) -> int:
             raise poison_guard(
                 "unexpected arguments for authoritative PyInstaller bootloader copy"
             )
-        if state["creation_anchor_handle"] is not None or state["producer_identity"] is not None:
+        if (
+            state["creation_anchor_handle"] is not None
+            or state["producer_anchor_stream"] is not None
+            or state["producer_identity"] is not None
+        ):
             raise poison_guard("PyInstaller attempted to recreate an already-pinned producer output")
 
         try:
-            continuity_handle, producer_identity = _create_initial_producer_copy(
-                source,
-                pathlib.Path(destination),
+            producer_stream, continuity_handle, producer_identity, producer_digest = (
+                _create_initial_producer_copy(
+                    source,
+                    pathlib.Path(destination),
+                )
             )
         except BaseException as exc:
             raise poison_guard(f"PyInstaller authoritative initial copy failed: {exc}", exc)
         state["creation_anchor_handle"] = continuity_handle
+        state["producer_anchor_stream"] = producer_stream
         state["producer_identity"] = producer_identity
+        state["producer_progress_digest"] = producer_digest
         return destination
 
     def guarded_update_exe_pe_checksum(path, *checksum_args, **checksum_kwargs):
@@ -494,18 +731,35 @@ def run(argv: list[str] | None = None) -> int:
 
         creation_anchor = state["creation_anchor_handle"]
         producer_identity = state["producer_identity"]
-        if creation_anchor is None or producer_identity is None:
+        anchor_stream = state["producer_anchor_stream"]
+        progress_digest = state["producer_progress_digest"]
+        transitions = state["trusted_transitions"]
+        if (
+            creation_anchor is None
+            or producer_identity is None
+            or anchor_stream is None
+            or progress_digest is None
+        ):
             raise poison_guard(
-                "PyInstaller reached final checksum without authoritative creation continuity"
+                "PyInstaller reached final checksum without authoritative byte progression"
+            )
+        required_transitions = {"remove-resources", "manifest", "append", "timestamp"}
+        if not required_transitions.issubset(set(transitions)) or transitions[-1:] != ["timestamp"]:
+            raise poison_guard(
+                "PyInstaller reached final checksum without the pinned 6.22.3 trusted mutation sequence"
             )
 
         current_before_upgrade = _require_regular_nonreparse(
             artifact,
             label="PyInstaller producer output before final checksum fence",
         )
-        if _object_identity(current_before_upgrade) != producer_identity:
+        if (
+            _object_identity(os.fstat(anchor_stream.fileno())) != producer_identity
+            or _object_identity(current_before_upgrade) != producer_identity
+            or _sha256_stream(anchor_stream) != progress_digest
+        ):
             raise poison_guard(
-                "PyInstaller producer pathname lost authoritative creation identity before checksum"
+                "PyInstaller producer lost authoritative byte progression before checksum"
             )
 
         if (
@@ -531,34 +785,20 @@ def run(argv: list[str] | None = None) -> int:
                 except FileNotFoundError:
                     pass
 
-        anchor_stream = state["producer_anchor_stream"]
-        if anchor_stream is None:
+        if (
+            os.environ.get("AUTOSPORT_TEST_WRITE_BEFORE_CHECKSUM_ANCHOR") == "1"
+            and state["test_pre_checksum_write_result"] is None
+        ):
             try:
-                anchor_stream, upgraded_identity = _open_producer_continuity_anchor(artifact)
-            except BaseException as exc:
-                raise poison_guard(
-                    f"PyInstaller final producer write-fence acquisition failed: {exc}",
-                    exc,
-                )
-            if upgraded_identity != producer_identity:
-                anchor_stream.close()
-                raise poison_guard(
-                    "PyInstaller final producer fence does not match authoritative creation object"
-                )
-            state["producer_anchor_stream"] = anchor_stream
-        else:
-            anchor_now = os.fstat(anchor_stream.fileno())
-            current_path = _require_regular_nonreparse(
-                artifact,
-                label="PyInstaller producer output before checksum retry",
-            )
-            if (
-                _object_identity(anchor_now) != producer_identity
-                or _object_identity(current_path) != producer_identity
-            ):
-                raise poison_guard(
-                    "PyInstaller producer output lost continuity before checksum retry"
-                )
+                with artifact.open("r+b") as writer:
+                    writer.seek(0, os.SEEK_END)
+                    writer.write(b"AUTOSPORT_PRE_CHECKSUM_SAME_OBJECT_WRITE")
+                    writer.flush()
+                    os.fsync(writer.fileno())
+            except OSError:
+                state["test_pre_checksum_write_result"] = "blocked"
+            else:
+                state["test_pre_checksum_write_result"] = "succeeded"
 
         missing = object()
         original_winutils_open = getattr(building_api.winutils, "open", missing)
@@ -603,6 +843,8 @@ def run(argv: list[str] | None = None) -> int:
                     "PyInstaller producer output lost continuity during final checksum"
                 )
             state["producer_digest"] = _sha256_stream(anchor_stream)
+            state["producer_progress_digest"] = state["producer_digest"]
+            state["trusted_transitions"].append("checksum")
             return result
         except BaseException as exc:
             raise poison_guard(f"PyInstaller final checksum binding failed: {exc}", exc)
@@ -741,6 +983,18 @@ def run(argv: list[str] | None = None) -> int:
                 "PyInstaller pre-checksum replacement test hook was not exercised"
             )
 
+        if os.environ.get("AUTOSPORT_TEST_WRITE_BEFORE_CHECKSUM_ANCHOR") == "1":
+            write_result = state["test_pre_checksum_write_result"]
+            if write_result == "blocked":
+                raise RuntimeError(
+                    "PyInstaller pre-checksum same-object write blocked by authoritative producer byte progression"
+                )
+            if write_result == "succeeded":
+                raise RuntimeError(
+                    "PyInstaller same-object write unexpectedly succeeded before checksum anchor"
+                )
+            raise RuntimeError("PyInstaller pre-checksum write test hook was not exercised")
+
         if os.environ.get("AUTOSPORT_TEST_WRITE_BEFORE_FINAL_FENCE") == "1":
             write_result = state["test_pre_fence_write_result"]
             if write_result == "blocked":
@@ -838,6 +1092,13 @@ def run(argv: list[str] | None = None) -> int:
         return result
 
     building_api.shutil.copyfile = guarded_copyfile
+    building_api.winresource.remove_all_resources = guarded_remove_all_resources
+    building_api.icon.CopyIcons = guarded_copy_icons
+    building_api.versioninfo.write_version_info_to_executable = guarded_write_version_info
+    building_api.EXE._copy_windows_resource = guarded_copy_windows_resource
+    building_api.winmanifest.write_manifest_to_executable = guarded_write_manifest
+    building_api.EXE._append_data_to_exe = guarded_append_data
+    building_api.winutils.set_exe_build_timestamp = guarded_set_build_timestamp
     miscutils.mtime = guarded_mtime
     building_api.winutils.update_exe_pe_checksum = guarded_update_exe_pe_checksum
     building_api.EXE.assemble = guarded_assemble
@@ -853,6 +1114,13 @@ def run(argv: list[str] | None = None) -> int:
         building_api.EXE.assemble = original_assemble
         building_api.winutils.update_exe_pe_checksum = original_update_checksum
         miscutils.mtime = original_mtime
+        building_api.winutils.set_exe_build_timestamp = original_set_build_timestamp
+        building_api.EXE._append_data_to_exe = original_append_data
+        building_api.winmanifest.write_manifest_to_executable = original_write_manifest
+        building_api.EXE._copy_windows_resource = original_copy_windows_resource
+        building_api.versioninfo.write_version_info_to_executable = original_write_version_info
+        building_api.icon.CopyIcons = original_copy_icons
+        building_api.winresource.remove_all_resources = original_remove_all_resources
         building_api.shutil.copyfile = original_copyfile
         guard_stream = state.get("guard_stream")
         anchor_stream = state.get("producer_anchor_stream")

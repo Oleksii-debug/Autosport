@@ -642,10 +642,37 @@ def run(argv: list[str] | None = None) -> int:
             )
 
         snapshot, _ = _make_expected_snapshot(anchor_stream, label)
+        reference_snapshot = None
         release_creation_anchor = label in _RESOURCE_API_TRANSITIONS
         oracle_stream = None
+        reference_oracle_stream = None
         try:
             expected_mutator(snapshot)
+
+            if os.environ.get("AUTOSPORT_TEST_WRITE_EXPECTED_BEFORE_ORACLE") == "1":
+                with snapshot.open("r+b") as writer:
+                    writer.seek(0, os.SEEK_END)
+                    writer.write(b"AUTOSPORT_EXPECTED_PRE_ORACLE_WRITE")
+                    writer.flush()
+                    os.fsync(writer.fileno())
+
+            if os.environ.get("AUTOSPORT_TEST_REPLACE_EXPECTED_BEFORE_ORACLE") == "1":
+                replacement = snapshot.with_name(
+                    f".{snapshot.name}.pre-oracle-replacement-{os.getpid()}"
+                )
+                try:
+                    original_copyfile(snapshot, replacement)
+                    with replacement.open("ab") as replacement_handle:
+                        replacement_handle.write(b"AUTOSPORT_EXPECTED_PRE_ORACLE_REPLACEMENT")
+                        replacement_handle.flush()
+                        os.fsync(replacement_handle.fileno())
+                    os.replace(replacement, snapshot)
+                finally:
+                    try:
+                        replacement.unlink()
+                    except FileNotFoundError:
+                        pass
+
             try:
                 oracle_stream, snapshot_identity = _open_expected_snapshot_oracle(
                     snapshot,
@@ -705,6 +732,46 @@ def run(argv: list[str] | None = None) -> int:
             ):
                 raise poison_guard(
                     f"PyInstaller {label} expected snapshot changed across oracle digest"
+                )
+
+            # Independently derive the same trusted transition from the still-pinned
+            # producer input after the primary result is fenced. A mutation or
+            # replacement that wins the pre-oracle handoff on one path cannot be
+            # adopted as authoritative unless the independently materialized
+            # replica reaches the exact same bytes.
+            reference_snapshot, _ = _make_expected_snapshot(
+                anchor_stream,
+                f"{label}-reference",
+            )
+            expected_mutator(reference_snapshot)
+            try:
+                reference_oracle_stream, reference_identity = (
+                    _open_expected_snapshot_oracle(
+                        reference_snapshot,
+                        label=f"{label}-reference",
+                    )
+                )
+            except BaseException as exc:
+                raise poison_guard(
+                    f"PyInstaller {label} reference expected snapshot could not be fenced: {exc}",
+                    exc,
+                )
+            reference_digest = _sha256_stream(reference_oracle_stream)
+            reference_now = os.fstat(reference_oracle_stream.fileno())
+            reference_path = _require_regular_nonreparse(
+                reference_snapshot,
+                label=f"trusted {label} reference expected snapshot after oracle digest",
+            )
+            if (
+                _object_identity(reference_now) != reference_identity
+                or _object_identity(reference_path) != reference_identity
+            ):
+                raise poison_guard(
+                    f"PyInstaller {label} reference expected snapshot changed across oracle digest"
+                )
+            if reference_digest != expected_digest:
+                raise poison_guard(
+                    f"PyInstaller {label} expected mutation result failed independent replica authentication"
                 )
 
             anchor_stream.close()
@@ -780,8 +847,15 @@ def run(argv: list[str] | None = None) -> int:
             state["trusted_transitions"].append(label)
             return live_result
         finally:
+            if reference_oracle_stream is not None:
+                reference_oracle_stream.close()
             if oracle_stream is not None:
                 oracle_stream.close()
+            if reference_snapshot is not None:
+                try:
+                    reference_snapshot.unlink()
+                except FileNotFoundError:
+                    pass
             try:
                 snapshot.unlink()
             except FileNotFoundError:

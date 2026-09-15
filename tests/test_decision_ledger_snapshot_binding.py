@@ -54,25 +54,24 @@ class DecisionLedgerSnapshotBindingTests(unittest.TestCase):
             run_ledger.append(self._record("snapshot-swap", 3))
             run_bytes = run_ledger.path.read_bytes()
 
-            original_snapshot = RunTransaction._read_canonical_file_snapshot
+            original_snapshot = JsonlDecisionLedger.verified_snapshot
             swapped = False
 
-            def snapshot_then_swap(path: Path, label: str):
+            def snapshot_then_swap(ledger: JsonlDecisionLedger):
                 nonlocal swapped
-                snapshot = original_snapshot(path, label)
-                if path == canonical.path and not swapped:
+                snapshot = original_snapshot(ledger)
+                if ledger.path == canonical.path and not swapped:
                     # Both A and B are individually valid ledgers. The attack is
-                    # identity substitution after the canonical pathname has been
-                    # verified and its exact bytes captured. Production must consume
-                    # the captured snapshot payload rather than reopen the replaced
-                    # canonical path for staging.
+                    # identity substitution after an exact-byte semantic proof, not
+                    # malformed evidence. Production must consume snapshot.payload,
+                    # never reopen the substituted canonical path for combination.
                     canonical.path.write_bytes(replacement_bytes)
                     swapped = True
                 return snapshot
 
             with patch.object(
-                RunTransaction,
-                "_read_canonical_file_snapshot",
+                JsonlDecisionLedger,
+                "verified_snapshot",
                 new=snapshot_then_swap,
             ):
                 tx.stage_outputs(book, canonical.path)

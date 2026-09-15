@@ -40,13 +40,23 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         self._run_git(root, "init")
         self._run_git(root, "config", "user.email", "autosport-tests@example.invalid")
         self._run_git(root, "config", "user.name", "Autosport Tests")
-        (root / ".gitignore").write_text(
-            "*.ignored.py\n.env\n__pycache__/\n.pytest_cache/\n*.egg-info/\nbuild/\ndist/\n*.spec\n",
-            encoding="utf-8",
+        # Mirror the release checkout's byte-canonical text policy and write the
+        # fixture bytes explicitly so Windows newline translation cannot make
+        # the fixture itself violate the raw worktree-vs-blob invariant.
+        (root / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+        (root / ".gitignore").write_bytes(
+            b"*.ignored.py\n.env\n__pycache__/\n.pytest_cache/\n*.egg-info/\nbuild/\ndist/\n*.spec\n"
         )
-        (root / "tracked.py").write_text("VALUE = 1\n", encoding="utf-8")
-        (root / "WINDOWS_START_HERE.txt").write_text("start\n", encoding="utf-8")
-        self._run_git(root, "add", ".gitignore", "tracked.py", "WINDOWS_START_HERE.txt")
+        (root / "tracked.py").write_bytes(b"VALUE = 1\n")
+        (root / "WINDOWS_START_HERE.txt").write_bytes(b"start\n")
+        self._run_git(
+            root,
+            "add",
+            ".gitattributes",
+            ".gitignore",
+            "tracked.py",
+            "WINDOWS_START_HERE.txt",
+        )
         self._run_git(root, "commit", "-m", "fixture")
         return self._run_git(root, "rev-parse", "HEAD")
 

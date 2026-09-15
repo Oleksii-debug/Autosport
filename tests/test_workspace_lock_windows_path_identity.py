@@ -293,3 +293,51 @@ def test_lock_rejects_same_metadata_replacement_at_final_handle_boundary(
     assert lock._handle is None
     assert lock_path.read_bytes() == b"\0"
     assert replacement.read_bytes() == b"\0"
+
+
+def test_lock_allows_same_file_metadata_change_during_identity_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutable sentinel metadata on the same inode is not pathname replacement."""
+
+    lock_path = tmp_path / WorkspaceEconomicLock.FILE_NAME
+    lock_path.write_bytes(b"\0")
+    real_stat = os.stat
+    real_sameopenfile = os.path.sameopenfile
+    state = {"sameopenfile_calls": 0, "metadata_change_visible": False}
+
+    def stat_with_same_file_metadata_change(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if (
+            state["metadata_change_visible"]
+            and not isinstance(path, int)
+            and Path(path) == lock_path
+            and kwargs.get("follow_symlinks", True) is False
+        ):
+            return _stat_with_changed_path_metadata(result)
+        return result
+
+    def sameopenfile_then_expose_metadata_change(first: int, second: int) -> bool:
+        result = real_sameopenfile(first, second)
+        state["sameopenfile_calls"] += 1
+        if state["sameopenfile_calls"] == 3:
+            # The third identity proof is the first proof in the post-lock checkpoint.
+            # Model another cooperating first opener changing sentinel metadata on the
+            # same inode before the following pathname stat. Descriptor identity remains
+            # exact, so acquisition must not misclassify this as replacement.
+            state["metadata_change_visible"] = True
+        return result
+
+    monkeypatch.setattr(workspace_lock.os, "stat", stat_with_same_file_metadata_change)
+    monkeypatch.setattr(
+        workspace_lock.os.path,
+        "sameopenfile",
+        sameopenfile_then_expose_metadata_change,
+    )
+
+    with WorkspaceEconomicLock(tmp_path):
+        pass
+
+    assert state["sameopenfile_calls"] == 4
+    assert lock_path.read_bytes() == b"\0"

@@ -156,22 +156,15 @@ def _file_identity(value: os.stat_result) -> tuple[int, int, int, int]:
     )
 
 
-def _capture_verified_executable(
+def _capture_verified_file(
     source: Path,
     expected_sha256: str,
     *,
     snapshot_dir: Path,
     snapshot_name: str,
+    handoff_kind: str,
 ) -> Path:
-    """Capture a verified executable into a process-private package snapshot.
-
-    The outer PowerShell verifier proves the executable immediately before this
-    process starts. This function carries that proof across the subprocess boundary:
-    it hashes the single opened source handle, checks that the path still names that
-    same regular file before and after the copy, and only then publishes a private
-    snapshot for the release builders. The live handoff path is never consumed by a
-    builder after this function returns.
-    """
+    """Capture one hash-bound regular file into a process-private package snapshot."""
 
     expected = _require_sha256(expected_sha256, field=f"{snapshot_name}_sha256")
     source = source.absolute()
@@ -182,18 +175,22 @@ def _capture_verified_executable(
     try:
         before_path = source.lstat()
     except OSError as exc:
-        raise ValueError(f"{snapshot_name} handoff is not readable: {source}") from exc
+        raise ValueError(f"{snapshot_name} {handoff_kind} handoff is not readable: {source}") from exc
     if stat.S_ISLNK(before_path.st_mode) or not stat.S_ISREG(before_path.st_mode):
-        raise ValueError(f"{snapshot_name} handoff must be a regular non-symlink file")
+        raise ValueError(
+            f"{snapshot_name} {handoff_kind} handoff must be a regular non-symlink file"
+        )
 
     digest = hashlib.sha256()
     try:
         with source.open("rb") as source_handle:
             opened = os.fstat(source_handle.fileno())
             if not stat.S_ISREG(opened.st_mode):
-                raise ValueError(f"{snapshot_name} opened handoff is not a regular file")
+                raise ValueError(
+                    f"{snapshot_name} opened {handoff_kind} handoff is not a regular file"
+                )
             if _file_identity(opened) != _file_identity(before_path):
-                raise ValueError(f"{snapshot_name} handoff changed before capture")
+                raise ValueError(f"{snapshot_name} {handoff_kind} handoff changed before capture")
 
             with tempfile.NamedTemporaryFile(
                 mode="wb",
@@ -214,21 +211,24 @@ def _capture_verified_executable(
 
             after_handle = os.fstat(source_handle.fileno())
             if _file_identity(after_handle) != _file_identity(opened):
-                raise ValueError(f"{snapshot_name} handoff changed during capture")
+                raise ValueError(f"{snapshot_name} {handoff_kind} handoff changed during capture")
 
         try:
             after_path = source.lstat()
         except OSError as exc:
-            raise ValueError(f"{snapshot_name} handoff disappeared during capture") from exc
+            raise ValueError(
+                f"{snapshot_name} {handoff_kind} handoff disappeared during capture"
+            ) from exc
         if stat.S_ISLNK(after_path.st_mode) or not stat.S_ISREG(after_path.st_mode):
-            raise ValueError(f"{snapshot_name} handoff was replaced during capture")
+            raise ValueError(f"{snapshot_name} {handoff_kind} handoff was replaced during capture")
         if _file_identity(after_path) != _file_identity(before_path):
-            raise ValueError(f"{snapshot_name} handoff was replaced during capture")
+            raise ValueError(f"{snapshot_name} {handoff_kind} handoff was replaced during capture")
 
         actual = digest.hexdigest()
         if actual != expected:
             raise ValueError(
-                f"{snapshot_name} handoff SHA-256 mismatch: expected {expected}, got {actual}"
+                f"{snapshot_name} {handoff_kind} handoff SHA-256 mismatch: "
+                f"expected {expected}, got {actual}"
             )
 
         os.replace(temporary_path, destination)
@@ -237,6 +237,38 @@ def _capture_verified_executable(
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def _capture_verified_executable(
+    source: Path,
+    expected_sha256: str,
+    *,
+    snapshot_dir: Path,
+    snapshot_name: str,
+) -> Path:
+    return _capture_verified_file(
+        source,
+        expected_sha256,
+        snapshot_dir=snapshot_dir,
+        snapshot_name=snapshot_name,
+        handoff_kind="executable",
+    )
+
+
+def _capture_verified_evidence(
+    source: Path,
+    expected_sha256: str,
+    *,
+    snapshot_dir: Path,
+    snapshot_name: str,
+) -> Path:
+    return _capture_verified_file(
+        source,
+        expected_sha256,
+        snapshot_dir=snapshot_dir,
+        snapshot_name=snapshot_name,
+        handoff_kind="evidence",
+    )
 
 
 def main() -> int:
@@ -248,9 +280,13 @@ def main() -> int:
     parser.add_argument("--start-file", type=Path, required=True)
     parser.add_argument("--example-dir", type=Path, required=True)
     parser.add_argument("--diagnostic", type=Path, required=True)
+    parser.add_argument("--diagnostic-sha256", required=True)
     parser.add_argument("--accessibility-audit", type=Path, required=True)
+    parser.add_argument("--accessibility-audit-sha256", required=True)
     parser.add_argument("--keyboard-audit", type=Path, required=True)
+    parser.add_argument("--keyboard-audit-sha256", required=True)
     parser.add_argument("--restart-recovery-audit", type=Path, required=True)
+    parser.add_argument("--restart-recovery-audit-sha256", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--verification-output", type=Path)
@@ -258,7 +294,7 @@ def main() -> int:
 
     _bind_source_sha_to_checkout(args.source_sha, repo_root=Path.cwd())
 
-    with tempfile.TemporaryDirectory(prefix="autosport-package-executables-") as snapshot_root:
+    with tempfile.TemporaryDirectory(prefix="autosport-package-inputs-") as snapshot_root:
         snapshot_dir = Path(snapshot_root)
         trusted_exe = _capture_verified_executable(
             args.exe,
@@ -272,15 +308,39 @@ def main() -> int:
             snapshot_dir=snapshot_dir,
             snapshot_name="Autosport-Data.exe",
         )
+        trusted_diagnostic = _capture_verified_evidence(
+            args.diagnostic,
+            args.diagnostic_sha256,
+            snapshot_dir=snapshot_dir,
+            snapshot_name="packaged-diagnostic.json",
+        )
+        trusted_accessibility = _capture_verified_evidence(
+            args.accessibility_audit,
+            args.accessibility_audit_sha256,
+            snapshot_dir=snapshot_dir,
+            snapshot_name="accessibility-audit.json",
+        )
+        trusted_keyboard = _capture_verified_evidence(
+            args.keyboard_audit,
+            args.keyboard_audit_sha256,
+            snapshot_dir=snapshot_dir,
+            snapshot_name="keyboard-audit.json",
+        )
+        trusted_restart_recovery = _capture_verified_evidence(
+            args.restart_recovery_audit,
+            args.restart_recovery_audit_sha256,
+            snapshot_dir=snapshot_dir,
+            snapshot_name="restart-recovery-audit.json",
+        )
 
         output, _base_digest = build_windows_package(
             trusted_exe,
             args.start_file,
             args.example_dir,
-            args.diagnostic,
-            args.accessibility_audit,
-            args.keyboard_audit,
-            args.restart_recovery_audit,
+            trusted_diagnostic,
+            trusted_accessibility,
+            trusted_keyboard,
+            trusted_restart_recovery,
             args.output,
             args.source_sha,
         )

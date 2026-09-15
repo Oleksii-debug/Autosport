@@ -5,12 +5,14 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
 
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_COPY_CHUNK_SIZE = 1024 * 1024
 
 
 def _require_git_commit_sha(value: object, *, field: str) -> str:
@@ -369,26 +371,73 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _file_identity(value: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+    )
+
+
 def bind_release_artifact(source: Path, destination: Path) -> str:
-    if source.is_symlink() or not source.is_file():
-        raise ValueError(f"release artifact source must be a regular file: {source}")
-    data = source.read_bytes()
-    digest = _sha256_bytes(data)
+    source = source.absolute()
+    destination = destination.absolute()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
+
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, destination)
-    except BaseException:
+        before_path = source.lstat()
+    except OSError as exc:
+        raise ValueError(f"release artifact source is not readable: {source}") from exc
+    if stat.S_ISLNK(before_path.st_mode) or not stat.S_ISREG(before_path.st_mode):
+        raise ValueError(f"release artifact source must be a regular non-symlink file: {source}")
+
+    digest = hashlib.sha256()
+    temporary_path: Path | None = None
+    try:
+        with source.open("rb") as source_handle:
+            opened = os.fstat(source_handle.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise ValueError(f"release artifact opened source is not a regular file: {source}")
+            if _file_identity(opened) != _file_identity(before_path):
+                raise ValueError(f"release artifact source changed before capture: {source}")
+
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                dir=destination.parent,
+                delete=False,
+            ) as destination_handle:
+                temporary_path = Path(destination_handle.name)
+                while True:
+                    chunk = source_handle.read(_COPY_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    destination_handle.write(chunk)
+                destination_handle.flush()
+                os.fsync(destination_handle.fileno())
+
+            after_handle = os.fstat(source_handle.fileno())
+            if _file_identity(after_handle) != _file_identity(opened):
+                raise ValueError(f"release artifact source changed during capture: {source}")
+
         try:
-            os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
-        raise
-    return digest
+            after_path = source.lstat()
+        except OSError as exc:
+            raise ValueError(f"release artifact source disappeared during capture: {source}") from exc
+        if stat.S_ISLNK(after_path.st_mode) or not stat.S_ISREG(after_path.st_mode):
+            raise ValueError(f"release artifact source was replaced during capture: {source}")
+        if _file_identity(after_path) != _file_identity(before_path):
+            raise ValueError(f"release artifact source was replaced during capture: {source}")
+
+        os.replace(temporary_path, destination)
+        temporary_path = None
+        return digest.hexdigest()
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def require_artifact_sha256(path: Path, expected_sha256: str) -> None:

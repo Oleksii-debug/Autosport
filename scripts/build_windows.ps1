@@ -75,6 +75,65 @@ namespace = {
 }
 exec(compile(data, str(path), "exec"), namespace)
 '@
+$trustedPackageLauncher = @'
+import hashlib
+import json
+import pathlib
+import sys
+import types
+
+root = pathlib.Path(sys.argv[1])
+manifest = json.loads(sys.argv[2])
+required = {
+    "scripts/package_windows.py",
+    "src/autosport/release_package.py",
+    "src/autosport/data_tool_package.py",
+}
+if set(manifest) != required:
+    raise SystemExit("trusted package source manifest membership mismatch")
+
+payloads = {}
+for relative in sorted(required):
+    path = root.joinpath(*relative.split("/"))
+    data = path.read_bytes()
+    actual = hashlib.sha256(data).hexdigest()
+    expected = manifest[relative]
+    if actual != expected:
+        raise SystemExit(
+            f"trusted package source SHA-256 mismatch for {relative}: "
+            f"expected {expected}, got {actual}"
+        )
+    payloads[relative] = (path, data)
+
+package = types.ModuleType("autosport")
+package.__package__ = "autosport"
+package.__path__ = []
+package.__file__ = "<trusted-package-source>"
+sys.modules["autosport"] = package
+
+def load_module(name, relative):
+    path, data = payloads[relative]
+    module = types.ModuleType(name)
+    module.__file__ = str(path)
+    module.__package__ = "autosport"
+    module.__cached__ = None
+    sys.modules[name] = module
+    exec(compile(data, str(path), "exec"), module.__dict__)
+    setattr(package, name.rsplit(".", 1)[1], module)
+    return module
+
+load_module("autosport.release_package", "src/autosport/release_package.py")
+load_module("autosport.data_tool_package", "src/autosport/data_tool_package.py")
+script_path, script_data = payloads["scripts/package_windows.py"]
+sys.argv = [str(script_path), *sys.argv[3:]]
+namespace = {
+    "__name__": "__main__",
+    "__file__": str(script_path),
+    "__package__": None,
+    "__cached__": None,
+}
+exec(compile(script_data, str(script_path), "exec"), namespace)
+'@
 
 function python {
   $pythonArguments = @($args)
@@ -89,6 +148,19 @@ function python {
       $remaining = @($pythonArguments[1..($pythonArguments.Count - 1)])
     }
     & $script:pythonExecutable -I -S -c $script:trustedVerifierLauncher $script:sourceVerifier $script:sourceVerifierSha256 @remaining
+    return
+  }
+  if (
+    $null -ne $script:trustedPackageRoot -and
+    $null -ne $script:trustedPackageManifestJson -and
+    $pythonArguments.Count -gt 0 -and
+    [string]$pythonArguments[0] -eq 'scripts/package_windows.py'
+  ) {
+    $remaining = @()
+    if ($pythonArguments.Count -gt 1) {
+      $remaining = @($pythonArguments[1..($pythonArguments.Count - 1)])
+    }
+    & $script:pythonExecutable -I -S -c $script:trustedPackageLauncher $script:trustedPackageRoot $script:trustedPackageManifestJson @remaining
     return
   }
   & $script:pythonExecutable @pythonArguments
@@ -344,6 +416,26 @@ python $sourceVerifier --verify-artifact $boundKeyboardAudit --expected-sha256 $
 if ($LASTEXITCODE -ne 0) { throw "Bound keyboard evidence verification exited $LASTEXITCODE" }
 python $sourceVerifier --verify-artifact $boundRestartRecoveryAudit --expected-sha256 $restartRecoverySha256
 if ($LASTEXITCODE -ne 0) { throw "Bound restart/recovery evidence verification exited $LASTEXITCODE" }
+
+# Execute the final package consumer only from exact source_sha bytes. The live
+# checkout paths can still mutate after the source gate, but those bytes are never
+# imported or executed by the package assembly process.
+$trustedPackageArchive = Join-Path $boundArtifactRoot 'trusted-package-source.zip'
+$trustedPackageRoot = Join-Path $boundArtifactRoot 'trusted-package-source'
+& $gitExecutable archive --format=zip "--output=$trustedPackageArchive" $sourceSha -- scripts/package_windows.py src/autosport/release_package.py src/autosport/data_tool_package.py
+if ($LASTEXITCODE -ne 0) { throw "Exact package source archive exited $LASTEXITCODE" }
+if (Test-Path $trustedPackageRoot) { Remove-Item -LiteralPath $trustedPackageRoot -Recurse -Force }
+New-Item -ItemType Directory -Path $trustedPackageRoot | Out-Null
+Expand-Archive -LiteralPath $trustedPackageArchive -DestinationPath $trustedPackageRoot -Force
+$trustedPackageManifest = [ordered]@{}
+foreach ($relativePath in @('scripts/package_windows.py', 'src/autosport/release_package.py', 'src/autosport/data_tool_package.py')) {
+  $snapshotPath = Join-Path $trustedPackageRoot ($relativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+  if (-not (Test-Path -LiteralPath $snapshotPath -PathType Leaf)) { throw "Trusted package source missing $relativePath" }
+  $trustedPackageManifest[$relativePath] = (Get-FileHash -LiteralPath $snapshotPath -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+$script:trustedPackageRoot = $trustedPackageRoot
+$script:trustedPackageManifestJson = ($trustedPackageManifest | ConvertTo-Json -Compress)
+
 python scripts/package_windows.py `
   --exe $boundAutosportExe `
   --exe-sha256 $autosportExeSha256 `

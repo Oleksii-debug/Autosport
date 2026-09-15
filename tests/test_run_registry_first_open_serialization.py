@@ -260,14 +260,14 @@ def test_zero_byte_ledger_must_be_readable_to_count_as_pristine(
 ) -> None:
     ledger_path = tmp_path / "decisions.jsonl"
     ledger_path.write_bytes(b"")
-    real_open = Path.open
+    real_open = run_registry._open_read_only_descriptor
 
-    def fail_ledger_open(path: Path, *args, **kwargs):
+    def fail_ledger_open(path: Path) -> int:
         if path == ledger_path:
             raise PermissionError("simulated unreadable zero-byte ledger")
-        return real_open(path, *args, **kwargs)
+        return real_open(path)
 
-    monkeypatch.setattr(Path, "open", fail_ledger_open)
+    monkeypatch.setattr(run_registry, "_open_read_only_descriptor", fail_ledger_open)
 
     assert has_durable_workspace_history(tmp_path) is True
 

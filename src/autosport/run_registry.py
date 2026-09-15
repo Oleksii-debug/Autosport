@@ -8,7 +8,12 @@ import time
 from pathlib import Path
 
 from .integrity import atomic_write_json, sha256_file
-from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    _open_read_only_descriptor,
+    _stable_stat_metadata,
+)
 
 
 _HEX_DIGITS = frozenset("0123456789abcdef")
@@ -51,7 +56,6 @@ _FINAL_ONLY_FIELDS = frozenset(
 )
 _FIRST_OPEN_RETRY_SECONDS = 0.01
 _FIRST_OPEN_MAX_WAIT_SECONDS = 5.0
-_ACTIVE_WRITER_ERROR = "another Autosport process owns the workspace economic-writer lock"
 
 
 def _is_canonical_sha256(value: object) -> bool:
@@ -97,6 +101,49 @@ def _lstat_or_none(path: Path) -> os.stat_result | None:
         return os.stat(path, follow_symlinks=False)
     except FileNotFoundError:
         return None
+
+
+def _path_matches_open_descriptor(
+    path: Path,
+    descriptor: int,
+    expected_path_stat: os.stat_result,
+) -> bool:
+    """Prove the current no-follow pathname still names the already-open descriptor."""
+
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or current.st_nlink != 1
+        or not _stable_stat_metadata(expected_path_stat, current)
+    ):
+        return False
+
+    try:
+        verification_descriptor = _open_read_only_descriptor(path)
+    except OSError:
+        return False
+    matched = False
+    try:
+        try:
+            same_file = os.path.sameopenfile(descriptor, verification_descriptor)
+            current_after_open = os.stat(path, follow_symlinks=False)
+        except OSError:
+            return False
+        matched = (
+            same_file
+            and stat.S_ISREG(current_after_open.st_mode)
+            and current_after_open.st_nlink == 1
+            and _stable_stat_metadata(expected_path_stat, current_after_open)
+        )
+    finally:
+        try:
+            os.close(verification_descriptor)
+        except OSError:
+            return False
+    return matched
 
 
 def has_durable_workspace_history(workspace: str | Path) -> bool:
@@ -185,15 +232,75 @@ class RunRegistry:
             registry._initialize_missing_registry()
         return registry
 
-    def _read_existing(self) -> dict:
-        """Read only a canonical regular registry path without following aliases."""
+    def _read_existing_bytes(self) -> bytes:
+        """Read bytes only from the exact stable regular object named by the registry path."""
 
-        path_stat = _lstat_or_none(self.path)
-        if path_stat is None:
+        path_before = _lstat_or_none(self.path)
+        if path_before is None:
             raise FileNotFoundError(self.path)
-        if not stat.S_ISREG(path_stat.st_mode):
-            raise ValueError("run registry path is not a regular non-symlink file")
-        return self._read()
+        if not stat.S_ISREG(path_before.st_mode) or path_before.st_nlink != 1:
+            raise ValueError("run registry path is not a regular non-aliased file")
+
+        try:
+            descriptor = _open_read_only_descriptor(self.path)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise ValueError("run registry path is unreadable") from exc
+
+        primary_error: BaseException | None = None
+        try:
+            try:
+                opened_before = os.fstat(descriptor)
+            except OSError as exc:
+                raise ValueError("run registry path changed while validating") from exc
+            if (
+                not stat.S_ISREG(opened_before.st_mode)
+                or opened_before.st_nlink != 1
+                or not _path_matches_open_descriptor(self.path, descriptor, path_before)
+            ):
+                raise ValueError("run registry path changed while validating")
+
+            chunks: list[bytes] = []
+            try:
+                while True:
+                    chunk = os.read(descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                opened_after = os.fstat(descriptor)
+            except OSError as exc:
+                raise ValueError("run registry path changed or became unreadable while validating") from exc
+
+            if (
+                not stat.S_ISREG(opened_after.st_mode)
+                or opened_after.st_nlink != 1
+                or not _stable_stat_metadata(opened_before, opened_after)
+                or not _path_matches_open_descriptor(self.path, descriptor, path_before)
+            ):
+                raise ValueError("run registry path changed while validating")
+            return b"".join(chunks)
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError as close_error:
+                if primary_error is None:
+                    raise ValueError("run registry descriptor cleanup failed") from close_error
+                try:
+                    primary_error.add_note(
+                        "run registry descriptor cleanup also failed: "
+                        f"{type(close_error).__name__}: {close_error}"
+                    )
+                except BaseException:
+                    pass
+
+    def _read_existing(self) -> dict:
+        """Read and validate only bytes bound to the current canonical registry object."""
+
+        return self._parse_registry_payload(self._read_existing_bytes())
 
     def _initialize_missing_registry(self) -> None:
         """Serialize first publication against every cooperating economic writer.
@@ -211,17 +318,15 @@ class RunRegistry:
             lock = WorkspaceEconomicLock(self.path.parent)
             try:
                 lock.acquire()
-            except WorkspaceEconomicLockError as contention:
-                # Only the exact OS-lock contention outcome permits winner re-read.
-                # Alias, identity, creation and cleanup failures are integrity defects,
-                # not evidence that another cooperating writer owns the lock.
-                if str(contention) != _ACTIVE_WRITER_ERROR:
-                    raise
+            except WorkspaceEconomicLockBusyError as contention:
+                # Only typed native advisory-lock contention permits winner re-read.
+                # Alias, identity, creation and backend failures remain fail-closed and
+                # propagate without being reclassified as another writer's ownership.
                 try:
                     self._read_existing()
                 except FileNotFoundError:
                     if time.monotonic() >= deadline:
-                        raise WorkspaceEconomicLockError(
+                        raise WorkspaceEconomicLockBusyError(
                             "run registry first-open could not serialize with the active economic writer"
                         ) from contention
                     time.sleep(_FIRST_OPEN_RETRY_SECONDS)
@@ -635,10 +740,10 @@ class RunRegistry:
                 if "paper_book_sha256" not in fields:
                     raise ValueError("reconciled run registry entry lacks PaperBook hash evidence")
 
-    def _read(self) -> dict:
+    def _parse_registry_payload(self, payload: bytes) -> dict:
         try:
             raw = json.loads(
-                self.path.read_text(encoding="utf-8"),
+                payload.decode("utf-8"),
                 object_pairs_hook=_reject_duplicate_json_keys,
                 parse_constant=_reject_nonfinite_json_constant,
             )
@@ -663,6 +768,9 @@ class RunRegistry:
                 raise ValueError("run registry contains duplicate run_id evidence")
             seen_run_ids.add(run_id)
         return raw
+
+    def _read(self) -> dict:
+        return self._read_existing()
 
     def _write(self, raw: dict) -> None:
         atomic_write_json(self.path, raw)

@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
+import autosport.run_registry as run_registry
 from autosport.run_registry import RunRegistry, has_durable_workspace_history
-from autosport.workspace_lock import WorkspaceEconomicLock
+from autosport.workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 
 
 _MARKET_SHA = "a" * 64
@@ -179,6 +180,37 @@ def test_read_constructor_missing_registry_is_non_mutating(tmp_path: Path) -> No
     assert not registry_path.exists()
 
 
+def test_existing_registry_read_rejects_redirected_primary_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_path = tmp_path / "run_registry.json"
+    RunRegistry.initialize_pristine(registry_path)
+    canonical_before = registry_path.read_bytes()
+
+    redirected_path = tmp_path / "redirected-registry.json"
+    redirected_path.write_text(
+        json.dumps({"schema_version": 1, "runs": {}}) + "\n",
+        encoding="utf-8",
+    )
+    real_open = run_registry._open_read_only_descriptor
+    open_calls = 0
+
+    def redirect_first_open(path: Path) -> int:
+        nonlocal open_calls
+        open_calls += 1
+        if open_calls == 1:
+            return real_open(redirected_path)
+        return real_open(path)
+
+    monkeypatch.setattr(run_registry, "_open_read_only_descriptor", redirect_first_open)
+
+    with pytest.raises(ValueError, match="changed while validating"):
+        RunRegistry(registry_path)
+
+    assert registry_path.read_bytes() == canonical_before
+
+
 def test_durable_workspace_history_predicate_covers_release_evidence(tmp_path: Path) -> None:
     pristine = tmp_path / "pristine"
     pristine.mkdir()
@@ -220,6 +252,47 @@ def test_durable_workspace_history_predicate_covers_release_evidence(tmp_path: P
         encoding="utf-8",
     )
     assert has_durable_workspace_history(summary) is True
+
+
+def test_zero_byte_ledger_must_be_readable_to_count_as_pristine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger_path = tmp_path / "decisions.jsonl"
+    ledger_path.write_bytes(b"")
+    real_open = Path.open
+
+    def fail_ledger_open(path: Path, *args, **kwargs):
+        if path == ledger_path:
+            raise PermissionError("simulated unreadable zero-byte ledger")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_ledger_open)
+
+    assert has_durable_workspace_history(tmp_path) is True
+
+
+def test_generic_lock_failure_is_not_retried_or_reclassified_as_writer_contention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_path = tmp_path / "run_registry.json"
+    acquire_calls = 0
+
+    def fail_integrity(_lock: WorkspaceEconomicLock) -> None:
+        nonlocal acquire_calls
+        acquire_calls += 1
+        raise WorkspaceEconomicLockError("simulated lock identity failure")
+
+    monkeypatch.setattr(run_registry.WorkspaceEconomicLock, "acquire", fail_integrity)
+
+    with pytest.raises(WorkspaceEconomicLockError, match="simulated lock identity failure"):
+        RunRegistry.initialize_pristine(registry_path)
+
+    assert acquire_calls == 1
+    assert not registry_path.exists()
+    assert not (tmp_path / "run_registry.json.tmp").exists()
+    assert list(tmp_path.glob(".run_registry.json.*.tmp")) == []
 
 
 def test_missing_registry_with_surviving_history_fails_closed_without_publication(

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
 from .dataset import ReplayDataset
+from .decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
 from .forecasting import ForecastRecord, parse_iso_timestamp
 
 
@@ -16,6 +18,10 @@ class ForecastOriginBinding:
 
     decision_ledger_path: Path
     run_summary_paths: tuple[Path, ...]
+
+
+class _RunSummaryJsonIntegrityError(ValueError):
+    """Raised when durable forecast-origin summary JSON is non-canonical."""
 
 
 def load_forecast_origin_binding(raw: Any, bundle_path: str | Path) -> ForecastOriginBinding:
@@ -69,7 +75,9 @@ def verify_forecast_origin_binding(
     if len(run_ids) != len(set(run_ids)):
         raise ValueError("forecast origin evidence contains duplicate run_id")
     expected_prefix_hashes = {item["decision_ledger_sha256"] for item in summaries}
-    prefixes = _validated_ledger_prefixes(binding.decision_ledger_path, expected_prefix_hashes)
+    prefixes, ledger_sha256 = _validated_ledger_prefixes(
+        binding.decision_ledger_path, expected_prefix_hashes
+    )
     missing_prefixes = sorted(expected_prefix_hashes.difference(prefixes))
     if missing_prefixes:
         raise ValueError("canonical decision ledger does not contain a run-summary committed prefix")
@@ -136,7 +144,7 @@ def verify_forecast_origin_binding(
 
     return {
         "status": "CANONICAL_BINDING_VERIFIED",
-        "decision_ledger_sha256": hashlib.sha256(binding.decision_ledger_path.read_bytes()).hexdigest(),
+        "decision_ledger_sha256": ledger_sha256,
         "run_ids": sorted({run_id for matched_runs in matched.values() for run_id in matched_runs}),
         "run_summary_count": len(summaries),
         "evaluated_forecast_count": len(evaluated_forecast_ids),
@@ -166,21 +174,102 @@ def _resolve_relative_file(parent: Path, value: Any, label: str) -> Path:
     return candidate
 
 
-def _load_summary(path: Path, dataset: ReplayDataset) -> dict[str, Any]:
+def _json_object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise _RunSummaryJsonIntegrityError(
+                f"forecast origin run summary contains duplicate JSON key {key!r}"
+            )
+        payload[key] = value
+    return payload
+
+
+def _reject_non_standard_json_constant(value: str) -> None:
+    raise _RunSummaryJsonIntegrityError(
+        f"forecast origin run summary contains non-standard JSON constant {value!r}"
+    )
+
+
+def _validate_summary_json_domain(value: Any, *, path: str = "$") -> None:
+    """Reject JSON values that cannot have one canonical UTF-8 meaning."""
+
+    if value is None or type(value) in {bool, int}:
+        return
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise _RunSummaryJsonIntegrityError(
+                f"forecast origin run summary contains non-UTF-8 text at {path}"
+            ) from exc
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise _RunSummaryJsonIntegrityError(
+                f"forecast origin run summary contains non-finite number at {path}"
+            )
+        return
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            _validate_summary_json_domain(child, path=f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, child in value.items():
+            try:
+                key.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise _RunSummaryJsonIntegrityError(
+                    f"forecast origin run summary contains non-UTF-8 object key at {path}"
+                ) from exc
+            _validate_summary_json_domain(child, path=f"{path}.{key}")
+        return
+    raise _RunSummaryJsonIntegrityError(
+        f"forecast origin run summary contains unsupported JSON value at {path}"
+    )
+
+
+def _load_strict_summary_json(path: Path) -> dict[str, Any]:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"forecast origin run summary is unreadable or invalid JSON: {path}") from exc
-    if not isinstance(raw, dict) or raw.get("schema_version") != 2:
+        text = path.read_bytes().decode("utf-8")
+        raw = json.loads(
+            text,
+            object_pairs_hook=_json_object_without_duplicate_keys,
+            parse_constant=_reject_non_standard_json_constant,
+        )
+        if not isinstance(raw, dict):
+            raise _RunSummaryJsonIntegrityError(
+                "forecast origin run summary root must be a JSON object"
+            )
+        _validate_summary_json_domain(raw)
+        return raw
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        _RunSummaryJsonIntegrityError,
+        RecursionError,
+    ) as exc:
+        raise ValueError(
+            f"forecast origin run summary is unreadable or invalid canonical UTF-8 JSON: {path}"
+        ) from exc
+
+
+def _load_summary(path: Path, dataset: ReplayDataset) -> dict[str, Any]:
+    raw = _load_strict_summary_json(path)
+    schema_version = raw.get("schema_version")
+    if type(schema_version) is not int or schema_version != 2:
         raise ValueError("forecast origin run summary must use schema_version 2")
-    if raw.get("transaction_schema_version") != 1:
+    transaction_schema_version = raw.get("transaction_schema_version")
+    if type(transaction_schema_version) is not int or transaction_schema_version != 1:
         raise ValueError("forecast origin run summary lacks canonical transaction precommit evidence")
     run_id = _required_text(raw, "run_id", "forecast origin run summary")
     if raw.get("transaction_run_id") != run_id:
         raise ValueError("forecast origin run summary transaction_run_id mismatch")
     if raw.get("real_money_execution") is not False:
         raise ValueError("forecast origin run summary violates REAL_MONEY_EXECUTION=false")
-    if raw.get("dataset_schema_version") != 2:
+    dataset_schema_version = raw.get("dataset_schema_version")
+    if type(dataset_schema_version) is not int or dataset_schema_version != 2:
         raise ValueError("forecast origin run summary is not bound to governed dataset schema v2")
     if raw.get("historical_import_identity") != dataset.import_identity:
         raise ValueError("forecast origin run summary historical import identity mismatch")
@@ -197,28 +286,33 @@ def _load_summary(path: Path, dataset: ReplayDataset) -> dict[str, Any]:
     }
 
 
-def _validated_ledger_prefixes(path: Path, expected_hashes: set[str]) -> dict[str, list[dict[str, Any]]]:
+def _validated_ledger_prefixes(
+    path: Path, expected_hashes: set[str]
+) -> tuple[dict[str, list[dict[str, Any]]], str]:
+    try:
+        snapshot = JsonlDecisionLedger(path).verified_snapshot()
+    except DecisionLedgerIntegrityError as exc:
+        raise ValueError(
+            "canonical decision ledger failed semantic integrity validation"
+        ) from exc
+
     hasher = hashlib.sha256()
     records: list[dict[str, Any]] = []
     found: dict[str, list[dict[str, Any]]] = {}
-    try:
-        with path.open("rb") as handle:
-            for raw_line in handle:
-                hasher.update(raw_line)
-                if not raw_line.endswith(b"\n"):
-                    raise ValueError("canonical decision ledger contains a non-terminated line")
-                try:
-                    envelope = json.loads(raw_line.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise ValueError("canonical decision ledger contains invalid UTF-8 JSON") from exc
-                _validate_envelope(envelope)
-                records.append(envelope)
-                digest = hasher.hexdigest()
-                if digest in expected_hashes:
-                    found[digest] = list(records)
-    except OSError as exc:
-        raise ValueError("canonical decision ledger is unreadable") from exc
-    return found
+    for raw_line in snapshot.payload.splitlines(keepends=True):
+        hasher.update(raw_line)
+        if not raw_line.endswith(b"\n"):
+            raise ValueError("canonical decision ledger contains a non-terminated line")
+        try:
+            envelope = json.loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("canonical decision ledger contains invalid UTF-8 JSON") from exc
+        _validate_envelope(envelope)
+        records.append(envelope)
+        digest = hasher.hexdigest()
+        if digest in expected_hashes:
+            found[digest] = list(records)
+    return found, snapshot.sha256
 
 
 def _validate_envelope(envelope: Any) -> None:
@@ -252,16 +346,21 @@ def _verify_forecast_audit(audit: dict[str, Any], forecast: ForecastRecord) -> N
 
 def _required_text(raw: dict[str, Any], key: str, context: str) -> str:
     value = raw.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{context}.{key} must be non-empty text")
-    return value.strip()
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"{context}.{key} must be canonical non-empty text")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{context}.{key} must be canonical UTF-8 text") from exc
+    return value
 
 
 def _required_sha256(raw: dict[str, Any], key: str, context: str) -> str:
     value = raw.get(key)
-    if not isinstance(value, str) or len(value) != 64:
-        raise ValueError(f"{context}.{key} must be a SHA-256 hex digest")
-    lowered = value.lower()
-    if any(char not in "0123456789abcdef" for char in lowered):
-        raise ValueError(f"{context}.{key} must be a SHA-256 hex digest")
-    return lowered
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(char not in "0123456789abcdef" for char in value)
+    ):
+        raise ValueError(f"{context}.{key} must be a canonical lowercase SHA-256 hex digest")
+    return value

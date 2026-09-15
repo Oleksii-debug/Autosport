@@ -146,6 +146,24 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "virtual bankroll state is invalid")
 
+    def test_canonical_open_exposure_beyond_risk_precision_reaches_configured_limits(self) -> None:
+        book = PaperBook("10")
+        book.open_ticket([self._leg()], Decimal("9." + "9" * 27))
+        book.open_ticket([self._leg()], Decimal("1E-28"))
+        # Current PaperBook semantics accept both sequential debits exactly even though the
+        # independently recomputed open-stake sum requires 29 significant digits.
+        PaperBook._validate_loaded_state(book)
+        policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("1"),
+            max_committed_fraction=Decimal("1"),
+            minimum_cash_reserve_fraction=Decimal("0"),
+        )
+
+        decision = policy.evaluate(book, Decimal("1E-28"))
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed")
+
     def test_inexact_risk_limit_rounding_cannot_relax_ticket_cap(self) -> None:
         book = PaperBook("7")
         policy = PaperRiskPolicy(

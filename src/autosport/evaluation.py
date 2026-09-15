@@ -93,9 +93,11 @@ def _exact_decimal_sum(values: tuple[Decimal, ...]) -> Decimal:
     if total == 0:
         return Decimal("0")
 
-    # Remove representation-only trailing zeroes without applying Decimal context.
+    # Remove only fractional representation zeroes. Do not promote an integral
+    # result such as -10 into scientific notation (-1E+1): durable evaluation
+    # evidence historically serializes plain integral Decimal values.
     canonical_exponent = minimum_exponent
-    while total % 10 == 0:
+    while canonical_exponent < 0 and total % 10 == 0:
         total //= 10
         canonical_exponent += 1
 

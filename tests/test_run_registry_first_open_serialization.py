@@ -56,7 +56,7 @@ def _first_open_writer_worker(
     try:
         if not missing_observed.wait(20):
             raise RuntimeError("timed out waiting for stale missing observation")
-        registry = RunRegistry(path)
+        registry = RunRegistry.initialize_pristine(path)
         with WorkspaceEconomicLock(root):
             continue_after_writer_lock.set()
             if not reread_done.wait(20):
@@ -78,7 +78,7 @@ def _simultaneous_clean_first_open_worker(workspace: str, start, results) -> Non
     try:
         if not start.wait(20):
             raise RuntimeError("timed out waiting for simultaneous first-open start")
-        registry = RunRegistry(Path(workspace) / "run_registry.json")
+        registry = RunRegistry.initialize_pristine(Path(workspace) / "run_registry.json")
         results.put(("ok", registry.strategy_ids()))
     except BaseException as exc:
         results.put(("error", type(exc).__name__, str(exc)))
@@ -168,6 +168,17 @@ def test_two_simultaneous_clean_first_opens_are_idempotent(tmp_path: Path) -> No
     assert list(tmp_path.glob(".run_registry.json.*.tmp")) == []
 
 
+def test_read_constructor_missing_registry_is_non_mutating(tmp_path: Path) -> None:
+    workspace = tmp_path / "missing-workspace"
+    registry_path = workspace / "run_registry.json"
+
+    with pytest.raises(ValueError, match="run registry is missing"):
+        RunRegistry(registry_path)
+
+    assert not workspace.exists()
+    assert not registry_path.exists()
+
+
 def test_durable_workspace_history_predicate_covers_release_evidence(tmp_path: Path) -> None:
     pristine = tmp_path / "pristine"
     pristine.mkdir()
@@ -216,7 +227,7 @@ def test_missing_registry_with_surviving_history_fails_closed_without_publicatio
 ) -> None:
     (tmp_path / "paper_book.json").write_text("{}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="missing while durable run history exists"):
-        RunRegistry(tmp_path / "run_registry.json")
+        RunRegistry.initialize_pristine(tmp_path / "run_registry.json")
     assert not (tmp_path / "run_registry.json").exists()
     assert not (tmp_path / "run_registry.json.tmp").exists()
     assert list(tmp_path.glob(".run_registry.json.*.tmp")) == []

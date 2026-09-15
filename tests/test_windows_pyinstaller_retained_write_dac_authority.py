@@ -3,7 +3,6 @@ from __future__ import annotations
 import ctypes
 import importlib.util
 import os
-import pathlib
 import shutil
 import subprocess
 import sys
@@ -15,6 +14,68 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 _SECURITY_AUTHORITY = _ROOT / "scripts" / "guarded_pyinstaller_security_authority.py"
+_PRODUCER_TEST_PATH = _ROOT / "tests" / "test_windows_pyinstaller_producer_handoff.py"
+_PRODUCER_SPEC = importlib.util.spec_from_file_location(
+    "_autosport_pyinstaller_producer_handoff_tests_retained_write_dac",
+    _PRODUCER_TEST_PATH,
+)
+assert _PRODUCER_SPEC is not None and _PRODUCER_SPEC.loader is not None
+_PRODUCER_TESTS = importlib.util.module_from_spec(_PRODUCER_SPEC)
+sys.modules[_PRODUCER_SPEC.name] = _PRODUCER_TESTS
+_PRODUCER_SPEC.loader.exec_module(_PRODUCER_TESTS)
+
+_REAL_WINDOWS_PYINSTALLER = (
+    os.name == "nt" and importlib.util.find_spec("PyInstaller") is not None
+)
+
+_CHILD_RETAINED_DIRECTORY_WRITE_DAC = r'''
+import ctypes
+import sys
+from ctypes import wintypes
+
+WRITE_DAC = 0x00040000
+FILE_SHARE_READ = 0x1
+FILE_SHARE_WRITE = 0x2
+FILE_SHARE_DELETE = 0x4
+OPEN_EXISTING = 3
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+create_file = kernel32.CreateFileW
+create_file.argtypes = (
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    wintypes.HANDLE,
+)
+create_file.restype = wintypes.HANDLE
+close_handle = kernel32.CloseHandle
+close_handle.argtypes = (wintypes.HANDLE,)
+close_handle.restype = wintypes.BOOL
+
+raw_handle = create_file(
+    sys.argv[1],
+    WRITE_DAC,
+    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    None,
+    OPEN_EXISTING,
+    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+    None,
+)
+value = raw_handle if isinstance(raw_handle, int) else ctypes.cast(raw_handle, ctypes.c_void_p).value
+if value in {None, INVALID_HANDLE_VALUE}:
+    raise SystemExit(f"PREOPEN_FAILED:{ctypes.get_last_error()}")
+print("READY", flush=True)
+try:
+    sys.stdin.buffer.read(1)
+finally:
+    close_handle(raw_handle)
+'''
 
 
 def _load_security_authority():
@@ -130,3 +191,59 @@ def test_preopened_write_dac_handle_survives_deny_but_is_detected(tmp_path: Path
         if competing is not None:
             close_handle(competing)
         close_handle(trusted)
+
+
+@pytest.mark.skipif(
+    not _REAL_WINDOWS_PYINSTALLER,
+    reason="real Windows PyInstaller retained-WRITE_DAC regression",
+)
+def test_production_namespace_fence_rejects_preopened_cross_process_write_dac(
+    tmp_path: Path,
+) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            _CHILD_RETAINED_DIRECTORY_WRITE_DAC,
+            str(dist),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdout is not None
+    assert child.stdin is not None
+    assert child.stderr is not None
+
+    try:
+        ready = child.stdout.readline().strip()
+        if ready != "READY":
+            stderr = child.stderr.read()
+            pytest.fail(f"retained-WRITE_DAC child did not become ready: {ready} {stderr}")
+        assert child.poll() is None
+
+        completed, _artifact, bound, digest = _PRODUCER_TESTS._run_real_pyinstaller_probe(
+            tmp_path
+        )
+
+        assert completed.returncode != 0
+        combined = completed.stdout + "\n" + completed.stderr
+        assert "trusted expected-snapshot parent security fence has" in combined
+        assert "pre-existing competing WRITE_DAC handle" in combined
+        assert not bound.exists()
+        assert not digest.exists()
+    finally:
+        try:
+            child.stdin.close()
+        except OSError:
+            pass
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.terminate()
+            child.wait(timeout=10)

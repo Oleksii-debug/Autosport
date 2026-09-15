@@ -7,6 +7,7 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal, DecimalException
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -69,6 +70,16 @@ def _reject_nonfinite_json(value: str) -> None:
     raise ValueError(f"non-finite JSON number: {value}")
 
 
+def _parse_exact_json_float(value: str) -> Decimal:
+    try:
+        parsed = Decimal(value)
+    except DecimalException as exc:
+        raise ValueError(f"invalid JSON number: {value}") from exc
+    if not parsed.is_finite():
+        raise ValueError(f"non-finite JSON number: {value}")
+    return parsed
+
+
 def _object_bytes(payload: bytes, *, context: str, path: Path) -> dict[str, Any]:
     try:
         text = payload.decode("utf-8")
@@ -79,6 +90,7 @@ def _object_bytes(payload: bytes, *, context: str, path: Path) -> dict[str, Any]
             text,
             object_pairs_hook=_strict_json_object,
             parse_constant=_reject_nonfinite_json,
+            parse_float=_parse_exact_json_float,
         )
     except json.JSONDecodeError as exc:
         raise ValueError(f"{context} is not readable valid JSON: {path}") from exc

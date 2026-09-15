@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 
+from autosport.calculation import CalculationEngine
 from autosport.calculation_service import CalculationService
 from autosport.domain import MarketEvent, MarketType
 
@@ -36,6 +38,28 @@ class CalculationServiceTests(unittest.TestCase):
             ingest_ts="2026-09-14T12:05:00+00:00",
             metadata={} if metadata is None else metadata,
         )
+
+    def test_rejects_noncanonical_engine_collaborators_before_calculation(self) -> None:
+        class SubstitutingEngine(CalculationEngine):
+            def implied_probability(self, decimal_odds: object) -> object:  # type: ignore[override]
+                raise AssertionError("subclass formula authority must never be invoked")
+
+        with self.assertRaisesRegex(ValueError, "engine must be an exact CalculationEngine"):
+            CalculationService(SubstitutingEngine())
+        with self.assertRaisesRegex(ValueError, "engine must be an exact CalculationEngine"):
+            CalculationService(object())  # type: ignore[arg-type]
+
+    def test_rejects_noncanonical_engine_result_before_evidence_publication(self) -> None:
+        event = self._event()
+        with patch.object(CalculationEngine, "implied_probability", return_value=object()):
+            with self.assertRaisesRegex(
+                ValueError,
+                "calculation result must be an exact CalculationResult",
+            ):
+                self.service.implied_probability_for_event(
+                    event,
+                    causal_cutoff_ts="2026-09-14T12:00:00Z",
+                )
 
     def test_quote_bound_calculations_delegate_to_canonical_engine(self) -> None:
         event = self._event()

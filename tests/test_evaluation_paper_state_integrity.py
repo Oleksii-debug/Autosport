@@ -79,6 +79,22 @@ class EvaluationPaperStateIntegrityTests(unittest.TestCase):
         self.assertEqual(summary.net_profit, Decimal("0"))
         self.assertEqual(summary.roi, Decimal("0"))
 
+    def test_pristine_29_digit_canonical_bankroll_preserves_zero_metrics(self) -> None:
+        bankroll = Decimal("12345678901234567890123456789")
+        book = PaperBook(bankroll)
+
+        summary = evaluate(book)
+
+        self.assertEqual(summary.initial_bankroll, bankroll)
+        self.assertEqual(summary.final_balance, bankroll)
+        self.assertEqual(summary.committed_stake, Decimal("0"))
+        self.assertEqual(summary.settled_stake, Decimal("0"))
+        self.assertEqual(summary.net_profit, Decimal("0"))
+        self.assertEqual(summary.roi, Decimal("0"))
+        self.assertEqual(summary.won, 0)
+        self.assertEqual(summary.lost, 0)
+        self.assertEqual(summary.void, 0)
+
     def test_out_of_policy_pristine_book_fails_before_unbounded_exact_scaling(self) -> None:
         book = PaperBook(Decimal("1E+1000000000"))
 

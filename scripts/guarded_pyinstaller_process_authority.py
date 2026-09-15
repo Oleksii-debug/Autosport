@@ -157,7 +157,10 @@ try:
     if not adjust_token_privileges(token, False, ctypes.byref(state), 0, None, None):
         raise SystemExit(f"SEDEBUG_DISABLE_FAILED:{ctypes.get_last_error()}")
     privilege_error = ctypes.get_last_error()
-    if privilege_error not in (0, ERROR_NOT_ALL_ASSIGNED):
+    if privilege_error == 0:
+        print("SEDEBUG_ASSIGNED", flush=True)
+        raise SystemExit(11)
+    if privilege_error != ERROR_NOT_ALL_ASSIGNED:
         raise SystemExit(f"SEDEBUG_DISABLE_FAILED:{privilege_error}")
 finally:
     if token:
@@ -566,6 +569,11 @@ def _fresh_process_access_available(desired_access: int) -> bool:
         return False
     if completed.returncode == 10 and stdout == "AVAILABLE":
         return True
+    if completed.returncode == 11 and stdout == "SEDEBUG_ASSIGNED":
+        raise RuntimeError(
+            "fresh same-token process-access sibling has SeDebugPrivilege assigned; "
+            "DACL denial is not a valid hostile-authority proof"
+        )
     diagnostic = (completed.stdout + "\n" + completed.stderr).strip()
     raise RuntimeError(
         "fresh same-token process-access sibling probe failed: "

@@ -44,7 +44,7 @@ def _validate_provider_event_id(value: object) -> str:
 def _validate_sequence(value: object) -> int:
     """Keep provider sequence identity stable across JSON/SQLite round trips."""
 
-    if isinstance(value, bool) or not isinstance(value, int):
+    if type(value) is not int:
         raise TypeError("sequence must be a non-boolean int")
     if value < _SQLITE_SEQUENCE_MIN or value > _SQLITE_SEQUENCE_MAX:
         raise ValueError("sequence must fit signed 64-bit SQLite INTEGER")

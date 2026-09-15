@@ -25,11 +25,20 @@ def _require_sha256(value: object, *, field: str) -> str:
     return value
 
 
+def _git_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    # Git replacement refs can make a claimed commit resolve a different tree.
+    # Release provenance must always read the repository's original objects.
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return env
+
+
 def _git_output(repo_root: Path, *args: str, allow_empty: bool = False) -> str:
     try:
         completed = subprocess.run(
             ["git", *args],
             cwd=repo_root,
+            env=_git_environment(),
             check=True,
             capture_output=True,
             text=True,
@@ -47,6 +56,7 @@ def _git_bytes(repo_root: Path, *args: str) -> bytes:
         completed = subprocess.run(
             ["git", *args],
             cwd=repo_root,
+            env=_git_environment(),
             check=True,
             capture_output=True,
         )
@@ -96,6 +106,22 @@ def _untracked_checkout_paths(repo_root: Path) -> list[str]:
 def _ignored_checkout_paths(repo_root: Path) -> list[str]:
     ignored = _git_output(repo_root, "ls-files", "--others", "--ignored", "--exclude-standard", allow_empty=True)
     return [line for line in ignored.splitlines() if line.strip()]
+
+
+def _require_no_replace_refs(repo_root: Path) -> None:
+    refs = _git_output(
+        repo_root,
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/replace",
+        allow_empty=True,
+    )
+    replacement_refs = [line for line in refs.splitlines() if line.strip()]
+    if replacement_refs:
+        raise ValueError(
+            "release build repository contains Git replacement refs: "
+            f"{_format_dirty_preview(replacement_refs)}"
+        )
 
 
 def _require_unmasked_index(repo_root: Path) -> None:
@@ -295,6 +321,7 @@ def verify_source_checkout(
     if authoritative_sha is not None and source_sha != authoritative_sha:
         raise ValueError("source_sha does not match the authoritative GitHub candidate head")
 
+    _require_no_replace_refs(repo_root)
     checkout_sha = _git_output(repo_root, "rev-parse", "--verify", "HEAD")
     _require_git_commit_sha(checkout_sha, field="checkout_head_sha")
     if checkout_sha != source_sha:

@@ -30,10 +30,18 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _require_utf8_encodable(value: str, field_name: str) -> str:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field_name} must be UTF-8 encodable") from exc
+    return value
+
+
 def _canonical_string_value(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value or value.strip() != value:
         raise ValueError(f"{field_name} must be a non-empty trimmed string")
-    return value
+    return _require_utf8_encodable(value, field_name)
 
 
 def _timezone_aware_iso8601_value(value: object, field_name: str) -> str:
@@ -73,11 +81,19 @@ def _required_sequence(raw: dict[str, Any]) -> int:
 
 
 def _required_decimal_odds(raw: dict[str, Any]) -> Decimal:
+    raw_value = raw.get("decimal_odds")
+    if (
+        not isinstance(raw_value, str)
+        or not raw_value
+        or raw_value.strip() != raw_value
+    ):
+        raise ValueError("decimal_odds must be a finite decimal greater than 1")
     try:
-        value = Decimal(str(raw["decimal_odds"]))
-    except (KeyError, InvalidOperation, ValueError) as exc:
+        raw_value.encode("utf-8")
+        value = Decimal(raw_value)
+    except (UnicodeEncodeError, InvalidOperation, ValueError) as exc:
         raise ValueError("decimal_odds must be a finite decimal greater than 1") from exc
-    if not value.is_finite() or value <= 1:
+    if not value.is_finite() or value <= 1 or str(value) != raw_value:
         raise ValueError("decimal_odds must be a finite decimal greater than 1")
     return value
 
@@ -94,7 +110,10 @@ def _validate_serialized_json_value(value: object, field_name: str) -> None:
             active_containers.remove(id(current))
             continue
 
-        if current is None or isinstance(current, (str, bool, int)):
+        if current is None or isinstance(current, (bool, int)):
+            continue
+        if isinstance(current, str):
+            _require_utf8_encodable(current, path)
             continue
         if isinstance(current, float):
             if not math.isfinite(current):
@@ -119,6 +138,7 @@ def _validate_serialized_json_value(value: object, field_name: str) -> None:
                 for key, item in current.items():
                     if not isinstance(key, str):
                         raise ValueError(f"{path} contains non-string JSON object key")
+                    _require_utf8_encodable(key, f"{path} object key")
                     stack.append((item, f"{path}.{key}", depth + 1, False))
             continue
         raise ValueError(
@@ -168,9 +188,7 @@ class MarketEvent:
         sequence = _required_sequence(raw)
         decimal_odds = _required_decimal_odds(raw)
 
-        ingest_ts = raw.get("ingest_ts", observed_ts)
-        if not isinstance(ingest_ts, str) or not ingest_ts or ingest_ts.strip() != ingest_ts:
-            raise ValueError("ingest_ts must be a non-empty trimmed string")
+        ingest_ts = _canonical_string_value(raw.get("ingest_ts", observed_ts), "ingest_ts")
 
         market_type_raw = _canonical_string_value(raw.get("market_type", "other"), "market_type")
         try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 
 import pytest
 
@@ -89,9 +90,30 @@ def test_deserialization_rejects_coerced_sequence_identity(sequence: object) -> 
 
 @pytest.mark.parametrize(
     "decimal_odds",
-    ["NaN", "Infinity", "-Infinity", float("nan"), float("inf"), float("-inf"), "1", "0", "-1", None, True],
+    [
+        "NaN",
+        "Infinity",
+        "-Infinity",
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        1.62,
+        2,
+        Decimal("1.62"),
+        "1",
+        "0",
+        "-1",
+        None,
+        True,
+        " 1.62 ",
+        "01.62",
+        "+1.62",
+        "1e2",
+    ],
 )
-def test_deserialization_rejects_non_executable_decimal_odds(decimal_odds: object) -> None:
+def test_deserialization_rejects_noncanonical_or_non_executable_decimal_odds(
+    decimal_odds: object,
+) -> None:
     payload = _event_payload()
     payload["decimal_odds"] = decimal_odds
 
@@ -107,6 +129,51 @@ def test_deserialization_rejects_missing_decimal_odds() -> None:
         MarketEvent.from_dict(payload)
 
 
+def test_deserialization_preserves_exact_high_precision_decimal_text() -> None:
+    payload = _event_payload()
+    odds_text = "2.1234567890123456789"
+    payload["decimal_odds"] = odds_text
+
+    event = MarketEvent.from_dict(payload)
+
+    assert event.decimal_odds == Decimal(odds_text)
+    assert event.to_dict()["decimal_odds"] == odds_text
+
+
+def test_replay_jsonl_rejects_high_precision_numeric_decimal_odds(tmp_path) -> None:
+    serialized = json.dumps(_event_payload(), ensure_ascii=False, sort_keys=True)
+    canonical_fragment = '"decimal_odds": "1.62"'
+    assert canonical_fragment in serialized
+    serialized = serialized.replace(
+        canonical_fragment,
+        '"decimal_odds": 2.1234567890123456789',
+    )
+    replay_path = tmp_path / "numeric-odds-replay.jsonl"
+    replay_path.write_text(serialized + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid replay event schema at line 1") as exc_info:
+        ReplayEngine.from_jsonl(replay_path)
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ValueError)
+    assert str(cause) == "decimal_odds must be a finite decimal greater than 1"
+
+
+def test_replay_jsonl_preserves_exact_high_precision_decimal_text(tmp_path) -> None:
+    payload = _event_payload()
+    odds_text = "2.1234567890123456789"
+    payload["decimal_odds"] = odds_text
+    replay_path = tmp_path / "text-odds-replay.jsonl"
+    replay_path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    replay = ReplayEngine.from_jsonl(replay_path)
+
+    assert replay.events[0].decimal_odds == Decimal(odds_text)
+    assert replay.events[0].to_dict()["decimal_odds"] == odds_text
+
+
 def test_replay_jsonl_rejects_nonfinite_serialized_decimal_odds(tmp_path) -> None:
     payload = _event_payload()
     payload["decimal_odds"] = float("nan")
@@ -116,8 +183,11 @@ def test_replay_jsonl_rejects_nonfinite_serialized_decimal_odds(tmp_path) -> Non
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="decimal_odds must be a finite decimal greater than 1"):
+    with pytest.raises(ValueError, match="invalid replay JSONL at line 1") as exc_info:
         ReplayEngine.from_jsonl(replay_path)
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ValueError)
+    assert str(cause) == "non-finite JSON constant: NaN"
 
 
 @pytest.mark.parametrize("ingest_ts", [7, True, "", " 2026-09-12T10:00:05+00:00 "])
@@ -309,6 +379,44 @@ def test_deserialization_rejects_noncanonical_metadata(metadata: object) -> None
         MarketEvent.from_dict(payload)
 
 
+def test_deserialization_rejects_lone_surrogate_metadata_value() -> None:
+    surrogate = json.loads(r'{"value":"\ud800"}')["value"]
+    payload = _event_payload()
+    payload["metadata"] = {"label": surrogate}
+
+    with pytest.raises(ValueError, match="UTF-8 encodable"):
+        MarketEvent.from_dict(payload)
+
+
+def test_deserialization_rejects_lone_surrogate_metadata_key() -> None:
+    metadata = json.loads(r'{"\ud800":"value"}')
+    payload = _event_payload()
+    payload["metadata"] = metadata
+
+    with pytest.raises(ValueError, match="UTF-8 encodable"):
+        MarketEvent.from_dict(payload)
+
+
+def test_deserialization_rejects_lone_surrogate_canonical_string_field() -> None:
+    surrogate = json.loads(r'{"value":"\ud800"}')["value"]
+    payload = _event_payload()
+    payload["event_id"] = surrogate
+
+    with pytest.raises(ValueError, match="event_id must be UTF-8 encodable"):
+        MarketEvent.from_dict(payload)
+
+
+def test_deserialization_preserves_valid_unicode_strings() -> None:
+    payload = _event_payload()
+    payload["event_id"] = "подія-Čadca-42"
+    payload["metadata"] = {"мітка": "Žilina ✓"}
+
+    event = MarketEvent.from_dict(payload)
+
+    assert event.event_id == "подія-Čadca-42"
+    assert event.metadata == {"мітка": "Žilina ✓"}
+
+
 def test_deserialization_rejects_cyclic_metadata() -> None:
     metadata: dict[str, object] = {}
     metadata["self"] = metadata
@@ -342,8 +450,11 @@ def test_replay_jsonl_rejects_coerced_optional_status(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="status must be a non-empty trimmed string"):
+    with pytest.raises(ValueError, match="invalid replay event schema at line 1") as exc_info:
         ReplayEngine.from_jsonl(replay_path)
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ValueError)
+    assert str(cause) == "status must be a non-empty trimmed string"
 
 
 @pytest.mark.parametrize(
@@ -366,5 +477,8 @@ def test_replay_jsonl_rejects_invalid_source_timestamp(
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match=error):
+    with pytest.raises(ValueError, match="invalid replay event schema at line 1") as exc_info:
         ReplayEngine.from_jsonl(replay_path)
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ValueError)
+    assert str(cause) == error

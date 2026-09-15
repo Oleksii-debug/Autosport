@@ -1,19 +1,34 @@
 from __future__ import annotations
 
-import json
 import tempfile
 from decimal import Decimal
 from pathlib import Path
 
 from .domain import MarketEvent, TicketLeg
+from .integrity import atomic_write_json
 from .paper import PaperBook
 from .replay import ReplayEngine, ReplayLeakageFirewall
 from .storage import SQLiteMarketStore
 
 
+def _sanitize_utf8_text(text: str) -> str:
+    return "".join(
+        "�" if 0xD800 <= ord(character) <= 0xDFFF else character
+        for character in text
+    )
+
+
+def _render_exception(exc: BaseException) -> str:
+    exception_type = type(exc).__name__
+    try:
+        details = str(exc)
+    except BaseException:
+        return f"{exception_type}: exception details unavailable"
+    return _sanitize_utf8_text(f"{exception_type}: {details}")
+
+
 def run_machine_diagnostic(output_path: str | Path) -> int:
     destination = Path(output_path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
     try:
         event = MarketEvent.from_dict({
             "event_id": "diag-event",
@@ -45,7 +60,7 @@ def run_machine_diagnostic(output_path: str | Path) -> int:
                 except BaseException as cleanup_error:
                     primary_error.add_note(
                         "SQLiteMarketStore.close() also failed while preserving the primary diagnostic failure: "
-                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                        f"{_render_exception(cleanup_error)}"
                     )
                 raise
             else:
@@ -57,15 +72,18 @@ def run_machine_diagnostic(output_path: str | Path) -> int:
             "human_tested": False,
             "nvda_verified": False,
         }
-        destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        atomic_write_json(destination, payload)
         return 0
     except Exception as exc:
         payload = {
             "status": "FAIL",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": _render_exception(exc),
             "real_money_execution": False,
             "human_tested": False,
             "nvda_verified": False,
         }
-        destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        error_notes = getattr(exc, "__notes__", None)
+        if error_notes:
+            payload["error_notes"] = [_sanitize_utf8_text(note) for note in error_notes]
+        atomic_write_json(destination, payload)
         return 1

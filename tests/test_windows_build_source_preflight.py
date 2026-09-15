@@ -53,7 +53,15 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
             encoding="utf-8",
         )
         (root / "tracked.py").write_text("VALUE = 1\n", encoding="utf-8")
-        self._run_git(root, "add", ".gitignore", "pyproject.toml", "tracked.py")
+        (root / "WINDOWS_START_HERE.txt").write_text("canonical start file\n", encoding="utf-8")
+        self._run_git(
+            root,
+            "add",
+            ".gitignore",
+            "pyproject.toml",
+            "tracked.py",
+            "WINDOWS_START_HERE.txt",
+        )
         self._run_git(root, "commit", "-m", "fixture")
         return self._run_git(root, "rev-parse", "HEAD")
 
@@ -160,6 +168,42 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
                     repo_root=root,
                     late_build_boundary=True,
                 )
+
+    def test_repeated_late_boundary_rejects_package_input_mutation_after_first_build(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_sha = self._clean_repo(root)
+            with self._without_github_event_environment():
+                verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
+                self._write_valid_egg_info(root)
+
+                # This models the first gate passing immediately before Autosport.exe.
+                verify_source_checkout.verify_source_checkout(
+                    source_sha,
+                    repo_root=root,
+                    late_build_boundary=True,
+                )
+
+                # First-PyInstaller products are expected generated outputs, but a tracked package
+                # input changed afterwards must be stopped by the next gate.
+                build = root / "build" / "Autosport"
+                build.mkdir(parents=True)
+                (build / "Analysis-00.toc").write_text("generated\n", encoding="utf-8")
+                dist = root / "dist"
+                dist.mkdir()
+                (dist / "Autosport.exe").write_bytes(b"generated executable")
+                (root / "Autosport.spec").write_text("generated\n", encoding="utf-8")
+                (root / "WINDOWS_START_HERE.txt").write_text(
+                    "mutated after first build\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(ValueError, "changed after initial preflight"):
+                    verify_source_checkout.verify_source_checkout(
+                        source_sha,
+                        repo_root=root,
+                        late_build_boundary=True,
+                    )
 
     def test_late_boundary_rejects_source_adjacent_bytecode_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

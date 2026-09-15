@@ -2,7 +2,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import autosport.research_demo_audit as research_demo_audit
+from autosport.integrity import atomic_write_json as real_atomic_write_json
 from autosport.research_demo_audit import run_research_demo_audit
 
 
@@ -43,6 +46,28 @@ class ResearchDemoAuditTests(unittest.TestCase):
         self.assertFalse(payload["real_money_execution"])
         self.assertFalse(payload["human_tested"])
         self.assertFalse(payload["nvda_verified"])
+
+    def test_machine_evidence_publication_failure_preserves_existing_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "research-demo-audit.json"
+            missing = root / "missing-demo"
+            original = '{"status":"PREVIOUS"}\n'
+            output.write_text(original, encoding="utf-8")
+
+            def reject_nonfinite(path, payload):
+                real_atomic_write_json(path, {**payload, "probe": float("nan")})
+
+            with patch.object(
+                research_demo_audit,
+                "atomic_write_json",
+                side_effect=reject_nonfinite,
+            ):
+                with self.assertRaises(ValueError):
+                    run_research_demo_audit(output, missing)
+
+            self.assertEqual(output.read_text(encoding="utf-8"), original)
+            self.assertEqual(list(output.parent.glob(f".{output.name}.*.tmp")), [])
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import uuid
 from decimal import (
     Context,
@@ -250,12 +251,28 @@ class PaperBook:
             ],
             "lifecycle": self._lifecycle_to_json(self._lifecycle),
         }
-        temporary = destination.with_suffix(destination.suffix + ".tmp")
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(raw, handle, ensure_ascii=False, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                newline="\n",
+                dir=destination.parent,
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                json.dump(raw, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
 
     @staticmethod
     def _require_finite(value: object, label: str) -> None:

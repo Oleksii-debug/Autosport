@@ -1,7 +1,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import (
+    Context,
+    Decimal,
+    DecimalException,
+    DivisionByZero,
+    InvalidOperation,
+    Overflow,
+    ROUND_HALF_EVEN,
+    Underflow,
+    localcontext,
+)
+
+
+# Candidate economics must not inherit precision, exponent range, rounding, traps,
+# or flags from unrelated caller/default-context configuration. These values match
+# Python's standard Decimal defaults while remaining explicit and process-stable.
+_CANDIDATE_DECIMAL_CONTEXT = Context(
+    prec=28,
+    rounding=ROUND_HALF_EVEN,
+    Emin=-999999,
+    Emax=999999,
+    capitals=1,
+    clamp=0,
+    flags=[],
+    traps=[InvalidOperation, DivisionByZero, Overflow],
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,11 +144,7 @@ class BeamParlayCandidateSearch:
         self._validate_input_legs(legs)
         ordered = sorted(
             legs,
-            key=lambda leg: (
-                -leg.paper_value_per_unit,
-                -leg.probability,
-                leg.quote_key,
-            ),
+            key=lambda leg: self._rank_key((leg,)),
         )
         beam: list[tuple[CandidateLeg, ...]] = [tuple()]
         results: list[ParlayCandidate] = []
@@ -203,12 +224,26 @@ class BeamParlayCandidateSearch:
 
     @staticmethod
     def _to_candidate(legs: tuple[CandidateLeg, ...]) -> ParlayCandidate:
-        odds = Decimal("1")
-        probability = Decimal("1")
-        for leg in legs:
-            odds *= leg.decimal_odds
-            probability *= leg.probability
-        return ParlayCandidate(legs, odds, probability, probability * odds - Decimal("1"))
+        try:
+            with localcontext(_CANDIDATE_DECIMAL_CONTEXT) as context:
+                context.clear_flags()
+                odds = Decimal("1")
+                probability = Decimal("1")
+                for leg in legs:
+                    odds *= leg.decimal_odds
+                    probability *= leg.probability
+                expected_profit = probability * odds - Decimal("1")
+                range_lost = context.flags[Overflow] or context.flags[Underflow]
+        except DecimalException as exc:
+            raise ValueError("candidate combined economics exceed Decimal range") from exc
+        if (
+            range_lost
+            or not odds.is_finite()
+            or not probability.is_finite()
+            or not expected_profit.is_finite()
+        ):
+            raise ValueError("candidate combined economics exceed Decimal range")
+        return ParlayCandidate(legs, odds, probability, expected_profit)
 
     def _rank_key(
         self,
@@ -216,8 +251,8 @@ class BeamParlayCandidateSearch:
     ) -> tuple[Decimal, Decimal, int, tuple[str, ...]]:
         candidate = self._to_candidate(legs)
         return (
-            -candidate.expected_profit_per_unit,
-            -candidate.independent_probability,
+            candidate.expected_profit_per_unit.copy_negate(),
+            candidate.independent_probability.copy_negate(),
             len(legs),
             tuple(leg.quote_key for leg in legs),
         )
@@ -227,8 +262,8 @@ class BeamParlayCandidateSearch:
         candidate: ParlayCandidate,
     ) -> tuple[Decimal, Decimal, int, tuple[str, ...]]:
         return (
-            -candidate.expected_profit_per_unit,
-            -candidate.independent_probability,
+            candidate.expected_profit_per_unit.copy_negate(),
+            candidate.independent_probability.copy_negate(),
             len(candidate.legs),
             tuple(leg.quote_key for leg in candidate.legs),
         )

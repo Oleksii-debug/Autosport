@@ -31,15 +31,17 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_exact_source_snapsho
         "Expand-Archive -LiteralPath $trustedBuildArchive "
         "-DestinationPath $trustedBuildRoot -Force"
     )
-    snapshot_install = "python -m pip install --no-deps --force-reinstall $trustedBuildRoot"
+    snapshot_install = (
+        "& $pythonExecutable -I -m pip install --no-deps --force-reinstall $trustedBuildRoot"
+    )
     enter_snapshot = "Push-Location $trustedBuildRoot"
     leave_snapshot = "Pop-Location"
     gui_build = (
-        "python -m PyInstaller --noconfirm --clean --onefile --windowed "
+        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
         "--name Autosport src/autosport/windows_entry.py"
     )
     data_build = (
-        "python -m PyInstaller --noconfirm --clean --onefile --console "
+        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
         "--name Autosport-Data src/autosport/data_tools_entry.py"
     )
     gui_bound_source = "$builtAutosportExe = Join-Path $trustedBuildRoot 'dist/Autosport.exe'"
@@ -81,6 +83,11 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_exact_source_snapsho
     assert script.count(enter_snapshot) == 2
     assert "$builtAutosportExe = Join-Path $PWD 'dist/Autosport.exe'" not in script
     assert "$builtDataExe = Join-Path $PWD 'dist/Autosport-Data.exe'" not in script
+
+    post_gate = script[gate_index:]
+    assert "python -m pip install --no-deps --force-reinstall $trustedBuildRoot" not in post_gate
+    assert "python -m PyInstaller" not in post_gate
+    assert post_gate.count("& $pythonExecutable -I -m PyInstaller") == 2
 
 
 def test_exact_source_archive_ignores_post_proof_live_entry_mutation(tmp_path: Path) -> None:

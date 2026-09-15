@@ -7,7 +7,7 @@ import os
 import stat
 import subprocess
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
 from autosport.release_package import (
@@ -138,6 +138,154 @@ def _bind_source_sha_to_checkout(source_sha: str, *, repo_root: Path) -> None:
         raise ValueError(
             "checked-out source tree does not match the authoritative source_sha tree"
         )
+
+
+def _exact_git_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in tuple(env):
+        if name.upper().startswith("GIT_"):
+            env.pop(name, None)
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return env
+
+
+def _exact_git_bytes(repo_root: Path, *args: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            env=_exact_git_environment(),
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"unable to materialize exact package source with git {' '.join(args)}") from exc
+    return completed.stdout
+
+
+def _repo_relative_path(repo_root: Path, requested: Path, *, field: str) -> PurePosixPath:
+    root = Path(os.path.abspath(repo_root))
+    candidate = requested if requested.is_absolute() else root / requested
+    candidate = Path(os.path.abspath(candidate))
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be inside the release source checkout") from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError(f"{field} must name a concrete tracked source path")
+    return PurePosixPath(*relative.parts)
+
+
+def _exact_tree_entries(
+    repo_root: Path,
+    source_sha: str,
+    pathspec: PurePosixPath,
+) -> tuple[tuple[PurePosixPath, str], ...]:
+    _require_git_commit_sha(source_sha, field="source_sha")
+    raw = _exact_git_bytes(
+        repo_root,
+        "ls-tree",
+        "-r",
+        "-z",
+        "--full-tree",
+        source_sha,
+        "--",
+        pathspec.as_posix(),
+    )
+    entries: list[tuple[PurePosixPath, str]] = []
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, path_bytes = record.split(b"\t", 1)
+            mode, object_type, object_sha = metadata.split(b" ", 2)
+        except ValueError as exc:
+            raise ValueError("unable to parse exact package source tree") from exc
+        path = PurePosixPath(path_bytes.decode("utf-8", errors="strict"))
+        if object_type != b"blob" or mode not in {b"100644", b"100755"}:
+            raise ValueError(
+                f"unsupported tracked package payload entry: {path.as_posix()}"
+            )
+        object_sha_text = object_sha.decode("ascii")
+        if len(object_sha_text) != 40 or any(character not in "0123456789abcdef" for character in object_sha_text):
+            raise ValueError("exact package source tree returned a noncanonical blob identity")
+        entries.append((path, object_sha_text))
+    return tuple(entries)
+
+
+def _write_exact_git_blob(
+    repo_root: Path,
+    object_sha: str,
+    destination: Path,
+) -> None:
+    data = _exact_git_bytes(repo_root, "cat-file", "blob", object_sha)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, destination)
+    except BaseException:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _materialize_exact_static_payload(
+    *,
+    repo_root: Path,
+    source_sha: str,
+    start_file: Path,
+    example_dir: Path,
+    snapshot_dir: Path,
+) -> tuple[Path, Path]:
+    """Materialize tracked static package inputs from the exact source Git tree.
+
+    The caller-provided paths select repository paths only. Their live working-tree
+    bytes and live directory membership are intentionally never consumed here.
+    """
+
+    start_relative = _repo_relative_path(repo_root, start_file, field="start_file")
+    example_relative = _repo_relative_path(repo_root, example_dir, field="example_dir")
+
+    start_entries = _exact_tree_entries(repo_root, source_sha, start_relative)
+    if len(start_entries) != 1 or start_entries[0][0] != start_relative:
+        raise ValueError("start_file is not exactly one tracked regular file in source_sha")
+
+    example_entries = _exact_tree_entries(repo_root, source_sha, example_relative)
+    prefix = example_relative.as_posix().rstrip("/") + "/"
+    if not example_entries:
+        raise ValueError("example_dir has no tracked regular files in source_sha")
+    if any(not path.as_posix().startswith(prefix) for path, _object_sha in example_entries):
+        raise ValueError("example_dir exact source tree escaped its requested prefix")
+
+    static_root = snapshot_dir / "exact-source-static"
+    trusted_start = static_root.joinpath(*start_relative.parts)
+    trusted_example_dir = static_root.joinpath(*example_relative.parts)
+    _write_exact_git_blob(repo_root, start_entries[0][1], trusted_start)
+    for path, object_sha in example_entries:
+        destination = static_root.joinpath(*path.parts)
+        _write_exact_git_blob(repo_root, object_sha, destination)
+
+    materialized = tuple(
+        PurePosixPath(path.relative_to(static_root).as_posix())
+        for path in trusted_example_dir.rglob("*")
+        if path.is_file()
+    )
+    expected = tuple(path for path, _object_sha in example_entries)
+    if tuple(sorted(materialized, key=lambda item: item.as_posix())) != tuple(
+        sorted(expected, key=lambda item: item.as_posix())
+    ):
+        raise ValueError("exact example payload materialization membership mismatch")
+    return trusted_start, trusted_example_dir
 
 
 def _require_sha256(value: str, *, field: str) -> str:
@@ -292,10 +440,18 @@ def main() -> int:
     parser.add_argument("--verification-output", type=Path)
     args = parser.parse_args()
 
-    _bind_source_sha_to_checkout(args.source_sha, repo_root=Path.cwd())
+    repo_root = Path.cwd()
+    _bind_source_sha_to_checkout(args.source_sha, repo_root=repo_root)
 
     with tempfile.TemporaryDirectory(prefix="autosport-package-inputs-") as snapshot_root:
         snapshot_dir = Path(snapshot_root)
+        trusted_start_file, trusted_example_dir = _materialize_exact_static_payload(
+            repo_root=repo_root,
+            source_sha=args.source_sha,
+            start_file=args.start_file,
+            example_dir=args.example_dir,
+            snapshot_dir=snapshot_dir,
+        )
         trusted_exe = _capture_verified_executable(
             args.exe,
             args.exe_sha256,
@@ -335,8 +491,8 @@ def main() -> int:
 
         output, _base_digest = build_windows_package(
             trusted_exe,
-            args.start_file,
-            args.example_dir,
+            trusted_start_file,
+            trusted_example_dir,
             trusted_diagnostic,
             trusted_accessibility,
             trusted_keyboard,

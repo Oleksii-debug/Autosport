@@ -85,6 +85,57 @@ def test_expected_snapshot_uses_continuous_authority_instead_of_replica_replay()
     ]
 
 
+def test_namespace_fence_restores_parent_dacl_when_icacls_reports_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "_autosport_guarded_pyinstaller_bind_namespace_rollback_test",
+        _GUARDED_PYINSTALLER,
+    )
+    assert spec is not None and spec.loader is not None
+    wrapper = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = wrapper
+    spec.loader.exec_module(wrapper)
+
+    parent = tmp_path / "release-parent"
+    parent.mkdir()
+    artifact = parent / "Autosport.exe"
+    original_dacl = b"captured-parent-dacl"
+    restored: list[tuple[Path, bytes]] = []
+
+    monkeypatch.setattr(
+        wrapper,
+        "_require_regular_directory_nonreparse",
+        lambda _path, *, label: None,
+    )
+    monkeypatch.setattr(wrapper, "_capture_windows_dacl", lambda _path: original_dacl)
+    monkeypatch.setattr(wrapper, "_directory_delete_child_available", lambda _path: True)
+    monkeypatch.setattr(
+        wrapper._CORE,
+        "_windows_system_binary",
+        lambda _name: Path("C:/Windows/System32/icacls.exe"),
+    )
+    monkeypatch.setattr(
+        wrapper.subprocess,
+        "run",
+        lambda *args, **kwargs: type("Completed", (), {"returncode": 5})(),
+    )
+    monkeypatch.setattr(
+        wrapper,
+        "_restore_windows_dacl",
+        lambda path, descriptor: restored.append((path, descriptor)),
+    )
+
+    with pytest.raises(RuntimeError, match="icacls exited 5"):
+        wrapper._install_expected_snapshot_namespace_fence(
+            artifact,
+            "S-1-5-21-1234",
+        )
+
+    assert restored == [(parent, original_dacl)]
+
+
 @pytest.mark.skipif(
     not _REAL_WINDOWS_PYINSTALLER,
     reason="real Windows PyInstaller regression",

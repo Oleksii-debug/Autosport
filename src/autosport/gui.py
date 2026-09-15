@@ -530,7 +530,10 @@ class AutosportApp(tk.Tk):
             self._hide_uncertain_economic_state(
                 "Workspace recovery не завершено; economic session state недоступний."
             )
-            detail = f"Workspace recovery відхилено fail-closed: {exc}"
+            detail = (
+                "Workspace recovery відхилено fail-closed: "
+                f"{_safe_exception_text(exc)}"
+            )
             self.status.set(
                 "Workspace recovery не завершено; economic state лишається недоступним, "
                 "а новий replay заблоковано до усунення причини."
@@ -573,7 +576,7 @@ class AutosportApp(tk.Tk):
             )
             detail = (
                 "Post-recovery workspace reopen відхилено fail-closed: "
-                f"{type(exc).__name__}: {exc}"
+                f"{_safe_exception_text(exc)}"
             )
             self.status.set(
                 "Recovery reconciliation завершено, але economic session state лишається недоступним; "

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from autosport.gui import AutosportApp
@@ -60,6 +61,21 @@ def _string_var(*_args, value: str = "", **_kwargs) -> _Value:
     return _Value(value)
 
 
+def _recovery_app(workspace: Path) -> tuple[AutosportApp, list[str]]:
+    app = object.__new__(AutosportApp)
+    app._closing = False
+    app.replay_worker = SimpleNamespace(busy=False)
+    app.live_worker = SimpleNamespace(busy=False)
+    app.workspace = workspace
+    app.status = _Value()
+    app._recovery_required_workspaces = set()
+    app._selected_replay_configuration = lambda: ("baseline-v1", None)
+    app._hide_uncertain_economic_state = lambda _message: True
+    logs: list[str] = []
+    app._append_log = logs.append
+    return app, logs
+
+
 def test_startup_exception_with_broken_str_keeps_shell_reachable(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
 
@@ -114,3 +130,51 @@ def test_teardown_exception_with_broken_str_still_quarantines_and_returns_false(
     assert len(logs) == 1
     assert f"workspace={workspace}" in logs[0]
     assert "secondary=_BrokenTextError: <message unavailable>" in logs[0]
+
+
+def test_reconcile_failure_with_broken_str_keeps_recovery_actionable(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    app, logs = _recovery_app(workspace)
+
+    with (
+        patch("autosport.gui.workspace_for_strategy", return_value=workspace),
+        patch("autosport.gui.reconcile_late_crashes", side_effect=_BrokenTextError()),
+        patch("autosport.gui.messagebox.showerror") as showerror,
+    ):
+        AutosportApp.repair_workspace(app)
+
+    expected = "Workspace recovery відхилено fail-closed: _BrokenTextError: <message unavailable>"
+    assert app._recovery_required_workspaces == {workspace}
+    assert expected in logs
+    assert "economic state лишається недоступним" in app.status.value
+    showerror.assert_called_once_with("Автоспорт", expected)
+
+
+def test_post_recovery_reopen_failure_with_broken_str_keeps_recovery_actionable(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    app, logs = _recovery_app(workspace)
+
+    def _open_session(_strategy_id, _research_plan):
+        raise _BrokenTextError()
+
+    app._open_session = _open_session
+    report = SimpleNamespace(
+        reconciled_keys=(),
+        aborted_uncommitted_keys=(),
+        unresolved_without_summary=(),
+    )
+
+    with (
+        patch("autosport.gui.workspace_for_strategy", return_value=workspace),
+        patch("autosport.gui.reconcile_late_crashes", return_value=report),
+        patch("autosport.gui.messagebox.showerror") as showerror,
+    ):
+        AutosportApp.repair_workspace(app)
+
+    expected = "Post-recovery workspace reopen відхилено fail-closed: _BrokenTextError: <message unavailable>"
+    assert app._recovery_required_workspaces == {workspace}
+    assert expected in logs
+    assert "economic session state лишається недоступним" in app.status.value
+    showerror.assert_called_once_with("Автоспорт", expected)

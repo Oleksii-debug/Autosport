@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -106,19 +107,22 @@ def test_export_rechecks_destination_after_snapshot_before_publication(
     except (OSError, NotImplementedError):
         pytest.skip("file symlinks unavailable in this environment")
 
-    real_hash = evidence_export._open_and_hash_regular_file
+    real_publish = evidence_export._publish_bound_output
     redirected = False
 
-    def hash_then_redirect(path: Path) -> tuple[int, str]:
+    def redirect_then_publish(
+        workspace_path: Path,
+        requested_destination: Path,
+        payload: dict[str, Any],
+    ) -> Path:
         nonlocal redirected
-        result = real_hash(path)
         if not redirected:
             link.unlink()
             os.symlink(internal_target, link)
             redirected = True
-        return result
+        return real_publish(workspace_path, requested_destination, payload)
 
-    monkeypatch.setattr(evidence_export, "_open_and_hash_regular_file", hash_then_redirect)
+    monkeypatch.setattr(evidence_export, "_publish_bound_output", redirect_then_publish)
 
     with pytest.raises(ValueError, match="outside the Autosport workspace"):
         export_evidence_manifest(workspace, link)

@@ -1,5 +1,9 @@
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
+import autosport.keyboard_audit as keyboard_audit
 from autosport.keyboard_audit import summarize_keyboard_contract
 from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
 
@@ -68,6 +72,46 @@ class KeyboardAuditTests(unittest.TestCase):
         report = summarize_keyboard_contract(bindings, focus, reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("bankroll" in item for item in report["failures"]))
+
+    def test_machine_evidence_publication_failure_preserves_existing_file(self):
+        class _AuditApp:
+            def update_idletasks(self):
+                return None
+
+            def update(self):
+                return None
+
+            def close_app(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "keyboard-audit.json"
+            original = '{"status":"PREVIOUS"}\n'
+            destination.write_text(original, encoding="utf-8")
+            nonfinite_report = {
+                "status": "PASS",
+                "probe": float("nan"),
+                "human_tested": False,
+                "nvda_verified": False,
+                "real_money_execution": False,
+            }
+
+            with (
+                patch.object(keyboard_audit, "WindowsAutosportApp", return_value=_AuditApp()),
+                patch.object(keyboard_audit, "_binding_presence", return_value={}),
+                patch.object(keyboard_audit, "_execute_focus_shortcuts", return_value={}),
+                patch.object(keyboard_audit, "_tab_reachable_controls", return_value=[]),
+                patch.object(
+                    keyboard_audit,
+                    "summarize_keyboard_contract",
+                    return_value=nonfinite_report,
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    keyboard_audit.run_keyboard_audit(destination)
+
+            self.assertEqual(destination.read_text(encoding="utf-8"), original)
+            self.assertEqual(list(destination.parent.glob(f".{destination.name}.*.tmp")), [])
 
 
 if __name__ == "__main__":

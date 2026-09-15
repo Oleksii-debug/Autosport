@@ -77,9 +77,12 @@ def strategy_id_from_display(display: str) -> str:
 
 
 def _safe_exception_text(exc: BaseException) -> str:
-    """Describe a caught failure without allowing hostile __str__ to escape containment."""
+    """Describe a caught failure without allowing hostile metadata/stringification to escape."""
 
-    name = type(exc).__name__
+    try:
+        name = type.__getattribute__(type(exc), "__name__")
+    except BaseException:
+        name = "BaseException"
     try:
         detail = str(exc)
     except BaseException:
@@ -369,9 +372,11 @@ class AutosportApp(tk.Tk):
             return True
         try:
             session.close()
-        except Exception as exc:
+        except BaseException as exc:
             session_workspace = Path(session.workspace)
             self._block_workspace_for_recovery(session_workspace)
+            if not isinstance(exc, Exception):
+                raise
             self._append_log(
                 "Economic session teardown після quarantine завершився помилкою; "
                 f"workspace={session_workspace}; secondary={_safe_exception_text(exc)}"

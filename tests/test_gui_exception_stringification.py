@@ -4,10 +4,24 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from autosport.gui import AutosportApp
 
 
 class _BrokenTextError(RuntimeError):
+    def __str__(self) -> str:
+        raise RuntimeError("exception stringification failed")
+
+
+class _BrokenTypeNameMeta(type):
+    def __getattribute__(cls, name: str):
+        if name == "__name__":
+            raise RuntimeError("exception type-name lookup failed")
+        return super().__getattribute__(name)
+
+
+class _BrokenMetadataAndTextError(RuntimeError, metaclass=_BrokenTypeNameMeta):
     def __str__(self) -> str:
         raise RuntimeError("exception stringification failed")
 
@@ -97,6 +111,28 @@ def test_startup_exception_with_broken_str_keeps_shell_reachable(tmp_path: Path)
     assert "недоступний до успішного recovery" in app.bank.value
 
 
+def test_startup_exception_with_hostile_type_metadata_and_str_keeps_shell_reachable(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+
+    with (
+        patch("autosport.gui.tk.Tk.__init__", return_value=None),
+        patch("autosport.gui.tk.StringVar", side_effect=_string_var),
+        patch("autosport.gui.default_workspace", return_value=workspace),
+        patch("autosport.gui.AutosportSession", side_effect=_BrokenMetadataAndTextError()),
+    ):
+        app = _HeadlessAutosportApp()
+
+    assert app.shell_built
+    assert app.accessibility_configured
+    assert app.close_protocol_bound
+    assert app.session is None
+    assert app._startup_economic_error == "_BrokenMetadataAndTextError: <message unavailable>"
+    assert app._recovery_required_workspaces == {workspace}
+    assert "Read-only live snapshot доступний" in app.status.value
+
+
 def test_teardown_exception_with_broken_str_still_quarantines_and_returns_false(
     tmp_path: Path,
 ) -> None:
@@ -130,6 +166,41 @@ def test_teardown_exception_with_broken_str_still_quarantines_and_returns_false(
     assert len(logs) == 1
     assert f"workspace={workspace}" in logs[0]
     assert "secondary=_BrokenTextError: <message unavailable>" in logs[0]
+
+
+@pytest.mark.parametrize("control_exception", [KeyboardInterrupt, SystemExit])
+def test_teardown_process_control_propagates_after_exact_workspace_quarantine(
+    tmp_path: Path,
+    control_exception: type[BaseException],
+) -> None:
+    workspace = tmp_path / "workspace"
+    app = object.__new__(AutosportApp)
+    app._active_workspace = workspace
+    app._recovery_required_workspaces = set()
+    app.bank = _Value("stale bankroll")
+    app.tickets = _Listbox()
+    logs: list[str] = []
+    app._append_log = logs.append
+
+    class _InterruptedSession:
+        def __init__(self, session_workspace: Path) -> None:
+            self.workspace = session_workspace
+
+        def close(self) -> None:
+            raise control_exception()
+
+    app.session = _InterruptedSession(workspace)
+
+    with pytest.raises(control_exception):
+        AutosportApp._hide_uncertain_economic_state(
+            app,
+            "Economic state hidden pending terminal transition.",
+        )
+
+    assert app.session is None
+    assert app._recovery_required_workspaces == {workspace}
+    assert app.tickets.lines == ["Economic state hidden pending terminal transition."]
+    assert logs == []
 
 
 def test_reconcile_failure_with_broken_str_keeps_recovery_actionable(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -49,6 +50,68 @@ def test_dangerous_process_mask_blocks_handle_duplication_and_code_injection() -
         authority._WRITE_OWNER,
     ):
         assert authority._DANGEROUS_PROCESS_ACCESS & access == access
+
+
+def test_fresh_process_access_probe_uses_sibling_with_sedebug_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_process_authority()
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(command, 0, stdout="DENIED\n", stderr="")
+
+    monkeypatch.setattr(authority.subprocess, "run", fake_run)
+    monkeypatch.setattr(authority.os, "getpid", lambda: 4242)
+
+    assert authority._fresh_process_access_available(authority._PROCESS_VM_WRITE) is False
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[:4] == [authority.sys.executable, "-I", "-c", authority._FRESH_PROCESS_ACCESS_PROBE]
+    assert command[-2:] == ["4242", str(authority._PROCESS_VM_WRITE)]
+    assert "SeDebugPrivilege" in authority._FRESH_PROCESS_ACCESS_PROBE
+    assert "AdjustTokenPrivileges" in authority._FRESH_PROCESS_ACCESS_PROBE
+    assert "ERROR_NOT_ALL_ASSIGNED" in authority._FRESH_PROCESS_ACCESS_PROBE
+    assert captured["kwargs"] == {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "errors": "replace",
+    }
+
+
+def test_fresh_process_access_probe_reports_unexpected_available_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_process_authority()
+
+    def fake_run(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 10, stdout="AVAILABLE\n", stderr="")
+
+    monkeypatch.setattr(authority.subprocess, "run", fake_run)
+
+    assert authority._fresh_process_access_available(authority._PROCESS_CREATE_THREAD) is True
+
+
+def test_fresh_process_access_probe_fails_closed_on_ambiguous_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_process_authority()
+
+    def fake_run(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr="SEDEBUG_DISABLE_FAILED:5\n",
+        )
+
+    monkeypatch.setattr(authority.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="fresh same-token process-access sibling probe failed"):
+        authority._fresh_process_access_available(authority._PROCESS_DUP_HANDLE)
 
 
 def test_production_process_authority_requires_birth_protected_worker_boundary() -> None:

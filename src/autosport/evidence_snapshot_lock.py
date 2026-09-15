@@ -92,7 +92,6 @@ class _WindowsWorkspaceChangeWatch:
         file_list_directory = 0x00000001
         file_share_read = 0x00000001
         file_share_write = 0x00000002
-        file_share_delete = 0x00000004
         open_existing = 3
         file_flag_backup_semantics = 0x02000000
         file_flag_overlapped = 0x40000000
@@ -101,10 +100,14 @@ class _WindowsWorkspaceChangeWatch:
         invalid_handle_value = ctypes.c_void_p(-1).value
 
         resolved = workspace.resolve(strict=True)
+        # ReadDirectoryChangesW reports changes within this directory but not a
+        # rename/delete of the watched directory object itself. Keep DELETE sharing
+        # disabled so the caller-visible workspace path cannot be renamed/replaced
+        # away from this authoritative handle during the snapshot interval.
         directory_handle = create_file(
             str(resolved),
             file_list_directory,
-            file_share_read | file_share_write | file_share_delete,
+            file_share_read | file_share_write,
             None,
             open_existing,
             file_flag_backup_semantics | file_flag_overlapped,

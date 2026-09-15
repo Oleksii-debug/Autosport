@@ -96,15 +96,16 @@ def test_export_rechecks_destination_after_snapshot_before_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = _workspace_with_evidence(tmp_path)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    alias = tmp_path / "destination-alias"
+    external_target = tmp_path / "external-manifest.json"
+    external_target.write_text("old-external-bytes\n", encoding="utf-8")
+    internal_target = workspace / "market.db"
+    internal_target.write_bytes(b"sqlite-product-state")
+    link = workspace / "destination-link.json"
     try:
-        os.symlink(outside, alias, target_is_directory=True)
+        os.symlink(external_target, link)
     except (OSError, NotImplementedError):
-        pytest.skip("directory symlinks unavailable in this environment")
+        pytest.skip("file symlinks unavailable in this environment")
 
-    destination = alias / "manifest.json"
     real_hash = evidence_export._open_and_hash_regular_file
     redirected = False
 
@@ -112,81 +113,99 @@ def test_export_rechecks_destination_after_snapshot_before_publication(
         nonlocal redirected
         result = real_hash(path)
         if not redirected:
-            alias.unlink()
-            os.symlink(workspace, alias, target_is_directory=True)
+            link.unlink()
+            os.symlink(internal_target, link)
             redirected = True
         return result
 
     monkeypatch.setattr(evidence_export, "_open_and_hash_regular_file", hash_then_redirect)
 
     with pytest.raises(ValueError, match="outside the Autosport workspace"):
-        export_evidence_manifest(workspace, destination)
+        export_evidence_manifest(workspace, link)
 
     assert redirected is True
+    assert external_target.read_text(encoding="utf-8") == "old-external-bytes\n"
+    assert internal_target.read_bytes() == b"sqlite-product-state"
+
+
+def test_export_rejects_reparentable_sibling_output_parent(tmp_path: Path) -> None:
+    workspace = _workspace_with_evidence(tmp_path)
+    destination = tmp_path / "exports" / "manifest.json"
+
+    with pytest.raises(ValueError, match="ancestor of the Autosport workspace"):
+        export_evidence_manifest(workspace, destination)
+
+    assert not destination.exists()
+    assert not destination.parent.exists()
+
+
+def test_export_accepts_output_in_workspace_ancestor(tmp_path: Path) -> None:
+    safe_parent = tmp_path / "safe-parent"
+    safe_parent.mkdir()
+    workspace = _workspace_with_evidence(safe_parent)
+    destination = safe_parent / "manifest.json"
+
+    report = export_evidence_manifest(workspace, destination)
+
+    assert json.loads(destination.read_text(encoding="utf-8")) == report
     assert not (workspace / "manifest.json").exists()
-    assert not (outside / "manifest.json").exists()
 
 
-def test_export_binds_new_output_parent_before_atomic_publication(
+def test_bound_parent_cannot_cross_into_workspace_after_ancestry_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A post-boundary parent substitution cannot redirect or produce a false PASS."""
+    """Attack the exact review seam: check returns, then rename before mutation."""
 
-    workspace = _workspace_with_evidence(tmp_path)
-    capture = workspace / "capture"
-    capture.mkdir()
-    future_parent = tmp_path / "future-parent"
-    moved_parent = tmp_path / "future-parent-original"
-    destination = future_parent / "manifest.json"
-    real_writer = evidence_export.atomic_write_json
+    safe_parent = tmp_path / "safe-parent"
+    safe_parent.mkdir()
+    workspace = _workspace_with_evidence(safe_parent)
+    destination = safe_parent / "manifest.json"
+    captured_parent = workspace / "captured-parent"
     attack_attempted = False
     rename_blocked = False
 
-    def redirect_parent_then_publish(path: Path, payload: dict[str, object]) -> None:
+    if os.name == "nt":
+        seam_name = "_require_windows_output_parent_outside_workspace"
+    else:
+        seam_name = "_require_posix_output_parent_outside_workspace"
+    real_require = getattr(evidence_export, seam_name)
+
+    def require_then_attack(parent_handle: int, workspace_handle: int) -> None:
         nonlocal attack_attempted, rename_blocked
+        real_require(parent_handle, workspace_handle)
+        if attack_attempted:
+            return
         attack_attempted = True
         try:
-            future_parent.rename(moved_parent)
+            safe_parent.rename(captured_parent)
         except OSError:
             rename_blocked = True
         else:
-            try:
-                os.symlink(capture, future_parent, target_is_directory=True)
-            except (OSError, NotImplementedError) as exc:
-                moved_parent.rename(future_parent)
-                pytest.fail(f"output parent was renameable but attack symlink failed: {exc}")
-        real_writer(path, payload)
+            pytest.fail("safe publication parent was reparented into its workspace descendant")
 
-    monkeypatch.setattr(evidence_export, "atomic_write_json", redirect_parent_then_publish)
+    monkeypatch.setattr(evidence_export, seam_name, require_then_attack)
 
-    try:
-        report = export_evidence_manifest(workspace, destination)
-    except ValueError:
-        assert attack_attempted is True
-        assert rename_blocked is False
-        assert not (capture / "manifest.json").exists()
-        assert future_parent.is_symlink()
-        assert json.loads((moved_parent / "manifest.json").read_text(encoding="utf-8"))[
-            "kind"
-        ] == "autosport-workspace-evidence-manifest"
-    else:
-        assert attack_attempted is True
-        assert rename_blocked is True
-        assert json.loads(destination.read_text(encoding="utf-8")) == report
-        assert not moved_parent.exists()
+    report = export_evidence_manifest(workspace, destination)
+
+    assert attack_attempted is True
+    assert rename_blocked is True
+    assert json.loads(destination.read_text(encoding="utf-8")) == report
+    assert not captured_parent.exists()
+    assert not (workspace / "manifest.json").exists()
 
 
-def test_export_fails_closed_if_bound_parent_moves_and_original_path_is_recreated(
+def test_export_fails_closed_if_safe_parent_moves_and_old_path_is_recreated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Identical decoy bytes at the old pathname cannot turn moved publication into PASS."""
+    """Post-publication PASS still binds the caller-visible parent/file identity."""
 
-    workspace = _workspace_with_evidence(tmp_path)
-    future_parent = tmp_path / "future-parent"
-    moved_parent = tmp_path / "future-parent-original"
-    destination = future_parent / "manifest.json"
+    safe_parent = tmp_path / "safe-parent"
+    safe_parent.mkdir()
+    workspace = _workspace_with_evidence(safe_parent)
+    destination = safe_parent / "manifest.json"
+    moved_parent = tmp_path / "safe-parent-moved"
     real_writer = evidence_export.atomic_write_json
     attack_attempted = False
     expected_payload: dict[str, object] | None = None
@@ -196,10 +215,14 @@ def test_export_fails_closed_if_bound_parent_moves_and_original_path_is_recreate
         attack_attempted = True
         expected_payload = payload
         try:
-            future_parent.rename(moved_parent)
+            safe_parent.rename(moved_parent)
         except OSError:
-            pytest.skip("platform prevents renaming the bound output parent")
-        future_parent.mkdir()
+            pytest.skip("platform prevents renaming the bound safe parent")
+
+        safe_parent.mkdir()
+        decoy_workspace = safe_parent / "workspace"
+        decoy_workspace.mkdir()
+        (decoy_workspace / "paper_book.json").write_bytes(b'{"balance":"100"}\n')
         destination.write_bytes(evidence_export._manifest_file_bytes(payload))
         real_writer(path, payload)
 
@@ -212,51 +235,3 @@ def test_export_fails_closed_if_bound_parent_moves_and_original_path_is_recreate
     assert expected_payload is not None
     assert json.loads(destination.read_text(encoding="utf-8")) == expected_payload
     assert json.loads((moved_parent / "manifest.json").read_text(encoding="utf-8")) == expected_payload
-
-
-def test_export_rejects_bound_parent_reparented_under_workspace_before_write(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A bound external directory cannot become a workspace write target."""
-
-    workspace = _workspace_with_evidence(tmp_path)
-    future_parent = tmp_path / "future-parent"
-    captured_parent = workspace / "captured-parent"
-    destination = future_parent / "manifest.json"
-    real_writer = evidence_export.atomic_write_json
-    attack_attempted = False
-    rename_blocked = False
-
-    def reparent_under_workspace_then_publish(
-        path: Path,
-        payload: dict[str, object],
-    ) -> None:
-        nonlocal attack_attempted, rename_blocked
-        attack_attempted = True
-        try:
-            future_parent.rename(captured_parent)
-        except OSError:
-            rename_blocked = True
-        real_writer(path, payload)
-
-    monkeypatch.setattr(
-        evidence_export,
-        "atomic_write_json",
-        reparent_under_workspace_then_publish,
-    )
-
-    try:
-        report = export_evidence_manifest(workspace, destination)
-    except ValueError as exc:
-        assert attack_attempted is True
-        assert rename_blocked is False
-        assert "moved into Autosport workspace before publication" in str(exc)
-        assert captured_parent.is_dir()
-        assert list(captured_parent.iterdir()) == []
-        assert not future_parent.exists()
-    else:
-        assert attack_attempted is True
-        assert rename_blocked is True
-        assert json.loads(destination.read_text(encoding="utf-8")) == report
-        assert not captured_parent.exists()

@@ -16,7 +16,134 @@ _READ_CONTROL = 0x00020000
 _WRITE_DAC = 0x00040000
 _DACL_SECURITY_INFORMATION = 0x00000004
 _SE_FILE_OBJECT = 1
+_SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
+_STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
+_MAX_SYSTEM_HANDLE_SNAPSHOT_BYTES = 64 * 1024 * 1024
 _TEST_DACL_REWRITE_ENV = "AUTOSPORT_TEST_REWRITE_EXPECTED_DACL_AFTER_RESOURCE_END"
+
+
+class _SystemHandleTableEntryInfoEx(ctypes.Structure):
+    _fields_ = (
+        ("Object", ctypes.c_void_p),
+        ("UniqueProcessId", ctypes.c_size_t),
+        ("HandleValue", ctypes.c_size_t),
+        ("GrantedAccess", ctypes.c_uint32),
+        ("CreatorBackTraceIndex", ctypes.c_uint16),
+        ("ObjectTypeIndex", ctypes.c_uint16),
+        ("HandleAttributes", ctypes.c_uint32),
+        ("Reserved", ctypes.c_uint32),
+    )
+
+
+def _raw_handle_value(raw_handle: Any) -> int:
+    value = (
+        raw_handle
+        if isinstance(raw_handle, int)
+        else ctypes.cast(raw_handle, ctypes.c_void_p).value
+    )
+    if value is None:
+        raise RuntimeError("trusted expected-snapshot security handle has no value")
+    return int(value)
+
+
+def _query_system_handles() -> list[tuple[int, int, int, int]]:
+    """Capture the Windows extended handle table or fail closed."""
+
+    if os.name != "nt":
+        raise RuntimeError("system handle authority audit requires Windows")
+
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    query = ntdll.NtQuerySystemInformation
+    query.argtypes = (
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+    )
+    query.restype = ctypes.c_int32
+
+    size = 1024 * 1024
+    while size <= _MAX_SYSTEM_HANDLE_SNAPSHOT_BYTES:
+        buffer = ctypes.create_string_buffer(size)
+        returned = ctypes.c_uint32(0)
+        status = int(
+            query(
+                _SYSTEM_EXTENDED_HANDLE_INFORMATION,
+                ctypes.cast(buffer, ctypes.c_void_p),
+                size,
+                ctypes.byref(returned),
+            )
+        )
+        status_u32 = ctypes.c_uint32(status).value
+        if status_u32 == 0:
+            header_size = ctypes.sizeof(ctypes.c_size_t) * 2
+            if size < header_size:
+                raise RuntimeError("system handle authority snapshot header was truncated")
+            count = ctypes.c_size_t.from_buffer_copy(buffer.raw[: ctypes.sizeof(ctypes.c_size_t)]).value
+            entry_size = ctypes.sizeof(_SystemHandleTableEntryInfoEx)
+            required = header_size + int(count) * entry_size
+            if required > size:
+                raise RuntimeError("system handle authority snapshot entries were truncated")
+            snapshot: list[tuple[int, int, int, int]] = []
+            for index in range(int(count)):
+                offset = header_size + index * entry_size
+                entry = _SystemHandleTableEntryInfoEx.from_buffer_copy(
+                    buffer.raw[offset : offset + entry_size]
+                )
+                snapshot.append(
+                    (
+                        int(entry.Object or 0),
+                        int(entry.UniqueProcessId),
+                        int(entry.HandleValue),
+                        int(entry.GrantedAccess),
+                    )
+                )
+            return snapshot
+        if status_u32 != _STATUS_INFO_LENGTH_MISMATCH:
+            raise RuntimeError(
+                "system handle authority snapshot failed: "
+                f"NTSTATUS=0x{status_u32:08x}"
+            )
+        requested = int(returned.value)
+        size = max(size * 2, requested + 64 * 1024)
+
+    raise RuntimeError("system handle authority snapshot exceeded bounded capture size")
+
+
+def _require_no_competing_write_dac_handles(raw_handle: Any, *, label: str) -> None:
+    """Reject WRITE_DAC handles that predate the OWNER RIGHTS deny.
+
+    The deny ACE prevents fresh WRITE_DAC acquisition. A handle granted before that
+    deny keeps its access mask, so after installing the deny we bind the trusted
+    handle to its kernel object and reject every other live handle to that same
+    object that still carries WRITE_DAC.
+    """
+
+    trusted_handle = _raw_handle_value(raw_handle)
+    current_pid = os.getpid()
+    snapshot = _query_system_handles()
+    trusted_rows = [
+        row
+        for row in snapshot
+        if row[1] == current_pid and row[2] == trusted_handle
+    ]
+    if len(trusted_rows) != 1:
+        raise RuntimeError(f"{label} trusted handle was not uniquely present in system handle table")
+    target_object, _pid, _handle, trusted_access = trusted_rows[0]
+    if target_object == 0 or trusted_access & _WRITE_DAC == 0:
+        raise RuntimeError(f"{label} trusted handle lost WRITE_DAC authority")
+
+    competing = [
+        row
+        for row in snapshot
+        if row[0] == target_object
+        and row[3] & _WRITE_DAC
+        and not (row[1] == current_pid and row[2] == trusted_handle)
+    ]
+    if competing:
+        raise RuntimeError(
+            f"{label} has {len(competing)} pre-existing competing WRITE_DAC handle(s)"
+        )
 
 
 _CHILD_DACL_PROBE = r'''
@@ -344,6 +471,10 @@ def install(wrapper: ModuleType) -> None:
                 raise RuntimeError(
                     "trusted expected-snapshot parent security fence still allows fresh WRITE_DAC"
                 )
+            _require_no_competing_write_dac_handles(
+                raw_handle,
+                label="trusted expected-snapshot parent security fence",
+            )
             record["parent_dacl"] = descriptor
             record["parent_security_authority"] = True
             return record
@@ -380,6 +511,10 @@ def install(wrapper: ModuleType) -> None:
                 raise RuntimeError(
                     "trusted expected-snapshot file security fence still allows fresh WRITE_DAC"
                 )
+            _require_no_competing_write_dac_handles(
+                raw_handle,
+                label="trusted expected-snapshot file security fence",
+            )
         except BaseException:
             authority = file_authorities.pop(key, None)
             if authority is not None:

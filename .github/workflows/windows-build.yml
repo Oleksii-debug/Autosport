@@ -198,61 +198,118 @@ jobs:
           "AUTOSPORT_QUALIFIED_PACKAGE_SHA256=$packageSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Execute packaged NVDA evidence contract
         shell: pwsh
-        run: ./scripts/nvda_evidence_package_smoke.ps1
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./scripts/packaged_executable_authority.ps1
+          $identity = Get-AutosportProducerPackageIdentity
+          $packagedDataExe = [string]$env:AUTOSPORT_PACKAGED_DATA_EXE
+          $freshDataExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
+          $packagedAuthority = $null
+          $freshAuthority = $null
+          try {
+            $packagedAuthority = Open-AutosportQualifiedExecutable -Path $packagedDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Packaged NVDA Autosport-Data.exe'
+            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Fresh-extracted NVDA Autosport-Data.exe'
+            ./scripts/nvda_evidence_package_smoke.ps1
+          } finally {
+            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
+            if ($null -ne $packagedAuthority) { $packagedAuthority.Dispose() }
+          }
       - name: Prove packaged workspace recovery reachability
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          . ./scripts/packaged_executable_authority.ps1
+          $identity = Get-AutosportProducerPackageIdentity
 
           $packagedDataExe = [string]$env:AUTOSPORT_PACKAGED_DATA_EXE
           $freshDataExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
           if ([string]::IsNullOrWhiteSpace($packagedDataExe)) { throw 'Packaged recovery smoke is missing verified package executable anchor' }
-          if (-not (Test-Path $packagedDataExe -PathType Leaf)) { throw 'Packaged recovery smoke is missing Autosport-Data.exe' }
-          if (-not (Test-Path $freshDataExe -PathType Leaf)) { throw 'Fresh-extracted recovery smoke is missing Autosport-Data.exe' }
 
-          $packagedWorkspace = Join-Path $PWD 'dist/repair-workspace-packaged-smoke'
-          $freshWorkspace = Join-Path $PWD 'dist/repair-workspace-fresh-smoke'
-          foreach ($workspace in @($packagedWorkspace, $freshWorkspace)) {
-            if (Test-Path $workspace) { Remove-Item -Recurse -Force $workspace }
-            New-Item -ItemType Directory -Path $workspace | Out-Null
+          $packagedAuthority = $null
+          $freshAuthority = $null
+          try {
+            $packagedAuthority = Open-AutosportQualifiedExecutable -Path $packagedDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Packaged recovery Autosport-Data.exe'
+            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Fresh-extracted recovery Autosport-Data.exe'
+
+            $packagedWorkspace = Join-Path $PWD 'dist/repair-workspace-packaged-smoke'
+            $freshWorkspace = Join-Path $PWD 'dist/repair-workspace-fresh-smoke'
+            foreach ($workspace in @($packagedWorkspace, $freshWorkspace)) {
+              if (Test-Path $workspace) { Remove-Item -Recurse -Force $workspace }
+              New-Item -ItemType Directory -Path $workspace | Out-Null
+            }
+
+            $packagedOutput = (& $packagedDataExe repair-workspace --workspace $packagedWorkspace 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe repair-workspace exited $LASTEXITCODE" }
+            if ($packagedOutput -notmatch 'repair=OK') { throw 'Packaged repair-workspace did not report canonical repair=OK' }
+
+            $freshOutput = (& $freshDataExe repair-workspace --workspace $freshWorkspace 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe repair-workspace exited $LASTEXITCODE" }
+            if ($freshOutput -notmatch 'repair=OK') { throw 'Fresh-extracted repair-workspace did not report canonical repair=OK' }
+
+            $evidence = [ordered]@{
+              status = 'PASS'
+              source_sha = $env:AUTOSPORT_SOURCE_SHA
+              packaged_repair_workspace_status = 'PASS'
+              fresh_extracted_repair_workspace_status = 'PASS'
+              canonical_output = 'repair=OK'
+              empty_isolated_workspace_reachability_only = $true
+              real_money_execution = $false
+              human_tested = $false
+              nvda_verified = $false
+            }
+            $evidencePath = Join-Path $PWD 'dist/repair-workspace-package-smoke.json'
+            $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $evidencePath -Encoding utf8
+
+            $verificationPath = Join-Path $PWD 'dist/fresh-extraction-verification.json'
+            $verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
+            $verification | Add-Member -NotePropertyName extracted_repair_workspace_status -NotePropertyValue 'PASS' -Force
+            $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
+          } finally {
+            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
+            if ($null -ne $packagedAuthority) { $packagedAuthority.Dispose() }
           }
-
-          $packagedOutput = (& $packagedDataExe repair-workspace --workspace $packagedWorkspace 2>&1 | Out-String).Trim()
-          if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe repair-workspace exited $LASTEXITCODE" }
-          if ($packagedOutput -notmatch 'repair=OK') { throw 'Packaged repair-workspace did not report canonical repair=OK' }
-
-          $freshOutput = (& $freshDataExe repair-workspace --workspace $freshWorkspace 2>&1 | Out-String).Trim()
-          if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe repair-workspace exited $LASTEXITCODE" }
-          if ($freshOutput -notmatch 'repair=OK') { throw 'Fresh-extracted repair-workspace did not report canonical repair=OK' }
-
-          $evidence = [ordered]@{
-            status = 'PASS'
-            source_sha = $env:AUTOSPORT_SOURCE_SHA
-            packaged_repair_workspace_status = 'PASS'
-            fresh_extracted_repair_workspace_status = 'PASS'
-            canonical_output = 'repair=OK'
-            empty_isolated_workspace_reachability_only = $true
-            real_money_execution = $false
-            human_tested = $false
-            nvda_verified = $false
-          }
-          $evidencePath = Join-Path $PWD 'dist/repair-workspace-package-smoke.json'
-          $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $evidencePath -Encoding utf8
-
-          $verificationPath = Join-Path $PWD 'dist/fresh-extraction-verification.json'
-          $verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
-          $verification | Add-Member -NotePropertyName extracted_repair_workspace_status -NotePropertyValue 'PASS' -Force
-          $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
       - name: Execute packaged walk-forward evaluation
         shell: pwsh
-        run: ./scripts/walk_forward_package_smoke.ps1
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./scripts/packaged_executable_authority.ps1
+          $identity = Get-AutosportProducerPackageIdentity
+          $packagedDataExe = [string]$env:AUTOSPORT_PACKAGED_DATA_EXE
+          $freshDataExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
+          $packagedAuthority = $null
+          $freshAuthority = $null
+          try {
+            $packagedAuthority = Open-AutosportQualifiedExecutable -Path $packagedDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Packaged walk-forward Autosport-Data.exe'
+            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Fresh-extracted walk-forward Autosport-Data.exe'
+            ./scripts/walk_forward_package_smoke.ps1
+          } finally {
+            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
+            if ($null -ne $packagedAuthority) { $packagedAuthority.Dispose() }
+          }
       - name: Execute packaged retrospective forecast-origin evaluation
         shell: pwsh
-        run: ./scripts/walk_forward_origin_package_smoke.ps1
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./scripts/packaged_executable_authority.ps1
+          $identity = Get-AutosportProducerPackageIdentity
+          $packagedDataExe = [string]$env:AUTOSPORT_PACKAGED_DATA_EXE
+          $freshDataExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
+          $packagedAuthority = $null
+          $freshAuthority = $null
+          try {
+            $packagedAuthority = Open-AutosportQualifiedExecutable -Path $packagedDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Packaged forecast-origin Autosport-Data.exe'
+            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Fresh-extracted forecast-origin Autosport-Data.exe'
+            ./scripts/walk_forward_origin_package_smoke.ps1
+          } finally {
+            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
+            if ($null -ne $packagedAuthority) { $packagedAuthority.Dispose() }
+          }
       - name: Audit packaged research demo path
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          . ./scripts/packaged_executable_authority.ps1
+          $identity = Get-AutosportProducerPackageIdentity
 
           $packagedRoot = [string]$env:AUTOSPORT_PACKAGED_ROOT
           $packagedExe = [string]$env:AUTOSPORT_PACKAGED_EXE
@@ -260,65 +317,83 @@ jobs:
             throw 'Packaged research demo audit is missing verified package extraction anchors'
           }
           $packagedDemo = Join-Path $packagedRoot 'examples/tt_demo'
-          if (-not (Test-Path $packagedExe -PathType Leaf)) { throw 'Packaged research demo audit is missing Autosport.exe' }
           if (-not (Test-Path (Join-Path $packagedDemo 'research_plan.json') -PathType Leaf)) { throw 'Packaged research demo audit is missing shipped research plan' }
-
-          $preAudit = Join-Path $PWD 'dist/research-demo-audit.json'
-          if (Test-Path $preAudit) { Remove-Item -Force $preAudit }
-          $preProcess = Start-Process -FilePath $packagedExe -ArgumentList '--research-demo-audit-output', $preAudit, $packagedDemo -Wait -PassThru
-          if ($preProcess.ExitCode -ne 0) { throw "Packaged research demo audit exited $($preProcess.ExitCode)" }
-          $preEvidence = Get-Content $preAudit -Raw | ConvertFrom-Json
-          if ($preEvidence.status -ne 'PASS') { throw 'Packaged research demo audit did not PASS' }
-          if ($preEvidence.strategy_id -ne 'research-replay-v1') { throw 'Packaged research demo audit strategy mismatch' }
-          if ($preEvidence.replay_event_count -ne 4 -or $preEvidence.settled_ticket_count -ne 1 -or $preEvidence.persistent_ticket_count -ne 1) {
-            throw 'Packaged research demo audit product journey drifted'
-          }
-          if ($preEvidence.persistent_balance -ne '990' -or $preEvidence.paper_net_profit -ne '-10') {
-            throw 'Packaged research demo audit economic result drifted'
-          }
-          if ($preEvidence.sample_fixture -ne $true -or $preEvidence.real_historical_market_proof -ne $false -or $preEvidence.profitability_claim -ne $false) {
-            throw 'Packaged research demo audit violated sample/historical truth boundary'
-          }
-          if ($preEvidence.real_money_execution -ne $false -or $preEvidence.human_tested -ne $false -or $preEvidence.nvda_verified -ne $false) {
-            throw 'Packaged research demo audit violated release truth labels'
-          }
 
           $freshRoot = Join-Path $PWD '.build-fresh-extraction/Autosport-V1'
           $freshExe = Join-Path $freshRoot 'Autosport.exe'
           $freshDemo = Join-Path $freshRoot 'examples/tt_demo'
-          if (-not (Test-Path $freshExe -PathType Leaf)) { throw 'Fresh extraction is missing Autosport.exe for research demo audit' }
           if (-not (Test-Path (Join-Path $freshDemo 'research_plan.json') -PathType Leaf)) { throw 'Fresh extraction is missing shipped research plan' }
 
-          $freshAudit = Join-Path $PWD 'dist/fresh-extraction-research-demo-audit.json'
-          if (Test-Path $freshAudit) { Remove-Item -Force $freshAudit }
-          $freshProcess = Start-Process -FilePath $freshExe -ArgumentList '--research-demo-audit-output', $freshAudit, $freshDemo -Wait -PassThru
-          if ($freshProcess.ExitCode -ne 0) { throw "Fresh-extracted research demo audit exited $($freshProcess.ExitCode)" }
-          $freshEvidence = Get-Content $freshAudit -Raw | ConvertFrom-Json
-          if ($freshEvidence.status -ne 'PASS') { throw 'Fresh-extracted research demo audit did not PASS' }
-          if ($freshEvidence.strategy_id -ne 'research-replay-v1') { throw 'Fresh-extracted research demo strategy mismatch' }
-          if ($freshEvidence.research_plan_sha256 -ne $preEvidence.research_plan_sha256) { throw 'Research plan identity changed after packaging' }
-          if ($freshEvidence.dataset_market_sha256 -ne $preEvidence.dataset_market_sha256 -or $freshEvidence.dataset_results_sha256 -ne $preEvidence.dataset_results_sha256) {
-            throw 'Research demo dataset identity changed after packaging'
-          }
-          if ($freshEvidence.replay_event_count -ne $preEvidence.replay_event_count -or $freshEvidence.settled_ticket_count -ne $preEvidence.settled_ticket_count -or $freshEvidence.persistent_ticket_count -ne $preEvidence.persistent_ticket_count) {
-            throw 'Research demo journey changed after fresh extraction'
-          }
-          if ($freshEvidence.persistent_balance -ne $preEvidence.persistent_balance -or $freshEvidence.paper_net_profit -ne $preEvidence.paper_net_profit) {
-            throw 'Research demo economic result changed after fresh extraction'
-          }
-          if ($freshEvidence.sample_fixture -ne $true -or $freshEvidence.real_historical_market_proof -ne $false -or $freshEvidence.profitability_claim -ne $false) {
-            throw 'Fresh-extracted research demo audit violated sample/historical truth boundary'
-          }
-          if ($freshEvidence.real_money_execution -ne $false -or $freshEvidence.human_tested -ne $false -or $freshEvidence.nvda_verified -ne $false) {
-            throw 'Fresh-extracted research demo audit violated release truth labels'
+          $packagedAuthority = $null
+          $freshAuthority = $null
+          try {
+            $packagedAuthority = Open-AutosportQualifiedExecutable -Path $packagedExe -ExpectedSha256 $identity.AutosportExeSha256 -Label 'Packaged research Autosport.exe'
+            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshExe -ExpectedSha256 $identity.AutosportExeSha256 -Label 'Fresh-extracted research Autosport.exe'
+
+            $preAudit = Join-Path $PWD 'dist/research-demo-audit.json'
+            if (Test-Path $preAudit) { Remove-Item -Force $preAudit }
+            $preProcess = Start-Process -FilePath $packagedExe -ArgumentList '--research-demo-audit-output', $preAudit, $packagedDemo -Wait -PassThru
+            if ($preProcess.ExitCode -ne 0) { throw "Packaged research demo audit exited $($preProcess.ExitCode)" }
+            $preEvidence = Get-Content $preAudit -Raw | ConvertFrom-Json
+            if ($preEvidence.status -ne 'PASS') { throw 'Packaged research demo audit did not PASS' }
+            if ($preEvidence.strategy_id -ne 'research-replay-v1') { throw 'Packaged research demo audit strategy mismatch' }
+            if ($preEvidence.replay_event_count -ne 4 -or $preEvidence.settled_ticket_count -ne 1 -or $preEvidence.persistent_ticket_count -ne 1) {
+              throw 'Packaged research demo audit product journey drifted'
+            }
+            if ($preEvidence.persistent_balance -ne '990' -or $preEvidence.paper_net_profit -ne '-10') {
+              throw 'Packaged research demo audit economic result drifted'
+            }
+            if ($preEvidence.sample_fixture -ne $true -or $preEvidence.real_historical_market_proof -ne $false -or $preEvidence.profitability_claim -ne $false) {
+              throw 'Packaged research demo audit violated sample/historical truth boundary'
+            }
+            if ($preEvidence.real_money_execution -ne $false -or $preEvidence.human_tested -ne $false -or $preEvidence.nvda_verified -ne $false) {
+              throw 'Packaged research demo audit violated release truth labels'
+            }
+
+            $freshAudit = Join-Path $PWD 'dist/fresh-extraction-research-demo-audit.json'
+            if (Test-Path $freshAudit) { Remove-Item -Force $freshAudit }
+            $freshProcess = Start-Process -FilePath $freshExe -ArgumentList '--research-demo-audit-output', $freshAudit, $freshDemo -Wait -PassThru
+            if ($freshProcess.ExitCode -ne 0) { throw "Fresh-extracted research demo audit exited $($freshProcess.ExitCode)" }
+            $freshEvidence = Get-Content $freshAudit -Raw | ConvertFrom-Json
+            if ($freshEvidence.status -ne 'PASS') { throw 'Fresh-extracted research demo audit did not PASS' }
+            if ($freshEvidence.strategy_id -ne 'research-replay-v1') { throw 'Fresh-extracted research demo strategy mismatch' }
+            if ($freshEvidence.research_plan_sha256 -ne $preEvidence.research_plan_sha256) { throw 'Research plan identity changed after packaging' }
+            if ($freshEvidence.dataset_market_sha256 -ne $preEvidence.dataset_market_sha256 -or $freshEvidence.dataset_results_sha256 -ne $preEvidence.dataset_results_sha256) {
+              throw 'Research demo dataset identity changed after packaging'
+            }
+            if ($freshEvidence.replay_event_count -ne $preEvidence.replay_event_count -or $freshEvidence.settled_ticket_count -ne $preEvidence.settled_ticket_count -or $freshEvidence.persistent_ticket_count -ne $preEvidence.persistent_ticket_count) {
+              throw 'Research demo journey changed after fresh extraction'
+            }
+            if ($freshEvidence.persistent_balance -ne $preEvidence.persistent_balance -or $freshEvidence.paper_net_profit -ne $preEvidence.paper_net_profit) {
+              throw 'Research demo economic result changed after fresh extraction'
+            }
+            if ($freshEvidence.sample_fixture -ne $true -or $freshEvidence.real_historical_market_proof -ne $false -or $freshEvidence.profitability_claim -ne $false) {
+              throw 'Fresh-extracted research demo audit violated sample/historical truth boundary'
+            }
+            if ($freshEvidence.real_money_execution -ne $false -or $freshEvidence.human_tested -ne $false -or $freshEvidence.nvda_verified -ne $false) {
+              throw 'Fresh-extracted research demo audit violated release truth labels'
+            }
+          } finally {
+            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
+            if ($null -ne $packagedAuthority) { $packagedAuthority.Dispose() }
           }
       - name: External UIA fresh-extraction gate
         shell: pwsh
         run: |
-          $evidence = Join-Path $PWD 'dist/fresh-extraction-external-uia-audit.json'
-          ./scripts/external_uia_audit.ps1 `
-            -Exe (Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport.exe') `
-            -Output $evidence
+          $ErrorActionPreference = 'Stop'
+          . ./scripts/packaged_executable_authority.ps1
+          $identity = Get-AutosportProducerPackageIdentity
+          $freshExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport.exe'
+          $freshAuthority = $null
+          try {
+            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshExe -ExpectedSha256 $identity.AutosportExeSha256 -Label 'Fresh-extracted external UIA Autosport.exe'
+            $evidence = Join-Path $PWD 'dist/fresh-extraction-external-uia-audit.json'
+            ./scripts/external_uia_audit.ps1 `
+              -Exe $freshExe `
+              -Output $evidence
+          } finally {
+            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
+          }
           $external = Get-Content $evidence -Raw | ConvertFrom-Json
           if ($external.status -ne 'PASS') { throw 'External UIA fresh-extraction audit did not PASS' }
           if ($external.real_money_execution -ne $false -or $external.human_tested -ne $false -or $external.nvda_verified -ne $false) {

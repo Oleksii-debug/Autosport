@@ -58,6 +58,12 @@ _BOUND_WINDOWS_OUTPUT: ContextVar[tuple[int, int, Path] | None] = ContextVar(
     "autosport_evidence_bound_windows_output",
     default=None,
 )
+_RETAINED_SOURCE_SNAPSHOTS: ContextVar[
+    list[tuple[Path, int, os.stat_result, os.stat_result, int, str]] | None
+] = ContextVar(
+    "autosport_evidence_retained_source_snapshots",
+    default=None,
+)
 
 
 def _is_canonical_run_summary_name(name: str) -> bool:
@@ -132,6 +138,19 @@ def _path_still_matches_open_file(
         os.close(verification_descriptor)
 
 
+def _hash_open_descriptor(descriptor: int) -> tuple[int, str]:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    size = 0
+    while True:
+        chunk = os.read(descriptor, _CHUNK_SIZE)
+        if not chunk:
+            break
+        size += len(chunk)
+        digest.update(chunk)
+    return size, digest.hexdigest()
+
+
 def _open_and_hash_regular_file(path: Path) -> tuple[int, str]:
     """Hash one stable regular-file snapshot without following path symlinks."""
 
@@ -140,33 +159,63 @@ def _open_and_hash_regular_file(path: Path) -> tuple[int, str]:
         raise ValueError(f"canonical evidence path is not a regular file: {path.name}")
 
     descriptor = os.open(path, _read_only_open_flags())
+    descriptor_retained = False
     try:
-        with os.fdopen(descriptor, "rb", closefd=False) as handle:
-            opened = os.fstat(handle.fileno())
-            if not stat.S_ISREG(opened.st_mode) or not _path_still_matches_open_file(
-                path,
-                handle.fileno(),
-                before,
-            ):
-                raise ValueError(f"canonical evidence path changed before snapshot: {path.name}")
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not _path_still_matches_open_file(
+            path,
+            descriptor,
+            before,
+        ):
+            raise ValueError(f"canonical evidence path changed before snapshot: {path.name}")
 
-            digest = hashlib.sha256()
-            size = 0
-            while True:
-                chunk = handle.read(_CHUNK_SIZE)
-                if not chunk:
-                    break
-                size += len(chunk)
-                digest.update(chunk)
+        size, digest = _hash_open_descriptor(descriptor)
+        opened_after = os.fstat(descriptor)
+        if not _stable_stat_metadata(opened, opened_after):
+            raise ValueError(f"canonical evidence file mutated during snapshot: {path.name}")
+        if not _path_still_matches_open_file(path, descriptor, before):
+            raise ValueError(f"canonical evidence path changed during snapshot: {path.name}")
 
-            opened_after = os.fstat(handle.fileno())
-            if not _stable_stat_metadata(opened, opened_after):
-                raise ValueError(f"canonical evidence file mutated during snapshot: {path.name}")
-            if not _path_still_matches_open_file(path, handle.fileno(), before):
-                raise ValueError(f"canonical evidence path changed during snapshot: {path.name}")
-            return size, digest.hexdigest()
+        retained_snapshots = _RETAINED_SOURCE_SNAPSHOTS.get()
+        if retained_snapshots is not None:
+            retained_snapshots.append(
+                (path, descriptor, before, opened, size, digest)
+            )
+            descriptor_retained = True
+        return size, digest
     finally:
-        os.close(descriptor)
+        if not descriptor_retained:
+            os.close(descriptor)
+
+
+def _reprove_retained_source_snapshot(
+    snapshot: tuple[Path, int, os.stat_result, os.stat_result, int, str],
+) -> None:
+    path, descriptor, expected_path_stat, expected_open_stat, expected_size, expected_digest = snapshot
+    current_before = os.fstat(descriptor)
+    if not _stable_stat_metadata(expected_open_stat, current_before):
+        raise ValueError(f"canonical evidence file mutated during snapshot: {path.name}")
+
+    size, digest = _hash_open_descriptor(descriptor)
+    current_after = os.fstat(descriptor)
+    if (
+        not _stable_stat_metadata(expected_open_stat, current_after)
+        or size != expected_size
+        or digest != expected_digest
+    ):
+        raise ValueError(f"canonical evidence file mutated during snapshot: {path.name}")
+    if not _path_still_matches_open_file(path, descriptor, expected_path_stat):
+        raise ValueError(f"canonical evidence path changed during snapshot: {path.name}")
+
+
+def _reprove_retained_source_path(
+    snapshot: tuple[Path, int, os.stat_result, os.stat_result, int, str],
+) -> None:
+    path, descriptor, expected_path_stat, expected_open_stat, _, _ = snapshot
+    if not _stable_stat_metadata(expected_open_stat, os.fstat(descriptor)):
+        raise ValueError(f"canonical evidence file mutated during snapshot: {path.name}")
+    if not _path_still_matches_open_file(path, descriptor, expected_path_stat):
+        raise ValueError(f"canonical evidence path changed during snapshot: {path.name}")
 
 
 def _manifest_sha256(payload: dict[str, Any]) -> str:
@@ -1218,47 +1267,84 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
     if not _canonical_source_names(root):
         raise ValueError("workspace contains no canonical exportable evidence")
 
-    # Keep the exclusive critical section limited to source discovery + hashing.
-    # The manifest payload is immutable ordinary Python data after this block, so a
-    # slow/failing destination write must not unnecessarily block replay/settlement.
+    # Keep the exclusive critical section limited to source discovery + hashing and
+    # close-boundary reproof. Publication remains outside this economic lock.
     with WorkspaceEconomicLock(root):
         names = _canonical_source_names(root)
         if not names:
             raise ValueError("workspace canonical evidence disappeared before snapshot")
 
-        files: list[dict[str, Any]] = []
-        for name in names:
-            size, digest = _open_and_hash_regular_file(root / name)
-            files.append(
-                {
-                    "path": name,
-                    "size_bytes": size,
-                    "sha256": digest,
-                }
-            )
+        retained_snapshots: list[
+            tuple[Path, int, os.stat_result, os.stat_result, int, str]
+        ] = []
+        retention_token = _RETAINED_SOURCE_SNAPSHOTS.set(retained_snapshots)
+        primary_error: BaseException | None = None
+        try:
+            files: list[dict[str, Any]] = []
+            for name in names:
+                size, digest = _open_and_hash_regular_file(root / name)
+                files.append(
+                    {
+                        "path": name,
+                        "size_bytes": size,
+                        "sha256": digest,
+                    }
+                )
 
-        if _canonical_source_names(root) != names:
-            raise ValueError("workspace canonical evidence set changed during snapshot")
+            missing_fixed = [name for name in _FIXED_EVIDENCE_NAMES if name not in names]
+            run_summary_count = sum(_is_canonical_run_summary_name(name) for name in names)
+            payload: dict[str, Any] = {
+                "schema_version": _SCHEMA_VERSION,
+                "kind": _KIND,
+                "file_count": len(files),
+                "files": files,
+                "expected_fixed_evidence_paths": list(_FIXED_EVIDENCE_NAMES),
+                "missing_fixed_evidence_paths": missing_fixed,
+                "fixed_evidence_set_complete": not missing_fixed,
+                "run_summary_count": run_summary_count,
+                "file_contents_included": False,
+                "market_database_included": False,
+                "raw_historical_or_provider_bytes_included": False,
+                "environment_or_credential_values_included": False,
+                "arbitrary_workspace_files_included": False,
+                "real_money_execution": False,
+            }
+            payload["manifest_sha256"] = _manifest_sha256(payload)
 
-        missing_fixed = [name for name in _FIXED_EVIDENCE_NAMES if name not in names]
-        run_summary_count = sum(_is_canonical_run_summary_name(name) for name in names)
-        payload: dict[str, Any] = {
-            "schema_version": _SCHEMA_VERSION,
-            "kind": _KIND,
-            "file_count": len(files),
-            "files": files,
-            "expected_fixed_evidence_paths": list(_FIXED_EVIDENCE_NAMES),
-            "missing_fixed_evidence_paths": missing_fixed,
-            "fixed_evidence_set_complete": not missing_fixed,
-            "run_summary_count": run_summary_count,
-            "file_contents_included": False,
-            "market_database_included": False,
-            "raw_historical_or_provider_bytes_included": False,
-            "environment_or_credential_values_included": False,
-            "arbitrary_workspace_files_included": False,
-            "real_money_execution": False,
-        }
-        payload["manifest_sha256"] = _manifest_sha256(payload)
+            # Re-read every originally hashed descriptor before snapshot close so
+            # mutation of an earlier member while a later member is being hashed
+            # cannot leave a stale digest in an otherwise unchanged name set.
+            for snapshot in retained_snapshots:
+                _reprove_retained_source_snapshot(snapshot)
+
+            if _canonical_source_names(root) != names:
+                raise ValueError("workspace canonical evidence set changed during snapshot")
+
+            # Keep a final lightweight path/identity proof immediately before the
+            # retained descriptors close and the WorkspaceEconomicLock is released.
+            for snapshot in retained_snapshots:
+                _reprove_retained_source_path(snapshot)
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            _RETAINED_SOURCE_SNAPSHOTS.reset(retention_token)
+            cleanup_error: BaseException | None = None
+            for snapshot in retained_snapshots:
+                try:
+                    os.close(snapshot[1])
+                except OSError as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            if primary_error is not None and cleanup_error is not None:
+                try:
+                    primary_error.add_note(
+                        f"retained evidence descriptor cleanup also failed: {cleanup_error}"
+                    )
+                except BaseException:
+                    pass
+            elif primary_error is None and cleanup_error is not None:
+                raise cleanup_error
 
     # Publication remains outside WorkspaceEconomicLock. Its resolved parent is a
     # workspace ancestor, so it cannot be reparented into that workspace descendant;

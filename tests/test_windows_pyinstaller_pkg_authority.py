@@ -25,7 +25,7 @@ _REAL_WINDOWS_PYINSTALLER = (
 )
 
 
-def test_pkg_authority_is_retained_from_carchive_writer_through_both_append_consumers() -> None:
+def test_pkg_authority_is_retained_from_carchive_writer_through_single_append_consumer() -> None:
     script = _GUARDED_PYINSTALLER.read_text(encoding="utf-8")
 
     writer = script.index("def guarded_carchive_writer(")
@@ -42,12 +42,13 @@ def test_pkg_authority_is_retained_from_carchive_writer_through_both_append_cons
         '_validate_package_authority(authority, phase="after append consumption")',
         copy,
     )
-    release = script.index('if authority["uses"] == 2:', validate_after)
+    release = script.index('if authority["uses"] == 1:', validate_after)
 
     assert writer < authoritative_open < publish < append
     assert append < validate_before < retained_read < copy < validate_after < release
     assert "building_api.CArchiveWriter = guarded_carchive_writer" in script
     assert "building_api.EXE._append_data_to_exe = guarded_append_data" in script
+    assert 'if authority["uses"] >= 1:' in script
     assert "without producer-bound PKG authority" in script
     assert "_FILE_SHARE_READ" in script
 

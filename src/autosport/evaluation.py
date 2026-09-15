@@ -95,11 +95,16 @@ def _exact_decimal_sum(values: tuple[Decimal, ...]) -> Decimal:
         ):
             raise ValueError(_INVALID_EVALUATION_STATE)
 
-        # Representation-only trailing zeroes do not carry mathematical scale for
-        # exact addition. Strip them before integer accumulation to minimize the
-        # bounded coefficient and exponent work without changing the value.
-        component_digits = significant_digits
-        component_exponent = normalized_exponent
+        # Preserve the predecessor representation for ordinary bounded operands so
+        # durable evidence remains text-stable (for example -10, not -1E+1).
+        # Wider raw coefficients are normalized first so representation-only
+        # trailing zeroes cannot make integer accumulation attacker-amplifiable.
+        if len(parts.digits) <= policy.prec:
+            component_digits = parts.digits
+            component_exponent = original_exponent
+        else:
+            component_digits = significant_digits
+            component_exponent = normalized_exponent
 
         coefficient = 0
         for digit in component_digits:

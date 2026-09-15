@@ -56,6 +56,44 @@ def test_independent_consumer_checks_producer_digest_before_mutable_json() -> No
     )
 
 
+def test_consumer_extracts_verified_snapshot_from_same_locked_stream() -> None:
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    start = workflow.index("- name: Materialize verified independent package extraction")
+    end = workflow.index("- name: Execute packaged NVDA evidence contract")
+    consumer = workflow[start:end]
+
+    function_start = consumer.index("function Expand-ProducerBoundPackage")
+    function_end = consumer.index("$package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'", function_start)
+    locked_extract = consumer[function_start:function_end]
+
+    lock_open = "$stream = [System.IO.File]::Open("
+    read_only_share = "[System.IO.FileShare]::Read"
+    digest_from_stream = "$sha256.ComputeHash($stream)"
+    rewind_stream = "$stream.Position = 0"
+    extract_from_stream = "[System.IO.Compression.ZipFile]::ExtractToDirectory($stream, $Destination, $true)"
+    close_stream = "$stream.Dispose()"
+    invocation = (
+        "Expand-ProducerBoundPackage -Path $consumerPackage -Expected $producerPackageSha "
+        "-Destination $postPackageExtractRoot -Label 'Consumer-bound release ZIP snapshot at extraction'"
+    )
+
+    assert lock_open in locked_extract
+    assert read_only_share in locked_extract
+    assert digest_from_stream in locked_extract
+    assert rewind_stream in locked_extract
+    assert extract_from_stream in locked_extract
+    assert close_stream in locked_extract
+    assert (
+        locked_extract.index(lock_open)
+        < locked_extract.index(digest_from_stream)
+        < locked_extract.index(rewind_stream)
+        < locked_extract.index(extract_from_stream)
+        < locked_extract.index(close_stream)
+    )
+    assert invocation in consumer
+    assert "Expand-Archive -LiteralPath $consumerPackage" not in consumer
+
+
 def test_coordinated_zip_and_json_replacement_is_rejected_by_earlier_digest() -> None:
     workflow = _WORKFLOW.read_text(encoding="utf-8")
     start = workflow.index("- name: Materialize verified independent package extraction")

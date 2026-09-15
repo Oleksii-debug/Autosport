@@ -51,7 +51,7 @@ def test_windows_build_holds_directory_namespace_fence_through_both_consumers() 
         "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "
         "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
     )
-    guarded_call = "& $pythonExecutable -I $trustedPyInstallerBinder `"
+    guarded_call = "& $packagingPython -I $trustedPyInstallerBinder `"
     gui_start = "$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'"
     data_start = "$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'"
     directory_dispose = "$trustedBuildDirectoryLocks[$directoryLockIndex].Dispose()"

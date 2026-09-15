@@ -414,7 +414,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
             "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "
             "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
         )
-        guarded_call = "& $pythonExecutable -I $trustedPyInstallerBinder `"
+        guarded_call = "& $packagingPython -I $trustedPyInstallerBinder `"
         first_start = "$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'"
         second_start = "$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'"
         package_build = "python scripts/package_windows.py `"
@@ -455,7 +455,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
 
     def test_windows_build_binds_pyinstaller_outputs_before_audit_and_package(self) -> None:
         script = Path("scripts/build_windows.ps1").read_text(encoding="utf-8")
-        guarded_call = "& $pythonExecutable -I $trustedPyInstallerBinder `"
+        guarded_call = "& $packagingPython -I $trustedPyInstallerBinder `"
         first_start = "$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'"
         second_start = "$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'"
         first_bind = "--bound-output $boundAutosportExe `"

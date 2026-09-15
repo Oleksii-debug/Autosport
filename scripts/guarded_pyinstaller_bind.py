@@ -16,9 +16,7 @@ from typing import Any
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _GENERIC_READ = 0x80000000
-_GENERIC_WRITE = 0x40000000
 _FILE_SHARE_READ = 0x00000001
-_CREATE_ALWAYS = 2
 _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
@@ -87,15 +85,18 @@ def _require_regular_nonreparse(path: pathlib.Path, *, label: str) -> os.stat_re
     return value
 
 
-def _create_windows_stream(
+def _open_final_retained_read_fence(
     path: pathlib.Path,
-    *,
-    desired_access: int,
-    share_mode: int,
-    creation_disposition: int,
-    os_flags: int,
-    mode: str,
-):
+) -> tuple[Any, tuple[int, int]]:
+    """Atomically establish the trusted final-object identity from an open handle.
+
+    PyInstaller legitimately rewrites/replaces the output object while assembling a
+    Windows executable. Therefore no identity captured at the initial bootloader
+    copy is authoritative. This fence is acquired only at PyInstaller's final
+    mtime transition, after its legitimate PE/resource/PKG mutations, and denies
+    later write/delete opens while the trusted verifier binds the exact object.
+    """
+
     if os.name != "nt":
         raise RuntimeError("guarded PyInstaller artifact binding is Windows-only")
 
@@ -120,10 +121,10 @@ def _create_windows_stream(
     ctypes.set_last_error(0)
     raw_handle = create_file(
         str(path),
-        desired_access,
-        share_mode,
+        _GENERIC_READ,
+        _FILE_SHARE_READ,
         None,
-        creation_disposition,
+        _OPEN_EXISTING,
         _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
         None,
     )
@@ -138,118 +139,29 @@ def _create_windows_stream(
     try:
         descriptor = msvcrt.open_osfhandle(
             int(handle_value),
-            os_flags | getattr(os, "O_BINARY", 0),
+            os.O_RDONLY | getattr(os, "O_BINARY", 0),
         )
     except BaseException:
         close_handle(raw_handle)
         raise
 
     try:
-        return os.fdopen(descriptor, mode, closefd=True)
+        stream = os.fdopen(descriptor, "rb", closefd=True)
     except BaseException:
         os.close(descriptor)
         raise
 
-
-def _copy_artifact_and_capture_identity(
-    src: str | os.PathLike[str],
-    dst: str | os.PathLike[str],
-) -> tuple[int, int]:
-    """Copy the initial artifact and capture identity from the still-open producing handle."""
-
-    destination = pathlib.Path(dst)
-    stream = _create_windows_stream(
-        destination,
-        desired_access=_GENERIC_READ | _GENERIC_WRITE,
-        share_mode=_FILE_SHARE_READ,
-        creation_disposition=_CREATE_ALWAYS,
-        os_flags=os.O_RDWR,
-        mode="w+b",
-    )
     try:
-        with open(src, "rb") as source:
-            shutil.copyfileobj(source, stream)
-        stream.flush()
-        os.fsync(stream.fileno())
-
-        if os.environ.get("AUTOSPORT_TEST_WRITE_PYINSTALLER_OUTPUT_BEFORE_IDENTITY") == "1":
-            with open(destination, "r+b") as competing_stream:
-                competing_stream.seek(0)
-                competing_stream.write(b"hostile same-object bytes")
-                competing_stream.flush()
-                os.fsync(competing_stream.fileno())
-            raise RuntimeError(
-                "producing PyInstaller handle allowed a concurrent write before identity capture"
-            )
-
-        if os.environ.get("AUTOSPORT_TEST_REPLACE_PYINSTALLER_OUTPUT_BEFORE_IDENTITY") == "1":
-            replacement = destination.with_name(
-                f".{destination.name}.pre-identity-replacement-{os.getpid()}"
-            )
-            try:
-                with open(replacement, "wb") as replacement_stream:
-                    stream.seek(0)
-                    shutil.copyfileobj(stream, replacement_stream)
-                    replacement_stream.flush()
-                    os.fsync(replacement_stream.fileno())
-                stream.seek(0, os.SEEK_END)
-                os.replace(replacement, destination)
-            finally:
-                try:
-                    replacement.unlink()
-                except FileNotFoundError:
-                    pass
-
         opened = os.fstat(stream.fileno())
         if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError(f"final PyInstaller output handle is not a regular file: {path}")
+        final_identity = _object_identity(opened)
+        after_path = _require_regular_nonreparse(path, label="final PyInstaller output")
+        if _object_identity(after_path) != final_identity:
             raise RuntimeError(
-                f"initial PyInstaller output handle must be a regular file: {destination}"
+                "PyInstaller output path changed while acquiring final retained binding fence"
             )
-        if _windows_attributes(destination) & _FILE_ATTRIBUTE_REPARSE_POINT:
-            raise RuntimeError(
-                f"initial PyInstaller output must not be a Windows reparse point: {destination}"
-            )
-        current_path = _require_regular_nonreparse(
-            destination,
-            label="initial PyInstaller output",
-        )
-        if _object_identity(current_path) != _object_identity(opened):
-            raise RuntimeError(
-                "initial PyInstaller output pathname changed before identity capture"
-            )
-        return _object_identity(opened)
-    finally:
-        stream.close()
-
-
-def _open_retained_read_fence(
-    path: pathlib.Path,
-    *,
-    expected_object_identity: tuple[int, int],
-):
-    if os.name != "nt":
-        raise RuntimeError("guarded PyInstaller artifact binding is Windows-only")
-
-    before = _require_regular_nonreparse(path, label="PyInstaller output")
-    if _object_identity(before) != expected_object_identity:
-        raise RuntimeError("PyInstaller produced object identity changed before binding")
-
-    stream = _create_windows_stream(
-        path,
-        desired_access=_GENERIC_READ,
-        share_mode=_FILE_SHARE_READ,
-        creation_disposition=_OPEN_EXISTING,
-        os_flags=os.O_RDONLY,
-        mode="rb",
-    )
-    try:
-        opened = os.fstat(stream.fileno())
-        if _object_identity(opened) != expected_object_identity:
-            raise RuntimeError("PyInstaller output changed while acquiring retained binding fence")
-        after_path = _require_regular_nonreparse(path, label="PyInstaller output")
-        if _object_identity(after_path) != expected_object_identity:
-            raise RuntimeError("PyInstaller output path changed while acquiring retained binding fence")
-        return stream
+        return stream, final_identity
     except BaseException:
         stream.close()
         raise
@@ -257,7 +169,7 @@ def _open_retained_read_fence(
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run PyInstaller and bind its exact produced EXE before producer completion."
+        description="Run PyInstaller and bind its exact final produced EXE before producer completion."
     )
     parser.add_argument("--artifact", required=True)
     parser.add_argument("--bound-output", required=True)
@@ -330,37 +242,26 @@ def run(argv: list[str] | None = None) -> int:
     import PyInstaller.building.api as building_api
     import PyInstaller.utils.misc as miscutils
 
-    original_copyfile = shutil.copyfile
     original_mtime = miscutils.mtime
     original_assemble = building_api.EXE.assemble
+    original_copyfile = shutil.copyfile
     state: dict[str, Any] = {
-        "initial_identity": None,
+        "producer_active": False,
+        "final_identity": None,
         "guard_stream": None,
         "bound": False,
         "test_replacement_injected": False,
     }
 
-    def guarded_copyfile(src, dst, *copy_args, **copy_kwargs):
-        if _normalized_path(dst) == artifact_key and state["initial_identity"] is None:
-            if copy_args:
-                raise RuntimeError("unexpected positional shutil.copyfile options for PyInstaller artifact")
-            unexpected = set(copy_kwargs) - {"follow_symlinks"}
-            if unexpected:
-                raise RuntimeError(
-                    "unexpected shutil.copyfile options for PyInstaller artifact: "
-                    + ", ".join(sorted(unexpected))
-                )
-            if copy_kwargs.get("follow_symlinks", True) is not True:
-                raise RuntimeError("PyInstaller artifact copy must follow the regular bootloader source")
-            state["initial_identity"] = _copy_artifact_and_capture_identity(src, dst)
-            return dst
-        return original_copyfile(src, dst, *copy_args, **copy_kwargs)
-
     def guarded_mtime(path):
-        if _normalized_path(path) == artifact_key and state["guard_stream"] is None:
-            initial_identity = state["initial_identity"]
-            if initial_identity is None:
-                raise RuntimeError("PyInstaller output identity was never captured at producer creation")
+        if (
+            state["producer_active"]
+            and _normalized_path(path) == artifact_key
+            and state["guard_stream"] is None
+        ):
+            guard_stream, final_identity = _open_final_retained_read_fence(artifact)
+            state["guard_stream"] = guard_stream
+            state["final_identity"] = final_identity
 
             if (
                 os.environ.get("AUTOSPORT_TEST_REPLACE_PYINSTALLER_OUTPUT") == "1"
@@ -371,40 +272,54 @@ def run(argv: list[str] | None = None) -> int:
                 )
                 try:
                     original_copyfile(artifact, replacement)
-                    os.replace(replacement, artifact)
+                    try:
+                        os.replace(replacement, artifact)
+                    except OSError as exc:
+                        state["test_replacement_injected"] = True
+                        raise RuntimeError(
+                            "PyInstaller output replacement blocked by retained final artifact fence"
+                        ) from exc
+                    raise RuntimeError(
+                        "PyInstaller output replacement unexpectedly succeeded after final artifact fence"
+                    )
                 finally:
                     try:
                         replacement.unlink()
                     except FileNotFoundError:
                         pass
-                state["test_replacement_injected"] = True
 
-            state["guard_stream"] = _open_retained_read_fence(
-                artifact,
-                expected_object_identity=initial_identity,
-            )
+            return os.fstat(guard_stream.fileno()).st_mtime
         return original_mtime(path)
 
     def guarded_assemble(self):
-        result = original_assemble(self)
-        if _normalized_path(self.name) != artifact_key:
-            return result
-        initial_identity = state["initial_identity"]
+        is_target = _normalized_path(self.name) == artifact_key
+        if not is_target:
+            return original_assemble(self)
+        if state["producer_active"]:
+            raise RuntimeError("guarded PyInstaller producer re-entered unexpectedly")
+
+        state["producer_active"] = True
+        try:
+            result = original_assemble(self)
+        finally:
+            state["producer_active"] = False
+
+        final_identity = state["final_identity"]
         guard_stream = state["guard_stream"]
-        if initial_identity is None or guard_stream is None:
+        if final_identity is None or guard_stream is None:
             raise RuntimeError(
-                "PyInstaller producer completed without retained artifact identity fence"
+                "PyInstaller producer completed without retained final artifact identity fence"
             )
 
         opened_before = os.fstat(guard_stream.fileno())
-        if _object_identity(opened_before) != initial_identity:
-            raise RuntimeError("retained PyInstaller artifact identity changed before trusted bind")
+        if _object_identity(opened_before) != final_identity:
+            raise RuntimeError("retained final PyInstaller artifact identity changed before trusted bind")
         current_path = _require_regular_nonreparse(
             artifact,
             label="PyInstaller output before trusted bind",
         )
-        if _object_identity(current_path) != initial_identity:
-            raise RuntimeError("PyInstaller output pathname no longer names the produced object")
+        if _object_identity(current_path) != final_identity:
+            raise RuntimeError("PyInstaller output pathname no longer names the final produced object")
 
         _invoke_trusted_verifier(
             verifier=verifier,
@@ -421,19 +336,18 @@ def run(argv: list[str] | None = None) -> int:
         )
         if (
             _stable_identity(opened_after) != _stable_identity(opened_before)
-            or _object_identity(current_after) != initial_identity
+            or _object_identity(current_after) != final_identity
         ):
             raise RuntimeError("PyInstaller output changed across trusted artifact binding")
         state["bound"] = True
         return result
 
-    shutil.copyfile = guarded_copyfile
     miscutils.mtime = guarded_mtime
     building_api.EXE.assemble = guarded_assemble
     try:
         PyInstaller.__main__.run(pyi_args=list(args.pyinstaller_args))
         if not state["bound"]:
-            raise RuntimeError("PyInstaller exited without binding the exact produced artifact")
+            raise RuntimeError("PyInstaller exited without binding the exact final produced artifact")
         digest = digest_output.read_text(encoding="utf-8").strip()
         if _SHA256_RE.fullmatch(digest) is None:
             raise RuntimeError("trusted artifact verifier emitted invalid digest")
@@ -441,7 +355,6 @@ def run(argv: list[str] | None = None) -> int:
     finally:
         building_api.EXE.assemble = original_assemble
         miscutils.mtime = original_mtime
-        shutil.copyfile = original_copyfile
         guard_stream = state.get("guard_stream")
         if guard_stream is not None:
             guard_stream.close()

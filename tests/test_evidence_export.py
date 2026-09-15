@@ -333,7 +333,7 @@ def test_verify_rejects_noncanonical_path_even_with_recomputed_manifest_hash(tmp
     forged["manifest_sha256"] = _manifest_hash(forged)
     _write_manifest(manifest, forged)
 
-    with pytest.raises(ValueError, match="manifest_sha256 does not match payload"):
+    with pytest.raises(ValueError, match="noncanonical evidence path"):
         verify_evidence_manifest(manifest, workspace)
 
 

@@ -368,6 +368,85 @@ def _open_producer_continuity_anchor(
         raise
 
 
+def _open_expected_snapshot_oracle(
+    path: pathlib.Path,
+    *,
+    expected_identity: tuple[int, int],
+    label: str,
+) -> Any:
+    """Retain a read-only oracle handle that denies snapshot writes and replacement."""
+
+    if os.name != "nt":
+        raise RuntimeError("guarded PyInstaller artifact binding is Windows-only")
+
+    import msvcrt
+
+    kernel32 = _windows_kernel32()
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+
+    ctypes.set_last_error(0)
+    raw_handle = create_file(
+        str(path),
+        _GENERIC_READ,
+        _FILE_SHARE_READ,
+        None,
+        _OPEN_EXISTING,
+        _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    handle_value = (
+        raw_handle
+        if isinstance(raw_handle, int)
+        else ctypes.cast(raw_handle, ctypes.c_void_p).value
+    )
+    if handle_value in {None, _INVALID_HANDLE_VALUE}:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    try:
+        descriptor = msvcrt.open_osfhandle(
+            int(handle_value),
+            os.O_RDONLY | getattr(os, "O_BINARY", 0),
+        )
+    except BaseException:
+        _close_windows_handle(raw_handle)
+        raise
+
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0, closefd=True)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+    try:
+        opened = os.fstat(stream.fileno())
+        current = _require_regular_nonreparse(
+            path,
+            label=f"trusted {label} expected snapshot oracle",
+        )
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _object_identity(opened) != expected_identity
+            or _object_identity(current) != expected_identity
+        ):
+            raise RuntimeError(
+                f"trusted {label} expected snapshot changed before oracle fencing"
+            )
+        return stream
+    except BaseException:
+        stream.close()
+        raise
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run PyInstaller and bind its exact final produced EXE before producer completion."
@@ -485,7 +564,10 @@ def run(argv: list[str] | None = None) -> int:
             error.__cause__ = exc
         return error
 
-    def _make_expected_snapshot(anchor_stream: Any, label: str) -> pathlib.Path:
+    def _make_expected_snapshot(
+        anchor_stream: Any,
+        label: str,
+    ) -> tuple[pathlib.Path, tuple[int, int]]:
         fd, raw_name = tempfile.mkstemp(
             prefix=f".{artifact.name}.{label}-",
             suffix=".exe",
@@ -506,8 +588,16 @@ def run(argv: list[str] | None = None) -> int:
                     anchor_stream.seek(position)
                 output.flush()
                 os.fsync(output.fileno())
-            _require_regular_nonreparse(snapshot, label=f"trusted {label} expected snapshot")
-            return snapshot
+                snapshot_identity = _object_identity(os.fstat(output.fileno()))
+            current = _require_regular_nonreparse(
+                snapshot,
+                label=f"trusted {label} expected snapshot",
+            )
+            if _object_identity(current) != snapshot_identity:
+                raise RuntimeError(
+                    f"trusted {label} expected snapshot changed during materialization"
+                )
+            return snapshot, snapshot_identity
         except BaseException:
             try:
                 os.close(fd)
@@ -552,11 +642,72 @@ def run(argv: list[str] | None = None) -> int:
                 f"PyInstaller producer bytes changed before trusted {label} transition"
             )
 
-        snapshot = _make_expected_snapshot(anchor_stream, label)
+        snapshot, snapshot_identity = _make_expected_snapshot(anchor_stream, label)
         release_creation_anchor = label in _RESOURCE_API_TRANSITIONS
+        oracle_stream = None
         try:
             expected_mutator(snapshot)
-            expected_digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+            try:
+                oracle_stream = _open_expected_snapshot_oracle(
+                    snapshot,
+                    expected_identity=snapshot_identity,
+                    label=label,
+                )
+            except BaseException as exc:
+                raise poison_guard(
+                    f"PyInstaller {label} expected snapshot could not be fenced: {exc}",
+                    exc,
+                )
+
+            if os.environ.get("AUTOSPORT_TEST_WRITE_EXPECTED_SNAPSHOT") == "1":
+                try:
+                    with snapshot.open("r+b") as writer:
+                        writer.seek(0, os.SEEK_END)
+                        writer.write(b"AUTOSPORT_EXPECTED_SNAPSHOT_WRITE")
+                        writer.flush()
+                        os.fsync(writer.fileno())
+                except OSError:
+                    raise RuntimeError(
+                        "PyInstaller expected-snapshot same-object write blocked by retained oracle fence"
+                    )
+                raise poison_guard(
+                    "PyInstaller expected-snapshot same-object write unexpectedly succeeded"
+                )
+
+            if os.environ.get("AUTOSPORT_TEST_REPLACE_EXPECTED_SNAPSHOT") == "1":
+                replacement = snapshot.with_name(
+                    f".{snapshot.name}.oracle-replacement-{os.getpid()}"
+                )
+                try:
+                    original_copyfile(snapshot, replacement)
+                    try:
+                        os.replace(replacement, snapshot)
+                    except OSError:
+                        raise RuntimeError(
+                            "PyInstaller expected-snapshot replacement blocked by retained oracle fence"
+                        )
+                    raise poison_guard(
+                        "PyInstaller expected-snapshot replacement unexpectedly succeeded"
+                    )
+                finally:
+                    try:
+                        replacement.unlink()
+                    except FileNotFoundError:
+                        pass
+
+            expected_digest = _sha256_stream(oracle_stream)
+            oracle_now = os.fstat(oracle_stream.fileno())
+            oracle_path = _require_regular_nonreparse(
+                snapshot,
+                label=f"trusted {label} expected snapshot after oracle digest",
+            )
+            if (
+                _object_identity(oracle_now) != snapshot_identity
+                or _object_identity(oracle_path) != snapshot_identity
+            ):
+                raise poison_guard(
+                    f"PyInstaller {label} expected snapshot changed across oracle digest"
+                )
 
             anchor_stream.close()
             state["producer_anchor_stream"] = None
@@ -631,6 +782,8 @@ def run(argv: list[str] | None = None) -> int:
             state["trusted_transitions"].append(label)
             return live_result
         finally:
+            if oracle_stream is not None:
+                oracle_stream.close()
             try:
                 snapshot.unlink()
             except FileNotFoundError:

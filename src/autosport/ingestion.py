@@ -82,6 +82,24 @@ class _SourceHealthSnapshot:
             quality_flags=state.quality_flags,
         )
 
+    def to_state(self) -> SourceHealthState:
+        return SourceHealthState(
+            source_id=self.source_id,
+            status=self.status,
+            poll_count=self.poll_count,
+            total_received=self.total_received,
+            total_accepted=self.total_accepted,
+            total_rejected=self.total_rejected,
+            total_failures=self.total_failures,
+            consecutive_failures=self.consecutive_failures,
+            last_success_at=self.last_success_at,
+            last_error_at=self.last_error_at,
+            last_error=self.last_error,
+            last_cursor=self.last_cursor,
+            latest_source_ts=self.latest_source_ts,
+            quality_flags=self.quality_flags,
+        )
+
     def after_success(
         self, outcome: "CommittedIngestionOutcome"
     ) -> "_SourceHealthSnapshot":
@@ -139,31 +157,23 @@ class CommittedIngestionOutcome:
         )
 
     def record_health(self, store: SourceHealthStore) -> SourceHealthState:
-        """Repair health only when durable state proves that one retry is safe."""
+        """Repair health only when compare-and-apply is atomic and provably safe."""
         if self.health_before is None:
             raise RuntimeError(
                 "committed ingestion outcome lacks pre-health state for a safe retry"
             )
-        current = store.get(self.source_id)
-        current_snapshot = _SourceHealthSnapshot.from_state(current)
-        expected = self.health_before.after_success(self)
-
-        # Equality with the expected post-state cannot identify which committed
-        # outcome produced it. Two concurrent same-source outcomes may capture the
-        # same pre-state and project identical health fields. Treating value equality
-        # as idempotency would silently under-count one market commit. Without a
-        # durable operation identity, this state is inherently ambiguous.
-        if current_snapshot == expected:
-            raise RuntimeError(
-                "source health matches the expected post-state but this outcome "
-                "cannot prove it performed that durable mutation; refusing ambiguous retry"
-            )
-        if current_snapshot != self.health_before:
-            raise RuntimeError(
-                "source health changed since the committed ingestion outcome; "
-                "refusing ambiguous retry"
-            )
-        return self._record_health_once(store)
+        expected_after = self.health_before.after_success(self)
+        return store.record_success_if_current(
+            self.health_before.to_state(),
+            ambiguous_after=expected_after.to_state(),
+            now=self.now,
+            received=self.received,
+            accepted=self.accepted,
+            rejected=self.rejected,
+            cursor=self.cursor,
+            latest_source_ts=self.latest_source_ts,
+            quality_flags=self.quality_flags,
+        )
 
     def stats(self, *, health_status: str | None = None) -> IngestionStats:
         if health_status is None:
@@ -224,22 +234,25 @@ class IngestionEngine:
         started = perf_counter()
         now = self.clock()
 
-        # Only provider acquisition and provider-owned batch-contract validation may
-        # transition provider health to failed. Local health projection, clock,
-        # normalization, persistence and subscriber failures are separate pipeline
-        # failures and must never be misattributed to the external source.
+        # Bind provider identity exactly once before acquisition. If acquisition or
+        # provider-owned validation fails, failure-health evidence must use that
+        # original identity rather than re-reading a mutable/raising accessor.
+        provider_source_id: str | None = None
         try:
+            provider_source_id = provider.source_id
             batch = provider.read_batch(max_items=max_items)
-            if batch.source_id != provider.source_id:
+            if batch.source_id != provider_source_id:
                 raise ValueError("provider returned mismatched source_id")
             if len(batch.quotes) > max_items:
                 raise ValueError(
                     f"provider returned {len(batch.quotes)} quotes above requested batch bound {max_items}"
                 )
         except Exception as exc:
-            if self.health_store is not None:
+            if self.health_store is not None and provider_source_id is not None:
                 try:
-                    self.health_store.record_failure(provider.source_id, now=now, error=exc)
+                    self.health_store.record_failure(
+                        provider_source_id, now=now, error=exc
+                    )
                 except Exception as health_error:
                     exc.add_note(
                         "source health failure persistence also failed: "

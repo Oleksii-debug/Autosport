@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from decimal import Decimal
 from pathlib import Path
@@ -51,6 +52,26 @@ class _TrackingHealthStore:
             raise OSError("health write failed")
         quality_flags = tuple(kwargs["quality_flags"])
         return SimpleNamespace(status="degraded" if quality_flags else "healthy")
+
+    def record_success_if_current(
+        self,
+        expected_before: SourceHealthState,
+        *,
+        ambiguous_after: SourceHealthState | None = None,
+        **kwargs,
+    ):
+        current = self.get(expected_before.source_id)
+        if ambiguous_after is not None and current == ambiguous_after:
+            raise RuntimeError(
+                "source health matches the expected post-state but this outcome "
+                "cannot prove it performed that durable mutation; refusing ambiguous retry"
+            )
+        if current != expected_before:
+            raise RuntimeError(
+                "source health changed since the committed ingestion outcome; "
+                "refusing ambiguous retry"
+            )
+        return self.record_success(expected_before.source_id, **kwargs)
 
 
 class _UnusedBus:
@@ -239,16 +260,11 @@ class IngestionFailureAttributionTests(unittest.TestCase):
             self.assertEqual(durable.total_accepted, 1)
             self.assertEqual(durable.total_rejected, 0)
 
-            with mock.patch.object(
-                health,
-                "record_success",
-                side_effect=AssertionError("ambiguous state must not be written twice"),
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "cannot prove it performed that durable mutation",
             ):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "cannot prove it performed that durable mutation",
-                ):
-                    error.outcome.record_health(health)
+                error.outcome.record_health(health)
 
             after_retry = health.get("source")
             self.assertEqual(after_retry.poll_count, 1)
@@ -297,18 +313,11 @@ class IngestionFailureAttributionTests(unittest.TestCase):
             state_from_b = health.get("source")
             self.assertEqual(state_from_b.poll_count, 1)
 
-            with mock.patch.object(
-                health,
-                "record_success",
-                side_effect=AssertionError(
-                    "A must neither claim B's state nor apply a second increment"
-                ),
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "cannot prove it performed that durable mutation",
             ):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "cannot prove it performed that durable mutation",
-                ):
-                    outcome_a.record_health(health)
+                outcome_a.record_health(health)
 
             after_a_recovery = health.get("source")
             self.assertEqual(after_a_recovery.poll_count, 1)
@@ -361,6 +370,84 @@ class IngestionFailureAttributionTests(unittest.TestCase):
             self.assertEqual(after_retry.total_received, before_retry.total_received)
             self.assertEqual(after_retry.total_accepted, before_retry.total_accepted)
             self.assertEqual(after_retry.total_rejected, before_retry.total_rejected)
+            self.assertEqual(bus.calls, 1)
+
+    def test_concurrent_recovery_of_same_outcome_applies_at_most_once(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            health = SourceHealthStore(Path(temporary_directory) / "source-health.json")
+            bus = _CommittedBus()
+            provider = _SuccessfulProvider(
+                ProviderBatch("source", (self._quote(),), cursor="cursor-1")
+            )
+            engine = IngestionEngine(
+                bus,  # type: ignore[arg-type]
+                health_store=health,
+                clock=lambda: "2026-09-14T08:00:01+00:00",
+            )
+
+            with mock.patch.object(
+                health,
+                "record_success",
+                side_effect=OSError("health write failed before publication"),
+            ):
+                with self.assertRaises(CommittedIngestionHealthError) as raised:
+                    engine.poll_once(provider, max_items=10)
+
+            outcome = raised.exception.outcome
+            entered_apply = threading.Event()
+            release_apply = threading.Event()
+            original_apply = health._record_success_locked
+            apply_calls = 0
+            apply_calls_lock = threading.Lock()
+            results: list[object] = []
+
+            def blocking_apply(state, **kwargs):
+                nonlocal apply_calls
+                with apply_calls_lock:
+                    apply_calls += 1
+                    call_number = apply_calls
+                if call_number == 1:
+                    entered_apply.set()
+                    if not release_apply.wait(timeout=5):
+                        raise RuntimeError("test timed out waiting to release first recovery")
+                return original_apply(state, **kwargs)
+
+            def recover():
+                try:
+                    results.append(outcome.record_health(health))
+                except BaseException as exc:
+                    results.append(exc)
+
+            with mock.patch.object(
+                health,
+                "_record_success_locked",
+                side_effect=blocking_apply,
+            ):
+                first = threading.Thread(target=recover)
+                second = threading.Thread(target=recover)
+                first.start()
+                self.assertTrue(entered_apply.wait(timeout=5))
+                second.start()
+                release_apply.set()
+                first.join(timeout=5)
+                second.join(timeout=5)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(len(results), 2)
+            self.assertEqual(sum(isinstance(item, SourceHealthState) for item in results), 1)
+            conflicts = [item for item in results if isinstance(item, RuntimeError)]
+            self.assertEqual(len(conflicts), 1)
+            self.assertIn(
+                "cannot prove it performed that durable mutation",
+                str(conflicts[0]),
+            )
+            durable = health.get("source")
+            self.assertEqual(durable.poll_count, 1)
+            self.assertEqual(durable.total_received, 1)
+            self.assertEqual(durable.total_accepted, 1)
+            self.assertEqual(durable.total_rejected, 0)
+            self.assertEqual(apply_calls, 1)
             self.assertEqual(bus.calls, 1)
 
 

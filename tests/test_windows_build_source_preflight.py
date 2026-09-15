@@ -123,14 +123,33 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
                 pytest_cache = root / ".pytest_cache"
                 pytest_cache.mkdir()
                 (pytest_cache / "README.md").write_text("generated\n", encoding="utf-8")
-                egg_info = root / "autosport_lab.egg-info"
-                egg_info.mkdir()
-                (egg_info / "PKG-INFO").write_text("generated\n", encoding="utf-8")
                 verify_source_checkout.verify_source_checkout(
                     source_sha,
                     repo_root=root,
                     late_build_boundary=True,
                 )
+
+    def test_late_boundary_rejects_editable_entry_point_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_sha = self._clean_repo(root)
+            with self._without_github_event_environment():
+                verify_source_checkout.verify_source_checkout(source_sha, repo_root=root)
+                egg_info = root / "src" / "autosport_lab.egg-info"
+                egg_info.mkdir(parents=True)
+                (egg_info / "entry_points.txt").write_text(
+                    "[pyinstaller40]\nhook-dirs = hostile:hook_dirs\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"ignored:src/autosport_lab\.egg-info/entry_points\.txt",
+                ):
+                    verify_source_checkout.verify_source_checkout(
+                        source_sha,
+                        repo_root=root,
+                        late_build_boundary=True,
+                    )
 
     def test_late_boundary_rejects_unexpected_ignored_input(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

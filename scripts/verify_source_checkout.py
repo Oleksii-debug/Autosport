@@ -98,20 +98,16 @@ def _ignored_checkout_paths(repo_root: Path) -> list[str]:
 
 
 def _is_expected_late_generated_ignored_path(path: str) -> bool:
-    """Return True only for repository-local outputs expected from pip/pytest/Python.
+    """Return True only for ignored outputs that cannot carry package/build metadata.
 
-    The late integrity gate must not treat every git-ignored path as safe: files such as .env or
-    other ignored configuration can still affect a build.  The initial pristine gate starts from
-    zero ignored files; after dependency install/tests, only these narrow generated families are
-    expected before the first PyInstaller invocation.
+    Repository-local ``*.egg-info`` is deliberately not accepted here. Editable metadata such as
+    ``entry_points.txt`` can affect package/plugin discovery and therefore PyInstaller analysis.
+    Allowing the whole egg-info family would leave build-consumed bytes outside the exact-source
+    proof. Bytecode and pytest caches are the only ignored families tolerated at this boundary.
     """
 
     parts = PurePosixPath(path).parts
-    return (
-        "__pycache__" in parts
-        or ".pytest_cache" in parts
-        or any(part.endswith(".egg-info") for part in parts)
-    )
+    return "__pycache__" in parts or ".pytest_cache" in parts
 
 
 def _format_dirty_preview(dirty: list[str]) -> str:
@@ -133,9 +129,9 @@ def _require_pristine_checkout(repo_root: Path) -> None:
 def _require_late_build_boundary_unchanged(repo_root: Path) -> None:
     """Reject source/input changes at the late PyInstaller boundary.
 
-    Tracked/index changes and non-ignored untracked files always fail closed.  Only narrow ignored
-    output families that are expected from Python bytecode generation, pytest, or setuptools are
-    tolerated; arbitrary ignored configuration/input remains a failure.
+    Tracked/index changes and non-ignored untracked files always fail closed. Only Python bytecode
+    and pytest cache outputs are tolerated. Repository-local editable package metadata, including
+    ``*.egg-info``, is rejected because it can participate in package/plugin discovery.
     """
 
     dirty = _ordinary_checkout_changes(repo_root)

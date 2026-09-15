@@ -505,7 +505,7 @@ def run(argv: list[str] | None = None) -> int:
             raise RuntimeError(
                 "PyInstaller append reached release EXE without producer-bound PKG authority"
             )
-        if authority["uses"] >= 2:
+        if authority["uses"] >= 1:
             raise RuntimeError("PyInstaller PKG authority was consumed more than expected")
 
         _validate_package_authority(authority, phase="before append consumption")
@@ -525,7 +525,7 @@ def run(argv: list[str] | None = None) -> int:
 
         _validate_package_authority(authority, phase="after append consumption")
         authority["uses"] += 1
-        if authority["uses"] == 2:
+        if authority["uses"] == 1:
             stream.close()
             package_authorities.pop(pkg_key, None)
         return None

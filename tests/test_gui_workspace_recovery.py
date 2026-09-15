@@ -93,7 +93,7 @@ class GuiWorkspaceRecoveryTests(unittest.TestCase):
         return app
 
     def test_packaged_windows_entry_uses_responsive_gui(self) -> None:
-        source = inspect.getsource(windows_entry.main)
+        source = inspect.getsource(windows_entry._run_interactive_gui)
         self.assertIn("from autosport.windows_gui import main as gui_main", source)
         self.assertEqual(AUTOMATION_IDS["repair_workspace"], 108)
 

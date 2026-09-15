@@ -41,7 +41,7 @@ def _json_provenance(value: Any) -> Any:
 
 
 def _canonical_sha256(value: object, *, field_name: str) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise ValueError(f"{field_name} must be a canonical SHA-256 digest")
     if len(value) != 64 or any(character not in _SHA256_HEX for character in value):
         raise ValueError(f"{field_name} must be a canonical lowercase SHA-256 digest")

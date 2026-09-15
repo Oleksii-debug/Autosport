@@ -27,9 +27,12 @@ def _clean_repo(root: Path) -> str:
     _git(root, "init")
     _git(root, "config", "user.email", "autosport-tests@example.invalid")
     _git(root, "config", "user.name", "Autosport Tests")
-    (root / ".gitignore").write_text("*.ignored\n", encoding="utf-8")
-    (root / "tracked.py").write_text("VALUE = 1\n", encoding="utf-8")
-    _git(root, "add", ".gitignore", "tracked.py")
+    # Match the release checkout's byte-canonical text policy and avoid
+    # platform newline translation inside this temporary Git fixture.
+    (root / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+    (root / ".gitignore").write_bytes(b"*.ignored\n")
+    (root / "tracked.py").write_bytes(b"VALUE = 1\n")
+    _git(root, "add", ".gitattributes", ".gitignore", "tracked.py")
     _git(root, "commit", "-m", "fixture")
     return _git(root, "rev-parse", "HEAD")
 
@@ -79,9 +82,9 @@ def test_source_verifier_rejects_index_only_drift_with_canonical_worktree_bytes(
         root = Path(temp_dir)
         source_sha = _clean_repo(root)
         tracked = root / "tracked.py"
-        tracked.write_text("VALUE = 2\n", encoding="utf-8")
+        tracked.write_bytes(b"VALUE = 2\n")
         _git(root, "add", "tracked.py")
-        tracked.write_text("VALUE = 1\n", encoding="utf-8")
+        tracked.write_bytes(b"VALUE = 1\n")
 
         with _without_github_event_environment(), pytest.raises(
             ValueError,

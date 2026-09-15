@@ -82,3 +82,40 @@ def test_final_no_follow_rejection_fails_lock_acquisition(
     assert state["verification_open_calls"] == 4
     assert lock._handle is None
     assert lock_path.read_bytes() == b"\0"
+
+
+def test_same_lock_file_metadata_change_is_not_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent sentinel write to the same inode must not look like pathname replacement."""
+
+    lock = WorkspaceEconomicLock(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    handle = lock._open_lock_handle()
+    real_verification_open = workspace_lock._open_read_only_descriptor
+    verification_calls = 0
+
+    def open_then_mutate_same_file(path: Path) -> int:
+        nonlocal verification_calls
+        descriptor = real_verification_open(path)
+        verification_calls += 1
+        if verification_calls == 1:
+            with path.open("ab") as writer:
+                writer.write(b"\0")
+                writer.flush()
+                os.fsync(writer.fileno())
+        return descriptor
+
+    monkeypatch.setattr(
+        workspace_lock,
+        "_open_read_only_descriptor",
+        open_then_mutate_same_file,
+    )
+    try:
+        lock._validate_open_handle_identity(handle)
+    finally:
+        handle.close()
+
+    assert verification_calls == 2
+    assert lock.path.read_bytes() == b"\0"

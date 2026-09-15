@@ -81,7 +81,7 @@ class RecoveryReconciliationTests(unittest.TestCase):
     def test_missing_summary_remains_unresolved_and_cli_returns_nonzero(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             key = registry.begin("a" * 64, "b" * 64, "strategy", "run-missing-summary")
             report = reconcile_late_crashes(root)
             self.assertEqual(report.reconciled_keys, ())

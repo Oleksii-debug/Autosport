@@ -105,6 +105,65 @@ class HistoricalGovernanceJsonIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-finite JSON number: NaN"):
                 verify_governance_authority_binding(proof_path)
 
+    def test_distinct_overflowing_bound_numbers_do_not_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proof_path, authority_path = self._write_valid_pair(Path(tmp))
+
+            authority = authority_path.read_text(encoding="utf-8")
+            authority_path.write_text(
+                authority[:-1] + ', "retention_basis": 9e999}',
+                encoding="utf-8",
+            )
+
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["authority_record_sha256"] = hashlib.sha256(
+                authority_path.read_bytes()
+            ).hexdigest()
+            proof_path.write_text(
+                json.dumps(proof, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            proof_text = proof_path.read_text(encoding="utf-8")
+            proof_path.write_text(
+                proof_text[:-1] + ', "retention_basis": 1e400}',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "governance proof.retention_basis does not match authority evidence artifact",
+            ):
+                verify_governance_authority_binding(proof_path)
+
+    def test_bound_boolean_does_not_alias_numeric_authority_claim(self) -> None:
+        for proof_value, authority_number in ((True, "1.0"), (False, "0.0")):
+            with self.subTest(proof_value=proof_value, authority_number=authority_number):
+                with tempfile.TemporaryDirectory() as tmp:
+                    proof_path, authority_path = self._write_valid_pair(Path(tmp))
+
+                    authority = authority_path.read_text(encoding="utf-8")
+                    authority_path.write_text(
+                        authority[:-1]
+                        + f', "redistribution_verified": {authority_number}}}',
+                        encoding="utf-8",
+                    )
+
+                    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+                    proof["redistribution_verified"] = proof_value
+                    proof["authority_record_sha256"] = hashlib.sha256(
+                        authority_path.read_bytes()
+                    ).hexdigest()
+                    proof_path.write_text(
+                        json.dumps(proof, ensure_ascii=False, sort_keys=True),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "governance proof.redistribution_verified does not match authority evidence artifact",
+                    ):
+                        verify_governance_authority_binding(proof_path)
+
     def test_schema_version_requires_exact_json_integer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

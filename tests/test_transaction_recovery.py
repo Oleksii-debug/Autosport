@@ -240,10 +240,10 @@ class TransactionRecoveryTests(unittest.TestCase):
     def test_pre_manifest_recovery_rejects_hash_matching_corrupt_base_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             book_path = root / "paper_book.json"
             PaperBook("10000").save(book_path)
             ledger_path = self._write_corrupt_ledger(root)
-            registry = RunRegistry(root / "run_registry.json")
             key = registry.begin(
                 "a" * 64,
                 "b" * 64,

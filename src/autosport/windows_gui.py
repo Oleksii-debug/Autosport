@@ -209,11 +209,30 @@ class WindowsAutosportApp(AutosportApp):
         session = self.session
         self.session = None
         if session is not None:
+            # Bind teardown uncertainty to the exact workspace owned by the detached
+            # economic session. Headless/legacy fixtures without a workspace field
+            # fall back to the previously active workspace rather than inventing one.
+            prior_session_workspace = prior_workspace
+            try:
+                session_state = object.__getattribute__(session, "__dict__")
+            except BaseException:
+                session_state = None
+            if isinstance(session_state, dict) and session_state.get("workspace") is not None:
+                try:
+                    prior_session_workspace = Path(session_state["workspace"])
+                except (TypeError, ValueError):
+                    prior_session_workspace = prior_workspace
             try:
                 session.close()
-            except Exception as exc:
-                if prior_workspace is not None:
-                    self._block_workspace_for_recovery(prior_workspace)
+            except BaseException as exc:
+                if prior_session_workspace is not None:
+                    self._block_workspace_for_recovery(prior_session_workspace)
+                # Establish fail-closed UI/economic projection state before any
+                # process-control BaseException is allowed to continue unwinding.
+                self.bank.set(self._bank_text())
+                self._refresh_tickets()
+                if not isinstance(exc, Exception):
+                    raise
                 detail = (
                     "Workspace recovery відхилено fail-closed: previous economic session teardown failed; "
                     f"{_safe_exception_detail(exc)}"
@@ -223,8 +242,6 @@ class WindowsAutosportApp(AutosportApp):
                     "economic state лишається прихованим, а workspace заблоковано fail-closed."
                 )
                 self._append_log(detail)
-                self.bank.set(self._bank_text())
-                self._refresh_tickets()
                 messagebox.showerror("Автоспорт", detail)
                 return
 
@@ -401,7 +418,7 @@ class WindowsAutosportApp(AutosportApp):
                 self._active_strategy_id,
                 self._active_research_plan,
             )
-        except Exception as exc:
+        except BaseException as exc:
             self.session = None
             self._recovery_view = None
             self._block_workspace_for_recovery(self._active_workspace)
@@ -410,6 +427,8 @@ class WindowsAutosportApp(AutosportApp):
             self._set_evaluation_lines([
                 "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
             ])
+            if not isinstance(exc, Exception):
+                raise
             detail = (
                 "Post-replay workspace reopen відхилено fail-closed: "
                 f"{_safe_exception_detail(exc)}"

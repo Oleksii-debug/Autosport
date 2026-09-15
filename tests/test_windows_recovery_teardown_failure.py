@@ -112,6 +112,51 @@ class WindowsRecoveryTeardownFailureTests(unittest.TestCase):
             self.assertFalse(app._workspace_requires_recovery(selected_workspace))
             self.assertTrue(app._workspace_requires_recovery(prior_workspace))
 
+    def test_process_control_teardown_propagates_after_exact_session_workspace_quarantine(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stale_active_workspace = root / "stale-active-workspace"
+            exact_session_workspace = root / "actual-attached-workspace"
+            selected_workspace = root / "selected-workspace"
+            app = self._app(root, stale_active_workspace)
+
+            class _InterruptedSession:
+                def __init__(self) -> None:
+                    self.workspace = exact_session_workspace
+
+                def close(self) -> None:
+                    self.assert_detached()
+                    raise KeyboardInterrupt("teardown interrupted")
+
+                @staticmethod
+                def assert_detached() -> None:
+                    if app.session is not None:
+                        raise AssertionError("economic session must detach before teardown")
+
+            app.session = _InterruptedSession()
+
+            with (
+                patch("autosport.windows_gui.workspace_for_strategy", return_value=selected_workspace),
+                patch("autosport.windows_gui.messagebox.showerror") as error,
+            ):
+                with self.assertRaisesRegex(KeyboardInterrupt, "teardown interrupted"):
+                    WindowsAutosportApp.repair_workspace(app)
+
+            self.assertIsNone(app.session)
+            self.assertFalse(app.recovery_worker.started)
+            self.assertEqual(app._active_workspace, selected_workspace)
+            self.assertEqual(app._recovery_blocked_workspace, exact_session_workspace)
+            self.assertEqual(
+                app._recovery_blocked_workspaces,
+                {exact_session_workspace, selected_workspace},
+            )
+            self.assertNotIn(stale_active_workspace, app._recovery_blocked_workspaces)
+            self.assertTrue(app._workspace_requires_recovery(exact_session_workspace))
+            self.assertTrue(app._workspace_requires_recovery(selected_workspace))
+            self.assertEqual(app.bank.value, "hidden")
+            self.assertEqual(app._ticket_sessions, [None])
+            error.assert_not_called()
+
     def test_hostile_teardown_exception_metadata_cannot_escape_fail_closed_handler(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

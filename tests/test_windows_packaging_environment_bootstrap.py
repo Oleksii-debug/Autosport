@@ -40,27 +40,29 @@ def test_current_release_path_reuses_live_install_interpreter_for_pyinstaller() 
     assert "$packagingPythonExecutable" not in script[late_gate:data_binder]
 
 
-def test_isolated_mode_still_executes_venv_pth_startup_authority(
+def test_isolated_mode_still_executes_venv_pth_but_clean_bootstrap_does_not(
     tmp_path: Path,
 ) -> None:
-    """Prove why uninstall + ``-I`` is not an environment provenance boundary.
+    """Prove both the live-environment gap and the smallest bootstrap closure.
 
     A transient hostile PEP-517/backend execution can persist executable ``.pth``
     authority in site-packages independently of tracked checkout bytes. Python
     isolated mode ignores PYTHON* and user-site inputs, but still initializes the
-    active environment's site-packages. ``-S`` suppresses that startup authority.
+    active environment's site-packages. Bootstrapping a fresh packaging venv through
+    ``-I -S -m venv`` prevents the contaminated environment's site startup authority
+    from running and the new venv does not inherit it.
     """
 
-    env_dir = tmp_path / "packaging-venv"
-    venv.EnvBuilder(with_pip=False, clear=True).create(env_dir)
+    outer_env_dir = tmp_path / "live-build-venv"
+    venv.EnvBuilder(with_pip=False, clear=True).create(outer_env_dir)
     if os.name == "nt":
-        env_python = env_dir / "Scripts" / "python.exe"
+        outer_python = outer_env_dir / "Scripts" / "python.exe"
     else:
-        env_python = env_dir / "bin" / "python"
+        outer_python = outer_env_dir / "bin" / "python"
 
     site_probe = subprocess.run(
         [
-            str(env_python),
+            str(outer_python),
             "-c",
             "import site; print(site.getsitepackages()[0])",
         ],
@@ -82,8 +84,9 @@ def test_isolated_mode_still_executes_venv_pth_startup_authority(
 
     child_env = os.environ.copy()
     child_env["AUTOSPORT_TEST_STARTUP_SENTINEL"] = str(sentinel)
+
     subprocess.run(
-        [str(env_python), "-I", "-c", "print('isolated-with-site')"],
+        [str(outer_python), "-I", "-c", "print('isolated-with-site')"],
         check=True,
         env=child_env,
         capture_output=True,
@@ -93,7 +96,38 @@ def test_isolated_mode_still_executes_venv_pth_startup_authority(
 
     sentinel.unlink()
     subprocess.run(
-        [str(env_python), "-I", "-S", "-c", "print('isolated-without-site')"],
+        [str(outer_python), "-I", "-S", "-c", "print('isolated-without-site')"],
+        check=True,
+        env=child_env,
+        capture_output=True,
+        text=True,
+    )
+    assert not sentinel.exists()
+
+    clean_env_dir = tmp_path / "clean-packaging-venv"
+    subprocess.run(
+        [
+            str(outer_python),
+            "-I",
+            "-S",
+            "-m",
+            "venv",
+            str(clean_env_dir),
+            "--without-pip",
+        ],
+        check=True,
+        env=child_env,
+        capture_output=True,
+        text=True,
+    )
+    assert not sentinel.exists()
+
+    if os.name == "nt":
+        clean_python = clean_env_dir / "Scripts" / "python.exe"
+    else:
+        clean_python = clean_env_dir / "bin" / "python"
+    subprocess.run(
+        [str(clean_python), "-I", "-c", "print('clean-packaging-env')"],
         check=True,
         env=child_env,
         capture_output=True,

@@ -7,11 +7,11 @@ import hashlib
 import os
 import pathlib
 import re
+import secrets
 import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 from ctypes import wintypes
 from typing import Any
 
@@ -20,13 +20,19 @@ _EXPECTED_PYINSTALLER_VERSION = "6.22.3"
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _GENERIC_READ = 0x80000000
 _GENERIC_WRITE = 0x40000000
+_DELETE_ACCESS = 0x00010000
 _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
+_FILE_SHARE_DELETE = 0x00000004
 _CREATE_NEW = 1
 _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_ERROR_ACCESS_DENIED = 5
+_ERROR_SHARING_VIOLATION = 32
+_ERROR_FILE_EXISTS = 80
+_ERROR_ALREADY_EXISTS = 183
 _RESOURCE_API_TRANSITIONS = frozenset(
     {"remove-resources", "icon", "version-info", "resource", "manifest"}
 )
@@ -62,6 +68,22 @@ class _RetainedArtifactWriter:
     def __enter__(self) -> Any:
         self._stream.seek(0)
         self._stream.truncate(0)
+        return self._stream
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self._stream.flush()
+        os.fsync(self._stream.fileno())
+        return False
+
+
+class _RetainedArtifactAppender:
+    """Expose a pinned append-only mutation without releasing the authoritative handle."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def __enter__(self) -> Any:
+        self._stream.seek(0, os.SEEK_END)
         return self._stream
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -446,6 +468,50 @@ def _open_expected_snapshot_oracle(
         raise
 
 
+def _require_windows_access_denied(
+    path: pathlib.Path,
+    desired_access: int,
+    *,
+    label: str,
+) -> None:
+    """Prove a live native update handle rejects a competing write/delete opener."""
+
+    kernel32 = _windows_kernel32()
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    ctypes.set_last_error(0)
+    raw_handle = create_file(
+        str(path),
+        desired_access,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+        None,
+        _OPEN_EXISTING,
+        _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    handle_value = (
+        raw_handle
+        if isinstance(raw_handle, int)
+        else ctypes.cast(raw_handle, ctypes.c_void_p).value
+    )
+    if handle_value in {None, _INVALID_HANDLE_VALUE}:
+        error = ctypes.get_last_error()
+        if error in {_ERROR_ACCESS_DENIED, _ERROR_SHARING_VIOLATION}:
+            return
+        raise ctypes.WinError(error)
+    _close_windows_handle(raw_handle)
+    raise RuntimeError(f"{label} unexpectedly allowed a competing handle")
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run PyInstaller and bind its exact final produced EXE before producer completion."
@@ -535,6 +601,9 @@ def run(argv: list[str] | None = None) -> int:
     original_write_manifest = building_api.winmanifest.write_manifest_to_executable
     original_append_data = building_api.EXE._append_data_to_exe
     original_set_build_timestamp = building_api.winutils.set_exe_build_timestamp
+    resource_win32api = building_api.winresource.win32api
+    original_begin_update_resource = resource_win32api.BeginUpdateResource
+    original_end_update_resource = resource_win32api.EndUpdateResource
 
     state: dict[str, Any] = {
         "producer_active": False,
@@ -566,28 +635,92 @@ def run(argv: list[str] | None = None) -> int:
     def _make_expected_snapshot(
         anchor_stream: Any,
         label: str,
-    ) -> tuple[pathlib.Path, tuple[int, int]]:
-        fd, raw_name = tempfile.mkstemp(
-            prefix=f".{artifact.name}.{label}-",
-            suffix=".exe",
-            dir=str(artifact.parent),
+    ) -> tuple[pathlib.Path, Any, tuple[int, int], str]:
+        """Create the expected copy under a retained writer from its first byte."""
+
+        import msvcrt
+
+        kernel32 = _windows_kernel32()
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
         )
-        snapshot = pathlib.Path(raw_name)
+        create_file.restype = wintypes.HANDLE
+
+        snapshot = None
+        raw_writer = None
+        for _ in range(128):
+            candidate = artifact.with_name(
+                f".{artifact.name}.{label}-{secrets.token_hex(16)}.exe"
+            )
+            ctypes.set_last_error(0)
+            candidate_handle = create_file(
+                str(candidate),
+                _GENERIC_READ | _GENERIC_WRITE,
+                _FILE_SHARE_READ,
+                None,
+                _CREATE_NEW,
+                _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )
+            candidate_value = (
+                candidate_handle
+                if isinstance(candidate_handle, int)
+                else ctypes.cast(candidate_handle, ctypes.c_void_p).value
+            )
+            if candidate_value not in {None, _INVALID_HANDLE_VALUE}:
+                snapshot = candidate
+                raw_writer = candidate_handle
+                break
+            error = ctypes.get_last_error()
+            if error not in {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}:
+                raise ctypes.WinError(error)
+        if snapshot is None or raw_writer is None:
+            raise RuntimeError(f"could not allocate trusted {label} expected snapshot")
+
         try:
-            with os.fdopen(fd, "w+b", buffering=0, closefd=True) as output:
-                position = anchor_stream.tell()
-                try:
-                    anchor_stream.seek(0)
-                    while True:
-                        chunk = anchor_stream.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        output.write(chunk)
-                finally:
-                    anchor_stream.seek(position)
-                output.flush()
-                os.fsync(output.fileno())
-                snapshot_identity = _object_identity(os.fstat(output.fileno()))
+            descriptor = msvcrt.open_osfhandle(
+                int(raw_writer),
+                os.O_RDWR | getattr(os, "O_BINARY", 0),
+            )
+        except BaseException:
+            _close_windows_handle(raw_writer)
+            try:
+                snapshot.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
+        try:
+            writer = os.fdopen(descriptor, "r+b", buffering=0, closefd=True)
+        except BaseException:
+            os.close(descriptor)
+            try:
+                snapshot.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
+        try:
+            position = anchor_stream.tell()
+            try:
+                anchor_stream.seek(0)
+                while True:
+                    chunk = anchor_stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    writer.write(chunk)
+            finally:
+                anchor_stream.seek(position)
+            writer.flush()
+            os.fsync(writer.fileno())
+            snapshot_identity = _object_identity(os.fstat(writer.fileno()))
             current = _require_regular_nonreparse(
                 snapshot,
                 label=f"trusted {label} expected snapshot",
@@ -596,12 +729,9 @@ def run(argv: list[str] | None = None) -> int:
                 raise RuntimeError(
                     f"trusted {label} expected snapshot changed during materialization"
                 )
-            return snapshot, snapshot_identity
+            return snapshot, writer, snapshot_identity, _sha256_stream(writer)
         except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+            writer.close()
             try:
                 snapshot.unlink()
             except FileNotFoundError:
@@ -641,48 +771,365 @@ def run(argv: list[str] | None = None) -> int:
                 f"PyInstaller producer bytes changed before trusted {label} transition"
             )
 
-        snapshot, _ = _make_expected_snapshot(anchor_stream, label)
-        reference_snapshot = None
+        snapshot, expected_stream, expected_identity, expected_input_digest = (
+            _make_expected_snapshot(anchor_stream, label)
+        )
         release_creation_anchor = label in _RESOURCE_API_TRANSITIONS
         oracle_stream = None
-        reference_oracle_stream = None
+        resource_context: dict[str, Any] | None = None
+        missing = object()
+        original_building_open = getattr(building_api, "open", missing)
+        original_winutils_open = getattr(building_api.winutils, "open", missing)
         try:
-            expected_mutator(snapshot)
+            if release_creation_anchor:
+                for module in (
+                    building_api.icon,
+                    building_api.versioninfo,
+                    building_api.winmanifest,
+                ):
+                    module_win32api = getattr(module, "win32api", resource_win32api)
+                    if module_win32api is not resource_win32api:
+                        raise poison_guard(
+                            "pinned PyInstaller resource helpers no longer share one Win32 API module"
+                        )
+
+                resource_context = {
+                    "stream": expected_stream,
+                    "identity": expected_identity,
+                    "digest": expected_input_digest,
+                    "native_handle": None,
+                    "begin_count": 0,
+                    "end_count": 0,
+                }
+                expected_stream = None
+
+                def _validate_resource_authority(phase: str) -> tuple[Any, tuple[int, int], str]:
+                    assert resource_context is not None
+                    authority_stream = resource_context["stream"]
+                    authority_identity = resource_context["identity"]
+                    authority_digest = resource_context["digest"]
+                    if authority_stream is None:
+                        raise poison_guard(
+                            f"PyInstaller {label} expected resource authority missing at {phase}"
+                        )
+                    current = _require_regular_nonreparse(
+                        snapshot,
+                        label=f"trusted {label} expected snapshot at {phase}",
+                    )
+                    if (
+                        _object_identity(os.fstat(authority_stream.fileno())) != authority_identity
+                        or _object_identity(current) != authority_identity
+                        or _sha256_stream(authority_stream) != authority_digest
+                    ):
+                        raise poison_guard(
+                            f"PyInstaller {label} expected authority changed at {phase}"
+                        )
+                    return authority_stream, authority_identity, authority_digest
+
+                def _discard_native_resource_update(native_handle: Any) -> None:
+                    assert resource_context is not None
+                    try:
+                        original_end_update_resource(native_handle, True)
+                    finally:
+                        resource_context["native_handle"] = None
+
+                def guarded_expected_begin_update_resource(
+                    path,
+                    *begin_args,
+                    **begin_kwargs,
+                ):
+                    if _normalized_path(path) != _normalized_path(snapshot):
+                        return original_begin_update_resource(
+                            path,
+                            *begin_args,
+                            **begin_kwargs,
+                        )
+                    assert resource_context is not None
+                    if resource_context["native_handle"] is not None:
+                        raise poison_guard(
+                            f"PyInstaller {label} nested expected resource update is unsupported"
+                        )
+
+                    authority_stream, authority_identity, authority_digest = (
+                        _validate_resource_authority("before native BeginUpdateResource")
+                    )
+                    authority_stream.close()
+                    resource_context["stream"] = None
+
+                    try:
+                        native_handle = original_begin_update_resource(
+                            path,
+                            *begin_args,
+                            **begin_kwargs,
+                        )
+                    except BaseException as exc:
+                        raise poison_guard(
+                            f"PyInstaller {label} native BeginUpdateResource failed: {exc}",
+                            exc,
+                        )
+                    resource_context["native_handle"] = native_handle
+                    resource_context["begin_count"] += 1
+
+                    try:
+                        after_begin = _require_regular_nonreparse(
+                            snapshot,
+                            label=f"trusted {label} expected snapshot under native resource handle",
+                        )
+                        if _object_identity(after_begin) != authority_identity:
+                            raise RuntimeError(
+                                "expected snapshot identity changed before native resource handle acquired"
+                            )
+                        with builtins.open(snapshot, "rb", buffering=0) as reader:
+                            after_begin_digest = _sha256_stream(reader)
+                        if after_begin_digest != authority_digest:
+                            raise RuntimeError(
+                                "expected snapshot bytes changed before native resource handle acquired"
+                            )
+                        _require_windows_access_denied(
+                            snapshot,
+                            _GENERIC_WRITE,
+                            label=f"PyInstaller {label} native resource write exclusion",
+                        )
+                        _require_windows_access_denied(
+                            snapshot,
+                            _DELETE_ACCESS,
+                            label=f"PyInstaller {label} native resource delete exclusion",
+                        )
+                    except BaseException as exc:
+                        try:
+                            _discard_native_resource_update(native_handle)
+                        finally:
+                            raise poison_guard(
+                                f"PyInstaller {label} native resource handle failed authority proof: {exc}",
+                                exc,
+                            )
+
+                    if os.environ.get("AUTOSPORT_TEST_WRITE_EXPECTED_DURING_RESOURCE_UPDATE") == "1":
+                        try:
+                            with snapshot.open("r+b") as writer:
+                                writer.seek(0, os.SEEK_END)
+                                writer.write(b"AUTOSPORT_EXPECTED_DURING_RESOURCE_WRITE")
+                                writer.flush()
+                                os.fsync(writer.fileno())
+                        except OSError:
+                            _discard_native_resource_update(native_handle)
+                            raise RuntimeError(
+                                "PyInstaller native resource update blocked hostile expected same-object write"
+                            )
+                        _discard_native_resource_update(native_handle)
+                        raise poison_guard(
+                            "PyInstaller hostile expected same-object write unexpectedly succeeded during native resource update"
+                        )
+
+                    if os.environ.get("AUTOSPORT_TEST_REPLACE_EXPECTED_DURING_RESOURCE_UPDATE") == "1":
+                        replacement = snapshot.with_name(
+                            f".{snapshot.name}.native-resource-replacement-{os.getpid()}"
+                        )
+                        try:
+                            with builtins.open(snapshot, "rb") as reader, builtins.open(
+                                replacement,
+                                "wb",
+                            ) as writer:
+                                shutil.copyfileobj(reader, writer)
+                                writer.write(b"AUTOSPORT_EXPECTED_DURING_RESOURCE_REPLACEMENT")
+                                writer.flush()
+                                os.fsync(writer.fileno())
+                            try:
+                                os.replace(replacement, snapshot)
+                            except OSError:
+                                _discard_native_resource_update(native_handle)
+                                raise RuntimeError(
+                                    "PyInstaller native resource update blocked hostile expected replacement"
+                                )
+                            _discard_native_resource_update(native_handle)
+                            raise poison_guard(
+                                "PyInstaller hostile expected replacement unexpectedly succeeded during native resource update"
+                            )
+                        finally:
+                            try:
+                                replacement.unlink()
+                            except FileNotFoundError:
+                                pass
+
+                    return native_handle
+
+                def guarded_expected_end_update_resource(
+                    native_handle,
+                    *end_args,
+                    **end_kwargs,
+                ):
+                    assert resource_context is not None
+                    if native_handle != resource_context["native_handle"]:
+                        return original_end_update_resource(
+                            native_handle,
+                            *end_args,
+                            **end_kwargs,
+                        )
+                    if end_args:
+                        discard_requested = bool(end_args[0])
+                    else:
+                        discard_requested = bool(end_kwargs.get("discard", False))
+                    try:
+                        result = original_end_update_resource(
+                            native_handle,
+                            *end_args,
+                            **end_kwargs,
+                        )
+                    except BaseException as exc:
+                        resource_context["native_handle"] = None
+                        raise poison_guard(
+                            f"PyInstaller {label} native EndUpdateResource failed: {exc}",
+                            exc,
+                        )
+                    resource_context["native_handle"] = None
+                    resource_context["end_count"] += 1
+                    if discard_requested:
+                        raise poison_guard(
+                            f"PyInstaller {label} trusted expected resource mutation discarded its update"
+                        )
+                    try:
+                        next_oracle, next_identity = _open_expected_snapshot_oracle(
+                            snapshot,
+                            label=label,
+                        )
+                    except BaseException as exc:
+                        raise poison_guard(
+                            f"PyInstaller {label} could not fence expected resource result inside EndUpdateResource: {exc}",
+                            exc,
+                        )
+                    resource_context["stream"] = next_oracle
+                    resource_context["identity"] = next_identity
+                    resource_context["digest"] = _sha256_stream(next_oracle)
+                    return result
+
+                resource_win32api.BeginUpdateResource = guarded_expected_begin_update_resource
+                resource_win32api.EndUpdateResource = guarded_expected_end_update_resource
+                try:
+                    expected_mutator(snapshot)
+                finally:
+                    resource_win32api.EndUpdateResource = original_end_update_resource
+                    resource_win32api.BeginUpdateResource = original_begin_update_resource
+
+                if resource_context["native_handle"] is not None:
+                    try:
+                        _discard_native_resource_update(resource_context["native_handle"])
+                    finally:
+                        raise poison_guard(
+                            f"PyInstaller {label} expected mutator returned with a native resource update still open"
+                        )
+                if (
+                    resource_context["begin_count"] == 0
+                    or resource_context["begin_count"] != resource_context["end_count"]
+                ):
+                    raise poison_guard(
+                        f"PyInstaller {label} expected mutator bypassed the pinned Win32 resource handoff"
+                    )
+                oracle_stream, expected_identity, expected_digest = (
+                    _validate_resource_authority("after native EndUpdateResource")
+                )
+                resource_context["stream"] = None
+            else:
+                def retained_expected_building_open(file, mode="r", *open_args, **open_kwargs):
+                    if label == "append" and mode == "ab" and _normalized_path(file) == _normalized_path(snapshot):
+                        if open_args or open_kwargs:
+                            raise RuntimeError(
+                                "unexpected arguments for pinned PyInstaller expected append"
+                            )
+                        return _RetainedArtifactAppender(expected_stream)
+                    opener = builtins.open if original_building_open is missing else original_building_open
+                    return opener(file, mode, *open_args, **open_kwargs)
+
+                def retained_expected_winutils_open(file, mode="r", *open_args, **open_kwargs):
+                    if label == "timestamp" and mode == "wb" and _normalized_path(file) == _normalized_path(snapshot):
+                        if open_args or open_kwargs:
+                            raise RuntimeError(
+                                "unexpected arguments for pinned PyInstaller expected timestamp rewrite"
+                            )
+                        return _RetainedArtifactWriter(expected_stream)
+                    opener = builtins.open if original_winutils_open is missing else original_winutils_open
+                    return opener(file, mode, *open_args, **open_kwargs)
+
+                if label == "append":
+                    building_api.open = retained_expected_building_open
+                elif label == "timestamp":
+                    building_api.winutils.open = retained_expected_winutils_open
+                else:
+                    raise poison_guard(
+                        f"PyInstaller {label} lacks a continuous expected-authority mutation adapter"
+                    )
+                try:
+                    expected_mutator(snapshot)
+                finally:
+                    if label == "append":
+                        if original_building_open is missing:
+                            try:
+                                delattr(building_api, "open")
+                            except AttributeError:
+                                pass
+                        else:
+                            building_api.open = original_building_open
+                    if label == "timestamp":
+                        if original_winutils_open is missing:
+                            try:
+                                delattr(building_api.winutils, "open")
+                            except AttributeError:
+                                pass
+                        else:
+                            building_api.winutils.open = original_winutils_open
+
+                expected_stream.flush()
+                os.fsync(expected_stream.fileno())
+                expected_identity_now = _object_identity(os.fstat(expected_stream.fileno()))
+                expected_path_now = _require_regular_nonreparse(
+                    snapshot,
+                    label=f"trusted {label} expected snapshot after retained mutation",
+                )
+                if (
+                    expected_identity_now != expected_identity
+                    or _object_identity(expected_path_now) != expected_identity
+                ):
+                    raise poison_guard(
+                        f"PyInstaller {label} expected snapshot lost retained-object continuity"
+                    )
+                expected_digest = _sha256_stream(expected_stream)
+                oracle_stream = expected_stream
+                expected_stream = None
 
             if os.environ.get("AUTOSPORT_TEST_WRITE_EXPECTED_BEFORE_ORACLE") == "1":
-                with snapshot.open("r+b") as writer:
-                    writer.seek(0, os.SEEK_END)
-                    writer.write(b"AUTOSPORT_EXPECTED_PRE_ORACLE_WRITE")
-                    writer.flush()
-                    os.fsync(writer.fileno())
+                try:
+                    with snapshot.open("r+b") as writer:
+                        writer.seek(0, os.SEEK_END)
+                        writer.write(b"AUTOSPORT_EXPECTED_PRE_ORACLE_WRITE")
+                        writer.flush()
+                        os.fsync(writer.fileno())
+                except OSError:
+                    raise RuntimeError(
+                        "PyInstaller continuous expected authority blocked pre-publication same-object write"
+                    )
+                raise poison_guard(
+                    "PyInstaller expected same-object write unexpectedly escaped continuous authority"
+                )
 
             if os.environ.get("AUTOSPORT_TEST_REPLACE_EXPECTED_BEFORE_ORACLE") == "1":
                 replacement = snapshot.with_name(
-                    f".{snapshot.name}.pre-oracle-replacement-{os.getpid()}"
+                    f".{snapshot.name}.pre-publication-replacement-{os.getpid()}"
                 )
                 try:
                     original_copyfile(snapshot, replacement)
-                    with replacement.open("ab") as replacement_handle:
-                        replacement_handle.write(b"AUTOSPORT_EXPECTED_PRE_ORACLE_REPLACEMENT")
-                        replacement_handle.flush()
-                        os.fsync(replacement_handle.fileno())
-                    os.replace(replacement, snapshot)
+                    try:
+                        os.replace(replacement, snapshot)
+                    except OSError:
+                        raise RuntimeError(
+                            "PyInstaller continuous expected authority blocked pre-publication replacement"
+                        )
+                    raise poison_guard(
+                        "PyInstaller expected replacement unexpectedly escaped continuous authority"
+                    )
                 finally:
                     try:
                         replacement.unlink()
                     except FileNotFoundError:
                         pass
-
-            try:
-                oracle_stream, snapshot_identity = _open_expected_snapshot_oracle(
-                    snapshot,
-                    label=label,
-                )
-            except BaseException as exc:
-                raise poison_guard(
-                    f"PyInstaller {label} expected snapshot could not be fenced: {exc}",
-                    exc,
-                )
 
             if os.environ.get("AUTOSPORT_TEST_WRITE_EXPECTED_SNAPSHOT") == "1":
                 try:
@@ -720,58 +1167,18 @@ def run(argv: list[str] | None = None) -> int:
                     except FileNotFoundError:
                         pass
 
-            expected_digest = _sha256_stream(oracle_stream)
             oracle_now = os.fstat(oracle_stream.fileno())
             oracle_path = _require_regular_nonreparse(
                 snapshot,
-                label=f"trusted {label} expected snapshot after oracle digest",
+                label=f"trusted {label} expected snapshot after authoritative digest",
             )
             if (
-                _object_identity(oracle_now) != snapshot_identity
-                or _object_identity(oracle_path) != snapshot_identity
+                _object_identity(oracle_now) != expected_identity
+                or _object_identity(oracle_path) != expected_identity
+                or _sha256_stream(oracle_stream) != expected_digest
             ):
                 raise poison_guard(
-                    f"PyInstaller {label} expected snapshot changed across oracle digest"
-                )
-
-            # Independently derive the same trusted transition from the still-pinned
-            # producer input after the primary result is fenced. A mutation or
-            # replacement that wins the pre-oracle handoff on one path cannot be
-            # adopted as authoritative unless the independently materialized
-            # replica reaches the exact same bytes.
-            reference_snapshot, _ = _make_expected_snapshot(
-                anchor_stream,
-                f"{label}-reference",
-            )
-            expected_mutator(reference_snapshot)
-            try:
-                reference_oracle_stream, reference_identity = (
-                    _open_expected_snapshot_oracle(
-                        reference_snapshot,
-                        label=f"{label}-reference",
-                    )
-                )
-            except BaseException as exc:
-                raise poison_guard(
-                    f"PyInstaller {label} reference expected snapshot could not be fenced: {exc}",
-                    exc,
-                )
-            reference_digest = _sha256_stream(reference_oracle_stream)
-            reference_now = os.fstat(reference_oracle_stream.fileno())
-            reference_path = _require_regular_nonreparse(
-                reference_snapshot,
-                label=f"trusted {label} reference expected snapshot after oracle digest",
-            )
-            if (
-                _object_identity(reference_now) != reference_identity
-                or _object_identity(reference_path) != reference_identity
-            ):
-                raise poison_guard(
-                    f"PyInstaller {label} reference expected snapshot changed across oracle digest"
-                )
-            if reference_digest != expected_digest:
-                raise poison_guard(
-                    f"PyInstaller {label} expected mutation result failed independent replica authentication"
+                    f"PyInstaller {label} expected snapshot changed across authoritative digest"
                 )
 
             anchor_stream.close()
@@ -847,15 +1254,16 @@ def run(argv: list[str] | None = None) -> int:
             state["trusted_transitions"].append(label)
             return live_result
         finally:
-            if reference_oracle_stream is not None:
-                reference_oracle_stream.close()
+            resource_win32api.EndUpdateResource = original_end_update_resource
+            resource_win32api.BeginUpdateResource = original_begin_update_resource
+            if resource_context is not None:
+                dangling_stream = resource_context.get("stream")
+                if dangling_stream is not None and dangling_stream is not oracle_stream:
+                    dangling_stream.close()
+            if expected_stream is not None:
+                expected_stream.close()
             if oracle_stream is not None:
                 oracle_stream.close()
-            if reference_snapshot is not None:
-                try:
-                    reference_snapshot.unlink()
-                except FileNotFoundError:
-                    pass
             try:
                 snapshot.unlink()
             except FileNotFoundError:
@@ -1372,6 +1780,8 @@ def run(argv: list[str] | None = None) -> int:
             raise RuntimeError("trusted artifact verifier emitted invalid digest")
         return 0
     finally:
+        resource_win32api.EndUpdateResource = original_end_update_resource
+        resource_win32api.BeginUpdateResource = original_begin_update_resource
         building_api.EXE.assemble = original_assemble
         building_api.winutils.update_exe_pe_checksum = original_update_checksum
         miscutils.mtime = original_mtime

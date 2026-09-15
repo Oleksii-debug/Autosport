@@ -315,4 +315,8 @@ def _sha256(payload: object) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    try:
+        encoded = canonical.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("calculation evidence text must be valid UTF-8") from exc
+    return hashlib.sha256(encoded).hexdigest()

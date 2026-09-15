@@ -63,6 +63,7 @@ def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | P
     ready = Path(ready_path)
     try:
         workspace.mkdir(parents=True, exist_ok=True)
+        registry = RunRegistry.initialize_pristine(workspace / "run_registry.json")
         paper_path = workspace / "paper_book.json"
         ledger_path = workspace / "decisions.jsonl"
         PaperBook("100").save(paper_path)
@@ -70,7 +71,6 @@ def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | P
         book_hash = sha256_file(paper_path)
         ledger_hash = sha256_file(ledger_path)
 
-        registry = RunRegistry(workspace / "run_registry.json")
         experiment_key = registry.begin(
             _PROCESS_MARKET_SHA256,
             _PROCESS_RESULTS_SHA256,

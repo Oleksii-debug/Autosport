@@ -273,6 +273,21 @@ class CalculationServiceTests(unittest.TestCase):
                 causal_cutoff_ts="2026-09-14T12:00:00+00:00",
             )
 
+    def test_non_utf8_quote_identity_fails_closed_before_calculation(self) -> None:
+        for field in ("event_id", "market_id", "selection_id", "source_id"):
+            with self.subTest(field=field):
+                invalid = self._event()
+                object.__setattr__(invalid, field, "invalid-" + chr(0xD800))
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "calculation evidence text must be valid UTF-8",
+                ):
+                    self.service.implied_probability_for_event(
+                        invalid,
+                        causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

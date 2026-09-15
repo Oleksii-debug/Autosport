@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal, getcontext
+from decimal import Decimal, getcontext, localcontext
 
 import pytest
 
@@ -71,10 +71,13 @@ def test_multiplicative_devig_is_order_independent_and_sums_to_one() -> None:
 
     assert forward.result_hash == reverse.result_hash
     outputs = _outputs(forward)
-    fair_total = Decimal(outputs["fair_probability.home"]) + Decimal(outputs["fair_probability.away"])
-    assert fair_total == Decimal("1")
     assert Decimal(outputs["overround"]) > Decimal("1")
-    assert Decimal(outputs["market_margin"]) == Decimal(outputs["overround"]) - Decimal("1")
+    with localcontext() as context:
+        context.prec = 200
+        fair_total = Decimal(outputs["fair_probability.home"]) + Decimal(outputs["fair_probability.away"])
+        normalization_error = abs(fair_total - Decimal("1"))
+        assert normalization_error <= Decimal("1e-159")
+        assert Decimal(outputs["market_margin"]) == Decimal(outputs["overround"]) - Decimal("1")
     assert Decimal(outputs["fair_decimal_odds.home"]) > Decimal("1")
     assert Decimal(outputs["fair_decimal_odds.away"]) > Decimal("1")
     assert forward.classification == "approximate_decimal"
@@ -114,15 +117,26 @@ def test_fractional_kelly_zero_edge_and_cap_are_explicit() -> None:
     assert capped.classification == "approximate_decimal"
 
 
-def test_performance_summary_reports_roi_yield_and_turnover() -> None:
+def test_performance_summary_preserves_canonical_roi_and_labels_bankroll_return() -> None:
     result = CalculationEngine().performance_summary(
         net_profit="25",
         turnover="250",
         starting_bankroll="100",
     )
 
-    assert _outputs(result) == {"roi": "0.25", "turnover": "250", "yield": "0.1"}
-    assert dict(result.output_units)["turnover"] == "paper_currency"
+    assert _outputs(result) == {
+        "bankroll_return": "0.25",
+        "roi": "0.1",
+        "turnover": "250",
+        "yield": "0.1",
+    }
+    assert dict(result.output_units) == {
+        "bankroll_return": "fraction",
+        "roi": "fraction",
+        "turnover": "paper_currency",
+        "yield": "fraction",
+    }
+    assert "settled-stake denominator" in result.assumptions[1]
 
 
 def test_return_dispersion_distinguishes_population_and_sample_contracts() -> None:
@@ -225,6 +239,21 @@ def test_finite_scenario_table_never_infers_completeness() -> None:
         engine.finite_scenario_table({"only": "1"}, completeness="unknown")
 
 
+def test_text_identifiers_are_utf8_safe_and_non_ascii_hashes_are_stable() -> None:
+    engine = CalculationEngine()
+
+    with pytest.raises(ValueError, match="UTF-8 encodable"):
+        engine.multiplicative_devig({"\ud800": "2", "valid": "2"})
+    with pytest.raises(ValueError, match="UTF-8 encodable"):
+        engine.finite_scenario_table({"\ud800": "1"}, completeness="partial")
+
+    forward = engine.multiplicative_devig({"господарі": "2.10", "гості": "1.80"})
+    reverse = engine.multiplicative_devig({"гості": Decimal("1.800"), "господарі": Decimal("2.1000")})
+    assert forward.result_hash == reverse.result_hash
+    assert "decimal_odds.гості" in dict(forward.inputs)
+    assert "decimal_odds.господарі" in dict(forward.inputs)
+
+
 def test_maximum_drawdown_uses_chronological_running_peak() -> None:
     result = CalculationEngine().maximum_drawdown(["100", "120", "90", "110", "60", "130"])
 
@@ -297,6 +326,29 @@ def test_result_serialization_contains_full_truth_and_hashes() -> None:
     assert payload["outputs"] == {"payout": "25", "profit": "15"}
     assert payload["input_hash"] == result.input_hash
     assert payload["result_hash"] == result.result_hash
+
+
+@pytest.mark.parametrize("precision", [6, 10, 28, 50, 100])
+def test_engine_results_are_independent_of_callers_decimal_precision(precision: int) -> None:
+    engine = CalculationEngine()
+
+    with localcontext() as baseline_context:
+        baseline_context.prec = 160
+        baseline = (
+            engine.multiplicative_devig({"home": "2.10", "away": "1.80"}).result_hash,
+            engine.american_to_decimal_odds("-137").result_hash,
+            engine.maximum_drawdown(["100", "123.45", "67.89", "130"]).result_hash,
+        )
+
+    with localcontext() as caller_context:
+        caller_context.prec = precision
+        observed = (
+            engine.multiplicative_devig({"home": "2.10", "away": "1.80"}).result_hash,
+            engine.american_to_decimal_odds("-137").result_hash,
+            engine.maximum_drawdown(["100", "123.45", "67.89", "130"]).result_hash,
+        )
+
+    assert observed == baseline
 
 
 def test_engine_does_not_mutate_callers_decimal_context() -> None:

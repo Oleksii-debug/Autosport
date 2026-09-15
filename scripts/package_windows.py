@@ -219,6 +219,16 @@ def _write_exact_git_blob(
     destination: Path,
 ) -> None:
     data = _exact_git_bytes(repo_root, "cat-file", "blob", object_sha)
+    blob_header = f"blob {len(data)}\0".encode("ascii")
+    actual_object_sha = hashlib.sha1(
+        blob_header + data,
+        usedforsecurity=False,
+    ).hexdigest()
+    if actual_object_sha != object_sha:
+        raise ValueError(
+            "exact package source Git blob identity mismatch: "
+            f"expected {object_sha}, got {actual_object_sha}"
+        )
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.",

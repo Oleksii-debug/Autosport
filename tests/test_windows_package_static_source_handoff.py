@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
+import zlib
 from pathlib import Path
 
 
@@ -81,6 +82,58 @@ def test_static_package_payload_comes_from_exact_source_tree_after_live_mutation
         if path.is_file()
     } == canonical_files
     assert not (trusted_examples / "extra.json").exists()
+
+
+def test_static_package_payload_rejects_corrupted_loose_git_blob(
+    tmp_path: Path,
+) -> None:
+    packager = _load_packager()
+    repo = tmp_path / "repo"
+    example_dir = repo / "examples" / "tt_demo"
+    example_dir.mkdir(parents=True)
+    start_file = repo / "WINDOWS_START_HERE.txt"
+    start_file.write_text("canonical start instructions\n", encoding="utf-8")
+    (example_dir / "manifest.json").write_text('{"kind":"manifest"}\n', encoding="utf-8")
+
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "autosport-test@example.invalid")
+    _git(repo, "config", "user.name", "Autosport Test")
+    _git(repo, "add", "WINDOWS_START_HERE.txt", "examples/tt_demo")
+    _git(repo, "commit", "-m", "canonical static package payload")
+    source_sha = _git(repo, "rev-parse", "HEAD")
+    object_sha = _git(repo, "rev-parse", f"{source_sha}:WINDOWS_START_HERE.txt")
+
+    hostile = b"hostile replacement\n"
+    raw_object = b"blob " + str(len(hostile)).encode("ascii") + b"\0" + hostile
+    object_path = repo / ".git" / "objects" / object_sha[:2] / object_sha[2:]
+    assert object_path.is_file()
+    object_path.chmod(0o600)
+    object_path.write_bytes(zlib.compress(raw_object))
+
+    cat_file = subprocess.run(
+        ["git", "cat-file", "blob", object_sha],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    ).stdout
+    assert cat_file == hostile
+
+    snapshot_dir = tmp_path / "private-snapshot"
+    try:
+        packager._materialize_exact_static_payload(
+            repo_root=repo,
+            source_sha=source_sha,
+            start_file=start_file,
+            example_dir=example_dir,
+            snapshot_dir=snapshot_dir,
+        )
+    except ValueError as exc:
+        assert "Git blob identity mismatch" in str(exc)
+    else:
+        raise AssertionError("corrupted Git blob object must fail closed")
+
+    trusted_start = snapshot_dir / "exact-source-static" / "WINDOWS_START_HERE.txt"
+    assert not trusted_start.exists()
 
 
 def test_static_package_payload_rejects_path_outside_checkout(tmp_path: Path) -> None:

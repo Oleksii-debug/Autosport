@@ -98,6 +98,33 @@ def _ordinary_checkout_changes(repo_root: Path) -> list[str]:
     return [line for line in ordinary.splitlines() if line.strip()]
 
 
+def _tracked_index_masking(repo_root: Path) -> list[str]:
+    """Reject Git index hints that can hide tracked worktree drift from status/diff."""
+
+    records = _git_output(
+        repo_root,
+        "ls-files",
+        "-v",
+        "-z",
+        allow_empty=True,
+    )
+    masked: list[str] = []
+    for record in records.split("\0"):
+        if not record:
+            continue
+        if len(record) < 3 or record[1] != " " or not record[2:]:
+            raise ValueError("git ls-files -v returned malformed tracked-index evidence")
+        tag = record[0]
+        path = record[2:]
+        # With `git ls-files -v`, lowercase tags mean assume-unchanged. `S` is
+        # skip-worktree; `s` is skip-worktree plus assume-unchanged. Either hint can
+        # intentionally suppress ordinary worktree-change discovery, so a release
+        # source proof must reject the hint itself instead of trusting status output.
+        if tag == "S" or tag.islower():
+            masked.append(f"index-masked:{tag}:{path}")
+    return masked
+
+
 def _ignored_checkout_paths(repo_root: Path) -> list[str]:
     ignored = _git_output(
         repo_root,
@@ -223,7 +250,8 @@ def _format_dirty_preview(dirty: list[str]) -> str:
 
 
 def _require_pristine_checkout(repo_root: Path) -> None:
-    dirty = _ordinary_checkout_changes(repo_root)
+    dirty = _tracked_index_masking(repo_root)
+    dirty.extend(_ordinary_checkout_changes(repo_root))
     dirty.extend(f"ignored:{line}" for line in _ignored_checkout_paths(repo_root))
     if dirty:
         raise ValueError(
@@ -235,7 +263,8 @@ def _require_pristine_checkout(repo_root: Path) -> None:
 def _require_late_build_boundary_unchanged(repo_root: Path) -> None:
     """Reject source/input changes at each late release source-consuming boundary."""
 
-    dirty = _ordinary_checkout_changes(repo_root)
+    dirty = _tracked_index_masking(repo_root)
+    dirty.extend(_ordinary_checkout_changes(repo_root))
     unexpected_ignored = [
         path
         for path in _ignored_checkout_paths(repo_root)

@@ -1,4 +1,9 @@
+import os
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -80,3 +85,36 @@ def test_packaged_evidence_smoke_has_fail_closed_tamper_probe() -> None:
     assert "$negative.ExitCode -ne 3" in text
     assert "evidence_verify=FAIL_CLOSED" in text
     assert "tampered_workspace_verify_status = 'FAIL_CLOSED'" in text
+
+
+def test_packaged_evidence_smoke_parses_with_powershell_on_windows() -> None:
+    if os.name != "nt":
+        pytest.skip("PowerShell parser check is Windows-specific")
+
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    parser_command = r"""
+$tokens = $null
+$errors = $null
+[System.Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$tokens, [ref]$errors) | Out-Null
+if ($errors.Count -ne 0) {
+    $errors | ForEach-Object { Write-Error $_.Message }
+    exit 1
+}
+"""
+    subprocess.run(
+        [
+            shell,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            parser_command,
+            str(SMOKE),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )

@@ -46,9 +46,67 @@ def _stable_stat_metadata(left: os.stat_result, right: os.stat_result) -> bool:
 
 
 def _open_read_only_descriptor(path: Path) -> int:
-    """Open a verification-only descriptor without mutating the persistent lock file."""
+    """Open a verification descriptor without following the final pathname alias."""
 
-    return os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if os.name != "nt":
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if not no_follow:
+            raise OSError(
+                errno.ENOTSUP,
+                "platform lacks no-follow verification open support",
+                str(path),
+            )
+        return os.open(path, flags | no_follow)
+
+    # Keep the verification boundary equivalent to the creation boundary: the final
+    # path component is opened as the reparse object itself, never traversed to a
+    # target that could be the already-open primary lock file.
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    open_existing = 3
+    file_attribute_normal = 0x00000080
+    file_flag_open_reparse_point = 0x00200000
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    kernel_handle = create_file(
+        str(path),
+        generic_read,
+        file_share_read | file_share_write | file_share_delete,
+        None,
+        open_existing,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    if kernel_handle == invalid_handle_value:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    try:
+        return msvcrt.open_osfhandle(kernel_handle, flags)
+    except BaseException:
+        close_handle(kernel_handle)
+        raise
 
 
 class WorkspaceEconomicLock:

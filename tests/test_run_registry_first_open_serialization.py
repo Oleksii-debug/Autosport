@@ -260,16 +260,52 @@ def test_zero_byte_ledger_must_be_readable_to_count_as_pristine(
 ) -> None:
     ledger_path = tmp_path / "decisions.jsonl"
     ledger_path.write_bytes(b"")
-    real_open = Path.open
+    real_open = run_registry._open_read_only_descriptor
 
-    def fail_ledger_open(path: Path, *args, **kwargs):
+    def fail_ledger_open(path: Path) -> int:
         if path == ledger_path:
             raise PermissionError("simulated unreadable zero-byte ledger")
-        return real_open(path, *args, **kwargs)
+        return real_open(path)
 
-    monkeypatch.setattr(Path, "open", fail_ledger_open)
+    monkeypatch.setattr(run_registry, "_open_read_only_descriptor", fail_ledger_open)
 
     assert has_durable_workspace_history(tmp_path) is True
+
+
+def test_zero_byte_ledger_redirect_after_lstat_fails_closed_without_registry_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger_path = tmp_path / "decisions.jsonl"
+    ledger_path.write_bytes(b"")
+    redirected_path = tmp_path / "redirected-ledger.jsonl"
+    redirected_path.write_bytes(b"")
+
+    real_open = run_registry._open_read_only_descriptor
+    ledger_open_calls = 0
+
+    def redirect_first_ledger_open(path: Path) -> int:
+        nonlocal ledger_open_calls
+        if path == ledger_path:
+            ledger_open_calls += 1
+            if ledger_open_calls == 1:
+                return real_open(redirected_path)
+        return real_open(path)
+
+    monkeypatch.setattr(run_registry, "_open_read_only_descriptor", redirect_first_ledger_open)
+
+    assert has_durable_workspace_history(tmp_path) is True
+    assert ledger_open_calls >= 2
+
+    ledger_open_calls = 0
+    registry_path = tmp_path / "run_registry.json"
+    with pytest.raises(ValueError, match="missing while durable run history exists"):
+        RunRegistry.initialize_pristine(registry_path)
+
+    assert ledger_open_calls >= 2
+    assert not registry_path.exists()
+    assert not (tmp_path / "run_registry.json.tmp").exists()
+    assert list(tmp_path.glob(".run_registry.json.*.tmp")) == []
 
 
 def test_generic_lock_failure_is_not_retried_or_reclassified_as_writer_contention(

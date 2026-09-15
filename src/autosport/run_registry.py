@@ -177,13 +177,50 @@ def has_durable_workspace_history(workspace: str | Path) -> bool:
     ledger_path = root / "decisions.jsonl"
     ledger_stat = _lstat_or_none(ledger_path)
     if ledger_stat is not None:
-        if not stat.S_ISREG(ledger_stat.st_mode) or ledger_stat.st_size > 0:
+        if (
+            not stat.S_ISREG(ledger_stat.st_mode)
+            or ledger_stat.st_nlink != 1
+            or ledger_stat.st_size > 0
+        ):
             return True
         try:
-            with ledger_path.open("rb") as handle:
-                if handle.read(1):
-                    return True
+            descriptor = _open_read_only_descriptor(ledger_path)
         except OSError:
+            return True
+
+        ledger_is_pristine = False
+        try:
+            try:
+                opened_before = os.fstat(descriptor)
+            except OSError:
+                return True
+            if (
+                not stat.S_ISREG(opened_before.st_mode)
+                or opened_before.st_nlink != 1
+                or not _path_matches_open_descriptor(ledger_path, descriptor, ledger_stat)
+            ):
+                return True
+
+            try:
+                first_byte = os.read(descriptor, 1)
+                opened_after = os.fstat(descriptor)
+            except OSError:
+                return True
+            if (
+                first_byte
+                or not stat.S_ISREG(opened_after.st_mode)
+                or opened_after.st_nlink != 1
+                or not _stable_stat_metadata(opened_before, opened_after)
+                or not _path_matches_open_descriptor(ledger_path, descriptor, ledger_stat)
+            ):
+                return True
+            ledger_is_pristine = True
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                ledger_is_pristine = False
+        if not ledger_is_pristine:
             return True
     return False
 

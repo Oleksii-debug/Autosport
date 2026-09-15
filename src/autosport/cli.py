@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import uuid
@@ -9,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Callable
 
+from . import ingestion as ingestion_module
 from .agents import AgentContext, AgentOrchestrator, MarketMirrorAgent, PaperBaselineAgent
 from .dataset import load_dataset
 from .domain import MarketEvent
@@ -33,6 +35,56 @@ from .strategies import available_strategies
 
 
 ProviderFactory = Callable[..., ParlayApiTableTennisProvider]
+
+
+def _print_paper_truth_boundary(*, mode: str, sample_fixture: bool | None = None) -> None:
+    sample_label = (
+        "" if sample_fixture is None else f" sample_fixture={str(sample_fixture).lower()}"
+    )
+    print(
+        f"mode={mode} paper_only=true real_money_execution=false "
+        f"profitability_claim=false{sample_label}"
+    )
+
+
+def _committed_ingestion_health_error_type() -> type[RuntimeError] | None:
+    candidate = getattr(ingestion_module, "CommittedIngestionHealthError", None)
+    if isinstance(candidate, type) and issubclass(candidate, RuntimeError):
+        return candidate
+    return None
+
+
+def _print_committed_ingestion_health_failure(exc: RuntimeError) -> None:
+    outcome = exc.outcome
+    delivery_error = getattr(exc, "delivery_error", None)
+    delivery_accepted_count = None
+    delivery_failure_count = None
+    if delivery_error is not None:
+        delivery_accepted_count = delivery_error.accepted_count
+        delivery_failure_count = len(delivery_error.exceptions)
+    print(
+        json.dumps(
+            {
+                "observation": "COMMITTED_HEALTH_FAILURE",
+                "market_committed": True,
+                "source_health_persistence": "unknown",
+                "health_reconciliation_required": True,
+                "whole_poll_retry_safe": False,
+                "delivery_error_present": delivery_error is not None,
+                "delivery_error_accepted_count": delivery_accepted_count,
+                "delivery_error_failure_count": delivery_failure_count,
+                "source_id": outcome.source_id,
+                "received": outcome.received,
+                "accepted": outcome.accepted,
+                "rejected": outcome.rejected,
+                "cursor": outcome.cursor,
+                "quality_flags": list(outcome.quality_flags),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -118,6 +170,7 @@ def run_replay(path: Path, bankroll: str) -> int:
     report = PortfolioEngine().analyse(list(book.tickets.values()))
     print(f"run_id={run.run_id}\ndataset_hash={run.dataset_hash}\nevents={run.event_count}\nvirtual_balance={book.balance}")
     print(f"scenario_mode={report.mode} worst={report.worst_case} best={report.best_case}")
+    _print_paper_truth_boundary(mode="replay")
     return 0
 
 
@@ -153,6 +206,7 @@ def run_dataset(
         print(f"settled={len(result.settled_ticket_ids)}")
         if dataset.import_identity is not None:
             print(f"historical_import_identity={dataset.import_identity}")
+        _print_paper_truth_boundary(mode="dataset")
     finally:
         session.close()
     return 0
@@ -236,6 +290,12 @@ def run_observe_table_tennis(
     except (ProviderTransportError, ProviderPayloadError, sqlite3.Error, ValueError, OSError) as exc:
         print(f"observation=FAIL_CLOSED error={exc}")
         return 3
+    except RuntimeError as exc:
+        committed_error_type = _committed_ingestion_health_error_type()
+        if committed_error_type is None or type(exc) is not committed_error_type:
+            raise
+        _print_committed_ingestion_health_failure(exc)
+        return 4
     _print_observation(result, show)
     return 0
 
@@ -434,6 +494,7 @@ def run_demo() -> int:
     orchestrator = AgentOrchestrator([MarketMirrorAgent(), PaperBaselineAgent("50")], context)
     run = ReplayEngine(events).run(orchestrator.on_market_event, run_id="demo-run")
     print(f"run={run.run_id} dataset={run.dataset_hash[:12]} events={context.event_count} balance={book.balance} tickets={len(book.tickets)}")
+    _print_paper_truth_boundary(mode="demo", sample_fixture=True)
     return 0
 
 

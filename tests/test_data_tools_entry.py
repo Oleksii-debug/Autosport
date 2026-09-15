@@ -17,6 +17,9 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertIn("walk-forward-evaluate", help_text)
         self.assertIn("import-betfair-historical", help_text)
         self.assertIn("repair-workspace", help_text)
+        self.assertIn("export-evidence", help_text)
+        self.assertIn("verify-evidence", help_text)
+        self.assertIn("metadata-only", help_text)
         self.assertIn("checksum-bound rights/retention evidence", help_text)
         self.assertIn("not an independent legal opinion", help_text)
 
@@ -75,6 +78,36 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertEqual(result, 4)
         target.assert_called_once_with(
             ["repair-workspace", "--workspace", r"C:\\Autosport\\state"]
+        )
+
+    def test_export_evidence_dispatches_exact_arguments(self):
+        with patch("autosport.evidence_export.main", return_value=13) as target:
+            result = data_tools_entry.main(
+                [
+                    "export-evidence",
+                    r"C:\\Autosport\\state",
+                    "--output",
+                    "evidence.json",
+                ]
+            )
+        self.assertEqual(result, 13)
+        target.assert_called_once_with(
+            [r"C:\\Autosport\\state", "--output", "evidence.json"]
+        )
+
+    def test_verify_evidence_dispatches_exact_arguments(self):
+        with patch("autosport.evidence_export.verify_main", return_value=14) as target:
+            result = data_tools_entry.main(
+                [
+                    "verify-evidence",
+                    "evidence.json",
+                    "--workspace",
+                    r"C:\\Autosport\\state",
+                ]
+            )
+        self.assertEqual(result, 14)
+        target.assert_called_once_with(
+            ["evidence.json", "--workspace", r"C:\\Autosport\\state"]
         )
 
     def test_real_missing_dataset_is_fail_closed_at_portable_boundary(self):

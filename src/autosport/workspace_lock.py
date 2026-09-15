@@ -295,11 +295,14 @@ class WorkspaceEconomicLock:
             try:
                 verification_stat = os.fstat(verification_descriptor)
                 opened_after = os.fstat(handle.fileno())
-                path_after = os.stat(self.path, follow_symlinks=False)
                 same_open_file = os.path.sameopenfile(
                     handle.fileno(),
                     verification_descriptor,
                 )
+                # This pathname read must be after the descriptor identity proof.
+                # Otherwise a replacement that lands during sameopenfile() can leave
+                # both descriptors bound to the old file and escape the checkpoint.
+                path_after = os.stat(self.path, follow_symlinks=False)
             except OSError as exc:
                 raise WorkspaceEconomicLockError(
                     "workspace economic lock path changed during acquisition"

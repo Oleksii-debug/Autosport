@@ -27,7 +27,6 @@ _MUTATION_CAPABLE_ACCESS = (
     _FILE_WRITE_DATA
     | _FILE_APPEND_DATA
     | _FILE_WRITE_EA
-    | _FILE_DELETE_CHILD
     | _FILE_WRITE_ATTRIBUTES
     | _DELETE_ACCESS
     | _WRITE_DAC
@@ -135,6 +134,7 @@ def _require_no_competing_mutation_handles(
     raw_handle: Any,
     *,
     label: str,
+    directory: bool,
     allow_current_process_data_mutators: bool = False,
 ) -> None:
     """Reject retained mutation authority that predates the filesystem deny fences.
@@ -143,7 +143,8 @@ def _require_no_competing_mutation_handles(
     a live handle. Bind the trusted security-authority handle to its kernel object and
     reject every other mutation-capable handle. During a native PyInstaller resource
     update, current-process data/delete handles are the trusted mutator and may remain;
-    security-descriptor mutation authority is never exempted.
+    security-descriptor mutation authority is never exempted. FILE_DELETE_CHILD is
+    directory-only: the same access bit is FILE_EXECUTE on regular files.
     """
 
     trusted_handle = _raw_handle_value(raw_handle)
@@ -160,6 +161,7 @@ def _require_no_competing_mutation_handles(
     if target_object == 0 or trusted_access & _WRITE_DAC == 0:
         raise RuntimeError(f"{label} trusted handle lost WRITE_DAC authority")
 
+    mutation_mask = _MUTATION_CAPABLE_ACCESS | (_FILE_DELETE_CHILD if directory else 0)
     competing: list[tuple[int, int, int, int]] = []
     for row in snapshot:
         object_id, pid, handle_value, granted_access = row
@@ -167,7 +169,7 @@ def _require_no_competing_mutation_handles(
             continue
         if pid == current_pid and handle_value == trusted_handle:
             continue
-        if granted_access & _MUTATION_CAPABLE_ACCESS == 0:
+        if granted_access & mutation_mask == 0:
             continue
         if (
             allow_current_process_data_mutators
@@ -511,6 +513,7 @@ def install(wrapper: ModuleType) -> None:
             _require_no_competing_mutation_handles(
                 raw_handle,
                 label="trusted expected-snapshot parent security fence",
+                directory=True,
             )
             record["parent_dacl"] = descriptor
             record["parent_security_authority"] = True
@@ -551,6 +554,7 @@ def install(wrapper: ModuleType) -> None:
             _require_no_competing_mutation_handles(
                 raw_handle,
                 label="trusted expected-snapshot file security fence",
+                directory=False,
                 allow_current_process_data_mutators=True,
             )
         except BaseException:

@@ -44,25 +44,35 @@ def test_expected_snapshot_uses_continuous_authority_instead_of_replica_replay()
     release_acl = core.index("_remove_expected_snapshot_write_fence(", post_commit_oracle)
     live_mutation = core.index("live_result = live_mutator()", release_acl)
 
+    namespace_helper = wrapper.index("def _install_expected_snapshot_namespace_fence(")
+    parent_delete_child_probe = wrapper.index("_directory_delete_child_available(parent)", namespace_helper)
+    parent_deny = wrapper.index('f"*{sid}:(DC)"', parent_delete_child_probe)
+    parent_postproof = wrapper.index("trusted expected-snapshot parent namespace fence still allows FILE_DELETE_CHILD", parent_deny)
+    wrapper_set = wrapper.index("def guarded_set_expected_snapshot_write_fence(")
+    namespace_install = wrapper.index("_install_expected_snapshot_namespace_fence(path, sid)", wrapper_set)
+    file_acl_fence = wrapper.index("original_set_fence(path, sid)", namespace_install)
     preproof_guard = wrapper.index("def guarded_require_windows_access_denied(")
-    wrapper_acl_fence = wrapper.index(
-        "guarded_set_expected_snapshot_write_fence(",
-        preproof_guard,
-    )
+    wrapper_acl_fence = wrapper.index("guarded_set_expected_snapshot_write_fence(", preproof_guard)
     wrapper_access_proof = wrapper.index(
         "original_require_access_denied(path, desired_access, label=label)",
         wrapper_acl_fence,
     )
 
-    # The retained core still contains the original call sites, but the canonical
-    # entrypoint interposes an idempotent DACL before the first native-access
-    # assertion. This closes the exact Windows failure without weakening the
-    # post-End retained-oracle semantics.
+    # The retained core keeps the prior expected-byte oracle. The canonical
+    # entrypoint now closes both Windows deletion authorization routes before
+    # the first native-resource assertion: target DELETE on the file and
+    # FILE_DELETE_CHILD on its parent namespace. Both remain installed across
+    # EndUpdateResource until the retained post-commit oracle is open.
     assert materialize < transition < resource_begin < native_begin < native_access_proof
     assert native_access_proof < core_acl_fence < resource_end < native_end
+    assert namespace_helper < parent_delete_child_probe < parent_deny < parent_postproof
+    assert wrapper_set < namespace_install < file_acl_fence < preproof_guard
     assert preproof_guard < wrapper_acl_fence < wrapper_access_proof
     assert native_end < post_end_access_proof < post_end_probe < post_commit_oracle
     assert post_commit_oracle < release_acl < live_mutation
+    assert "_FILE_DELETE_CHILD = 0x00000040" in wrapper
+    assert "_capture_windows_dacl(parent)" in wrapper[namespace_helper:wrapper_set]
+    assert "_restore_windows_dacl(existing[\"parent\"], existing[\"parent_dacl\"])" in wrapper
     assert "reference_snapshot" not in core[transition:live_mutation]
     assert "reference_digest" not in core[transition:live_mutation]
     assert "_RetainedArtifactAppender(expected_stream)" in core[transition:live_mutation]
@@ -187,10 +197,14 @@ def test_post_end_resource_acl_fence_blocks_same_object_write_before_oracle(
     not _REAL_WINDOWS_PYINSTALLER,
     reason="real Windows PyInstaller regression",
 )
-def test_post_end_resource_acl_fence_blocks_replacement_before_oracle(
+def test_post_end_resource_acl_fence_blocks_replacement_with_parent_delete_child_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The runner parent must expose the alternative Windows deletion route before
+    # the fence. The wrapper then explicitly denies FILE_DELETE_CHILD while the
+    # file-level DELETE deny remains active across EndUpdateResource.
+    monkeypatch.setenv("AUTOSPORT_TEST_REQUIRE_PARENT_DELETE_CHILD_AUTHORITY", "1")
     monkeypatch.setenv("AUTOSPORT_TEST_REPLACE_EXPECTED_AFTER_RESOURCE_END", "1")
 
     completed, _artifact, bound, digest = _PRODUCER_TESTS._run_real_pyinstaller_probe(
@@ -199,6 +213,7 @@ def test_post_end_resource_acl_fence_blocks_replacement_before_oracle(
 
     assert completed.returncode != 0
     combined = completed.stdout + "\n" + completed.stderr
+    assert "parent lacked FILE_DELETE_CHILD before adversarial namespace fence" not in combined
     assert (
         "post-EndUpdateResource ACL fence blocked hostile expected replacement before oracle"
         in combined

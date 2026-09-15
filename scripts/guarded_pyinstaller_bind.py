@@ -6,6 +6,8 @@ import importlib.util
 import os
 import pathlib
 import shutil
+import stat
+import subprocess
 import sys
 from ctypes import wintypes
 from typing import Any
@@ -27,6 +29,10 @@ _EXPECTED_PYINSTALLER_VERSION = _CORE._EXPECTED_PYINSTALLER_VERSION
 _require_expected_pyinstaller_version = _CORE._require_expected_pyinstaller_version
 
 _CREATE_ALWAYS = 2
+_FILE_DELETE_CHILD = 0x00000040
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_DACL_SECURITY_INFORMATION = 0x00000004
+_ERROR_INSUFFICIENT_BUFFER = 122
 
 
 class _RetainedPackageWriter:
@@ -179,6 +185,165 @@ def _run_package_hostile_probes(authority: dict[str, Any]) -> None:
                 pass
 
 
+def _require_regular_directory_nonreparse(path: pathlib.Path, *, label: str) -> None:
+    try:
+        value = path.lstat()
+    except OSError as exc:
+        raise RuntimeError(f"{label} is not readable: {path}") from exc
+    if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
+        raise RuntimeError(f"{label} must be a regular non-symlink directory: {path}")
+    if _CORE._windows_attributes(path) & _CORE._FILE_ATTRIBUTE_REPARSE_POINT:
+        raise RuntimeError(f"{label} must not be a Windows reparse point: {path}")
+
+
+def _directory_delete_child_available(path: pathlib.Path) -> bool:
+    """Return whether this token can acquire parent FILE_DELETE_CHILD authority."""
+
+    kernel32 = _CORE._windows_kernel32()
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    ctypes.set_last_error(0)
+    raw_handle = create_file(
+        str(path),
+        _FILE_DELETE_CHILD,
+        _CORE._FILE_SHARE_READ | _CORE._FILE_SHARE_WRITE | _CORE._FILE_SHARE_DELETE,
+        None,
+        _CORE._OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS | _CORE._FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    handle_value = (
+        raw_handle
+        if isinstance(raw_handle, int)
+        else ctypes.cast(raw_handle, ctypes.c_void_p).value
+    )
+    if handle_value in {None, _CORE._INVALID_HANDLE_VALUE}:
+        error = ctypes.get_last_error()
+        if error == _CORE._ERROR_ACCESS_DENIED:
+            return False
+        raise ctypes.WinError(error)
+    _CORE._close_windows_handle(raw_handle)
+    return True
+
+
+def _capture_windows_dacl(path: pathlib.Path) -> bytes:
+    """Capture the exact parent DACL so the temporary namespace deny is reversible."""
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    get_file_security = advapi32.GetFileSecurityW
+    get_file_security.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    get_file_security.restype = wintypes.BOOL
+
+    needed = wintypes.DWORD(0)
+    ctypes.set_last_error(0)
+    if get_file_security(
+        str(path),
+        _DACL_SECURITY_INFORMATION,
+        None,
+        0,
+        ctypes.byref(needed),
+    ):
+        raise RuntimeError("unexpected zero-length parent DACL capture")
+    error = ctypes.get_last_error()
+    if error != _ERROR_INSUFFICIENT_BUFFER or needed.value == 0:
+        raise ctypes.WinError(error)
+
+    buffer = ctypes.create_string_buffer(needed.value)
+    if not get_file_security(
+        str(path),
+        _DACL_SECURITY_INFORMATION,
+        ctypes.cast(buffer, ctypes.c_void_p),
+        needed.value,
+        ctypes.byref(needed),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return bytes(buffer.raw[: needed.value])
+
+
+def _restore_windows_dacl(path: pathlib.Path, descriptor: bytes) -> None:
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    set_file_security = advapi32.SetFileSecurityW
+    set_file_security.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    )
+    set_file_security.restype = wintypes.BOOL
+    buffer = ctypes.create_string_buffer(descriptor, len(descriptor))
+    if not set_file_security(
+        str(path),
+        _DACL_SECURITY_INFORMATION,
+        ctypes.cast(buffer, ctypes.c_void_p),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _install_expected_snapshot_namespace_fence(
+    path: pathlib.Path,
+    sid: str,
+) -> dict[str, Any]:
+    """Deny the parent FILE_DELETE_CHILD alternative across resource commit return."""
+
+    parent = path.parent
+    _require_regular_directory_nonreparse(
+        parent,
+        label="trusted expected-snapshot parent namespace",
+    )
+    parent_dacl = _capture_windows_dacl(parent)
+    had_delete_child = _directory_delete_child_available(parent)
+
+    icacls = _CORE._windows_system_binary("icacls.exe")
+    completed = subprocess.run(
+        [str(icacls), str(parent), "/deny", f"*{sid}:(DC)", "/Q"],
+        check=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "trusted expected-snapshot parent namespace fence could not be installed: "
+            f"icacls exited {completed.returncode}"
+        )
+    try:
+        if _directory_delete_child_available(parent):
+            raise RuntimeError(
+                "trusted expected-snapshot parent namespace fence still allows FILE_DELETE_CHILD"
+            )
+        if (
+            os.environ.get("AUTOSPORT_TEST_REQUIRE_PARENT_DELETE_CHILD_AUTHORITY") == "1"
+            and not had_delete_child
+        ):
+            raise RuntimeError(
+                "expected-snapshot parent lacked FILE_DELETE_CHILD before adversarial namespace fence"
+            )
+    except BaseException:
+        _restore_windows_dacl(parent, parent_dacl)
+        raise
+
+    return {
+        "parent": parent,
+        "parent_dacl": parent_dacl,
+        "had_delete_child": had_delete_child,
+        "parent_fenced": True,
+    }
+
+
 def run(argv: list[str] | None = None) -> int:
     if os.name != "nt":
         return _CORE.run(argv)
@@ -199,26 +364,51 @@ def run(argv: list[str] | None = None) -> int:
     original_require_access_denied = _CORE._require_windows_access_denied
 
     package_authorities: dict[str, dict[str, Any]] = {}
-    expected_resource_fences: dict[str, tuple[pathlib.Path, str]] = {}
+    expected_resource_fences: dict[str, dict[str, Any]] = {}
 
     def guarded_set_expected_snapshot_write_fence(path: pathlib.Path, sid: str) -> None:
+        path = pathlib.Path(path)
         key = _CORE._normalized_path(path)
         existing = expected_resource_fences.get(key)
         if existing is not None:
-            if existing[1] != sid:
+            if existing["sid"] != sid:
                 raise RuntimeError("expected-snapshot ACL fence SID changed unexpectedly")
             return
-        original_set_fence(path, sid)
-        expected_resource_fences[key] = (pathlib.Path(path), sid)
+
+        namespace = _install_expected_snapshot_namespace_fence(path, sid)
+        record = {
+            "path": path,
+            "sid": sid,
+            **namespace,
+            "file_fenced": False,
+        }
+        expected_resource_fences[key] = record
+        try:
+            original_set_fence(path, sid)
+            record["file_fenced"] = True
+        except BaseException:
+            try:
+                if record["parent_fenced"]:
+                    _restore_windows_dacl(record["parent"], record["parent_dacl"])
+                    record["parent_fenced"] = False
+            finally:
+                expected_resource_fences.pop(key, None)
+            raise
 
     def guarded_remove_expected_snapshot_write_fence(path: pathlib.Path, sid: str) -> None:
         key = _CORE._normalized_path(path)
         existing = expected_resource_fences.get(key)
         if existing is None:
             raise RuntimeError("expected-snapshot ACL fence removal lacked installed authority")
-        if existing[1] != sid:
+        if existing["sid"] != sid:
             raise RuntimeError("expected-snapshot ACL fence removal SID mismatch")
-        original_remove_fence(path, sid)
+
+        if existing["file_fenced"]:
+            original_remove_fence(path, sid)
+            existing["file_fenced"] = False
+        if existing["parent_fenced"]:
+            _restore_windows_dacl(existing["parent"], existing["parent_dacl"])
+            existing["parent_fenced"] = False
         expected_resource_fences.pop(key, None)
 
     def guarded_require_windows_access_denied(
@@ -228,7 +418,9 @@ def run(argv: list[str] | None = None) -> int:
         label: str,
     ) -> None:
         # BeginUpdateResource does not itself promise CreateFile sharing exclusion.
-        # Install the enforceable DACL before the first assertion that depends on it.
+        # Install both object and parent-namespace fences before the first assertion
+        # that depends on them, then keep both through EndUpdateResource and until
+        # the retained post-commit oracle has been opened.
         if "native resource" in label and "post-EndUpdateResource" not in label:
             key = _CORE._normalized_path(path)
             if key not in expected_resource_fences:
@@ -364,12 +556,23 @@ def run(argv: list[str] | None = None) -> int:
                 cleanup_errors.append(f"PKG authority close failed: {exc}")
         package_authorities.clear()
 
-        for path, sid in list(expected_resource_fences.values()):
+        for record in list(expected_resource_fences.values()):
             try:
-                if path.exists():
-                    original_remove_fence(path, sid)
+                if record["file_fenced"] and record["path"].exists():
+                    original_remove_fence(record["path"], record["sid"])
+                    record["file_fenced"] = False
             except BaseException as exc:
-                cleanup_errors.append(f"expected-snapshot ACL cleanup failed for {path}: {exc}")
+                cleanup_errors.append(
+                    f"expected-snapshot file ACL cleanup failed for {record['path']}: {exc}"
+                )
+            try:
+                if record["parent_fenced"] and record["parent"].exists():
+                    _restore_windows_dacl(record["parent"], record["parent_dacl"])
+                    record["parent_fenced"] = False
+            except BaseException as exc:
+                cleanup_errors.append(
+                    f"expected-snapshot parent DACL cleanup failed for {record['parent']}: {exc}"
+                )
         expected_resource_fences.clear()
 
         if cleanup_errors and not active_exception:

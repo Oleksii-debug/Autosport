@@ -10,7 +10,7 @@ class RunRegistryStateIntegrityTests(unittest.TestCase):
     @staticmethod
     def _new_registry(root: Path) -> tuple[RunRegistry, Path]:
         path = root / "run_registry.json"
-        return RunRegistry(path), path
+        return RunRegistry.initialize_pristine(path), path
 
     @staticmethod
     def _begin(

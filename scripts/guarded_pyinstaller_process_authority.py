@@ -343,18 +343,17 @@ class ProcessDuplicationFence:
                     "trusted build-process identity handle was not uniquely visible in system handle table"
                 )
             process_object = identity_rows[0][0]
-            trusted_processes = {current_pid, os.getppid()}
             competing = [
                 row
                 for row in snapshot
                 if row[0] == process_object
                 and row[3] & _DANGEROUS_PROCESS_ACCESS
-                and row[1] not in trusted_processes
+                and row[1] != current_pid
             ]
             if competing:
                 raise RuntimeError(
                     "trusted build-process security fence found "
-                    f"{len(competing)} pre-existing untrusted dangerous process handle(s)"
+                    f"{len(competing)} pre-existing external dangerous process handle(s)"
                 )
         finally:
             _close_handle(identity_handle)

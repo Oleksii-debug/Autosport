@@ -754,10 +754,8 @@ def run(argv: list[str] | None = None) -> int:
                         f"PyInstaller {label} transition raced while restoring producer fences"
                     )
 
-            if next_identity != producer_identity:
-                if next_creation_anchor is not None:
-                    _close_windows_handle(next_creation_anchor)
-                    state["creation_anchor_handle"] = None
+            identity_rotated = next_identity != producer_identity
+            if identity_rotated and not release_creation_anchor:
                 next_anchor.close()
                 state["producer_anchor_stream"] = None
                 raise poison_guard(
@@ -766,9 +764,9 @@ def run(argv: list[str] | None = None) -> int:
 
             actual_digest = _sha256_stream(next_anchor)
             if live_error is not None:
-                if actual_digest != current_digest:
+                if identity_rotated or actual_digest != current_digest:
                     raise poison_guard(
-                        f"PyInstaller {label} transition failed after changing producer bytes",
+                        f"PyInstaller {label} transition failed after changing producer bytes or identity",
                         live_error,
                     )
                 raise live_error
@@ -778,6 +776,8 @@ def run(argv: list[str] | None = None) -> int:
                     f"PyInstaller {label} transition produced bytes outside the trusted expected progression"
                 )
 
+            if identity_rotated:
+                state["producer_identity"] = next_identity
             state["producer_progress_digest"] = actual_digest
             state["trusted_transitions"].append(label)
             return live_result

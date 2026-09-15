@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .integrity import atomic_write_json as _path_atomic_write_json
-from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
+from .evidence_snapshot_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 
 
 _SCHEMA_VERSION = 1

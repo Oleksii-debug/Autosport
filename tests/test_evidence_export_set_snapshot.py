@@ -169,3 +169,44 @@ def test_windows_retained_handle_denies_same_name_replace_after_first_final_repr
     assert paper.read_bytes() == b"paper-state-v1"
     assert replacement.exists()
     assert not output.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows V1 namespace snapshot boundary")
+def test_windows_export_rejects_canonical_addition_after_membership_recheck(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "paper_book.json").write_bytes(b"paper-state-v1")
+    (workspace / "run_registry.json").write_bytes(b"registry-state")
+    output = tmp_path / "manifest.json"
+    injected = workspace / f"run-{uuid.uuid4()}.json"
+    real_reproof = evidence_export._reprove_retained_source_path
+    reproof_count = 0
+
+    def adding_reproof(snapshot: tuple[Path, int, os.stat_result, os.stat_result, int, str]) -> None:
+        nonlocal reproof_count
+        real_reproof(snapshot)
+        reproof_count += 1
+        if reproof_count == 1:
+            injected.write_text(
+                '{"real_money_execution":false}\n',
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr(
+        evidence_export,
+        "_reprove_retained_source_path",
+        adding_reproof,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="workspace changed during evidence snapshot namespace boundary",
+    ):
+        evidence_export.export_evidence_manifest(workspace, output)
+
+    assert reproof_count == 2
+    assert injected.exists()
+    assert not output.exists()

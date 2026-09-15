@@ -95,10 +95,18 @@ def test_packaged_evidence_smoke_parses_with_powershell_on_windows() -> None:
     if shell is None:
         pytest.skip("PowerShell is unavailable")
 
+    target_env = "AUTOSPORT_POWERSHELL_PARSE_TARGET"
+    env = os.environ.copy()
+    env[target_env] = str(SMOKE)
     parser_command = r"""
 $tokens = $null
 $errors = $null
-[System.Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$tokens, [ref]$errors) | Out-Null
+$target = $env:AUTOSPORT_POWERSHELL_PARSE_TARGET
+if ([string]::IsNullOrWhiteSpace($target)) {
+    Write-Error 'AUTOSPORT_POWERSHELL_PARSE_TARGET is required'
+    exit 1
+}
+[System.Management.Automation.Language.Parser]::ParseFile($target, [ref]$tokens, [ref]$errors) | Out-Null
 if ($errors.Count -ne 0) {
     $errors | ForEach-Object { Write-Error $_.Message }
     exit 1
@@ -112,9 +120,9 @@ if ($errors.Count -ne 0) {
             "-NonInteractive",
             "-Command",
             parser_command,
-            str(SMOKE),
         ],
         check=True,
         capture_output=True,
         text=True,
+        env=env,
     )

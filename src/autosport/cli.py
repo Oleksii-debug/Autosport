@@ -283,7 +283,7 @@ def run_observe_table_tennis(
         return 3
     except RuntimeError as exc:
         committed_error_type = _committed_ingestion_health_error_type()
-        if committed_error_type is None or not isinstance(exc, committed_error_type):
+        if committed_error_type is None or type(exc) is not committed_error_type:
             raise
         _print_committed_ingestion_health_failure(exc)
         return 4

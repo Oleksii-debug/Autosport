@@ -273,6 +273,34 @@ class CliObservationIsolationTests(unittest.TestCase):
             },
         )
 
+    def test_committed_health_error_subclass_is_not_reclassified_as_exact_contract(self):
+        class DerivedCommittedIngestionHealthError(_FutureCommittedIngestionHealthError):
+            pass
+
+        def factory(api_key, *, public_preview):
+            self.assertIsNone(api_key)
+            self.assertTrue(public_preview)
+            return self._provider()
+
+        derived_error = DerivedCommittedIngestionHealthError(SimpleNamespace())
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch(
+                    "autosport.cli.ingestion_module.CommittedIngestionHealthError",
+                    _FutureCommittedIngestionHealthError,
+                    create=True,
+                ),
+                patch("autosport.cli.observe_workspace_once", side_effect=derived_error),
+            ):
+                with self.assertRaises(DerivedCommittedIngestionHealthError):
+                    run_observe_table_tennis(
+                        Path(tmp),
+                        public_preview=True,
+                        max_items=10,
+                        show=10,
+                        provider_factory=factory,
+                    )
+
     def test_unrelated_runtime_error_is_not_reclassified_as_committed_health_failure(self):
         def factory(api_key, *, public_preview):
             self.assertIsNone(api_key)

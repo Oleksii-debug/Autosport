@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
 import stat
 import uuid
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
-from .integrity import atomic_write_json
+from .integrity import atomic_write_json as _path_atomic_write_json
 from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 
 
@@ -47,6 +49,10 @@ _FALSE_TRUTH_FIELDS = (
     "environment_or_credential_values_included",
     "arbitrary_workspace_files_included",
     "real_money_execution",
+)
+_BOUND_POSIX_OUTPUT: ContextVar[tuple[int, Path] | None] = ContextVar(
+    "autosport_evidence_bound_posix_output",
+    default=None,
 )
 
 
@@ -188,6 +194,371 @@ def _resolve_output_destination(workspace: Path, output: Path) -> Path:
         "output path must be outside the Autosport workspace; "
         "must not overwrite canonical workspace evidence"
     )
+
+
+def _posix_directory_open_flags() -> int:
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    no_follow_flag = getattr(os, "O_NOFOLLOW", 0)
+    if not directory_flag or not no_follow_flag:
+        raise OSError(
+            errno.ENOTSUP,
+            "platform lacks no-follow directory descriptor support for evidence export",
+        )
+    return (
+        os.O_RDONLY
+        | directory_flag
+        | no_follow_flag
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _open_posix_directory(path: Path) -> int:
+    descriptor = os.open(path, _posix_directory_open_flags())
+    try:
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise ValueError(f"output path component is not a directory: {path}")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _posix_directory_is_within(candidate_descriptor: int, ancestor_descriptor: int) -> bool:
+    if os.open not in os.supports_dir_fd:
+        raise OSError(
+            errno.ENOTSUP,
+            "platform lacks descriptor-relative directory traversal for evidence export",
+        )
+
+    current = os.dup(candidate_descriptor)
+    try:
+        while True:
+            if os.path.sameopenfile(current, ancestor_descriptor):
+                return True
+            parent = os.open("..", _posix_directory_open_flags(), dir_fd=current)
+            try:
+                if os.path.sameopenfile(current, parent):
+                    return False
+            except BaseException:
+                os.close(parent)
+                raise
+            os.close(current)
+            current = parent
+    finally:
+        os.close(current)
+
+
+def _open_or_create_posix_child_directory(parent_descriptor: int, name: str) -> int:
+    if os.mkdir not in os.supports_dir_fd:
+        raise OSError(
+            errno.ENOTSUP,
+            "platform lacks descriptor-relative directory creation for evidence export",
+        )
+    try:
+        return os.open(name, _posix_directory_open_flags(), dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        try:
+            os.mkdir(name, 0o777, dir_fd=parent_descriptor)
+        except FileExistsError:
+            pass
+        return os.open(name, _posix_directory_open_flags(), dir_fd=parent_descriptor)
+
+
+def _atomic_write_json_at_directory(
+    parent_descriptor: int,
+    destination_name: str,
+    payload: dict[str, Any],
+) -> None:
+    if destination_name in {"", ".", ".."} or Path(destination_name).name != destination_name:
+        raise ValueError("evidence export destination must name one file")
+    if os.open not in os.supports_dir_fd or os.replace not in os.supports_dir_fd:
+        raise OSError(
+            errno.ENOTSUP,
+            "platform lacks descriptor-relative atomic publication for evidence export",
+        )
+
+    temporary_name = f".{destination_name}.{uuid.uuid4().hex}.tmp"
+    open_flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor: int | None = None
+    temporary_exists = False
+    try:
+        descriptor = os.open(
+            temporary_name,
+            open_flags,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        temporary_exists = True
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            descriptor = None
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(
+            temporary_name,
+            destination_name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        temporary_exists = False
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_exists:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                pass
+
+
+def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
+    """Preserve the canonical writer API while honoring a bound POSIX parent.
+
+    The context binding is set only by evidence export after it has proved that the
+    opened directory object is outside the workspace. Keeping this name as the public
+    seam also preserves existing fault-injection tests around publication.
+    """
+
+    destination = Path(path)
+    binding = _BOUND_POSIX_OUTPUT.get()
+    if binding is None:
+        _path_atomic_write_json(destination, payload)
+        return
+    parent_descriptor, expected_destination = binding
+    if destination != expected_destination:
+        raise RuntimeError("bound evidence output destination changed before publication")
+    _atomic_write_json_at_directory(parent_descriptor, destination.name, payload)
+
+
+def _publish_posix_bound_output(
+    workspace: Path,
+    destination: Path,
+    payload: dict[str, Any],
+) -> None:
+    workspace_descriptor = _open_posix_directory(_resolved(workspace, strict=True))
+    current_descriptor: int | None = None
+    token = None
+    try:
+        parent = destination.parent
+        if not parent.is_absolute() or not parent.anchor:
+            raise ValueError("evidence export destination must resolve to an absolute path")
+        current_descriptor = _open_posix_directory(Path(parent.anchor))
+        for component in parent.parts[1:]:
+            if _posix_directory_is_within(current_descriptor, workspace_descriptor):
+                raise ValueError(
+                    "output path must be outside the Autosport workspace; "
+                    "must not overwrite canonical workspace evidence"
+                )
+            next_descriptor = _open_or_create_posix_child_directory(
+                current_descriptor,
+                component,
+            )
+            os.close(current_descriptor)
+            current_descriptor = next_descriptor
+
+        if _posix_directory_is_within(current_descriptor, workspace_descriptor):
+            raise ValueError(
+                "output path must be outside the Autosport workspace; "
+                "must not overwrite canonical workspace evidence"
+            )
+
+        token = _BOUND_POSIX_OUTPUT.set((current_descriptor, destination))
+        atomic_write_json(destination, payload)
+    finally:
+        if token is not None:
+            _BOUND_POSIX_OUTPUT.reset(token)
+        if current_descriptor is not None:
+            os.close(current_descriptor)
+        os.close(workspace_descriptor)
+
+
+def _windows_api_path(path: Path) -> str:
+    text = str(path)
+    if text.startswith("\\\\?\\"):
+        return text
+    if text.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + text[2:]
+    return "\\\\?\\" + text
+
+
+def _publish_windows_bound_output(
+    workspace: Path,
+    destination: Path,
+    payload: dict[str, Any],
+) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    get_file_information = kernel32.GetFileInformationByHandle
+    get_file_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(ByHandleFileInformation),
+    )
+    get_file_information.restype = wintypes.BOOL
+    create_directory = kernel32.CreateDirectoryW
+    create_directory.argtypes = (wintypes.LPCWSTR, ctypes.c_void_p)
+    create_directory.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    open_existing = 3
+    file_attribute_directory = 0x00000010
+    file_attribute_reparse_point = 0x00000400
+    file_flag_open_reparse_point = 0x00200000
+    file_flag_backup_semantics = 0x02000000
+    error_file_not_found = 2
+    error_path_not_found = 3
+    error_already_exists = 183
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    def open_directory(path: Path, *, deny_delete: bool) -> tuple[object, tuple[int, int, int]]:
+        share_mode = file_share_read | file_share_write
+        if not deny_delete:
+            share_mode |= 0x00000004
+        handle = create_file(
+            _windows_api_path(path),
+            0,
+            share_mode,
+            None,
+            open_existing,
+            file_flag_backup_semantics | file_flag_open_reparse_point,
+            None,
+        )
+        if handle == invalid_handle_value:
+            error_code = ctypes.get_last_error()
+            if error_code in (error_file_not_found, error_path_not_found):
+                raise FileNotFoundError(error_code, "output directory path does not exist", str(path))
+            raise ctypes.WinError(error_code)
+        information = ByHandleFileInformation()
+        if not get_file_information(handle, ctypes.byref(information)):
+            error = ctypes.WinError(ctypes.get_last_error())
+            close_handle(handle)
+            raise error
+        if not information.dwFileAttributes & file_attribute_directory:
+            close_handle(handle)
+            raise ValueError(f"output path component is not a directory: {path}")
+        if information.dwFileAttributes & file_attribute_reparse_point:
+            close_handle(handle)
+            raise ValueError(f"output directory ancestry contains a reparse point: {path}")
+        identity = (
+            int(information.dwVolumeSerialNumber),
+            int(information.nFileIndexHigh),
+            int(information.nFileIndexLow),
+        )
+        return handle, identity
+
+    workspace_root = _resolved(workspace, strict=True)
+    workspace_handle, workspace_identity = open_directory(workspace_root, deny_delete=True)
+    handles: list[object] = [workspace_handle]
+    primary_error: BaseException | None = None
+    try:
+        parent = destination.parent
+        if not parent.is_absolute() or not parent.anchor:
+            raise ValueError("evidence export destination must resolve to an absolute path")
+        current_path = Path(parent.anchor)
+        prefixes = [current_path]
+        for component in parent.parts[1:]:
+            current_path = current_path / component
+            prefixes.append(current_path)
+
+        for prefix in prefixes:
+            try:
+                handle, identity = open_directory(prefix, deny_delete=True)
+            except FileNotFoundError:
+                if not create_directory(_windows_api_path(prefix), None):
+                    error_code = ctypes.get_last_error()
+                    if error_code != error_already_exists:
+                        raise ctypes.WinError(error_code)
+                handle, identity = open_directory(prefix, deny_delete=True)
+            handles.append(handle)
+            if identity == workspace_identity:
+                raise ValueError(
+                    "output path must be outside the Autosport workspace; "
+                    "must not overwrite canonical workspace evidence"
+                )
+
+        # Every parent component now has an open handle that deliberately denies
+        # FILE_SHARE_DELETE, so Windows rename/delete/reparse substitution cannot
+        # reinterpret the pathname while the canonical atomic writer publishes.
+        checked_destination = _resolve_output_destination(workspace, destination)
+        if os.path.normcase(str(checked_destination)) != os.path.normcase(str(destination)):
+            raise ValueError("output path changed while binding publication ancestry")
+        atomic_write_json(destination, payload)
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        cleanup_error: BaseException | None = None
+        for handle in reversed(handles):
+            if close_handle(handle):
+                continue
+            close_error = ctypes.WinError(ctypes.get_last_error())
+            if primary_error is not None:
+                try:
+                    primary_error.add_note(
+                        f"evidence output directory handle close also failed: {close_error}"
+                    )
+                except BaseException:
+                    pass
+            elif cleanup_error is None:
+                cleanup_error = close_error
+        if primary_error is None and cleanup_error is not None:
+            raise cleanup_error
+
+
+def _publish_bound_output(
+    workspace: Path,
+    requested_destination: Path,
+    payload: dict[str, Any],
+) -> Path:
+    destination = _resolve_output_destination(workspace, requested_destination)
+    if os.name == "nt":
+        _publish_windows_bound_output(workspace, destination, payload)
+    else:
+        _publish_posix_bound_output(workspace, destination, payload)
+    return destination
 
 
 def _reject_duplicate_manifest_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -349,13 +720,13 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
         }
         payload["manifest_sha256"] = _manifest_sha256(payload)
 
-    # Re-resolve immediately before publication so a destination symlink/ancestor
-    # redirected into the workspace while evidence was being snapshotted fails closed.
-    # Publish through the same resolved path that passed the boundary check: os.replace()
-    # replaces a final symlink entry rather than following it, so using the original
-    # lexical path here could otherwise mutate an in-workspace symlink itself.
-    destination = _resolve_output_destination(root, requested_destination)
-    atomic_write_json(destination, payload)
+    # Publication remains outside WorkspaceEconomicLock, but its parent directory is
+    # now bound to a stable directory object before any temp file or replace happens.
+    # POSIX uses descriptor-relative mkdir/temp/replace; Windows keeps every resolved
+    # parent component open without FILE_SHARE_DELETE until canonical atomic publication
+    # finishes. A post-check ancestry substitution therefore cannot redirect bytes back
+    # into the Autosport workspace.
+    _publish_bound_output(root, requested_destination, payload)
     return payload
 
 

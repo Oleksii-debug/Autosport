@@ -1,13 +1,26 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import json
 import os
 import re
 import subprocess
+import tomllib
 from pathlib import Path, PurePosixPath
 
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_NORMALIZED_DIST_RE = re.compile(r"[-_.]+")
+_SAFE_EGG_INFO_FILES = frozenset(
+    {
+        "PKG-INFO",
+        "SOURCES.txt",
+        "dependency_links.txt",
+        "entry_points.txt",
+        "requires.txt",
+        "top_level.txt",
+    }
+)
 
 
 def _require_git_commit_sha(value: object, *, field: str) -> str:
@@ -97,21 +110,110 @@ def _ignored_checkout_paths(repo_root: Path) -> list[str]:
     return [line for line in ignored.splitlines() if line.strip()]
 
 
-def _is_expected_late_generated_ignored_path(path: str) -> bool:
-    """Return True only for repository-local outputs expected from pip/pytest/Python.
+def _project_egg_info_contract(repo_root: Path) -> tuple[str, dict[str, str]]:
+    pyproject = repo_root / "pyproject.toml"
+    try:
+        payload = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError("tracked pyproject.toml is not readable canonical TOML") from exc
 
-    The late integrity gate must not treat every git-ignored path as safe: files such as .env or
-    other ignored configuration can still affect a build.  The initial pristine gate starts from
-    zero ignored files; after dependency install/tests, only these narrow generated families are
-    expected before the first PyInstaller invocation.
+    project = payload.get("project")
+    if not isinstance(project, dict):
+        raise ValueError("tracked pyproject.toml is missing [project] metadata")
+    name = project.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("tracked pyproject.toml has invalid project.name")
+
+    scripts = project.get("scripts", {})
+    if not isinstance(scripts, dict) or not all(
+        isinstance(key, str)
+        and key.strip()
+        and isinstance(value, str)
+        and value.strip()
+        for key, value in scripts.items()
+    ):
+        raise ValueError("tracked pyproject.toml has invalid project.scripts metadata")
+
+    normalized = _NORMALIZED_DIST_RE.sub("_", name).lower()
+    return f"{normalized}.egg-info", dict(scripts)
+
+
+def _validate_project_entry_points(
+    repo_root: Path,
+    relative_path: str,
+    *,
+    expected_scripts: dict[str, str],
+) -> None:
+    entry_points_path = repo_root.joinpath(*PurePosixPath(relative_path).parts)
+    try:
+        text = entry_points_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("editable project entry_points.txt is not readable UTF-8") from exc
+
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.optionxform = str
+    try:
+        parser.read_string(text)
+    except configparser.Error as exc:
+        raise ValueError("editable project entry_points.txt is not canonical INI") from exc
+
+    if set(parser.sections()) != {"console_scripts"}:
+        raise ValueError(
+            "editable project entry_points.txt does not match tracked pyproject.toml"
+        )
+    actual_scripts = {
+        name.strip(): value.strip()
+        for name, value in parser.items("console_scripts", raw=True)
+    }
+    if actual_scripts != expected_scripts:
+        raise ValueError(
+            "editable project entry_points.txt does not match tracked pyproject.toml"
+        )
+
+
+def _is_expected_late_generated_ignored_path(repo_root: Path, path: str) -> bool:
+    """Return True only for repository-local outputs that cannot redefine build source.
+
+    Source-adjacent bytecode caches are deliberately *not* accepted: unchecked-hash .pyc files
+    can execute bytes that are not represented by tracked source.  PyInstaller build/dist outputs
+    and its root .spec files are generated products, while pytest cache is non-executable metadata.
+    Setuptools egg-info is constrained to the one project distribution, a fixed leaf set, and an
+    entry-point map that must exactly match tracked pyproject.toml; arbitrary pyinstaller40 hook
+    metadata therefore fails closed.
     """
 
     parts = PurePosixPath(path).parts
-    return (
-        "__pycache__" in parts
-        or ".pytest_cache" in parts
-        or any(part.endswith(".egg-info") for part in parts)
-    )
+    if not parts:
+        return False
+    if ".pytest_cache" in parts:
+        return True
+    if parts[0] in {"build", "dist"}:
+        return True
+    if len(parts) == 1 and parts[0].endswith(".spec"):
+        return True
+
+    egg_info_indexes = [
+        index for index, part in enumerate(parts) if part.endswith(".egg-info")
+    ]
+    if len(egg_info_indexes) != 1:
+        return False
+    egg_info_index = egg_info_indexes[0]
+    if egg_info_index != len(parts) - 2:
+        return False
+
+    expected_egg_info, expected_scripts = _project_egg_info_contract(repo_root)
+    if parts[egg_info_index] != expected_egg_info:
+        return False
+    leaf = parts[-1]
+    if leaf not in _SAFE_EGG_INFO_FILES:
+        return False
+    if leaf == "entry_points.txt":
+        _validate_project_entry_points(
+            repo_root,
+            path,
+            expected_scripts=expected_scripts,
+        )
+    return True
 
 
 def _format_dirty_preview(dirty: list[str]) -> str:
@@ -131,23 +233,18 @@ def _require_pristine_checkout(repo_root: Path) -> None:
 
 
 def _require_late_build_boundary_unchanged(repo_root: Path) -> None:
-    """Reject source/input changes at the late PyInstaller boundary.
-
-    Tracked/index changes and non-ignored untracked files always fail closed.  Only narrow ignored
-    output families that are expected from Python bytecode generation, pytest, or setuptools are
-    tolerated; arbitrary ignored configuration/input remains a failure.
-    """
+    """Reject source/input changes at each late release source-consuming boundary."""
 
     dirty = _ordinary_checkout_changes(repo_root)
     unexpected_ignored = [
         path
         for path in _ignored_checkout_paths(repo_root)
-        if not _is_expected_late_generated_ignored_path(path)
+        if not _is_expected_late_generated_ignored_path(repo_root, path)
     ]
     dirty.extend(f"ignored:{path}" for path in unexpected_ignored)
     if dirty:
         raise ValueError(
-            "release build source changed after initial preflight before PyInstaller: "
+            "release build source changed after initial preflight before source-consuming step: "
             f"{_format_dirty_preview(dirty)}"
         )
 
@@ -182,7 +279,7 @@ def main() -> int:
     parser.add_argument(
         "--late-build-boundary",
         action="store_true",
-        help="re-prove exact HEAD and reject post-preflight source changes before PyInstaller",
+        help="re-prove exact HEAD and reject post-preflight source changes before a source-consuming release step",
     )
     args = parser.parse_args()
     verify_source_checkout(

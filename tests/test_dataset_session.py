@@ -11,6 +11,7 @@ from autosport.decision_ledger import (
     JsonlDecisionLedger,
 )
 from autosport.integrity import sha256_file
+from autosport.run_registry import RunRegistry
 from autosport.session import AutosportSession
 
 
@@ -79,6 +80,7 @@ class DatasetSessionTests(unittest.TestCase):
         dataset = load_dataset(Path("examples/tt_demo"))
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            RunRegistry.initialize_pristine(root / "run_registry.json")
             ledger = JsonlDecisionLedger(root / "decisions.jsonl")
             ledger.append(
                 DecisionRecord(

@@ -292,7 +292,7 @@ if (Test-Path $freshDiag) { Remove-Item -Force $freshDiag }
 $freshDiagProcess = Start-Process -FilePath $extractedExe -ArgumentList '--diagnostic-output', $freshDiag -Wait -PassThru
 if ($freshDiagProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe diagnostic exited $($freshDiagProcess.ExitCode)" }
 $freshDiagnostic = Get-Content $freshDiag -Raw | ConvertFrom-Json
-if ($freshDiagnostic.status -ne 'PASS') { throw 'Fresh-extracted diagnostic did not PASS' }
+if ($freshDiagnostic.status -ne 'PASS') { throw 'Fresh-extracted Autosport.exe diagnostic did not PASS' }
 if ($freshDiagnostic.real_money_execution -ne $false -or $freshDiagnostic.human_tested -ne $false -or $freshDiagnostic.nvda_verified -ne $false) {
   throw 'Fresh-extracted diagnostic violated release truth labels'
 }
@@ -310,7 +310,7 @@ if ($freshAccessibility.real_money_execution -ne $false -or $freshAccessibility.
 $freshKeyboard = Join-Path $PWD 'dist/fresh-extraction-keyboard-audit.json'
 if (Test-Path $freshKeyboard) { Remove-Item -Force $freshKeyboard }
 $freshKeyboardProcess = Start-Process -FilePath $extractedExe -ArgumentList '--keyboard-audit-output', $freshKeyboard -Wait -PassThru
-if ($freshKeyboardProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe keyboard audit exited $($freshKeyboardProcess.ExitCode)" }
+if ($freshKeyboardProcess.ExitCode -ne 0) { throw "Fresh-extracted keyboard audit exited $($freshKeyboardProcess.ExitCode)" }
 $freshKeyboardEvidence = Get-Content $freshKeyboard -Raw | ConvertFrom-Json
 if ($freshKeyboardEvidence.status -ne 'PASS') { throw 'Fresh-extracted keyboard audit did not PASS' }
 if ($freshKeyboardEvidence.real_money_execution -ne $false -or $freshKeyboardEvidence.human_tested -ne $false -or $freshKeyboardEvidence.nvda_verified -ne $false) {

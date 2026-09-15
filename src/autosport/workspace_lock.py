@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from pathlib import Path
@@ -7,7 +8,11 @@ from typing import BinaryIO
 
 
 class WorkspaceEconomicLockError(RuntimeError):
-    """Raised when another process owns the workspace economic-writer lock."""
+    """Base error for workspace economic lock acquisition, integrity, and teardown failures."""
+
+
+class WorkspaceEconomicLockBusyError(WorkspaceEconomicLockError):
+    """Raised only when another process currently owns the advisory workspace lock."""
 
 
 def _add_secondary_failure_note(
@@ -27,6 +32,81 @@ def _add_secondary_failure_note(
         # Exception subclasses may override add_note(), and diagnostic enrichment is
         # never allowed to replace the economic/replay failure we are preserving.
         return
+
+
+def _stable_stat_metadata(left: os.stat_result, right: os.stat_result) -> bool:
+    """Compare metadata only within one stat domain, never path-stat to fstat identity."""
+
+    return (
+        left.st_mode == right.st_mode
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+    )
+
+
+def _open_read_only_descriptor(path: Path) -> int:
+    """Open a verification descriptor without following the final pathname alias."""
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if os.name != "nt":
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if not no_follow:
+            raise OSError(
+                errno.ENOTSUP,
+                "platform lacks no-follow verification open support",
+                str(path),
+            )
+        return os.open(path, flags | no_follow)
+
+    # Keep the verification boundary equivalent to the creation boundary: the final
+    # path component is opened as the reparse object itself, never traversed to a
+    # target that could be the already-open primary lock file.
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    open_existing = 3
+    file_attribute_normal = 0x00000080
+    file_flag_open_reparse_point = 0x00200000
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    kernel_handle = create_file(
+        str(path),
+        generic_read,
+        file_share_read | file_share_write | file_share_delete,
+        None,
+        open_existing,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    if kernel_handle == invalid_handle_value:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    try:
+        return msvcrt.open_osfhandle(kernel_handle, flags)
+    except BaseException:
+        close_handle(kernel_handle)
+        raise
 
 
 class WorkspaceEconomicLock:
@@ -257,23 +337,101 @@ class WorkspaceEconomicLock:
         """Prove the opened handle is the current canonical single-link lock file."""
 
         try:
-            opened_stat = os.fstat(handle.fileno())
-            path_stat = os.stat(self.path, follow_symlinks=False)
+            opened_before = os.fstat(handle.fileno())
+            path_before = os.stat(self.path, follow_symlinks=False)
         except OSError as exc:
             raise WorkspaceEconomicLockError(
                 "workspace economic lock path changed during acquisition"
             ) from exc
-        self._require_regular_file(opened_stat)
-        self._require_regular_file(path_stat)
-        if not os.path.samestat(opened_stat, path_stat):
+        self._require_regular_file(opened_before)
+        self._require_regular_file(path_before)
+
+        try:
+            verification_descriptor = _open_read_only_descriptor(self.path)
+        except OSError as exc:
             raise WorkspaceEconomicLockError(
                 "workspace economic lock path changed during acquisition"
-            )
-        # Only after proving both stat snapshots identify the same inode can link
-        # count describe aliases of the canonical lock rather than an unlinked old
-        # handle from a pathname-replacement race.
-        self._require_single_link(opened_stat)
-        self._require_single_link(path_stat)
+            ) from exc
+
+        final_verification_descriptor: int | None = None
+        validation_error: BaseException | None = None
+        try:
+            try:
+                verification_stat = os.fstat(verification_descriptor)
+                opened_after = os.fstat(handle.fileno())
+                same_open_file = os.path.sameopenfile(
+                    handle.fileno(),
+                    verification_descriptor,
+                )
+                # This pathname read must be after the first descriptor identity proof.
+                # A final fresh descriptor is then opened from that pathname and bound
+                # back to the primary handle, so same-metadata replacement cannot pass.
+                path_after = os.stat(self.path, follow_symlinks=False)
+                final_verification_descriptor = _open_read_only_descriptor(self.path)
+                final_verification_stat = os.fstat(final_verification_descriptor)
+                same_final_open_file = os.path.sameopenfile(
+                    handle.fileno(),
+                    final_verification_descriptor,
+                )
+            except OSError as exc:
+                raise WorkspaceEconomicLockError(
+                    "workspace economic lock path changed during acquisition"
+                ) from exc
+
+            self._require_regular_file(verification_stat)
+            self._require_regular_file(opened_after)
+            self._require_regular_file(path_after)
+            self._require_regular_file(final_verification_stat)
+
+            if (
+                not same_open_file
+                or not same_final_open_file
+                or not _stable_stat_metadata(opened_before, opened_after)
+                or not _stable_stat_metadata(path_before, path_after)
+            ):
+                raise WorkspaceEconomicLockError(
+                    "workspace economic lock path changed during acquisition"
+                )
+
+            # Link counts become alias evidence only after descriptor proofs establish
+            # that both the earlier and final canonical-path opens identify the primary
+            # handle. Checking an already-unlinked old handle earlier would misclassify
+            # a pathname replacement race (st_nlink == 0) as a hard-link-alias failure.
+            self._require_single_link(opened_before)
+            self._require_single_link(path_before)
+            self._require_single_link(verification_stat)
+            self._require_single_link(opened_after)
+            self._require_single_link(path_after)
+            self._require_single_link(final_verification_stat)
+        except BaseException as exc:
+            validation_error = exc
+            raise
+        finally:
+            cleanup_error: BaseException | None = None
+            for descriptor in (final_verification_descriptor, verification_descriptor):
+                if descriptor is None:
+                    continue
+                try:
+                    os.close(descriptor)
+                except BaseException as close_error:
+                    if validation_error is not None:
+                        _add_secondary_failure_note(
+                            validation_error,
+                            "workspace economic lock verification handle close also failed",
+                            close_error,
+                        )
+                    elif cleanup_error is None:
+                        cleanup_error = close_error
+                    else:
+                        _add_secondary_failure_note(
+                            cleanup_error,
+                            "another workspace economic lock verification handle close also failed",
+                            close_error,
+                        )
+            if validation_error is None and cleanup_error is not None:
+                raise WorkspaceEconomicLockError(
+                    "cannot close workspace economic lock verification handle"
+                ) from cleanup_error
 
     @staticmethod
     def _require_regular_file(path_stat: os.stat_result) -> None:
@@ -297,8 +455,12 @@ class WorkspaceEconomicLock:
             try:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EAGAIN):
+                    raise WorkspaceEconomicLockBusyError(
+                        "another Autosport process owns the workspace economic-writer lock"
+                    ) from exc
                 raise WorkspaceEconomicLockError(
-                    "another Autosport process owns the workspace economic-writer lock"
+                    "cannot acquire workspace economic-writer lock"
                 ) from exc
             return
 
@@ -307,8 +469,12 @@ class WorkspaceEconomicLock:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                raise WorkspaceEconomicLockBusyError(
+                    "another Autosport process owns the workspace economic-writer lock"
+                ) from exc
             raise WorkspaceEconomicLockError(
-                "another Autosport process owns the workspace economic-writer lock"
+                "cannot acquire workspace economic-writer lock"
             ) from exc
 
     @staticmethod

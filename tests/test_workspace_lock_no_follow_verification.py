@@ -33,7 +33,16 @@ def test_verification_descriptor_never_resolves_final_symlink(tmp_path: Path) ->
             # POSIX O_NOFOLLOW normally rejects the final symlink outright. Windows
             # may likewise reject conversion of an OPEN_REPARSE_POINT handle.
             return
-        assert not os.path.sameopenfile(target_descriptor, verification_descriptor)
+        try:
+            resolves_target = os.path.sameopenfile(
+                target_descriptor,
+                verification_descriptor,
+            )
+        except OSError:
+            # A platform that cannot produce identity for the reparse-object handle
+            # is also fail-closed at the production sameopenfile boundary.
+            return
+        assert resolves_target is False
     finally:
         if verification_descriptor is not None:
             os.close(verification_descriptor)

@@ -190,6 +190,7 @@ def require_directory(path, label):
 
 require_directory(root, "root")
 expected_paths = set()
+expected_directories = {""}
 for relative, expected in sorted(manifest.items()):
     if not isinstance(relative, str) or not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
         raise SystemExit("source snapshot manifest contains a non-canonical entry")
@@ -197,13 +198,22 @@ for relative, expected in sorted(manifest.items()):
     if pure.is_absolute() or pure.as_posix() != relative or any(part in {"", ".", ".."} for part in pure.parts):
         raise SystemExit(f"source snapshot manifest contains non-canonical path: {relative}")
     expected_paths.add(relative)
+    for index in range(1, len(pure.parts)):
+        expected_directories.add(pathlib.PurePosixPath(*pure.parts[:index]).as_posix())
 
 actual_paths = set()
+actual_directories = {""}
 for directory, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
     directory_path = pathlib.Path(directory)
     require_directory(directory_path, "directory")
     for dirname in dirnames:
-        require_directory(directory_path / dirname, "directory")
+        child_directory = directory_path / dirname
+        require_directory(child_directory, "directory")
+        try:
+            child_relative = child_directory.relative_to(root).as_posix()
+        except ValueError as exc:
+            raise SystemExit(f"source snapshot directory escaped root: {child_directory}") from exc
+        actual_directories.add(child_relative)
     for filename in filenames:
         path = directory_path / filename
         try:
@@ -217,6 +227,14 @@ for directory, dirnames, filenames in os.walk(root, topdown=True, followlinks=Fa
         except ValueError as exc:
             raise SystemExit(f"source snapshot member escaped root: {path}") from exc
         actual_paths.add(relative)
+
+if actual_directories != expected_directories:
+    missing = sorted(expected_directories - actual_directories)
+    unexpected = sorted(actual_directories - expected_directories)
+    raise SystemExit(
+        "source snapshot directory membership mismatch: "
+        f"missing={missing!r}, unexpected={unexpected!r}"
+    )
 
 if actual_paths != expected_paths:
     missing = sorted(expected_paths - actual_paths)
@@ -474,9 +492,9 @@ $trustedBuildManifestJson = [string]$trustedBuildManifestLines[0]
 
 # Freeze every PyInstaller source/module input to exact source_sha bytes outside
 # the mutable checkout. The independent blob oracle is paired with an OS write
-# fence plus retained read handles before the final verification. Directory
-# membership and every manifest file therefore stay immutable across both
-# PyInstaller consumers, including against writers opened before the ACL fence.
+# fence plus retained namespace and file handles before final verification.
+# Exact directory membership and every manifest file therefore stay immutable
+# across both PyInstaller consumers, including against handles opened pre-fence.
 $trustedBuildArchive = Join-Path $boundArtifactRoot 'trusted-build-source.zip'
 $trustedBuildRoot = Join-Path $boundArtifactRoot 'trusted-build-source'
 & $gitExecutable archive --format=zip "--output=$trustedBuildArchive" $sourceSha
@@ -509,23 +527,125 @@ if ([string]::IsNullOrWhiteSpace($currentSid) -or $currentSid -notmatch '^S-') {
   throw 'Unable to resolve current Windows security identifier for trusted source fence'
 }
 
+$trustedDirectoryFenceTypeSource = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+namespace Autosport.Release
+{
+    public static class TrustedDirectoryFence
+    {
+        private const uint FILE_LIST_DIRECTORY = 0x00000001;
+        private const uint FILE_SHARE_READ = 0x00000001;
+        private const uint OPEN_EXISTING = 3;
+        private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+
+        [DllImport(
+            "kernel32.dll",
+            EntryPoint = "CreateFileW",
+            CharSet = CharSet.Unicode,
+            SetLastError = true,
+            ExactSpelling = true)]
+        private static extern SafeFileHandle CreateFile(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        public static SafeFileHandle OpenReadFence(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path))
+            {
+                throw new ArgumentException("Directory fence path is empty", "path");
+            }
+
+            SafeFileHandle handle = CreateFile(
+                path,
+                FILE_LIST_DIRECTORY,
+                FILE_SHARE_READ,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                IntPtr.Zero);
+            if (handle.IsInvalid)
+            {
+                int error = Marshal.GetLastWin32Error();
+                handle.Dispose();
+                throw new Win32Exception(
+                    error,
+                    "Unable to acquire trusted build directory namespace fence: " + path);
+            }
+            return handle;
+        }
+    }
+}
+'@
+if ($null -eq ('Autosport.Release.TrustedDirectoryFence' -as [type])) {
+  Add-Type -TypeDefinition $trustedDirectoryFenceTypeSource -Language CSharp
+}
+
 $trustedBuildProtected = $false
+$trustedBuildDirectoryLocks = [System.Collections.Generic.List[Microsoft.Win32.SafeHandles.SafeFileHandle]]::new()
 $trustedBuildReadLocks = [System.Collections.Generic.List[System.IO.FileStream]]::new()
 try {
   & icacls $trustedBuildRoot /deny "*${currentSid}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)" /T /C | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Trusted build source write fence exited $LASTEXITCODE" }
   $trustedBuildProtected = $true
 
-  # A deny ACE cannot revoke a writer that already had the file open. Acquire
-  # read-only handles that share only reads for every exact-manifest file before
-  # final verification. Windows share-access compatibility makes any pre-existing
-  # writer/delete handle fail this acquisition closed, and the retained handles
-  # then prevent new writer/delete opens until both PyInstaller consumers finish.
   $trustedBuildManifest = $trustedBuildManifestJson | ConvertFrom-Json
   $trustedBuildManifestNames = @($trustedBuildManifest.PSObject.Properties.Name | Sort-Object)
   if ($trustedBuildManifestNames.Count -eq 0) {
     throw 'Exact build source manifest contains no files to lock'
   }
+
+  # The ACL blocks new namespace mutations but cannot revoke a directory handle
+  # that already owns create/write/delete capability. Acquire a read-only,
+  # read-share-only CreateFile directory handle for every expected snapshot
+  # directory. Windows share-access compatibility makes any such pre-existing
+  # namespace writer fail this acquisition closed; retained handles prevent new
+  # conflicting directory opens through both PyInstaller consumers.
+  $trustedBuildRootFull = [System.IO.Path]::GetFullPath($trustedBuildRoot)
+  $trustedBuildRootPrefix = $trustedBuildRootFull + [System.IO.Path]::DirectorySeparatorChar
+  $trustedBuildDirectories = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  [void]$trustedBuildDirectories.Add($trustedBuildRootFull)
+  foreach ($relativeSourcePath in $trustedBuildManifestNames) {
+    $trustedBuildSourcePath = [System.IO.Path]::GetFullPath(
+      (Join-Path $trustedBuildRootFull ($relativeSourcePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
+    )
+    if (-not $trustedBuildSourcePath.StartsWith($trustedBuildRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "Exact build source manifest escaped trusted root: $relativeSourcePath"
+    }
+    $trustedBuildDirectoryPath = [System.IO.Path]::GetDirectoryName($trustedBuildSourcePath)
+    while (-not [string]::IsNullOrWhiteSpace($trustedBuildDirectoryPath)) {
+      if ([string]::Equals($trustedBuildDirectoryPath, $trustedBuildRootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        [void]$trustedBuildDirectories.Add($trustedBuildRootFull)
+        break
+      }
+      if (-not $trustedBuildDirectoryPath.StartsWith($trustedBuildRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Exact build source parent escaped trusted root: $relativeSourcePath"
+      }
+      [void]$trustedBuildDirectories.Add($trustedBuildDirectoryPath)
+      $trustedBuildDirectoryPath = [System.IO.Path]::GetDirectoryName($trustedBuildDirectoryPath)
+    }
+  }
+  foreach ($trustedBuildDirectoryPath in @($trustedBuildDirectories | Sort-Object)) {
+    try {
+      $namespaceHandle = [Autosport.Release.TrustedDirectoryFence]::OpenReadFence($trustedBuildDirectoryPath)
+    } catch {
+      throw "Unable to acquire trusted build directory namespace fence for ${trustedBuildDirectoryPath}: $($_.Exception.Message)"
+    }
+    [void]$trustedBuildDirectoryLocks.Add($namespaceHandle)
+  }
+
+  # A deny ACE also cannot revoke a writer that already had a file open. Acquire
+  # read-only handles that share only reads for every exact-manifest file before
+  # final verification. Any pre-existing writer/delete handle fails closed, and
+  # retained handles prevent new conflicting file opens until both consumers end.
   foreach ($relativeSourcePath in $trustedBuildManifestNames) {
     $trustedBuildLockPath = Join-Path $trustedBuildRoot ($relativeSourcePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
     try {
@@ -541,9 +661,9 @@ try {
     [void]$trustedBuildReadLocks.Add($lockStream)
   }
 
-  # Verify only after the deny ACE and retained per-file handles are fully applied.
-  # Any replacement/addition that raced extraction or locking is detected before
-  # consumption; later same-user write/delete/create attempts remain denied.
+  # Verify only after ACL, namespace handles, and per-file handles are all held.
+  # Unexpected directories/files or any race during fence acquisition are rejected
+  # before consumption; the handles close the remaining proof-to-use interval.
   $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
   if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification before Autosport.exe exited $LASTEXITCODE" }
 
@@ -577,9 +697,15 @@ try {
       $trustedBuildReadLocks[$lockIndex].Dispose()
     }
   } finally {
-    if ($trustedBuildProtected) {
-      & icacls $trustedBuildRoot /remove:d "*${currentSid}" /T /C | Out-Null
-      if ($LASTEXITCODE -ne 0) { throw "Trusted build source write-fence cleanup exited $LASTEXITCODE" }
+    try {
+      for ($directoryLockIndex = $trustedBuildDirectoryLocks.Count - 1; $directoryLockIndex -ge 0; $directoryLockIndex--) {
+        $trustedBuildDirectoryLocks[$directoryLockIndex].Dispose()
+      }
+    } finally {
+      if ($trustedBuildProtected) {
+        & icacls $trustedBuildRoot /remove:d "*${currentSid}" /T /C | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Trusted build source write-fence cleanup exited $LASTEXITCODE" }
+      }
     }
   }
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from enum import IntEnum
 
 import pytest
 
@@ -10,6 +11,27 @@ from autosport.replay import ReplayEngine
 
 
 OBSERVED_TS = "2026-09-12T10:00:00+00:00"
+
+
+class _SerializedIntEnum(IntEnum):
+    ONE = 1
+
+
+class _SerializedFloatSubclass(float):
+    pass
+
+
+class _ExplosiveMetadataDict(dict):
+    def items(self):
+        raise AssertionError("dict subclass items() must not be invoked")
+
+    def __deepcopy__(self, memo):
+        raise AssertionError("dict subclass deepcopy must not be invoked")
+
+
+class _ExplosiveMetadataList(list):
+    def __iter__(self):
+        raise AssertionError("list subclass iteration must not be invoked")
 
 
 def _event_payload() -> dict[str, object]:
@@ -83,6 +105,14 @@ def test_deserialization_rejects_missing_source_identity() -> None:
 def test_deserialization_rejects_coerced_sequence_identity(sequence: object) -> None:
     payload = _event_payload()
     payload["sequence"] = sequence
+
+    with pytest.raises(ValueError, match="sequence must be a non-boolean int"):
+        MarketEvent.from_dict(payload)
+
+
+def test_deserialization_rejects_int_enum_sequence_before_json_type_drift() -> None:
+    payload = _event_payload()
+    payload["sequence"] = _SerializedIntEnum.ONE
 
     with pytest.raises(ValueError, match="sequence must be a non-boolean int"):
         MarketEvent.from_dict(payload)
@@ -369,6 +399,10 @@ def test_deserialization_rejects_unknown_market_type() -> None:
         {1: "value"},
         {"nonfinite": float("nan")},
         {"infinite": float("inf")},
+        {"int_enum": _SerializedIntEnum.ONE},
+        {"float_subclass": _SerializedFloatSubclass(0.5)},
+        {"list_subclass": _ExplosiveMetadataList([1, 2])},
+        {"dict_subclass": _ExplosiveMetadataDict({"safe": 1})},
     ],
 )
 def test_deserialization_rejects_noncanonical_metadata(metadata: object) -> None:
@@ -376,6 +410,14 @@ def test_deserialization_rejects_noncanonical_metadata(metadata: object) -> None
     payload["metadata"] = metadata
 
     with pytest.raises(ValueError):
+        MarketEvent.from_dict(payload)
+
+
+def test_deserialization_rejects_metadata_dict_subclass_before_virtual_methods() -> None:
+    payload = _event_payload()
+    payload["metadata"] = _ExplosiveMetadataDict({"safe": 1})
+
+    with pytest.raises(ValueError, match="metadata must be a JSON object"):
         MarketEvent.from_dict(payload)
 
 

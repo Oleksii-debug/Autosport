@@ -75,7 +75,7 @@ def _optional_canonical_timestamp(raw: dict[str, Any], field_name: str) -> str |
 
 def _required_sequence(raw: dict[str, Any]) -> int:
     value = raw.get("sequence")
-    if isinstance(value, bool) or not isinstance(value, int):
+    if type(value) is not int:
         raise ValueError("sequence must be a non-boolean int")
     return value
 
@@ -110,16 +110,16 @@ def _validate_serialized_json_value(value: object, field_name: str) -> None:
             active_containers.remove(id(current))
             continue
 
-        if current is None or isinstance(current, (bool, int)):
+        if current is None or type(current) is bool or type(current) is int:
             continue
         if type(current) is str:
             _require_utf8_encodable(current, path)
             continue
-        if isinstance(current, float):
+        if type(current) is float:
             if not math.isfinite(current):
                 raise ValueError(f"{path} contains non-finite JSON number")
             continue
-        if isinstance(current, (list, dict)):
+        if type(current) is list or type(current) is dict:
             if depth > _MAX_SERIALIZED_METADATA_NESTING:
                 raise ValueError(
                     f"{field_name} exceeds maximum JSON nesting depth "
@@ -131,7 +131,7 @@ def _validate_serialized_json_value(value: object, field_name: str) -> None:
             active_containers.add(container_id)
             stack.append((current, path, depth, True))
 
-            if isinstance(current, list):
+            if type(current) is list:
                 for index, item in enumerate(current):
                     stack.append((item, f"{path}[{index}]", depth + 1, False))
             else:
@@ -148,7 +148,7 @@ def _validate_serialized_json_value(value: object, field_name: str) -> None:
 
 def _serialized_metadata(raw: dict[str, Any]) -> dict[str, Any]:
     metadata = raw.get("metadata", {})
-    if not isinstance(metadata, dict):
+    if type(metadata) is not dict:
         raise ValueError("metadata must be a JSON object")
     _validate_serialized_json_value(metadata, "metadata")
     return copy.deepcopy(metadata)

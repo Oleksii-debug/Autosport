@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import uuid
@@ -9,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Callable
 
+from . import ingestion as ingestion_module
 from .agents import AgentContext, AgentOrchestrator, MarketMirrorAgent, PaperBaselineAgent
 from .dataset import load_dataset
 from .domain import MarketEvent
@@ -42,6 +44,37 @@ def _print_paper_truth_boundary(*, mode: str, sample_fixture: bool | None = None
     print(
         f"mode={mode} paper_only=true real_money_execution=false "
         f"profitability_claim=false{sample_label}"
+    )
+
+
+def _committed_ingestion_health_error_type() -> type[RuntimeError] | None:
+    candidate = getattr(ingestion_module, "CommittedIngestionHealthError", None)
+    if isinstance(candidate, type) and issubclass(candidate, RuntimeError):
+        return candidate
+    return None
+
+
+def _print_committed_ingestion_health_failure(exc: RuntimeError) -> None:
+    outcome = exc.outcome
+    print(
+        json.dumps(
+            {
+                "observation": "COMMITTED_HEALTH_FAILURE",
+                "market_committed": True,
+                "source_health_persisted": False,
+                "health_repair_required": True,
+                "whole_poll_retry_safe": False,
+                "source_id": outcome.source_id,
+                "received": outcome.received,
+                "accepted": outcome.accepted,
+                "rejected": outcome.rejected,
+                "cursor": outcome.cursor,
+                "quality_flags": list(outcome.quality_flags),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     )
 
 
@@ -245,6 +278,12 @@ def run_observe_table_tennis(
             return 2
         provider = provider_factory(api_key, public_preview=public_preview)
         result = observe_workspace_once(workspace, provider, max_items=max_items)
+    except RuntimeError as exc:
+        committed_error_type = _committed_ingestion_health_error_type()
+        if committed_error_type is None or not isinstance(exc, committed_error_type):
+            raise
+        _print_committed_ingestion_health_failure(exc)
+        return 4
     except (ProviderTransportError, ProviderPayloadError, sqlite3.Error, ValueError, OSError) as exc:
         print(f"observation=FAIL_CLOSED error={exc}")
         return 3

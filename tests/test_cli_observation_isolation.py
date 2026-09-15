@@ -1,10 +1,12 @@
 import io
+import json
 import sqlite3
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from autosport.cli import run_observe_table_tennis
@@ -17,6 +19,12 @@ class _FailingProvider:
 
     def read_batch(self, max_items: int = 1000):
         raise ProviderTransportError("provider HTTP 503", status_code=503)
+
+
+class _FutureCommittedIngestionHealthError(RuntimeError):
+    def __init__(self, outcome):
+        super().__init__("market events were committed but source health persistence failed")
+        self.outcome = outcome
 
 
 class CliObservationIsolationTests(unittest.TestCase):
@@ -151,6 +159,86 @@ class CliObservationIsolationTests(unittest.TestCase):
                 output.getvalue().strip(),
                 "observation=FAIL_CLOSED error=provider HTTP 503",
             )
+
+    def test_committed_health_failure_preserves_market_commit_truth_without_traceback(self):
+        def factory(api_key, *, public_preview):
+            self.assertIsNone(api_key)
+            self.assertTrue(public_preview)
+            return self._provider()
+
+        outcome = SimpleNamespace(
+            source_id="fixture:cli-isolation",
+            received=10,
+            accepted=7,
+            rejected=3,
+            cursor="cursor-9",
+            quality_flags=("INVALID_QUOTE", "STALE_SOURCE"),
+        )
+        committed_error = _FutureCommittedIngestionHealthError(outcome)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = io.StringIO()
+            with (
+                patch(
+                    "autosport.cli.ingestion_module.CommittedIngestionHealthError",
+                    _FutureCommittedIngestionHealthError,
+                    create=True,
+                ),
+                patch("autosport.cli.observe_workspace_once", side_effect=committed_error),
+                redirect_stdout(output),
+            ):
+                code = run_observe_table_tennis(
+                    Path(tmp),
+                    public_preview=True,
+                    max_items=10,
+                    show=10,
+                    provider_factory=factory,
+                )
+
+        self.assertEqual(code, 4)
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {
+                "accepted": 7,
+                "cursor": "cursor-9",
+                "health_repair_required": True,
+                "market_committed": True,
+                "observation": "COMMITTED_HEALTH_FAILURE",
+                "quality_flags": ["INVALID_QUOTE", "STALE_SOURCE"],
+                "received": 10,
+                "rejected": 3,
+                "source_health_persisted": False,
+                "source_id": "fixture:cli-isolation",
+                "whole_poll_retry_safe": False,
+            },
+        )
+
+    def test_unrelated_runtime_error_is_not_reclassified_as_committed_health_failure(self):
+        def factory(api_key, *, public_preview):
+            self.assertIsNone(api_key)
+            self.assertTrue(public_preview)
+            return self._provider()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch(
+                    "autosport.cli.ingestion_module.CommittedIngestionHealthError",
+                    _FutureCommittedIngestionHealthError,
+                    create=True,
+                ),
+                patch(
+                    "autosport.cli.observe_workspace_once",
+                    side_effect=RuntimeError("unrelated local runtime failure"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "unrelated local runtime failure"):
+                    run_observe_table_tennis(
+                        Path(tmp),
+                        public_preview=True,
+                        max_items=10,
+                        show=10,
+                        provider_factory=factory,
+                    )
 
 
 if __name__ == "__main__":

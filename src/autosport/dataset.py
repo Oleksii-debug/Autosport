@@ -8,6 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from .domain import MarketEvent, MarketType
+from .json_integrity import (
+    DuplicateJsonKeyError,
+    InvalidJsonDomainError,
+    NonStandardJsonConstantError,
+    jsonl_bytes_are_blank,
+    strict_json_loads,
+)
 
 
 _FORBIDDEN_HISTORICAL_METADATA_KEYS = frozenset(
@@ -28,44 +35,23 @@ _PARLAY_TERMS_REFERENCE = "https://parlay-api.com/terms"
 _PARLAY_STANDARD_RETENTION_CEILING = timedelta(days=90)
 
 
-class _DuplicateJsonKeyError(ValueError):
-    pass
-
-
-class _NonStandardJsonConstantError(ValueError):
-    pass
-
-
-def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    value: dict[str, Any] = {}
-    for key, item in pairs:
-        if key in value:
-            raise _DuplicateJsonKeyError(key)
-        value[key] = item
-    return value
-
-
-def _reject_nonstandard_json_constant(value: str) -> None:
-    raise _NonStandardJsonConstantError(value)
-
-
 def _strict_json_text(text: str, *, context: str) -> Any:
     try:
-        return json.loads(
-            text,
-            object_pairs_hook=_unique_json_object,
-            parse_constant=_reject_nonstandard_json_constant,
-        )
-    except _DuplicateJsonKeyError as exc:
+        return strict_json_loads(text)
+    except DuplicateJsonKeyError as exc:
         raise ValueError(
-            f"{context} contains duplicate JSON object key: {exc.args[0]}"
+            f"{context} contains duplicate JSON object key: {exc.key}"
         ) from exc
-    except _NonStandardJsonConstantError as exc:
+    except NonStandardJsonConstantError as exc:
         raise ValueError(
-            f"{context} contains non-standard JSON constant: {exc.args[0]}"
+            f"{context} contains non-standard JSON constant: {exc.value}"
         ) from exc
+    except InvalidJsonDomainError as exc:
+        raise ValueError(f"{context} contains invalid JSON value: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"{context} is not valid JSON") from exc
+    except RecursionError as exc:
+        raise ValueError(f"{context} exceeds supported JSON nesting") from exc
 
 
 def _strict_json_bytes(payload: bytes, *, context: str) -> Any:
@@ -273,7 +259,7 @@ class ReplayDataset:
         with self.market_path.open("rb") as handle:
             for line_number, raw_line in enumerate(handle, start=1):
                 digest.update(raw_line)
-                if not raw_line.strip():
+                if jsonl_bytes_are_blank(raw_line):
                     continue
                 raw_event = _strict_json_bytes(
                     raw_line,
@@ -653,16 +639,14 @@ def _validate_historical_payloads(
     dedupe_keys: set[str] = set()
     event_count = 0
 
-    try:
-        market_text = market_payload.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError("historical market corpus must be valid UTF-8") from exc
-
-    for line_number, line in enumerate(market_text.splitlines(), start=1):
-        if not line.strip():
+    for line_number, raw_line in enumerate(market_payload.split(b"\n"), start=1):
+        if jsonl_bytes_are_blank(raw_line):
             continue
         event_count += 1
-        raw_event = _strict_json_text(line, context=f"market line {line_number}")
+        raw_event = _strict_json_bytes(
+            raw_line,
+            context=f"market line {line_number}",
+        )
         if not isinstance(raw_event, dict):
             raise ValueError(f"market line {line_number} must be a JSON object")
         for timestamp_field in ("source_ts", "observed_ts", "ingest_ts"):

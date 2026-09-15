@@ -30,8 +30,7 @@ def ensure_durable_file(path: str | Path) -> None:
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    mode = "ab" if destination.exists() else "wb"
-    with destination.open(mode) as handle:
+    with destination.open("ab") as handle:
         handle.flush()
         os.fsync(handle.fileno())
 

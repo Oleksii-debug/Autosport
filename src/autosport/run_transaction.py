@@ -943,38 +943,35 @@ class RunTransaction:
         path: Path,
         label: str,
     ) -> VerifiedDecisionLedgerSnapshot:
+        snapshot = cls._read_canonical_file_snapshot(path, label)
+        temporary: Path | None = None
         try:
-            path_before = os.stat(path, follow_symlinks=False)
-        except FileNotFoundError as exc:
-            raise RunTransactionError(f"{label} canonical file is missing") from exc
-        except OSError as exc:
-            raise RunTransactionError(f"{label} canonical file is unreadable") from exc
-        if not stat.S_ISREG(path_before.st_mode):
-            raise RunTransactionError(
-                f"{label} canonical path must be a regular non-symlink file"
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=path.parent,
+                prefix=f".{path.name}.verify-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(snapshot.payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            verified = cls._verified_decision_ledger(
+                temporary,
+                f"canonical {label} verification copy",
             )
-        if path_before.st_nlink != 1:
-            raise RunTransactionError(
-                f"{label} canonical path must not have hard-link aliases"
-            )
-
-        verified = cls._verified_decision_ledger(path, f"canonical {label}")
-
-        try:
-            path_after = os.stat(path, follow_symlinks=False)
-        except OSError as exc:
-            raise RunTransactionError(
-                f"{label} canonical path changed while validating"
-            ) from exc
-        if (
-            not stat.S_ISREG(path_after.st_mode)
-            or path_after.st_nlink != 1
-            or not os.path.samestat(path_before, path_after)
-        ):
-            raise RunTransactionError(
-                f"{label} canonical path changed while validating"
-            )
-        return verified
+            if verified.sha256 != snapshot.sha256 or verified.payload != snapshot.payload:
+                raise RunTransactionError(
+                    f"canonical {label} exact snapshot copy mismatch"
+                )
+            return verified
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
 
     @classmethod
     def _require_run_decision_identity(

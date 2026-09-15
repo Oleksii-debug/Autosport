@@ -352,9 +352,29 @@ def _install_expected_snapshot_namespace_fence(
     }
 
 
+def _install_expected_snapshot_security_authority_hardening() -> None:
+    hardening_path = pathlib.Path(__file__).with_name(
+        "guarded_pyinstaller_security_authority.py"
+    )
+    hardening_spec = importlib.util.spec_from_file_location(
+        "_autosport_guarded_pyinstaller_security_authority",
+        hardening_path,
+    )
+    if hardening_spec is None or hardening_spec.loader is None:
+        raise RuntimeError(
+            f"could not load guarded PyInstaller security authority: {hardening_path}"
+        )
+    hardening = importlib.util.module_from_spec(hardening_spec)
+    sys.modules[hardening_spec.name] = hardening
+    hardening_spec.loader.exec_module(hardening)
+    hardening.install(sys.modules[__name__])
+
+
 def run(argv: list[str] | None = None) -> int:
     if os.name != "nt":
         return _CORE.run(argv)
+
+    _install_expected_snapshot_security_authority_hardening()
 
     import PyInstaller
     import PyInstaller.archive.writers as archive_writers

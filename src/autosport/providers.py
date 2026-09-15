@@ -161,7 +161,7 @@ class ProviderBatch:
         if type(self.quotes) is not tuple:
             raise TypeError("provider batch quotes must be a tuple of ProviderQuote values")
         for quote in self.quotes:
-            if not isinstance(quote, ProviderQuote):
+            if type(quote) is not ProviderQuote:
                 raise TypeError("provider batch quote must be ProviderQuote")
         if self.cursor is not None and not isinstance(self.cursor, str):
             raise TypeError("provider batch cursor must be str or None")

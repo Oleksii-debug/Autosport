@@ -5,7 +5,7 @@ import json
 import os
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
@@ -85,14 +85,7 @@ def _ordinary_checkout_changes(repo_root: Path) -> list[str]:
     return [line for line in ordinary.splitlines() if line.strip()]
 
 
-def _format_dirty_preview(dirty: list[str]) -> str:
-    preview = ", ".join(dirty[:8])
-    suffix = "" if len(dirty) <= 8 else f" (+{len(dirty) - 8} more)"
-    return f"{preview}{suffix}"
-
-
-def _require_pristine_checkout(repo_root: Path) -> None:
-    dirty = _ordinary_checkout_changes(repo_root)
+def _ignored_checkout_paths(repo_root: Path) -> list[str]:
     ignored = _git_output(
         repo_root,
         "ls-files",
@@ -101,7 +94,35 @@ def _require_pristine_checkout(repo_root: Path) -> None:
         "--exclude-standard",
         allow_empty=True,
     )
-    dirty.extend(f"ignored:{line}" for line in ignored.splitlines() if line.strip())
+    return [line for line in ignored.splitlines() if line.strip()]
+
+
+def _is_expected_late_generated_ignored_path(path: str) -> bool:
+    """Return True only for repository-local outputs expected from pip/pytest/Python.
+
+    The late integrity gate must not treat every git-ignored path as safe: files such as .env or
+    other ignored configuration can still affect a build.  The initial pristine gate starts from
+    zero ignored files; after dependency install/tests, only these narrow generated families are
+    expected before the first PyInstaller invocation.
+    """
+
+    parts = PurePosixPath(path).parts
+    return (
+        "__pycache__" in parts
+        or ".pytest_cache" in parts
+        or any(part.endswith(".egg-info") for part in parts)
+    )
+
+
+def _format_dirty_preview(dirty: list[str]) -> str:
+    preview = ", ".join(dirty[:8])
+    suffix = "" if len(dirty) <= 8 else f" (+{len(dirty) - 8} more)"
+    return f"{preview}{suffix}"
+
+
+def _require_pristine_checkout(repo_root: Path) -> None:
+    dirty = _ordinary_checkout_changes(repo_root)
+    dirty.extend(f"ignored:{line}" for line in _ignored_checkout_paths(repo_root))
     if dirty:
         raise ValueError(
             "release build checkout is not pristine before dependency install/PyInstaller: "
@@ -110,14 +131,20 @@ def _require_pristine_checkout(repo_root: Path) -> None:
 
 
 def _require_late_build_boundary_unchanged(repo_root: Path) -> None:
-    """Reject tracked/index or non-ignored untracked changes at the PyInstaller boundary.
+    """Reject source/input changes at the late PyInstaller boundary.
 
-    Dependency installation, tests, and smoke execution legitimately create ignored cache/build
-    outputs. Those ignored outputs are deliberately excluded here, while staged/unstaged tracked
-    changes and non-ignored untracked files remain fail-closed.
+    Tracked/index changes and non-ignored untracked files always fail closed.  Only narrow ignored
+    output families that are expected from Python bytecode generation, pytest, or setuptools are
+    tolerated; arbitrary ignored configuration/input remains a failure.
     """
 
     dirty = _ordinary_checkout_changes(repo_root)
+    unexpected_ignored = [
+        path
+        for path in _ignored_checkout_paths(repo_root)
+        if not _is_expected_late_generated_ignored_path(path)
+    ]
+    dirty.extend(f"ignored:{path}" for path in unexpected_ignored)
     if dirty:
         raise ValueError(
             "release build source changed after initial preflight before PyInstaller: "

@@ -383,12 +383,13 @@ class WorkspaceEconomicLock:
             self._require_regular_file(path_after)
             self._require_regular_file(final_verification_stat)
 
-            if (
-                not same_open_file
-                or not same_final_open_file
-                or not _stable_stat_metadata(opened_before, opened_after)
-                or not _stable_stat_metadata(path_before, path_after)
-            ):
+            # Descriptor identity is authoritative. A cooperating first opener may
+            # initialize the sentinel on this same inode while another process is in
+            # the pre-lock checkpoint, legitimately changing size/mtime/ctime. Treating
+            # those mutable fields as pathname identity turns ordinary contention into
+            # a false integrity failure. The two fresh no-follow descriptor proofs
+            # still reject replacement, including a replacement with identical metadata.
+            if not same_open_file or not same_final_open_file:
                 raise WorkspaceEconomicLockError(
                     "workspace economic lock path changed during acquisition"
                 )

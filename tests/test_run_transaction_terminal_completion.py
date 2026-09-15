@@ -13,12 +13,12 @@ from autosport.run_transaction import RunTransaction, RunTransactionError
 class RunTransactionTerminalCompletionTests(unittest.TestCase):
     @staticmethod
     def _prepare_canonical_commit(root: Path):
+        registry = RunRegistry.initialize_pristine(root / "run_registry.json")
         book_path = root / "paper_book.json"
         PaperBook("10000").save(book_path)
         ledger = JsonlDecisionLedger(root / "decisions.jsonl")
         ledger.path.touch()
 
-        registry = RunRegistry.initialize_pristine(root / "run_registry.json")
         market_sha256 = "a" * 64
         results_sha256 = "b" * 64
         strategy_id = "baseline-v1"

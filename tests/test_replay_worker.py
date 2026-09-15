@@ -80,6 +80,60 @@ class ReplayWorkerTests(unittest.TestCase):
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
+    def test_worker_partial_thread_start_exception_cancels_task_and_publishes_one_error(self):
+        worker = OneShotReplayWorker()
+        original_start = threading.Thread.start
+        task_ran = threading.Event()
+
+        def start_then_fail(thread) -> None:
+            original_start(thread)
+            raise OSError("late start failure")
+
+        with patch.object(threading.Thread, "start", new=start_then_fail):
+            self.assertTrue(worker.start(lambda: task_ran.set()))
+
+        self.assertFalse(task_ran.wait(0.1))
+        self.assertTrue(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertFalse(worker.start(lambda: self.fail("retry must wait for poll")))
+        failed = self._terminal(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(failed.error, "OSError: late start failure")
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker.poll())
+
+        sentinel = object()
+        self.assertTrue(worker.start(lambda: sentinel))
+        completed = self._terminal(worker)
+        self.assertIs(completed.result, sentinel)
+        self.assertIsNone(completed.error)
+        self.assertFalse(worker.busy)
+
+    def test_worker_partial_thread_start_baseexception_cancels_task_before_reraise(self):
+        worker = OneShotReplayWorker()
+        original_start = threading.Thread.start
+        task_ran = threading.Event()
+
+        def start_then_interrupt(thread) -> None:
+            original_start(thread)
+            raise KeyboardInterrupt("late start interrupt")
+
+        with patch.object(threading.Thread, "start", new=start_then_interrupt):
+            with self.assertRaisesRegex(KeyboardInterrupt, "late start interrupt"):
+                worker.start(lambda: task_ran.set())
+
+        self.assertFalse(task_ran.wait(0.1))
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+
+        sentinel = object()
+        self.assertTrue(worker.start(lambda: sentinel))
+        completed = self._terminal(worker)
+        self.assertIs(completed.result, sentinel)
+        self.assertIsNone(completed.error)
+        self.assertFalse(worker.busy)
+
     def test_worker_thread_construction_exception_publishes_terminal_error(self):
         worker = OneShotReplayWorker()
         task_ran = threading.Event()
@@ -245,6 +299,33 @@ class ReplayWorkerTests(unittest.TestCase):
         failed = self._terminal(worker)
         self.assertIsNone(failed.result)
         self.assertEqual(failed.error, "BrokenNameBaseError: task metadata failed")
+        self.assertFalse(worker.busy)
+
+        sentinel = object()
+        self.assertTrue(worker.start(lambda: sentinel))
+        completed = self._terminal(worker)
+        self.assertIs(completed.result, sentinel)
+        self.assertIsNone(completed.error)
+        self.assertFalse(worker.busy)
+
+    def test_worker_terminalizes_hostile_rendered_string_subclass_and_allows_retry(self):
+        worker = OneShotReplayWorker()
+
+        class HostileRenderedString(str):
+            def __format__(self, spec: str) -> str:
+                raise RuntimeError("hostile rendered-string formatter")
+
+        class HostileRenderedError(BaseException):
+            def __str__(self) -> str:
+                return HostileRenderedString("rendered safely")
+
+        def task():
+            raise HostileRenderedError()
+
+        self.assertTrue(worker.start(task))
+        failed = self._terminal(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(failed.error, "HostileRenderedError: rendered safely")
         self.assertFalse(worker.busy)
 
         sentinel = object()

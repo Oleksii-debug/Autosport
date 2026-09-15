@@ -32,14 +32,17 @@ def _terminal_error(exc: BaseException) -> str:
         # Bypass a custom metaclass __getattribute__: even exception type-name
         # lookup must not be able to defeat terminal publication after the
         # single-flight slot has been acquired.
-        exception_type = type.__getattribute__(type(exc), "__name__")
+        exception_type = str.__str__(type.__getattribute__(type(exc), "__name__"))
     except BaseException:
         exception_type = "BaseException"
     try:
-        detail = str(exc)
+        # ``str(exc)`` may legally return a str subclass with hostile overridden
+        # methods such as __format__. Detach through the trusted base str method
+        # before any formatting/concatenation touches the rendered detail.
+        detail = str.__str__(str(exc))
     except BaseException:
-        return f"{exception_type}: exception details unavailable"
-    return f"{exception_type}: {detail}"
+        return exception_type + ": exception details unavailable"
+    return exception_type + ": " + detail
 
 
 class OneShotReplayWorker:
@@ -62,28 +65,76 @@ class OneShotReplayWorker:
                 return False
             self._busy = True
         # Economic replay may be inside PRECOMMIT/promotion. A daemon thread could
-        # be killed with the process at an arbitrary point, so keep it non-daemon
-        # and let the GUI refuse close until the terminal worker message arrives.
+        # be killed with the process at an arbitrary point, so keep it non-daemon.
+        # The helper additionally waits behind a start-commit gate: Thread.start()
+        # can create the OS thread and still raise to its caller, and an economic
+        # task must not run until startup has returned successfully and committed.
         try:
+            start_gate = threading.Event()
+            cancelled = threading.Event()
             thread = threading.Thread(
-                target=self._run,
-                args=(task,),
+                target=self._run_when_committed,
+                args=(task, start_gate, cancelled),
                 name="autosport-paper-replay",
                 daemon=False,
             )
-            self._thread = thread
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                self._publish_setup_failure(exc)
+                return True
+            self._release_unstarted_slot()
+            raise
+
+        self._thread = thread
+        task_committed = False
+        try:
             thread.start()
-        except Exception as exc:
-            # A request that won the single-flight slot must have exactly one
-            # terminal poll outcome. Preserve that contract for ordinary Thread
-            # construction/start failures as well as RuntimeError: publish one
-            # terminal error and let poll() restore idle state. False remains
-            # reserved for a genuinely busy worker, so GUI callers never confuse
-            # setup failure with another replay already running.
-            self._thread = None
-            self._messages.put(ReplayWorkerMessage(error=_terminal_error(exc)))
-            return True
+            # Commit before opening the worker gate. If process-control flow lands
+            # after this assignment, the task is already authorized and must be
+            # released exactly once rather than rolled back as an unstarted request.
+            task_committed = True
+            start_gate.set()
+        except BaseException as exc:
+            if task_committed:
+                start_gate.set()
+                if isinstance(exc, Exception):
+                    return True
+                raise
+
+            # Thread.start() may have created a real helper before raising. Cancel
+            # before opening the gate so that helper exits without invoking task()
+            # and can never publish a competing terminal task result.
+            cancelled.set()
+            start_gate.set()
+            if isinstance(exc, Exception):
+                self._publish_setup_failure(exc)
+                return True
+            self._release_unstarted_slot()
+            raise
         return True
+
+    def _publish_setup_failure(self, exc: Exception) -> None:
+        # Preserve #302's established caller contract: a request which won the slot
+        # returns True for ordinary setup failure and publishes exactly one terminal
+        # error; poll() is what restores idle. False remains "already busy" only.
+        self._thread = None
+        self._messages.put(ReplayWorkerMessage(error=_terminal_error(exc)))
+
+    def _release_unstarted_slot(self) -> None:
+        self._thread = None
+        with self._lock:
+            self._busy = False
+
+    def _run_when_committed(
+        self,
+        task: ReplayTask,
+        start_gate: threading.Event,
+        cancelled: threading.Event,
+    ) -> None:
+        start_gate.wait()
+        if cancelled.is_set():
+            return
+        self._run(task)
 
     def _run(self, task: ReplayTask) -> None:
         try:

@@ -125,6 +125,7 @@ def _audit_session_restart(root: Path) -> dict[str, object]:
 def _audit_uncommitted_recovery(root: Path) -> dict[str, object]:
     workspace = root / "recovery-workspace"
     workspace.mkdir(parents=True, exist_ok=True)
+    registry = RunRegistry.initialize_pristine(workspace / "run_registry.json")
     paper_path = workspace / "paper_book.json"
     ledger_path = workspace / "decisions.jsonl"
 
@@ -133,7 +134,6 @@ def _audit_uncommitted_recovery(root: Path) -> dict[str, object]:
     book_hash = sha256_file(paper_path)
     ledger_hash = sha256_file(ledger_path)
 
-    registry = RunRegistry(workspace / "run_registry.json")
     run_id = "packaged-restart-recovery-audit"
     market_sha = "a" * 64
     results_sha = "b" * 64

@@ -18,7 +18,7 @@ class RunRegistryMissingHistoryTests(unittest.TestCase):
                 ValueError,
                 "run registry is missing while durable run history exists",
             ):
-                RunRegistry(registry_path)
+                RunRegistry.initialize_pristine(registry_path)
 
             self.assertFalse(registry_path.exists())
 
@@ -32,7 +32,7 @@ class RunRegistryMissingHistoryTests(unittest.TestCase):
                 ValueError,
                 "run registry is missing while durable run history exists",
             ):
-                RunRegistry(registry_path)
+                RunRegistry.initialize_pristine(registry_path)
 
             self.assertFalse(registry_path.exists())
 
@@ -42,7 +42,7 @@ class RunRegistryMissingHistoryTests(unittest.TestCase):
             registry_path = root / "run_registry.json"
             (root / ".run-transactions").mkdir()
 
-            registry = RunRegistry(registry_path)
+            registry = RunRegistry.initialize_pristine(registry_path)
 
             self.assertTrue(registry_path.is_file())
             self.assertEqual(registry.strategy_ids(), ())

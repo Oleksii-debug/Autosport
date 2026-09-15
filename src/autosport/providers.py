@@ -165,7 +165,7 @@ class ProviderBatch:
                 raise TypeError("provider batch quote must be ProviderQuote")
         if self.cursor is not None and not isinstance(self.cursor, str):
             raise TypeError("provider batch cursor must be str or None")
-        if not isinstance(self.quality_flags, tuple):
+        if type(self.quality_flags) is not tuple:
             raise TypeError("provider batch quality_flags must be a tuple of strings")
         for flag in self.quality_flags:
             if not isinstance(flag, str):

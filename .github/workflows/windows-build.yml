@@ -506,3 +506,27 @@ jobs:
           if ($uploadedSha -ne $expected) {
             throw "GitHub-stored release ZIP SHA-256 mismatch: expected $expected, got $uploadedSha"
           }
+      - name: Execute packaged evidence export/verify contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./scripts/packaged_executable_authority.ps1
+          $identity = Get-AutosportProducerPackageIdentity
+          $packagedDataExe = [string]$env:AUTOSPORT_PACKAGED_DATA_EXE
+          $freshDataExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
+          $packagedAuthority = $null
+          $freshAuthority = $null
+          try {
+            $packagedAuthority = Open-AutosportQualifiedExecutable -Path $packagedDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Packaged evidence-export Autosport-Data.exe'
+            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Fresh-extracted evidence-export Autosport-Data.exe'
+            ./scripts/evidence_export_package_smoke.ps1
+          } finally {
+            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
+            if ($null -ne $packagedAuthority) { $packagedAuthority.Dispose() }
+          }
+      - name: Upload packaged evidence export/verify smoke
+        uses: actions/upload-artifact@v4
+        with:
+          name: Autosport-packaged-evidence-export-smoke
+          path: dist/evidence-export-package-smoke.json
+          if-no-files-found: error

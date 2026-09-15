@@ -181,6 +181,65 @@ class BetfairHistoricalReadOnceTests(unittest.TestCase):
             legacy_import.assert_not_called()
             self.assertFalse(output.exists())
 
+    def test_non_json_whitespace_only_lines_fail_closed_at_user_facing_boundary(self) -> None:
+        for name, invalid_whitespace in (("nbsp", "\u00a0"), ("vertical-tab", "\x0b")):
+            with self.subTest(name=name), TemporaryDirectory() as temporary:
+                tmp_path = Path(temporary)
+                source = tmp_path / "market.jsonl"
+                source.write_text(f"{invalid_whitespace}\n", encoding="utf-8")
+                output = tmp_path / "dataset"
+
+                with patch.object(read_once, "import_betfair_historical") as legacy_import:
+                    result = read_once.main(
+                        [
+                            str(source),
+                            "--output-dir",
+                            str(output),
+                            "--acquired-at",
+                            "2026-09-13T08:00:00Z",
+                            "--terms-reference",
+                            "terms",
+                            "--retention-basis",
+                            "basis",
+                        ]
+                    )
+
+                self.assertEqual(result, 3)
+                legacy_import.assert_not_called()
+                self.assertFalse(output.exists())
+
+    def test_ascii_json_whitespace_only_lines_remain_supported(self) -> None:
+        with TemporaryDirectory() as temporary:
+            tmp_path = Path(temporary)
+            source = tmp_path / "market.jsonl"
+            source.write_text(
+                " \t\r\n\t  \n" + '{"op":"mcm","pt":1789372800000}\n',
+                encoding="utf-8",
+            )
+            output = tmp_path / "dataset"
+
+            with patch.object(
+                read_once,
+                "import_betfair_historical",
+                side_effect=lambda _inputs, output_dir, **_kwargs: _report(output_dir),
+            ) as legacy_import:
+                result = read_once.main(
+                    [
+                        str(source),
+                        "--output-dir",
+                        str(output),
+                        "--acquired-at",
+                        "2026-09-13T08:00:00Z",
+                        "--terms-reference",
+                        "terms",
+                        "--retention-basis",
+                        "basis",
+                    ]
+                )
+
+            self.assertEqual(result, 0)
+            legacy_import.assert_called_once()
+
     def test_windows_data_tool_routes_betfair_import_through_read_once_boundary(self) -> None:
         seen: list[list[str]] = []
 

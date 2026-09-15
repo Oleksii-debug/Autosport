@@ -57,7 +57,7 @@ def _validate_strict_json_inputs(inputs: Iterable[Path]) -> None:
         try:
             with _open_frozen_text(path) as handle:
                 for line_number, line in enumerate(handle, start=1):
-                    if not line.strip():
+                    if not line.strip(" \t\r\n"):
                         continue
                     try:
                         parsed = json.loads(

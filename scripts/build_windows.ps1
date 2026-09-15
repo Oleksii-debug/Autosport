@@ -54,10 +54,90 @@ function Assert-ProcessRecoveryEvidence {
   }
 }
 
+$pythonExecutable = (Get-Command python -CommandType Application -ErrorAction Stop).Source
+$trustedVerifierLauncher = @'
+import hashlib
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+expected = sys.argv[2]
+data = path.read_bytes()
+actual = hashlib.sha256(data).hexdigest()
+if actual != expected:
+    raise SystemExit(f"trusted verifier SHA-256 mismatch: expected {expected}, got {actual}")
+sys.argv = [str(path), *sys.argv[3:]]
+namespace = {
+    "__name__": "__main__",
+    "__file__": str(path),
+    "__package__": None,
+    "__cached__": None,
+}
+exec(compile(data, str(path), "exec"), namespace)
+'@
+
+function python {
+  $pythonArguments = @($args)
+  if (
+    $null -ne $script:sourceVerifier -and
+    $null -ne $script:sourceVerifierSha256 -and
+    $pythonArguments.Count -gt 0 -and
+    [string]$pythonArguments[0] -eq [string]$script:sourceVerifier
+  ) {
+    $remaining = @()
+    if ($pythonArguments.Count -gt 1) {
+      $remaining = @($pythonArguments[1..($pythonArguments.Count - 1)])
+    }
+    & $script:pythonExecutable -I -S -c $script:trustedVerifierLauncher $script:sourceVerifier $script:sourceVerifierSha256 @remaining
+    return
+  }
+  & $script:pythonExecutable @pythonArguments
+}
+
+# Bootstrap the verifier from the exact Git object before executing any
+# repository-local Python. Do not inherit repository-shaping Git environment.
+Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' } | ForEach-Object {
+  Remove-Item -LiteralPath ("Env:" + $_.Name) -ErrorAction SilentlyContinue
+}
+$env:GIT_NO_REPLACE_OBJECTS = '1'
+$gitExecutable = (Get-Command git -CommandType Application -ErrorAction Stop).Source
+
+$checkoutHead = (& $gitExecutable rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0) { throw "Unable to resolve checkout HEAD; git exited $LASTEXITCODE" }
 $sourceSha = $env:AUTOSPORT_SOURCE_SHA
-if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
+if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = $checkoutHead }
+if ($sourceSha -notmatch '^[0-9a-f]{40}$') { throw 'AUTOSPORT_SOURCE_SHA/source HEAD is not a canonical Git commit SHA' }
+if ($sourceSha -ne $checkoutHead) { throw 'Exact source SHA does not match checkout HEAD' }
+
+$repoRoot = [System.IO.Path]::GetFullPath($PWD.Path)
+$gitTopLevel = [System.IO.Path]::GetFullPath((& $gitExecutable rev-parse --show-toplevel).Trim())
+if ($LASTEXITCODE -ne 0) { throw "Unable to resolve Git top-level; git exited $LASTEXITCODE" }
+if (-not [string]::Equals($repoRoot, $gitTopLevel, [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw 'Release build Git top-level does not match the current repository root'
+}
+$replacementRefs = @(& $gitExecutable for-each-ref '--format=%(refname)' refs/replace | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($LASTEXITCODE -ne 0) { throw "Unable to enumerate Git replacement refs; git exited $LASTEXITCODE" }
+if ($replacementRefs.Count -ne 0) { throw 'Release build repository contains Git replacement refs' }
+
+$verifierTreeEntry = (& $gitExecutable ls-tree $sourceSha -- 'scripts/verify_source_checkout.py').Trim()
+if ($LASTEXITCODE -ne 0) { throw "Unable to resolve trusted verifier source entry; git exited $LASTEXITCODE" }
+$verifierMatch = [regex]::Match($verifierTreeEntry, '^(100644|100755) blob ([0-9a-f]{40})\tscripts/verify_source_checkout\.py$')
+if (-not $verifierMatch.Success) { throw 'Exact source does not contain one regular trusted verifier blob' }
+$verifierBlobSha = $verifierMatch.Groups[2].Value
+
 $sourceVerifier = (New-TemporaryFile).FullName
-python scripts/verify_source_checkout.py --source-sha $sourceSha --trusted-verifier-output $sourceVerifier
+$verifierBootstrapError = (New-TemporaryFile).FullName
+try {
+  $verifierBootstrap = Start-Process -FilePath $gitExecutable -ArgumentList @('cat-file', 'blob', $verifierBlobSha) -RedirectStandardOutput $sourceVerifier -RedirectStandardError $verifierBootstrapError -NoNewWindow -Wait -PassThru
+  if ($verifierBootstrap.ExitCode -ne 0) {
+    $bootstrapMessage = (Get-Content -LiteralPath $verifierBootstrapError -Raw -ErrorAction SilentlyContinue).Trim()
+    throw "Unable to materialize exact trusted verifier blob (git exit $($verifierBootstrap.ExitCode)): $bootstrapMessage"
+  }
+} finally {
+  Remove-Item -LiteralPath $verifierBootstrapError -Force -ErrorAction SilentlyContinue
+}
+$sourceVerifierSha256 = (Get-FileHash -LiteralPath $sourceVerifier -Algorithm SHA256).Hash.ToLowerInvariant()
+python $sourceVerifier --source-sha $sourceSha
 if ($LASTEXITCODE -ne 0) { throw "Source checkout preflight exited $LASTEXITCODE" }
 # Historical unsafe regression marker; this command must remain comment-only: Copy-Item -LiteralPath 'scripts/verify_source_checkout.py' -Destination $sourceVerifier -Force
 $boundArtifactRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("autosport-release-" + [guid]::NewGuid().ToString("N"))
@@ -313,7 +393,7 @@ if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe help exited
 & $extractedDataExe compare-strategies --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe compare-strategies --help exited $LASTEXITCODE" }
 & $extractedDataExe walk-forward-evaluate --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe walk-forward-evaluate --help exited $LASTEXITCODE" }
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe walk-forward-evaluate exited $LASTEXITCODE" }
 & $extractedDataExe acquire --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe acquire --help exited $LASTEXITCODE" }
 & $extractedDataExe build-corpus --help | Out-Null

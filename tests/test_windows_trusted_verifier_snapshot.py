@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -51,6 +53,16 @@ def _committed_verifier_repo(tmp_path: Path) -> tuple[Path, str, bytes]:
     return repo, _git(repo, "rev-parse", "HEAD"), canonical
 
 
+def _trusted_launcher_source() -> str:
+    script = _BUILD_SCRIPT.read_text(encoding="utf-8")
+    start_marker = "$trustedVerifierLauncher = @'\n"
+    end_marker = "\n'@\n"
+    assert start_marker in script
+    tail = script.split(start_marker, 1)[1]
+    assert end_marker in tail
+    return tail.split(end_marker, 1)[0]
+
+
 def test_trusted_verifier_snapshot_uses_exact_git_blob_after_live_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -95,19 +107,91 @@ def test_trusted_verifier_snapshot_refuses_destination_inside_checkout(
         )
 
 
-def test_windows_build_materializes_trusted_verifier_during_initial_preflight() -> None:
+def test_trusted_launcher_rejects_snapshot_mutation_before_execution(tmp_path: Path) -> None:
+    launcher = _trusted_launcher_source()
+    verifier = tmp_path / "trusted-verifier.py"
+    marker = tmp_path / "hostile-executed.txt"
+    canonical = b"raise SystemExit(0)\n"
+    expected = hashlib.sha256(canonical).hexdigest()
+    verifier.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", launcher, str(verifier), expected],
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "trusted verifier SHA-256 mismatch" in completed.stderr
+    assert not marker.exists()
+
+
+def test_trusted_launcher_isolated_startup_does_not_import_sitecustomize(
+    tmp_path: Path,
+) -> None:
+    launcher = _trusted_launcher_source()
+    site_dir = tmp_path / "candidate-site"
+    site_dir.mkdir()
+    site_marker = tmp_path / "sitecustomize-executed.txt"
+    verifier_marker = tmp_path / "verifier-executed.txt"
+    (site_dir / "sitecustomize.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['AUTOSPORT_SITE_MARKER']).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    verifier = tmp_path / "trusted-verifier.py"
+    verifier_bytes = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['AUTOSPORT_VERIFIER_MARKER']).write_text('executed', encoding='utf-8')\n"
+    ).encode("utf-8")
+    verifier.write_bytes(verifier_bytes)
+    expected = hashlib.sha256(verifier_bytes).hexdigest()
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(site_dir)
+    env["AUTOSPORT_SITE_MARKER"] = str(site_marker)
+    env["AUTOSPORT_VERIFIER_MARKER"] = str(verifier_marker)
+
+    completed = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", launcher, str(verifier), expected],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert verifier_marker.read_text(encoding="utf-8") == "executed"
+    assert not site_marker.exists()
+
+
+def test_windows_build_bootstraps_exact_verifier_before_repository_python() -> None:
     script = _BUILD_SCRIPT.read_text(encoding="utf-8")
+    active_lines = [
+        line.strip()
+        for line in script.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
 
     source_sha = "$sourceSha = $env:AUTOSPORT_SOURCE_SHA"
-    snapshot_path = "$sourceVerifier = (New-TemporaryFile).FullName"
-    preflight = (
-        "python scripts/verify_source_checkout.py --source-sha $sourceSha "
-        "--trusted-verifier-output $sourceVerifier"
-    )
-    old_copy = "Copy-Item -LiteralPath 'scripts/verify_source_checkout.py' -Destination $sourceVerifier -Force"
+    exact_entry = "$verifierTreeEntry = (& $gitExecutable ls-tree $sourceSha -- 'scripts/verify_source_checkout.py').Trim()"
+    exact_blob = "$verifierBootstrap = Start-Process -FilePath $gitExecutable -ArgumentList @('cat-file', 'blob', $verifierBlobSha)"
+    digest = "$sourceVerifierSha256 = (Get-FileHash -LiteralPath $sourceVerifier -Algorithm SHA256).Hash.ToLowerInvariant()"
+    preflight = "python $sourceVerifier --source-sha $sourceSha"
     first_mutation = "python -m pip install --upgrade pip"
+    old_copy = "Copy-Item -LiteralPath 'scripts/verify_source_checkout.py' -Destination $sourceVerifier -Force"
 
-    assert script.index(source_sha) < script.index(snapshot_path) < script.index(preflight)
+    assert all(not line.startswith("python scripts/verify_source_checkout.py") for line in active_lines)
+    assert "Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' }" in script
+    assert "$env:GIT_NO_REPLACE_OBJECTS = '1'" in script
+    assert script.index(source_sha) < script.index(exact_entry)
+    assert script.index(exact_entry) < script.index(exact_blob)
+    assert script.index(exact_blob) < script.index(digest) < script.index(preflight)
     assert script.index(preflight) < script.index(first_mutation)
-    assert all(not line.strip().startswith(old_copy) for line in script.splitlines())
+    assert all(not line.startswith(old_copy) for line in active_lines)
+    assert "& $script:pythonExecutable -I -S -c $script:trustedVerifierLauncher" in script
     assert script.count("python $sourceVerifier --source-sha $sourceSha --late-build-boundary") == 3

@@ -278,15 +278,15 @@ def run_observe_table_tennis(
             return 2
         provider = provider_factory(api_key, public_preview=public_preview)
         result = observe_workspace_once(workspace, provider, max_items=max_items)
+    except (ProviderTransportError, ProviderPayloadError, sqlite3.Error, ValueError, OSError) as exc:
+        print(f"observation=FAIL_CLOSED error={exc}")
+        return 3
     except RuntimeError as exc:
         committed_error_type = _committed_ingestion_health_error_type()
         if committed_error_type is None or not isinstance(exc, committed_error_type):
             raise
         _print_committed_ingestion_health_failure(exc)
         return 4
-    except (ProviderTransportError, ProviderPayloadError, sqlite3.Error, ValueError, OSError) as exc:
-        print(f"observation=FAIL_CLOSED error={exc}")
-        return 3
     _print_observation(result, show)
     return 0
 

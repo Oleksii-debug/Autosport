@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 from typing import BinaryIO
 
@@ -9,12 +10,37 @@ class WorkspaceEconomicLockError(RuntimeError):
     """Raised when another process owns the workspace economic-writer lock."""
 
 
+def _add_secondary_failure_note(
+    primary: BaseException,
+    prefix: str,
+    secondary: BaseException,
+) -> None:
+    """Attach cleanup evidence without ever replacing the primary failure."""
+
+    try:
+        secondary_text = f"{type(secondary).__name__}: {secondary}"
+    except BaseException:
+        secondary_text = "secondary exception details unavailable"
+    try:
+        primary.add_note(f"{prefix}: {secondary_text}")
+    except BaseException:
+        # Exception subclasses may override add_note(), and diagnostic enrichment is
+        # never allowed to replace the economic/replay failure we are preserving.
+        return
+
+
 class WorkspaceEconomicLock:
     """Cross-process, crash-releasing exclusive lock for PaperBook/ledger mutations.
 
-    The lock is advisory and intentionally scoped to Autosport's economic writers.
-    The lock file itself may persist after process exit; the operating-system lock
-    is the authority and is released automatically when the owning process dies.
+    The lock is advisory and intentionally scoped to cooperating Autosport economic
+    writers. Those writers treat the lock pathname as persistent workspace metadata:
+    they do not unlink, rename, replace, or hard-link it while coordinating. Acquire
+    rejects unsafe aliases and detects pathname replacement through its post-lock
+    identity checkpoint. Like any pathname-based advisory file lock, it cannot make
+    the pathname immutable against an external actor that replaces it after the final
+    validated checkpoint; such filesystem mutation is outside this coordination
+    contract. The file itself may persist after process exit; the operating-system
+    lock is the authority and is released automatically when the owning process dies.
     """
 
     FILE_NAME = ".economic-run.lock"
@@ -28,8 +54,13 @@ class WorkspaceEconomicLock:
         if self._handle is not None:
             raise WorkspaceEconomicLockError("workspace economic lock is already held by this lock object")
         self.workspace.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+b")
+        handle = self._open_lock_handle()
         try:
+            # The creation/open split never creates or truncates through an existing
+            # pathname. Bind the opened handle back to the exact canonical workspace
+            # pathname before any sentinel byte is written so a race-created alias
+            # cannot mutate an external file during lock initialization.
+            self._validate_open_handle_identity(handle)
             handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:
                 handle.write(b"\0")
@@ -37,6 +68,11 @@ class WorkspaceEconomicLock:
                 os.fsync(handle.fileno())
             handle.seek(0)
             self._lock_handle(handle)
+            # Detect replacement that happened between open and this post-lock
+            # checkpoint. This is deliberately not a claim that an external actor
+            # cannot replace a POSIX pathname after the checkpoint; cooperating
+            # Autosport writers never perform that mutation (see class contract).
+            self._validate_open_handle_identity(handle)
         except BaseException as acquire_error:
             try:
                 handle.close()
@@ -46,9 +82,10 @@ class WorkspaceEconomicLock:
                 # the handle as a poisoned ownership marker so this object cannot
                 # silently reserve another writer slot.
                 self._handle = handle
-                acquire_error.add_note(
-                    "workspace economic lock handle close also failed while cleaning up acquisition failure: "
-                    f"{type(close_error).__name__}: {close_error}"
+                _add_secondary_failure_note(
+                    acquire_error,
+                    "workspace economic lock handle close also failed while cleaning up acquisition failure",
+                    close_error,
                 )
             raise
         self._handle = handle
@@ -66,9 +103,10 @@ class WorkspaceEconomicLock:
             try:
                 handle.close()
             except BaseException as close_error:
-                unlock_error.add_note(
-                    "workspace economic lock handle close also failed after unlock failure: "
-                    f"{type(close_error).__name__}: {close_error}"
+                _add_secondary_failure_note(
+                    unlock_error,
+                    "workspace economic lock handle close also failed after unlock failure",
+                    close_error,
                 )
                 self._handle = handle
             else:
@@ -95,11 +133,160 @@ class WorkspaceEconomicLock:
             self.release()
         except BaseException as release_error:
             # Never replace the economic/replay failure that caused scope exit with
-            # a secondary lock-teardown failure. Keep both pieces of evidence on the
-            # primary exception so recovery diagnostics retain the actual root cause.
-            exc_value.add_note(
-                "WorkspaceEconomicLock release also failed while propagating the primary error: "
-                f"{type(release_error).__name__}: {release_error}"
+            # a secondary lock-teardown failure. Diagnostic enrichment itself is an
+            # untrusted exception boundary, so it is deliberately best-effort.
+            _add_secondary_failure_note(
+                exc_value,
+                "WorkspaceEconomicLock release also failed while propagating the primary error",
+                release_error,
+            )
+
+    def _open_lock_handle(self) -> BinaryIO:
+        """Create or open the canonical lock without create-through-alias races."""
+
+        try:
+            return self._open_new_lock_handle()
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise WorkspaceEconomicLockError(
+                "cannot create workspace economic lock path"
+            ) from exc
+
+        self._validate_existing_lock_path()
+        try:
+            return self.path.open("r+b")
+        except FileNotFoundError as exc:
+            raise WorkspaceEconomicLockError(
+                "workspace economic lock path changed during acquisition"
+            ) from exc
+        except OSError as exc:
+            raise WorkspaceEconomicLockError(
+                "cannot open workspace economic lock path"
+            ) from exc
+
+    def _open_new_lock_handle(self) -> BinaryIO:
+        """Exclusively create the canonical lock without following Windows reparse points."""
+
+        if os.name != "nt":
+            return self.path.open("x+b")
+
+        # Python's CRT-backed x+b can follow a Windows symlink/reparse point whose
+        # target does not exist, creating that external target before our identity
+        # checks run. CreateFileW with OPEN_REPARSE_POINT makes the final pathname
+        # component authoritative: an existing reparse point causes CREATE_NEW to
+        # fail instead of being traversed. Existing files are opened separately,
+        # without create/truncate semantics, after the no-follow path checks below.
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+
+        generic_read = 0x80000000
+        generic_write = 0x40000000
+        file_share_read = 0x00000001
+        file_share_write = 0x00000002
+        file_share_delete = 0x00000004
+        create_new = 1
+        file_attribute_normal = 0x00000080
+        file_flag_open_reparse_point = 0x00200000
+        invalid_handle_value = ctypes.c_void_p(-1).value
+
+        kernel_handle = create_file(
+            str(self.path),
+            generic_read | generic_write,
+            file_share_read | file_share_write | file_share_delete,
+            None,
+            create_new,
+            file_attribute_normal | file_flag_open_reparse_point,
+            None,
+        )
+        if kernel_handle == invalid_handle_value:
+            error_code = ctypes.get_last_error()
+            if error_code in (80, 183):  # ERROR_FILE_EXISTS / ERROR_ALREADY_EXISTS
+                raise FileExistsError(
+                    error_code,
+                    "workspace economic lock path already exists",
+                    str(self.path),
+                )
+            raise ctypes.WinError(error_code)
+
+        close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        try:
+            descriptor = msvcrt.open_osfhandle(
+                kernel_handle,
+                os.O_RDWR | os.O_BINARY,
+            )
+        except BaseException:
+            close_handle(kernel_handle)
+            raise
+        try:
+            return os.fdopen(descriptor, "r+b", closefd=True)
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def _validate_existing_lock_path(self) -> None:
+        """Reject unsafe aliases before opening the canonical lock pathname."""
+
+        try:
+            path_stat = os.stat(self.path, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise WorkspaceEconomicLockError(
+                "cannot inspect workspace economic lock path"
+            ) from exc
+        self._require_regular_file(path_stat)
+        self._require_single_link(path_stat)
+
+    def _validate_open_handle_identity(self, handle: BinaryIO) -> None:
+        """Prove the opened handle is the current canonical single-link lock file."""
+
+        try:
+            opened_stat = os.fstat(handle.fileno())
+            path_stat = os.stat(self.path, follow_symlinks=False)
+        except OSError as exc:
+            raise WorkspaceEconomicLockError(
+                "workspace economic lock path changed during acquisition"
+            ) from exc
+        self._require_regular_file(opened_stat)
+        self._require_regular_file(path_stat)
+        if not os.path.samestat(opened_stat, path_stat):
+            raise WorkspaceEconomicLockError(
+                "workspace economic lock path changed during acquisition"
+            )
+        # Only after proving both stat snapshots identify the same inode can link
+        # count describe aliases of the canonical lock rather than an unlinked old
+        # handle from a pathname-replacement race.
+        self._require_single_link(opened_stat)
+        self._require_single_link(path_stat)
+
+    @staticmethod
+    def _require_regular_file(path_stat: os.stat_result) -> None:
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise WorkspaceEconomicLockError(
+                "workspace economic lock path must be a regular non-symlink file"
+            )
+
+    @staticmethod
+    def _require_single_link(path_stat: os.stat_result) -> None:
+        if path_stat.st_nlink != 1:
+            raise WorkspaceEconomicLockError(
+                "workspace economic lock path must not have hard-link aliases"
             )
 
     @staticmethod

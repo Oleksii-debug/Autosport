@@ -51,6 +51,7 @@ _FINAL_ONLY_FIELDS = frozenset(
 )
 _FIRST_OPEN_RETRY_SECONDS = 0.01
 _FIRST_OPEN_MAX_WAIT_SECONDS = 5.0
+_ACTIVE_WRITER_ERROR = "another Autosport process owns the workspace economic-writer lock"
 
 
 def _is_canonical_sha256(value: object) -> bool:
@@ -156,11 +157,20 @@ class RunRegistry:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
+        try:
+            self._read_existing()
+        except FileNotFoundError:
             self._initialize_missing_registry()
-        else:
-            # Validate recovery/economic truth before a session can use an existing workspace.
-            self._read()
+
+    def _read_existing(self) -> dict:
+        """Read only a canonical regular registry path without following aliases."""
+
+        path_stat = _lstat_or_none(self.path)
+        if path_stat is None:
+            raise FileNotFoundError(self.path)
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise ValueError("run registry path is not a regular non-symlink file")
+        return self._read()
 
     def _initialize_missing_registry(self) -> None:
         """Serialize first publication against every cooperating economic writer.
@@ -179,8 +189,13 @@ class RunRegistry:
             try:
                 lock.acquire()
             except WorkspaceEconomicLockError as contention:
+                # Only the exact OS-lock contention outcome permits winner re-read.
+                # Alias, identity, creation and cleanup failures are integrity defects,
+                # not evidence that another cooperating writer owns the lock.
+                if str(contention) != _ACTIVE_WRITER_ERROR:
+                    raise
                 try:
-                    self._read()
+                    self._read_existing()
                 except FileNotFoundError:
                     if time.monotonic() >= deadline:
                         raise WorkspaceEconomicLockError(
@@ -195,8 +210,11 @@ class RunRegistry:
                 # The winner may have published while this process was waiting for
                 # the OS lock. Existing bytes are authoritative and are never replaced
                 # with a stale empty state.
-                if self.path.exists():
-                    self._read()
+                try:
+                    self._read_existing()
+                except FileNotFoundError:
+                    pass
+                else:
                     return
                 try:
                     durable_history = has_durable_workspace_history(self.path.parent)
@@ -208,7 +226,7 @@ class RunRegistry:
                     raise ValueError("run registry is missing while durable run history exists")
                 self._write({"schema_version": 1, "runs": {}})
                 # Verify the exact published registry before exposing this object.
-                self._read()
+                self._read_existing()
                 return
             except BaseException as exc:
                 primary_error = exc

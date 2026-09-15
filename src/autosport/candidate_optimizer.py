@@ -164,8 +164,6 @@ def _candidate_ticket(
     ticket_legs: list[TicketLeg] = []
     touched_groups: set[int] = set()
     used_event_ids: set[str] = set()
-    recomputed_odds = Decimal("1")
-    recomputed_probability = Decimal("1")
     for leg in candidate.legs:
         if leg.quote_key not in quote_to_group:
             raise ValueError(f"candidate quote missing from scenario space: {leg.quote_key}")
@@ -183,17 +181,17 @@ def _candidate_ticket(
             raise ValueError("candidate leg probability must be finite")
         if leg.probability < 0 or leg.probability > 1:
             raise ValueError("candidate leg probability must be between 0 and 1")
-        ticket_leg = _ticket_leg_from_candidate(leg)
-        ticket_legs.append(ticket_leg)
-        recomputed_odds *= leg.decimal_odds
-        recomputed_probability *= leg.probability
+        ticket_legs.append(_ticket_leg_from_candidate(leg))
 
-    recomputed_ev = recomputed_probability * recomputed_odds - Decimal("1")
-    if candidate.combined_odds != recomputed_odds:
+    # Reuse the generator's canonical arithmetic authority instead of rebuilding
+    # candidate economics under mutable caller Decimal context.  This keeps
+    # validation stable after candidate_search pinned its precision/range policy.
+    canonical = BeamParlayCandidateSearch._to_candidate(tuple(candidate.legs))
+    if candidate.combined_odds != canonical.combined_odds:
         raise ValueError("candidate combined_odds does not match its legs")
-    if candidate.independent_probability != recomputed_probability:
+    if candidate.independent_probability != canonical.independent_probability:
         raise ValueError("candidate independent_probability does not match its legs")
-    if candidate.expected_profit_per_unit != recomputed_ev:
+    if candidate.expected_profit_per_unit != canonical.expected_profit_per_unit:
         raise ValueError("candidate expected_profit_per_unit does not match its legs")
 
     identity = json.dumps(

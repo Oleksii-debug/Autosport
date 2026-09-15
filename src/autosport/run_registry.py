@@ -146,6 +146,46 @@ def _path_matches_open_descriptor(
     return matched
 
 
+def _is_stable_empty_regular_file(
+    path: Path,
+    expected_path_stat: os.stat_result,
+) -> bool:
+    """Return whether the path still names the same stable empty regular file."""
+
+    try:
+        descriptor = _open_read_only_descriptor(path)
+    except OSError:
+        return False
+
+    stable_empty = False
+    try:
+        try:
+            opened_before = os.fstat(descriptor)
+            path_bound_before = (
+                stat.S_ISREG(opened_before.st_mode)
+                and opened_before.st_nlink == 1
+                and _path_matches_open_descriptor(path, descriptor, expected_path_stat)
+            )
+            if path_bound_before:
+                first_byte = os.read(descriptor, 1)
+                opened_after = os.fstat(descriptor)
+                stable_empty = (
+                    not first_byte
+                    and stat.S_ISREG(opened_after.st_mode)
+                    and opened_after.st_nlink == 1
+                    and _stable_stat_metadata(opened_before, opened_after)
+                    and _path_matches_open_descriptor(path, descriptor, expected_path_stat)
+                )
+        except OSError:
+            stable_empty = False
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            stable_empty = False
+    return stable_empty
+
+
 def has_durable_workspace_history(workspace: str | Path) -> bool:
     """Return whether a missing registry would discard surviving economic/run evidence.
 
@@ -179,11 +219,7 @@ def has_durable_workspace_history(workspace: str | Path) -> bool:
     if ledger_stat is not None:
         if not stat.S_ISREG(ledger_stat.st_mode) or ledger_stat.st_size > 0:
             return True
-        try:
-            with ledger_path.open("rb") as handle:
-                if handle.read(1):
-                    return True
-        except OSError:
+        if not _is_stable_empty_regular_file(ledger_path, ledger_stat):
             return True
     return False
 

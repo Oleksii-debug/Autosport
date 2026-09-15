@@ -56,14 +56,23 @@ def _committed_ingestion_health_error_type() -> type[RuntimeError] | None:
 
 def _print_committed_ingestion_health_failure(exc: RuntimeError) -> None:
     outcome = exc.outcome
+    delivery_error = getattr(exc, "delivery_error", None)
+    delivery_accepted_count = None
+    delivery_failure_count = None
+    if delivery_error is not None:
+        delivery_accepted_count = delivery_error.accepted_count
+        delivery_failure_count = len(delivery_error.exceptions)
     print(
         json.dumps(
             {
                 "observation": "COMMITTED_HEALTH_FAILURE",
                 "market_committed": True,
-                "source_health_persisted": False,
-                "health_repair_required": True,
+                "source_health_persistence": "unknown",
+                "health_reconciliation_required": True,
                 "whole_poll_retry_safe": False,
+                "delivery_error_present": delivery_error is not None,
+                "delivery_error_accepted_count": delivery_accepted_count,
+                "delivery_error_failure_count": delivery_failure_count,
                 "source_id": outcome.source_id,
                 "received": outcome.received,
                 "accepted": outcome.accepted,

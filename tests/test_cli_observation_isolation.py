@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from autosport import ingestion as ingestion_module
 from autosport.cli import run_observe_table_tennis
+from autosport.market_bus import MarketEventDeliveryError
 from autosport.parlayapi_provider import ProviderTransportError
 from autosport.providers import InMemoryProvider, ProviderQuote
 
@@ -23,9 +24,10 @@ class _FailingProvider:
 
 
 class _FutureCommittedIngestionHealthError(RuntimeError):
-    def __init__(self, outcome):
+    def __init__(self, outcome, *, delivery_error=None):
         super().__init__("market events were committed but source health persistence failed")
         self.outcome = outcome
+        self.delivery_error = delivery_error
 
 
 class CliObservationIsolationTests(unittest.TestCase):
@@ -44,6 +46,43 @@ class CliObservationIsolationTests(unittest.TestCase):
                 )
             ],
         )
+
+    @staticmethod
+    def _committed_outcome(*, accepted: int = 7):
+        return SimpleNamespace(
+            source_id="fixture:cli-isolation",
+            received=10,
+            accepted=accepted,
+            rejected=10 - accepted,
+            cursor="cursor-9",
+            quality_flags=("INVALID_QUOTE", "STALE_SOURCE"),
+        )
+
+    def _run_committed_error(self, committed_error):
+        def factory(api_key, *, public_preview):
+            self.assertIsNone(api_key)
+            self.assertTrue(public_preview)
+            return self._provider()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = io.StringIO()
+            with (
+                patch(
+                    "autosport.cli.ingestion_module.CommittedIngestionHealthError",
+                    _FutureCommittedIngestionHealthError,
+                    create=True,
+                ),
+                patch("autosport.cli.observe_workspace_once", side_effect=committed_error),
+                redirect_stdout(output),
+            ):
+                code = run_observe_table_tennis(
+                    Path(tmp),
+                    public_preview=True,
+                    max_items=10,
+                    show=10,
+                    provider_factory=factory,
+                )
+        return code, json.loads(output.getvalue())
 
     def test_observation_does_not_open_or_rewrite_corrupt_economic_state(self):
         def factory(api_key, *, public_preview):
@@ -161,58 +200,55 @@ class CliObservationIsolationTests(unittest.TestCase):
                 "observation=FAIL_CLOSED error=provider HTTP 503",
             )
 
-    def test_committed_health_failure_preserves_market_commit_truth_without_traceback(self):
-        def factory(api_key, *, public_preview):
-            self.assertIsNone(api_key)
-            self.assertTrue(public_preview)
-            return self._provider()
+    def test_committed_health_failure_keeps_health_persistence_unknown_without_operation_identity(self):
+        committed_error = _FutureCommittedIngestionHealthError(self._committed_outcome())
 
-        outcome = SimpleNamespace(
-            source_id="fixture:cli-isolation",
-            received=10,
-            accepted=7,
-            rejected=3,
-            cursor="cursor-9",
-            quality_flags=("INVALID_QUOTE", "STALE_SOURCE"),
-        )
-        committed_error = _FutureCommittedIngestionHealthError(outcome)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            output = io.StringIO()
-            with (
-                patch(
-                    "autosport.cli.ingestion_module.CommittedIngestionHealthError",
-                    _FutureCommittedIngestionHealthError,
-                    create=True,
-                ),
-                patch("autosport.cli.observe_workspace_once", side_effect=committed_error),
-                redirect_stdout(output),
-            ):
-                code = run_observe_table_tennis(
-                    Path(tmp),
-                    public_preview=True,
-                    max_items=10,
-                    show=10,
-                    provider_factory=factory,
-                )
+        code, payload = self._run_committed_error(committed_error)
 
         self.assertEqual(code, 4)
         self.assertEqual(
-            json.loads(output.getvalue()),
+            payload,
             {
                 "accepted": 7,
                 "cursor": "cursor-9",
-                "health_repair_required": True,
+                "delivery_error_accepted_count": None,
+                "delivery_error_failure_count": None,
+                "delivery_error_present": False,
+                "health_reconciliation_required": True,
                 "market_committed": True,
                 "observation": "COMMITTED_HEALTH_FAILURE",
                 "quality_flags": ["INVALID_QUOTE", "STALE_SOURCE"],
                 "received": 10,
                 "rejected": 3,
-                "source_health_persisted": False,
+                "source_health_persistence": "unknown",
                 "source_id": "fixture:cli-isolation",
                 "whole_poll_retry_safe": False,
             },
         )
+        self.assertNotIn("source_health_persisted", payload)
+        self.assertNotIn("health_repair_required", payload)
+
+    def test_committed_health_failure_preserves_simultaneous_delivery_evidence(self):
+        delivery_error = MarketEventDeliveryError(
+            "subscriber delivery failed after persistence",
+            [RuntimeError("subscriber-a"), ValueError("subscriber-b")],
+            [SimpleNamespace(event_id="a"), SimpleNamespace(event_id="b")],
+        )
+        committed_error = _FutureCommittedIngestionHealthError(
+            self._committed_outcome(accepted=2),
+            delivery_error=delivery_error,
+        )
+
+        code, payload = self._run_committed_error(committed_error)
+
+        self.assertEqual(code, 4)
+        self.assertTrue(payload["delivery_error_present"])
+        self.assertEqual(payload["delivery_error_accepted_count"], 2)
+        self.assertEqual(payload["delivery_error_failure_count"], 2)
+        self.assertEqual(payload["accepted"], 2)
+        self.assertEqual(payload["source_health_persistence"], "unknown")
+        self.assertTrue(payload["health_reconciliation_required"])
+        self.assertFalse(payload["whole_poll_retry_safe"])
 
     @unittest.skipUnless(
         hasattr(ingestion_module, "CommittedIngestionHealthError")
@@ -261,17 +297,75 @@ class CliObservationIsolationTests(unittest.TestCase):
             {
                 "accepted": 7,
                 "cursor": "cursor-9",
-                "health_repair_required": True,
+                "delivery_error_accepted_count": None,
+                "delivery_error_failure_count": None,
+                "delivery_error_present": False,
+                "health_reconciliation_required": True,
                 "market_committed": True,
                 "observation": "COMMITTED_HEALTH_FAILURE",
                 "quality_flags": ["INVALID_QUOTE", "STALE_SOURCE"],
                 "received": 10,
                 "rejected": 3,
-                "source_health_persisted": False,
+                "source_health_persistence": "unknown",
                 "source_id": "fixture:cli-isolation",
                 "whole_poll_retry_safe": False,
             },
         )
+
+    @unittest.skipUnless(
+        hasattr(ingestion_module, "CommittedIngestionHealthError")
+        and hasattr(ingestion_module, "CommittedIngestionOutcome"),
+        "requires integrated committed-ingestion health contract",
+    )
+    def test_integrated_committed_health_error_preserves_delivery_evidence(self):
+        def factory(api_key, *, public_preview):
+            self.assertIsNone(api_key)
+            self.assertTrue(public_preview)
+            return self._provider()
+
+        outcome_type = ingestion_module.CommittedIngestionOutcome
+        error_type = ingestion_module.CommittedIngestionHealthError
+        outcome = outcome_type(
+            source_id="fixture:cli-isolation",
+            now="2026-09-15T12:00:00+00:00",
+            received=2,
+            accepted=2,
+            rejected=0,
+            elapsed_seconds=0.25,
+            cursor="cursor-9",
+            latest_source_ts="2026-09-15T11:59:59+00:00",
+            quality_flags=(),
+            health_before=None,
+        )
+        delivery_error = MarketEventDeliveryError(
+            "subscriber delivery failed after persistence",
+            [RuntimeError("subscriber")],
+            [SimpleNamespace(event_id="a"), SimpleNamespace(event_id="b")],
+        )
+        committed_error = error_type(outcome, delivery_error=delivery_error)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = io.StringIO()
+            with (
+                patch("autosport.cli.observe_workspace_once", side_effect=committed_error),
+                redirect_stdout(output),
+            ):
+                code = run_observe_table_tennis(
+                    Path(tmp),
+                    public_preview=True,
+                    max_items=10,
+                    show=10,
+                    provider_factory=factory,
+                )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 4)
+        self.assertTrue(payload["delivery_error_present"])
+        self.assertEqual(payload["delivery_error_accepted_count"], 2)
+        self.assertEqual(payload["delivery_error_failure_count"], 1)
+        self.assertEqual(payload["source_health_persistence"], "unknown")
+        self.assertTrue(payload["health_reconciliation_required"])
+        self.assertFalse(payload["whole_poll_retry_safe"])
 
     def test_committed_health_error_subclass_is_not_reclassified_as_exact_contract(self):
         class DerivedCommittedIngestionHealthError(_FutureCommittedIngestionHealthError):

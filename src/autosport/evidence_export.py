@@ -238,6 +238,7 @@ def _posix_directory_is_within(candidate_descriptor: int, ancestor_descriptor: i
             parent = os.open("..", _posix_directory_open_flags(), dir_fd=current)
             try:
                 if os.path.sameopenfile(current, parent):
+                    os.close(parent)
                     return False
             except BaseException:
                 os.close(parent)
@@ -271,7 +272,7 @@ def _atomic_write_json_at_directory(
 ) -> None:
     if destination_name in {"", ".", ".."} or Path(destination_name).name != destination_name:
         raise ValueError("evidence export destination must name one file")
-    if os.open not in os.supports_dir_fd or os.replace not in os.supports_dir_fd:
+    if os.open not in os.supports_dir_fd:
         raise OSError(
             errno.ENOTSUP,
             "platform lacks descriptor-relative atomic publication for evidence export",
@@ -307,12 +308,18 @@ def _atomic_write_json_at_directory(
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(
-            temporary_name,
-            destination_name,
-            src_dir_fd=parent_descriptor,
-            dst_dir_fd=parent_descriptor,
-        )
+        try:
+            os.replace(
+                temporary_name,
+                destination_name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+        except NotImplementedError as exc:
+            raise OSError(
+                errno.ENOTSUP,
+                "platform lacks descriptor-relative atomic replace for evidence export",
+            ) from exc
         temporary_exists = False
     finally:
         if descriptor is not None:

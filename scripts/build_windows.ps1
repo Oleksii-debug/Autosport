@@ -537,7 +537,7 @@ if ($restartRecoveryProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe rest
 python $sourceVerifier --bind-artifact $restartRecovery --bound-output $boundRestartRecoveryAudit --digest-output $restartRecoveryDigestPath
 if ($LASTEXITCODE -ne 0) { throw "Restart/recovery evidence binding exited $LASTEXITCODE" }
 $restartRecoverySha256 = (Get-Content -LiteralPath $restartRecoveryDigestPath -Raw).Trim()
-$restartRecoveryEvidence = Get-Content $boundRestartRecovery -Raw | ConvertFrom-Json
+$restartRecoveryEvidence = Get-Content $boundRestartRecoveryAudit -Raw | ConvertFrom-Json
 if ($restartRecoveryEvidence.status -ne 'PASS') { throw 'Packaged restart/recovery audit did not PASS' }
 if ($restartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Packaged restart audit did not prove persistent session reopen' }
 if ($restartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Packaged recovery audit did not prove transaction recovery' }

@@ -491,7 +491,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         workflow = Path(".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         exact_ref = "ref: ${{ github.event.pull_request.head.sha || github.sha }}"
         preflight = "python scripts/verify_source_checkout.py --source-sha $env:AUTOSPORT_SOURCE_SHA"
-        build_command = "& ./scripts/build_windows.ps1"
+        build_command = "& ./scripts/build_windows.ps1 2>&1 | ForEach-Object {"
         self.assertIn(exact_ref, workflow)
         self.assertIn("fetch-depth: 0", workflow)
         self.assertIn(preflight, workflow)
@@ -503,12 +503,25 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         nvda_smoke = Path("scripts/nvda_evidence_package_smoke.ps1").read_text(encoding="utf-8")
         walk_forward = Path("scripts/walk_forward_package_smoke.ps1").read_text(encoding="utf-8")
         forecast_origin = Path("scripts/walk_forward_origin_package_smoke.ps1").read_text(encoding="utf-8")
+        consumer_bind = "python scripts/verify_source_checkout.py --bind-artifact $package --bound-output $consumerPackage --digest-output $consumerDigestPath"
+        consumer_digest = "$packageSha = (Get-Content -LiteralPath $consumerDigestPath -Raw).Trim()"
+        consumer_verify = "Assert-ProducerPackageDigest -Path $consumerPackage -Expected $producerPackageSha -Label 'Consumer-bound release ZIP snapshot'"
+        consumer_extract = "Expand-Archive -LiteralPath $consumerPackage -DestinationPath $postPackageExtractRoot -Force"
+        live_extract = "Expand-Archive -LiteralPath $package -DestinationPath $postPackageExtractRoot -Force"
 
         self.assertIn("name: Materialize verified independent package extraction", workflow)
         self.assertIn("AUTOSPORT_PACKAGED_EXE=", workflow)
         self.assertIn("AUTOSPORT_PACKAGED_DATA_EXE=", workflow)
         self.assertIn("Independent package Autosport.exe hash mismatch", workflow)
         self.assertIn("Independent package Autosport-Data.exe hash mismatch", workflow)
+        self.assertIn(consumer_bind, workflow)
+        self.assertIn(consumer_digest, workflow)
+        self.assertIn(consumer_verify, workflow)
+        self.assertIn(consumer_extract, workflow)
+        self.assertNotIn(live_extract, workflow)
+        self.assertLess(workflow.index(consumer_bind), workflow.index(consumer_digest))
+        self.assertLess(workflow.index(consumer_digest), workflow.index(consumer_verify))
+        self.assertLess(workflow.index(consumer_verify), workflow.index(consumer_extract))
         self.assertNotIn("Join-Path $PWD 'dist/Autosport-Data.exe'", workflow)
         self.assertNotIn("Join-Path $PWD 'dist/Autosport.exe'", workflow)
 

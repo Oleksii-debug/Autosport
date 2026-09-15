@@ -78,6 +78,24 @@ jobs:
           $producerPackageSha = [string]$env:AUTOSPORT_PRODUCER_PACKAGE_SHA256
           if ($producerPackageSha -notmatch '^[0-9a-f]{64}$') { throw 'Independent package extraction is missing canonical producer-bound package SHA-256' }
 
+          # Capture the producer package through the canonical artifact binder before
+          # any downstream consumer reopens ZIP bytes. The binder proves that the
+          # source object stays the same regular file for the full capture and
+          # atomically publishes a private snapshot outside the mutable checkout.
+          $consumerSnapshotRoot = Join-Path $env:RUNNER_TEMP "autosport-consumer-bound-$($env:AUTOSPORT_SOURCE_SHA)"
+          $consumerPackage = Join-Path $consumerSnapshotRoot 'Autosport-V1-windows-x64.zip'
+          $consumerDigestPath = Join-Path $consumerSnapshotRoot 'Autosport-V1-windows-x64.sha256'
+          if (Test-Path $consumerSnapshotRoot) { Remove-Item -LiteralPath $consumerSnapshotRoot -Recurse -Force }
+          New-Item -ItemType Directory -Path $consumerSnapshotRoot | Out-Null
+          python scripts/verify_source_checkout.py --bind-artifact $package --bound-output $consumerPackage --digest-output $consumerDigestPath
+          if ($LASTEXITCODE -ne 0) { throw "Consumer-bound release ZIP capture exited $LASTEXITCODE" }
+          if (-not (Test-Path $consumerDigestPath -PathType Leaf)) { throw 'Consumer-bound release ZIP capture did not publish a digest' }
+          $packageSha = (Get-Content -LiteralPath $consumerDigestPath -Raw).Trim()
+          if ($packageSha -ne $producerPackageSha) {
+            throw "Consumer-bound release ZIP SHA-256 mismatch: expected producer $producerPackageSha, got $packageSha"
+          }
+          [void](Assert-ProducerPackageDigest -Path $consumerPackage -Expected $producerPackageSha -Label 'Consumer-bound release ZIP snapshot')
+
           # Adversarial regression: a coordinated replacement can make a mutable ZIP
           # and mutable verification JSON agree with each other. It must still lose
           # against the earlier producer-bound digest before that JSON is trusted.
@@ -112,10 +130,9 @@ jobs:
             Remove-Item -LiteralPath $handoffProbeRoot -Recurse -Force -ErrorAction SilentlyContinue
           }
 
-          # This comparison is intentionally before the first read of the mutable
-          # verification JSON. The producer digest crossed the previous step in
-          # runner-managed environment state, so ZIP+JSON cannot redefine it here.
-          $packageSha = Assert-ProducerPackageDigest -Path $package -Expected $producerPackageSha -Label 'Release ZIP at producer-to-consumer handoff'
+          # Only the consumer-bound snapshot crosses the digest-proof -> extraction
+          # boundary. Replacing the live dist pathname after capture cannot change
+          # the bytes that drive companion package evidence.
           $verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
           if ($verification.status -ne 'PASS') { throw 'Canonical fresh extraction is not PASS before independent package extraction' }
           if ([string]$verification.source_sha -ne [string]$env:AUTOSPORT_SOURCE_SHA) { throw 'Canonical fresh extraction source_sha does not match exact workflow head' }
@@ -124,7 +141,7 @@ jobs:
           $postPackageExtractRoot = Join-Path $PWD '.build-post-package-extraction'
           if (Test-Path $postPackageExtractRoot) { Remove-Item -Recurse -Force $postPackageExtractRoot }
           New-Item -ItemType Directory -Path $postPackageExtractRoot | Out-Null
-          Expand-Archive -LiteralPath $package -DestinationPath $postPackageExtractRoot -Force
+          Expand-Archive -LiteralPath $consumerPackage -DestinationPath $postPackageExtractRoot -Force
           $postPackageRoot = Join-Path $postPackageExtractRoot 'Autosport-V1'
           $buildInfoPath = Join-Path $postPackageRoot 'BUILD_INFO.json'
           $packagedExe = Join-Path $postPackageRoot 'Autosport.exe'

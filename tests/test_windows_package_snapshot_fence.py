@@ -126,6 +126,56 @@ def test_final_package_consumers_are_inside_private_snapshot_fence() -> None:
     assert fence_index < build_index < bind_index < base_digest_index < exe_digest_index
 
 
+def test_bound_final_package_verification_ignores_post_capture_live_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_windows = _load_package_windows()
+    package = tmp_path / "candidate.zip"
+    producer_bytes = b"producer-bound-final-zip"
+    replacement_bytes = b"post-publication-replacement-zip"
+    package.write_bytes(producer_bytes)
+    producer_digest = hashlib.sha256(producer_bytes).hexdigest()
+    source_sha = "a" * 40
+    observed: dict[str, object] = {}
+
+    def adversarial_windows_verifier(
+        path: str | Path,
+        *,
+        expected_source_sha: str,
+    ) -> dict[str, object]:
+        assert expected_source_sha == source_sha
+        package.write_bytes(replacement_bytes)
+        observed["windows_path"] = Path(path)
+        observed["windows_bytes"] = Path(path).read_bytes()
+        return {"status": "PASS", "source_sha": expected_source_sha}
+
+    def data_verifier(path: str | Path) -> dict[str, object]:
+        observed["data_path"] = Path(path)
+        observed["data_bytes"] = Path(path).read_bytes()
+        return {"status": "PASS", "portable_historical_data_tools": True}
+
+    monkeypatch.setattr(
+        package_windows,
+        "verify_windows_package",
+        adversarial_windows_verifier,
+    )
+    monkeypatch.setattr(package_windows, "verify_portable_data_tool", data_verifier)
+
+    report = package_windows._verify_bound_final_package(
+        package,
+        producer_digest,
+        expected_source_sha=source_sha,
+    )
+
+    assert package.read_bytes() == replacement_bytes
+    assert observed["windows_bytes"] == producer_bytes
+    assert observed["data_bytes"] == producer_bytes
+    assert observed["windows_path"] == observed["data_path"]
+    assert observed["windows_path"] != package.absolute()
+    assert report["package_sha256"] == producer_digest
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows ACL/share-mode fence")
 def test_windows_snapshot_fence_blocks_post_capture_mutation_and_namespace_replace(
     tmp_path: Path,

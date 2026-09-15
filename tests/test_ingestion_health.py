@@ -163,6 +163,39 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(reopened.last_cursor, "cursor-1")
             store.close()
 
+    def test_normalization_rejection_degrades_source_health(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            invalid_quote = ProviderQuote(
+                provider_event_id="event-1",
+                provider_market_id="winner",
+                provider_selection_id="invalid-odds",
+                decimal_odds=Decimal("1.0"),
+                observed_ts="2026-09-12T12:00:00+00:00",
+                sequence=1,
+            )
+            provider = StaticProvider(
+                "source",
+                [ProviderBatch("source", (invalid_quote,), cursor="cursor-invalid")],
+            )
+
+            stats = engine.poll_once(provider, max_items=10)
+
+            self.assertEqual(stats.received, 1)
+            self.assertEqual(stats.accepted, 0)
+            self.assertEqual(stats.rejected, 1)
+            self.assertEqual(stats.quality_flags, ("INVALID_QUOTE",))
+            self.assertEqual(stats.health_status, "degraded")
+            self.assertEqual(len(store.events()), 0)
+            persisted = health.get("source")
+            self.assertEqual(persisted.status, "degraded")
+            self.assertEqual(persisted.total_received, 1)
+            self.assertEqual(persisted.total_accepted, 0)
+            self.assertEqual(persisted.total_rejected, 1)
+            self.assertEqual(persisted.quality_flags, ("INVALID_QUOTE",))
+            self.assertEqual(persisted.last_cursor, "cursor-invalid")
+            store.close()
+
     def test_stale_future_skew_and_invalid_source_time_are_truth_labeled(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, store, health = self._engine(tmp)

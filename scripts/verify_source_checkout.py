@@ -74,7 +74,7 @@ def _github_authoritative_source_sha() -> str | None:
     return _require_git_commit_sha(source_sha, field="authoritative_source_sha")
 
 
-def _require_pristine_checkout(repo_root: Path) -> None:
+def _ordinary_checkout_changes(repo_root: Path) -> list[str]:
     ordinary = _git_output(
         repo_root,
         "status",
@@ -82,6 +82,17 @@ def _require_pristine_checkout(repo_root: Path) -> None:
         "--untracked-files=all",
         allow_empty=True,
     )
+    return [line for line in ordinary.splitlines() if line.strip()]
+
+
+def _format_dirty_preview(dirty: list[str]) -> str:
+    preview = ", ".join(dirty[:8])
+    suffix = "" if len(dirty) <= 8 else f" (+{len(dirty) - 8} more)"
+    return f"{preview}{suffix}"
+
+
+def _require_pristine_checkout(repo_root: Path) -> None:
+    dirty = _ordinary_checkout_changes(repo_root)
     ignored = _git_output(
         repo_root,
         "ls-files",
@@ -90,19 +101,37 @@ def _require_pristine_checkout(repo_root: Path) -> None:
         "--exclude-standard",
         allow_empty=True,
     )
-    dirty = [line for line in ordinary.splitlines() if line.strip()]
     dirty.extend(f"ignored:{line}" for line in ignored.splitlines() if line.strip())
     if dirty:
-        preview = ", ".join(dirty[:8])
-        suffix = "" if len(dirty) <= 8 else f" (+{len(dirty) - 8} more)"
         raise ValueError(
             "release build checkout is not pristine before dependency install/PyInstaller: "
-            f"{preview}{suffix}"
+            f"{_format_dirty_preview(dirty)}"
         )
 
 
-def verify_source_checkout(source_sha: str, *, repo_root: Path) -> None:
-    """Prove the exact clean repository state that is about to enter the Windows build."""
+def _require_late_build_boundary_unchanged(repo_root: Path) -> None:
+    """Reject tracked/index or non-ignored untracked changes at the PyInstaller boundary.
+
+    Dependency installation, tests, and smoke execution legitimately create ignored cache/build
+    outputs. Those ignored outputs are deliberately excluded here, while staged/unstaged tracked
+    changes and non-ignored untracked files remain fail-closed.
+    """
+
+    dirty = _ordinary_checkout_changes(repo_root)
+    if dirty:
+        raise ValueError(
+            "release build source changed after initial preflight before PyInstaller: "
+            f"{_format_dirty_preview(dirty)}"
+        )
+
+
+def verify_source_checkout(
+    source_sha: str,
+    *,
+    repo_root: Path,
+    late_build_boundary: bool = False,
+) -> None:
+    """Prove the exact repository state that is about to enter the Windows build."""
 
     _require_git_commit_sha(source_sha, field="source_sha")
     authoritative_sha = _github_authoritative_source_sha()
@@ -114,15 +143,30 @@ def verify_source_checkout(source_sha: str, *, repo_root: Path) -> None:
     if checkout_sha != source_sha:
         raise ValueError("checked-out HEAD does not match the exact build source_sha")
 
-    _require_pristine_checkout(repo_root)
+    if late_build_boundary:
+        _require_late_build_boundary_unchanged(repo_root)
+    else:
+        _require_pristine_checkout(repo_root)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-sha", required=True)
+    parser.add_argument(
+        "--late-build-boundary",
+        action="store_true",
+        help="re-prove exact HEAD and reject post-preflight source changes before PyInstaller",
+    )
     args = parser.parse_args()
-    verify_source_checkout(args.source_sha, repo_root=Path.cwd())
-    print("SOURCE_CHECKOUT_PREFLIGHT=PASS")
+    verify_source_checkout(
+        args.source_sha,
+        repo_root=Path.cwd(),
+        late_build_boundary=args.late_build_boundary,
+    )
+    if args.late_build_boundary:
+        print("SOURCE_CHECKOUT_LATE_BOUNDARY=PASS")
+    else:
+        print("SOURCE_CHECKOUT_PREFLIGHT=PASS")
     return 0
 
 

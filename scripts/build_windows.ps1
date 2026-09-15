@@ -512,7 +512,7 @@ if ([string]::IsNullOrWhiteSpace($currentSid) -or $currentSid -notmatch '^S-') {
 $trustedBuildProtected = $false
 $trustedBuildReadLocks = [System.Collections.Generic.List[System.IO.FileStream]]::new()
 try {
-  & icacls $trustedBuildRoot /deny "*${currentSid}:(OI)(CI)(W,D,DC)" /T /C | Out-Null
+  & icacls $trustedBuildRoot /deny "*${currentSid}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)" /T /C | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Trusted build source write fence exited $LASTEXITCODE" }
   $trustedBuildProtected = $true
 
@@ -713,6 +713,29 @@ $walkForwardBundle = [ordered]@{
     [ordered]@{
       window_id = 'holdout-2'
       training_end_ts = '2026-02-28T23:59:59+00:00'
+      evaluation_start_ts = '2026-03-01T12:00:00+00:00'
+      generated_at = '2026-03-01T12:00:00+00:00'
+      uncertainty = '0.20'
+      evidence_hashes = @()
+      market_snapshot_hash = ('b' * 64)
+      provenance = [ordered]@{ source = 'packaged-smoke-fixture' }
+    }
+  )
+  outcomes = @(
+    [ordered]@{ forecast_id = 'f-1'; outcome = 1; revealed_at = '2026-02-02T12:00:00+00:00' },
+    [ordered]@{ forecast_id = 'f-2'; outcome = 0; revealed_at = '2026-03-02T12:00:00+00:00' }
+  )
+  windows = @(
+    [ordered]@{
+      window_id = 'holdout-1'
+      training_end_ts = '2026-01-31T23:59:59+00:00'
+      evaluation_start_ts = '2026-02-01T00:00:00+00:00'
+      evaluation_end_ts = '2026-02-28T23:59:59+00:00'
+      split = 'holdout'
+    },
+    [ordered]@{
+      window_id = 'holdout-2'
+      training_end_ts = '2026-02-28T23:59:59+00:00'
       evaluation_start_ts = '2026-03-01T00:00:00+00:00'
       evaluation_end_ts = '2026-03-31T23:59:59+00:00'
       split = 'holdout'
@@ -751,9 +774,6 @@ if ($LASTEXITCODE -ne 0) { throw "Bound keyboard evidence verification exited $L
 python $sourceVerifier --verify-artifact $boundRestartRecoveryAudit --expected-sha256 $restartRecoverySha256
 if ($LASTEXITCODE -ne 0) { throw "Bound restart/recovery evidence verification exited $LASTEXITCODE" }
 
-# Derive the three package-consumer identities from exact Git objects before the
-# archive is materialized. The isolated package launcher later hashes the bytes
-# it compiles/executes against this immutable in-memory oracle.
 $trustedPackagePathsJson = ConvertTo-Json -Compress -InputObject @(
   'scripts/package_windows.py',
   'src/autosport/release_package.py',
@@ -764,9 +784,6 @@ if ($LASTEXITCODE -ne 0) { throw "Exact package source Git oracle exited $LASTEX
 if ($trustedPackageManifestLines.Count -ne 1) { throw 'Exact package source Git oracle did not emit one canonical manifest' }
 $trustedPackageManifestJson = [string]$trustedPackageManifestLines[0]
 
-# Execute the final package consumer only from exact source_sha bytes. The live
-# checkout paths can still mutate after the source gate, but those bytes are never
-# imported or executed by the package assembly process.
 $trustedPackageArchive = Join-Path $boundArtifactRoot 'trusted-package-source.zip'
 $trustedPackageRoot = Join-Path $boundArtifactRoot 'trusted-package-source'
 & $gitExecutable archive --format=zip "--output=$trustedPackageArchive" $sourceSha -- scripts/package_windows.py src/autosport/release_package.py src/autosport/data_tool_package.py
@@ -799,9 +816,6 @@ python scripts/package_windows.py `
   --verification-output $packageVerification
 if ($LASTEXITCODE -ne 0) { throw "Windows package assembly exited $LASTEXITCODE" }
 
-# Binding release gate: verify the artifact after a clean extraction, not only the
-# pre-package executables. This catches archive/path/packaging defects that a
-# successful dist smoke test cannot prove away.
 $extractRoot = Join-Path $PWD '.build-fresh-extraction'
 if (Test-Path $extractRoot) { Remove-Item -Recurse -Force $extractRoot }
 New-Item -ItemType Directory -Path $extractRoot | Out-Null

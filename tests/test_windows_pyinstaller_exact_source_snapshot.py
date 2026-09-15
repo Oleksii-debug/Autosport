@@ -60,7 +60,7 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
         "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "
         "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
     )
-    guarded_call = "& $pythonExecutable -I $trustedPyInstallerBinder `"
+    guarded_call = "& $packagingPython -I $trustedPyInstallerBinder `"
     gui_bound_source = "$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'"
     data_bound_source = "$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'"
 

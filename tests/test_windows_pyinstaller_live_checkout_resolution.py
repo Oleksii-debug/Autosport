@@ -34,7 +34,7 @@ def _write_package(root: Path, *, marker: str) -> Path:
 def test_windows_release_invokes_both_pyinstaller_analyses_from_trusted_snapshot_path() -> None:
     script = _BUILD_SCRIPT.read_text(encoding="utf-8")
 
-    guarded_call = "& $pythonExecutable -I $trustedPyInstallerBinder `"
+    guarded_call = "& $packagingPython -I $trustedPyInstallerBinder `"
     trusted_path = "--paths $trustedBuildSrc `"
 
     assert script.count(guarded_call) == 2

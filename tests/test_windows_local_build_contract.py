@@ -9,7 +9,7 @@ def _build_script_text() -> str:
 
 
 def _guarded_pyinstaller_indices(script: str) -> tuple[int, int]:
-    guarded_call = "& $pythonExecutable -I $trustedPyInstallerBinder `"
+    guarded_call = "& $packagingPython -I $trustedPyInstallerBinder `"
     gui_start = script.index("$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'")
     gui_index = script.index(guarded_call, gui_start)
     data_start = script.index("$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'", gui_index)
@@ -149,7 +149,7 @@ def test_local_windows_build_binds_pyinstaller_outputs_before_consumption() -> N
 
     assert first_build_index < script.index(first_bind, first_build_index) < script.index(first_digest, first_build_index)
     assert second_build_index < script.index(second_bind, second_build_index) < script.index(second_digest, second_build_index)
-    assert script.count("& $pythonExecutable -I $trustedPyInstallerBinder `") == 2
+    assert script.count("& $packagingPython -I $trustedPyInstallerBinder `") == 2
     assert script.count("--verifier-sha256 $sourceVerifierSha256 `") == 2
     assert "Start-Process -FilePath $boundAutosportExe" in script
     assert "$dataExe = $boundDataExe" in script

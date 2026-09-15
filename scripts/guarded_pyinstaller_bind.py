@@ -18,7 +18,6 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _GENERIC_READ = 0x80000000
 _GENERIC_WRITE = 0x40000000
 _FILE_SHARE_READ = 0x00000001
-_FILE_SHARE_WRITE = 0x00000002
 _CREATE_ALWAYS = 2
 _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
@@ -162,7 +161,7 @@ def _copy_artifact_and_capture_identity(
     stream = _create_windows_stream(
         destination,
         desired_access=_GENERIC_READ | _GENERIC_WRITE,
-        share_mode=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        share_mode=_FILE_SHARE_READ,
         creation_disposition=_CREATE_ALWAYS,
         os_flags=os.O_RDWR,
         mode="w+b",
@@ -172,6 +171,16 @@ def _copy_artifact_and_capture_identity(
             shutil.copyfileobj(source, stream)
         stream.flush()
         os.fsync(stream.fileno())
+
+        if os.environ.get("AUTOSPORT_TEST_WRITE_PYINSTALLER_OUTPUT_BEFORE_IDENTITY") == "1":
+            with open(destination, "r+b") as competing_stream:
+                competing_stream.seek(0)
+                competing_stream.write(b"hostile same-object bytes")
+                competing_stream.flush()
+                os.fsync(competing_stream.fileno())
+            raise RuntimeError(
+                "producing PyInstaller handle allowed a concurrent write before identity capture"
+            )
 
         if os.environ.get("AUTOSPORT_TEST_REPLACE_PYINSTALLER_OUTPUT_BEFORE_IDENTITY") == "1":
             replacement = destination.with_name(

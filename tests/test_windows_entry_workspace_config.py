@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import types
 from pathlib import Path
@@ -20,6 +21,19 @@ def test_invalid_workspace_configuration_is_reported_before_gui_import(tmp_path:
 
     assert exit_code == 2
     show_error.assert_called_once_with(detail)
+
+
+def test_real_relative_workspace_override_is_rejected_before_gui_import() -> None:
+    with (
+        patch.dict(os.environ, {"AUTOSPORT_WORKSPACE": "relative-workspace"}, clear=False),
+        patch.object(windows_entry, "_show_workspace_configuration_error") as show_error,
+        patch.dict(sys.modules, {"autosport.windows_gui": None}),
+    ):
+        exit_code = windows_entry._run_interactive_gui()
+
+    assert exit_code == 2
+    show_error.assert_called_once()
+    assert "absolute path" in show_error.call_args.args[0]
 
 
 def test_valid_workspace_configuration_delegates_to_gui(tmp_path: Path) -> None:

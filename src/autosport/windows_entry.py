@@ -33,12 +33,18 @@ def _show_workspace_configuration_error(detail: str) -> None:
 
 def _run_interactive_gui() -> int:
     # Validate durable workspace identity before importing/constructing the GUI.
-    # `default_workspace()` owns the path contract; this boundary only turns its
-    # explicit configuration rejection into deterministic packaged feedback.
+    # `default_workspace()` remains the canonical path resolver. This packaged
+    # boundary also requires its resolved result to be absolute so the current
+    # main path implementation cannot silently make durable identity depend on CWD.
     from autosport.paths import default_workspace
 
     try:
-        default_workspace()
+        workspace = default_workspace()
+        if not workspace.is_absolute():
+            raise ValueError(
+                "Resolved Autosport workspace must be an absolute path; "
+                "configure an absolute AUTOSPORT_WORKSPACE or LOCALAPPDATA value"
+            )
     except ValueError as exc:
         _show_workspace_configuration_error(str(exc))
         return 2

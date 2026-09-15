@@ -228,6 +228,45 @@ class ResearchPipelineInputIntegrityTests(unittest.TestCase):
             self.assertEqual(book.tickets, {})
             self.assertFalse(ledger.path.exists())
 
+    def test_pipeline_rejects_hostile_str_subclass_before_approved_economic_path(self):
+        class HostileString(str):
+            strip_calls = 0
+            encode_calls = 0
+
+            def strip(self, chars=None):
+                type(self).strip_calls += 1
+                return self
+
+            def encode(self, encoding="utf-8", errors="strict"):
+                type(self).encode_calls += 1
+                return b"benign"
+
+        pipeline = ResearchDecisionPipeline()
+        book = PaperBook("100")
+        candidate, groups, forecasts, evidence = self._approved_inputs()
+        hostile_run_id = HostileString("\ud800")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = JsonlDecisionLedger(Path(tmp) / "decisions.jsonl")
+            with self.assertRaisesRegex(ValueError, "replay_run_id"):
+                pipeline.decide_and_open(
+                    book=book,
+                    candidate=candidate,
+                    groups=groups,
+                    forecasts=forecasts,
+                    evidence=evidence,
+                    stake="10",
+                    decision_ts="2026-09-14T10:00:03+00:00",
+                    decision_ledger=ledger,
+                    replay_run_id=hostile_run_id,
+                )
+
+            self.assertEqual(HostileString.strip_calls, 0)
+            self.assertEqual(HostileString.encode_calls, 0)
+            self.assertEqual(book.balance, Decimal("100"))
+            self.assertEqual(book.tickets, {})
+            self.assertFalse(ledger.path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

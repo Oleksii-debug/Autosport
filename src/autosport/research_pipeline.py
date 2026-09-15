@@ -44,7 +44,7 @@ def _validate_canonical_string(
     canonical_error: str | None = None,
 ) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or not value
         or not value.strip()
         or value != value.strip()

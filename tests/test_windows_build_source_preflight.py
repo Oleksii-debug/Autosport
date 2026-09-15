@@ -24,6 +24,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
 
     @staticmethod
     def _without_github_event_environment():
+        # Keep PATH/SystemRoot intact so Windows can still resolve git.exe.
         return patch.dict(
             os.environ,
             {

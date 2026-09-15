@@ -57,7 +57,7 @@ def test_windows_sentinel_barrier_rejects_change_before_linearization(
     watch_type = evidence_snapshot_lock._WindowsWorkspaceChangeWatch
     real_create = watch_type._create_linearization_sentinel
 
-    def create_after_external_change(self: object) -> Path:
+    def create_after_external_change(self: object) -> tuple[Path, int]:
         injected.write_bytes(b"outside-change")
         return real_create(self)  # type: ignore[arg-type]
 
@@ -75,6 +75,51 @@ def test_windows_sentinel_barrier_rejects_change_before_linearization(
 
     assert injected.read_bytes() == b"outside-change"
     assert not output.exists()
+    assert not list(workspace.glob("*.asv"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows V1 sentinel snapshot boundary")
+def test_windows_sentinel_marker_cannot_be_replaced_before_object_bound_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "paper_book.json").write_bytes(b"paper-state")
+    output = tmp_path / "manifest.json"
+    replacement = workspace / "replacement.tmp"
+    replacement.write_bytes(b"replacement-must-survive")
+
+    watch_type = evidence_snapshot_lock._WindowsWorkspaceChangeWatch
+    real_require = watch_type._require_only_sentinel_notifications
+    replacement_attempted = False
+
+    def require_then_attempt_replacement(
+        records: tuple[tuple[int, str], ...],
+        sentinel_name: str,
+    ) -> None:
+        nonlocal replacement_attempted
+        real_require(records, sentinel_name)
+        sentinel = workspace / sentinel_name
+
+        with pytest.raises(OSError):
+            os.replace(replacement, sentinel)
+
+        replacement_attempted = True
+        assert sentinel.exists()
+        assert replacement.read_bytes() == b"replacement-must-survive"
+
+    monkeypatch.setattr(
+        watch_type,
+        "_require_only_sentinel_notifications",
+        staticmethod(require_then_attempt_replacement),
+    )
+
+    evidence_export.export_evidence_manifest(workspace, output)
+
+    assert replacement_attempted is True
+    assert output.exists()
+    assert replacement.read_bytes() == b"replacement-must-survive"
     assert not list(workspace.glob("*.asv"))
 
 

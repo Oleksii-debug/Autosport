@@ -43,6 +43,19 @@ def test_local_windows_build_proves_pristine_source_before_mutation() -> None:
     assert 'if ($LASTEXITCODE -ne 0) { throw "Source checkout preflight exited $LASTEXITCODE" }' in script
 
 
+def test_local_windows_build_scalarizes_application_resolution() -> None:
+    script = _build_script_text()
+
+    assert "(Get-Command git -CommandType Application -ErrorAction Stop).Source" not in script
+    assert "(Get-Command python -CommandType Application -ErrorAction Stop).Source" not in script
+    assert "$gitCommands = @(Get-Command git -CommandType Application -ErrorAction Stop)" in script
+    assert "$gitExecutable = [string]$gitCommands[0].Source" in script
+    assert "$pythonCommands = @(Get-Command python -CommandType Application -ErrorAction Stop)" in script
+    assert "$pythonExecutable = [string]$pythonCommands[0].Source" in script
+    assert "Resolved Git application has an empty source path" in script
+    assert "Resolved Python application has an empty source path" in script
+
+
 def test_local_windows_build_runs_canonical_full_pytest_gate() -> None:
     script = _build_script_text()
 

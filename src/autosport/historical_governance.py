@@ -7,6 +7,7 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal, DecimalException
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -56,11 +57,45 @@ def _read_bytes(path: Path, *, context: str) -> bytes:
         raise ValueError(f"{context} is not readable: {path}") from exc
 
 
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
+def _parse_exact_json_float(value: str) -> Decimal:
+    try:
+        parsed = Decimal(value)
+    except DecimalException as exc:
+        raise ValueError(f"invalid JSON number: {value}") from exc
+    if not parsed.is_finite():
+        raise ValueError(f"non-finite JSON number: {value}")
+    return parsed
+
+
 def _object_bytes(payload: bytes, *, context: str, path: Path) -> dict[str, Any]:
     try:
-        raw = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise ValueError(f"{context} is not readable valid JSON: {path}") from exc
+    try:
+        raw = json.loads(
+            text,
+            object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_nonfinite_json,
+            parse_float=_parse_exact_json_float,
+        )
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{context} is not readable valid JSON: {path}") from exc
+    except ValueError as exc:
+        raise ValueError(f"{context} contains invalid JSON semantics: {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"{context} must be a JSON object")
     return raw
@@ -125,6 +160,16 @@ def _normalized_source_ids(raw: Any, *, context: str) -> tuple[str, ...]:
     return values
 
 
+def _bound_values_equal(proof_value: Any, authority_value: Any) -> bool:
+    """Compare decoded JSON claims without Python bool/number coercion."""
+
+    proof_is_bool = type(proof_value) is bool
+    authority_is_bool = type(authority_value) is bool
+    if proof_is_bool or authority_is_bool:
+        return proof_is_bool and authority_is_bool and proof_value is authority_value
+    return proof_value == authority_value
+
+
 def verify_governance_authority_binding(
     governance_proof_path: str | Path,
 ) -> GovernanceAuthorityBinding:
@@ -140,7 +185,7 @@ def verify_governance_authority_binding(
     proof_bytes = _read_bytes(proof_path, context="governance proof")
     proof = _object_bytes(proof_bytes, context="governance proof", path=proof_path)
     proof_sha256 = _sha256_bytes(proof_bytes)
-    if int(proof.get("schema_version", 0)) != 1:
+    if type(proof.get("schema_version")) is not int or proof["schema_version"] != 1:
         raise ValueError("governance proof schema_version must be 1")
     if proof.get("kind") != _GOVERNANCE_PROOF_KIND:
         raise ValueError(f"governance proof kind must be {_GOVERNANCE_PROOF_KIND}")
@@ -174,7 +219,7 @@ def verify_governance_authority_binding(
         context="governance authority record",
         path=authority_path,
     )
-    if int(authority.get("schema_version", 0)) != 1:
+    if type(authority.get("schema_version")) is not int or authority["schema_version"] != 1:
         raise ValueError("governance authority record schema_version must be 1")
     if authority.get("kind") != _AUTHORITY_RECORD_KIND:
         raise ValueError(f"governance authority record kind must be {_AUTHORITY_RECORD_KIND}")
@@ -198,7 +243,10 @@ def verify_governance_authority_binding(
             raise ValueError(
                 f"governance proof.{bound_field} presence does not match authority evidence artifact"
             )
-        if bound_field in proof and proof[bound_field] != authority[bound_field]:
+        if bound_field in proof and not _bound_values_equal(
+            proof[bound_field],
+            authority[bound_field],
+        ):
             raise ValueError(
                 f"governance proof.{bound_field} does not match authority evidence artifact"
             )

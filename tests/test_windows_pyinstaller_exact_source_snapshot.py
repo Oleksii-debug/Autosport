@@ -60,16 +60,7 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
         "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "
         "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
     )
-    gui_build = (
-        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
-        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
-    )
-    data_build = (
-        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
-        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
-        "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
-    )
+    guarded_call = "& $pythonExecutable -I $trustedPyInstallerBinder `"
     gui_bound_source = "$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'"
     data_bound_source = "$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'"
 
@@ -79,19 +70,19 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
     fence_index = script.index(write_fence, expand_index)
     lock_index = script.index(read_lock_open, fence_index)
     verify_index = script.index(snapshot_verify, lock_index)
-    gui_index = script.index(gui_build, verify_index)
+    gui_bound_index = script.index(gui_bound_source, verify_index)
+    gui_index = script.index(guarded_call, gui_bound_index)
     first_post_verify = script.index(snapshot_verify, gui_index)
     second_gate_index = script.index(
         trusted_gate + " --allow-release-outputs",
         first_post_verify,
     )
     second_pre_verify = script.index(snapshot_verify, second_gate_index)
-    data_index = script.index(data_build, second_pre_verify)
+    data_bound_index = script.index(data_bound_source, second_pre_verify)
+    data_index = script.index(guarded_call, data_bound_index)
     second_post_verify = script.index(snapshot_verify, data_index)
     dispose_index = script.index(read_lock_dispose, second_post_verify)
     unfence_index = script.index(remove_write_fence, dispose_index)
-    gui_bound_index = script.index(gui_bound_source, gui_index)
-    data_bound_index = script.index(data_bound_source, data_index)
 
     assert (
         gate_index
@@ -100,13 +91,13 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
         < fence_index
         < lock_index
         < verify_index
-        < gui_index
         < gui_bound_index
+        < gui_index
         < first_post_verify
         < second_gate_index
         < second_pre_verify
-        < data_index
         < data_bound_index
+        < data_index
         < second_post_verify
         < dispose_index
         < unfence_index
@@ -125,7 +116,9 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
 
     post_gate = script[gate_index:]
     assert "python -m PyInstaller" not in post_gate
-    assert post_gate.count("& $pythonExecutable -I -m PyInstaller") == 2
+    assert "& $pythonExecutable -I -m PyInstaller" not in post_gate
+    assert post_gate.count(guarded_call) == 2
+    assert post_gate.count("--verifier-sha256 $sourceVerifierSha256 `") == 2
 
 
 def test_snapshot_verifier_rejects_added_membership_after_materialization(tmp_path: Path) -> None:

@@ -1,9 +1,11 @@
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
 from autosport.release_package import build_windows_package, verify_windows_package
@@ -203,6 +205,32 @@ class PortableDataToolPackageTests(unittest.TestCase):
                 package, data_exe = self._build_base(local, "b" * 40)
                 hashes.append(self._bind(package, data_exe)["package_sha256"])
             self.assertEqual(hashes[0], hashes[1])
+
+    def test_binding_digest_cannot_rebind_to_post_publish_path_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_sha = "6" * 40
+
+            reference_package, reference_data_exe = self._build_base(root / "reference", source_sha)
+            expected_digest = self._bind(reference_package, reference_data_exe)["package_sha256"]
+
+            package, data_exe = self._build_base(root / "subject", source_sha)
+            expected = self._binding_kwargs(package)
+            replacement_bytes = b"post-publication-package-replacement"
+            real_replace = os.replace
+
+            def replace_then_tamper(source: str | Path, destination: str | Path) -> None:
+                real_replace(source, destination)
+                if Path(destination) == package:
+                    package.write_bytes(replacement_bytes)
+
+            with patch("autosport.data_tool_package.os.replace", side_effect=replace_then_tamper):
+                binding = bind_portable_data_tool(package, data_exe, **expected)
+
+            replacement_digest = hashlib.sha256(replacement_bytes).hexdigest()
+            self.assertEqual(binding["package_sha256"], expected_digest)
+            self.assertEqual(package.read_bytes(), replacement_bytes)
+            self.assertNotEqual(binding["package_sha256"], replacement_digest)
 
     def test_verifier_rejects_package_without_data_tool(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -312,7 +312,13 @@ def test_preopened_write_dac_handle_survives_deny_but_is_detected(tmp_path: Path
             close_handle(fresh)
             pytest.fail("OWNER RIGHTS deny did not block a fresh WRITE_DAC open")
 
-        with pytest.raises(RuntimeError, match="pre-existing competing mutation-capable handle"):
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "pre-existing competing mutation-capable handle"
+                "|live uninspectable mutation-capable handle"
+            ),
+        ):
             security._require_no_competing_mutation_handles(
                 trusted,
                 label="retained WRITE_DAC regression",

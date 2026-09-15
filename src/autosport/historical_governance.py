@@ -160,6 +160,16 @@ def _normalized_source_ids(raw: Any, *, context: str) -> tuple[str, ...]:
     return values
 
 
+def _bound_values_equal(proof_value: Any, authority_value: Any) -> bool:
+    """Compare decoded JSON claims without Python bool/number coercion."""
+
+    proof_is_bool = type(proof_value) is bool
+    authority_is_bool = type(authority_value) is bool
+    if proof_is_bool or authority_is_bool:
+        return proof_is_bool and authority_is_bool and proof_value is authority_value
+    return proof_value == authority_value
+
+
 def verify_governance_authority_binding(
     governance_proof_path: str | Path,
 ) -> GovernanceAuthorityBinding:
@@ -233,7 +243,10 @@ def verify_governance_authority_binding(
             raise ValueError(
                 f"governance proof.{bound_field} presence does not match authority evidence artifact"
             )
-        if bound_field in proof and proof[bound_field] != authority[bound_field]:
+        if bound_field in proof and not _bound_values_equal(
+            proof[bound_field],
+            authority[bound_field],
+        ):
             raise ValueError(
                 f"governance proof.{bound_field} does not match authority evidence artifact"
             )

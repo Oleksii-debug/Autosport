@@ -257,23 +257,64 @@ class WorkspaceEconomicLock:
         """Prove the opened handle is the current canonical single-link lock file."""
 
         try:
-            opened_stat = os.fstat(handle.fileno())
-            path_stat = os.stat(self.path, follow_symlinks=False)
+            opened_before = os.fstat(handle.fileno())
+            path_before = os.stat(self.path, follow_symlinks=False)
         except OSError as exc:
             raise WorkspaceEconomicLockError(
                 "workspace economic lock path changed during acquisition"
             ) from exc
-        self._require_regular_file(opened_stat)
-        self._require_regular_file(path_stat)
-        if not os.path.samestat(opened_stat, path_stat):
+        self._require_regular_file(opened_before)
+        self._require_regular_file(path_before)
+        self._require_single_link(opened_before)
+        self._require_single_link(path_before)
+
+        # On modern Windows/Python, pathname stat identity fields can be incomplete
+        # even when fstat() has a usable file identity. Never compare those two stat
+        # domains directly. A second read-only descriptor proves pathname -> handle
+        # identity with sameopenfile(), while pathname metadata and handle metadata
+        # are each checked only against snapshots from their own domain.
+        try:
+            with self.path.open("rb") as verification:
+                verification_before = os.fstat(verification.fileno())
+                same_file = os.path.sameopenfile(
+                    handle.fileno(),
+                    verification.fileno(),
+                )
+                path_after_open = os.stat(self.path, follow_symlinks=False)
+                opened_after = os.fstat(handle.fileno())
+                verification_after = os.fstat(verification.fileno())
+        except OSError as exc:
+            raise WorkspaceEconomicLockError(
+                "workspace economic lock path changed during acquisition"
+            ) from exc
+
+        for snapshot in (
+            verification_before,
+            path_after_open,
+            opened_after,
+            verification_after,
+        ):
+            self._require_regular_file(snapshot)
+            self._require_single_link(snapshot)
+
+        if (
+            not same_file
+            or not self._stable_metadata(path_before, path_after_open)
+            or not self._stable_metadata(opened_before, opened_after)
+            or not self._stable_metadata(verification_before, verification_after)
+        ):
             raise WorkspaceEconomicLockError(
                 "workspace economic lock path changed during acquisition"
             )
-        # Only after proving both stat snapshots identify the same inode can link
-        # count describe aliases of the canonical lock rather than an unlinked old
-        # handle from a pathname-replacement race.
-        self._require_single_link(opened_stat)
-        self._require_single_link(path_stat)
+
+    @staticmethod
+    def _stable_metadata(left: os.stat_result, right: os.stat_result) -> bool:
+        return (
+            left.st_mode == right.st_mode
+            and left.st_size == right.st_size
+            and left.st_mtime_ns == right.st_mtime_ns
+            and left.st_ctime_ns == right.st_ctime_ns
+        )
 
     @staticmethod
     def _require_regular_file(path_stat: os.stat_result) -> None:

@@ -474,8 +474,9 @@ $trustedBuildManifestJson = [string]$trustedBuildManifestLines[0]
 
 # Freeze every PyInstaller source/module input to exact source_sha bytes outside
 # the mutable checkout. The independent blob oracle is paired with an OS write
-# fence before the final verification, so proof and later source consumption are
-# one fail-closed interval instead of a verify-then-reopen race.
+# fence plus retained read handles before the final verification. Directory
+# membership and every manifest file therefore stay immutable across both
+# PyInstaller consumers, including against writers opened before the ACL fence.
 $trustedBuildArchive = Join-Path $boundArtifactRoot 'trusted-build-source.zip'
 $trustedBuildRoot = Join-Path $boundArtifactRoot 'trusted-build-source'
 & $gitExecutable archive --format=zip "--output=$trustedBuildArchive" $sourceSha
@@ -509,15 +510,40 @@ if ([string]::IsNullOrWhiteSpace($currentSid) -or $currentSid -notmatch '^S-') {
 }
 
 $trustedBuildProtected = $false
+$trustedBuildReadLocks = [System.Collections.Generic.List[System.IO.FileStream]]::new()
 try {
   & icacls $trustedBuildRoot /deny "*${currentSid}:(OI)(CI)(W,D,DC)" /T /C | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Trusted build source write fence exited $LASTEXITCODE" }
   $trustedBuildProtected = $true
 
-  # Verify only after the deny ACE is fully applied. Any replacement/addition that
-  # raced extraction or ACL propagation is therefore detected before consumption,
-  # while later same-user write/delete/create attempts remain denied through both
-  # PyInstaller consumers.
+  # A deny ACE cannot revoke a writer that already had the file open. Acquire
+  # read-only handles that share only reads for every exact-manifest file before
+  # final verification. Windows share-access compatibility makes any pre-existing
+  # writer/delete handle fail this acquisition closed, and the retained handles
+  # then prevent new writer/delete opens until both PyInstaller consumers finish.
+  $trustedBuildManifest = $trustedBuildManifestJson | ConvertFrom-Json
+  $trustedBuildManifestNames = @($trustedBuildManifest.PSObject.Properties.Name | Sort-Object)
+  if ($trustedBuildManifestNames.Count -eq 0) {
+    throw 'Exact build source manifest contains no files to lock'
+  }
+  foreach ($relativeSourcePath in $trustedBuildManifestNames) {
+    $trustedBuildLockPath = Join-Path $trustedBuildRoot ($relativeSourcePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+    try {
+      $lockStream = [System.IO.File]::Open(
+        $trustedBuildLockPath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+      )
+    } catch {
+      throw "Unable to acquire trusted build source read lock for ${relativeSourcePath}: $($_.Exception.Message)"
+    }
+    [void]$trustedBuildReadLocks.Add($lockStream)
+  }
+
+  # Verify only after the deny ACE and retained per-file handles are fully applied.
+  # Any replacement/addition that raced extraction or locking is detected before
+  # consumption; later same-user write/delete/create attempts remain denied.
   $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
   if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification before Autosport.exe exited $LASTEXITCODE" }
 
@@ -546,9 +572,15 @@ try {
   $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
   if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification after Autosport-Data.exe exited $LASTEXITCODE" }
 } finally {
-  if ($trustedBuildProtected) {
-    & icacls $trustedBuildRoot /remove:d "*${currentSid}" /T /C | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Trusted build source write-fence cleanup exited $LASTEXITCODE" }
+  try {
+    for ($lockIndex = $trustedBuildReadLocks.Count - 1; $lockIndex -ge 0; $lockIndex--) {
+      $trustedBuildReadLocks[$lockIndex].Dispose()
+    }
+  } finally {
+    if ($trustedBuildProtected) {
+      & icacls $trustedBuildRoot /remove:d "*${currentSid}" /T /C | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw "Trusted build source write-fence cleanup exited $LASTEXITCODE" }
+    }
   }
 }
 

@@ -48,6 +48,10 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
         "-DestinationPath $trustedBuildRoot -Force"
     )
     write_fence = '& icacls $trustedBuildRoot /deny "*${currentSid}:(OI)(CI)(W,D,DC)" /T /C'
+    read_lock_open = "$lockStream = [System.IO.File]::Open("
+    read_lock_share = "[System.IO.FileShare]::Read"
+    read_lock_add = "[void]$trustedBuildReadLocks.Add($lockStream)"
+    read_lock_dispose = "$trustedBuildReadLocks[$lockIndex].Dispose()"
     remove_write_fence = '& icacls $trustedBuildRoot /remove:d "*${currentSid}" /T /C'
     snapshot_verify = (
         "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "
@@ -70,7 +74,8 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
     archive_index = script.index(snapshot_archive)
     expand_index = script.index(snapshot_expand)
     fence_index = script.index(write_fence, expand_index)
-    verify_index = script.index(snapshot_verify, fence_index)
+    lock_index = script.index(read_lock_open, fence_index)
+    verify_index = script.index(snapshot_verify, lock_index)
     gui_index = script.index(gui_build, verify_index)
     first_post_verify = script.index(snapshot_verify, gui_index)
     second_gate_index = script.index(
@@ -80,7 +85,8 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
     second_pre_verify = script.index(snapshot_verify, second_gate_index)
     data_index = script.index(data_build, second_pre_verify)
     second_post_verify = script.index(snapshot_verify, data_index)
-    unfence_index = script.index(remove_write_fence, second_post_verify)
+    dispose_index = script.index(read_lock_dispose, second_post_verify)
+    unfence_index = script.index(remove_write_fence, dispose_index)
     gui_bound_index = script.index(gui_bound_source, gui_index)
     data_bound_index = script.index(data_bound_source, data_index)
 
@@ -89,6 +95,7 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
         < archive_index
         < expand_index
         < fence_index
+        < lock_index
         < verify_index
         < gui_index
         < gui_bound_index
@@ -98,12 +105,16 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
         < data_index
         < data_bound_index
         < second_post_verify
+        < dispose_index
         < unfence_index
     )
     assert script.count(snapshot_archive) == 1
     assert script.count(write_fence) == 1
     assert script.count(remove_write_fence) == 1
     assert script.count(snapshot_verify) >= 4
+    assert script.count(read_lock_open) == 1
+    assert read_lock_share in script
+    assert read_lock_add in script
     assert "pip install --no-deps --force-reinstall $trustedBuildRoot" not in script
     assert "$builtAutosportExe = Join-Path $trustedBuildRoot 'dist/Autosport.exe'" not in script
     assert "$builtDataExe = Join-Path $trustedBuildRoot 'dist/Autosport-Data.exe'" not in script
@@ -194,6 +205,94 @@ def test_windows_snapshot_write_fence_blocks_post_proof_replacement_and_addition
         with pytest.raises(PermissionError):
             os.replace(replacement, canonical)
     finally:
+        subprocess.run(
+            ["icacls", str(root), "/remove:d", principal, "/T", "/C"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows retained-handle sharing regression")
+def test_windows_snapshot_read_lock_fails_closed_on_preexisting_writer(tmp_path: Path) -> None:
+    root = tmp_path / "trusted-source"
+    root.mkdir()
+    canonical = root / "canonical.py"
+    canonical.write_bytes(b"VALUE = 'canonical'\n")
+
+    sid_result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    sid = sid_result.stdout.strip()
+    assert sid.startswith("S-")
+    principal = f"*{sid}"
+    lock_probe = r"""
+$path = $env:AUTOSPORT_LOCK_TEST_PATH
+try {
+  $stream = [System.IO.File]::Open(
+    $path,
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::Read
+  )
+  $stream.Dispose()
+  exit 0
+} catch [System.IO.IOException] {
+  exit 23
+} catch {
+  Write-Error $_
+  exit 24
+}
+"""
+    env = os.environ.copy()
+    env["AUTOSPORT_LOCK_TEST_PATH"] = str(canonical)
+    writer = canonical.open("r+b", buffering=0)
+    subprocess.run(
+        [
+            "icacls",
+            str(root),
+            "/deny",
+            f"{principal}:(OI)(CI)(W,D,DC)",
+            "/T",
+            "/C",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        writer.seek(0)
+        writer.write(b"VALUE = 'retained!'\n")
+        writer.flush()
+        os.fsync(writer.fileno())
+
+        blocked = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", lock_probe],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert blocked.returncode == 23, (blocked.stdout, blocked.stderr)
+
+        writer.close()
+        acquired = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", lock_probe],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert acquired.returncode == 0, (acquired.stdout, acquired.stderr)
+    finally:
+        if not writer.closed:
+            writer.close()
         subprocess.run(
             ["icacls", str(root), "/remove:d", principal, "/T", "/C"],
             check=True,

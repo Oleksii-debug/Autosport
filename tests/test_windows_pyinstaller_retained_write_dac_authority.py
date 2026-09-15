@@ -103,6 +103,10 @@ def test_security_authority_source_audits_preexisting_mutation_handles() -> None
     assert "directory=False" in source
     assert "trusted expected-snapshot parent security fence" in source
     assert "trusted expected-snapshot file security fence" in source
+    assert "guarded_pyinstaller_process_authority.py" in source
+    assert "ProcessDuplicationFence(_query_system_handles)" in source
+    assert source.count("process_fence.acquire(sid)") >= 2
+    assert source.count("release_process_fence_if_idle()") >= 5
 
 
 def test_mutation_handle_audit_rejects_cross_process_direct_writer(

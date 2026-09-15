@@ -88,9 +88,9 @@ def _github_authoritative_source_sha() -> str | None:
     return _require_git_commit_sha(source_sha, field="authoritative_source_sha")
 
 
-def _ordinary_checkout_changes(repo_root: Path) -> list[str]:
-    ordinary = _git_output(repo_root, "status", "--porcelain=v1", "--untracked-files=all", allow_empty=True)
-    return [line for line in ordinary.splitlines() if line.strip()]
+def _untracked_checkout_paths(repo_root: Path) -> list[str]:
+    untracked = _git_output(repo_root, "ls-files", "--others", "--exclude-standard", allow_empty=True)
+    return [line for line in untracked.splitlines() if line.strip()]
 
 
 def _ignored_checkout_paths(repo_root: Path) -> list[str]:
@@ -108,15 +108,9 @@ def _require_unmasked_index(repo_root: Path) -> None:
         )
 
 
-def _git_blob_sha1(data: bytes) -> str:
-    header = f"blob {len(data)}\0".encode("ascii")
-    return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
-
-
-def _require_raw_tracked_bytes_match_source(repo_root: Path, source_sha: str) -> None:
-    """Bind every tracked worktree byte to the exact commit without Git clean filters."""
+def _source_tree_entries(repo_root: Path, source_sha: str) -> dict[bytes, tuple[bytes, bytes]]:
     tree = _git_bytes(repo_root, "ls-tree", "-r", "-z", "--full-tree", source_sha)
-    mismatches: list[str] = []
+    entries: dict[bytes, tuple[bytes, bytes]] = {}
     for record in tree.split(b"\0"):
         if not record:
             continue
@@ -124,13 +118,56 @@ def _require_raw_tracked_bytes_match_source(repo_root: Path, source_sha: str) ->
             metadata, path_bytes = record.split(b"\t", 1)
             mode, object_type, object_sha = metadata.split(b" ", 2)
         except ValueError as exc:
-            raise ValueError("unable to parse exact source tree for raw tracked-byte proof") from exc
-
-        path = path_bytes.decode("utf-8", errors="surrogateescape")
+            raise ValueError("unable to parse exact source tree") from exc
         if object_type != b"blob":
-            mismatches.append(f"{path} (unsupported tracked type {object_type.decode('ascii', errors='replace')})")
-            continue
+            path = path_bytes.decode("utf-8", errors="surrogateescape")
+            raise ValueError(
+                "release build exact source contains unsupported tracked type: "
+                f"{path} ({object_type.decode('ascii', errors='replace')})"
+            )
+        entries[path_bytes] = (mode, object_sha)
+    return entries
 
+
+def _require_index_matches_source(repo_root: Path, source_sha: str) -> None:
+    expected = _source_tree_entries(repo_root, source_sha)
+    actual: dict[bytes, tuple[bytes, bytes]] = {}
+    invalid: list[str] = []
+    index = _git_bytes(repo_root, "ls-files", "--stage", "-z")
+    for record in index.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, path_bytes = record.split(b"\t", 1)
+            mode, object_sha, stage = metadata.split(b" ", 2)
+        except ValueError as exc:
+            raise ValueError("unable to parse release build index") from exc
+        path = path_bytes.decode("utf-8", errors="surrogateescape")
+        if stage != b"0":
+            invalid.append(f"{path} (stage {stage.decode('ascii', errors='replace')})")
+            continue
+        actual[path_bytes] = (mode, object_sha)
+
+    for path_bytes in sorted(expected.keys() | actual.keys()):
+        if expected.get(path_bytes) != actual.get(path_bytes):
+            invalid.append(path_bytes.decode("utf-8", errors="surrogateescape"))
+    if invalid:
+        raise ValueError(
+            "release build index does not match exact source_sha: "
+            f"{_format_dirty_preview(invalid)}"
+        )
+
+
+def _git_blob_sha1(data: bytes) -> str:
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
+
+
+def _require_raw_tracked_bytes_match_source(repo_root: Path, source_sha: str) -> None:
+    """Bind every tracked worktree byte to the exact commit without Git clean filters."""
+    mismatches: list[str] = []
+    for path_bytes, (_mode, object_sha) in _source_tree_entries(repo_root, source_sha).items():
+        path = path_bytes.decode("utf-8", errors="surrogateescape")
         target = repo_root.joinpath(*PurePosixPath(path).parts)
         try:
             if target.is_symlink():
@@ -208,14 +245,19 @@ def _format_dirty_preview(dirty: list[str]) -> str:
 
 def _require_pristine_checkout(repo_root: Path, source_sha: str) -> None:
     _require_unmasked_index(repo_root)
+    # Preserve the early raw-byte failure for ordinary tracked drift, then seal
+    # again after every Git metadata query. No content-filtering Git command is
+    # used inside this proof.
     _require_raw_tracked_bytes_match_source(repo_root, source_sha)
-    dirty = _ordinary_checkout_changes(repo_root)
+    _require_index_matches_source(repo_root, source_sha)
+    dirty = _untracked_checkout_paths(repo_root)
     dirty.extend(f"ignored:{line}" for line in _ignored_checkout_paths(repo_root))
     if dirty:
         raise ValueError(
             "release build checkout is not pristine before dependency install/PyInstaller: "
             f"{_format_dirty_preview(dirty)}"
         )
+    _require_raw_tracked_bytes_match_source(repo_root, source_sha)
 
 
 def _require_late_build_boundary_unchanged(
@@ -226,7 +268,8 @@ def _require_late_build_boundary_unchanged(
 ) -> None:
     _require_unmasked_index(repo_root)
     _require_raw_tracked_bytes_match_source(repo_root, source_sha)
-    dirty = _ordinary_checkout_changes(repo_root)
+    _require_index_matches_source(repo_root, source_sha)
+    dirty = _untracked_checkout_paths(repo_root)
     unexpected_ignored = [
         path for path in _ignored_checkout_paths(repo_root)
         if not _is_expected_late_generated_ignored_path(path, allow_release_outputs=allow_release_outputs)
@@ -237,6 +280,7 @@ def _require_late_build_boundary_unchanged(
             "release build source changed after initial preflight before source-consuming boundary: "
             f"{_format_dirty_preview(dirty)}"
         )
+    _require_raw_tracked_bytes_match_source(repo_root, source_sha)
 
 
 def verify_source_checkout(

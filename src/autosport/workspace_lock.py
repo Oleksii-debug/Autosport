@@ -282,8 +282,6 @@ class WorkspaceEconomicLock:
             ) from exc
         self._require_regular_file(opened_before)
         self._require_regular_file(path_before)
-        self._require_single_link(opened_before)
-        self._require_single_link(path_before)
 
         try:
             verification_descriptor = _open_read_only_descriptor(self.path)
@@ -310,9 +308,6 @@ class WorkspaceEconomicLock:
             self._require_regular_file(verification_stat)
             self._require_regular_file(opened_after)
             self._require_regular_file(path_after)
-            self._require_single_link(verification_stat)
-            self._require_single_link(opened_after)
-            self._require_single_link(path_after)
 
             if (
                 not same_open_file
@@ -322,6 +317,16 @@ class WorkspaceEconomicLock:
                 raise WorkspaceEconomicLockError(
                     "workspace economic lock path changed during acquisition"
                 )
+
+            # Link counts become alias evidence only after the verification handle has
+            # proved that the current pathname and the primary handle are the same file.
+            # Checking an already-unlinked old handle earlier would misclassify a path
+            # replacement race (st_nlink == 0) as a hard-link-alias failure.
+            self._require_single_link(opened_before)
+            self._require_single_link(path_before)
+            self._require_single_link(verification_stat)
+            self._require_single_link(opened_after)
+            self._require_single_link(path_after)
         except BaseException as exc:
             validation_error = exc
             raise

@@ -14,6 +14,7 @@ from ctypes import wintypes
 from typing import Any
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_EXPECTED_PYINSTALLER_VERSION = "6.22.3"
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _GENERIC_READ = 0x80000000
 _FILE_SHARE_READ = 0x00000001
@@ -59,6 +60,14 @@ def _stable_identity(value: os.stat_result) -> tuple[int, int, int, int]:
         int(value.st_size),
         int(value.st_mtime_ns),
     )
+
+
+def _require_expected_pyinstaller_version(actual: str) -> None:
+    if actual != _EXPECTED_PYINSTALLER_VERSION:
+        raise RuntimeError(
+            "guarded PyInstaller producer version mismatch: "
+            f"expected {_EXPECTED_PYINSTALLER_VERSION}, got {actual}"
+        )
 
 
 def _windows_attributes(path: pathlib.Path) -> int:
@@ -238,9 +247,12 @@ def run(argv: list[str] | None = None) -> int:
             f"expected {args.verifier_sha256}, got {verifier_actual}"
         )
 
+    import PyInstaller
     import PyInstaller.__main__
     import PyInstaller.building.api as building_api
     import PyInstaller.utils.misc as miscutils
+
+    _require_expected_pyinstaller_version(PyInstaller.__version__)
 
     original_mtime = miscutils.mtime
     original_assemble = building_api.EXE.assemble

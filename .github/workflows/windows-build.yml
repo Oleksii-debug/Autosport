@@ -35,22 +35,90 @@ jobs:
       - name: Verify exact pristine source checkout before build
         shell: pwsh
         run: python scripts/verify_source_checkout.py --source-sha $env:AUTOSPORT_SOURCE_SHA
-      - shell: pwsh
-        run: ./scripts/build_windows.ps1
+      - name: Build Windows candidate and retain producer-bound package digest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $producerPackageDigests = [System.Collections.Generic.List[string]]::new()
+          & ./scripts/build_windows.ps1 2>&1 | ForEach-Object {
+            $line = [string]$_
+            Write-Host $line
+            if ($line -match '^SHA256=([0-9a-f]{64})$') {
+              [void]$producerPackageDigests.Add($Matches[1])
+            }
+          }
+          if ($producerPackageDigests.Count -ne 1) {
+            throw "Windows build must emit exactly one producer-bound final package SHA-256; found $($producerPackageDigests.Count)"
+          }
+          $producerPackageSha = $producerPackageDigests[0]
+          "AUTOSPORT_PRODUCER_PACKAGE_SHA256=$producerPackageSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Materialize verified independent package extraction
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+
+          function Assert-ProducerPackageDigest {
+            param(
+              [Parameter(Mandatory=$true)][string]$Path,
+              [Parameter(Mandatory=$true)][string]$Expected,
+              [Parameter(Mandatory=$true)][string]$Label
+            )
+            if (-not (Test-Path $Path -PathType Leaf)) { throw "$Label is missing: $Path" }
+            if ($Expected -notmatch '^[0-9a-f]{64}$') { throw "$Label expected producer SHA-256 is not canonical" }
+            $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $Expected) { throw "$Label SHA-256 mismatch: expected producer $Expected, got $actual" }
+            return $actual
+          }
 
           $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
           $verificationPath = Join-Path $PWD 'dist/fresh-extraction-verification.json'
           if (-not (Test-Path $package -PathType Leaf)) { throw 'Independent package extraction is missing release ZIP' }
           if (-not (Test-Path $verificationPath -PathType Leaf)) { throw 'Independent package extraction is missing canonical fresh verification' }
 
+          $producerPackageSha = [string]$env:AUTOSPORT_PRODUCER_PACKAGE_SHA256
+          if ($producerPackageSha -notmatch '^[0-9a-f]{64}$') { throw 'Independent package extraction is missing canonical producer-bound package SHA-256' }
+
+          # Adversarial regression: a coordinated replacement can make a mutable ZIP
+          # and mutable verification JSON agree with each other. It must still lose
+          # against the earlier producer-bound digest before that JSON is trusted.
+          $handoffProbeRoot = Join-Path $env:RUNNER_TEMP 'autosport-producer-consumer-handoff-probe'
+          $probePackage = Join-Path $handoffProbeRoot 'Autosport-V1-windows-x64.zip'
+          $probeVerificationPath = Join-Path $handoffProbeRoot 'fresh-extraction-verification.json'
+          try {
+            if (Test-Path $handoffProbeRoot) { Remove-Item -LiteralPath $handoffProbeRoot -Recurse -Force }
+            New-Item -ItemType Directory -Path $handoffProbeRoot | Out-Null
+            [System.IO.File]::WriteAllText($probePackage, 'COORDINATED_REPLACEMENT_PACKAGE', [System.Text.Encoding]::UTF8)
+            $forgedPackageSha = (Get-FileHash -LiteralPath $probePackage -Algorithm SHA256).Hash.ToLowerInvariant()
+            $forgedVerification = [ordered]@{
+              status = 'PASS'
+              source_sha = $env:AUTOSPORT_SOURCE_SHA
+              package_sha256 = $forgedPackageSha
+              real_money_execution = $false
+              human_tested = $false
+              nvda_verified = $false
+            }
+            $forgedVerification | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $probeVerificationPath -Encoding utf8
+            $probeEvidence = Get-Content $probeVerificationPath -Raw | ConvertFrom-Json
+            if ([string]$probeEvidence.package_sha256 -ne $forgedPackageSha) { throw 'Coordinated replacement probe JSON did not self-consistently forge package digest' }
+
+            $probeRejected = $false
+            try {
+              [void](Assert-ProducerPackageDigest -Path $probePackage -Expected $producerPackageSha -Label 'Coordinated producer handoff replacement probe')
+            } catch {
+              $probeRejected = $true
+            }
+            if (-not $probeRejected) { throw 'Producer-bound digest gate accepted coordinated ZIP + verification JSON replacement' }
+          } finally {
+            Remove-Item -LiteralPath $handoffProbeRoot -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          # This comparison is intentionally before the first read of the mutable
+          # verification JSON. The producer digest crossed the previous step in
+          # runner-managed environment state, so ZIP+JSON cannot redefine it here.
+          $packageSha = Assert-ProducerPackageDigest -Path $package -Expected $producerPackageSha -Label 'Release ZIP at producer-to-consumer handoff'
           $verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
           if ($verification.status -ne 'PASS') { throw 'Canonical fresh extraction is not PASS before independent package extraction' }
           if ([string]$verification.source_sha -ne [string]$env:AUTOSPORT_SOURCE_SHA) { throw 'Canonical fresh extraction source_sha does not match exact workflow head' }
-          $packageSha = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
           if ([string]$verification.package_sha256 -ne $packageSha) { throw 'Release ZIP digest drifted after canonical fresh extraction' }
 
           $postPackageExtractRoot = Join-Path $PWD '.build-post-package-extraction'

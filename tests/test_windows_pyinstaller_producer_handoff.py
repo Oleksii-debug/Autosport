@@ -91,6 +91,24 @@ def test_initial_artifact_copy_blocks_replacement_before_identity_capture(
     assert not list(tmp_path.glob(".Probe.exe.pre-identity-replacement-*"))
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows producer-handle regression")
+def test_initial_artifact_copy_blocks_write_before_identity_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guarded = _load_guarded_pyinstaller_module()
+    source = tmp_path / "bootloader.exe"
+    artifact = tmp_path / "Probe.exe"
+    payload = b"canonical bootloader bytes\n"
+    source.write_bytes(payload)
+
+    monkeypatch.setenv("AUTOSPORT_TEST_WRITE_PYINSTALLER_OUTPUT_BEFORE_IDENTITY", "1")
+    with pytest.raises(OSError):
+        guarded._copy_artifact_and_capture_identity(source, artifact)
+
+    assert artifact.read_bytes() == payload
+
+
 @pytest.mark.skipif(
     os.name != "nt" or importlib.util.find_spec("PyInstaller") is None,
     reason="real Windows PyInstaller regression",

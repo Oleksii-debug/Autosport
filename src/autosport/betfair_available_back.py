@@ -144,8 +144,11 @@ class BetfairAvailableBackBook:
             if not isinstance(row, list) or len(row) != 3:
                 raise ValueError(f"batb[{index}] must be [level,price,size]")
             level_raw = row[0]
-            if isinstance(level_raw, bool) or not isinstance(level_raw, int) or level_raw < 0:
-                raise ValueError(f"batb[{index}].level must be a non-negative integer")
+            # Betfair ADVANCED historical `batb` is a best-three depth ladder;
+            # provider levels are therefore exactly 0, 1 or 2. Accepting a deeper
+            # synthetic level would turn malformed source data into verified cache state.
+            if isinstance(level_raw, bool) or not isinstance(level_raw, int) or not 0 <= level_raw <= 2:
+                raise ValueError(f"batb[{index}].level must be an integer between 0 and 2")
             price = _decimal_number(row[1], field=f"batb[{index}].price", non_negative=True)
             size = _decimal_number(row[2], field=f"batb[{index}].size", non_negative=True)
             if size == 0:

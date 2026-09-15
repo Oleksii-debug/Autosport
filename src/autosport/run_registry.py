@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
+import time
 from pathlib import Path
 
-from .integrity import sha256_file
+from .integrity import atomic_write_json, sha256_file
+from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 
 
 _HEX_DIGITS = frozenset("0123456789abcdef")
@@ -46,6 +49,8 @@ _FINAL_ONLY_FIELDS = frozenset(
         "reconciled_from_summary",
     }
 )
+_FIRST_OPEN_RETRY_SECONDS = 0.01
+_FIRST_OPEN_MAX_WAIT_SECONDS = 5.0
 
 
 def _is_canonical_sha256(value: object) -> bool:
@@ -86,6 +91,49 @@ def _reject_nonfinite_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON constant: {value}")
 
 
+def _lstat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def has_durable_workspace_history(workspace: str | Path) -> bool:
+    """Return whether a missing registry would discard surviving economic/run evidence.
+
+    A pristine zero-byte Decision Ledger and an empty transaction directory are allowed
+    first-open artifacts. Everything else named here is durable product history and must
+    make missing-registry initialization fail closed.
+    """
+
+    root = Path(workspace)
+    transaction_root = root / ".run-transactions"
+    transaction_stat = _lstat_or_none(transaction_root)
+    if transaction_stat is not None:
+        if not stat.S_ISDIR(transaction_stat.st_mode):
+            return True
+        try:
+            next(transaction_root.iterdir())
+        except StopIteration:
+            pass
+        else:
+            return True
+
+    for entry in root.iterdir():
+        if entry.name.startswith("run-") and entry.name.endswith(".json"):
+            return True
+
+    if _lstat_or_none(root / "paper_book.json") is not None:
+        return True
+
+    ledger_stat = _lstat_or_none(root / "decisions.jsonl")
+    if ledger_stat is not None and (
+        not stat.S_ISREG(ledger_stat.st_mode) or ledger_stat.st_size > 0
+    ):
+        return True
+    return False
+
+
 class RepeatedExperimentError(RuntimeError):
     pass
 
@@ -109,17 +157,76 @@ class RunRegistry:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
-            transaction_root = self.path.parent / ".run-transactions"
-            if transaction_root.exists() and (
-                not transaction_root.is_dir() or any(transaction_root.iterdir())
-            ):
-                raise ValueError("run registry is missing while durable run history exists")
-            if any(self.path.parent.glob("run-*.json")):
-                raise ValueError("run registry is missing while durable run history exists")
-            self._write({"schema_version": 1, "runs": {}})
+            self._initialize_missing_registry()
         else:
             # Validate recovery/economic truth before a session can use an existing workspace.
             self._read()
+
+    def _initialize_missing_registry(self) -> None:
+        """Serialize first publication against every cooperating economic writer.
+
+        The initial missing-path observation is never publication authority. We first
+        acquire the canonical workspace lock, then re-read the registry under that lock.
+        If another process already owns the lock, a registry it has durably published can
+        be adopted immediately; otherwise we briefly retry until that writer publishes or
+        releases. The bounded retry also guarantees a caller that already owns the lock
+        cannot deadlock itself if an external actor removed the registry unexpectedly.
+        """
+
+        deadline = time.monotonic() + _FIRST_OPEN_MAX_WAIT_SECONDS
+        while True:
+            lock = WorkspaceEconomicLock(self.path.parent)
+            try:
+                lock.acquire()
+            except WorkspaceEconomicLockError as contention:
+                try:
+                    self._read()
+                except FileNotFoundError:
+                    if time.monotonic() >= deadline:
+                        raise WorkspaceEconomicLockError(
+                            "run registry first-open could not serialize with the active economic writer"
+                        ) from contention
+                    time.sleep(_FIRST_OPEN_RETRY_SECONDS)
+                    continue
+                return
+
+            primary_error: BaseException | None = None
+            try:
+                # The winner may have published while this process was waiting for
+                # the OS lock. Existing bytes are authoritative and are never replaced
+                # with a stale empty state.
+                if self.path.exists():
+                    self._read()
+                    return
+                try:
+                    durable_history = has_durable_workspace_history(self.path.parent)
+                except OSError as exc:
+                    raise ValueError(
+                        "cannot determine durable workspace history while run registry is missing"
+                    ) from exc
+                if durable_history:
+                    raise ValueError("run registry is missing while durable run history exists")
+                self._write({"schema_version": 1, "runs": {}})
+                # Verify the exact published registry before exposing this object.
+                self._read()
+                return
+            except BaseException as exc:
+                primary_error = exc
+                raise
+            finally:
+                if primary_error is None:
+                    lock.release()
+                else:
+                    try:
+                        lock.release()
+                    except BaseException as release_error:
+                        try:
+                            primary_error.add_note(
+                                "WorkspaceEconomicLock release also failed during run registry first-open: "
+                                f"{type(release_error).__name__}: {release_error}"
+                            )
+                        except BaseException:
+                            pass
 
     @staticmethod
     def experiment_identity(market_sha256: str, results_sha256: str, strategy_id: str) -> str:
@@ -517,10 +624,4 @@ class RunRegistry:
         return raw
 
     def _write(self, raw: dict) -> None:
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(raw, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, self.path)
+        atomic_write_json(self.path, raw)

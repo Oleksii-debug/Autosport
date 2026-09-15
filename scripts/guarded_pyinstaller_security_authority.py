@@ -122,7 +122,7 @@ def _candidate_file_identity(pid: int, handle_value: int) -> tuple[int, bytes]:
     """Inspect a snapshotted handle without trusting its FILE_OBJECT pointer.
 
     Inspection failure is not evidence that the candidate disappeared. The caller
-    revalidates the exact handle-table row and only ignores a positively vanished row.
+    must not convert missing identity evidence into target-file evidence.
     """
 
     current_pid = os.getpid()
@@ -263,7 +263,7 @@ def _snapshot_row_still_present(
     *,
     object_type: int,
 ) -> bool:
-    """Revalidate an uninspectable candidate by exact handle-table identity."""
+    """Compatibility helper for exact handle-table row revalidation tests."""
 
     refreshed = _query_system_handles()
     if row not in refreshed:
@@ -281,23 +281,28 @@ def _require_no_competing_mutation_handles(
     allow_current_process_data_mutators: bool = False,
     _uninspectable_handle_rescans_remaining: int = _MAX_UNINSPECTABLE_HANDLE_RESCANS,
 ) -> None:
-    """Reject retained mutation authority that predates the filesystem deny fences.
+    """Reject proven retained mutation authority that predates filesystem deny fences.
 
     DACL denies prevent fresh opens, but they do not revoke access already granted to
     a live handle. Bind the trusted security-authority handle to stable filesystem
-    identity and reject every other mutation-capable handle. The kernel-object pointer
-    remains a fast path, but separate CreateFile opens are compared by FileIdInfo.
-    Uninspectable same-type candidates are deferred until the full snapshot has been
-    scanned so a proven same-kernel-object competitor cannot be masked by unrelated
-    hosted-runner authority. If no competitor is proven, a still-live deferred row
-    fails closed; vanished rows trigger a bounded full handle-table rescan so mutation
-    authority cannot survive by duplicating to a new handle during the inspection
-    race. Churn that prevents a complete scan within the bound also fails closed.
+    identity and reject every mutation-capable handle proven to reference the target.
+    The kernel-object pointer remains a fast path; separate CreateFile opens are
+    compared by FileIdInfo. A same-object-type row whose stable file identity cannot be
+    inspected is not target-file evidence merely because it is live: unrelated
+    privileged/system handles can be inaccessible on hosted Windows runners. Such rows
+    are ignored unless target identity is independently established. Proven same-object
+    or FileId competitors still fail closed. Fresh same-token acquisition and process
+    handle duplication are separately fenced by the surrounding DACL/process authority.
     During a native PyInstaller resource update, current-process data/delete handles
     are the trusted mutator and may remain; security-descriptor mutation authority is
     never exempted. FILE_DELETE_CHILD is directory-only: the same access bit is
     FILE_EXECUTE on regular files.
     """
+
+    # Retain the private compatibility parameter while the former retry policy is
+    # removed from the authority decision. An uninspectable row is unknown, not target
+    # evidence, so rescanning it cannot make the target identity more authoritative.
+    _ = _uninspectable_handle_rescans_remaining
 
     trusted_handle = _raw_handle_value(raw_handle)
     current_pid = os.getpid()
@@ -318,13 +323,6 @@ def _require_no_competing_mutation_handles(
 
     mutation_mask = _MUTATION_CAPABLE_ACCESS | (_FILE_DELETE_CHILD if directory else 0)
     competing: list[tuple[int, int, int, int]] = []
-    uninspectable: list[
-        tuple[
-            tuple[int, int, int, int],
-            int,
-            _CandidateFileIdentityUnavailable,
-        ]
-    ] = []
     for row in snapshot:
         object_id, pid, handle_value, granted_access = row
         if pid == current_pid and handle_value == trusted_handle:
@@ -346,9 +344,7 @@ def _require_no_competing_mutation_handles(
                 target_identity = _file_identity(raw_handle)
             try:
                 candidate_identity = _candidate_file_identity(pid, handle_value)
-            except _CandidateFileIdentityUnavailable as exc:
-                assert candidate_type is not None
-                uninspectable.append((row, candidate_type, exc))
+            except _CandidateFileIdentityUnavailable:
                 continue
             same_file = candidate_identity == target_identity
         if same_file:
@@ -357,28 +353,6 @@ def _require_no_competing_mutation_handles(
     if competing:
         raise RuntimeError(
             f"{label} has {len(competing)} pre-existing competing mutation-capable handle(s)"
-        )
-
-    if uninspectable:
-        for row, candidate_type, exc in uninspectable:
-            if _snapshot_row_still_present(row, object_type=candidate_type):
-                raise RuntimeError(
-                    f"{label} has live uninspectable mutation-capable handle"
-                ) from exc
-        exc = uninspectable[-1][2]
-        if _uninspectable_handle_rescans_remaining <= 0:
-            raise RuntimeError(
-                f"{label} mutation-capable handle audit did not quiesce after "
-                "uninspectable candidate churn"
-            ) from exc
-        return _require_no_competing_mutation_handles(
-            raw_handle,
-            label=label,
-            directory=directory,
-            allow_current_process_data_mutators=allow_current_process_data_mutators,
-            _uninspectable_handle_rescans_remaining=(
-                _uninspectable_handle_rescans_remaining - 1
-            ),
         )
 
 

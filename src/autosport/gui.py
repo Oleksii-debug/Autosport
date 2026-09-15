@@ -7,7 +7,8 @@ from tkinter import filedialog, messagebox, ttk
 
 import tk_uia
 
-from .dataset import load_dataset
+from .dataset import ReplayDataset, load_dataset
+from .dataset_worker import OneShotDatasetValidationWorker
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .paths import default_workspace
@@ -111,6 +112,8 @@ class AutosportApp(tk.Tk):
             self._startup_economic_error = _safe_exception_text(exc)
         self.replay_worker = OneShotReplayWorker()
         self.live_worker = OneShotObservationWorker()
+        self.dataset_worker = OneShotDatasetValidationWorker()
+        self._pending_dataset_path: Path | None = None
         self._active_strategy_id = "baseline-v1"
         self._active_research_plan: ResearchStrategyPlan | None = None
         self._closing = False
@@ -245,7 +248,7 @@ class AutosportApp(tk.Tk):
         controls = (
             (self.strategy, "Стратегія replay", "Canonical selectable strategy implementation. Для Typed research replay потрібен research plan.", AUTOMATION_IDS["strategy"]),
             (self.research_plan_button, "Вибрати research plan", "Вибирає та валідовує typed causal research-plan JSON для research-replay-v1.", AUTOMATION_IDS["research_plan"]),
-            (self.choose_button, "Вибрати replay dataset", "Відкриває вибір папки replay dataset. Гаряча клавіша Control+O.", AUTOMATION_IDS["choose_dataset"]),
+            (self.choose_button, "Вибрати replay dataset", "Відкриває вибір папки replay dataset і перевіряє його у фоновому read-only worker. Гаряча клавіша Control+O.", AUTOMATION_IDS["choose_dataset"]),
             (self.run_button, "Запустити paper replay", "Запускає causal paper replay для вибраного dataset і canonical strategy. Гаряча клавіша Control+R.", AUTOMATION_IDS["run_replay"]),
             (self.repair_button, "Відновити workspace", "Запускає fail-closed crash recovery для workspace вибраної canonical strategy. Гаряча клавіша Control+Shift+R.", AUTOMATION_IDS["repair_workspace"]),
             (self.speed, "Швидкість replay", "Вибір подієвого, 1×, 10×, 100× або 1000× режиму replay.", AUTOMATION_IDS["replay_speed"]),
@@ -272,6 +275,9 @@ class AutosportApp(tk.Tk):
         )
 
     def _on_strategy_changed(self, _event=None) -> None:
+        if self._dataset_busy:
+            self.status.set("Strategy configuration не можна змінювати під час перевірки dataset.")
+            return
         if self.replay_worker.busy:
             return
         strategy_id = strategy_id_from_display(self.strategy_text.get())
@@ -286,6 +292,9 @@ class AutosportApp(tk.Tk):
         self.status.set(f"Вибрано canonical strategy {strategy_id}.")
 
     def choose_research_plan(self) -> None:
+        if self._dataset_busy:
+            self.status.set("Research plan не можна змінювати під час перевірки dataset.")
+            return
         if self.replay_worker.busy:
             self.status.set("Research plan не можна змінювати під час economic replay.")
             return
@@ -359,6 +368,23 @@ class AutosportApp(tk.Tk):
     def _block_workspace_for_recovery(self, workspace: Path) -> None:
         self._recovery_required_workspaces.add(Path(workspace))
 
+    @property
+    def _dataset_busy(self) -> bool:
+        worker = self.__dict__.get("dataset_worker")
+        return bool(worker is not None and worker.busy)
+
+    def _dataset_selection_blocker(self) -> str | None:
+        if self._dataset_busy:
+            return "Перевірка dataset уже виконується; дочекайтеся terminal result."
+        if self.replay_worker.busy:
+            return "Replay уже виконується; вибір іншого dataset доступний після завершення поточного run."
+        if self.live_worker.busy:
+            return "Live snapshot уже виконується; вибір dataset доступний після terminal live state."
+        recovery_worker = self.__dict__.get("recovery_worker")
+        if recovery_worker is not None and recovery_worker.busy:
+            return "Workspace recovery уже виконується; вибір dataset доступний після terminal recovery state."
+        return None
+
     def _hide_uncertain_economic_state(self, ticket_message: str) -> bool:
         session = self.session
         self.session = None
@@ -385,25 +411,104 @@ class AutosportApp(tk.Tk):
         return True
 
     def choose_dataset(self) -> None:
-        if self.replay_worker.busy:
-            self.status.set("Replay уже виконується; вибір іншого dataset доступний після завершення поточного run.")
+        if self._closing:
+            return
+        blocker = self._dataset_selection_blocker()
+        if blocker is not None:
+            self.status.set(blocker)
             return
         selected = filedialog.askdirectory(title="Вибрати папку Autosport replay dataset")
         if not selected:
             return
-        try:
-            dataset = load_dataset(selected)
-        except Exception as exc:
-            messagebox.showerror("Автоспорт", f"Dataset відхилено: {exc}")
+
+        # ``askdirectory`` runs a nested Tk event loop. Re-check every worker after
+        # the dialog closes so an operation started during that interval cannot be
+        # raced by validation/control-state publication.
+        blocker = self._dataset_selection_blocker()
+        if blocker is not None:
+            self.status.set(blocker)
             return
-        self.dataset_path = Path(selected)
+
+        selected_path = Path(selected).absolute()
+        self._pending_dataset_path = selected_path
+
+        def task() -> ReplayDataset:
+            return load_dataset(selected_path)
+
+        try:
+            started = self.dataset_worker.start(task)
+        except BaseException:
+            self._pending_dataset_path = None
+            raise
+        if not started:
+            self._pending_dataset_path = None
+            text = (
+                "Dataset validation worker не запущено; попередній перевірений dataset не змінено. "
+                "Повторіть вибір після завершення поточних операцій."
+            )
+            self.status.set(text)
+            self._append_log(text)
+            messagebox.showerror("Автоспорт", text)
+            return
+
+        self._set_replay_controls_busy(True)
+        self.status.set(
+            f"Dataset validation виконується у фоновому read-only worker: {selected_path}. "
+            "Tk/UIA/NVDA thread і журнал залишаються доступними."
+        )
+        self._append_log(f"Фонову перевірку dataset запущено: {selected_path}")
+        self.after(100, self._poll_dataset_worker)
+
+    def _poll_dataset_worker(self) -> None:
+        if self._closing:
+            return
+        message = self.dataset_worker.poll()
+        if message is None:
+            self.after(100, self._poll_dataset_worker)
+            return
+
+        pending_path = self._pending_dataset_path
+        self._pending_dataset_path = None
+        self._set_replay_controls_busy(False)
+        if message.error is not None:
+            text = f"Dataset відхилено: {message.error}"
+            self.status.set(
+                "Dataset не змінено: фонова fail-closed validation завершилася помилкою."
+            )
+            self._append_log(text)
+            messagebox.showerror("Автоспорт", text)
+            return
+
+        dataset = message.result
+        if (
+            not isinstance(dataset, ReplayDataset)
+            or pending_path is None
+            or Path(dataset.root) != pending_path
+        ):
+            text = (
+                "Dataset відхилено: terminal worker result не відповідає точній вибраній папці; "
+                "попередній перевірений dataset не змінено."
+            )
+            self.status.set("Dataset не змінено: terminal validation identity mismatch.")
+            self._append_log(text)
+            messagebox.showerror("Автоспорт", text)
+            return
+
+        self.dataset_path = pending_path
         self.dataset_text.set(
             f"Dataset: {dataset.name}; sport={dataset.sport}; market SHA={dataset.market_sha256[:12]}; sealed results SHA={dataset.results_sha256[:12]}"
         )
         self.status.set("Dataset перевірено. Можна запускати replay.")
+        self._append_log(
+            f"Dataset перевірено у background worker: {dataset.name}; sport={dataset.sport}; root={pending_path}"
+        )
 
     def refresh_live_snapshot(self) -> None:
         if self._closing:
+            return
+        if self._dataset_busy:
+            self.live_status.set("Live snapshot відкладено: dataset validation ще виконується.")
+            self.status.set("Read-only live observation не запускається одночасно з перевіркою dataset.")
             return
         if self.replay_worker.busy:
             self.live_status.set("Live snapshot відкладено: economic replay уже виконується у цьому workspace.")
@@ -471,7 +576,7 @@ class AutosportApp(tk.Tk):
         self.log.see("end")
 
     def _set_replay_controls_busy(self, busy: bool) -> None:
-        if busy:
+        if busy or self._dataset_busy:
             self.strategy.configure(state="disabled")
             self.research_plan_button.state(["disabled"])
             self.choose_button.state(["disabled"])
@@ -492,6 +597,9 @@ class AutosportApp(tk.Tk):
 
     def repair_workspace(self) -> None:
         if self._closing:
+            return
+        if self._dataset_busy:
+            self.status.set("Recovery заблоковано: dataset validation ще виконується.")
             return
         if self.replay_worker.busy:
             self.status.set("Recovery заблоковано: economic replay ще виконується.")
@@ -599,6 +707,9 @@ class AutosportApp(tk.Tk):
         messagebox.showinfo("Автоспорт", "Workspace recovery завершено без unresolved runs.")
 
     def run_dataset(self) -> None:
+        if self._dataset_busy:
+            self.status.set("Paper replay не запускається: dataset validation ще виконується.")
+            return
         if not self.dataset_path:
             messagebox.showinfo("Автоспорт", "Спочатку виберіть dataset.")
             return

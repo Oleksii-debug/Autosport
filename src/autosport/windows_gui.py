@@ -183,6 +183,9 @@ class WindowsAutosportApp(AutosportApp):
     def repair_workspace(self) -> None:
         if self._closing:
             return
+        if self._dataset_busy:
+            self.status.set("Recovery заблоковано: dataset validation ще виконується.")
+            return
         if self.replay_worker.busy:
             self.status.set("Recovery заблоковано: economic replay ще виконується.")
             return

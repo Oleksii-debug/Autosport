@@ -92,6 +92,8 @@ class CalculationService:
     """
 
     def __init__(self, engine: CalculationEngine | None = None) -> None:
+        if engine is not None and type(engine) is not CalculationEngine:
+            raise ValueError("engine must be an exact CalculationEngine")
         self._engine = engine if engine is not None else CalculationEngine()
 
     def odds_conversion_for_event(
@@ -277,6 +279,8 @@ def _bind(
     sources: tuple[MarketQuoteEvidence, ...],
     cutoff: str,
 ) -> CalculationEvidence:
+    if type(result) is not CalculationResult:
+        raise ValueError("calculation result must be an exact CalculationResult")
     ordered = tuple(sorted(sources, key=_quote_sort_key))
     payload = {
         "service_version": _SERVICE_VERSION,

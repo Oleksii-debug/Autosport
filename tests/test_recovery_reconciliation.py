@@ -14,6 +14,7 @@ from autosport.run_registry import (
     RepeatedExperimentError,
     RunRegistry,
 )
+from autosport.run_transaction import RunTransaction
 from autosport.session import AutosportSession
 from autosport.workspace_lock import WorkspaceEconomicLock
 
@@ -83,23 +84,66 @@ class RecoveryReconciliationTests(unittest.TestCase):
 
     def test_late_crash_reconciles_without_replaying_economic_effects(self):
         with tempfile.TemporaryDirectory() as tmp:
-            dataset, key, _item, _summary = self._create_late_crash(tmp)
-            book_hash_before = sha256_file(Path(tmp) / "paper_book.json")
+            dataset, key, item, _summary = self._create_late_crash(tmp)
+            root = Path(tmp)
+            book_hash_before = sha256_file(root / "paper_book.json")
             report = reconcile_late_crashes(tmp)
             self.assertEqual(report.reconciled_keys, (key,))
             self.assertEqual(report.unresolved_without_summary, ())
-            self.assertEqual(sha256_file(Path(tmp) / "paper_book.json"), book_hash_before)
+            self.assertEqual(sha256_file(root / "paper_book.json"), book_hash_before)
 
-            registry = RunRegistry(Path(tmp) / "run_registry.json")
+            registry = RunRegistry(root / "run_registry.json")
             repaired = registry.get(key)
             self.assertEqual(repaired["status"], "completed")
             self.assertTrue(repaired["reconciled_from_summary"])
             self.assertEqual(repaired["paper_book_sha256"], book_hash_before)
+            manifest_path = root / RunTransaction.ROOT_NAME / item["run_id"] / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["phase"], "completed")
 
             restored = AutosportSession(tmp, "1")
             with self.assertRaises(RepeatedExperimentError):
                 restored.run_dataset(dataset)
             restored.close()
+
+    def test_second_crash_after_registry_reconciliation_is_recoverable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _dataset, key, item, _summary = self._create_late_crash(tmp)
+            manifest_path = root / RunTransaction.ROOT_NAME / item["run_id"] / "manifest.json"
+            book_hash_before = sha256_file(root / "paper_book.json")
+            self.assertEqual(
+                json.loads(manifest_path.read_text(encoding="utf-8"))["phase"],
+                "canonical_committed",
+            )
+
+            with patch.object(
+                RunTransaction,
+                "mark_registry_completed",
+                side_effect=OSError("simulated manifest finalization failure"),
+            ):
+                with self.assertRaisesRegex(
+                    ReconciliationError,
+                    "simulated manifest finalization failure",
+                ):
+                    reconcile_late_crashes(tmp)
+
+            registry = RunRegistry(root / "run_registry.json")
+            self.assertEqual(registry.get(key)["status"], "completed")
+            self.assertEqual(
+                json.loads(manifest_path.read_text(encoding="utf-8"))["phase"],
+                "canonical_committed",
+            )
+            self.assertEqual(sha256_file(root / "paper_book.json"), book_hash_before)
+
+            report = reconcile_late_crashes(tmp)
+            self.assertEqual(report.reconciled_keys, (key,))
+            self.assertEqual(registry.get(key)["status"], "completed")
+            self.assertEqual(
+                json.loads(manifest_path.read_text(encoding="utf-8"))["phase"],
+                "completed",
+            )
+            self.assertEqual(sha256_file(root / "paper_book.json"), book_hash_before)
 
     def test_tampered_paper_book_prevents_reconciliation(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -310,7 +310,7 @@ if ($freshAccessibility.real_money_execution -ne $false -or $freshAccessibility.
 $freshKeyboard = Join-Path $PWD 'dist/fresh-extraction-keyboard-audit.json'
 if (Test-Path $freshKeyboard) { Remove-Item -Force $freshKeyboard }
 $freshKeyboardProcess = Start-Process -FilePath $extractedExe -ArgumentList '--keyboard-audit-output', $freshKeyboard -Wait -PassThru
-if ($freshKeyboardProcess.ExitCode -ne 0) { throw "Fresh-extracted keyboard audit exited $($freshKeyboardProcess.ExitCode)" }
+if ($freshKeyboardProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe keyboard audit exited $($freshKeyboardProcess.ExitCode)" }
 $freshKeyboardEvidence = Get-Content $freshKeyboard -Raw | ConvertFrom-Json
 if ($freshKeyboardEvidence.status -ne 'PASS') { throw 'Fresh-extracted keyboard audit did not PASS' }
 if ($freshKeyboardEvidence.real_money_execution -ne $false -or $freshKeyboardEvidence.human_tested -ne $false -or $freshKeyboardEvidence.nvda_verified -ne $false) {

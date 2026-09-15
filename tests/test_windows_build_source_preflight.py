@@ -357,8 +357,8 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         snapshot_gate = "python $sourceVerifier --source-sha $sourceSha --late-build-boundary"
         release_output_gate = snapshot_gate + " --allow-release-outputs"
         live_late_gate = "python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary"
-        first_build = "python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
-        second_build = "python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py"
+        first_build = "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
+        second_build = "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py"
         package_build = "python scripts/package_windows.py `"
 
         first_gate = script.index(snapshot_gate)
@@ -384,12 +384,12 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
 
     def test_windows_build_binds_pyinstaller_outputs_before_audit_and_package(self) -> None:
         script = Path("scripts/build_windows.ps1").read_text(encoding="utf-8")
-        first_build = "python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
+        first_build = "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
         first_bind = (
             "python $sourceVerifier --bind-artifact $builtAutosportExe "
             "--bound-output $boundAutosportExe --digest-output $autosportDigestPath"
         )
-        second_build = "python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py"
+        second_build = "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py"
         second_bind = (
             "python $sourceVerifier --bind-artifact $builtDataExe "
             "--bound-output $boundDataExe --digest-output $dataDigestPath"

@@ -742,7 +742,10 @@ class AutosportApp(tk.Tk):
             self._set_evaluation_lines([
                 "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
             ])
-            detail = f"Post-replay workspace reopen відхилено fail-closed: {type(exc).__name__}: {exc}"
+            detail = (
+                "Post-replay workspace reopen відхилено fail-closed: "
+                f"{_safe_exception_text(exc)}"
+            )
             self.status.set(
                 "Replay terminal state не можна безпечно підтвердити; economic session state недоступний. "
                 "Виконайте «Відновити workspace» або Control+Shift+R перед наступним economic run."

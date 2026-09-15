@@ -249,3 +249,51 @@ def test_post_recovery_reopen_failure_with_broken_str_keeps_recovery_actionable(
     assert expected in logs
     assert "economic session state лишається недоступним" in app.status.value
     showerror.assert_called_once_with("Автоспорт", expected)
+
+
+def test_post_replay_reopen_failure_with_hostile_exception_keeps_feedback_actionable(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    app = object.__new__(AutosportApp)
+    app._active_workspace = workspace
+    app._active_strategy_id = "baseline-v1"
+    app._active_research_plan = None
+    app._recovery_required_workspaces = set()
+    app.session = None
+    app.bank = _Value("stale bankroll")
+    app.tickets = _Listbox()
+    app.status = _Value()
+    logs: list[str] = []
+    evaluation: list[str] = []
+    app._append_log = logs.append
+    app._set_evaluation_lines = evaluation.extend
+    app._set_replay_controls_busy = lambda _busy: None
+    app.replay_worker = SimpleNamespace(
+        poll=lambda: SimpleNamespace(error=None, result=object())
+    )
+
+    def _open_session(_strategy_id, _research_plan):
+        raise _BrokenMetadataAndTextError()
+
+    app._open_session = _open_session
+
+    with patch("autosport.gui.messagebox.showerror") as showerror:
+        AutosportApp._poll_replay_worker(app)
+
+    expected = (
+        "Post-replay workspace reopen відхилено fail-closed: "
+        "_BrokenMetadataAndTextError: <message unavailable>"
+    )
+    assert app.session is None
+    assert app._recovery_required_workspaces == {workspace}
+    assert "недоступний до підтвердженого terminal state/recovery" in app.bank.value
+    assert app.tickets.lines == [
+        "Replay завершено, але economic session state недоступний; виконайте recovery workspace."
+    ]
+    assert evaluation == [
+        "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
+    ]
+    assert logs == [expected]
+    assert "economic session state недоступний" in app.status.value
+    showerror.assert_called_once_with("Автоспорт", expected)

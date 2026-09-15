@@ -21,10 +21,18 @@ _DATA_TOOL = "Autosport-Data.exe"
 _BUILD_INFO = "BUILD_INFO.json"
 _MANIFEST = "PACKAGE_MANIFEST.json"
 _SUMS = "SHA256SUMS.txt"
+_SHA256_HEX = frozenset("0123456789abcdef")
 
 
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _require_sha256(value: str, *, field: str) -> str:
+    normalized = value.strip().lower()
+    if len(normalized) != 64 or any(character not in _SHA256_HEX for character in normalized):
+        raise ValueError(f"{field} must be exactly 64 hexadecimal characters")
+    return normalized
 
 
 def _json_bytes(payload: dict[str, Any]) -> bytes:
@@ -76,10 +84,27 @@ def _write_deterministic(package_zip: Path, members: dict[str, bytes]) -> None:
             tmp.unlink()
 
 
-def _verified_base_members(package: Path) -> tuple[dict[str, bytes], dict[str, Any]]:
+def _verified_base_members(
+    package: Path,
+    *,
+    expected_package_sha256: str | None = None,
+    expected_autosport_exe_sha256: str | None = None,
+) -> tuple[dict[str, bytes], dict[str, Any]]:
     """Verify and return members from one immutable read of the base ZIP bytes."""
 
     base_bytes = package.read_bytes()
+    if expected_package_sha256 is not None:
+        expected_package = _require_sha256(
+            expected_package_sha256,
+            field="expected_base_package_sha256",
+        )
+        actual_package = _sha256_bytes(base_bytes)
+        if actual_package != expected_package:
+            raise ValueError(
+                "base release package producer SHA-256 mismatch: "
+                f"expected {expected_package}, got {actual_package}"
+            )
+
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{package.name}.verify.",
         suffix=".zip",
@@ -97,6 +122,18 @@ def _verified_base_members(package: Path) -> tuple[dict[str, bytes], dict[str, A
             if required not in members:
                 raise ValueError(f"base release package is missing required member: {required}")
 
+        if expected_autosport_exe_sha256 is not None:
+            expected_exe = _require_sha256(
+                expected_autosport_exe_sha256,
+                field="expected_autosport_exe_sha256",
+            )
+            actual_exe = _sha256_bytes(members["Autosport.exe"])
+            if actual_exe != expected_exe:
+                raise ValueError(
+                    "base release package Autosport.exe producer SHA-256 mismatch: "
+                    f"expected {expected_exe}, got {actual_exe}"
+                )
+
         build_info = _decode_json_object(members[_BUILD_INFO], _BUILD_INFO)
         verify_windows_package(
             snapshot,
@@ -108,8 +145,14 @@ def _verified_base_members(package: Path) -> tuple[dict[str, bytes], dict[str, A
             snapshot.unlink()
 
 
-def bind_portable_data_tool(package_zip: str | Path, data_exe: str | Path) -> dict[str, str]:
-    """Add the console data tool only after the exact captured base package verifies cleanly."""
+def bind_portable_data_tool(
+    package_zip: str | Path,
+    data_exe: str | Path,
+    *,
+    expected_base_package_sha256: str,
+    expected_autosport_exe_sha256: str,
+) -> dict[str, str]:
+    """Add the console data tool only after the producer-bound base ZIP verifies cleanly."""
 
     package = Path(package_zip)
     data_path = Path(data_exe)
@@ -117,7 +160,11 @@ def bind_portable_data_tool(package_zip: str | Path, data_exe: str | Path) -> di
     if not data_bytes:
         raise ValueError("portable data tool executable is empty")
 
-    members, build_info = _verified_base_members(package)
+    members, build_info = _verified_base_members(
+        package,
+        expected_package_sha256=expected_base_package_sha256,
+        expected_autosport_exe_sha256=expected_autosport_exe_sha256,
+    )
 
     members[_DATA_TOOL] = data_bytes
     data_sha = _sha256_bytes(data_bytes)

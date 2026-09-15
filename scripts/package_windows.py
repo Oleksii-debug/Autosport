@@ -881,7 +881,12 @@ def main() -> int:
                 args.output,
                 args.source_sha,
             )
-            binding = bind_portable_data_tool(output, trusted_data_exe)
+            binding = bind_portable_data_tool(
+                output,
+                trusted_data_exe,
+                expected_base_package_sha256=_base_digest,
+                expected_autosport_exe_sha256=expected_snapshot_sha256[trusted_exe],
+            )
 
     verification = verify_windows_package(output, expected_source_sha=args.source_sha)
     data_verification = verify_portable_data_tool(output)

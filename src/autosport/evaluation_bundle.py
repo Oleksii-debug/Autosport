@@ -53,26 +53,32 @@ def _validate_decoded_json_domain(root: Any) -> None:
         value, depth = pending.pop()
         if depth > _MAX_DECODED_JSON_DEPTH:
             raise ValueError("walk-forward bundle JSON nesting is too deep")
+        if value is None or type(value) is bool or type(value) is int:
+            continue
         if type(value) is float:
             if not math.isfinite(value):
                 raise ValueError("walk-forward bundle contains non-finite JSON number")
             continue
-        if isinstance(value, str):
+        if type(value) is str:
             try:
                 value.encode("utf-8")
             except UnicodeEncodeError as exc:
                 raise ValueError("walk-forward bundle contains invalid UTF-8 text") from exc
             continue
-        if isinstance(value, list):
+        if type(value) is list:
             pending.extend((item, depth + 1) for item in value)
             continue
-        if isinstance(value, dict):
+        if type(value) is dict:
             for key, item in value.items():
+                if type(key) is not str:
+                    raise ValueError("walk-forward bundle contains non-string JSON object key")
                 try:
                     key.encode("utf-8")
                 except UnicodeEncodeError as exc:
                     raise ValueError("walk-forward bundle contains invalid UTF-8 text") from exc
                 pending.append((item, depth + 1))
+            continue
+        raise ValueError("walk-forward bundle contains non-JSON value")
 
 
 def _decode_bundle_json(payload: bytes) -> Any:
@@ -144,6 +150,7 @@ class WalkForwardBundle:
     ) -> "WalkForwardBundle":
         if not isinstance(raw, dict):
             raise ValueError("walk-forward bundle root must be an object")
+        _validate_decoded_json_domain(raw)
         schema_version = raw.get("schema_version")
         if type(schema_version) is not int or schema_version not in {1, 2}:
             raise ValueError("walk-forward bundle schema_version must be 1 or 2")

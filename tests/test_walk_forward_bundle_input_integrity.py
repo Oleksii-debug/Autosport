@@ -156,6 +156,65 @@ class WalkForwardBundleInputIntegrityTests(unittest.TestCase):
         self.assertEqual(bundle.forecasts[0].provenance["weight"], 1e300)
         self.assertEqual(bundle.forecasts[0].provenance["nested"]["label"], "✅")
 
+    def test_from_dict_rejects_nonfinite_json_domain_even_with_supplied_hash(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                raw = self._valid_raw()
+                raw["forecasts"][0]["provenance"] = {"weight": value}
+                with self.assertRaisesRegex(ValueError, "non-finite JSON number"):
+                    WalkForwardBundle.from_dict(raw, source_sha256="0" * 64)
+
+    def test_from_dict_rejects_lone_surrogate_value_or_key(self):
+        provenances = (
+            {"source": "\ud800"},
+            {"\ud800": "fixture"},
+        )
+        for provenance in provenances:
+            with self.subTest(provenance=repr(provenance)):
+                raw = self._valid_raw()
+                raw["forecasts"][0]["provenance"] = provenance
+                with self.assertRaisesRegex(ValueError, "invalid UTF-8 text"):
+                    WalkForwardBundle.from_dict(raw, source_sha256="0" * 64)
+
+    def test_from_dict_rejects_non_json_value_or_mapping_key(self):
+        cases = (
+            ({"source": ("fixture",)}, "non-JSON value"),
+            ({1: "fixture"}, "non-string JSON object key"),
+        )
+        for provenance, message in cases:
+            with self.subTest(message=message):
+                raw = self._valid_raw()
+                raw["forecasts"][0]["provenance"] = provenance
+                with self.assertRaisesRegex(ValueError, message):
+                    WalkForwardBundle.from_dict(raw, source_sha256="0" * 64)
+
+    def test_from_dict_rejects_excessive_nesting_before_forecast_construction(self):
+        raw = self._valid_raw()
+        nested = "leaf"
+        for _ in range(160):
+            nested = [nested]
+        raw["forecasts"][0]["provenance"] = {"nested": nested}
+
+        with self.assertRaisesRegex(ValueError, "JSON nesting is too deep"):
+            WalkForwardBundle.from_dict(raw, source_sha256="0" * 64)
+
+    def test_from_dict_preserves_finite_json_scalars_and_valid_unicode(self):
+        raw = self._valid_raw()
+        raw["forecasts"][0]["provenance"] = {
+            "source": "фікстура",
+            "weight": 1e300,
+            "nested": {"label": "✅", "flag": True, "missing": None, "count": 2},
+        }
+
+        bundle = WalkForwardBundle.from_dict(raw)
+
+        self.assertEqual(bundle.forecasts[0].provenance["source"], "фікстура")
+        self.assertEqual(bundle.forecasts[0].provenance["weight"], 1e300)
+        self.assertEqual(bundle.forecasts[0].provenance["nested"]["label"], "✅")
+        self.assertIs(bundle.forecasts[0].provenance["nested"]["flag"], True)
+        self.assertIsNone(bundle.forecasts[0].provenance["nested"]["missing"])
+        self.assertEqual(bundle.forecasts[0].provenance["nested"]["count"], 2)
+
     def test_schema_version_requires_exact_integer_type(self):
         for value in (True, 1.0, "1", 2.0):
             with self.subTest(value=value):

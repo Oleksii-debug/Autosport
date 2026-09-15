@@ -135,6 +135,14 @@ def capture_historical_snapshot(
     canonical_response = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     response_sha256 = hashlib.sha256(canonical_response.encode("utf-8")).hexdigest()
     market_types = tuple(sorted({event.market_type.value for event in events}))
+    observed_fixture_ids = {event.event_id for event in events}
+    observed_fixture_markets = {(event.event_id, event.market_id) for event in events}
+    observed_quote_count_by_market_type: dict[str, int] = {}
+    for event in events:
+        market_type = event.market_type.value
+        observed_quote_count_by_market_type[market_type] = (
+            observed_quote_count_by_market_type.get(market_type, 0) + 1
+        )
 
     evidence_payload = {
         "schema_version": 1,
@@ -152,6 +160,16 @@ def capture_historical_snapshot(
         "has_data": bool(events),
         "market_types": list(market_types),
         "bookmaker_keys": sorted(bookmaker_keys),
+        "observed_coverage": {
+            "scope": "captured_snapshot_rows_only",
+            "fixture_identity": "canonical_event_id",
+            "fixture_market_identity": "canonical_event_id_plus_market_id",
+            "fixture_count": len(observed_fixture_ids),
+            "fixture_market_count": len(observed_fixture_markets),
+            "quote_count": len(events),
+            "quote_count_by_market_type": dict(sorted(observed_quote_count_by_market_type.items())),
+            "completeness_semantics": "observed_rows_only_not_provider_universe",
+        },
         "snapshot_timestamp_fallback_count": fallback_count,
         "source_time_semantics": {
             "preferred": "provider_quote_last_update",

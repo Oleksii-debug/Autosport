@@ -236,7 +236,7 @@ def _require_recorded_base_state(
     if not isinstance(expected_book, str) or len(expected_book) != 64:
         raise ReconciliationError("registry lacks a valid base PaperBook SHA-256")
     if not isinstance(expected_ledger, str) or len(expected_ledger) != 64:
-        raise ReconciliationError("registry lacks a valid Decision Ledger SHA-256")
+        raise ReconciliationError("registry lacks a valid base Decision Ledger SHA-256")
     if not paper_book_path.is_file() or not decision_ledger_path.is_file():
         raise ReconciliationError("canonical economic base files are missing")
 
@@ -245,7 +245,7 @@ def _require_recorded_base_state(
         ledger_snapshot = JsonlDecisionLedger(decision_ledger_path).verified_snapshot()
     except DecisionLedgerIntegrityError as exc:
         raise ReconciliationError(
-            "canonical Decision Ledger integrity validation failed: " + str(exc)
+            f"canonical Decision Ledger integrity validation failed: {exc}"
         ) from exc
     if actual_book != expected_book or ledger_snapshot.sha256 != expected_ledger:
         raise ReconciliationError("canonical economic state no longer matches the recorded transaction BASE")

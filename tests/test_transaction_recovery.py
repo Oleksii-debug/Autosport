@@ -211,7 +211,7 @@ class TransactionRecoveryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 RunTransactionError,
-                "canonical Decision Ledger integrity validation failed",
+                "canonical Decision Ledger verification copy integrity validation failed",
             ):
                 tx.stage_outputs(
                     PaperBook.load(root / "paper_book.json"),
@@ -226,7 +226,7 @@ class TransactionRecoveryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 RunTransactionError,
-                "canonical Decision Ledger integrity validation failed",
+                "canonical Decision Ledger verification copy integrity validation failed",
             ):
                 RunTransaction.recover(
                     root,

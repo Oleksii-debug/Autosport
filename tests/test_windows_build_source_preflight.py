@@ -506,7 +506,12 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         consumer_bind = "python scripts/verify_source_checkout.py --bind-artifact $package --bound-output $consumerPackage --digest-output $consumerDigestPath"
         consumer_digest = "$packageSha = (Get-Content -LiteralPath $consumerDigestPath -Raw).Trim()"
         consumer_verify = "Assert-ProducerPackageDigest -Path $consumerPackage -Expected $producerPackageSha -Label 'Consumer-bound release ZIP snapshot'"
-        consumer_extract = "Expand-Archive -LiteralPath $consumerPackage -DestinationPath $postPackageExtractRoot -Force"
+        consumer_expand_function = "function Expand-ProducerBoundPackage {"
+        consumer_locked_stream = "$stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)"
+        consumer_stream_hash = "$actual = [System.Convert]::ToHexString($sha256.ComputeHash($stream)).ToLowerInvariant()"
+        consumer_stream_rewind = "$stream.Position = 0"
+        consumer_stream_extract = "[System.IO.Compression.ZipFile]::ExtractToDirectory($stream, $Destination, $true)"
+        consumer_extract = "Expand-ProducerBoundPackage -Path $consumerPackage -Expected $producerPackageSha -Destination $postPackageExtractRoot -Label 'Consumer-bound release ZIP snapshot at extraction'"
         live_extract = "Expand-Archive -LiteralPath $package -DestinationPath $postPackageExtractRoot -Force"
 
         self.assertIn("name: Materialize verified independent package extraction", workflow)
@@ -517,11 +522,21 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         self.assertIn(consumer_bind, workflow)
         self.assertIn(consumer_digest, workflow)
         self.assertIn(consumer_verify, workflow)
+        self.assertIn(consumer_expand_function, workflow)
+        self.assertIn(consumer_locked_stream, workflow)
+        self.assertIn(consumer_stream_hash, workflow)
+        self.assertIn(consumer_stream_rewind, workflow)
+        self.assertIn(consumer_stream_extract, workflow)
         self.assertIn(consumer_extract, workflow)
         self.assertNotIn(live_extract, workflow)
+        self.assertLess(workflow.index(consumer_expand_function), workflow.index(consumer_locked_stream))
+        self.assertLess(workflow.index(consumer_locked_stream), workflow.index(consumer_stream_hash))
+        self.assertLess(workflow.index(consumer_stream_hash), workflow.index(consumer_stream_rewind))
+        self.assertLess(workflow.index(consumer_stream_rewind), workflow.index(consumer_stream_extract))
         self.assertLess(workflow.index(consumer_bind), workflow.index(consumer_digest))
         self.assertLess(workflow.index(consumer_digest), workflow.index(consumer_verify))
         self.assertLess(workflow.index(consumer_verify), workflow.index(consumer_extract))
+        self.assertLess(workflow.index(consumer_stream_extract), workflow.index(consumer_extract))
         self.assertNotIn("Join-Path $PWD 'dist/Autosport-Data.exe'", workflow)
         self.assertNotIn("Join-Path $PWD 'dist/Autosport.exe'", workflow)
 

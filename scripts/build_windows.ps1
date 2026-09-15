@@ -189,12 +189,45 @@ def require_directory(path, label):
         raise SystemExit(f"source snapshot {label} must be a real directory: {path}")
 
 require_directory(root, "root")
+expected_paths = set()
 for relative, expected in sorted(manifest.items()):
     if not isinstance(relative, str) or not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
         raise SystemExit("source snapshot manifest contains a non-canonical entry")
     pure = pathlib.PurePosixPath(relative)
     if pure.is_absolute() or pure.as_posix() != relative or any(part in {"", ".", ".."} for part in pure.parts):
         raise SystemExit(f"source snapshot manifest contains non-canonical path: {relative}")
+    expected_paths.add(relative)
+
+actual_paths = set()
+for directory, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+    directory_path = pathlib.Path(directory)
+    require_directory(directory_path, "directory")
+    for dirname in dirnames:
+        require_directory(directory_path / dirname, "directory")
+    for filename in filenames:
+        path = directory_path / filename
+        try:
+            value = path.lstat()
+        except OSError as exc:
+            raise SystemExit(f"source snapshot member is not readable: {path}") from exc
+        if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+            raise SystemExit(f"source snapshot member must be a regular file: {path}")
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError as exc:
+            raise SystemExit(f"source snapshot member escaped root: {path}") from exc
+        actual_paths.add(relative)
+
+if actual_paths != expected_paths:
+    missing = sorted(expected_paths - actual_paths)
+    unexpected = sorted(actual_paths - expected_paths)
+    raise SystemExit(
+        "source snapshot membership mismatch: "
+        f"missing={missing!r}, unexpected={unexpected!r}"
+    )
+
+for relative, expected in sorted(manifest.items()):
+    pure = pathlib.PurePosixPath(relative)
     parent = root
     for part in pure.parts[:-1]:
         parent = parent / part
@@ -440,8 +473,9 @@ if ($trustedBuildManifestLines.Count -ne 1) { throw 'Exact build source Git orac
 $trustedBuildManifestJson = [string]$trustedBuildManifestLines[0]
 
 # Freeze every PyInstaller source/module input to exact source_sha bytes outside
-# the mutable checkout. The independent blob oracle above is checked at each
-# source-consuming boundary so post-extraction replacement fails closed.
+# the mutable checkout. The independent blob oracle is paired with an OS write
+# fence before the final verification, so proof and later source consumption are
+# one fail-closed interval instead of a verify-then-reopen race.
 $trustedBuildArchive = Join-Path $boundArtifactRoot 'trusted-build-source.zip'
 $trustedBuildRoot = Join-Path $boundArtifactRoot 'trusted-build-source'
 & $gitExecutable archive --format=zip "--output=$trustedBuildArchive" $sourceSha
@@ -449,48 +483,74 @@ if ($LASTEXITCODE -ne 0) { throw "Exact build source archive exited $LASTEXITCOD
 if (Test-Path $trustedBuildRoot) { Remove-Item -LiteralPath $trustedBuildRoot -Recurse -Force }
 New-Item -ItemType Directory -Path $trustedBuildRoot | Out-Null
 Expand-Archive -LiteralPath $trustedBuildArchive -DestinationPath $trustedBuildRoot -Force
-$trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
-if ($LASTEXITCODE -ne 0) { throw "Exact build source snapshot verification before install exited $LASTEXITCODE" }
 foreach ($requiredBuildSource in @('pyproject.toml', 'src/autosport/windows_entry.py', 'src/autosport/data_tools_entry.py')) {
   $trustedBuildSource = Join-Path $trustedBuildRoot ($requiredBuildSource.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
   if (-not (Test-Path -LiteralPath $trustedBuildSource -PathType Leaf)) {
     throw "Exact build source snapshot is missing $requiredBuildSource"
   }
 }
-# Replace the earlier editable checkout install with the exact snapshot package.
-# Isolated Python startup prevents cwd/PYTHONPATH/sitecustomize from reopening
-# mutable checkout code after the final trusted source gate.
-& $pythonExecutable -I -m pip install --no-deps --force-reinstall $trustedBuildRoot
-if ($LASTEXITCODE -ne 0) { throw "Exact build source install exited $LASTEXITCODE" }
-$trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
-if ($LASTEXITCODE -ne 0) { throw "Exact build source snapshot verification before Autosport.exe exited $LASTEXITCODE" }
 
-Push-Location $trustedBuildRoot
-try {
-  & $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
-} finally {
-  Pop-Location
+# Dependencies were installed before the final source gate. Do not reinstall the
+# project from a writable snapshot after that gate. PyInstaller receives the
+# exact source tree explicitly through --paths and absolute entry paths.
+$trustedBuildSrc = Join-Path $trustedBuildRoot 'src'
+$trustedGuiEntry = Join-Path $trustedBuildRoot 'src/autosport/windows_entry.py'
+$trustedDataEntry = Join-Path $trustedBuildRoot 'src/autosport/data_tools_entry.py'
+$pyInstallerOutputRoot = Join-Path $boundArtifactRoot 'pyinstaller-output'
+$pyInstallerDist = Join-Path $pyInstallerOutputRoot 'dist'
+$pyInstallerWork = Join-Path $pyInstallerOutputRoot 'build'
+$pyInstallerSpec = Join-Path $pyInstallerOutputRoot 'spec'
+New-Item -ItemType Directory -Path $pyInstallerDist -Force | Out-Null
+New-Item -ItemType Directory -Path $pyInstallerWork -Force | Out-Null
+New-Item -ItemType Directory -Path $pyInstallerSpec -Force | Out-Null
+$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+if ([string]::IsNullOrWhiteSpace($currentSid) -or $currentSid -notmatch '^S-') {
+  throw 'Unable to resolve current Windows security identifier for trusted source fence'
 }
-if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
-$builtAutosportExe = Join-Path $trustedBuildRoot 'dist/Autosport.exe'
-python $sourceVerifier --bind-artifact $builtAutosportExe --bound-output $boundAutosportExe --digest-output $autosportDigestPath
-if ($LASTEXITCODE -ne 0) { throw "Autosport.exe artifact binding exited $LASTEXITCODE" }
-$autosportExeSha256 = (Get-Content -LiteralPath $autosportDigestPath -Raw).Trim()
-python $sourceVerifier --source-sha $sourceSha --late-build-boundary --allow-release-outputs
-if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport-Data.exe exited $LASTEXITCODE" }
-$trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
-if ($LASTEXITCODE -ne 0) { throw "Exact build source snapshot verification before Autosport-Data.exe exited $LASTEXITCODE" }
-Push-Location $trustedBuildRoot
+
+$trustedBuildProtected = $false
 try {
-  & $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
+  & icacls $trustedBuildRoot /deny "*${currentSid}:(OI)(CI)(W,D,DC)" /T /C | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Trusted build source write fence exited $LASTEXITCODE" }
+  $trustedBuildProtected = $true
+
+  # Verify only after the deny ACE is fully applied. Any replacement/addition that
+  # raced extraction or ACL propagation is therefore detected before consumption,
+  # while later same-user write/delete/create attempts remain denied through both
+  # PyInstaller consumers.
+  $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
+  if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification before Autosport.exe exited $LASTEXITCODE" }
+
+  & $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry
+  if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
+  $builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'
+  python $sourceVerifier --bind-artifact $builtAutosportExe --bound-output $boundAutosportExe --digest-output $autosportDigestPath
+  if ($LASTEXITCODE -ne 0) { throw "Autosport.exe artifact binding exited $LASTEXITCODE" }
+  $autosportExeSha256 = (Get-Content -LiteralPath $autosportDigestPath -Raw).Trim()
+
+  $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
+  if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification after Autosport.exe exited $LASTEXITCODE" }
+
+  python $sourceVerifier --source-sha $sourceSha --late-build-boundary --allow-release-outputs
+  if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport-Data.exe exited $LASTEXITCODE" }
+  $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
+  if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification before Autosport-Data.exe exited $LASTEXITCODE" }
+
+  & $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry
+  if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }
+  $builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'
+  python $sourceVerifier --bind-artifact $builtDataExe --bound-output $boundDataExe --digest-output $dataDigestPath
+  if ($LASTEXITCODE -ne 0) { throw "Autosport-Data.exe artifact binding exited $LASTEXITCODE" }
+  $dataExeSha256 = (Get-Content -LiteralPath $dataDigestPath -Raw).Trim()
+
+  $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
+  if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification after Autosport-Data.exe exited $LASTEXITCODE" }
 } finally {
-  Pop-Location
+  if ($trustedBuildProtected) {
+    & icacls $trustedBuildRoot /remove:d "*${currentSid}" /T /C | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Trusted build source write-fence cleanup exited $LASTEXITCODE" }
+  }
 }
-if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }
-$builtDataExe = Join-Path $trustedBuildRoot 'dist/Autosport-Data.exe'
-python $sourceVerifier --bind-artifact $builtDataExe --bound-output $boundDataExe --digest-output $dataDigestPath
-if ($LASTEXITCODE -ne 0) { throw "Autosport-Data.exe artifact binding exited $LASTEXITCODE" }
-$dataExeSha256 = (Get-Content -LiteralPath $dataDigestPath -Raw).Trim()
 
 $releaseDist = Join-Path $repoRoot 'dist'
 if (-not (Test-Path -LiteralPath $releaseDist -PathType Container)) {
@@ -554,7 +614,7 @@ if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe help exited $LASTE
 & $dataExe compare-strategies --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe compare-strategies --help exited $LASTEXITCODE" }
 & $dataExe walk-forward-evaluate --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe walk-forward-evaluate --help exited $LASTEXITCODE" }
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe walk-forward-evaluate exited $LASTEXITCODE" }
 & $dataExe acquire --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe acquire --help exited $LASTEXITCODE" }
 & $dataExe build-corpus --help | Out-Null

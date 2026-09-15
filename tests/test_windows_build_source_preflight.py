@@ -414,25 +414,20 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
             "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "
             "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
         )
-        first_build = (
-            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-            "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
-            "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
-        )
-        second_build = (
-            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
-            "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
-            "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
-        )
+        guarded_call = "& $pythonExecutable -I $trustedPyInstallerBinder `"
+        first_start = "$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'"
+        second_start = "$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'"
         package_build = "python scripts/package_windows.py `"
 
         first_gate = script.index(snapshot_gate)
         first_locked_gate = script.index(locked_snapshot_gate, first_gate)
-        first_build_index = script.index(first_build)
+        first_start_index = script.index(first_start, first_locked_gate)
+        first_build_index = script.index(guarded_call, first_start_index)
         post_first_locked_gate = script.index(locked_snapshot_gate, first_build_index)
         second_gate = script.index(release_output_gate, first_build_index)
         pre_second_locked_gate = script.index(locked_snapshot_gate, second_gate)
-        second_build_index = script.index(second_build)
+        second_start_index = script.index(second_start, pre_second_locked_gate)
+        second_build_index = script.index(guarded_call, second_start_index)
         post_second_locked_gate = script.index(locked_snapshot_gate, second_build_index)
         package_gate = script.index(release_output_gate, second_build_index)
         package_build_index = script.index(package_build)
@@ -441,6 +436,8 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         self.assertEqual(script.count(snapshot_gate), 3)
         self.assertEqual(script.count(release_output_gate), 2)
         self.assertEqual(script.count(locked_snapshot_gate), 4)
+        self.assertEqual(script.count(guarded_call), 2)
+        self.assertEqual(script.count("--verifier-sha256 $sourceVerifierSha256 `"), 2)
         self.assertLess(first_gate, first_locked_gate)
         self.assertLess(first_locked_gate, first_build_index)
         self.assertLess(first_build_index, post_first_locked_gate)
@@ -458,30 +455,31 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
 
     def test_windows_build_binds_pyinstaller_outputs_before_audit_and_package(self) -> None:
         script = Path("scripts/build_windows.ps1").read_text(encoding="utf-8")
-        first_build = (
-            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-            "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
-            "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
-        )
-        first_bind = (
-            "python $sourceVerifier --bind-artifact $builtAutosportExe "
-            "--bound-output $boundAutosportExe --digest-output $autosportDigestPath"
-        )
-        second_build = (
-            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
-            "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
-            "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
-        )
-        second_bind = (
-            "python $sourceVerifier --bind-artifact $builtDataExe "
-            "--bound-output $boundDataExe --digest-output $dataDigestPath"
-        )
+        guarded_call = "& $pythonExecutable -I $trustedPyInstallerBinder `"
+        first_start = "$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'"
+        second_start = "$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'"
+        first_bind = "--bound-output $boundAutosportExe `"
+        first_digest = "--digest-output $autosportDigestPath `"
+        second_bind = "--bound-output $boundDataExe `"
+        second_digest = "--digest-output $dataDigestPath `"
         verify_gui = "python $sourceVerifier --verify-artifact $boundAutosportExe --expected-sha256 $autosportExeSha256"
         verify_data = "python $sourceVerifier --verify-artifact $boundDataExe --expected-sha256 $dataExeSha256"
         package_build = "python scripts/package_windows.py `"
 
-        self.assertLess(script.index(first_build), script.index(first_bind))
-        self.assertLess(script.index(second_build), script.index(second_bind))
+        first_start_index = script.index(first_start)
+        first_build_index = script.index(guarded_call, first_start_index)
+        first_bind_index = script.index(first_bind, first_build_index)
+        first_digest_index = script.index(first_digest, first_bind_index)
+        second_start_index = script.index(second_start, first_digest_index)
+        second_build_index = script.index(guarded_call, second_start_index)
+        second_bind_index = script.index(second_bind, second_build_index)
+        second_digest_index = script.index(second_digest, second_bind_index)
+
+        self.assertLess(first_build_index, first_bind_index)
+        self.assertLess(first_bind_index, first_digest_index)
+        self.assertLess(second_build_index, second_bind_index)
+        self.assertLess(second_bind_index, second_digest_index)
+        self.assertEqual(script.count(guarded_call), 2)
         self.assertIn("Start-Process -FilePath $boundAutosportExe", script)
         self.assertIn("$dataExe = $boundDataExe", script)
         self.assertLess(script.index(verify_gui), script.index(package_build))

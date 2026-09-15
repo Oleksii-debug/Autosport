@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .dataset import ReplayDataset
 from .endurance import EnduranceConfig, run_endurance
-from .integrity import ensure_durable_file, sha256_file
+from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
 from .run_registry import RunRegistry
 from .run_transaction import RunTransaction
@@ -39,6 +39,20 @@ _PACKAGED_ENDURANCE_CONFIG = EnduranceConfig(
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _safe_exception_detail(exc: Exception) -> str:
+    """Render semantic-audit failure evidence without trusting exception formatting."""
+
+    try:
+        exception_type = type.__getattribute__(type(exc), "__name__")
+    except BaseException:
+        exception_type = "Exception"
+    try:
+        rendered = str.__str__(str(exc))
+    except BaseException:
+        rendered = "exception details unavailable"
+    return f"{exception_type}: {rendered}"
 
 
 def _fixture_dataset(root: Path) -> ReplayDataset:
@@ -204,6 +218,7 @@ def _audit_bounded_endurance(root: Path) -> dict[str, object]:
 def run_restart_recovery_audit(output_path: str | Path) -> int:
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    exit_code = 0
     try:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -236,21 +251,17 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
             "human_tested": False,
             "nvda_verified": False,
         }
-        destination.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        return 0
     except Exception as exc:
         payload = {
             "status": "FAIL",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": _safe_exception_detail(exc),
             "real_money_execution": False,
             "human_tested": False,
             "nvda_verified": False,
         }
-        destination.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        return 1
+        exit_code = 1
+
+    # Evidence publication is a separate durable boundary. A publication failure
+    # must not be reclassified as a semantic audit FAIL or destroy prior evidence.
+    atomic_write_json(destination, payload)
+    return exit_code

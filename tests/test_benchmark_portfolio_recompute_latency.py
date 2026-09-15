@@ -64,6 +64,27 @@ def test_benchmark_fails_closed_when_measured_clock_does_not_advance() -> None:
         )
 
 
+def test_benchmark_rejects_same_size_wrong_event_subgraph(monkeypatch: pytest.MonkeyPatch) -> None:
+    def wrong_event_ids(
+        _self: PortfolioEngine,
+        _tickets: object,
+        _trigger_quote_key: str,
+    ) -> list[str]:
+        return ["ticket-1-0", "ticket-1-1"]
+
+    monkeypatch.setattr(PortfolioEngine, "affected_tickets", wrong_event_ids)
+    values: Iterator[int] = iter([1_000, 1_010])
+
+    with pytest.raises(RuntimeError, match="wrong ticket identities"):
+        run_latency_benchmark(
+            event_count=2,
+            tickets_per_event=2,
+            measured_updates=1,
+            warmup_updates=0,
+            clock_ns=lambda: next(values),
+        )
+
+
 def test_small_benchmark_reports_complete_exact_affected_workload() -> None:
     values: Iterator[int] = iter(range(1_000, 1_000 + 14 * 10, 10))
 

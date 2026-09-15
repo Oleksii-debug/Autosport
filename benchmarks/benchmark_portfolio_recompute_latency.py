@@ -100,14 +100,21 @@ def _expected_scenarios(tickets_per_event: int) -> int:
 def _validate_recompute(
     *,
     affected_ids: list[str],
+    expected_ticket_ids: frozenset[str],
     report: PortfolioReport,
     tickets_per_event: int,
     expected_scenarios: int,
 ) -> None:
-    if len(affected_ids) != tickets_per_event or len(set(affected_ids)) != tickets_per_event:
+    observed_ticket_ids = set(affected_ids)
+    if len(affected_ids) != tickets_per_event or len(observed_ticket_ids) != tickets_per_event:
         raise RuntimeError(
             "affected-subgraph discovery was incomplete or duplicated: "
-            f"expected={tickets_per_event} observed={len(affected_ids)} unique={len(set(affected_ids))}"
+            f"expected={tickets_per_event} observed={len(affected_ids)} unique={len(observed_ticket_ids)}"
+        )
+    if observed_ticket_ids != expected_ticket_ids:
+        raise RuntimeError(
+            "affected-subgraph discovery returned wrong ticket identities for the trigger: "
+            f"expected={sorted(expected_ticket_ids)!r} observed={sorted(observed_ticket_ids)!r}"
         )
     if report.mode != "exact":
         raise RuntimeError(f"ordinary benchmark subgraph unexpectedly used mode={report.mode!r}")
@@ -142,6 +149,17 @@ def run_latency_benchmark(
     if len(by_id) != len(tickets):
         raise RuntimeError("benchmark fixture contains duplicate ticket identities")
 
+    expected_ids_by_trigger = {
+        trigger_quote_key: frozenset(
+            ticket.ticket_id
+            for ticket in tickets
+            if any(leg.quote_key == trigger_quote_key for leg in ticket.legs)
+        )
+        for trigger_quote_key in trigger_quote_keys
+    }
+    if any(len(expected_ids) != tickets_per_event for expected_ids in expected_ids_by_trigger.values()):
+        raise RuntimeError("benchmark fixture trigger mapping did not produce the exact expected ticket set")
+
     expected_scenarios = _expected_scenarios(tickets_per_event)
     engine = PortfolioEngine(max_exact_states=max(100_000, expected_scenarios))
 
@@ -154,9 +172,11 @@ def run_latency_benchmark(
         return affected_ids, engine.analyse(affected)
 
     for update_index in range(warmup_updates):
-        affected_ids, report = recompute(trigger_quote_keys[update_index % event_count])
+        trigger_quote_key = trigger_quote_keys[update_index % event_count]
+        affected_ids, report = recompute(trigger_quote_key)
         _validate_recompute(
             affected_ids=affected_ids,
+            expected_ticket_ids=expected_ids_by_trigger[trigger_quote_key],
             report=report,
             tickets_per_event=tickets_per_event,
             expected_scenarios=expected_scenarios,
@@ -172,6 +192,7 @@ def run_latency_benchmark(
             raise RuntimeError("latency clock did not advance for a measured portfolio recompute")
         _validate_recompute(
             affected_ids=affected_ids,
+            expected_ticket_ids=expected_ids_by_trigger[trigger_quote_key],
             report=report,
             tickets_per_event=tickets_per_event,
             expected_scenarios=expected_scenarios,

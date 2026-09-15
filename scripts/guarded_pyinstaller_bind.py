@@ -96,7 +96,7 @@ def _sha256_stream(stream: Any) -> str:
 
 
 def _require_expected_pyinstaller_version(actual: str) -> None:
-    if actual != _EXPECTEDED_PYINSTALLER_VERSION:
+    if actual != _EXPECTED_PYINSTALLER_VERSION:
         raise RuntimeError(
             "guarded PyInstaller producer version mismatch: "
             f"expected {_EXPECTED_PYINSTALLER_VERSION}, got {actual}"

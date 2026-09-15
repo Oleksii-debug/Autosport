@@ -53,11 +53,17 @@ def _committed_verifier_repo(tmp_path: Path) -> tuple[Path, str, bytes]:
 
 def test_trusted_verifier_snapshot_uses_exact_git_blob_after_live_mutation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     verifier = _load_verifier()
     repo, source_sha, canonical = _committed_verifier_repo(tmp_path)
     live_verifier = repo / "scripts" / "verify_source_checkout.py"
     trusted_snapshot = tmp_path / "trusted-verifier.py"
+
+    # This synthetic nested repository has its own source identity. Do not let
+    # the outer GitHub Actions pull-request event bind it to the real PR head.
+    for name in ("GITHUB_EVENT_PATH", "GITHUB_REPOSITORY", "GITHUB_SHA"):
+        monkeypatch.delenv(name, raising=False)
 
     # Model the vulnerable old ordering: a clean proof succeeds, then the live
     # verifier path is replaced before snapshot materialization.

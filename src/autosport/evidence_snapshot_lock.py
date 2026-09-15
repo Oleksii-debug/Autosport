@@ -22,7 +22,7 @@ def _add_secondary_failure_note(
 
 
 class _WindowsWorkspaceChangeWatch:
-    """Observe workspace namespace changes across one evidence snapshot interval."""
+    """Observe workspace changes across one evidence snapshot interval."""
 
     _BUFFER_SIZE = 64 * 1024
 
@@ -97,6 +97,11 @@ class _WindowsWorkspaceChangeWatch:
         file_flag_overlapped = 0x40000000
         file_notify_change_file_name = 0x00000001
         file_notify_change_dir_name = 0x00000002
+        file_notify_change_attributes = 0x00000004
+        file_notify_change_size = 0x00000008
+        file_notify_change_last_write = 0x00000010
+        file_notify_change_creation = 0x00000040
+        file_notify_change_security = 0x00000100
         invalid_handle_value = ctypes.c_void_p(-1).value
 
         resolved = workspace.resolve(strict=True)
@@ -131,12 +136,25 @@ class _WindowsWorkspaceChangeWatch:
         self._buffer = buffer
         self._overlapped = overlapped
 
+        # Retained canonical-source handles are released immediately before this
+        # watcher is cancelled at context exit. Keep data/metadata notifications in
+        # scope so a same-name in-place write cannot cross that handoff interval
+        # silently after the retained handle has stopped denying WRITE.
+        notify_filter = (
+            file_notify_change_file_name
+            | file_notify_change_dir_name
+            | file_notify_change_attributes
+            | file_notify_change_size
+            | file_notify_change_last_write
+            | file_notify_change_creation
+            | file_notify_change_security
+        )
         queued = read_changes(
             directory_handle,
             buffer,
             self._BUFFER_SIZE,
             False,
-            file_notify_change_file_name | file_notify_change_dir_name,
+            notify_filter,
             None,
             ctypes.byref(overlapped),
             None,
@@ -152,7 +170,7 @@ class _WindowsWorkspaceChangeWatch:
             raise error
 
     def close_and_require_unchanged(self) -> None:
-        """Linearize the Windows namespace watch and fail if it saw a change."""
+        """Linearize the Windows watcher and fail if it saw a relevant change."""
 
         if self._closed:
             return
@@ -230,11 +248,11 @@ class _WindowsWorkspaceChangeWatch:
 
 
 class WorkspaceEconomicLock:
-    """Evidence-only wrapper adding a Windows direct-filesystem namespace boundary.
+    """Evidence-only wrapper adding a Windows direct-filesystem snapshot boundary.
 
     The canonical WorkspaceEconomicLock remains the advisory writer-coordination
     mechanism. This wrapper is imported only by evidence export/verification so
-    non-cooperating direct namespace changes become observable without creating a
+    non-cooperating direct filesystem changes become observable without creating a
     second lock/state architecture. Retained source handles in evidence_export keep
     canonical member bytes/path identities stable through the final source reproof.
     """
@@ -275,7 +293,7 @@ class WorkspaceEconomicLock:
             if watch_error is not None:
                 _add_secondary_failure_note(
                     exc_value,
-                    "workspace namespace also changed during the evidence snapshot",
+                    "workspace also changed during the evidence snapshot",
                     watch_error,
                 )
             return self._lock.__exit__(exc_type, exc_value, traceback)

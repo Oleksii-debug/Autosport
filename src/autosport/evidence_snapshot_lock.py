@@ -221,32 +221,53 @@ class _WindowsWorkspaceChangeWatch:
             self._resolved_workspace = None
             raise error
 
-    def _create_linearization_sentinel(self) -> Path:
+    def _create_linearization_sentinel(self) -> tuple[Path, int]:
         workspace = self._resolved_workspace
         if workspace is None:
             raise RuntimeError("workspace change watch has no resolved root")
 
-        # Keep the barrier name 8.3-compatible. FILE_NOTIFY_INFORMATION may
-        # otherwise report either a long name or its short-name alias. Exclusive
-        # creation means a collision fails closed rather than weakening the proof.
-        sentinel = workspace / f"{uuid.uuid4().hex[:8]}.asv"
-        descriptor = os.open(
-            sentinel,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_BINARY", 0),
-            0o600,
+        ctypes = self._ctypes
+        wintypes = self._wintypes
+        create_file = self._kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
         )
-        try:
-            os.close(descriptor)
-        except BaseException:
-            try:
-                sentinel.unlink()
-            except BaseException:
-                pass
-            raise
-        return sentinel
+        create_file.restype = wintypes.HANDLE
+
+        generic_write = 0x40000000
+        delete_access = 0x00010000
+        file_share_read = 0x00000001
+        file_share_write = 0x00000002
+        create_new = 1
+        file_attribute_temporary = 0x00000100
+        file_flag_delete_on_close = 0x04000000
+        invalid_handle_value = ctypes.c_void_p(-1).value
+
+        # Keep the barrier name 8.3-compatible. FILE_NOTIFY_INFORMATION may
+        # otherwise report either a long name or its short-name alias. The native
+        # handle remains authoritative until cleanup: DELETE access plus
+        # DELETE_ON_CLOSE owns deletion of this exact object, and omitting
+        # FILE_SHARE_DELETE prevents a foreign rename/replacement from substituting
+        # another object at the pathname before cleanup.
+        sentinel = workspace / f"{uuid.uuid4().hex[:8]}.asv"
+        sentinel_handle = create_file(
+            str(sentinel),
+            generic_write | delete_access,
+            file_share_read | file_share_write,
+            None,
+            create_new,
+            file_attribute_temporary | file_flag_delete_on_close,
+            None,
+        )
+        if sentinel_handle == invalid_handle_value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return sentinel, int(sentinel_handle)
 
     @staticmethod
     def _require_only_sentinel_notifications(
@@ -321,6 +342,7 @@ class _WindowsWorkspaceChangeWatch:
 
         error_not_found = 1168
         sentinel: Path | None = None
+        sentinel_handle: int | None = None
         request_drained = False
         primary_error: BaseException | None = None
         try:
@@ -330,7 +352,7 @@ class _WindowsWorkspaceChangeWatch:
             # the cancellation. Instead create one unique watched entry. Its creation
             # is the snapshot linearization point and must complete the already-pending
             # ReadDirectoryChangesW request normally.
-            sentinel = self._create_linearization_sentinel()
+            sentinel, sentinel_handle = self._create_linearization_sentinel()
 
             transferred = wintypes.DWORD()
             completed = get_result(
@@ -383,14 +405,12 @@ class _WindowsWorkspaceChangeWatch:
                     ):
                         cleanup_error = ctypes.WinError(drain_error)
 
-            if sentinel is not None:
-                try:
-                    sentinel.unlink()
-                except FileNotFoundError:
-                    pass
-                except BaseException as error:
-                    if cleanup_error is None:
-                        cleanup_error = error
+            # Closing the retained native sentinel handle deletes exactly the
+            # object we created. No pathname unlink is used, so cleanup cannot
+            # remove a foreign replacement.
+            if sentinel_handle is not None:
+                if not close_handle(sentinel_handle) and cleanup_error is None:
+                    cleanup_error = ctypes.WinError(ctypes.get_last_error())
 
             if not close_handle(event_handle) and cleanup_error is None:
                 cleanup_error = ctypes.WinError(ctypes.get_last_error())

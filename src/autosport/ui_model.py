@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,13 @@ def _reject_nonfinite_json_constant(value: str) -> Any:
     raise ValueError(f"non-finite JSON constant: {value}")
 
 
+def _parse_finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"non-finite JSON number: {value}")
+    return parsed
+
+
 def _market_price_truth_line(result: SessionResult) -> str:
     try:
         text = Path(result.result_path).read_text(encoding="utf-8")
@@ -37,9 +45,12 @@ def _market_price_truth_line(result: SessionResult) -> str:
             text,
             object_pairs_hook=_reject_duplicate_object_pairs,
             parse_constant=_reject_nonfinite_json_constant,
+            parse_float=_parse_finite_json_float,
         )
     except (OSError, UnicodeError):
         return "Price truth | ERROR — run summary evidence is missing or unreadable."
+    except RecursionError:
+        return "Price truth | ERROR — run summary JSON nesting is too deep."
     except json.JSONDecodeError as exc:
         return f"Price truth | ERROR — run summary JSON is invalid: {exc.msg}."
     except ValueError as exc:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -17,6 +18,71 @@ from .scenario_search import ScenarioGroup, ScenarioOutcome
 
 
 RESEARCH_STRATEGY_ID = "research-replay-v1"
+_MAX_RESEARCH_PLAN_JSON_DEPTH = 64
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError(f"research strategy plan contains duplicate JSON key {key!r}")
+        payload[key] = value
+    return payload
+
+
+def _reject_non_finite_json(value: str) -> None:
+    raise ValueError(f"research strategy plan contains non-finite JSON value {value!r}")
+
+
+def _validate_json_text(value: str) -> None:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("research strategy plan contains non-UTF-8 JSON text") from exc
+
+
+def _validate_strict_json_domain(raw: Any) -> None:
+    """Fail closed on decoded values that cannot represent bounded strict JSON."""
+
+    pending: list[tuple[Any, int]] = [(raw, 0)]
+    while pending:
+        value, depth = pending.pop()
+        if depth > _MAX_RESEARCH_PLAN_JSON_DEPTH:
+            raise ValueError("research strategy plan JSON nesting exceeds supported depth")
+        if value is None or type(value) in (bool, int):
+            continue
+        if type(value) is float:
+            if not math.isfinite(value):
+                raise ValueError("research strategy plan contains non-finite JSON number")
+            continue
+        if type(value) is str:
+            _validate_json_text(value)
+            continue
+        if type(value) is list:
+            pending.extend((item, depth + 1) for item in value)
+            continue
+        if type(value) is dict:
+            for key, item in value.items():
+                if type(key) is not str:
+                    raise ValueError("research strategy plan JSON object keys must be strings")
+                _validate_json_text(key)
+                pending.append((item, depth + 1))
+            continue
+        raise ValueError("research strategy plan contains unsupported JSON value")
+
+
+def _canonical_plan_json(raw: Any) -> str:
+    _validate_strict_json_domain(raw)
+    try:
+        return json.dumps(
+            raw,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, UnicodeEncodeError, RecursionError) as exc:
+        raise ValueError("research strategy plan must be canonical strict JSON") from exc
 
 
 def _stable_event_projection(event: MarketEvent) -> dict[str, Any]:
@@ -138,10 +204,14 @@ class ResearchStrategyPlan:
     def from_path(cls, path: str | Path) -> "ResearchStrategyPlan":
         raw_bytes = Path(path).read_bytes()
         try:
-            raw = json.loads(raw_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raw = json.loads(
+                raw_bytes.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_non_finite_json,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
             raise ValueError("research strategy plan must be valid UTF-8 JSON") from exc
-        canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        canonical = _canonical_plan_json(raw)
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         return cls.from_dict(raw, source_sha256=digest)
 
@@ -154,8 +224,10 @@ class ResearchStrategyPlan:
     ) -> "ResearchStrategyPlan":
         if not isinstance(raw, dict):
             raise ValueError("research strategy plan root must be an object")
-        if raw.get("schema_version") != 1:
-            raise ValueError("research strategy plan schema_version must be 1")
+        _validate_strict_json_domain(raw)
+        schema_version = raw.get("schema_version")
+        if type(schema_version) is not int or schema_version != 1:
+            raise ValueError("research strategy plan schema_version must be integer 1")
         if raw.get("strategy_id") != RESEARCH_STRATEGY_ID:
             raise ValueError(f"research strategy plan strategy_id must be {RESEARCH_STRATEGY_ID}")
         decisions = raw.get("decisions")
@@ -163,7 +235,7 @@ class ResearchStrategyPlan:
             raise ValueError("research strategy plan decisions must be a non-empty list")
         instructions = tuple(_instruction_from_dict(item) for item in decisions)
         if source_sha256 is None:
-            canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            canonical = _canonical_plan_json(raw)
             source_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         return cls(instructions, source_sha256.lower())
 

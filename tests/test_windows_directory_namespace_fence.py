@@ -24,6 +24,16 @@ def _trusted_snapshot_verifier_source() -> str:
     return tail.split(end_marker, 1)[0]
 
 
+def _trusted_directory_fence_type_source() -> str:
+    script = _BUILD_SCRIPT.read_text(encoding="utf-8")
+    start_marker = "$trustedDirectoryFenceTypeSource = @'\n"
+    end_marker = "\n'@\n"
+    assert start_marker in script
+    tail = script.split(start_marker, 1)[1]
+    assert end_marker in tail
+    return tail.split(end_marker, 1)[0]
+
+
 def test_windows_build_holds_directory_namespace_fence_through_both_consumers() -> None:
     script = _BUILD_SCRIPT.read_text(encoding="utf-8")
 
@@ -149,6 +159,8 @@ def test_windows_directory_fence_rejects_preopened_namespace_writer(tmp_path: Pa
 
     root = tmp_path / "trusted-source"
     root.mkdir()
+    fence_source = tmp_path / "trusted-directory-fence.cs"
+    fence_source.write_text(_trusted_directory_fence_type_source(), encoding="utf-8")
 
     def raw_handle(handle: object) -> int | None:
         if handle is None:
@@ -173,6 +185,41 @@ def test_windows_directory_fence_rejects_preopened_namespace_writer(tmp_path: Pa
         )
         return handle, ctypes.get_last_error()
 
+    production_fence_script = r"""
+$ErrorActionPreference = 'Stop'
+$source = Get-Content -Raw -LiteralPath $env:AUTOSPORT_FENCE_SOURCE
+Add-Type -TypeDefinition $source -Language CSharp
+try {
+  $handle = [Autosport.Release.TrustedDirectoryFence]::OpenReadFence($env:AUTOSPORT_FENCE_ROOT)
+  try {
+    [Console]::Out.WriteLine('FENCE=PASS')
+  } finally {
+    $handle.Dispose()
+  }
+} catch {
+  $current = $_.Exception
+  while ($null -ne $current) {
+    if ($current -is [System.ComponentModel.Win32Exception]) {
+      [Console]::Error.WriteLine("WIN32_ERROR=$($current.NativeErrorCode)")
+      exit 23
+    }
+    $current = $current.InnerException
+  }
+  throw
+}
+"""
+
+    def run_production_fence() -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env["AUTOSPORT_FENCE_SOURCE"] = str(fence_source)
+        env["AUTOSPORT_FENCE_ROOT"] = str(root)
+        return subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", production_fence_script],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
     sid_result = subprocess.run(
         [
             "powershell.exe",
@@ -188,21 +235,7 @@ def test_windows_directory_fence_rejects_preopened_namespace_writer(tmp_path: Pa
     assert sid.startswith("S-")
     principal = f"*{sid}"
 
-    hostile_access = (
-        file_list_directory
-        | file_add_file
-        | file_add_subdirectory
-        | file_delete_child
-        | delete_access
-    )
-    share_all = file_share_read | file_share_write | file_share_delete
-    hostile_handle = None
-    fence_handle = None
-    acl_applied = False
-    try:
-        hostile_handle, hostile_error = open_directory(hostile_access, share_all)
-        assert not is_invalid(hostile_handle), hostile_error
-
+    def apply_mutation_deny() -> None:
         subprocess.run(
             [
                 "icacls",
@@ -216,7 +249,40 @@ def test_windows_directory_fence_rejects_preopened_namespace_writer(tmp_path: Pa
             capture_output=True,
             text=True,
         )
+
+    def remove_mutation_deny() -> None:
+        subprocess.run(
+            ["icacls", str(root), "/remove:d", principal, "/T", "/C"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    hostile_access = (
+        file_list_directory
+        | file_add_file
+        | file_add_subdirectory
+        | file_delete_child
+        | delete_access
+    )
+    share_all = file_share_read | file_share_write | file_share_delete
+    hostile_handle = None
+    reader_handle = None
+    fence_handle = None
+    acl_applied = False
+    try:
+        hostile_handle, hostile_error = open_directory(hostile_access, share_all)
+        assert not is_invalid(hostile_handle), hostile_error
+
+        apply_mutation_deny()
         acl_applied = True
+
+        production_blocked = run_production_fence()
+        assert production_blocked.returncode == 23, (
+            production_blocked.stdout,
+            production_blocked.stderr,
+        )
+        assert "WIN32_ERROR=32" in production_blocked.stderr
 
         blocked_handle, blocked_error = open_directory(
             file_list_directory,
@@ -230,18 +296,35 @@ def test_windows_directory_fence_rejects_preopened_namespace_writer(tmp_path: Pa
         assert close_handle(hostile_handle)
         hostile_handle = None
 
+        remove_mutation_deny()
+        acl_applied = False
+
+        reader_handle, reader_error = open_directory(
+            file_list_directory,
+            file_share_read,
+        )
+        assert not is_invalid(reader_handle), reader_error
+
+        apply_mutation_deny()
+        acl_applied = True
+
+        production_allowed = run_production_fence()
+        assert production_allowed.returncode == 0, (
+            production_allowed.stdout,
+            production_allowed.stderr,
+        )
+        assert "FENCE=PASS" in production_allowed.stdout
+
+        assert close_handle(reader_handle)
+        reader_handle = None
+
         fence_handle, fence_error = open_directory(
             file_list_directory,
             file_share_read,
         )
         assert not is_invalid(fence_handle), fence_error
 
-        subprocess.run(
-            ["icacls", str(root), "/remove:d", principal, "/T", "/C"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        remove_mutation_deny()
         acl_applied = False
 
         fresh_writer, fresh_writer_error = open_directory(hostile_access, share_all)
@@ -252,12 +335,9 @@ def test_windows_directory_fence_rejects_preopened_namespace_writer(tmp_path: Pa
     finally:
         if hostile_handle is not None and not is_invalid(hostile_handle):
             close_handle(hostile_handle)
+        if reader_handle is not None and not is_invalid(reader_handle):
+            close_handle(reader_handle)
         if fence_handle is not None and not is_invalid(fence_handle):
             close_handle(fence_handle)
         if acl_applied:
-            subprocess.run(
-                ["icacls", str(root), "/remove:d", principal, "/T", "/C"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            remove_mutation_deny()

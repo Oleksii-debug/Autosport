@@ -814,6 +814,8 @@ class RunTransaction:
             ) + "\n"
         except (TypeError, ValueError) as exc:
             raise RunTransactionError(f"{label} cannot be serialized as JSON") from exc
+        # Strict re-decode rejects NaN/Infinity and duplicate ambiguity on the exact
+        # canonical bytes before their digest can become durable transaction evidence.
         cls._decode_strict_json(text, label=label)
         encoded = text.encode("utf-8")
         return VerifiedFileSnapshot(
@@ -982,6 +984,8 @@ class RunTransaction:
         expected_run_id: str,
         label: str,
     ) -> None:
+        """Bind every run-local decision in an immutable verified snapshot to this transaction."""
+
         if snapshot.record_count == 0:
             return
         for line_number, line in enumerate(snapshot.payload.decode("utf-8").splitlines(), start=1):
@@ -1001,6 +1005,8 @@ class RunTransaction:
         *,
         label: str,
     ) -> None:
+        """Bind run-summary truth to the durable transaction identity."""
+
         expected = {
             "run_id": self.run_id,
             "experiment_key": manifest.get("experiment_key"),
@@ -1036,6 +1042,7 @@ class RunTransaction:
 
     @staticmethod
     def _verify_decision_ledger(path: Path, label: str) -> int:
+        """Compatibility wrapper for callers/tests that only need semantic validation."""
         return RunTransaction._verified_decision_ledger(path, label).record_count
 
     def _validate_precommit_evidence(self, manifest: dict[str, Any]) -> None:

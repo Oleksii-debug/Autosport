@@ -8,15 +8,33 @@ def _build_script_text() -> str:
     return _BUILD_SCRIPT.read_text(encoding="utf-8")
 
 
+def _all_indices(text: str, needle: str) -> list[int]:
+    indices: list[int] = []
+    start = 0
+    while True:
+        index = text.find(needle, start)
+        if index < 0:
+            return indices
+        indices.append(index)
+        start = index + len(needle)
+
+
 def test_local_windows_build_proves_pristine_source_before_mutation() -> None:
     script = _build_script_text()
 
     source_sha = "$sourceSha = $env:AUTOSPORT_SOURCE_SHA"
     preflight = "python scripts/verify_source_checkout.py --source-sha $sourceSha"
+    disable_repo_bytecode = "$env:PYTHONDONTWRITEBYTECODE = '1'"
     first_mutation = "python -m pip install --upgrade pip"
 
-    assert script.index(source_sha) < script.index(preflight) < script.index(first_mutation)
+    assert (
+        script.index(source_sha)
+        < script.index(preflight)
+        < script.index(disable_repo_bytecode)
+        < script.index(first_mutation)
+    )
     assert script.count(source_sha) == 1
+    assert script.count(disable_repo_bytecode) == 1
     assert 'if ($LASTEXITCODE -ne 0) { throw "Source checkout preflight exited $LASTEXITCODE" }' in script
 
 
@@ -33,25 +51,34 @@ def test_local_windows_build_runs_canonical_full_pytest_gate() -> None:
     assert 'if ($LASTEXITCODE -ne 0) { throw "Full pytest gate exited $LASTEXITCODE" }' in script
 
 
-def test_local_windows_build_reproves_source_immediately_before_pyinstaller() -> None:
+def test_local_windows_build_reproves_source_before_every_source_consuming_release_step() -> None:
     script = _build_script_text()
 
     dataset_smoke = "python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace"
     smoke_cleanup = "if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }"
     late_gate = "python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary"
-    late_gate_check = 'if ($LASTEXITCODE -ne 0) { throw "Late source checkout integrity gate exited $LASTEXITCODE" }'
     first_build = "python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
+    second_build = "python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py"
+    package_command = "python scripts/package_windows.py `"
 
     dataset_index = script.index(dataset_smoke)
     cleanup_index = script.index(smoke_cleanup, dataset_index)
-    late_gate_index = script.index(late_gate)
-    first_build_index = script.index(first_build)
+    late_gate_indices = _all_indices(script, late_gate)
 
-    assert dataset_index < cleanup_index < late_gate_index < first_build_index
-    assert script.index(late_gate_check) > late_gate_index
-    assert script.index(late_gate_check) < first_build_index
-    assert script.count(late_gate) == 1
+    assert len(late_gate_indices) == 3
+    assert dataset_index < cleanup_index < late_gate_indices[0] < script.index(first_build)
+    assert script.index(first_build) < late_gate_indices[1] < script.index(second_build)
+    assert script.index(second_build) < late_gate_indices[2] < script.index(package_command)
     assert script.count(smoke_cleanup) == 2
+
+    required_gate_failures = (
+        'throw "Late source checkout integrity gate before Autosport.exe exited $LASTEXITCODE"',
+        'throw "Late source checkout integrity gate before Autosport-Data.exe exited $LASTEXITCODE"',
+        'throw "Late source checkout integrity gate before package assembly exited $LASTEXITCODE"',
+    )
+    for gate_index, failure in zip(late_gate_indices, required_gate_failures, strict=True):
+        failure_index = script.index(failure)
+        assert gate_index < failure_index
 
 
 def test_local_windows_build_fails_closed_on_release_native_steps() -> None:

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
+from autosport.run_registry import RunRegistry
 from autosport.session import AutosportSession
 from autosport.workspace_lock import WorkspaceEconomicLock
 
@@ -25,6 +26,7 @@ class SessionPaperBookLockRefreshTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             book_path = root / "paper_book.json"
+            RunRegistry.initialize_pristine(root / "run_registry.json")
             PaperBook("10000").save(book_path)
 
             stale_session = AutosportSession(root, "10000")
@@ -46,6 +48,7 @@ class SessionPaperBookLockRefreshTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             book_path = root / "paper_book.json"
+            RunRegistry.initialize_pristine(root / "run_registry.json")
             PaperBook("10000").save(book_path)
 
             stale_session = AutosportSession(root, "10000")

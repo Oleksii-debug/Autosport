@@ -491,15 +491,12 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         workflow = Path(".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         exact_ref = "ref: ${{ github.event.pull_request.head.sha || github.sha }}"
         preflight = "python scripts/verify_source_checkout.py --source-sha $env:AUTOSPORT_SOURCE_SHA"
-        build_step = "- name: Build Windows package"
-        build_command = "./scripts/build_windows.ps1"
+        build_command = "& ./scripts/build_windows.ps1"
         self.assertIn(exact_ref, workflow)
         self.assertIn("fetch-depth: 0", workflow)
         self.assertIn(preflight, workflow)
-        self.assertIn(build_step, workflow)
         self.assertIn(build_command, workflow)
-        self.assertLess(workflow.index(preflight), workflow.index(build_step))
-        self.assertLess(workflow.index(build_step), workflow.index(build_command))
+        self.assertLess(workflow.index(preflight), workflow.index(build_command))
 
     def test_post_build_release_consumers_use_verified_package_extractions(self) -> None:
         workflow = Path(".github/workflows/windows-build.yml").read_text(encoding="utf-8")

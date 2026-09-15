@@ -76,6 +76,10 @@ class _SystemHandleSnapshot(list[tuple[int, int, int, int]]):
         self.object_types: dict[tuple[int, int, int], int] = {}
 
 
+class _CandidateFileIdentityUnavailable(RuntimeError):
+    """A snapshotted candidate is not currently inspectable by stable file identity."""
+
+
 def _raw_handle_value(raw_handle: Any) -> int:
     value = (
         raw_handle
@@ -113,20 +117,21 @@ def _file_identity(raw_handle: Any) -> tuple[int, bytes]:
     return int(info.VolumeSerialNumber), bytes(info.FileId.ByteIdentifier)
 
 
-def _candidate_file_identity(pid: int, handle_value: int) -> tuple[int, bytes] | None:
+def _candidate_file_identity(pid: int, handle_value: int) -> tuple[int, bytes]:
     """Inspect a snapshotted handle without trusting its FILE_OBJECT pointer.
 
-    A handle can close between the system snapshot and duplication; that race is
-    treated as gone. Other non-file/uninspectable handles return ``None`` and retain
-    the kernel-object pointer fast path in the caller.
+    Inspection failure is not evidence that the candidate disappeared. The caller
+    revalidates the exact handle-table row and only ignores a positively vanished row.
     """
 
     current_pid = os.getpid()
     if pid == current_pid:
         try:
             return _file_identity(handle_value)
-        except OSError:
-            return None
+        except OSError as exc:
+            raise _CandidateFileIdentityUnavailable(
+                "current-process candidate FileIdInfo is unavailable"
+            ) from exc
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     open_process = kernel32.OpenProcess
@@ -156,7 +161,10 @@ def _candidate_file_identity(pid: int, handle_value: int) -> tuple[int, bytes] |
         process if isinstance(process, int) else ctypes.cast(process, ctypes.c_void_p).value
     )
     if not process_value:
-        return None
+        error = ctypes.get_last_error()
+        raise _CandidateFileIdentityUnavailable(
+            f"candidate process cannot be opened for handle duplication: WinError {error}"
+        )
     duplicated = wintypes.HANDLE()
     try:
         ctypes.set_last_error(0)
@@ -169,11 +177,16 @@ def _candidate_file_identity(pid: int, handle_value: int) -> tuple[int, bytes] |
             False,
             _DUPLICATE_SAME_ACCESS,
         ):
-            return None
+            error = ctypes.get_last_error()
+            raise _CandidateFileIdentityUnavailable(
+                f"candidate handle cannot be duplicated: WinError {error}"
+            )
         try:
             return _file_identity(duplicated)
-        except OSError:
-            return None
+        except OSError as exc:
+            raise _CandidateFileIdentityUnavailable(
+                "candidate FileIdInfo is unavailable"
+            ) from exc
         finally:
             close_handle(duplicated)
     finally:
@@ -244,6 +257,21 @@ def _query_system_handles() -> list[tuple[int, int, int, int]]:
     raise RuntimeError("system handle authority snapshot exceeded bounded capture size")
 
 
+def _snapshot_row_still_present(
+    row: tuple[int, int, int, int],
+    *,
+    object_type: int,
+) -> bool:
+    """Revalidate an uninspectable candidate by exact handle-table identity."""
+
+    refreshed = _query_system_handles()
+    if row not in refreshed:
+        return False
+    object_id, pid, handle_value, _granted_access = row
+    refreshed_types = getattr(refreshed, "object_types", {})
+    return refreshed_types.get((object_id, pid, handle_value)) == object_type
+
+
 def _require_no_competing_mutation_handles(
     raw_handle: Any,
     *,
@@ -257,10 +285,12 @@ def _require_no_competing_mutation_handles(
     a live handle. Bind the trusted security-authority handle to stable filesystem
     identity and reject every other mutation-capable handle. The kernel-object pointer
     remains a fast path, but separate CreateFile opens are compared by FileIdInfo.
-    During a native PyInstaller resource update, current-process data/delete handles
-    are the trusted mutator and may remain; security-descriptor mutation authority is
-    never exempted. FILE_DELETE_CHILD is directory-only: the same access bit is
-    FILE_EXECUTE on regular files.
+    If stable identity inspection is unavailable, the exact candidate row is recaptured:
+    only a positively vanished candidate may be ignored; a live uninspectable mutator
+    fails closed. During a native PyInstaller resource update, current-process
+    data/delete handles are the trusted mutator and may remain; security-descriptor
+    mutation authority is never exempted. FILE_DELETE_CHILD is directory-only: the
+    same access bit is FILE_EXECUTE on regular files.
     """
 
     trusted_handle = _raw_handle_value(raw_handle)
@@ -301,7 +331,14 @@ def _require_no_competing_mutation_handles(
                 continue
             if target_identity is None:
                 target_identity = _file_identity(raw_handle)
-            candidate_identity = _candidate_file_identity(pid, handle_value)
+            try:
+                candidate_identity = _candidate_file_identity(pid, handle_value)
+            except _CandidateFileIdentityUnavailable as exc:
+                if _snapshot_row_still_present(row, object_type=candidate_type):
+                    raise RuntimeError(
+                        f"{label} has live uninspectable mutation-capable handle"
+                    ) from exc
+                continue
             same_file = candidate_identity == target_identity
         if same_file:
             competing.append(row)

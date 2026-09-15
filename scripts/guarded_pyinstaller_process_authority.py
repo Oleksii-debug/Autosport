@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import ctypes
+import importlib.util
 import os
+import pathlib
+import sys
 from ctypes import wintypes
 from typing import Any, Callable
 
@@ -31,6 +34,35 @@ _DANGEROUS_PROCESS_ACCESS = (
     | _WRITE_DAC
     | _WRITE_OWNER
 )
+
+
+def _require_birth_protected_worker() -> None:
+    """Move the release-sensitive binder behind a process-creation trust boundary."""
+
+    if os.name != "nt":
+        return
+    if pathlib.Path(sys.argv[0]).name.lower() != "guarded_pyinstaller_bind.py":
+        return
+    launcher_path = pathlib.Path(__file__).with_name(
+        "guarded_pyinstaller_launch_boundary.py"
+    )
+    launcher_spec = importlib.util.spec_from_file_location(
+        "_autosport_guarded_pyinstaller_launch_boundary",
+        launcher_path,
+    )
+    if launcher_spec is None or launcher_spec.loader is None:
+        raise RuntimeError(
+            f"could not load guarded PyInstaller launch boundary: {launcher_path}"
+        )
+    launcher = importlib.util.module_from_spec(launcher_spec)
+    sys.modules[launcher_spec.name] = launcher
+    launcher_spec.loader.exec_module(launcher)
+    if launcher.protected_launch_attested():
+        return
+    raise SystemExit(launcher.relaunch_birth_protected_worker())
+
+
+_require_birth_protected_worker()
 
 
 class _TrusteeW(ctypes.Structure):
@@ -373,10 +405,9 @@ class ProcessDuplicationFence:
         try:
             self._require_fresh_dangerous_access_denied()
             self._require_no_untrusted_preexisting_authority()
-            # A pre-existing dangerous handle that mutates the process DACL and
-            # closes before the system snapshot is invisible to the snapshot.
-            # Re-prove every denied capability after that audit so such a
-            # closed-before-snapshot mutation still fails closed.
+            # The birth-protected worker DACL prevents peers from ever obtaining a
+            # fresh dangerous handle before this point. This repeated proof keeps the
+            # narrower post-install DACL mutation check fail-closed as a second layer.
             self._require_fresh_dangerous_access_denied()
         except BaseException:
             _restore_kernel_object_dacl(current_process, descriptor)

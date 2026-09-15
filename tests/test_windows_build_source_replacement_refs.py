@@ -60,9 +60,33 @@ class WindowsBuildReplacementRefTests(unittest.TestCase):
             root = Path(temp_dir)
             source_a, source_b = self._replacement_repo(root)
 
-            ordinary_tree = self._run_git(root, "ls-tree", "-r", source_a)
-            source_b_blob = self._run_git(root, "rev-parse", f"{source_b}:tracked.py")
-            self.assertIn(source_b_blob, ordinary_tree)
+            # Use cat-file as the portable replacement-object oracle. Git documents
+            # this command as returning replacement commit bytes by default, while
+            # --no-replace-objects (and GIT_NO_REPLACE_OBJECTS) returns the original.
+            ordinary_commit = self._run_git(root, "cat-file", "commit", source_a)
+            source_b_commit = self._run_git(
+                root,
+                "--no-replace-objects",
+                "cat-file",
+                "commit",
+                source_b,
+            )
+            self.assertEqual(ordinary_commit, source_b_commit)
+
+            protected_commit = verify_source_checkout._git_output(
+                root,
+                "cat-file",
+                "commit",
+                source_a,
+            )
+            source_a_commit = self._run_git(
+                root,
+                "--no-replace-objects",
+                "cat-file",
+                "commit",
+                source_a,
+            )
+            self.assertEqual(protected_commit, source_a_commit)
 
             entries = verify_source_checkout._source_tree_entries(root, source_a)
             source_a_blob = verify_source_checkout._git_blob_sha1(b"VALUE = 1\n").encode("ascii")

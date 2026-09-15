@@ -276,9 +276,9 @@ def _require_no_competing_mutation_handles(
     target_object, _pid, _handle, trusted_access = trusted_rows[0]
     if target_object == 0 or trusted_access & _WRITE_DAC == 0:
         raise RuntimeError(f"{label} trusted handle lost WRITE_DAC authority")
-    target_identity = _file_identity(raw_handle)
     object_types = getattr(snapshot, "object_types", {})
     target_type = object_types.get((target_object, current_pid, trusted_handle))
+    target_identity: tuple[int, bytes] | None = None
 
     mutation_mask = _MUTATION_CAPABLE_ACCESS | (_FILE_DELETE_CHILD if directory else 0)
     competing: list[tuple[int, int, int, int]] = []
@@ -299,6 +299,8 @@ def _require_no_competing_mutation_handles(
             candidate_type = object_types.get((object_id, pid, handle_value))
             if candidate_type != target_type:
                 continue
+            if target_identity is None:
+                target_identity = _file_identity(raw_handle)
             candidate_identity = _candidate_file_identity(pid, handle_value)
             same_file = candidate_identity == target_identity
         if same_file:

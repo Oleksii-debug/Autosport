@@ -60,31 +60,85 @@ class OneShotRecoveryWorker:
                 return False
             self._busy = True
         # Recovery can mutate transaction/registry state. Do not allow interpreter
-        # shutdown to kill it at an arbitrary persistence boundary.
+        # shutdown to kill it at an arbitrary persistence boundary. The worker waits
+        # behind a gate until Thread.start() has returned successfully, so an
+        # interrupted/failed start can cancel a partially-created OS thread without
+        # ever running the economic recovery task.
         try:
+            # Gate allocation is part of pre-commit worker setup too. If either
+            # synchronization primitive cannot be created after this request has won
+            # the single-flight slot, release that slot under the same contract as a
+            # failed Thread construction rather than leaving recovery permanently busy.
+            start_gate = threading.Event()
+            cancelled = threading.Event()
             thread = threading.Thread(
-                target=self._run,
-                args=(task,),
+                target=self._run_when_committed,
+                args=(task, start_gate, cancelled),
                 name="autosport-workspace-recovery",
                 daemon=False,
             )
-            self._thread = thread
+        except BaseException as exc:
+            self._release_unstarted_slot()
+            if isinstance(exc, Exception):
+                return False
+            raise
+
+        self._thread = thread
+        task_committed = False
+        try:
             thread.start()
-        except RuntimeError:
-            # CPython reports OS/runtime inability to start a new thread as
-            # RuntimeError. No task ran, so restore the worker to an idle state;
-            # callers already treat False as a fail-closed "not started" result.
-            self._thread = None
-            with self._lock:
-                self._busy = False
-            return False
+            # Mark the request committed before releasing the worker. If a
+            # process-control BaseException arrives after this assignment, the
+            # handler must keep the single-flight slot occupied and ensure the
+            # already-authorized task is released exactly once.
+            task_committed = True
+            start_gate.set()
+        except BaseException as exc:
+            if task_committed:
+                start_gate.set()
+                if isinstance(exc, Exception):
+                    return True
+                raise
+
+            # Thread.start() can be interrupted after the OS thread exists but
+            # before it returns to the caller. Cancel before opening the gate so
+            # such a thread exits without touching recovery/economic state.
+            cancelled.set()
+            start_gate.set()
+            self._release_unstarted_slot()
+            if isinstance(exc, Exception):
+                return False
+            raise
         return True
+
+    def _release_unstarted_slot(self) -> None:
+        self._thread = None
+        with self._lock:
+            self._busy = False
+
+    def _run_when_committed(
+        self,
+        task: RecoveryTask,
+        start_gate: threading.Event,
+        cancelled: threading.Event,
+    ) -> None:
+        start_gate.wait()
+        if cancelled.is_set():
+            return
+        self._run(task)
 
     def _run(self, task: RecoveryTask) -> None:
         try:
             message = RecoveryWorkerMessage(result=task())
-        except Exception as exc:
-            message = RecoveryWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+        except BaseException as exc:
+            # Error rendering is itself an untrusted boundary: arbitrary exception
+            # classes may implement a broken __str__. Never let that secondary
+            # failure kill the worker before the terminal message reaches poll().
+            try:
+                error = f"{type(exc).__name__}: {exc}"
+            except BaseException:
+                error = "BaseException: recovery task failed; exception details unavailable"
+            message = RecoveryWorkerMessage(error=error)
         self._messages.put(message)
 
     def poll(self) -> RecoveryWorkerMessage | None:

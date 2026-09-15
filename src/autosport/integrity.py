@@ -30,8 +30,7 @@ def ensure_durable_file(path: str | Path) -> None:
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    mode = "ab" if destination.exists() else "wb"
-    with destination.open(mode) as handle:
+    with destination.open("ab") as handle:
         handle.flush()
         os.fsync(handle.fileno())
 
@@ -51,7 +50,14 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
             delete=False,
         ) as handle:
             temporary = Path(handle.name)
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())

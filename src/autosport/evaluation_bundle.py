@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass
+from decimal import Decimal, DecimalException
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,87 @@ from .forecasting import (
 )
 
 
+_MAX_DECODED_JSON_DEPTH = 128
+
+
+class _DuplicateJsonKeyError(ValueError):
+    pass
+
+
+class _NonStandardJsonConstantError(ValueError):
+    pass
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateJsonKeyError(key)
+        value[key] = item
+    return value
+
+
+def _reject_nonstandard_json_constant(value: str) -> None:
+    raise _NonStandardJsonConstantError(value)
+
+
+def _validate_decoded_json_domain(root: Any) -> None:
+    pending: list[tuple[Any, int]] = [(root, 0)]
+    while pending:
+        value, depth = pending.pop()
+        if depth > _MAX_DECODED_JSON_DEPTH:
+            raise ValueError("walk-forward bundle JSON nesting is too deep")
+        if value is None or type(value) is bool or type(value) is int:
+            continue
+        if type(value) is float:
+            if not math.isfinite(value):
+                raise ValueError("walk-forward bundle contains non-finite JSON number")
+            continue
+        if type(value) is str:
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError("walk-forward bundle contains invalid UTF-8 text") from exc
+            continue
+        if type(value) is list:
+            pending.extend((item, depth + 1) for item in value)
+            continue
+        if type(value) is dict:
+            for key, item in value.items():
+                if type(key) is not str:
+                    raise ValueError("walk-forward bundle contains non-string JSON object key")
+                try:
+                    key.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise ValueError("walk-forward bundle contains invalid UTF-8 text") from exc
+                pending.append((item, depth + 1))
+            continue
+        raise ValueError("walk-forward bundle contains non-JSON value")
+
+
+def _decode_bundle_json(payload: bytes) -> Any:
+    try:
+        decoded = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_nonstandard_json_constant,
+        )
+    except _DuplicateJsonKeyError as exc:
+        raise ValueError(
+            f"walk-forward bundle contains duplicate JSON object key: {exc.args[0]}"
+        ) from exc
+    except _NonStandardJsonConstantError as exc:
+        raise ValueError(
+            f"walk-forward bundle contains non-standard JSON constant: {exc.args[0]}"
+        ) from exc
+    except RecursionError as exc:
+        raise ValueError("walk-forward bundle JSON nesting is too deep") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("walk-forward bundle must be valid UTF-8 JSON") from exc
+    _validate_decoded_json_domain(decoded)
+    return decoded
+
+
 @dataclass(frozen=True, slots=True)
 class WalkForwardBundle:
     forecasts: tuple[ForecastRecord, ...]
@@ -36,15 +119,16 @@ class WalkForwardBundle:
     def from_path(cls, path: str | Path) -> "WalkForwardBundle":
         source = Path(path)
         raw_bytes = source.read_bytes()
-        try:
-            raw = json.loads(raw_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("walk-forward bundle must be valid UTF-8 JSON") from exc
+        raw = _decode_bundle_json(raw_bytes)
         canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         governed_dataset = None
         forecast_origin_binding = None
-        if isinstance(raw, dict) and raw.get("schema_version") == 2:
+        if (
+            isinstance(raw, dict)
+            and type(raw.get("schema_version")) is int
+            and raw.get("schema_version") == 2
+        ):
             governed_dataset = _load_declared_governed_dataset(raw, source)
             if raw.get("forecast_origin") is not None:
                 forecast_origin_binding = load_forecast_origin_binding(raw["forecast_origin"], source)
@@ -66,8 +150,9 @@ class WalkForwardBundle:
     ) -> "WalkForwardBundle":
         if not isinstance(raw, dict):
             raise ValueError("walk-forward bundle root must be an object")
+        _validate_decoded_json_domain(raw)
         schema_version = raw.get("schema_version")
-        if schema_version not in {1, 2}:
+        if type(schema_version) is not int or schema_version not in {1, 2}:
             raise ValueError("walk-forward bundle schema_version must be 1 or 2")
         if schema_version == 1:
             if raw.get("dataset") is not None:
@@ -101,9 +186,9 @@ class WalkForwardBundle:
         forecasts = tuple(_forecast_from_dict(item) for item in forecast_values)
         outcomes = tuple(_outcome_from_dict(item) for item in outcome_values)
         windows = tuple(_window_from_dict(item) for item in window_values)
-        bins = int(raw.get("bins", 10))
-        if bins <= 0:
-            raise ValueError("walk-forward bundle bins must be positive")
+        bins = raw.get("bins", 10)
+        if type(bins) is not int or bins <= 0:
+            raise ValueError("walk-forward bundle bins must be a positive integer")
 
         _validate_global_identity(forecasts, outcomes, windows)
         if source_sha256 is None:
@@ -117,7 +202,7 @@ class WalkForwardBundle:
             source_sha256.lower(),
             governed_dataset=governed_dataset,
             forecast_origin_binding=forecast_origin_binding,
-            bundle_schema_version=int(schema_version),
+            bundle_schema_version=schema_version,
         )
 
 
@@ -402,6 +487,22 @@ def _validate_global_identity(
         raise ValueError("walk-forward bundle contains duplicate window_id")
 
 
+def _required_canonical_text(raw: dict[str, Any], key: str, *, context: str) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise ValueError(f"{context}.{key} must be a non-empty trimmed string")
+    return value
+
+
+def _required_canonical_decimal_text(raw: dict[str, Any], key: str, *, context: str) -> str:
+    value = _required_canonical_text(raw, key, context=context)
+    try:
+        Decimal(value)
+    except DecimalException as exc:
+        raise ValueError(f"{context}.{key} must be a valid decimal string") from exc
+    return value
+
+
 def _forecast_from_dict(raw: Any) -> ForecastRecord:
     if not isinstance(raw, dict):
         raise ValueError("walk-forward forecast entry must be an object")
@@ -410,46 +511,73 @@ def _forecast_from_dict(raw: Any) -> ForecastRecord:
         raise ValueError("walk-forward forecast evidence_hashes must be a JSON array")
     if any(not isinstance(item, str) for item in evidence_hashes_raw):
         raise ValueError("walk-forward forecast evidence_hashes must contain strings")
+    provenance = raw.get("provenance", {})
+    if not isinstance(provenance, dict):
+        raise ValueError("walk-forward forecast provenance must be a JSON object")
+    probability = _required_canonical_decimal_text(
+        raw, "probability", context="walk-forward forecast"
+    )
+    uncertainty = (
+        _required_canonical_decimal_text(raw, "uncertainty", context="walk-forward forecast")
+        if "uncertainty" in raw
+        else "0"
+    )
     return ForecastRecord(
-        quote_key=str(raw["quote_key"]),
-        probability=raw["probability"],
-        model_id=str(raw["model_id"]),
-        model_version=str(raw["model_version"]),
-        strategy_version=str(raw["strategy_version"]),
-        model_training_cutoff_ts=str(raw["model_training_cutoff_ts"]),
-        input_cutoff_ts=str(raw["input_cutoff_ts"]),
-        generated_at=str(raw["generated_at"]),
-        uncertainty=raw.get("uncertainty", "0"),
+        quote_key=_required_canonical_text(raw, "quote_key", context="walk-forward forecast"),
+        probability=probability,
+        model_id=_required_canonical_text(raw, "model_id", context="walk-forward forecast"),
+        model_version=_required_canonical_text(raw, "model_version", context="walk-forward forecast"),
+        strategy_version=_required_canonical_text(raw, "strategy_version", context="walk-forward forecast"),
+        model_training_cutoff_ts=_required_canonical_text(
+            raw, "model_training_cutoff_ts", context="walk-forward forecast"
+        ),
+        input_cutoff_ts=_required_canonical_text(
+            raw, "input_cutoff_ts", context="walk-forward forecast"
+        ),
+        generated_at=_required_canonical_text(raw, "generated_at", context="walk-forward forecast"),
+        uncertainty=uncertainty,
         evidence_hashes=tuple(evidence_hashes_raw),
         market_snapshot_hash=(
             raw["market_snapshot_hash"]
             if raw.get("market_snapshot_hash") is not None
             else None
         ),
-        provenance=dict(raw.get("provenance", {})),
-        forecast_id=str(raw["forecast_id"]),
+        provenance=dict(provenance),
+        forecast_id=_required_canonical_text(raw, "forecast_id", context="walk-forward forecast"),
     )
 
 
 def _outcome_from_dict(raw: Any) -> ForecastOutcomeFact:
     if not isinstance(raw, dict):
         raise ValueError("walk-forward outcome entry must be an object")
+    outcome = raw.get("outcome")
+    if type(outcome) is not int or outcome not in {0, 1}:
+        raise ValueError("walk-forward outcome.outcome must be the integer 0 or 1")
     return ForecastOutcomeFact(
-        forecast_id=str(raw["forecast_id"]),
-        outcome=int(raw["outcome"]),
-        revealed_at=str(raw["revealed_at"]),
+        forecast_id=_required_canonical_text(raw, "forecast_id", context="walk-forward outcome"),
+        outcome=outcome,
+        revealed_at=_required_canonical_text(raw, "revealed_at", context="walk-forward outcome"),
     )
 
 
 def _window_from_dict(raw: Any) -> TemporalEvaluationWindow:
     if not isinstance(raw, dict):
         raise ValueError("walk-forward window entry must be an object")
+    split = raw.get("split", "holdout")
+    if not isinstance(split, str) or not split or split.strip() != split:
+        raise ValueError("walk-forward window.split must be a non-empty trimmed string")
     return TemporalEvaluationWindow(
-        window_id=str(raw["window_id"]),
-        training_end_ts=str(raw["training_end_ts"]),
-        evaluation_start_ts=str(raw["evaluation_start_ts"]),
-        evaluation_end_ts=str(raw["evaluation_end_ts"]),
-        split=str(raw.get("split", "holdout")),
+        window_id=_required_canonical_text(raw, "window_id", context="walk-forward window"),
+        training_end_ts=_required_canonical_text(
+            raw, "training_end_ts", context="walk-forward window"
+        ),
+        evaluation_start_ts=_required_canonical_text(
+            raw, "evaluation_start_ts", context="walk-forward window"
+        ),
+        evaluation_end_ts=_required_canonical_text(
+            raw, "evaluation_end_ts", context="walk-forward window"
+        ),
+        split=split,
     )
 
 

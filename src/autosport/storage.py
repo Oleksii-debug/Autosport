@@ -59,6 +59,8 @@ _FORBIDDEN_TABLE_SQL = re.compile(
     r"\b(?:CHECK|COLLATE|GENERATED|REFERENCES)\b|\bON\s+CONFLICT\b",
     re.IGNORECASE,
 )
+_SQLITE_INTEGER_MIN = -(2**63)
+_SQLITE_INTEGER_MAX = 2**63 - 1
 
 
 def _observed_instant(value: str) -> datetime:
@@ -149,8 +151,17 @@ def _load_history_payload(payload_json: str) -> dict[str, object]:
     return raw
 
 
+def _validate_persistable_sequence(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("market event sequence must be a non-boolean int")
+    if value < _SQLITE_INTEGER_MIN or value > _SQLITE_INTEGER_MAX:
+        raise ValueError("market event sequence must fit signed 64-bit SQLite INTEGER")
+    return value
+
+
 def _validate_incoming_event(event: MarketEvent) -> str:
-    """Prove an event survives the exact durable JSON representation without type drift."""
+    """Prove an event survives the exact durable JSON/SQLite representation without type drift."""
+    _validate_persistable_sequence(event.sequence)
     try:
         raw = event.to_dict()
         payload = _canonical_json(raw)
@@ -186,9 +197,11 @@ def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
     if not isinstance(payload_json, str):
         raise ValueError("stored market event payload must be JSON text")
     raw = _load_history_payload(payload_json)
+    canonical_raw = _canonical_json(raw)
+    if payload_json != canonical_raw:
+        raise ValueError("stored market event payload is not canonical JSON text")
 
     event = MarketEvent.from_dict(raw)
-    canonical_raw = _canonical_json(raw)
     if canonical_raw != _canonical_payload(event):
         raise ValueError("stored market event payload is not canonical")
 

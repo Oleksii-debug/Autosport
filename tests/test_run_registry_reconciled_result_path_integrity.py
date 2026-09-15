@@ -11,7 +11,7 @@ class RunRegistryReconciledResultPathIntegrityTests(unittest.TestCase):
     @staticmethod
     def _reconciled_legacy_run(root: Path) -> tuple[Path, str]:
         registry_path = root / "run_registry.json"
-        registry = RunRegistry(registry_path)
+        registry = RunRegistry.initialize_pristine(registry_path)
         key = registry.begin(
             "a" * 64,
             "b" * 64,

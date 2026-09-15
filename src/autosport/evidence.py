@@ -2,11 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from .causal_integrity import (
+    contains_forbidden_future_key,
+    freeze_canonical_json_object,
+)
 
-_FORBIDDEN_FUTURE_KEYS = {"final_result", "result", "winner", "settled_outcome", "future_quote"}
+
+def _json_payload(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _json_payload(child) for key, child in value.items()}
+    if isinstance(value, tuple):
+        return [_json_payload(child) for child in value]
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,8 +30,12 @@ class EvidenceItem:
     source_hash: str | None = None
 
     def __post_init__(self) -> None:
-        if _contains_forbidden_key(self.payload):
+        payload = freeze_canonical_json_object(
+            self.payload, field_name="strategy/research evidence payload"
+        )
+        if contains_forbidden_future_key(payload):
             raise ValueError("strategy/research evidence must not contain future-result fields")
+        object.__setattr__(self, "payload", payload)
 
     @property
     def canonical_hash(self) -> str:
@@ -29,10 +44,16 @@ class EvidenceItem:
             "as_of_ts": self.as_of_ts,
             "source": self.source,
             "kind": self.kind,
-            "payload": self.payload,
+            "payload": _json_payload(self.payload),
             "source_hash": self.source_hash,
         }
-        canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        canonical = json.dumps(
+            raw,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -41,15 +62,3 @@ class ResearchPacket:
     event_id: str
     generated_at: str
     evidence: tuple[EvidenceItem, ...] = field(default_factory=tuple)
-
-
-def _contains_forbidden_key(value: Any) -> bool:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if str(key).lower() in _FORBIDDEN_FUTURE_KEYS:
-                return True
-            if _contains_forbidden_key(child):
-                return True
-    elif isinstance(value, list):
-        return any(_contains_forbidden_key(child) for child in value)
-    return False

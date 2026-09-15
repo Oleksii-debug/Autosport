@@ -3,7 +3,7 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
-from autosport.ingestion import IngestionEngine
+from autosport.ingestion import IngestionEngine, IngestionStats
 from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
 from autosport.market_bus import MarketEventBus
 from autosport.providers import InMemoryProvider, ProviderBatch, ProviderQuote
@@ -54,6 +54,33 @@ class IngestionHealthTests(unittest.TestCase):
             sequence=sequence,
             source_ts=source_ts,
         )
+
+    def test_stats_throughput_uses_finite_positive_elapsed(self):
+        stats = IngestionStats(
+            source_id="source",
+            received=2,
+            accepted=1,
+            rejected=1,
+            elapsed_seconds=0.25,
+            cursor=None,
+        )
+
+        self.assertEqual(stats.accepted_per_second, 4.0)
+
+    def test_stats_throughput_rejects_invalid_elapsed_truth(self):
+        invalid_values = (True, "1", 0.0, -1.0, float("nan"), float("inf"), float("-inf"))
+        for elapsed in invalid_values:
+            with self.subTest(elapsed=elapsed):
+                stats = IngestionStats(
+                    source_id="source",
+                    received=1,
+                    accepted=1,
+                    rejected=0,
+                    elapsed_seconds=elapsed,  # type: ignore[arg-type]
+                    cursor=None,
+                )
+                with self.assertRaisesRegex(ValueError, "elapsed_seconds must be a finite positive number"):
+                    _ = stats.accepted_per_second
 
     def test_policy_rejects_invalid_backpressure_bound(self):
         for value in (True, 1.5, float("nan"), float("inf")):
@@ -134,6 +161,39 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(reopened.total_accepted, 1)
             self.assertEqual(reopened.consecutive_failures, 0)
             self.assertEqual(reopened.last_cursor, "cursor-1")
+            store.close()
+
+    def test_normalization_rejection_degrades_source_health(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            invalid_quote = ProviderQuote(
+                provider_event_id="event-1",
+                provider_market_id="winner",
+                provider_selection_id="invalid-odds",
+                decimal_odds=Decimal("1.0"),
+                observed_ts="2026-09-12T12:00:00+00:00",
+                sequence=1,
+            )
+            provider = StaticProvider(
+                "source",
+                [ProviderBatch("source", (invalid_quote,), cursor="cursor-invalid")],
+            )
+
+            stats = engine.poll_once(provider, max_items=10)
+
+            self.assertEqual(stats.received, 1)
+            self.assertEqual(stats.accepted, 0)
+            self.assertEqual(stats.rejected, 1)
+            self.assertEqual(stats.quality_flags, ("INVALID_QUOTE",))
+            self.assertEqual(stats.health_status, "degraded")
+            self.assertEqual(len(store.events()), 0)
+            persisted = health.get("source")
+            self.assertEqual(persisted.status, "degraded")
+            self.assertEqual(persisted.total_received, 1)
+            self.assertEqual(persisted.total_accepted, 0)
+            self.assertEqual(persisted.total_rejected, 1)
+            self.assertEqual(persisted.quality_flags, ("INVALID_QUOTE",))
+            self.assertEqual(persisted.last_cursor, "cursor-invalid")
             store.close()
 
     def test_stale_future_skew_and_invalid_source_time_are_truth_labeled(self):

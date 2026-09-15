@@ -5,14 +5,19 @@ import json
 import math
 import os
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable
 
+from .causal_integrity import (
+    contains_forbidden_future_key,
+    freeze_canonical_json_object,
+)
 
-_FORBIDDEN_FUTURE_KEYS = {"final_result", "result", "winner", "settled_outcome", "future_quote"}
+
 _ALLOWED_SPLITS = {"validation", "holdout"}
 _SHA256_HEX = frozenset("0123456789abcdef")
 
@@ -27,19 +32,16 @@ def parse_iso_timestamp(value: str) -> datetime:
     return parsed
 
 
-def _contains_forbidden(value: Any) -> bool:
-    if isinstance(value, dict):
-        return any(
-            str(key).lower() in _FORBIDDEN_FUTURE_KEYS or _contains_forbidden(child)
-            for key, child in value.items()
-        )
-    if isinstance(value, (list, tuple)):
-        return any(_contains_forbidden(child) for child in value)
-    return False
+def _json_provenance(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _json_provenance(child) for key, child in value.items()}
+    if isinstance(value, tuple):
+        return [_json_provenance(child) for child in value]
+    return value
 
 
 def _canonical_sha256(value: object, *, field_name: str) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise ValueError(f"{field_name} must be a canonical SHA-256 digest")
     if len(value) != 64 or any(character not in _SHA256_HEX for character in value):
         raise ValueError(f"{field_name} must be a canonical lowercase SHA-256 digest")
@@ -86,8 +88,12 @@ class ForecastRecord:
             raise ValueError("model training cutoff cannot be after forecast input cutoff")
         if input_cutoff > generated:
             raise ValueError("input cutoff cannot be after forecast generation")
-        if _contains_forbidden(self.provenance):
+        provenance = freeze_canonical_json_object(
+            self.provenance, field_name="forecast provenance"
+        )
+        if contains_forbidden_future_key(provenance):
             raise ValueError("forecast provenance must not contain future-result fields")
+        object.__setattr__(self, "provenance", provenance)
         if not isinstance(self.evidence_hashes, (tuple, list)):
             raise ValueError("evidence_hashes must be an ordered collection of SHA-256 digests")
         evidence_hashes = tuple(
@@ -111,7 +117,11 @@ class ForecastRecord:
     @property
     def canonical_hash(self) -> str:
         canonical = json.dumps(
-            self.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            self.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -129,7 +139,7 @@ class ForecastRecord:
             "uncertainty": str(self.uncertainty),
             "evidence_hashes": list(self.evidence_hashes),
             "market_snapshot_hash": self.market_snapshot_hash,
-            "provenance": self.provenance,
+            "provenance": _json_provenance(self.provenance),
         }
 
 
@@ -144,7 +154,10 @@ class JsonlForecastLedger:
         payload = record.to_dict()
         digest = record.canonical_hash
         envelope = json.dumps(
-            {"sha256": digest, "record": payload}, ensure_ascii=False, sort_keys=True
+            {"sha256": digest, "record": payload},
+            ensure_ascii=False,
+            sort_keys=True,
+            allow_nan=False,
         )
         with self.path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(envelope + "\n")

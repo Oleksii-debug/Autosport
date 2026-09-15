@@ -10,6 +10,8 @@ from .domain import MarketEvent, MarketType
 
 
 _MAX_PROVIDER_METADATA_NESTING = 64
+_SQLITE_SEQUENCE_MIN = -(1 << 63)
+_SQLITE_SEQUENCE_MAX = (1 << 63) - 1
 
 
 def _validate_source_id(source_id: object) -> str:
@@ -42,8 +44,10 @@ def _validate_provider_event_id(value: object) -> str:
 def _validate_sequence(value: object) -> int:
     """Keep provider sequence identity stable across JSON/SQLite round trips."""
 
-    if isinstance(value, bool) or not isinstance(value, int):
+    if type(value) is not int:
         raise TypeError("sequence must be a non-boolean int")
+    if value < _SQLITE_SEQUENCE_MIN or value > _SQLITE_SEQUENCE_MAX:
+        raise ValueError("sequence must fit signed 64-bit SQLite INTEGER")
     return value
 
 
@@ -66,24 +70,18 @@ def _validate_provider_timestamp(value: object, name: str) -> str:
     return timestamp
 
 
-def _validate_json_value(value: object, field: str) -> None:
-    """Require bounded durable JSON without type drift, cycles, or non-finite numbers."""
+def _snapshot_json_value(value: object, field: str) -> Any:
+    """Validate durable provider JSON while copying it into an independent value graph."""
 
-    stack: list[tuple[object, str, int, bool]] = [(value, field, 0, False)]
     active_containers: set[int] = set()
 
-    while stack:
-        current, path, depth, exiting = stack.pop()
-        if exiting:
-            active_containers.remove(id(current))
-            continue
-
+    def snapshot(current: object, path: str, depth: int) -> Any:
         if current is None or isinstance(current, (str, bool, int)):
-            continue
+            return current
         if isinstance(current, float):
             if not math.isfinite(current):
                 raise ValueError(f"{path} contains non-finite JSON number")
-            continue
+            return current
         if isinstance(current, (list, dict)):
             if depth > _MAX_PROVIDER_METADATA_NESTING:
                 raise ValueError(
@@ -94,20 +92,26 @@ def _validate_json_value(value: object, field: str) -> None:
             if container_id in active_containers:
                 raise ValueError(f"{path} contains cyclic JSON container")
             active_containers.add(container_id)
-            stack.append((current, path, depth, True))
+            try:
+                if isinstance(current, list):
+                    return [
+                        snapshot(item, f"{path}[{index}]", depth + 1)
+                        for index, item in enumerate(current)
+                    ]
 
-            if isinstance(current, list):
-                for index, item in enumerate(current):
-                    stack.append((item, f"{path}[{index}]", depth + 1, False))
-            else:
+                result: dict[str, Any] = {}
                 for key, item in current.items():
                     if not isinstance(key, str):
                         raise TypeError(f"{path} contains non-string JSON object key")
-                    stack.append((item, f"{path}.{key}", depth + 1, False))
-            continue
+                    result[key] = snapshot(item, f"{path}.{key}", depth + 1)
+                return result
+            finally:
+                active_containers.remove(container_id)
         raise TypeError(
             f"{path} contains non-canonical JSON value type {type(current).__name__}"
         )
+
+    return snapshot(value, field, 0)
 
 
 def _scoped_identity(source_id: str, provider_component: str) -> str:
@@ -154,6 +158,20 @@ class ProviderBatch:
 
     def __post_init__(self) -> None:
         _validate_source_id(self.source_id)
+        if type(self.quotes) is not tuple:
+            raise TypeError("provider batch quotes must be a tuple of ProviderQuote values")
+        for quote in self.quotes:
+            if type(quote) is not ProviderQuote:
+                raise TypeError("provider batch quote must be ProviderQuote")
+        if self.cursor is not None and not isinstance(self.cursor, str):
+            raise TypeError("provider batch cursor must be str or None")
+        if type(self.quality_flags) is not tuple:
+            raise TypeError("provider batch quality_flags must be a tuple of strings")
+        for flag in self.quality_flags:
+            if type(flag) is not str:
+                raise TypeError("provider batch quality flag must be str")
+            if not flag or flag != flag.strip():
+                raise ValueError("provider batch quality flag must be non-empty and trimmed")
         if len(set(self.quality_flags)) != len(self.quality_flags):
             raise ValueError("duplicate provider batch quality flag")
 
@@ -187,7 +205,9 @@ class CanonicalNormalizer:
             score_state = _validate_provider_text(score_state, "score_state")
         if not isinstance(quote.metadata, dict):
             raise TypeError("metadata must be dict")
-        _validate_json_value(quote.metadata, "metadata")
+        metadata = _snapshot_json_value(quote.metadata, "metadata")
+        if not isinstance(metadata, dict):
+            raise TypeError("metadata must be dict")
         return MarketEvent(
             event_id=_scoped_identity(source_id, quote.provider_event_id),
             market_id=_scoped_identity(source_id, quote.provider_market_id),
@@ -201,7 +221,7 @@ class CanonicalNormalizer:
             source_ts=source_ts,
             ingest_ts=observed_ts,
             score_state=score_state,
-            metadata=dict(quote.metadata),
+            metadata=metadata,
         )
 
 

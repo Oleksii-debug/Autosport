@@ -8,8 +8,50 @@ _MACHINE_MODE_ARITY = {
     "--accessibility-audit-output": 2,
     "--keyboard-audit-output": 2,
     "--restart-recovery-audit-output": 2,
+    "--restart-recovery-stage-child": 3,
+    "--restart-recovery-recover-child": 3,
     "--research-demo-audit-output": 3,
 }
+
+
+def _show_workspace_configuration_error(detail: str) -> None:
+    """Show an accessible native Windows error before any interactive GUI state opens."""
+
+    import ctypes
+
+    title = "Автоспорт — помилка конфігурації workspace"
+    message = (
+        "Автоспорт не відкрив interactive workspace через недійсну конфігурацію.\n\n"
+        f"{detail}\n\n"
+        "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
+        "потім перезапустіть Автоспорт. Economic і live state не змінено."
+    )
+    # MB_OK | MB_ICONERROR. Native MessageBox is keyboard-operable and exposed
+    # through standard Windows accessibility rather than a custom visual surface.
+    ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)
+
+
+def _run_interactive_gui() -> int:
+    # Validate durable workspace identity before importing/constructing the GUI.
+    # `default_workspace()` remains the canonical path resolver. This packaged
+    # boundary also requires its resolved result to be absolute so the current
+    # main path implementation cannot silently make durable identity depend on CWD.
+    from autosport.paths import default_workspace
+
+    try:
+        workspace = default_workspace()
+        if not workspace.is_absolute():
+            raise ValueError(
+                "Resolved Autosport workspace must be an absolute path; "
+                "configure an absolute AUTOSPORT_WORKSPACE or LOCALAPPDATA value"
+            )
+    except ValueError as exc:
+        _show_workspace_configuration_error(str(exc))
+        return 2
+
+    from autosport.windows_gui import main as gui_main
+
+    return gui_main()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,16 +84,22 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_keyboard_audit(args[1])
     if args and args[0] == "--restart-recovery-audit-output":
-        from autosport.restart_recovery_audit import run_restart_recovery_audit
+        from autosport.process_recovery_audit import run_packaged_restart_recovery_audit
 
-        return run_restart_recovery_audit(args[1])
+        return run_packaged_restart_recovery_audit(args[1])
+    if args and args[0] == "--restart-recovery-stage-child":
+        from autosport.process_recovery_audit import run_process_kill_stage_child
+
+        return run_process_kill_stage_child(args[1], args[2])
+    if args and args[0] == "--restart-recovery-recover-child":
+        from autosport.process_recovery_audit import run_process_kill_recovery_child
+
+        return run_process_kill_recovery_child(args[1], args[2])
     if args and args[0] == "--research-demo-audit-output":
         from autosport.research_demo_audit import run_research_demo_audit
 
         return run_research_demo_audit(args[1], args[2])
-    from autosport.windows_gui import main as gui_main
-
-    return gui_main()
+    return _run_interactive_gui()
 
 
 if __name__ == "__main__":

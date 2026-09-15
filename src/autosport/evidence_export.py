@@ -180,6 +180,30 @@ def _manifest_sha256(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _manifest_file_bytes(payload: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _read_descriptor_bytes(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, _CHUNK_SIZE)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _resolved(path: Path, *, strict: bool) -> Path:
     try:
         return path.resolve(strict=strict)
@@ -198,6 +222,20 @@ def _resolve_output_destination(workspace: Path, output: Path) -> Path:
         "output path must be outside the Autosport workspace; "
         "must not overwrite canonical workspace evidence"
     )
+
+
+def _current_caller_visible_destination(
+    workspace: Path,
+    requested_destination: Path,
+    bound_destination: Path,
+) -> Path:
+    """Re-prove the caller-visible pathname before reporting export PASS."""
+
+    current = _resolved(requested_destination, strict=True)
+    _resolve_output_destination(workspace, requested_destination)
+    if current != bound_destination:
+        raise ValueError("caller-visible evidence output path changed before PASS")
+    return current
 
 
 def _posix_directory_open_flags() -> int:
@@ -501,16 +539,7 @@ def _atomic_write_json_at_windows_directory(
     primary_error: BaseException | None = None
     renamed = False
     try:
-        encoded = (
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-                allow_nan=False,
-            )
-            + "\n"
-        ).encode("utf-8")
+        encoded = _manifest_file_bytes(payload)
         offset = 0
         while offset < len(encoded):
             chunk = encoded[offset : offset + _CHUNK_SIZE]
@@ -597,6 +626,7 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
 
 def _publish_posix_bound_output(
     workspace: Path,
+    requested_destination: Path,
     destination: Path,
     payload: dict[str, Any],
 ) -> None:
@@ -629,6 +659,45 @@ def _publish_posix_bound_output(
 
         token = _BOUND_POSIX_OUTPUT.set((current_descriptor, destination))
         atomic_write_json(destination, payload)
+
+        caller_destination = _current_caller_visible_destination(
+            workspace,
+            requested_destination,
+            destination,
+        )
+        caller_parent_descriptor = _open_posix_directory(caller_destination.parent)
+        bound_file_descriptor: int | None = None
+        caller_file_descriptor: int | None = None
+        try:
+            if not os.path.sameopenfile(current_descriptor, caller_parent_descriptor):
+                raise ValueError("caller-visible evidence output parent changed before PASS")
+            no_follow_flag = getattr(os, "O_NOFOLLOW", 0)
+            if not no_follow_flag:
+                raise OSError(
+                    errno.ENOTSUP,
+                    "platform lacks no-follow file verification for evidence export",
+                )
+            bound_file_descriptor = os.open(
+                destination.name,
+                _read_only_open_flags() | no_follow_flag,
+                dir_fd=current_descriptor,
+            )
+            caller_file_descriptor = os.open(
+                caller_destination,
+                _read_only_open_flags() | no_follow_flag,
+            )
+            if not os.path.sameopenfile(bound_file_descriptor, caller_file_descriptor):
+                raise ValueError("caller-visible evidence output file changed before PASS")
+            if not stat.S_ISREG(os.fstat(caller_file_descriptor).st_mode):
+                raise ValueError("caller-visible evidence output is not a regular file")
+            if _read_descriptor_bytes(caller_file_descriptor) != _manifest_file_bytes(payload):
+                raise ValueError("caller-visible evidence output content changed before PASS")
+        finally:
+            if caller_file_descriptor is not None:
+                os.close(caller_file_descriptor)
+            if bound_file_descriptor is not None:
+                os.close(bound_file_descriptor)
+            os.close(caller_parent_descriptor)
     finally:
         if token is not None:
             _BOUND_POSIX_OUTPUT.reset(token)
@@ -639,6 +708,7 @@ def _publish_posix_bound_output(
 
 def _publish_windows_bound_output(
     workspace: Path,
+    requested_destination: Path,
     destination: Path,
     payload: dict[str, Any],
 ) -> None:
@@ -821,6 +891,7 @@ def _publish_windows_bound_output(
 
     workspace_handle, workspace_identity = open_directory_path(_resolved(workspace, strict=True))
     current_handle: int | None = None
+    current_identity: tuple[int, int, int] | None = None
     token = None
     primary_error: BaseException | None = None
     try:
@@ -844,6 +915,7 @@ def _publish_windows_bound_output(
                 close_handle(next_handle)
                 raise ctypes.WinError(ctypes.get_last_error())
             current_handle = next_handle
+            current_identity = next_identity
             if next_identity == workspace_identity:
                 raise ValueError(
                     "output path must be outside the Autosport workspace; "
@@ -852,6 +924,30 @@ def _publish_windows_bound_output(
 
         token = _BOUND_WINDOWS_OUTPUT.set((current_handle, destination))
         atomic_write_json(destination, payload)
+
+        caller_destination = _current_caller_visible_destination(
+            workspace,
+            requested_destination,
+            destination,
+        )
+        caller_parent_handle: int | None = None
+        caller_descriptor: int | None = None
+        try:
+            caller_parent_handle, caller_parent_identity = open_directory_path(
+                caller_destination.parent
+            )
+            if caller_parent_identity != current_identity:
+                raise ValueError("caller-visible evidence output parent changed before PASS")
+            caller_descriptor = os.open(caller_destination, _read_only_open_flags())
+            if not stat.S_ISREG(os.fstat(caller_descriptor).st_mode):
+                raise ValueError("caller-visible evidence output is not a regular file")
+            if _read_descriptor_bytes(caller_descriptor) != _manifest_file_bytes(payload):
+                raise ValueError("caller-visible evidence output content changed before PASS")
+        finally:
+            if caller_descriptor is not None:
+                os.close(caller_descriptor)
+            if caller_parent_handle is not None and not close_handle(caller_parent_handle):
+                raise ctypes.WinError(ctypes.get_last_error())
     except BaseException as exc:
         primary_error = exc
         raise
@@ -879,9 +975,19 @@ def _publish_bound_output(
 ) -> Path:
     destination = _resolve_output_destination(workspace, requested_destination)
     if os.name == "nt":
-        _publish_windows_bound_output(workspace, destination, payload)
+        _publish_windows_bound_output(
+            workspace,
+            requested_destination,
+            destination,
+            payload,
+        )
     else:
-        _publish_posix_bound_output(workspace, destination, payload)
+        _publish_posix_bound_output(
+            workspace,
+            requested_destination,
+            destination,
+            payload,
+        )
     return destination
 
 
@@ -1044,11 +1150,9 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
         }
         payload["manifest_sha256"] = _manifest_sha256(payload)
 
-    # Publication remains outside WorkspaceEconomicLock, but its parent directory is
-    # bound before any temp file or replace happens. POSIX uses descriptor-relative
-    # mkdir/temp/replace; Windows uses RootDirectory-relative NtCreateFile traversal,
-    # temp creation and rename. Retargeting the pathname therefore cannot redirect the
-    # published manifest back into the Autosport workspace.
+    # Publication remains outside WorkspaceEconomicLock. Its parent directory is bound
+    # before temp creation/replace, and before PASS the caller-visible pathname is
+    # re-proved to identify that bound publication with the exact deterministic bytes.
     _publish_bound_output(root, requested_destination, payload)
     return payload
 

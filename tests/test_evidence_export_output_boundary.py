@@ -131,7 +131,7 @@ def test_export_binds_new_output_parent_before_atomic_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A post-boundary parent substitution must not redirect publication into workspace."""
+    """A post-boundary parent substitution cannot redirect or produce a false PASS."""
 
     workspace = _workspace_with_evidence(tmp_path)
     capture = workspace / "capture"
@@ -149,9 +149,6 @@ def test_export_binds_new_output_parent_before_atomic_publication(
         try:
             future_parent.rename(moved_parent)
         except OSError:
-            # Windows ancestry handles deliberately omit FILE_SHARE_DELETE, so this
-            # is the expected attack result there. POSIX permits the rename, but the
-            # descriptor-relative writer below remains bound to the moved directory.
             rename_blocked = True
         else:
             try:
@@ -163,14 +160,55 @@ def test_export_binds_new_output_parent_before_atomic_publication(
 
     monkeypatch.setattr(evidence_export, "atomic_write_json", redirect_parent_then_publish)
 
-    report = export_evidence_manifest(workspace, destination)
-
-    assert attack_attempted is True
-    assert not (capture / "manifest.json").exists()
-    if rename_blocked:
+    try:
+        report = export_evidence_manifest(workspace, destination)
+    except ValueError:
+        assert attack_attempted is True
+        assert rename_blocked is False
+        assert not (capture / "manifest.json").exists()
+        assert future_parent.is_symlink()
+        assert json.loads((moved_parent / "manifest.json").read_text(encoding="utf-8"))[
+            "kind"
+        ] == "autosport-workspace-evidence-manifest"
+    else:
+        assert attack_attempted is True
+        assert rename_blocked is True
         assert json.loads(destination.read_text(encoding="utf-8")) == report
         assert not moved_parent.exists()
-    else:
-        assert future_parent.is_symlink()
-        published = moved_parent / "manifest.json"
-        assert json.loads(published.read_text(encoding="utf-8")) == report
+
+
+def test_export_fails_closed_if_bound_parent_moves_and_original_path_is_recreated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identical decoy bytes at the old pathname cannot turn moved publication into PASS."""
+
+    workspace = _workspace_with_evidence(tmp_path)
+    future_parent = tmp_path / "future-parent"
+    moved_parent = tmp_path / "future-parent-original"
+    destination = future_parent / "manifest.json"
+    real_writer = evidence_export.atomic_write_json
+    attack_attempted = False
+    expected_payload: dict[str, object] | None = None
+
+    def move_recreate_and_publish(path: Path, payload: dict[str, object]) -> None:
+        nonlocal attack_attempted, expected_payload
+        attack_attempted = True
+        expected_payload = payload
+        try:
+            future_parent.rename(moved_parent)
+        except OSError:
+            pytest.skip("platform prevents renaming the bound output parent")
+        future_parent.mkdir()
+        destination.write_bytes(evidence_export._manifest_file_bytes(payload))
+        real_writer(path, payload)
+
+    monkeypatch.setattr(evidence_export, "atomic_write_json", move_recreate_and_publish)
+
+    with pytest.raises(ValueError, match="caller-visible evidence output parent changed before PASS"):
+        export_evidence_manifest(workspace, destination)
+
+    assert attack_attempted is True
+    assert expected_payload is not None
+    assert json.loads(destination.read_text(encoding="utf-8")) == expected_payload
+    assert json.loads((moved_parent / "manifest.json").read_text(encoding="utf-8")) == expected_payload

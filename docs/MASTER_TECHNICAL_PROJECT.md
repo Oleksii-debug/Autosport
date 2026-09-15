@@ -1,200 +1,388 @@
 # АВТОСПОРТ — MASTER TECHNICAL PROJECT
 
-## 1. Продуктова мета
+## 1. Кінцева продуктова мета
 
-«Автоспорт» — окремий від Nika-Core самодостатній Windows-продукт з агентами. Він має розроблятися, тестуватися, пакуватися й запускатися незалежно від готовності Nika-Core. Перший vertical slice — настільний теніс, але domain model має залишатися придатною для інших видів спорту.
+«Автоспорт» — окремий від Nika-Core самодостатній Windows-продукт і професійна багатоагентна система спортивного беттінгу. Він розробляється, тестується, пакується й запускається незалежно від готовності Nika-Core.
 
-V1 уже є реальним Windows-продуктом, а не CLI/demo: historical replay без future leakage, high-speed Market Mirror, Virtual Bank, singles/parlays, deterministic settlement, incremental Portfolio/Exposure Engine, agent orchestration, evaluation/learning loop та keyboard/NVDA-oriented UI.
+Перший vertical slice — настільний теніс, але canonical domain model має залишатися sport-generic і придатною для інших видів спорту, provider-ів, market types та settlement semantics.
 
-Real-money autonomous wagering не входить до поточного scope. V1–V4 є paper/replay research platform або дають людині аналітичні рекомендації.
+Autosport **не є програмою “вгадай переможця”**. Його зріла економічна мета — довгострокове зростання банку в межах жорстких user-configured risk/execution limits.
 
-## 2. Незалежність від Nika-Core
+Forecasting — лише одне джерело edge. Рівноправні strategy families:
 
-Повний fork Nika-Core не є базовою стратегією. Використовується Selective Reuse: стабільні нейтральні компоненти Nika можуть бути перенесені або адаптовані з точним source SHA, якщо це реально пришвидшує продукт. Перші кандидати на аудит: model gateway, multi-agent primitives, durable memory/state, interaction/browser adapters, task/runtime contracts.
+- predictive probability edge;
+- live odds/state movement;
+- lead/lag та stale actionable quote detection;
+- cross-provider/cross-market discrepancy;
+- arbitrage;
+- dutching/full-outcome coverage;
+- hedge/rebalance;
+- багато singles/parlays/combinations, керованих як один portfolio;
+- hybrid strategies.
 
-Автоспорт має власні: repository, release cycle, Windows package, database, tests, CI, roadmap і coordination issue.
+Для price-structure strategies directional winner forecast може бути непотрібним.
 
-## 3. Product-wide + V1 одночасно
+Canonical long-horizon controls:
+- Issue #1 — global product/control truth;
+- Issue #355 — live market / arbitrage / dutching / outcome-independent portfolio program;
+- Issue #356 — generic opportunity decision contract, forecast optional by strategy class;
+- Issue #353 — bookmaker/account real execution program;
+- Issue #213 — mathematical intelligence;
+- Issue #198 — continuous roadmap.
 
-Розробка йде двома паралельними контурами:
+`REAL_MONEY_EXECUTION=false` — поточна truth state, а не постійна межа продукту.
 
-- `PRODUCT-WIDE` — довгострокові contracts, event/data model, agents, storage, replay, portfolio math, observability, provider interfaces, Windows/accessibility.
-- `V1-CRITICAL-PATH` — найкоротший шлях до першого готового Windows-релізу.
+## 2. Один продукт, поетапне підвищення довіри
 
-Кожен task/PR має один primary lane tag: `PRODUCT-FOUNDATION`, `V1-CRITICAL`, `V1-QA`, `DATA`, `REPLAY`, `PORTFOLIO`, `AGENTS`, `LEARNING`, `PROVIDER`, `PERFORMANCE`, `WINDOWS`, `ACCESSIBILITY`, `RELEASE`, `DOCS`.
+V1 використовує paper/replay/live-observation не як кінцеву бізнес-мету, а як proving ground перед money-moving authority.
 
-## 4. Базова архітектура
+Product progression:
+
+1. exact V1 Windows proof release;
+2. V1.0.x bug bash / correctness hardening;
+3. professional paper + live-observation qualification;
+4. #355 live portfolio / arbitrage / dutching / hedge intelligence;
+5. bookmaker/account read-only capability;
+6. supervised execution;
+7. separate real execution ledger/reconciliation including partial multi-leg safety;
+8. bounded autonomous execution under explicit external user limits and emergency STOP;
+9. continuous causal learning/champion-challenger improvement.
+
+V1 не має передчасно реалізовувати money-moving features, якщо це затримує release, але V1 contracts не повинні створювати тупикову архітектуру для майбутнього live/real execution.
+
+## 3. Незалежність від Nika-Core
+
+Повний fork Nika-Core не є базовою стратегією. Використовується Selective Reuse / REUSE → ADAPT → THIN CUSTOM: стабільні нейтральні компоненти можуть бути перенесені або адаптовані з exact source identity, якщо це зменшує ризик і пришвидшує Autosport.
+
+Не переносити shared god-runtime або компоненти, які створюють залежність від незавершеної Nika.
+
+Autosport має власні repository, release cycle, Windows package, canonical storage, tests, CI, roadmap та coordination control.
+
+## 4. Product-wide + V1 одночасно
+
+- `PRODUCT-WIDE` — sport/market/event contracts, storage, replay, portfolio math, agents, learning/evaluation, live-market intelligence, provider/bookmaker interfaces, observability, recovery, Windows/accessibility.
+- `V1-CRITICAL-PATH` — найкоротший шлях до exact trusted Windows proof release без money-moving execution.
+
+Primary lane tags можуть включати:
+`PRODUCT-FOUNDATION`, `V1-CRITICAL`, `V1-QA`, `DATA`, `REPLAY`, `PORTFOLIO`, `AGENTS`, `LEARNING`, `PROVIDER`, `LIVE`, `ARBITRAGE`, `PERFORMANCE`, `WINDOWS`, `ACCESSIBILITY`, `RELEASE`, `BOOKMAKER`, `EXECUTION`, `DOCS`.
+
+Live native/source ownership and F01 integration authority мають пріоритет над плановими документами. One semantic slice = one source owner.
+
+## 5. Базова архітектура
 
 Event-driven pipeline:
 
-`Provider Adapter → Normalizer → Canonical Market Event Bus → Market State Store/History → Incremental Portfolio Engine → Strategy/Agent Layer → Paper Book → Settlement → Evaluation/Learning`
+`Provider Adapter -> Normalizer -> Canonical Market Event Bus -> Market State Store/History -> Incremental Portfolio/Opportunity Engine -> Strategy/Agent Layer -> Paper/Execution Plan -> Settlement/Reconciliation -> Evaluation/Learning`
 
-LLM/AI не знаходиться у subsecond hot path. Ingestion, normalization, storage, current-state update, portfolio invalidation і deterministic calculations працюють звичайним кодом.
+LLM/AI не знаходиться у subsecond hot path. Ingestion, normalization, storage, quote freshness/order, current-state update, portfolio invalidation, exact money math, min-P&L, risk limits та execution identity працюють детермінованим кодом.
 
-## 5. Canonical Market Model
+## 6. Canonical Market Model
 
-Канонічні сутності: Sport, Competition, Participant, Match/Event, Market, Selection, Quote, ScoreState, MarketStatus, Result, SettlementRule.
+Canonical entities include:
+`Sport`, `Competition`, `Participant`, `Match/Event`, `Market`, `Selection`, `Quote`, `ScoreState`, `MarketStatus`, `Result`, `SettlementRule`, `Provider/Bookmaker`, `Ticket/Position`, `Portfolio`, `Scenario`, `ExecutionPlan`, `ExecutionRecord`.
 
-V1 обов’язково підтримує winner/moneyline, totals, handicaps/fora; schema не повинна блокувати sets/games та інші market types.
+V1 мінімально підтримує winner/moneyline, totals, handicaps/fora; schema не повинна блокувати sets/games та інші sports/markets.
 
-Кожен Quote містить event_id, market_id, selection_id, decimal_odds, status, source_timestamp, observed_timestamp, ingest_timestamp, source_id, sequence/version.
+Кожен Quote має bind:
+- sport/event/market/selection identity;
+- provider/bookmaker identity;
+- decimal odds/price;
+- market status/suspension;
+- source timestamp;
+- receive/observed timestamp;
+- ingest timestamp;
+- sequence/version where available;
+- provenance/quality/freshness state.
 
-## 6. High-Speed Market Mirror
+Stale/suspended/ambiguous quote не може вважатися executable.
 
-Market Mirror тримає current state десятків і пізніше сотень матчів та append-only history усіх змін. Зберігаються odds, market status, score state, suspension/reopen, selection changes і provider sequence.
+## 7. High-Speed Market Mirror
 
-Hot path: deterministic parser → normalized event → in-memory state → append-only/time-series storage.
+Market Mirror тримає current state десятків/сотень матчів та append-only history змін.
 
-Якщо provider не дає точного source timestamp, quality of time позначається явно; система не вигадує точність.
+Hot path:
+`deterministic parser -> normalized event -> in-memory current state -> append-only canonical storage -> affected-subgraph invalidation`.
 
-## 7. Storage
+Зберігати odds, market status, score state, suspension/reopen, selection changes, provider sequence, source/receive timing і quality flags.
 
-V1: SQLite або DuckDB для metadata/transactions; Parquet або компактний append-only format для великих потоків quotes; in-memory cache для current state.
+Live observation та historical replay використовують один canonical event contract, щоб strategy/opportunity code не залежав від джерела.
 
-Invariants: idempotent writes, append-only normalized history, deterministic ordering, schema versioning, dataset checksums, crash-safe transactions, restart recovery без втрати paper portfolio.
+## 8. Canonical storage / data plane
 
-## 8. Replay Engine
+V1 canonical mutable operational/transaction authority — **SQLite**.
 
-Історичні матчі відтворюються так, ніби відбуваються зараз. Strategy runtime бачить лише events з timestamp ≤ simulation_clock. Future quotes/results фізично ізольовані від Strategy layer.
+Не вводити DuckDB/PostgreSQL/Parquet як другий canonical economic truth у V1. DuckDB/Polars/Parquet/PyArrow можуть з'явитися пізніше як derived read-only analytical/corpus acceleration після benchmark evidence.
 
-Режими: 1×, 10×, 100×, event-driven jump-to-next-change, deterministic step-by-step.
+Invariants:
+- idempotent writes;
+- append-only raw/normalized history where required;
+- deterministic ordering;
+- schema versioning;
+- exact checksums/identity;
+- crash-safe transaction boundaries;
+- restart/recovery without economic duplication;
+- no secret leakage into artifacts/logs.
 
-Live observation і historical replay мають один `MarketEventStream` interface, щоб strategy code не залежав від джерела.
+## 9. Replay Engine / causal firewall
 
-Кожен run має immutable run_id, dataset hash, strategy/model version, random seed, config snapshot, virtual bankroll і decision log.
+Historical replay відтворює market stream так, ніби подія відбувається зараз. Runtime бачить лише evidence з `available_at <= simulation_clock`.
 
-## 9. Paper Book / Virtual Bank
+Future quotes/results фізично ізольовані до causal reveal. Learning/evaluation не може заднім числом переписати earlier decision evidence.
 
-Paper Book моделює bookmaker environment без реального грошового виконання. Кожний virtual ticket зберігає stake, type, legs, locked odds, potential payout, timestamps, strategy reason, risk state та settlement result.
+Режими можуть включати 1x, accelerated 10x/100x, event-jump та deterministic step-by-step.
 
-Підтримуються singles і parlays/accumulators із configurable number of legs. Великі комбінації не перебираються brute-force; candidate generation використовує pruning.
+Кожен run binds immutable run identity, dataset/source identity, strategy/model/config identity, cutoffs, seed where relevant, starting bankroll та decision evidence.
 
-Settlement Engine окремий від Strategy Agent і бачить final results тільки після завершення event/replay.
+## 10. PaperBook / Virtual Bank
 
-## 10. Portfolio / Exposure Engine
+PaperBook моделює bookmaker economics без реального money movement.
 
-Центральне математичне ядро будує dependency graph між outcomes, legs, tickets, scenarios та aggregate P&L.
+Кожний virtual ticket/position зберігає:
+- stake;
+- ticket/position type;
+- legs;
+- decision-time locked odds;
+- potential payout;
+- timestamps;
+- strategy/opportunity identity;
+- risk/portfolio context;
+- settlement result.
 
-Система має в будь-який момент давати committed stake, current exposure, remaining live legs, best-case, worst-case, expected-case та sensitivity до outcome.
+Підтримуються singles і parlays/combinations із configurable legs. Candidate search використовує pruning/solver logic, а не безмежний brute force.
 
-При зміні Quote/Score перераховується лише affected subgraph: dirty selections → affected candidates/tickets → affected portfolio/scenario nodes.
+Settlement Engine окремий від Strategy/Opportunity decision path і бачить authoritative outcome лише після causal reveal.
 
-Для малого state space — exact enumeration. Для великого — factorization, dynamic programming, branch-and-bound, dominance pruning, scenario compression; Monte Carlo/importance sampling лише як явно позначений approximation mode.
+## 11. Portfolio / Exposure / Opportunity Engine
 
-Portfolio Coverage може заявити non-negative modeled worst-case лише після solver proof для чітко визначеного scenario space.
+Центральне економічне ядро моделює dependency graph між outcomes, selections, tickets/positions, parlays, providers і terminal scenarios.
 
-## 11. Probability / Forecasting
+Виходи:
+- available/reserved bankroll;
+- committed stake/capital at risk;
+- current exposure;
+- event/market/provider concentration;
+- best-case terminal P&L;
+- minimum/worst-case terminal P&L;
+- expected P&L only when valid probability evidence exists;
+- exact/approximate/completeness label;
+- outcome coverage;
+- drawdown/risk metrics;
+- marginal effect of each candidate;
+- hedge/rebalance/dutching alternatives.
 
-Детерміновані calculators відповідають за implied probabilities, overround normalization, stake/payout, EV, variance, drawdown, exposure, correlations, calibration metrics і scenario P&L.
+На quote/score/state change перераховується лише affected dependency subgraph where correctness permits.
 
-AI/ML шар формує probability estimates, features, research hypotheses та explanations, але не замінює arithmetic engine.
+For small complete spaces use exact enumeration. For larger spaces use factorization, dynamic programming, branch-and-bound, constraint solving, scenario compression or sampling, but approximation must be explicit.
 
-Потрібна baseline-модель без LLM для чесного порівняння advanced strategies.
+Sampling/Monte Carlo can estimate risk; it can never prove guaranteed positive minimum P&L over an incomplete terminal-state space.
 
-## 12. Агентна система
+## 12. Outcome-independent profit contract
 
-- Coordinator Agent — orchestration і latency budgets.
-- Research Agent — participant history/form/ranking/matchup evidence.
-- Market Analyst Agent — structure and dynamics of normalized markets.
-- Strategy Agent — paper decisions/candidate tickets без future results.
-- Portfolio Agent — працює через deterministic Portfolio Engine.
-- Risk Agent — paper stake/drawdown/concentration/correlation limits.
-- Critic Agent — leakage/overfitting/weak-assumption review.
-- Settlement Agent — deterministic post-event settlement.
-- Learning/Evaluation Agent — post-settlement analysis і strategy revision proposals.
-- Data Quality Agent — gaps, duplicates, timestamp/order anomalies, identity mismatches.
+Portfolio може бути labelled `OUTCOME_INDEPENDENT_POSITIVE` лише коли:
 
-Агенти можуть створювати підзадачі, але hot-path ingestion/storage/math залишається ordinary code.
+- complete relevant terminal outcome space is proven;
+- every terminal state is evaluated;
+- exact stake/payout semantics used;
+- provider/bookmaker settlement rules are compatible;
+- quotes are actionable/fresh;
+- provider/account limits allow the stake vector;
+- stake granularity is included;
+- applicable fees/commission/tax are included;
+- partial acceptance/rejection is represented;
+- execution sequencing/atomicity assumptions are feasible;
+- `minimum terminal net P&L > 0`.
 
-## 13. Learning loop
+Otherwise use weaker truth labels such as:
+`THEORETICAL_ARBITRAGE_ONLY`, `EXECUTION_RISK_PRESENT`, `PARTIAL_COVERAGE`, `HEDGED_BUT_NOT_GUARANTEED`, `RISKED_PORTFOLIO`.
 
-Кожне decision фіксується ДО результату з доступним context, probabilities, model/strategy version, features, odds і portfolio state. Після settlement додається result fact.
+A simple inverse-odds test is only a fast candidate screen for suitable mutually exclusive outcomes, not final execution proof.
 
-Evaluation використовує walk-forward/out-of-sample windows і immutable test periods. Метрики: bankroll curve, ROI, max drawdown, risk of ruin, volatility, calibration, Brier/log loss, hit rate, average odds, P&L attribution, performance by market type, live vs pre-match, favorite/underdog segments, stress scenarios.
+## 13. Probability / forecasting / mathematical intelligence
 
-Окремо показувати результат без найбільших випадкових wins.
+Deterministic calculators own odds conversion, overround/de-vig primitives, stake/payout, EV, variance, drawdown, exposure, scenario P&L and exact portfolio arithmetic.
 
-## 14. Windows / Accessibility
+Forecast models may estimate probabilities, features and uncertainty. They are required only for strategy classes that claim probability/predictive edge.
 
-V1 має packaged runnable Windows application. UI keyboard-first, main workflows без миші, коректні UIA names/roles/states. Усі графіки мають текстовий/табличний equivalent.
+Mature generic opportunity contract (#356) supports at minimum:
+- `PREDICTIVE_EDGE`;
+- `LIVE_PRICE_MOVEMENT`;
+- `ARBITRAGE`;
+- `DUTCHING`;
+- `HEDGE_REBALANCE`;
+- `HYBRID`.
 
-Основні екрани V1: Dashboard; Live/Replay Matches; Match Detail; Market History; Virtual Bank; Open/Settled Tickets; Portfolio Exposure; Agent Activity; Strategy Runs; Evaluation; Settings/Data Sources.
+Pure price-structure/arbitrage/dutching/hedge decisions may not require a directional forecast; their proof comes from causal quote/state evidence + portfolio/settlement/stake-vector economics.
 
-Physical Windows + NVDA acceptance — окремий gate; automated UIA не можна називати NVDA verification.
+External numerical/scientific libraries are optional post-V1/measured-need engines behind Autosport-owned ports. They never become economic, causal, provenance or release authority.
 
-## 15. Technology direction V1
+## 14. Live-market intelligence
 
-Control/agent/domain: Python 3.12+.
+Live is a first-class mature-product earning lane.
 
-Data/numerical: NumPy/Polars + deterministic custom modules. Performance-critical solver після profiling може бути винесений у Rust/PyO3, але Rust не блокує старт.
+Required live loop:
 
-Storage: SQLite/DuckDB + Parquet/append-only event files.
+`market/state update -> identity/provenance/freshness/order -> incremental analysis -> opportunity candidates -> portfolio delta -> min-P&L/risk -> execution feasibility -> supervised/bounded execution -> acknowledgement/reconciliation -> repeat`.
 
-Async ingestion: asyncio, bounded queues, backpressure.
+Support future analysis of:
+- quote velocity/acceleration/reversal;
+- provider disagreement and lead/lag;
+- stale quote detection;
+- regime/volatility changes;
+- short-horizon market-state transitions;
+- cross-provider/cross-market actionable discrepancies.
 
-UI: desktop framework із перевіреним Windows UIA; framework може змінюватися, якщо цього вимагатимуть accessibility gates.
+No cached recommendation survives quote expiry automatically.
 
-## 16. Performance targets
+## 15. Агентна система
 
-Engineering targets V1, що мають бути виміряні на цільовому Windows laptop:
+Possible typed roles:
+- Coordinator Agent;
+- Research/Data Quality Agent;
+- Market Analyst Agent;
+- Forecast/Predictive Agent;
+- Live Opportunity Agent;
+- Strategy/Opportunity Planner;
+- Portfolio Agent;
+- Risk/Critic Agent;
+- Settlement Agent;
+- Learning/Evaluation Agent.
 
-- normalizer + local state update p95 < 100 ms, excluding network/provider delay;
-- ordinary affected-subgraph portfolio recompute p95 < 100 ms;
-- no unbounded queues;
-- accelerated replay ≥ 100× real-time for a typical recording або максимально швидкий event-driven mode з опублікованим throughput.
+Agents work through canonical stores/contracts and cannot bypass deterministic money/risk/execution authorities.
 
-Targets не є claims; release notes показують фактичні benchmarks.
+Risk limits are external/user-configured authority. No model/agent may silently enlarge stake, loss, turnover, exposure or automation limits.
 
-## 17. Версії
+## 16. Learning / champion-challenger loop
 
-### V1 — Windows Paper Lab / Table Tennis First
+Every decision is frozen before outcome with exact available evidence, quote/state, portfolio state, strategy/model/config identity, cutoffs and action/rejection reason.
 
-Реальний Windows release: table tennis vertical slice, historical replay without leakage, live observation adapter where available, Market Mirror, winner/totals/handicaps, Virtual Bank, singles/parlays, settlement, incremental Portfolio Engine, baseline model, agents, accessible UI, evaluation, import/export replay datasets, restart/recovery.
+After authoritative reveal evaluate:
+- realized net P&L;
+- bankroll growth;
+- EV capture where applicable;
+- calibration for predictive models;
+- max drawdown / risk of ruin;
+- turnover;
+- live quote age/freshness;
+- execution slippage;
+- rejected/partial execution rate;
+- hedge cost;
+- arbitrage detected-vs-captured;
+- performance by sport/provider/market/live regime.
 
-### V1.1 — Reliability and Performance
+Promotion requires causal walk-forward/holdout evidence and must fail closed on material protective-metric deterioration.
 
-Endurance, provider resync, dataset validation, large portfolios, profiling, optional Rust accelerators, stronger UIA/NVDA acceptance.
+## 17. Real bankroll / stake policy
 
-### V2 — Multi-Sport / Multi-Provider Portfolio Lab
+A real account balance is not unrestricted execution authority.
 
-Інші sports, multiple providers, cross-provider entity resolution/history, advanced markets, correlation-aware models, larger parlays, stronger pruning/solvers, distributed collectors, strategy arena, scheduled replay campaigns.
+Example: 10,000 UAH bank can still imply 50 UAH or zero for a position depending on risk, edge, open exposure and user limits.
 
-### V3 — Learning Laboratory
+For arbitrage/dutching/hedging evaluate the whole stake vector, not each leg independently.
 
-Model/strategy registry, feature pipelines, walk-forward campaigns, champion/challenger, agent tournaments, calibration improvement, distributed replay workers, large corpora, reproducible training/evaluation artifacts.
+Configurable future limits include:
+- max stake per bet;
+- max stake/capital at risk as bankroll fraction;
+- max session/day loss;
+- max turnover;
+- max event/market/provider exposure;
+- max concurrent positions;
+- max parlay/combination exposure;
+- max slippage;
+- min quote freshness;
+- per-agent/automation authority;
+- emergency global STOP/kill switch.
 
-### V4 — Scaled Autonomous Research Platform
+## 18. Bookmaker execution / reconciliation
 
-Large-scale multi-machine workers, plugin SDK, provider sandbox, advanced scenario graph, richer memory, formal portfolio proofs where possible, enterprise observability, backup/restore, unattended paper research.
+After paper/live qualification, #353 governs:
 
-## 18. V1 Critical Path
+- Bookmaker Capability Registry;
+- official API first, sanctioned integration second, permitted browser automation where applicable;
+- account/balance/limits read-only;
+- event/market/selection verification;
+- bet-slip/action preparation;
+- current odds/freshness/slippage recheck;
+- stake/stake-vector entry;
+- acknowledgement + external bet IDs;
+- open/settled position readback;
+- balance reconciliation;
+- duplicate-bet prevention;
+- partial multi-leg safety;
+- bounded autonomy.
 
-Repository/bootstrap → domain schemas → append-only event log/current state → replay clock/leakage firewall → Paper Book/Virtual Bank → settlement → portfolio dependency graph → incremental calculator → table-tennis fixture dataset → baseline strategy → agent contracts/orchestrator → evaluation → Windows UI → packaging → restart/recovery → accessibility → endurance/performance.
+A P0 hazard is one accepted leg with later hedge/arbitrage legs rejected or repriced. After every acknowledgement recompute the actual portfolio, invalidate stale remaining plan actions, reconcile external IDs and continue only with a fresh plan within limits.
 
-Паралельна робота дозволена, але integration постійно має тримати runnable vertical slice.
+PaperBook is never reused as fake real-account truth. Real money requires a separate execution ledger.
 
-## 19. Definition of Done V1
+## 19. Windows / Accessibility
 
-V1 DONE лише якщо одночасно є: runnable Windows artifact; keyboard-first UI; real agent orchestration; historical replay without future leakage; Market Mirror; Virtual Bank; singles/parlays; deterministic settlement; incremental Portfolio Engine; Research/Strategy/Risk/Critic/Data Quality/Learning roles; durable restart/recovery; reproducible run identities; evaluation metrics; exact-head green packaged tests; separate human NVDA acceptance record.
+Current V1 UI path remains **Tk + tk-uia** through physical acceptance. Do not rewrite to another UI stack merely from preference.
 
-## 20. GitHub coordination
+Packaged application must be keyboard-first. Machine UIA checks verify prerequisites, but only physical Windows 11 + NVDA evidence can set `HUMAN_TESTED` / `NVDA_VERIFIED`.
 
-Канонічний control issue: `#1 AUTOSPORT — GLOBAL PRODUCT COMPLETION / V1 WINDOWS PAPER LAB`.
+Critical future execution surfaces—recommendation, min-P&L/risk, approval, balance, acknowledgement, rejection, reconciliation and STOP—must have textual keyboard/screen-reader access.
 
-Live GitHub state має пріоритет над старими reports. Один semantic slice — один owner. Existing canonical lineage > duplicate implementation. Finish/converge useful work before distant feature work.
+## 20. Performance direction
 
-## 21. Перші задачі
+Subsecond updates never depend on LLM. Collectors, normalizers, event bus, current state, quote freshness and affected-subgraph portfolio recomputation are local deterministic code.
 
-1. Провести Nika-Core selective reuse audit з COPY / ADAPT / DO-NOT-COPY і source SHAs.
-2. Закріпити canonical domain schemas і `MarketEventStream`.
-3. Побудувати deterministic historical table-tennis fixture.
-4. Реалізувати Replay + future-leakage firewall.
-5. Реалізувати Virtual Bank / Paper Book / Settlement.
-6. Реалізувати incremental Portfolio Engine.
-7. Підключити baseline strategy та agent contracts.
-8. Зібрати Windows shell.
-9. Довести end-to-end replay до packaged Windows executable.
+V1 performance budgets remain engineering targets to measure honestly. Optimize from profiler/benchmark evidence; indexes/batching/SQLite and algorithmic pruning first, heavier vector/columnar/runtime engines later if justified.
 
-## 22. Головне правило
+## 21. Version / roadmap interpretation
 
-Автоспорт — не чат-бот, який «думає про ставки». Це високошвидкісна event-driven математична та агентна лабораторія, де AI формує гіпотези/стратегії, а дані, час, арифметика, portfolio dependencies, settlement, replay causality та audit забезпечуються детермінованим програмним ядром.
+Version numbers are milestones, not permanent scope walls.
+
+### V1 — Windows Paper/Replay/Live-Observation Proof
+Causal replay, Market Mirror, Virtual Bank, singles/parlays, settlement, portfolio truth, agents, recovery, accessible Windows package.
+
+### V1.0.x — Reliability / Bug Bash
+Crash/data-loss/economic/accessibility/recovery/security defects before feature breadth.
+
+### Professional Paper + Live Qualification
+Long-running lawful historical and forward/live observation proving bankroll/risk/live-opportunity behavior.
+
+### Live Portfolio Intelligence (#355)
+Arbitrage, dutching, hedge/rebalance, cross-provider/cross-market opportunity classification and exact min-P&L truth.
+
+### Bookmaker Read-Only / Supervised / Real Execution (#353)
+Controlled progression to real-account execution and reconciliation.
+
+### Multi-Sport / Mathematical Intelligence
+Expand sport/provider/model breadth without weakening canonical economic/causal/execution truth.
+
+No V1–V4 wording may be interpreted as a permanent prohibition on the mature real-execution goal.
+
+## 22. V1 Critical Path
+
+Repository/bootstrap -> canonical domain schemas -> append-only event log/current state -> replay clock/leakage firewall -> PaperBook/Virtual Bank -> settlement -> portfolio dependency graph -> incremental calculator -> lawful fixture/market dataset -> baseline strategy -> agent contracts/orchestrator -> evaluation -> Windows UI -> packaging -> restart/recovery -> accessibility -> endurance/performance.
+
+Keep runnable vertical slice. Do not accumulate duplicate framework implementations.
+
+## 23. Definition of Done V1
+
+V1 DONE only when one exact integrated packaged Windows candidate proves:
+- keyboard-first UI;
+- real agent orchestration;
+- replay without future leakage;
+- Market Mirror;
+- Virtual Bank;
+- singles/parlays;
+- deterministic settlement;
+- incremental Portfolio Engine;
+- exact-vs-approximate/completeness truth;
+- durable restart/recovery;
+- reproducible identities/evidence;
+- evaluation;
+- exact-head required machine gates;
+- separate physical NVDA acceptance.
+
+Real-money execution remains disabled in V1, but that is a stage boundary, not mature product scope.
+
+## 24. Головне правило
+
+Autosport — не чат-бот і не “winner predictor”. Це high-speed event-driven mathematical, agentic and execution-oriented betting system. AI can research and propose; canonical data/time/money/portfolio/settlement/replay/execution/reconciliation truth remains deterministic and auditable.
+
+`REAL_MONEY_EXECUTION=false`
+`HUMAN_TESTED=false`
+`NVDA_VERIFIED=false`
+`V1_READY=false`

@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from .integrity import atomic_write_json, sha256_file
-from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
+from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockBusyError
 
 
 _HEX_DIGITS = frozenset("0123456789abcdef")
@@ -51,7 +51,6 @@ _FINAL_ONLY_FIELDS = frozenset(
 )
 _FIRST_OPEN_RETRY_SECONDS = 0.01
 _FIRST_OPEN_MAX_WAIT_SECONDS = 5.0
-_ACTIVE_WRITER_ERROR = "another Autosport process owns the workspace economic-writer lock"
 
 
 def _is_canonical_sha256(value: object) -> bool:
@@ -211,17 +210,15 @@ class RunRegistry:
             lock = WorkspaceEconomicLock(self.path.parent)
             try:
                 lock.acquire()
-            except WorkspaceEconomicLockError as contention:
-                # Only the exact OS-lock contention outcome permits winner re-read.
-                # Alias, identity, creation and cleanup failures are integrity defects,
-                # not evidence that another cooperating writer owns the lock.
-                if str(contention) != _ACTIVE_WRITER_ERROR:
-                    raise
+            except WorkspaceEconomicLockBusyError as contention:
+                # Only typed native advisory-lock contention permits winner re-read.
+                # Alias, identity, creation and backend failures remain fail-closed and
+                # propagate without being reclassified as another writer's ownership.
                 try:
                     self._read_existing()
                 except FileNotFoundError:
                     if time.monotonic() >= deadline:
-                        raise WorkspaceEconomicLockError(
+                        raise WorkspaceEconomicLockBusyError(
                             "run registry first-open could not serialize with the active economic writer"
                         ) from contention
                     time.sleep(_FIRST_OPEN_RETRY_SECONDS)

@@ -18,6 +18,7 @@ from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
 from .price_truth import market_price_truth_from_events
 from .providers import MarketProvider
+from .recovery import transaction_history_requires_recovery
 from .replay import ReplayEngine, ReplayRun
 from .research_strategy import ResearchStrategyPlan
 from .run_registry import MixedStrategyWorkspaceError, RunRegistry, UnresolvedExperimentError
@@ -74,7 +75,7 @@ class AutosportSession:
             self.book_path = self.workspace / "paper_book.json"
             self.book = PaperBook.load(self.book_path) if self.book_path.exists() else PaperBook(initial_bankroll)
             self.ledger = JsonlDecisionLedger(self.workspace / "decisions.jsonl")
-            self.registry = RunRegistry(self.workspace / "run_registry.json")
+            self.registry = RunRegistry.initialize_pristine(self.workspace / "run_registry.json")
             self.portfolio_engine = PortfolioEngine()
         except BaseException as initialization_error:
             # SQLiteMarketStore owns an OS file handle after construction. If any
@@ -264,6 +265,10 @@ class AutosportSession:
         if self.registry.in_progress():
             raise UnresolvedExperimentError(
                 "Workspace has an unresolved economic run; repair it before starting another paper experiment."
+            )
+        if transaction_history_requires_recovery(self.workspace):
+            raise UnresolvedExperimentError(
+                "Workspace has unresolved transaction history; repair it before starting another paper experiment."
             )
         prior_strategy_ids = self.registry.strategy_ids()
         foreign_strategy_ids = tuple(

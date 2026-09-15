@@ -346,9 +346,8 @@ def build_windows_package(
         if relative == "SHA256SUMS.txt":
             continue
         lines.append(f"{sha256_file(path)}  {relative}")
-    (package_dir / "SHA256SUMS.txt").write_text(
-        "\n".join(lines) + "\n",
-        encoding="utf-8",
+    (package_dir / "SHA256SUMS.txt").write_bytes(
+        ("\n".join(lines) + "\n").encode("utf-8")
     )
 
     archive_members = {

@@ -68,9 +68,17 @@ def test_protected_worker_uses_restricted_token_and_immutable_file_bootstrap() -
     assert "restricted_token," in relaunch
     assert "str(launcher)," in relaunch
     assert "_PROTECTED_WORKER_ARG," in relaunch
+    assert "str(binder)," in relaunch
     assert "_PROTECTED_BOOTSTRAP" not in launcher
     assert "runpy.run_path(str(binder), run_name=\"__main__\")" in launcher
     assert "_current_process_token_is_restricted()" in launcher
+
+
+def test_restricting_sid_entries_use_documented_zero_attributes() -> None:
+    launcher = _LAUNCH_BOUNDARY.read_text(encoding="utf-8")
+
+    assert "_SE_GROUP_ENABLED" not in launcher
+    assert "restricting_sids[index].Attributes = 0" in launcher
 
 
 def test_forged_process_local_marker_is_not_enough_for_attestation(
@@ -97,6 +105,20 @@ def test_primary_thread_birth_mask_covers_required_mutation_rights() -> None:
         launcher._WRITE_OWNER,
     ):
         assert launcher._DANGEROUS_THREAD_ACCESS & access == access
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows restricted-token regression")
+def test_restricted_primary_token_factory_returns_restricted_token() -> None:
+    launcher = _load_launcher()
+    token = launcher._create_restricted_primary_token()
+    try:
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        is_token_restricted = advapi32.IsTokenRestricted
+        is_token_restricted.argtypes = (ctypes.wintypes.HANDLE,)
+        is_token_restricted.restype = ctypes.wintypes.BOOL
+        assert is_token_restricted(token)
+    finally:
+        launcher._close_handle(token)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real Windows pre-census mutation regression")

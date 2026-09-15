@@ -15,6 +15,14 @@ _DANGEROUS_PROCESS_ACCESS = 0x000C006A
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000
 _SYNCHRONIZE = 0x00100000
 _SAFE_PARENT_ACCESS = _PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE
+_DANGEROUS_THREAD_ACCESS = 0x000C17B3
+_THREAD_QUERY_LIMITED_INFORMATION = 0x00000800
+_SAFE_THREAD_ACCESS = _THREAD_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE
+_THREAD_SET_CONTEXT = 0x00000010
+_THREAD_SUSPEND_RESUME = 0x00000002
+_WRITE_DAC = 0x00040000
+_WRITE_OWNER = 0x00080000
+_ERROR_ACCESS_DENIED = 5
 _WAIT_OBJECT_0 = 0x00000000
 _INFINITE = 0xFFFFFFFF
 _SDDL_REVISION_1 = 1
@@ -22,6 +30,7 @@ _PROTECTED_MARKER_MODULE = "_autosport_birth_protected_worker"
 _BARRIER_ENV = "AUTOSPORT_BINDER_LAUNCH_BARRIER"
 _NONCE_ENV = "AUTOSPORT_BINDER_LAUNCH_NONCE"
 _TEST_RETAIN_CREATOR_ENV = "AUTOSPORT_TEST_RETAIN_CREATOR_PROCESS_HANDLE"
+_TEST_THREAD_SIBLING_PROBE_ENV = "AUTOSPORT_TEST_PRIMARY_THREAD_SIBLING_PROBE"
 
 
 class _SecurityAttributes(ctypes.Structure):
@@ -191,6 +200,72 @@ def _birth_security_descriptor(current_user_sid: str) -> ctypes.c_void_p:
     return descriptor
 
 
+def _birth_thread_security_descriptor(current_user_sid: str) -> ctypes.c_void_p:
+    """Create a primary-thread SD that denies same-token mutation/control at birth."""
+
+    if not current_user_sid.startswith("S-"):
+        raise RuntimeError("protected worker launch requires a canonical current-user SID")
+    sddl = (
+        "D:P"
+        f"(D;;0x{_DANGEROUS_THREAD_ACCESS:08x};;;{current_user_sid})"
+        f"(D;;0x{_DANGEROUS_THREAD_ACCESS:08x};;;OW)"
+        f"(A;;0x{_SAFE_THREAD_ACCESS:08x};;;{current_user_sid})"
+        "(A;;GA;;;SY)"
+        "(A;;GA;;;BA)"
+    )
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    convert = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    convert.restype = wintypes.BOOL
+    descriptor = ctypes.c_void_p()
+    length = wintypes.DWORD(0)
+    if not convert(sddl, _SDDL_REVISION_1, ctypes.byref(descriptor), ctypes.byref(length)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not descriptor.value or length.value == 0:
+        if descriptor.value:
+            ctypes.WinDLL("kernel32", use_last_error=True).LocalFree(descriptor)
+        raise RuntimeError("protected worker primary-thread security descriptor is empty")
+    return descriptor
+
+
+_THREAD_SIBLING_PROBE = r'''
+import ctypes
+import sys
+from ctypes import wintypes
+
+ERROR_ACCESS_DENIED = 5
+rights = (
+    (0x00000010, "THREAD_SET_CONTEXT"),
+    (0x00000002, "THREAD_SUSPEND_RESUME"),
+    (0x00040000, "WRITE_DAC"),
+    (0x00080000, "WRITE_OWNER"),
+)
+thread_id = int(sys.argv[1])
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+open_thread = kernel32.OpenThread
+open_thread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+open_thread.restype = wintypes.HANDLE
+close_handle = kernel32.CloseHandle
+close_handle.argtypes = (wintypes.HANDLE,)
+close_handle.restype = wintypes.BOOL
+for access, name in rights:
+    ctypes.set_last_error(0)
+    handle = open_thread(access, False, thread_id)
+    value = handle if isinstance(handle, int) else ctypes.cast(handle, ctypes.c_void_p).value
+    if value:
+        close_handle(handle)
+        raise SystemExit(f"hostile sibling acquired {name} on barrier-blocked primary thread")
+    error = ctypes.get_last_error()
+    if error != ERROR_ACCESS_DENIED:
+        raise SystemExit(f"hostile sibling {name} probe failed non-deny: {error}")
+'''
+
+
 _PROTECTED_BOOTSTRAP = r'''
 import ctypes
 import os
@@ -236,6 +311,46 @@ def protected_launch_attested() -> bool:
     marker = sys.modules.get(_PROTECTED_MARKER_MODULE)
     nonce = getattr(marker, "nonce", None)
     return isinstance(nonce, str) and len(nonce) >= 32
+
+
+def _require_fresh_thread_access_denied(thread_id: int) -> None:
+    """Prove the birth DACL blocks fresh same-token primary-thread control handles."""
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_thread = kernel32.OpenThread
+    open_thread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    open_thread.restype = wintypes.HANDLE
+    for access, name in (
+        (_THREAD_SET_CONTEXT, "THREAD_SET_CONTEXT"),
+        (_THREAD_SUSPEND_RESUME, "THREAD_SUSPEND_RESUME"),
+        (_WRITE_DAC, "WRITE_DAC"),
+        (_WRITE_OWNER, "WRITE_OWNER"),
+    ):
+        ctypes.set_last_error(0)
+        raw_handle = open_thread(access, False, thread_id)
+        if _raw_handle_value(raw_handle):
+            _close_handle(raw_handle)
+            raise RuntimeError(
+                f"protected worker primary-thread birth fence still allows fresh {name}"
+            )
+        error = ctypes.get_last_error()
+        if error != _ERROR_ACCESS_DENIED:
+            raise ctypes.WinError(error)
+
+
+def _run_primary_thread_sibling_probe(python: pathlib.Path, thread_id: int) -> None:
+    completed = subprocess.run(
+        [str(python), "-I", "-c", _THREAD_SIBLING_PROBE, str(thread_id)],
+        check=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "protected worker primary-thread hostile sibling probe failed: "
+            + (completed.stdout + "\n" + completed.stderr).strip()
+        )
 
 
 def relaunch_birth_protected_worker() -> int:
@@ -298,10 +413,17 @@ def relaunch_birth_protected_worker() -> int:
     if not _raw_handle_value(barrier):
         raise ctypes.WinError(ctypes.get_last_error())
 
-    descriptor = _birth_security_descriptor(_current_user_sid())
+    current_user_sid = _current_user_sid()
+    descriptor = _birth_security_descriptor(current_user_sid)
+    thread_descriptor = _birth_thread_security_descriptor(current_user_sid)
     process_attributes = _SecurityAttributes(
         ctypes.sizeof(_SecurityAttributes),
         descriptor,
+        False,
+    )
+    thread_attributes = _SecurityAttributes(
+        ctypes.sizeof(_SecurityAttributes),
+        thread_descriptor,
         False,
     )
     startup = _StartupInfoW()
@@ -332,7 +454,7 @@ def relaunch_birth_protected_worker() -> int:
             str(python),
             command_buffer,
             ctypes.byref(process_attributes),
-            None,
+            ctypes.byref(thread_attributes),
             False,
             0,
             None,
@@ -343,6 +465,10 @@ def relaunch_birth_protected_worker() -> int:
             raise ctypes.WinError(ctypes.get_last_error())
         creator_process_open = True
         primary_thread_open = True
+
+        _require_fresh_thread_access_denied(int(process_info.dwThreadId))
+        if os.environ.get(_TEST_THREAD_SIBLING_PROBE_ENV) == "1":
+            _run_primary_thread_sibling_probe(python, int(process_info.dwThreadId))
 
         ctypes.set_last_error(0)
         safe_process = open_process(_SAFE_PARENT_ACCESS, False, process_info.dwProcessId)
@@ -375,6 +501,7 @@ def relaunch_birth_protected_worker() -> int:
         if _raw_handle_value(safe_process):
             _close_handle(safe_process)
         _close_handle(barrier)
+        ctypes.WinDLL("kernel32", use_last_error=True).LocalFree(thread_descriptor)
         ctypes.WinDLL("kernel32", use_last_error=True).LocalFree(descriptor)
         if old_barrier is None:
             os.environ.pop(_BARRIER_ENV, None)

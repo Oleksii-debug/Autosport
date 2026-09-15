@@ -773,6 +773,39 @@ def _package_input_write_fence(
             raise acl_error
 
 
+def _verify_bound_final_package(
+    package: Path,
+    expected_package_sha256: str,
+    *,
+    expected_source_sha: str,
+) -> dict[str, object]:
+    """Verify semantic evidence from the exact producer-bound final ZIP bytes."""
+
+    expected = _require_sha256(
+        expected_package_sha256,
+        field="final_package_sha256",
+    )
+    with tempfile.TemporaryDirectory(prefix="autosport-package-verification-") as snapshot_root:
+        snapshot_dir = Path(snapshot_root)
+        trusted_package = _capture_verified_file(
+            package,
+            expected,
+            snapshot_dir=snapshot_dir,
+            snapshot_name=package.name,
+            handoff_kind="release package",
+        )
+        manifest = {trusted_package: expected}
+        with _package_input_write_fence(snapshot_dir, manifest):
+            verification: dict[str, object] = verify_windows_package(
+                trusted_package,
+                expected_source_sha=expected_source_sha,
+            )
+            data_verification = verify_portable_data_tool(trusted_package)
+            verification.update(data_verification)
+            verification["package_sha256"] = expected
+            return verification
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe", type=Path, required=True)
@@ -888,10 +921,11 @@ def main() -> int:
                 expected_autosport_exe_sha256=expected_snapshot_sha256[trusted_exe],
             )
 
-    verification = verify_windows_package(output, expected_source_sha=args.source_sha)
-    data_verification = verify_portable_data_tool(output)
-    verification.update(data_verification)
-    verification["package_sha256"] = binding["package_sha256"]
+    verification = _verify_bound_final_package(
+        output,
+        binding["package_sha256"],
+        expected_source_sha=args.source_sha,
+    )
     if args.verification_output is not None:
         args.verification_output.parent.mkdir(parents=True, exist_ok=True)
         args.verification_output.write_text(

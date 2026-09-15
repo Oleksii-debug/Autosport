@@ -10,7 +10,7 @@ class RunRegistryTerminalResultIdentityTests(unittest.TestCase):
     @staticmethod
     def _completed_transaction_run(root: Path, *, run_id: str = "run-1") -> tuple[Path, str]:
         registry_path = root / "run_registry.json"
-        registry = RunRegistry(registry_path)
+        registry = RunRegistry.initialize_pristine(registry_path)
         key = registry.begin(
             "a" * 64,
             "b" * 64,
@@ -59,7 +59,7 @@ class RunRegistryTerminalResultIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry_path = root / "run_registry.json"
-            registry = RunRegistry(registry_path)
+            registry = RunRegistry.initialize_pristine(registry_path)
             key = registry.begin(
                 "a" * 64,
                 "b" * 64,
@@ -96,7 +96,7 @@ class RunRegistryTerminalResultIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry_path = root / "run_registry.json"
-            registry = RunRegistry(registry_path)
+            registry = RunRegistry.initialize_pristine(registry_path)
             key = registry.begin("a" * 64, "b" * 64, "strategy", "legacy-run")
             registry.complete(key, "legacy-summary.json")
 

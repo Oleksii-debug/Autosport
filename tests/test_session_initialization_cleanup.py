@@ -28,7 +28,7 @@ class SessionInitializationCleanupTests(unittest.TestCase):
             "autosport.session.SQLiteMarketStore",
             return_value=market_store,
         ), patch(
-            "autosport.session.RunRegistry",
+            "autosport.session.RunRegistry.initialize_pristine",
             side_effect=ValueError("invalid registry"),
         ):
             with self.assertRaisesRegex(ValueError, "invalid registry"):

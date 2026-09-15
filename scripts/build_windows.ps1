@@ -781,6 +781,8 @@ $trustedBuildSrc = Join-Path $trustedBuildRoot 'src'
 $trustedGuiEntry = Join-Path $trustedBuildRoot 'src/autosport/windows_entry.py'
 $trustedDataEntry = Join-Path $trustedBuildRoot 'src/autosport/data_tools_entry.py'
 $trustedPyInstallerBinder = Join-Path $trustedBuildRoot 'scripts/guarded_pyinstaller_bind.py'
+$trustedPyInstallerLaunchBoundary = Join-Path $trustedBuildRoot 'scripts/guarded_pyinstaller_launch_boundary.py'
+$trustedPyInstallerOrchestratorBoundary = Join-Path $trustedBuildRoot 'scripts/guarded_pyinstaller_orchestrator_boundary.cs'
 $pyInstallerOutputRoot = Join-Path $boundArtifactRoot 'pyinstaller-output'
 $pyInstallerDist = Join-Path $pyInstallerOutputRoot 'dist'
 $pyInstallerWork = Join-Path $pyInstallerOutputRoot 'build'
@@ -934,22 +936,38 @@ try {
   $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
   if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification before Autosport.exe exited $LASTEXITCODE" }
 
+  # Compile the native creator only from the already locked, exact-source snapshot.
+  # The process/thread DACL therefore exists at child birth, before any guarded
+  # binder Python instruction can run or acquire release-sensitive authority.
+  if ($null -eq ('Autosport.Release.BirthProtectedPyInstaller' -as [type])) {
+    Add-Type -Path $trustedPyInstallerOrchestratorBoundary
+  }
+
   $builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'
-  & $packagingPython -I $trustedPyInstallerBinder `
-    --artifact $builtAutosportExe `
-    --bound-output $boundAutosportExe `
-    --digest-output $autosportDigestPath `
-    --verifier $sourceVerifier `
-    --verifier-sha256 $sourceVerifierSha256 `
-    -- `
-    --noconfirm --clean --onefile --windowed `
-    --paths $trustedBuildSrc `
-    --distpath $pyInstallerDist `
-    --workpath $pyInstallerWork `
-    --specpath $pyInstallerSpec `
-    --name Autosport `
+  $autosportPyInstallerArguments = [string[]]@(
+    '--artifact', $builtAutosportExe,
+    '--bound-output', $boundAutosportExe,
+    '--digest-output', $autosportDigestPath,
+    '--verifier', $sourceVerifier,
+    '--verifier-sha256', $sourceVerifierSha256,
+    '--',
+    '--noconfirm', '--clean', '--onefile', '--windowed',
+    '--paths', $trustedBuildSrc,
+    '--distpath', $pyInstallerDist,
+    '--workpath', $pyInstallerWork,
+    '--specpath', $pyInstallerSpec,
+    '--name', 'Autosport',
     $trustedGuiEntry
-  if ($LASTEXITCODE -ne 0) { throw "Guarded Autosport PyInstaller/binding exited $LASTEXITCODE" }
+  )
+  $autosportBindExitCode = [Autosport.Release.BirthProtectedPyInstaller]::Run(
+    $packagingPython,
+    $trustedPyInstallerLaunchBoundary,
+    $trustedPyInstallerBinder,
+    $autosportPyInstallerArguments,
+    $repoRoot,
+    $currentSid
+  )
+  if ($autosportBindExitCode -ne 0) { throw "Guarded Autosport PyInstaller/binding exited $autosportBindExitCode" }
   $autosportExeSha256 = (Get-Content -LiteralPath $autosportDigestPath -Raw).Trim()
 
   $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
@@ -961,21 +979,30 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification before Autosport-Data.exe exited $LASTEXITCODE" }
 
   $builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'
-  & $packagingPython -I $trustedPyInstallerBinder `
-    --artifact $builtDataExe `
-    --bound-output $boundDataExe `
-    --digest-output $dataDigestPath `
-    --verifier $sourceVerifier `
-    --verifier-sha256 $sourceVerifierSha256 `
-    -- `
-    --noconfirm --clean --onefile --console `
-    --paths $trustedBuildSrc `
-    --distpath $pyInstallerDist `
-    --workpath $pyInstallerWork `
-    --specpath $pyInstallerSpec `
-    --name Autosport-Data `
+  $dataPyInstallerArguments = [string[]]@(
+    '--artifact', $builtDataExe,
+    '--bound-output', $boundDataExe,
+    '--digest-output', $dataDigestPath,
+    '--verifier', $sourceVerifier,
+    '--verifier-sha256', $sourceVerifierSha256,
+    '--',
+    '--noconfirm', '--clean', '--onefile', '--console',
+    '--paths', $trustedBuildSrc,
+    '--distpath', $pyInstallerDist,
+    '--workpath', $pyInstallerWork,
+    '--specpath', $pyInstallerSpec,
+    '--name', 'Autosport-Data',
     $trustedDataEntry
-  if ($LASTEXITCODE -ne 0) { throw "Guarded Autosport-Data PyInstaller/binding exited $LASTEXITCODE" }
+  )
+  $dataBindExitCode = [Autosport.Release.BirthProtectedPyInstaller]::Run(
+    $packagingPython,
+    $trustedPyInstallerLaunchBoundary,
+    $trustedPyInstallerBinder,
+    $dataPyInstallerArguments,
+    $repoRoot,
+    $currentSid
+  )
+  if ($dataBindExitCode -ne 0) { throw "Guarded Autosport-Data PyInstaller/binding exited $dataBindExitCode" }
   $dataExeSha256 = (Get-Content -LiteralPath $dataDigestPath -Raw).Trim()
 
   $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
@@ -1309,7 +1336,7 @@ if ($freshRestartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Fr
 if ($freshRestartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Fresh-extracted recovery audit did not prove transaction recovery' }
 if ($freshRestartRecoveryEvidence.recovery_disposition -ne 'aborted_uncommitted') { throw 'Fresh-extracted recovery audit disposition is not fail-closed' }
 if ($freshRestartRecoveryEvidence.real_money_execution -ne $false -or $freshRestartRecoveryEvidence.human_tested -ne $false -or $freshRestartRecoveryEvidence.nvda_verified -ne $false) {
-  throw 'Machine restart/recovery audit violated release truth labels'
+  throw 'Fresh-extracted restart/recovery audit violated release truth labels'
 }
 Assert-ProcessRecoveryEvidence -Evidence $freshRestartRecoveryEvidence -Label 'Fresh-extracted restart/recovery audit'
 

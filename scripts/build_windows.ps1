@@ -922,7 +922,7 @@ if ($restartRecoveryProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe rest
 python $sourceVerifier --bind-artifact $restartRecovery --bound-output $boundRestartRecoveryAudit --digest-output $restartRecoveryDigestPath
 if ($LASTEXITCODE -ne 0) { throw "Restart/recovery evidence binding exited $LASTEXITCODE" }
 $restartRecoverySha256 = (Get-Content -LiteralPath $restartRecoveryDigestPath -Raw).Trim()
-$restartRecoveryEvidence = Get-Content $boundRestartRecovery -Raw | ConvertFrom-Json
+$restartRecoveryEvidence = Get-Content $boundRestartRecoveryAudit -Raw | ConvertFrom-Json
 if ($restartRecoveryEvidence.status -ne 'PASS') { throw 'Packaged restart/recovery audit did not PASS' }
 if ($restartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Packaged restart audit did not prove persistent session reopen' }
 if ($restartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Packaged recovery audit did not prove transaction recovery' }
@@ -1006,7 +1006,7 @@ $walkForwardBundle = [ordered]@{
     [ordered]@{
       window_id = 'holdout-2'
       training_end_ts = '2026-02-28T23:59:59+00:00'
-      evaluation_start_ts = '2026-03-01T12:00:00+00:00'
+      evaluation_start_ts = '2026-03-01T00:00:00+00:00'
       evaluation_end_ts = '2026-03-31T23:59:59+00:00'
       split = 'holdout'
     }

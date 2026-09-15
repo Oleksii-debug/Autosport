@@ -18,6 +18,7 @@ _EXPECTED_PYINSTALLER_VERSION = "6.22.3"
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _GENERIC_READ = 0x80000000
 _FILE_SHARE_READ = 0x00000001
+_FILE_SHARE_WRITE = 0x00000002
 _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
@@ -94,17 +95,91 @@ def _require_regular_nonreparse(path: pathlib.Path, *, label: str) -> os.stat_re
     return value
 
 
+def _open_producer_continuity_anchor(
+    path: pathlib.Path,
+) -> tuple[Any, tuple[int, int]]:
+    """Retain the producer object across its final legitimate Windows mutation.
+
+    The anchor permits additional READ/WRITE opens so PyInstaller can perform its
+    final checksum rewrite, but intentionally omits DELETE sharing. A same-path
+    rename/replacement therefore cannot swap the object between that producer
+    mutation and acquisition of the stricter final binding fence.
+    """
+
+    if os.name != "nt":
+        raise RuntimeError("guarded PyInstaller artifact binding is Windows-only")
+
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    ctypes.set_last_error(0)
+    raw_handle = create_file(
+        str(path),
+        _GENERIC_READ,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        None,
+        _OPEN_EXISTING,
+        _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    handle_value = (
+        raw_handle
+        if isinstance(raw_handle, int)
+        else ctypes.cast(raw_handle, ctypes.c_void_p).value
+    )
+    if handle_value in {None, _INVALID_HANDLE_VALUE}:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    try:
+        descriptor = msvcrt.open_osfhandle(
+            int(handle_value),
+            os.O_RDONLY | getattr(os, "O_BINARY", 0),
+        )
+    except BaseException:
+        close_handle(raw_handle)
+        raise
+
+    try:
+        stream = os.fdopen(descriptor, "rb", closefd=True)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+    try:
+        opened = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError(f"PyInstaller producer anchor is not a regular file: {path}")
+        producer_identity = _object_identity(opened)
+        after_path = _require_regular_nonreparse(path, label="PyInstaller producer output")
+        if _object_identity(after_path) != producer_identity:
+            raise RuntimeError(
+                "PyInstaller output path changed while acquiring producer continuity anchor"
+            )
+        return stream, producer_identity
+    except BaseException:
+        stream.close()
+        raise
+
+
 def _open_final_retained_read_fence(
     path: pathlib.Path,
 ) -> tuple[Any, tuple[int, int]]:
-    """Atomically establish the trusted final-object identity from an open handle.
-
-    PyInstaller legitimately rewrites/replaces the output object while assembling a
-    Windows executable. Therefore no identity captured at the initial bootloader
-    copy is authoritative. This fence is acquired only at PyInstaller's final
-    mtime transition, after its legitimate PE/resource/PKG mutations, and denies
-    later write/delete opens while the trusted verifier binds the exact object.
-    """
+    """Establish the final no-write/no-delete binding fence from an open handle."""
 
     if os.name != "nt":
         raise RuntimeError("guarded PyInstaller artifact binding is Windows-only")
@@ -256,14 +331,79 @@ def run(argv: list[str] | None = None) -> int:
 
     original_mtime = miscutils.mtime
     original_assemble = building_api.EXE.assemble
+    original_update_checksum = building_api.winutils.update_exe_pe_checksum
     original_copyfile = shutil.copyfile
     state: dict[str, Any] = {
         "producer_active": False,
+        "producer_anchor_stream": None,
+        "producer_identity": None,
         "final_identity": None,
         "guard_stream": None,
+        "guard_error": None,
         "bound": False,
+        "test_pre_fence_replacement_result": None,
         "test_replacement_result": None,
     }
+
+    def poison_guard(message: str, exc: BaseException | None = None) -> RuntimeError:
+        if state["guard_error"] is None:
+            state["guard_error"] = message
+        error = RuntimeError(str(state["guard_error"]))
+        if exc is not None:
+            error.__cause__ = exc
+        return error
+
+    def guarded_update_exe_pe_checksum(path, *checksum_args, **checksum_kwargs):
+        if not state["producer_active"] or _normalized_path(path) != artifact_key:
+            return original_update_checksum(path, *checksum_args, **checksum_kwargs)
+        if state["guard_error"] is not None:
+            raise RuntimeError(str(state["guard_error"]))
+
+        anchor_stream = state["producer_anchor_stream"]
+        producer_identity = state["producer_identity"]
+        if anchor_stream is None:
+            try:
+                anchor_stream, producer_identity = _open_producer_continuity_anchor(artifact)
+            except BaseException as exc:
+                raise poison_guard(
+                    f"PyInstaller producer continuity anchor acquisition failed: {exc}",
+                    exc,
+                )
+            state["producer_anchor_stream"] = anchor_stream
+            state["producer_identity"] = producer_identity
+        else:
+            anchor_now = os.fstat(anchor_stream.fileno())
+            current_path = _require_regular_nonreparse(
+                artifact,
+                label="PyInstaller producer output before checksum retry",
+            )
+            if (
+                _object_identity(anchor_now) != producer_identity
+                or _object_identity(current_path) != producer_identity
+            ):
+                raise poison_guard(
+                    "PyInstaller producer output lost continuity before checksum retry"
+                )
+
+        try:
+            result = original_update_checksum(path, *checksum_args, **checksum_kwargs)
+            anchor_after = os.fstat(anchor_stream.fileno())
+            current_after = _require_regular_nonreparse(
+                artifact,
+                label="PyInstaller producer output after final checksum",
+            )
+            if (
+                _object_identity(anchor_after) != producer_identity
+                or _object_identity(current_after) != producer_identity
+            ):
+                raise poison_guard(
+                    "PyInstaller producer output lost continuity during final checksum"
+                )
+            return result
+        except RuntimeError as exc:
+            if state["guard_error"] is not None:
+                raise
+            raise exc
 
     def guarded_mtime(path):
         if (
@@ -271,7 +411,56 @@ def run(argv: list[str] | None = None) -> int:
             and _normalized_path(path) == artifact_key
             and state["guard_stream"] is None
         ):
-            guard_stream, final_identity = _open_final_retained_read_fence(artifact)
+            if state["guard_error"] is not None:
+                raise RuntimeError(str(state["guard_error"]))
+
+            anchor_stream = state["producer_anchor_stream"]
+            producer_identity = state["producer_identity"]
+            if anchor_stream is None or producer_identity is None:
+                raise poison_guard(
+                    "PyInstaller reached final fence without a producer continuity anchor"
+                )
+
+            if (
+                os.environ.get("AUTOSPORT_TEST_REPLACE_BEFORE_FINAL_FENCE") == "1"
+                and state["test_pre_fence_replacement_result"] is None
+            ):
+                replacement = artifact.with_name(
+                    f".{artifact.name}.pre-fence-replacement-{os.getpid()}"
+                )
+                try:
+                    original_copyfile(artifact, replacement)
+                    with replacement.open("ab") as replacement_handle:
+                        replacement_handle.write(b"AUTOSPORT_PRE_FENCE_REPLACEMENT")
+                    try:
+                        os.replace(replacement, artifact)
+                    except OSError:
+                        state["test_pre_fence_replacement_result"] = "blocked"
+                    else:
+                        state["test_pre_fence_replacement_result"] = "succeeded"
+                finally:
+                    try:
+                        replacement.unlink()
+                    except FileNotFoundError:
+                        pass
+
+            try:
+                guard_stream, final_identity = _open_final_retained_read_fence(artifact)
+                anchor_now = os.fstat(anchor_stream.fileno())
+                if (
+                    _object_identity(anchor_now) != producer_identity
+                    or final_identity != producer_identity
+                ):
+                    guard_stream.close()
+                    raise RuntimeError(
+                        "final PyInstaller fence object does not match producer continuity anchor"
+                    )
+            except BaseException as exc:
+                raise poison_guard(
+                    f"PyInstaller final fence integrity failure: {exc}",
+                    exc,
+                )
+
             state["guard_stream"] = guard_stream
             state["final_identity"] = final_identity
 
@@ -297,6 +486,8 @@ def run(argv: list[str] | None = None) -> int:
                         pass
 
             return os.fstat(guard_stream.fileno()).st_mtime
+        if state["guard_error"] is not None and state["producer_active"]:
+            raise RuntimeError(str(state["guard_error"]))
         return original_mtime(path)
 
     def guarded_assemble(self):
@@ -312,6 +503,23 @@ def run(argv: list[str] | None = None) -> int:
         finally:
             state["producer_active"] = False
 
+        if state["guard_error"] is not None:
+            raise RuntimeError(str(state["guard_error"]))
+
+        if os.environ.get("AUTOSPORT_TEST_REPLACE_BEFORE_FINAL_FENCE") == "1":
+            replacement_result = state["test_pre_fence_replacement_result"]
+            if replacement_result == "blocked":
+                raise RuntimeError(
+                    "PyInstaller output replacement blocked by producer continuity anchor"
+                )
+            if replacement_result == "succeeded":
+                raise RuntimeError(
+                    "PyInstaller output replacement unexpectedly succeeded before final artifact fence"
+                )
+            raise RuntimeError(
+                "PyInstaller pre-fence replacement test hook was not exercised"
+            )
+
         if os.environ.get("AUTOSPORT_TEST_REPLACE_PYINSTALLER_OUTPUT") == "1":
             replacement_result = state["test_replacement_result"]
             if replacement_result == "blocked":
@@ -326,16 +534,29 @@ def run(argv: list[str] | None = None) -> int:
                 "PyInstaller output replacement test hook was not exercised at final artifact fence"
             )
 
+        producer_identity = state["producer_identity"]
+        anchor_stream = state["producer_anchor_stream"]
         final_identity = state["final_identity"]
         guard_stream = state["guard_stream"]
+        if producer_identity is None or anchor_stream is None:
+            raise RuntimeError(
+                "PyInstaller producer completed without retained producer continuity anchor"
+            )
         if final_identity is None or guard_stream is None:
             raise RuntimeError(
                 "PyInstaller producer completed without retained final artifact identity fence"
             )
 
+        anchor_before = os.fstat(anchor_stream.fileno())
         opened_before = os.fstat(guard_stream.fileno())
-        if _object_identity(opened_before) != final_identity:
-            raise RuntimeError("retained final PyInstaller artifact identity changed before trusted bind")
+        if (
+            _object_identity(anchor_before) != producer_identity
+            or _object_identity(opened_before) != final_identity
+            or final_identity != producer_identity
+        ):
+            raise RuntimeError(
+                "retained PyInstaller producer/final artifact identity changed before trusted bind"
+            )
         current_path = _require_regular_nonreparse(
             artifact,
             label="PyInstaller output before trusted bind",
@@ -351,13 +572,15 @@ def run(argv: list[str] | None = None) -> int:
             digest_output=digest_output,
         )
 
+        anchor_after = os.fstat(anchor_stream.fileno())
         opened_after = os.fstat(guard_stream.fileno())
         current_after = _require_regular_nonreparse(
             artifact,
             label="PyInstaller output after trusted bind",
         )
         if (
-            _stable_identity(opened_after) != _stable_identity(opened_before)
+            _object_identity(anchor_after) != producer_identity
+            or _stable_identity(opened_after) != _stable_identity(opened_before)
             or _object_identity(current_after) != final_identity
         ):
             raise RuntimeError("PyInstaller output changed across trusted artifact binding")
@@ -365,6 +588,7 @@ def run(argv: list[str] | None = None) -> int:
         return result
 
     miscutils.mtime = guarded_mtime
+    building_api.winutils.update_exe_pe_checksum = guarded_update_exe_pe_checksum
     building_api.EXE.assemble = guarded_assemble
     try:
         PyInstaller.__main__.run(pyi_args=list(args.pyinstaller_args))
@@ -376,10 +600,14 @@ def run(argv: list[str] | None = None) -> int:
         return 0
     finally:
         building_api.EXE.assemble = original_assemble
+        building_api.winutils.update_exe_pe_checksum = original_update_checksum
         miscutils.mtime = original_mtime
         guard_stream = state.get("guard_stream")
         if guard_stream is not None:
             guard_stream.close()
+        anchor_stream = state.get("producer_anchor_stream")
+        if anchor_stream is not None:
+            anchor_stream.close()
 
 
 def main(argv: list[str] | None = None) -> int:

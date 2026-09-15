@@ -41,6 +41,9 @@ _SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
 _STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
 _MAX_SYSTEM_HANDLE_SNAPSHOT_BYTES = 64 * 1024 * 1024
 _TEST_DACL_REWRITE_ENV = "AUTOSPORT_TEST_REWRITE_EXPECTED_DACL_AFTER_RESOURCE_END"
+_FILE_ID_INFO_CLASS = 18
+_PROCESS_DUP_HANDLE = 0x00000040
+_DUPLICATE_SAME_ACCESS = 0x00000002
 
 
 class _SystemHandleTableEntryInfoEx(ctypes.Structure):
@@ -56,6 +59,23 @@ class _SystemHandleTableEntryInfoEx(ctypes.Structure):
     )
 
 
+class _FileId128(ctypes.Structure):
+    _fields_ = (("ByteIdentifier", ctypes.c_ubyte * 16),)
+
+
+class _FileIdInfo(ctypes.Structure):
+    _fields_ = (
+        ("VolumeSerialNumber", ctypes.c_ulonglong),
+        ("FileId", _FileId128),
+    )
+
+
+class _SystemHandleSnapshot(list[tuple[int, int, int, int]]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.object_types: dict[tuple[int, int, int], int] = {}
+
+
 def _raw_handle_value(raw_handle: Any) -> int:
     value = (
         raw_handle
@@ -65,6 +85,99 @@ def _raw_handle_value(raw_handle: Any) -> int:
     if value is None:
         raise RuntimeError("trusted expected-snapshot security handle has no value")
     return int(value)
+
+
+def _file_identity(raw_handle: Any) -> tuple[int, bytes]:
+    """Return stable volume/file identity for an inspectable Windows file handle."""
+
+    if os.name != "nt":
+        raise RuntimeError("file identity audit requires Windows")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_info = kernel32.GetFileInformationByHandleEx
+    get_info.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    )
+    get_info.restype = wintypes.BOOL
+    info = _FileIdInfo()
+    ctypes.set_last_error(0)
+    if not get_info(
+        raw_handle,
+        _FILE_ID_INFO_CLASS,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(info.VolumeSerialNumber), bytes(info.FileId.ByteIdentifier)
+
+
+def _candidate_file_identity(pid: int, handle_value: int) -> tuple[int, bytes] | None:
+    """Inspect a snapshotted handle without trusting its FILE_OBJECT pointer.
+
+    A handle can close between the system snapshot and duplication; that race is
+    treated as gone. Other non-file/uninspectable handles return ``None`` and retain
+    the kernel-object pointer fast path in the caller.
+    """
+
+    current_pid = os.getpid()
+    if pid == current_pid:
+        try:
+            return _file_identity(handle_value)
+        except OSError:
+            return None
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    open_process.restype = wintypes.HANDLE
+    duplicate_handle = kernel32.DuplicateHandle
+    duplicate_handle.argtypes = (
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    )
+    duplicate_handle.restype = wintypes.BOOL
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.argtypes = ()
+    get_current_process.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    ctypes.set_last_error(0)
+    process = open_process(_PROCESS_DUP_HANDLE, False, pid)
+    process_value = (
+        process if isinstance(process, int) else ctypes.cast(process, ctypes.c_void_p).value
+    )
+    if not process_value:
+        return None
+    duplicated = wintypes.HANDLE()
+    try:
+        ctypes.set_last_error(0)
+        if not duplicate_handle(
+            process,
+            wintypes.HANDLE(handle_value),
+            get_current_process(),
+            ctypes.byref(duplicated),
+            0,
+            False,
+            _DUPLICATE_SAME_ACCESS,
+        ):
+            return None
+        try:
+            return _file_identity(duplicated)
+        except OSError:
+            return None
+        finally:
+            close_handle(duplicated)
+    finally:
+        close_handle(process)
 
 
 def _query_system_handles() -> list[tuple[int, int, int, int]]:
@@ -105,20 +218,20 @@ def _query_system_handles() -> list[tuple[int, int, int, int]]:
             required = header_size + int(count) * entry_size
             if required > size:
                 raise RuntimeError("system handle authority snapshot entries were truncated")
-            snapshot: list[tuple[int, int, int, int]] = []
+            snapshot = _SystemHandleSnapshot()
             for index in range(int(count)):
                 offset = header_size + index * entry_size
                 entry = _SystemHandleTableEntryInfoEx.from_buffer_copy(
                     buffer.raw[offset : offset + entry_size]
                 )
-                snapshot.append(
-                    (
-                        int(entry.Object or 0),
-                        int(entry.UniqueProcessId),
-                        int(entry.HandleValue),
-                        int(entry.GrantedAccess),
-                    )
+                row = (
+                    int(entry.Object or 0),
+                    int(entry.UniqueProcessId),
+                    int(entry.HandleValue),
+                    int(entry.GrantedAccess),
                 )
+                snapshot.append(row)
+                snapshot.object_types[(row[0], row[1], row[2])] = int(entry.ObjectTypeIndex)
             return snapshot
         if status_u32 != _STATUS_INFO_LENGTH_MISMATCH:
             raise RuntimeError(
@@ -141,11 +254,13 @@ def _require_no_competing_mutation_handles(
     """Reject retained mutation authority that predates the filesystem deny fences.
 
     DACL denies prevent fresh opens, but they do not revoke access already granted to
-    a live handle. Bind the trusted security-authority handle to its kernel object and
-    reject every other mutation-capable handle. During a native PyInstaller resource
-    update, current-process data/delete handles are the trusted mutator and may remain;
-    security-descriptor mutation authority is never exempted. FILE_DELETE_CHILD is
-    directory-only: the same access bit is FILE_EXECUTE on regular files.
+    a live handle. Bind the trusted security-authority handle to stable filesystem
+    identity and reject every other mutation-capable handle. The kernel-object pointer
+    remains a fast path, but separate CreateFile opens are compared by FileIdInfo.
+    During a native PyInstaller resource update, current-process data/delete handles
+    are the trusted mutator and may remain; security-descriptor mutation authority is
+    never exempted. FILE_DELETE_CHILD is directory-only: the same access bit is
+    FILE_EXECUTE on regular files.
     """
 
     trusted_handle = _raw_handle_value(raw_handle)
@@ -161,13 +276,14 @@ def _require_no_competing_mutation_handles(
     target_object, _pid, _handle, trusted_access = trusted_rows[0]
     if target_object == 0 or trusted_access & _WRITE_DAC == 0:
         raise RuntimeError(f"{label} trusted handle lost WRITE_DAC authority")
+    target_identity = _file_identity(raw_handle)
+    object_types = getattr(snapshot, "object_types", {})
+    target_type = object_types.get((target_object, current_pid, trusted_handle))
 
     mutation_mask = _MUTATION_CAPABLE_ACCESS | (_FILE_DELETE_CHILD if directory else 0)
     competing: list[tuple[int, int, int, int]] = []
     for row in snapshot:
         object_id, pid, handle_value, granted_access = row
-        if object_id != target_object:
-            continue
         if pid == current_pid and handle_value == trusted_handle:
             continue
         if granted_access & mutation_mask == 0:
@@ -178,7 +294,15 @@ def _require_no_competing_mutation_handles(
             and granted_access & (_WRITE_DAC | _WRITE_OWNER) == 0
         ):
             continue
-        competing.append(row)
+        same_file = object_id == target_object
+        if not same_file and target_type is not None:
+            candidate_type = object_types.get((object_id, pid, handle_value))
+            if candidate_type != target_type:
+                continue
+            candidate_identity = _candidate_file_identity(pid, handle_value)
+            same_file = candidate_identity == target_identity
+        if same_file:
+            competing.append(row)
 
     if competing:
         raise RuntimeError(

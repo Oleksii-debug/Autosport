@@ -76,7 +76,7 @@ class WorkspaceEconomicLockTests(unittest.TestCase):
     def test_recovery_fails_closed_while_active_writer_holds_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            RunRegistry(root / "run_registry.json")
+            RunRegistry.initialize_pristine(root / "run_registry.json")
             process, release = self._start_holder(root)
             try:
                 with self.assertRaisesRegex(

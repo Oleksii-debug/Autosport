@@ -51,16 +51,9 @@ def test_windows_build_holds_directory_namespace_fence_through_both_consumers() 
         "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "
         "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
     )
-    gui_build = (
-        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
-        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
-    )
-    data_build = (
-        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
-        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
-        "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
-    )
+    guarded_call = "& $pythonExecutable -I $trustedPyInstallerBinder `"
+    gui_start = "$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'"
+    data_start = "$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'"
     directory_dispose = "$trustedBuildDirectoryLocks[$directoryLockIndex].Dispose()"
     acl_remove = '& icacls $trustedBuildRoot /remove:d "*${currentSid}" /T /C'
 
@@ -69,8 +62,10 @@ def test_windows_build_holds_directory_namespace_fence_through_both_consumers() 
     directory_index = script.index(directory_open, acl_index)
     file_index = script.index(file_open, directory_index)
     first_verify_index = script.index(snapshot_verify, file_index)
-    gui_index = script.index(gui_build, first_verify_index)
-    data_index = script.index(data_build, gui_index)
+    gui_start_index = script.index(gui_start, first_verify_index)
+    gui_index = script.index(guarded_call, gui_start_index)
+    data_start_index = script.index(data_start, gui_index)
+    data_index = script.index(guarded_call, data_start_index)
     final_verify_index = script.index(snapshot_verify, data_index)
     dispose_index = script.index(directory_dispose, final_verify_index)
     remove_index = script.index(acl_remove, dispose_index)
@@ -87,6 +82,8 @@ def test_windows_build_holds_directory_namespace_fence_through_both_consumers() 
         < dispose_index
         < remove_index
     )
+    assert script.count(guarded_call) == 2
+    assert script.count("--verifier-sha256 $sourceVerifierSha256 `") == 2
     assert "private const uint FILE_LIST_DIRECTORY = 0x00000001;" in script
     assert "private const uint FILE_SHARE_READ = 0x00000001;" in script
     assert "private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;" in script

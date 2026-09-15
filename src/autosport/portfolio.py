@@ -3,9 +3,81 @@ from __future__ import annotations
 import itertools
 import random
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import (
+    Context,
+    Decimal,
+    DecimalException,
+    DivisionByZero,
+    InvalidOperation,
+    Overflow,
+    ROUND_HALF_EVEN,
+    Underflow,
+    localcontext,
+)
 
 from .domain import PaperTicket, TicketStatus
+
+
+# Portfolio reports are persisted as run evidence, so their values cannot depend
+# on an unrelated caller's thread-local/default Decimal configuration.  This
+# explicit policy matches the canonical PaperBook settlement range and rounding.
+_PORTFOLIO_DECIMAL_CONTEXT = Context(
+    prec=28,
+    rounding=ROUND_HALF_EVEN,
+    Emin=-999999,
+    Emax=999999,
+    capitals=1,
+    clamp=0,
+    flags=[],
+    traps=[InvalidOperation, DivisionByZero, Overflow, Underflow],
+)
+
+
+def _require_finite_decimal(value: object, label: str) -> Decimal:
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise ValueError(f"{label} must be a finite Decimal")
+    return value
+
+
+def _portfolio_arithmetic_error(exc: DecimalException) -> ValueError:
+    return ValueError(
+        "portfolio economics are not representable in the canonical Decimal context"
+    )
+
+
+def _scenario_profit_in_context(
+    tickets: list[PaperTicket],
+    winning_quote_keys: set[str],
+) -> Decimal:
+    """Calculate one scenario while the canonical local context is active."""
+
+    total = Decimal("0")
+    for ticket in tickets:
+        if ticket.status is not TicketStatus.OPEN:
+            continue
+        stake = _require_finite_decimal(
+            ticket.stake,
+            f"portfolio ticket {ticket.ticket_id} stake",
+        )
+        combined_odds = Decimal("1")
+        for leg in ticket.legs:
+            odds = _require_finite_decimal(
+                leg.locked_odds,
+                f"portfolio ticket {ticket.ticket_id} locked_odds",
+            )
+            combined_odds *= odds
+        if all(leg.quote_key in winning_quote_keys for leg in ticket.legs):
+            scenario_value = stake * combined_odds - stake
+        else:
+            scenario_value = stake.copy_negate()
+        if not scenario_value.is_finite():
+            raise ValueError(
+                f"portfolio ticket {ticket.ticket_id} scenario profit must be finite"
+            )
+        total += scenario_value
+    if not total.is_finite():
+        raise ValueError("portfolio scenario profit must be finite")
+    return total
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,15 +116,11 @@ class PortfolioEngine:
 
     @staticmethod
     def scenario_profit(tickets: list[PaperTicket], winning_quote_keys: set[str]) -> Decimal:
-        total = Decimal("0")
-        for ticket in tickets:
-            if ticket.status is not TicketStatus.OPEN:
-                continue
-            if all(leg.quote_key in winning_quote_keys for leg in ticket.legs):
-                total += ticket.stake * ticket.combined_odds - ticket.stake
-            else:
-                total -= ticket.stake
-        return total
+        try:
+            with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
+                return _scenario_profit_in_context(tickets, winning_quote_keys)
+        except DecimalException as exc:
+            raise _portfolio_arithmetic_error(exc) from exc
 
     def analyse(self, tickets: list[PaperTicket], exclusive_groups: list[set[str]] | None = None) -> PortfolioReport:
         groups = [set(group) for group in (exclusive_groups or [])]
@@ -80,13 +148,26 @@ class PortfolioEngine:
             # not prove that one of its members must win, so preserve the possible
             # terminal state where none of the listed quote keys wins.
             state_count *= len(group) + 1
-        if state_count <= self.max_exact_states:
-            profits = list(self._exact_profits(open_tickets, groups, ungrouped))
-            mode = "conservative-enumeration" if groups else "exact"
-        else:
-            profits = list(self._sample_profits(open_tickets, groups, ungrouped))
-            mode = "conservative-approximate" if groups else "approximate"
-        return PortfolioReport(mode, len(profits), min(profits), max(profits), sum(profits, Decimal("0")) / Decimal(len(profits)))
+        try:
+            with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
+                if state_count <= self.max_exact_states:
+                    profits = list(self._exact_profits(open_tickets, groups, ungrouped))
+                    mode = "conservative-enumeration" if groups else "exact"
+                else:
+                    profits = list(self._sample_profits(open_tickets, groups, ungrouped))
+                    mode = "conservative-approximate" if groups else "approximate"
+                mean_case = sum(profits, Decimal("0")) / Decimal(len(profits))
+                if not mean_case.is_finite():
+                    raise ValueError("portfolio mean scenario profit must be finite")
+        except DecimalException as exc:
+            raise _portfolio_arithmetic_error(exc) from exc
+        return PortfolioReport(
+            mode,
+            len(profits),
+            min(profits),
+            max(profits),
+            mean_case,
+        )
 
     def _exact_profits(self, tickets, groups, ungrouped):
         group_choices = [tuple(sorted(group)) + (None,) for group in groups]
@@ -96,7 +177,7 @@ class PortfolioEngine:
             for mask in range(2 ** len(ungrouped)):
                 winners = set(base)
                 winners.update(selection for index, selection in enumerate(ungrouped) if mask & (1 << index))
-                yield self.scenario_profit(tickets, winners)
+                yield _scenario_profit_in_context(tickets, winners)
 
     def _sample_profits(self, tickets, groups, ungrouped):
         rng = random.Random(self.seed)
@@ -108,4 +189,4 @@ class PortfolioEngine:
                 if selected is not None:
                     winners.add(selected)
             winners.update(selection for selection in ungrouped if rng.random() < 0.5)
-            yield self.scenario_profit(tickets, winners)
+            yield _scenario_profit_in_context(tickets, winners)

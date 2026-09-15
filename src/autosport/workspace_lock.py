@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from pathlib import Path
@@ -7,7 +8,11 @@ from typing import BinaryIO
 
 
 class WorkspaceEconomicLockError(RuntimeError):
-    """Raised when another process owns the workspace economic-writer lock."""
+    """Base error for workspace economic lock acquisition, integrity, and teardown failures."""
+
+
+class WorkspaceEconomicLockBusyError(WorkspaceEconomicLockError):
+    """Raised only when another process currently owns the advisory workspace lock."""
 
 
 def _add_secondary_failure_note(
@@ -392,8 +397,12 @@ class WorkspaceEconomicLock:
             try:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EAGAIN):
+                    raise WorkspaceEconomicLockBusyError(
+                        "another Autosport process owns the workspace economic-writer lock"
+                    ) from exc
                 raise WorkspaceEconomicLockError(
-                    "another Autosport process owns the workspace economic-writer lock"
+                    "cannot acquire workspace economic-writer lock"
                 ) from exc
             return
 
@@ -402,8 +411,12 @@ class WorkspaceEconomicLock:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                raise WorkspaceEconomicLockBusyError(
+                    "another Autosport process owns the workspace economic-writer lock"
+                ) from exc
             raise WorkspaceEconomicLockError(
-                "another Autosport process owns the workspace economic-writer lock"
+                "cannot acquire workspace economic-writer lock"
             ) from exc
 
     @staticmethod

@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
-import sys
 import venv
 
 
@@ -41,15 +40,15 @@ def test_current_release_path_reuses_live_install_interpreter_for_pyinstaller() 
     assert "$packagingPythonExecutable" not in script[late_gate:data_binder]
 
 
-def test_isolated_mode_still_executes_venv_site_startup_authority(
+def test_isolated_mode_still_executes_venv_pth_startup_authority(
     tmp_path: Path,
 ) -> None:
     """Prove why uninstall + ``-I`` is not an environment provenance boundary.
 
-    A transient hostile PEP-517/backend execution can persist startup authority in
-    the interpreter environment independently of the tracked checkout bytes. Python
-    isolated mode ignores PYTHON* and user-site inputs, but it still initializes the
-    active environment's site-packages. ``-S`` is the relevant bootstrap boundary.
+    A transient hostile PEP-517/backend execution can persist executable ``.pth``
+    authority in site-packages independently of tracked checkout bytes. Python
+    isolated mode ignores PYTHON* and user-site inputs, but still initializes the
+    active environment's site-packages. ``-S`` suppresses that startup authority.
     """
 
     env_dir = tmp_path / "packaging-venv"
@@ -73,13 +72,11 @@ def test_isolated_mode_still_executes_venv_site_startup_authority(
     assert site_packages.is_dir()
 
     sentinel = tmp_path / "startup-authority-executed.txt"
-    sitecustomize = site_packages / "sitecustomize.py"
-    sitecustomize.write_text(
-        "import os\n"
-        "from pathlib import Path\n"
-        "target = os.environ.get('AUTOSPORT_TEST_STARTUP_SENTINEL')\n"
-        "if target:\n"
-        "    Path(target).write_text('executed', encoding='utf-8')\n",
+    executable_pth = site_packages / "autosport_packaging_poison.pth"
+    executable_pth.write_text(
+        "import os,pathlib; "
+        "target=os.environ.get('AUTOSPORT_TEST_STARTUP_SENTINEL'); "
+        "target and pathlib.Path(target).write_text('executed', encoding='utf-8')\n",
         encoding="utf-8",
     )
 

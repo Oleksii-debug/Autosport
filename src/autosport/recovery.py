@@ -66,11 +66,34 @@ def _has_durable_run_history(root: Path) -> bool:
     return any(root.glob("run-*.json"))
 
 
+def _require_regular_manifest(transaction: RunTransaction) -> bool:
+    manifest_stat = _lstat_or_none(transaction.manifest_path)
+    if manifest_stat is None:
+        return False
+    if not stat.S_ISREG(manifest_stat.st_mode):
+        raise ReconciliationError("transaction manifest path is not a regular file")
+    return True
+
+
+def _remove_empty_pre_manifest_transaction_dir(transaction: RunTransaction) -> None:
+    root_stat = _lstat_or_none(transaction.root)
+    if root_stat is None:
+        return
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise ReconciliationError("pre-manifest transaction path is not a directory")
+    try:
+        transaction.root.rmdir()
+    except OSError as exc:
+        raise ReconciliationError(
+            "pre-manifest transaction directory is not empty or cannot be removed"
+        ) from exc
+
+
 def _finalize_terminal_transaction_manifests(
     root: Path,
     registry: RunRegistry,
 ) -> tuple[str, ...]:
-    """Finish the registry-completed/manifest-canonical_committed crash state."""
+    """Validate terminal transaction history and finish the second-crash state."""
 
     transaction_root = root / RunTransaction.ROOT_NAME
     transaction_stat = _lstat_or_none(transaction_root)
@@ -92,49 +115,80 @@ def _finalize_terminal_transaction_manifests(
 
         try:
             transaction = RunTransaction(root, entry.name)
+        except RunTransactionError as exc:
+            raise ReconciliationError(str(exc)) from exc
+        if not _require_regular_manifest(transaction):
+            raise ReconciliationError(
+                "transaction history entry lacks a durable manifest"
+            )
+        try:
             manifest = transaction._read_manifest()
         except RunTransactionError as exc:
             raise ReconciliationError(str(exc)) from exc
 
-        phase = manifest.get("phase")
-        if phase != "canonical_committed":
-            continue
-
         experiment_key = manifest.get("experiment_key")
         if not isinstance(experiment_key, str) or not experiment_key:
             raise ReconciliationError(
-                "canonical committed transaction lacks experiment identity"
+                "transaction manifest lacks experiment identity"
             )
         try:
             registry_item = registry.get(experiment_key)
         except (KeyError, ValueError) as exc:
             raise ReconciliationError(
-                "canonical committed transaction lacks registry identity"
+                "transaction manifest lacks registry identity"
             ) from exc
-        if registry_item.get("status") != "completed":
-            raise ReconciliationError(
-                "canonical committed transaction lacks completed registry evidence"
-            )
         if registry_item.get("run_id") != entry.name:
             raise ReconciliationError(
-                "canonical committed transaction registry run_id mismatch"
+                "transaction manifest registry run_id mismatch"
             )
 
+        phase = manifest.get("phase")
+        registry_status = registry_item.get("status")
         try:
-            outcome = RunTransaction.recover(
-                root,
-                run_id=entry.name,
-                registry_item=registry_item,
-                experiment_key=experiment_key,
-            )
-            if outcome.disposition != "committed":
-                raise ReconciliationError(
-                    "terminal registry transaction recovery returned an unsupported disposition"
+            if registry_status == "completed":
+                if phase not in {"canonical_committed", "completed"}:
+                    raise ReconciliationError(
+                        "completed registry is incompatible with transaction phase "
+                        f"{phase!r}"
+                    )
+                outcome = RunTransaction.recover(
+                    root,
+                    run_id=entry.name,
+                    registry_item=registry_item,
+                    experiment_key=experiment_key,
                 )
-            transaction.mark_registry_completed()
+                if outcome.disposition != "committed":
+                    raise ReconciliationError(
+                        "terminal registry transaction recovery returned an unsupported disposition"
+                    )
+                transaction.mark_registry_completed()
+                if phase == "canonical_committed":
+                    finalized.append(experiment_key)
+                continue
+
+            if registry_status == "aborted":
+                if phase != "aborted":
+                    raise ReconciliationError(
+                        "aborted registry is incompatible with transaction phase "
+                        f"{phase!r}"
+                    )
+                outcome = RunTransaction.recover(
+                    root,
+                    run_id=entry.name,
+                    registry_item=registry_item,
+                    experiment_key=experiment_key,
+                )
+                if outcome.disposition != "aborted_uncommitted":
+                    raise ReconciliationError(
+                        "aborted registry transaction recovery returned an unsupported disposition"
+                    )
+                continue
+
+            raise ReconciliationError(
+                "transaction manifest lacks matching terminal registry evidence"
+            )
         except RunTransactionError as exc:
             raise ReconciliationError(str(exc)) from exc
-        finalized.append(experiment_key)
 
     return tuple(finalized)
 
@@ -153,7 +207,7 @@ def _reconcile_late_crashes_locked(root: Path, registry_path: Path) -> RecoveryR
         transaction = RunTransaction(root, run_id)
 
         try:
-            if transaction.manifest_path.is_file():
+            if _require_regular_manifest(transaction):
                 outcome = RunTransaction.recover(
                     root,
                     run_id=run_id,
@@ -184,7 +238,7 @@ def _reconcile_late_crashes_locked(root: Path, registry_path: Path) -> RecoveryR
                 raise ReconciliationError("transaction recovery returned an unsupported disposition")
 
             if _has_recorded_base_hashes(item):
-                if result_path.exists():
+                if _lstat_or_none(result_path) is not None:
                     raise ReconciliationError(
                         "transaction-aware run has a canonical summary but no transaction manifest"
                     )
@@ -193,6 +247,7 @@ def _reconcile_late_crashes_locked(root: Path, registry_path: Path) -> RecoveryR
                     paper_book_path,
                     decision_ledger_path,
                 )
+                _remove_empty_pre_manifest_transaction_dir(transaction)
                 registry.abort_uncommitted(
                     key,
                     reason="crash occurred before transaction manifest became durable; canonical economic state remained BASE",

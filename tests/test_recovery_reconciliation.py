@@ -145,6 +145,88 @@ class RecoveryReconciliationTests(unittest.TestCase):
             )
             self.assertEqual(sha256_file(root / "paper_book.json"), book_hash_before)
 
+    def test_pre_manifest_crash_directory_aborts_idempotently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = AutosportSession(root, "10000")
+            session.close()
+
+            registry = RunRegistry(root / "run_registry.json")
+            book_hash = sha256_file(root / "paper_book.json")
+            ledger_hash = sha256_file(root / "decisions.jsonl")
+            key = registry.begin(
+                "a" * 64,
+                "b" * 64,
+                "strategy",
+                "run-before-manifest",
+                base_paper_book_sha256=book_hash,
+                base_decision_ledger_sha256=ledger_hash,
+            )
+            transaction_dir = root / RunTransaction.ROOT_NAME / "run-before-manifest"
+            transaction_dir.mkdir(parents=True)
+            self.assertFalse((transaction_dir / "manifest.json").exists())
+
+            report = reconcile_late_crashes(root)
+            self.assertEqual(report.aborted_uncommitted_keys, (key,))
+            self.assertEqual(registry.get(key)["status"], "aborted")
+            self.assertFalse(transaction_dir.exists())
+            self.assertEqual(sha256_file(root / "paper_book.json"), book_hash)
+            self.assertEqual(sha256_file(root / "decisions.jsonl"), ledger_hash)
+
+            retry = reconcile_late_crashes(root)
+            self.assertEqual(retry.reconciled_keys, ())
+            self.assertEqual(retry.aborted_uncommitted_keys, ())
+            self.assertEqual(retry.unresolved_without_summary, ())
+            self.assertEqual(registry.get(key)["status"], "aborted")
+            self.assertEqual(sha256_file(root / "paper_book.json"), book_hash)
+            self.assertEqual(sha256_file(root / "decisions.jsonl"), ledger_hash)
+
+    def test_completed_registry_with_precommitted_manifest_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _dataset, key, item, _summary = self._create_late_crash(tmp)
+            reconcile_late_crashes(root)
+
+            registry_path = root / "run_registry.json"
+            book_hash = sha256_file(root / "paper_book.json")
+            ledger_hash = sha256_file(root / "decisions.jsonl")
+            registry_bytes = registry_path.read_bytes()
+            manifest_path = root / RunTransaction.ROOT_NAME / item["run_id"] / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["phase"], "completed")
+            manifest["phase"] = "precommitted"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ReconciliationError,
+                "completed registry is incompatible with transaction phase",
+            ):
+                reconcile_late_crashes(root)
+
+            self.assertEqual(registry_path.read_bytes(), registry_bytes)
+            self.assertEqual(RunRegistry(registry_path).get(key)["status"], "completed")
+            self.assertEqual(sha256_file(root / "paper_book.json"), book_hash)
+            self.assertEqual(sha256_file(root / "decisions.jsonl"), ledger_hash)
+
+    def test_manifest_symlink_is_not_accepted_as_durable_transaction_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _dataset, key, item, _summary = self._create_late_crash(tmp)
+            manifest_path = root / RunTransaction.ROOT_NAME / item["run_id"] / "manifest.json"
+            target = root / "captured-manifest.json"
+            target.write_bytes(manifest_path.read_bytes())
+            manifest_path.unlink()
+            self._symlink_or_skip(manifest_path, target)
+
+            with self.assertRaisesRegex(
+                ReconciliationError,
+                "transaction manifest path is not a regular file",
+            ):
+                reconcile_late_crashes(root)
+
+            self.assertTrue(manifest_path.is_symlink())
+            self.assertEqual(RunRegistry(root / "run_registry.json").get(key)["status"], "in_progress")
+
     def test_tampered_paper_book_prevents_reconciliation(self):
         with tempfile.TemporaryDirectory() as tmp:
             _dataset, key, _item, _summary = self._create_late_crash(tmp)

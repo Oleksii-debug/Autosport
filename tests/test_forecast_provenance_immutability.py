@@ -6,6 +6,11 @@ from pathlib import Path
 from autosport.forecasting import ForecastRecord, JsonlForecastLedger
 
 
+class _SpoofedLengthDigest(str):
+    def __len__(self) -> int:
+        return 64
+
+
 class ForecastProvenanceImmutabilityTests(unittest.TestCase):
     def _record(self, provenance: dict[str, object]) -> ForecastRecord:
         return ForecastRecord(
@@ -56,6 +61,44 @@ class ForecastProvenanceImmutabilityTests(unittest.TestCase):
         self.assertNotIn("winner", record.provenance)
         self.assertNotIn("result", record.provenance["nested"][0])
         self.assertEqual(record.canonical_hash, canonical_hash)
+
+    def test_rejects_string_subclass_that_spoofs_evidence_hash_length(self):
+        spoofed = _SpoofedLengthDigest("1")
+        self.assertEqual(len(spoofed), 64)
+
+        with self.assertRaisesRegex(ValueError, "evidence hash must be a canonical SHA-256 digest"):
+            ForecastRecord(
+                quote_key="event|winner|selection-a",
+                probability="0.6",
+                model_id="model-a",
+                model_version="1",
+                strategy_version="strategy-a",
+                model_training_cutoff_ts="2026-01-01T00:00:00+00:00",
+                input_cutoff_ts="2026-01-02T00:00:00+00:00",
+                generated_at="2026-01-02T00:01:00+00:00",
+                evidence_hashes=(spoofed,),
+                forecast_id="forecast-spoofed-evidence-hash",
+            )
+
+    def test_rejects_string_subclass_that_spoofs_market_snapshot_hash_length(self):
+        spoofed = _SpoofedLengthDigest("1")
+        self.assertEqual(len(spoofed), 64)
+
+        with self.assertRaisesRegex(
+            ValueError, "market_snapshot_hash must be a canonical SHA-256 digest"
+        ):
+            ForecastRecord(
+                quote_key="event|winner|selection-a",
+                probability="0.6",
+                model_id="model-a",
+                model_version="1",
+                strategy_version="strategy-a",
+                model_training_cutoff_ts="2026-01-01T00:00:00+00:00",
+                input_cutoff_ts="2026-01-02T00:00:00+00:00",
+                generated_at="2026-01-02T00:01:00+00:00",
+                market_snapshot_hash=spoofed,
+                forecast_id="forecast-spoofed-market-hash",
+            )
 
     def test_to_dict_returns_detached_json_container_and_ledger_stays_causal(self):
         record = self._record({"nested": [{"feature": "serve-form"}]})

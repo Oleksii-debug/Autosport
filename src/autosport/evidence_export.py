@@ -217,11 +217,28 @@ def _resolve_output_destination(workspace: Path, output: Path) -> Path:
     try:
         output_path.relative_to(workspace_root)
     except ValueError:
-        return output_path
-    raise ValueError(
-        "output path must be outside the Autosport workspace; "
-        "must not overwrite canonical workspace evidence"
-    )
+        pass
+    else:
+        raise ValueError(
+            "output path must be outside the Autosport workspace; "
+            "must not overwrite canonical workspace evidence"
+        )
+
+    # A portable descriptor/handle does not make a directory namespace-immutable.
+    # If an arbitrary external parent is accepted, another actor can reparent that
+    # already-open directory under WORKSPACE between an ancestry check and the next
+    # create/replace syscall. Requiring the resolved output parent to contain the
+    # workspace makes that transition structurally impossible: moving an ancestor
+    # into its own descendant is rejected by the filesystem as a directory cycle.
+    output_parent = output_path.parent
+    try:
+        workspace_root.relative_to(output_parent)
+    except ValueError as exc:
+        raise ValueError(
+            "output parent must be an ancestor of the Autosport workspace; "
+            "safe publication must not use a reparentable sibling directory"
+        ) from exc
+    return output_path
 
 
 def _current_caller_visible_destination(
@@ -1240,9 +1257,9 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
         }
         payload["manifest_sha256"] = _manifest_sha256(payload)
 
-    # Publication remains outside WorkspaceEconomicLock. Its parent directory is bound
-    # before temp creation/replace, and the live bound ancestry is re-proved at each
-    # create/content/replace boundary before PASS rebinds the caller-visible pathname.
+    # Publication remains outside WorkspaceEconomicLock. Its resolved parent is a
+    # workspace ancestor, so it cannot be reparented into that workspace descendant;
+    # descriptor/handle-relative writes and caller-visible reproof remain defense in depth.
     _publish_bound_output(root, requested_destination, payload)
     return payload
 

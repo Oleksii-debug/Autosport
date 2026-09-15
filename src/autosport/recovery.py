@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
 from .integrity import sha256_file
-from .run_registry import ReconciliationError, RunRegistry
+from .run_registry import ReconciliationError, RunRegistry, has_durable_workspace_history
 from .run_transaction import RunTransaction, RunTransactionError
 from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 
@@ -30,7 +30,7 @@ def reconcile_late_crashes(workspace: str | Path) -> RecoveryReport:
             try:
                 registry_stat = _lstat_or_none(registry_path)
                 if registry_stat is None:
-                    if _has_durable_run_history(root):
+                    if has_durable_workspace_history(root):
                         raise ReconciliationError(
                             "run registry is missing while durable run history exists"
                         )
@@ -55,15 +55,6 @@ def _lstat_or_none(path: Path) -> os.stat_result | None:
         return path.lstat()
     except FileNotFoundError:
         return None
-
-
-def _has_durable_run_history(root: Path) -> bool:
-    transaction_root = root / RunTransaction.ROOT_NAME
-    transaction_stat = _lstat_or_none(transaction_root)
-    if transaction_stat is not None:
-        if not stat.S_ISDIR(transaction_stat.st_mode) or any(transaction_root.iterdir()):
-            return True
-    return any(root.glob("run-*.json"))
 
 
 def _require_regular_manifest(transaction: RunTransaction) -> bool:

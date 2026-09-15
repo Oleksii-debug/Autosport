@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -9,6 +10,19 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 _PROCESS_AUTHORITY = _ROOT / "scripts" / "guarded_pyinstaller_process_authority.py"
+_LAUNCH_BOUNDARY = _ROOT / "scripts" / "guarded_pyinstaller_launch_boundary.py"
+_PRODUCER_TEST_PATH = _ROOT / "tests" / "test_windows_pyinstaller_producer_handoff.py"
+_PRODUCER_SPEC = importlib.util.spec_from_file_location(
+    "_autosport_pyinstaller_producer_handoff_tests_process_authority",
+    _PRODUCER_TEST_PATH,
+)
+assert _PRODUCER_SPEC is not None and _PRODUCER_SPEC.loader is not None
+_PRODUCER_TESTS = importlib.util.module_from_spec(_PRODUCER_SPEC)
+sys.modules[_PRODUCER_SPEC.name] = _PRODUCER_TESTS
+_PRODUCER_SPEC.loader.exec_module(_PRODUCER_TESTS)
+_REAL_WINDOWS_PYINSTALLER = (
+    os.name == "nt" and importlib.util.find_spec("PyInstaller") is not None
+)
 
 
 def _load_process_authority():
@@ -35,6 +49,23 @@ def test_dangerous_process_mask_blocks_handle_duplication_and_code_injection() -
         authority._WRITE_OWNER,
     ):
         assert authority._DANGEROUS_PROCESS_ACCESS & access == access
+
+
+def test_production_process_authority_requires_birth_protected_worker_boundary() -> None:
+    authority = _PROCESS_AUTHORITY.read_text(encoding="utf-8")
+    launcher = _LAUNCH_BOUNDARY.read_text(encoding="utf-8")
+
+    assert "_require_birth_protected_worker()" in authority
+    assert "launcher.protected_launch_attested()" in authority
+    assert "launcher.relaunch_birth_protected_worker()" in authority
+    assert "CreateProcessW" in launcher
+    assert "_birth_security_descriptor" in launcher
+    assert "_DANGEROUS_PROCESS_ACCESS = 0x000C006A" in launcher
+    assert "_close_handle(process_info.hThread)" in launcher
+    assert "_close_handle(process_info.hProcess)" in launcher
+    assert "set_event(barrier)" in launcher
+    assert launcher.index("_close_handle(process_info.hThread)") < launcher.index("set_event(barrier)")
+    assert launcher.index("_close_handle(process_info.hProcess)") < launcher.index("set_event(barrier)")
 
 
 def test_preexisting_vm_write_authority_is_rejected(
@@ -135,3 +166,24 @@ def test_current_process_dangerous_handles_are_not_external_brokers(
     )
 
     fence._require_no_untrusted_preexisting_authority()
+
+
+@pytest.mark.skipif(
+    not _REAL_WINDOWS_PYINSTALLER,
+    reason="real Windows protected-worker PyInstaller regression",
+)
+def test_protected_worker_rejects_retained_creator_process_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_TEST_RETAIN_CREATOR_PROCESS_HANDLE", "1")
+
+    completed, _artifact, bound, digest = _PRODUCER_TESTS._run_real_pyinstaller_probe(
+        tmp_path
+    )
+
+    assert completed.returncode != 0
+    combined = completed.stdout + "\n" + completed.stderr
+    assert "pre-existing external dangerous process handle" in combined
+    assert not bound.exists()
+    assert not digest.exists()

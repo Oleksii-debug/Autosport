@@ -65,8 +65,8 @@ def test_export_is_deterministic_metadata_only_secret_safe_and_verifiable(tmp_pa
     nested.mkdir()
     (nested / "paper_book.json").write_text("not-root-evidence\n", encoding="utf-8")
 
-    first_output = tmp_path / "exports" / "first.json"
-    second_output = tmp_path / "exports" / "second.json"
+    first_output = tmp_path / "first.json"
+    second_output = tmp_path / "second.json"
     first = export_evidence_manifest(workspace, first_output)
     second = export_evidence_manifest(workspace, second_output)
 

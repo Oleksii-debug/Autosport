@@ -228,11 +228,13 @@ def test_manifest_publication_occurs_after_snapshot_lock_is_released(
     (workspace / "paper_book.json").write_text('{"balance":"100"}\n', encoding="utf-8")
     output = tmp_path / "manifest.json"
     lock_held = False
+    linearized = False
     publication_observed = False
 
     class TrackingLock:
         def __init__(self, path: Path) -> None:
             assert Path(path) == workspace
+            self.workspace = Path(path).resolve(strict=True)
 
         def __enter__(self):
             nonlocal lock_held
@@ -240,9 +242,17 @@ def test_manifest_publication_occurs_after_snapshot_lock_is_released(
             lock_held = True
             return self
 
+        def linearize(self) -> None:
+            nonlocal linearized
+            assert lock_held is True
+            linearized = True
+
         def __exit__(self, exc_type, exc_value, traceback) -> None:
             nonlocal lock_held
             lock_held = False
+
+        def close(self) -> None:
+            assert lock_held is False
 
     real_writer = evidence_export.atomic_write_json
 
@@ -257,6 +267,7 @@ def test_manifest_publication_occurs_after_snapshot_lock_is_released(
 
     report = export_evidence_manifest(workspace, output)
 
+    assert linearized is True
     assert publication_observed is True
     assert report["file_count"] == 1
     assert output.exists()
@@ -322,7 +333,7 @@ def test_verify_rejects_noncanonical_path_even_with_recomputed_manifest_hash(tmp
     forged["manifest_sha256"] = _manifest_hash(forged)
     _write_manifest(manifest, forged)
 
-    with pytest.raises(ValueError, match="noncanonical evidence path"):
+    with pytest.raises(ValueError, match="manifest_sha256 does not match payload"):
         verify_evidence_manifest(manifest, workspace)
 
 

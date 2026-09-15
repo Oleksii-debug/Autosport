@@ -57,30 +57,65 @@ def _evaluation_decimal_context() -> Context:
 
 
 def _exact_decimal_sum(values: tuple[Decimal, ...]) -> Decimal:
-    """Sum finite Decimals exactly without introducing a second working context."""
+    """Sum canonical finite Decimals exactly with bounded coefficient scaling."""
 
-    if not values:
-        return Decimal("0")
-
+    policy = _evaluation_decimal_context()
     components: list[tuple[int, int]] = []
     minimum_exponent: int | None = None
+
     for value in values:
         if not isinstance(value, Decimal) or not value.is_finite():
             raise ValueError(_INVALID_EVALUATION_STATE)
         parts = value.as_tuple()
-        exponent = parts.exponent
-        if not isinstance(exponent, int):
+        original_exponent = parts.exponent
+        if not isinstance(original_exponent, int):
             raise ValueError(_INVALID_EVALUATION_STATE)
+        if not any(parts.digits):
+            # Zero carries no scale information for an exact mathematical sum and
+            # must not widen the exponent span of non-zero operands.
+            continue
+
+        significant_end = len(parts.digits)
+        while significant_end > 1 and parts.digits[significant_end - 1] == 0:
+            significant_end -= 1
+        significant_digits = parts.digits[:significant_end]
+        normalized_exponent = original_exponent + (
+            len(parts.digits) - significant_end
+        )
+        adjusted_exponent = normalized_exponent + len(significant_digits) - 1
+
+        # Every raw economic value consumed here must be exactly representable by
+        # the canonical 28-digit PaperBook/evaluation envelope. Aggregate results
+        # may legitimately exceed 28 significant digits; only source operands are
+        # bounded before any Python-int 10**gap expansion can occur.
+        if (
+            len(significant_digits) > policy.prec
+            or normalized_exponent < policy.Etiny()
+            or adjusted_exponent > policy.Emax
+        ):
+            raise ValueError(_INVALID_EVALUATION_STATE)
+
+        # Preserve ordinary <=precision Decimal representation (notably integral
+        # exponent zero used by durable JSON). If an exact source spelling exceeds
+        # precision only through trailing zeroes, normalize those zeroes first so
+        # the coefficient and exponent span remain bounded.
+        if len(parts.digits) <= policy.prec:
+            component_digits = parts.digits
+            component_exponent = original_exponent
+        else:
+            component_digits = significant_digits
+            component_exponent = normalized_exponent
+
         coefficient = 0
-        for digit in parts.digits:
+        for digit in component_digits:
             coefficient = coefficient * 10 + digit
         if parts.sign:
             coefficient = -coefficient
-        components.append((coefficient, exponent))
+        components.append((coefficient, component_exponent))
         minimum_exponent = (
-            exponent
+            component_exponent
             if minimum_exponent is None
-            else min(minimum_exponent, exponent)
+            else min(minimum_exponent, component_exponent)
         )
 
     if minimum_exponent is None:
@@ -88,22 +123,23 @@ def _exact_decimal_sum(values: tuple[Decimal, ...]) -> Decimal:
 
     total = 0
     for coefficient, exponent in components:
+        # Source validation above bounds this gap to the canonical Decimal
+        # representable envelope rather than attacker-controlled raw exponents.
         total += coefficient * (10 ** (exponent - minimum_exponent))
 
     if total == 0:
         return Decimal("0")
 
-    # Remove only fractional representation zeroes. Do not promote an integral
-    # result such as -10 into scientific notation (-1E+1): durable evaluation
-    # evidence historically serializes plain integral Decimal values.
-    canonical_exponent = minimum_exponent
-    while canonical_exponent < 0 and total % 10 == 0:
-        total //= 10
-        canonical_exponent += 1
+    result_digits = Decimal(abs(total)).as_tuple().digits
+    removable = min(max(0, -minimum_exponent), len(result_digits) - 1)
+    stripped = 0
+    while stripped < removable and result_digits[-1 - stripped] == 0:
+        stripped += 1
+    if stripped:
+        result_digits = result_digits[:-stripped]
+    canonical_exponent = minimum_exponent + stripped
 
-    sign = int(total < 0)
-    digits = Decimal(abs(total)).as_tuple().digits
-    return Decimal((sign, digits, canonical_exponent))
+    return Decimal((int(total < 0), result_digits, canonical_exponent))
 
 
 def evaluate(book: PaperBook) -> EvaluationSummary:
@@ -125,20 +161,22 @@ def evaluate(book: PaperBook) -> EvaluationSummary:
             for ticket in tickets
             if ticket.status is not TicketStatus.OPEN
         )
-        committed_stake = _exact_decimal_sum(
-            tuple(
-                ticket.stake
-                for ticket in tickets
-                if ticket.status is TicketStatus.OPEN
-            )
+        open_stakes = tuple(
+            ticket.stake
+            for ticket in tickets
+            if ticket.status is TicketStatus.OPEN
         )
+        committed_stake = _exact_decimal_sum(open_stakes)
         settled_stake = _exact_decimal_sum(
             tuple(ticket.stake for ticket in settled)
         )
+        # Feed canonical raw operands rather than the possibly >28-digit aggregate
+        # back into the source-operand validator. This keeps exact 29+ digit open
+        # stake totals valid while net profit remains mathematically exact.
         net_profit = _exact_decimal_sum(
             (
                 final_balance,
-                committed_stake,
+                *open_stakes,
                 initial_bankroll.copy_negate(),
             )
         )

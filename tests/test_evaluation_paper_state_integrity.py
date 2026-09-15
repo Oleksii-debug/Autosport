@@ -79,6 +79,15 @@ class EvaluationPaperStateIntegrityTests(unittest.TestCase):
         self.assertEqual(summary.net_profit, Decimal("0"))
         self.assertEqual(summary.roi, Decimal("0"))
 
+    def test_out_of_policy_pristine_book_fails_before_unbounded_exact_scaling(self) -> None:
+        book = PaperBook(Decimal("1E+1000000000"))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "virtual bankroll state is invalid for evaluation",
+        ):
+            evaluate(book)
+
     def test_derived_roi_decimal_range_failure_is_fail_closed_and_context_isolated(self) -> None:
         book = PaperBook(Decimal("1E+999999"))
         leg = TicketLeg("event-1", "winner", "player-a", Decimal("2"))

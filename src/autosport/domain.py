@@ -180,6 +180,9 @@ class MarketEvent:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "MarketEvent":
+        if type(raw) is not dict:
+            raise ValueError("serialized market event must be a JSON object")
+
         event_id = _required_canonical_string(raw, "event_id")
         market_id = _required_canonical_string(raw, "market_id")
         selection_id = _required_canonical_string(raw, "selection_id")

@@ -66,6 +66,79 @@ def _has_durable_run_history(root: Path) -> bool:
     return any(root.glob("run-*.json"))
 
 
+def _finalize_terminal_transaction_manifests(
+    root: Path,
+    registry: RunRegistry,
+) -> tuple[str, ...]:
+    """Finish the registry-completed/manifest-canonical_committed crash state."""
+
+    transaction_root = root / RunTransaction.ROOT_NAME
+    transaction_stat = _lstat_or_none(transaction_root)
+    if transaction_stat is None:
+        return ()
+    if not stat.S_ISDIR(transaction_stat.st_mode):
+        raise ReconciliationError("transaction root is not a directory")
+
+    try:
+        entries = sorted(transaction_root.iterdir(), key=lambda path: path.name)
+    except OSError as exc:
+        raise ReconciliationError("transaction history is unreadable") from exc
+
+    finalized: list[str] = []
+    for entry in entries:
+        entry_stat = _lstat_or_none(entry)
+        if entry_stat is None or not stat.S_ISDIR(entry_stat.st_mode):
+            raise ReconciliationError("transaction history entry is not a directory")
+
+        try:
+            transaction = RunTransaction(root, entry.name)
+            manifest = transaction._read_manifest()
+        except RunTransactionError as exc:
+            raise ReconciliationError(str(exc)) from exc
+
+        phase = manifest.get("phase")
+        if phase != "canonical_committed":
+            continue
+
+        experiment_key = manifest.get("experiment_key")
+        if not isinstance(experiment_key, str) or not experiment_key:
+            raise ReconciliationError(
+                "canonical committed transaction lacks experiment identity"
+            )
+        try:
+            registry_item = registry.get(experiment_key)
+        except (KeyError, ValueError) as exc:
+            raise ReconciliationError(
+                "canonical committed transaction lacks registry identity"
+            ) from exc
+        if registry_item.get("status") != "completed":
+            raise ReconciliationError(
+                "canonical committed transaction lacks completed registry evidence"
+            )
+        if registry_item.get("run_id") != entry.name:
+            raise ReconciliationError(
+                "canonical committed transaction registry run_id mismatch"
+            )
+
+        try:
+            outcome = RunTransaction.recover(
+                root,
+                run_id=entry.name,
+                registry_item=registry_item,
+                experiment_key=experiment_key,
+            )
+            if outcome.disposition != "committed":
+                raise ReconciliationError(
+                    "terminal registry transaction recovery returned an unsupported disposition"
+                )
+            transaction.mark_registry_completed()
+        except RunTransactionError as exc:
+            raise ReconciliationError(str(exc)) from exc
+        finalized.append(experiment_key)
+
+    return tuple(finalized)
+
+
 def _reconcile_late_crashes_locked(root: Path, registry_path: Path) -> RecoveryReport:
     registry = RunRegistry(registry_path)
     paper_book_path = root / "paper_book.json"
@@ -104,6 +177,7 @@ def _reconcile_late_crashes_locked(root: Path, registry_path: Path) -> RecoveryR
 
                 if outcome.disposition == "committed" and outcome.summary_path is not None:
                     registry.reconcile_completed_summary(key, outcome.summary_path, paper_book_path)
+                    transaction.mark_registry_completed()
                     reconciled.append(key)
                     continue
 
@@ -139,6 +213,10 @@ def _reconcile_late_crashes_locked(root: Path, registry_path: Path) -> RecoveryR
         except RunTransactionError as exc:
             raise ReconciliationError(str(exc)) from exc
 
+    for key in _finalize_terminal_transaction_manifests(root, registry):
+        if key not in reconciled:
+            reconciled.append(key)
+
     return RecoveryReport(tuple(reconciled), tuple(aborted), tuple(unresolved))
 
 
@@ -158,7 +236,7 @@ def _require_recorded_base_state(
     if not isinstance(expected_book, str) or len(expected_book) != 64:
         raise ReconciliationError("registry lacks a valid base PaperBook SHA-256")
     if not isinstance(expected_ledger, str) or len(expected_ledger) != 64:
-        raise ReconciliationError("registry lacks a valid base Decision Ledger SHA-256")
+        raise ReconciliationError("registry lacks a valid Decision Ledger SHA-256")
     if not paper_book_path.is_file() or not decision_ledger_path.is_file():
         raise ReconciliationError("canonical economic base files are missing")
 
@@ -167,7 +245,7 @@ def _require_recorded_base_state(
         ledger_snapshot = JsonlDecisionLedger(decision_ledger_path).verified_snapshot()
     except DecisionLedgerIntegrityError as exc:
         raise ReconciliationError(
-            f"canonical Decision Ledger integrity validation failed: {exc}"
+            "canonical Decision Ledger integrity validation failed: " + str(exc)
         ) from exc
     if actual_book != expected_book or ledger_snapshot.sha256 != expected_ledger:
         raise ReconciliationError("canonical economic state no longer matches the recorded transaction BASE")

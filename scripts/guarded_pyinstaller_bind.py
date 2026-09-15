@@ -371,10 +371,9 @@ def _open_producer_continuity_anchor(
 def _open_expected_snapshot_oracle(
     path: pathlib.Path,
     *,
-    expected_identity: tuple[int, int],
     label: str,
-) -> Any:
-    """Retain a read-only oracle handle that denies snapshot writes and replacement."""
+) -> tuple[Any, tuple[int, int]]:
+    """Fence and bind the trusted mutator's current expected-snapshot object."""
 
     if os.name != "nt":
         raise RuntimeError("guarded PyInstaller artifact binding is Windows-only")
@@ -429,19 +428,19 @@ def _open_expected_snapshot_oracle(
 
     try:
         opened = os.fstat(stream.fileno())
+        opened_identity = _object_identity(opened)
         current = _require_regular_nonreparse(
             path,
             label=f"trusted {label} expected snapshot oracle",
         )
         if (
             not stat.S_ISREG(opened.st_mode)
-            or _object_identity(opened) != expected_identity
-            or _object_identity(current) != expected_identity
+            or _object_identity(current) != opened_identity
         ):
             raise RuntimeError(
                 f"trusted {label} expected snapshot changed before oracle fencing"
             )
-        return stream
+        return stream, opened_identity
     except BaseException:
         stream.close()
         raise
@@ -642,15 +641,14 @@ def run(argv: list[str] | None = None) -> int:
                 f"PyInstaller producer bytes changed before trusted {label} transition"
             )
 
-        snapshot, snapshot_identity = _make_expected_snapshot(anchor_stream, label)
+        snapshot, _ = _make_expected_snapshot(anchor_stream, label)
         release_creation_anchor = label in _RESOURCE_API_TRANSITIONS
         oracle_stream = None
         try:
             expected_mutator(snapshot)
             try:
-                oracle_stream = _open_expected_snapshot_oracle(
+                oracle_stream, snapshot_identity = _open_expected_snapshot_oracle(
                     snapshot,
-                    expected_identity=snapshot_identity,
                     label=label,
                 )
             except BaseException as exc:

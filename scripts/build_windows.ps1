@@ -203,18 +203,44 @@ $verifierMatch = [regex]::Match($verifierTreeEntry, '^(100644|100755) blob ([0-9
 if (-not $verifierMatch.Success) { throw 'Exact source does not contain one regular trusted verifier blob' }
 $verifierBlobSha = $verifierMatch.Groups[2].Value
 
-$sourceVerifier = (New-TemporaryFile).FullName
-$verifierBootstrapError = (New-TemporaryFile).FullName
+# Read the exact Git blob into process memory and bind its digest before any
+# filesystem pathname for the verifier exists. A concurrent replacement of the
+# later temp file can therefore only make the isolated launcher reject it; it
+# cannot redefine the expected digest.
+$verifierBootstrapInfo = [System.Diagnostics.ProcessStartInfo]::new()
+$verifierBootstrapInfo.FileName = $gitExecutable
+$verifierBootstrapInfo.UseShellExecute = $false
+$verifierBootstrapInfo.RedirectStandardOutput = $true
+$verifierBootstrapInfo.RedirectStandardError = $true
+$verifierBootstrapInfo.CreateNoWindow = $true
+[void]$verifierBootstrapInfo.ArgumentList.Add('cat-file')
+[void]$verifierBootstrapInfo.ArgumentList.Add('blob')
+[void]$verifierBootstrapInfo.ArgumentList.Add($verifierBlobSha)
+$verifierBootstrap = [System.Diagnostics.Process]::new()
+$verifierBootstrap.StartInfo = $verifierBootstrapInfo
+$verifierBuffer = [System.IO.MemoryStream]::new()
 try {
-  $verifierBootstrap = Start-Process -FilePath $gitExecutable -ArgumentList @('cat-file', 'blob', $verifierBlobSha) -RedirectStandardOutput $sourceVerifier -RedirectStandardError $verifierBootstrapError -NoNewWindow -Wait -PassThru
+  if (-not $verifierBootstrap.Start()) { throw 'Unable to start exact trusted verifier bootstrap' }
+  $verifierBootstrap.StandardOutput.BaseStream.CopyTo($verifierBuffer)
+  $bootstrapMessage = $verifierBootstrap.StandardError.ReadToEnd().Trim()
+  $verifierBootstrap.WaitForExit()
   if ($verifierBootstrap.ExitCode -ne 0) {
-    $bootstrapMessage = (Get-Content -LiteralPath $verifierBootstrapError -Raw -ErrorAction SilentlyContinue).Trim()
     throw "Unable to materialize exact trusted verifier blob (git exit $($verifierBootstrap.ExitCode)): $bootstrapMessage"
   }
+  $verifierBytes = $verifierBuffer.ToArray()
 } finally {
-  Remove-Item -LiteralPath $verifierBootstrapError -Force -ErrorAction SilentlyContinue
+  $verifierBuffer.Dispose()
+  $verifierBootstrap.Dispose()
 }
-$sourceVerifierSha256 = (Get-FileHash -LiteralPath $sourceVerifier -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($verifierBytes.Length -eq 0) { throw 'Exact trusted verifier blob is empty' }
+$verifierHasher = [System.Security.Cryptography.SHA256]::Create()
+try {
+  $sourceVerifierSha256 = ([System.BitConverter]::ToString($verifierHasher.ComputeHash($verifierBytes))).Replace('-', '').ToLowerInvariant()
+} finally {
+  $verifierHasher.Dispose()
+}
+$sourceVerifier = (New-TemporaryFile).FullName
+[System.IO.File]::WriteAllBytes($sourceVerifier, $verifierBytes)
 python $sourceVerifier --source-sha $sourceSha
 if ($LASTEXITCODE -ne 0) { throw "Source checkout preflight exited $LASTEXITCODE" }
 # Historical unsafe regression marker; this command must remain comment-only: Copy-Item -LiteralPath 'scripts/verify_source_checkout.py' -Destination $sourceVerifier -Force
@@ -263,14 +289,15 @@ foreach ($requiredBuildSource in @('pyproject.toml', 'src/autosport/windows_entr
     throw "Exact build source snapshot is missing $requiredBuildSource"
   }
 }
-# Replace the earlier editable checkout install with the exact snapshot package so
-# import/distribution metadata cannot route PyInstaller back into the live checkout.
-python -m pip install --no-deps --force-reinstall $trustedBuildRoot
+# Replace the earlier editable checkout install with the exact snapshot package.
+# Isolated Python startup prevents cwd/PYTHONPATH/sitecustomize from reopening
+# mutable checkout code after the final trusted source gate.
+& $pythonExecutable -I -m pip install --no-deps --force-reinstall $trustedBuildRoot
 if ($LASTEXITCODE -ne 0) { throw "Exact build source install exited $LASTEXITCODE" }
 
 Push-Location $trustedBuildRoot
 try {
-  python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
+  & $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
 } finally {
   Pop-Location
 }
@@ -283,7 +310,7 @@ python $sourceVerifier --source-sha $sourceSha --late-build-boundary --allow-rel
 if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport-Data.exe exited $LASTEXITCODE" }
 Push-Location $trustedBuildRoot
 try {
-  python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
+  & $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
 } finally {
   Pop-Location
 }

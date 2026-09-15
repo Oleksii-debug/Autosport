@@ -5,9 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from autosport.agents import agent_composition_sha256
 from autosport.dataset import load_dataset
 from autosport.run_transaction import RunTransaction
 from autosport.session import AutosportSession
+from autosport.strategies import strategy_spec
 from autosport.strategy_comparison import (
     compare_strategy_runs,
     load_strategy_run_summary,
@@ -27,7 +29,10 @@ class StrategyComparisonTests(unittest.TestCase):
         final_balance: str,
         market_sha256: str = "1" * 64,
         run_id: str = "run-1",
+        agent_names: list[str] | None = None,
     ) -> Path:
+        if agent_names is None:
+            agent_names = list(strategy_spec(canonical_strategy_id).agent_names)
         payload = {
             "schema_version": 2,
             "transaction_schema_version": RunTransaction.SCHEMA_VERSION,
@@ -48,7 +53,7 @@ class StrategyComparisonTests(unittest.TestCase):
                 "strategy_id": strategy_id,
                 "canonical_strategy_id": canonical_strategy_id,
                 "label": strategy_id,
-                "agent_names": ["TestAgent"],
+                "agent_names": agent_names,
                 "opens_paper_tickets": True,
                 "research_plan_sha256": None,
             },
@@ -84,6 +89,11 @@ class StrategyComparisonTests(unittest.TestCase):
         self.assertEqual(evidence.run_id, result.replay.run_id)
         self.assertEqual(evidence.strategy_id, "baseline-v1")
         self.assertEqual(evidence.canonical_strategy_id, "baseline-v1")
+        self.assertEqual(evidence.agent_names, ("market-mirror", "paper-baseline"))
+        self.assertEqual(
+            evidence.agent_composition_sha256,
+            agent_composition_sha256(evidence.agent_names),
+        )
 
     def test_same_dataset_strategies_compare_with_truth_labels(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -120,6 +130,14 @@ class StrategyComparisonTests(unittest.TestCase):
         )
         entries = {item["strategy_id"]: item for item in report["strategies"]}
         self.assertEqual(entries["research-replay-v1:abc"]["observed_delta_vs_baseline"]["net_profit"], "15")
+        self.assertEqual(
+            entries["baseline-v1"]["agent_names"],
+            ["market-mirror", "paper-baseline"],
+        )
+        self.assertEqual(
+            entries["baseline-v1"]["agent_composition_sha256"],
+            agent_composition_sha256(("market-mirror", "paper-baseline")),
+        )
         self.assertFalse(report["truth"]["profitability_claim"])
         self.assertFalse(report["truth"]["predictive_superiority_claim"])
         self.assertFalse(report["truth"]["out_of_sample_claim"])
@@ -127,6 +145,50 @@ class StrategyComparisonTests(unittest.TestCase):
         self.assertTrue(report["truth"]["governed_historical_import"])
         self.assertFalse(report["truth"]["real_historical_market_coverage_verified"])
         self.assertFalse(report["truth"]["licensing_retention_verified"])
+
+    def test_loader_rejects_missing_agent_composition(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._summary(
+                Path(temp) / "missing-agent-names.json",
+                strategy_id="baseline-v1",
+                canonical_strategy_id="baseline-v1",
+                net_profit="0",
+                roi="0",
+                final_balance="10000",
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["strategy_runtime"].pop("agent_names")
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "agent_names"):
+                load_strategy_run_summary(path)
+
+    def test_loader_rejects_wrong_agent_composition(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._summary(
+                Path(temp) / "wrong-agent-names.json",
+                strategy_id="baseline-v1",
+                canonical_strategy_id="baseline-v1",
+                net_profit="0",
+                roi="0",
+                final_balance="10000",
+                agent_names=["market-mirror"],
+            )
+            with self.assertRaisesRegex(ValueError, "does not match canonical StrategySpec"):
+                load_strategy_run_summary(path)
+
+    def test_loader_rejects_reordered_agent_composition(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._summary(
+                Path(temp) / "reordered-agent-names.json",
+                strategy_id="baseline-v1",
+                canonical_strategy_id="baseline-v1",
+                net_profit="0",
+                roi="0",
+                final_balance="10000",
+                agent_names=["paper-baseline", "market-mirror"],
+            )
+            with self.assertRaisesRegex(ValueError, "does not match canonical StrategySpec"):
+                load_strategy_run_summary(path)
 
     def test_mismatched_dataset_fails_closed(self):
         with tempfile.TemporaryDirectory() as temp:

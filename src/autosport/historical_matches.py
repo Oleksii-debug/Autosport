@@ -4,13 +4,15 @@ import argparse
 import hashlib
 import json
 import os
+import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-from .integrity import atomic_write_json, sha256_file
+from .integrity import atomic_write_json
 from .parlayapi_provider import (
     ParlayApiTableTennisProvider,
     ProviderPayloadError,
@@ -19,6 +21,7 @@ from .parlayapi_provider import (
 
 TERMS_REFERENCE = "https://parlay-api.com/terms"
 REQUEST_CONTRACT_REFERENCE = "https://api.parlay-api.com/docs"
+_CAPTURE_PUBLISH_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +60,11 @@ def capture_historical_matches(
     if not isinstance(priced_only, bool):
         raise ValueError("priced_only must be boolean")
 
+    output = Path(output_path)
+    evidence = Path(evidence_path) if evidence_path is not None else output.with_suffix(output.suffix + ".evidence.json")
+    if _paths_alias(output, evidence):
+        raise ValueError("output_path and evidence_path must refer to different files")
+
     query_values = {
         "date": requested_date,
         "pricedOnly": "true" if priced_only else "false",
@@ -86,11 +94,19 @@ def capture_historical_matches(
     payload = response.payload
     if not isinstance(payload, (dict, list)):
         raise ProviderPayloadError("historical matches response must be a JSON object or array")
-    canonical_response = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    canonical_response_sha256 = hashlib.sha256(canonical_response.encode("utf-8")).hexdigest()
+    try:
+        canonical_response = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        canonical_response_bytes = canonical_response.encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ProviderPayloadError("historical matches response must contain strict UTF-8 JSON values") from exc
+    canonical_response_sha256 = hashlib.sha256(canonical_response_bytes).hexdigest()
 
-    output = Path(output_path)
-    evidence = Path(evidence_path) if evidence_path is not None else output.with_suffix(output.suffix + ".evidence.json")
     capture_payload = {
         "schema_version": 1,
         "kind": "parlayapi_historical_match_result_capture",
@@ -105,8 +121,7 @@ def capture_historical_matches(
         "canonical_response_sha256": canonical_response_sha256,
         "payload": payload,
     }
-    atomic_write_json(output, capture_payload)
-    capture_sha256 = sha256_file(output)
+    capture_sha256 = _atomic_write_capture_json(output, capture_payload)
 
     evidence_payload = {
         "schema_version": 1,
@@ -150,6 +165,56 @@ def capture_historical_matches(
     )
 
 
+def _atomic_write_capture_json(path: str | Path, payload: dict[str, Any]) -> str:
+    """Publish one deterministic JSON byte snapshot and return that snapshot's SHA-256."""
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    serialized = (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    digest = hashlib.sha256(serialized).hexdigest()
+
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        with _CAPTURE_PUBLISH_LOCK:
+            os.replace(temporary, destination)
+        return digest
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _paths_alias(first: Path, second: Path) -> bool:
+    if first.resolve(strict=False) == second.resolve(strict=False):
+        return True
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False
+
+
 def _header(headers: Any, name: str) -> str | None:
     expected = name.lower()
     for key, value in headers.items():
@@ -160,10 +225,15 @@ def _header(headers: Any, name: str) -> str | None:
 
 
 def _parse_date(value: str, *, field: str) -> date:
+    if not isinstance(value, str) or len(value) != 10 or value[4] != "-" or value[7] != "-":
+        raise ValueError(f"{field} must be YYYY-MM-DD")
     try:
-        return date.fromisoformat(value)
-    except (TypeError, ValueError) as exc:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
         raise ValueError(f"{field} must be YYYY-MM-DD") from exc
+    if parsed.isoformat() != value:
+        raise ValueError(f"{field} must be YYYY-MM-DD")
+    return parsed
 
 
 def _parse_provider_date(value: str, *, field: str) -> date:

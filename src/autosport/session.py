@@ -18,6 +18,7 @@ from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
 from .price_truth import market_price_truth_from_events
 from .providers import MarketProvider
+from .recovery import transaction_history_requires_recovery
 from .replay import ReplayEngine, ReplayRun
 from .research_strategy import ResearchStrategyPlan
 from .run_registry import MixedStrategyWorkspaceError, RunRegistry, UnresolvedExperimentError
@@ -260,9 +261,9 @@ class AutosportSession:
         return result
 
     def _ensure_canonical_economic_base(self) -> VerifiedDecisionLedgerSnapshot:
-        if self.registry.in_progress():
+        if self.registry.in_progress() or transaction_history_requires_recovery(self.workspace):
             raise UnresolvedExperimentError(
-                "Workspace has an unresolved economic run; repair it before starting another paper experiment."
+                "Workspace has unresolved transaction history; repair it before starting another paper experiment."
             )
         prior_strategy_ids = self.registry.strategy_ids()
         foreign_strategy_ids = tuple(

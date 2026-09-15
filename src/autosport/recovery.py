@@ -66,6 +66,51 @@ def _require_regular_manifest(transaction: RunTransaction) -> bool:
     return True
 
 
+def transaction_history_requires_recovery(workspace: str | Path) -> bool:
+    """Return whether durable transaction history has any nonterminal manifest.
+
+    Callers must hold the canonical workspace economic lock. This is a read-only
+    start gate: a completed registry item whose manifest is still
+    ``canonical_committed`` remains recovery work and must not be followed by a new
+    economic transaction, otherwise later canonical state could make the older
+    second-crash boundary unrecoverable.
+    """
+
+    root = Path(workspace)
+    transaction_root = root / RunTransaction.ROOT_NAME
+    transaction_stat = _lstat_or_none(transaction_root)
+    if transaction_stat is None:
+        return False
+    if not stat.S_ISDIR(transaction_stat.st_mode):
+        raise ReconciliationError("transaction root is not a directory")
+
+    try:
+        entries = sorted(transaction_root.iterdir(), key=lambda path: path.name)
+    except OSError as exc:
+        raise ReconciliationError("transaction history is unreadable") from exc
+
+    for entry in entries:
+        entry_stat = _lstat_or_none(entry)
+        if entry_stat is None or not stat.S_ISDIR(entry_stat.st_mode):
+            raise ReconciliationError("transaction history entry is not a directory")
+        try:
+            transaction = RunTransaction(root, entry.name)
+        except RunTransactionError as exc:
+            raise ReconciliationError(str(exc)) from exc
+        if not _require_regular_manifest(transaction):
+            raise ReconciliationError(
+                "transaction history entry lacks a durable manifest"
+            )
+        try:
+            manifest = transaction._read_manifest()
+            transaction._validate_manifest_paths(manifest)
+        except RunTransactionError as exc:
+            raise ReconciliationError(str(exc)) from exc
+        if manifest.get("phase") not in {"completed", "aborted"}:
+            return True
+    return False
+
+
 def _remove_empty_pre_manifest_transaction_dir(transaction: RunTransaction) -> None:
     root_stat = _lstat_or_none(transaction.root)
     if root_stat is None:

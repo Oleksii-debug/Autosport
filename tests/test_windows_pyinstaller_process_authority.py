@@ -57,6 +57,8 @@ def test_production_process_authority_requires_birth_protected_worker_boundary()
 
     assert "def _require_birth_protected_worker(" in authority
     assert "_require_birth_protected_worker(_query_system_handles)" in authority
+    assert "trusted_creator_pid = _parent_process_id()" in authority
+    assert "allowed_external_pids={trusted_creator_pid}" in authority
     assert "creator_fence.acquire(launcher._current_user_sid())" in authority
     assert "launcher.protected_launch_attested()" in authority
     assert "launcher.relaunch_birth_protected_worker()" in authority
@@ -140,6 +142,52 @@ def test_parent_process_dangerous_broker_authority_is_rejected(
         ]
     )
 
+    with pytest.raises(RuntimeError, match="pre-existing external dangerous process handle"):
+        fence._require_no_untrusted_preexisting_authority()
+
+
+def test_explicit_trusted_creator_pid_is_the_only_external_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_process_authority()
+    current_pid = 101
+    parent_pid = 202
+    hostile_pid = 303
+    identity_handle = 0x123
+    process_object = 0xABCDEF
+    snapshot = [
+        (
+            process_object,
+            current_pid,
+            identity_handle,
+            authority._PROCESS_QUERY_LIMITED_INFORMATION,
+        ),
+        (
+            process_object,
+            parent_pid,
+            0x789,
+            authority._PROCESS_DUP_HANDLE | authority._PROCESS_VM_WRITE,
+        ),
+    ]
+
+    monkeypatch.setattr(authority.os, "getpid", lambda: current_pid)
+    monkeypatch.setattr(authority, "_open_self_identity_handle", lambda: identity_handle)
+    monkeypatch.setattr(authority, "_close_handle", lambda _handle: None)
+
+    fence = authority.ProcessDuplicationFence(
+        lambda: snapshot,
+        allowed_external_pids={parent_pid},
+    )
+    fence._require_no_untrusted_preexisting_authority()
+
+    snapshot.append(
+        (
+            process_object,
+            hostile_pid,
+            0x999,
+            authority._PROCESS_DUP_HANDLE,
+        )
+    )
     with pytest.raises(RuntimeError, match="pre-existing external dangerous process handle"):
         fence._require_no_untrusted_preexisting_authority()
 

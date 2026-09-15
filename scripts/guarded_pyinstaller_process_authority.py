@@ -54,6 +54,16 @@ class _SystemHandleTableEntryInfoEx(ctypes.Structure):
     )
 
 
+class _ProcessBasicInformation(ctypes.Structure):
+    _fields_ = (
+        ("Reserved1", ctypes.c_void_p),
+        ("PebBaseAddress", ctypes.c_void_p),
+        ("Reserved2", ctypes.c_void_p * 2),
+        ("UniqueProcessId", ctypes.c_size_t),
+        ("InheritedFromUniqueProcessId", ctypes.c_size_t),
+    )
+
+
 _TEST_DUP_HANDLE_HELPER = r'''
 import ctypes
 import sys
@@ -145,6 +155,50 @@ def _query_system_handles() -> list[tuple[int, int, int, int]]:
     raise RuntimeError("process handle authority snapshot exceeded bounded capture size")
 
 
+def _parent_process_id() -> int:
+    """Return the exact immediate creator PID of the current launcher process."""
+
+    if os.name != "nt":
+        raise RuntimeError("parent process identity requires Windows")
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    query = ntdll.NtQueryInformationProcess
+    query.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        ctypes.POINTER(wintypes.ULONG),
+    )
+    query.restype = ctypes.c_long
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.argtypes = ()
+    get_current_process.restype = wintypes.HANDLE
+
+    info = _ProcessBasicInformation()
+    returned = wintypes.ULONG(0)
+    status = int(
+        query(
+            get_current_process(),
+            0,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            ctypes.byref(returned),
+        )
+    )
+    if status != 0:
+        raise RuntimeError(
+            "parent process identity query failed: "
+            f"NTSTATUS=0x{ctypes.c_uint32(status).value:08x}"
+        )
+    if returned.value and returned.value < ctypes.sizeof(info):
+        raise RuntimeError("parent process identity query returned a truncated structure")
+    parent_pid = int(info.InheritedFromUniqueProcessId)
+    if parent_pid <= 0 or parent_pid == os.getpid():
+        raise RuntimeError("parent process identity query returned an invalid creator PID")
+    return parent_pid
+
+
 def _spawn_test_prelaunch_dup_handle_helper() -> subprocess.Popen[str] | None:
     if os.environ.get(_TEST_PRELAUNCH_DUP_HANDLE_ENV) != "1":
         return None
@@ -210,8 +264,12 @@ def _require_birth_protected_worker(
     if launcher.protected_launch_attested():
         return
 
+    trusted_creator_pid = _parent_process_id()
     helper = _spawn_test_prelaunch_dup_handle_helper()
-    creator_fence = ProcessDuplicationFence(query_system_handles)
+    creator_fence = ProcessDuplicationFence(
+        query_system_handles,
+        allowed_external_pids={trusted_creator_pid},
+    )
     try:
         creator_fence.acquire(launcher._current_user_sid())
         if helper is not None:
@@ -499,8 +557,11 @@ class ProcessDuplicationFence:
     def __init__(
         self,
         query_system_handles: Callable[[], list[tuple[int, int, int, int]]],
+        *,
+        allowed_external_pids: set[int] | None = None,
     ) -> None:
         self._query_system_handles = query_system_handles
+        self._allowed_external_pids = frozenset(allowed_external_pids or ())
         self._descriptor: bytes | None = None
 
     @property
@@ -543,6 +604,7 @@ class ProcessDuplicationFence:
                 if row[0] == process_object
                 and row[3] & _DANGEROUS_PROCESS_ACCESS
                 and row[1] != current_pid
+                and row[1] not in self._allowed_external_pids
             ]
             if competing:
                 raise RuntimeError(

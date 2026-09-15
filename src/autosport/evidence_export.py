@@ -1434,11 +1434,51 @@ def verify_evidence_manifest(manifest: str | Path, workspace: str | Path) -> dic
         current_names = _canonical_source_names(root)
         if current_names != expected_names:
             raise ValueError("workspace canonical evidence set does not match manifest")
-        for name in current_names:
-            size, digest = _open_and_hash_regular_file(root / name)
-            expected = expected_files[name]
-            if size != expected["size_bytes"] or digest != expected["sha256"]:
-                raise ValueError(f"workspace evidence does not match manifest: {name}")
+
+        retained_snapshots: list[
+            tuple[Path, int, os.stat_result, os.stat_result, int, str]
+        ] = []
+        retention_token = _RETAINED_SOURCE_SNAPSHOTS.set(retained_snapshots)
+        primary_error: BaseException | None = None
+        try:
+            for name in current_names:
+                size, digest = _open_and_hash_regular_file(root / name)
+                expected = expected_files[name]
+                if size != expected["size_bytes"] or digest != expected["sha256"]:
+                    raise ValueError(f"workspace evidence does not match manifest: {name}")
+
+            # Verification must use the same coherent retained-source interval as
+            # export.  In particular, an earlier verified member may not become
+            # stale while a later member is being checked and still yield PASS.
+            for snapshot in retained_snapshots:
+                _reprove_retained_source_snapshot(snapshot)
+
+            if _canonical_source_names(root) != current_names:
+                raise ValueError("workspace canonical evidence set does not match manifest")
+
+            for snapshot in retained_snapshots:
+                _reprove_retained_source_path(snapshot)
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            _RETAINED_SOURCE_SNAPSHOTS.reset(retention_token)
+            cleanup_error: BaseException | None = None
+            for snapshot in retained_snapshots:
+                try:
+                    os.close(snapshot[1])
+                except OSError as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            if primary_error is not None and cleanup_error is not None:
+                try:
+                    primary_error.add_note(
+                        f"retained evidence descriptor cleanup also failed: {cleanup_error}"
+                    )
+                except BaseException:
+                    pass
+            elif primary_error is None and cleanup_error is not None:
+                raise cleanup_error
     return payload
 
 

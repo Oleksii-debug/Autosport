@@ -182,7 +182,8 @@ def test_export_rejects_in_place_mutation_during_hash(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     paper = workspace / "paper_book.json"
-    paper.write_bytes(b"A" * 128)
+    original = b"A" * 128
+    paper.write_bytes(original)
     output = tmp_path / "manifest.json"
     real_sha256 = hashlib.sha256
     mutated = False
@@ -195,8 +196,9 @@ def test_export_rejects_in_place_mutation_during_hash(
             nonlocal mutated
             if not mutated:
                 mutated = True
-                # Truncate/rewrite the same pathname in place: inode identity can
-                # remain unchanged, so size/mtime/ctime stability must reject it.
+                # On Windows the retained source handle intentionally denies this
+                # WRITE open. On POSIX the write succeeds and the stability reproof
+                # must reject the changed bytes before publication.
                 paper.write_bytes(b"B" * 257)
             self.inner.update(chunk)
 
@@ -205,8 +207,13 @@ def test_export_rejects_in_place_mutation_during_hash(
 
     monkeypatch.setattr(evidence_export.hashlib, "sha256", MutatingDigest)
 
-    with pytest.raises(ValueError, match="mutated during snapshot"):
-        export_evidence_manifest(workspace, output)
+    if os.name == "nt":
+        with pytest.raises(OSError):
+            export_evidence_manifest(workspace, output)
+        assert paper.read_bytes() == original
+    else:
+        with pytest.raises(ValueError, match="mutated during snapshot"):
+            export_evidence_manifest(workspace, output)
 
     assert mutated is True
     assert not output.exists()

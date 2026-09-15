@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 import pathlib
+import runpy
 import subprocess
 import sys
 import types
@@ -26,7 +27,11 @@ _ERROR_ACCESS_DENIED = 5
 _WAIT_OBJECT_0 = 0x00000000
 _INFINITE = 0xFFFFFFFF
 _SDDL_REVISION_1 = 1
+_TOKEN_DUPLICATE = 0x0002
+_TOKEN_QUERY = 0x0008
+_DISABLE_MAX_PRIVILEGE = 0x00000001
 _PROTECTED_MARKER_MODULE = "_autosport_birth_protected_worker"
+_PROTECTED_WORKER_ARG = "--autosport-birth-protected-worker"
 _BARRIER_ENV = "AUTOSPORT_BINDER_LAUNCH_BARRIER"
 _NONCE_ENV = "AUTOSPORT_BINDER_LAUNCH_NONCE"
 _TEST_RETAIN_CREATOR_ENV = "AUTOSPORT_TEST_RETAIN_CREATOR_PROCESS_HANDLE"
@@ -94,7 +99,6 @@ def _close_handle(raw_handle: Any) -> None:
 
 
 def _current_user_sid() -> str:
-    token_query = 0x0008
     token_user = 1
     error_insufficient_buffer = 122
 
@@ -130,7 +134,7 @@ def _current_user_sid() -> str:
     convert_sid.restype = wintypes.BOOL
 
     token = wintypes.HANDLE()
-    if not open_process_token(get_current_process(), token_query, ctypes.byref(token)):
+    if not open_process_token(get_current_process(), _TOKEN_QUERY, ctypes.byref(token)):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
         required = wintypes.DWORD(0)
@@ -163,15 +167,105 @@ def _current_user_sid() -> str:
         _close_handle(token)
 
 
+def _current_process_token_is_restricted() -> bool:
+    """Return whether the live process primary token is an OS restricted token."""
+
+    if os.name != "nt":
+        return False
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.argtypes = ()
+    get_current_process.restype = wintypes.HANDLE
+    open_process_token = advapi32.OpenProcessToken
+    open_process_token.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    )
+    open_process_token.restype = wintypes.BOOL
+    is_token_restricted = advapi32.IsTokenRestricted
+    is_token_restricted.argtypes = (wintypes.HANDLE,)
+    is_token_restricted.restype = wintypes.BOOL
+
+    token = wintypes.HANDLE()
+    if not open_process_token(get_current_process(), _TOKEN_QUERY, ctypes.byref(token)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return bool(is_token_restricted(token))
+    finally:
+        _close_handle(token)
+
+
+def _create_restricted_primary_token() -> Any:
+    """Create a privilege-stripped primary token that cannot be forged in-place later."""
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.argtypes = ()
+    get_current_process.restype = wintypes.HANDLE
+    open_process_token = advapi32.OpenProcessToken
+    open_process_token.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    )
+    open_process_token.restype = wintypes.BOOL
+    create_restricted_token = advapi32.CreateRestrictedToken
+    create_restricted_token.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.HANDLE),
+    )
+    create_restricted_token.restype = wintypes.BOOL
+    is_token_restricted = advapi32.IsTokenRestricted
+    is_token_restricted.argtypes = (wintypes.HANDLE,)
+    is_token_restricted.restype = wintypes.BOOL
+
+    current = wintypes.HANDLE()
+    if not open_process_token(
+        get_current_process(),
+        _TOKEN_QUERY | _TOKEN_DUPLICATE,
+        ctypes.byref(current),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    restricted = wintypes.HANDLE()
+    try:
+        ctypes.set_last_error(0)
+        if not create_restricted_token(
+            current,
+            _DISABLE_MAX_PRIVILEGE,
+            0,
+            None,
+            0,
+            None,
+            0,
+            None,
+            ctypes.byref(restricted),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        _close_handle(current)
+    if not _raw_handle_value(restricted):
+        raise RuntimeError("CreateRestrictedToken returned an empty protected-worker token")
+    if not is_token_restricted(restricted):
+        _close_handle(restricted)
+        raise RuntimeError("protected-worker primary token is not restricted")
+    return restricted
+
+
 def _birth_security_descriptor(current_user_sid: str) -> ctypes.c_void_p:
     """Create a self-relative process SD that denies dangerous rights from birth."""
 
     if not current_user_sid.startswith("S-"):
         raise RuntimeError("protected worker launch requires a canonical current-user SID")
-    # Deny process injection/duplication/security rewrite to both the concrete user
-    # and OWNER RIGHTS while retaining only query/synchronize for the launching user.
-    # SYSTEM/Administrators keep their normal administrative access; the explicit
-    # user deny takes precedence when the current token also belongs to Administrators.
     sddl = (
         "D:P"
         f"(D;;0x{_DANGEROUS_PROCESS_ACCESS:08x};;;{current_user_sid})"
@@ -266,51 +360,23 @@ for access, name in rights:
 '''
 
 
-_PROTECTED_BOOTSTRAP = r'''
-import ctypes
-import os
-import runpy
-import sys
-import types
-from ctypes import wintypes
-
-barrier_name = os.environ.pop("AUTOSPORT_BINDER_LAUNCH_BARRIER", "")
-nonce = os.environ.pop("AUTOSPORT_BINDER_LAUNCH_NONCE", "")
-if not barrier_name or not nonce:
-    raise SystemExit("protected binder launch attestation is missing")
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-open_event = kernel32.OpenEventW
-open_event.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
-open_event.restype = wintypes.HANDLE
-wait = kernel32.WaitForSingleObject
-wait.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-wait.restype = wintypes.DWORD
-close_handle = kernel32.CloseHandle
-close_handle.argtypes = (wintypes.HANDLE,)
-close_handle.restype = wintypes.BOOL
-handle = open_event(0x00100000, False, barrier_name)
-value = handle if isinstance(handle, int) else ctypes.cast(handle, ctypes.c_void_p).value
-if not value:
-    raise SystemExit(f"protected binder launch barrier open failed: {ctypes.get_last_error()}")
-try:
-    result = int(wait(handle, 60000))
-finally:
-    close_handle(handle)
-if result != 0:
-    raise SystemExit(f"protected binder launch barrier wait failed: 0x{result:08x}")
-marker = types.ModuleType("_autosport_birth_protected_worker")
-marker.nonce = nonce
-sys.modules["_autosport_birth_protected_worker"] = marker
-script = sys.argv[1]
-sys.argv = [script, *sys.argv[2:]]
-runpy.run_path(script, run_name="__main__")
-'''
-
-
 def protected_launch_attested() -> bool:
+    """Accept launch attestation only when marker and OS restricted token both agree."""
+
     marker = sys.modules.get(_PROTECTED_MARKER_MODULE)
     nonce = getattr(marker, "nonce", None)
-    return isinstance(nonce, str) and len(nonce) >= 32
+    restricted = getattr(marker, "restricted_primary_token", False)
+    launcher_path = getattr(marker, "launcher_path", None)
+    if not isinstance(nonce, str) or len(nonce) < 32 or restricted is not True:
+        return False
+    if not isinstance(launcher_path, str):
+        return False
+    try:
+        if pathlib.Path(launcher_path).resolve() != pathlib.Path(__file__).resolve():
+            return False
+    except OSError:
+        return False
+    return _current_process_token_is_restricted()
 
 
 def _require_fresh_thread_access_denied(thread_id: int) -> None:
@@ -353,25 +419,80 @@ def _run_primary_thread_sibling_probe(python: pathlib.Path, thread_id: int) -> N
         )
 
 
-def relaunch_birth_protected_worker() -> int:
-    """Run the guarded binder in a process protected before its first instruction.
+def _run_birth_protected_worker() -> None:
+    """Execute the immutable sibling binder after the creator releases the barrier."""
 
-    The child starts in a tiny stdlib-only barrier bootstrap under a birth DACL that
-    denies dangerous same-token process rights. The creator closes its full process
-    and primary-thread handles before signalling the barrier. It retains only a
-    query/synchronize process handle, which the worker's live handle census permits.
+    if os.name != "nt":
+        raise RuntimeError("birth-protected binder worker requires Windows")
+    if not _current_process_token_is_restricted():
+        raise RuntimeError("birth-protected binder worker lacks restricted primary token")
+
+    barrier_name = os.environ.pop(_BARRIER_ENV, "")
+    nonce = os.environ.pop(_NONCE_ENV, "")
+    if not barrier_name or not nonce or len(nonce) < 32:
+        raise RuntimeError("protected binder launch attestation is missing")
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_event = kernel32.OpenEventW
+    open_event.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+    open_event.restype = wintypes.HANDLE
+    wait = kernel32.WaitForSingleObject
+    wait.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    wait.restype = wintypes.DWORD
+
+    handle = open_event(_SYNCHRONIZE, False, barrier_name)
+    if not _raw_handle_value(handle):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        result = int(wait(handle, 60_000))
+    finally:
+        _close_handle(handle)
+    if result != _WAIT_OBJECT_0:
+        raise RuntimeError(f"protected binder launch barrier wait failed: 0x{result:08x}")
+
+    launcher = pathlib.Path(__file__).resolve()
+    binder = launcher.with_name("guarded_pyinstaller_bind.py")
+    if not binder.is_file():
+        raise RuntimeError("protected binder launch cannot resolve immutable sibling binder")
+
+    marker = types.ModuleType(_PROTECTED_MARKER_MODULE)
+    marker.nonce = nonce
+    marker.restricted_primary_token = True
+    marker.launcher_path = str(launcher)
+    marker.binder_path = str(binder)
+    sys.modules[_PROTECTED_MARKER_MODULE] = marker
+
+    binder_args = list(sys.argv[2:])
+    sys.argv = [str(binder), *binder_args]
+    runpy.run_path(str(binder), run_name="__main__")
+
+
+def relaunch_birth_protected_worker() -> int:
+    """Run the guarded binder behind birth DACLs and a restricted primary token.
+
+    The ordinary creator is never accepted as trusted release execution. It may only
+    create a new worker whose process/thread DACLs and restricted primary token exist
+    at process birth. The child's first Python file is this immutable exact-source
+    launch boundary, not a creator-memory ``python -c`` payload. The creator closes
+    full process/thread handles before releasing the barrier and retains only a
+    query/synchronize process handle while waiting for the protected worker.
     """
 
     if os.name != "nt":
         raise RuntimeError("birth-protected binder launch requires Windows")
     binder = pathlib.Path(sys.argv[0]).resolve()
-    if binder.name.lower() != "guarded_pyinstaller_bind.py":
-        raise RuntimeError("birth-protected launch was requested outside guarded PyInstaller binder")
+    launcher = pathlib.Path(__file__).resolve()
+    expected_binder = launcher.with_name("guarded_pyinstaller_bind.py")
+    if binder != expected_binder:
+        raise RuntimeError(
+            "birth-protected launch requires the immutable sibling guarded PyInstaller binder"
+        )
     python = pathlib.Path(sys.executable).resolve()
     if not python.is_file():
         raise RuntimeError("birth-protected launch cannot resolve the Python executable")
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     create_event = kernel32.CreateEventW
     create_event.argtypes = (
         ctypes.POINTER(_SecurityAttributes),
@@ -383,8 +504,11 @@ def relaunch_birth_protected_worker() -> int:
     set_event = kernel32.SetEvent
     set_event.argtypes = (wintypes.HANDLE,)
     set_event.restype = wintypes.BOOL
-    create_process = kernel32.CreateProcessW
+    # Do not fall back to CreateProcessW: a restricted primary token is part of
+    # the birth attestation and cannot be retrofitted into the ordinary creator.
+    create_process = advapi32.CreateProcessAsUserW
     create_process.argtypes = (
+        wintypes.HANDLE,
         wintypes.LPCWSTR,
         wintypes.LPWSTR,
         ctypes.POINTER(_SecurityAttributes),
@@ -416,6 +540,7 @@ def relaunch_birth_protected_worker() -> int:
     current_user_sid = _current_user_sid()
     descriptor = _birth_security_descriptor(current_user_sid)
     thread_descriptor = _birth_thread_security_descriptor(current_user_sid)
+    restricted_token = _create_restricted_primary_token()
     process_attributes = _SecurityAttributes(
         ctypes.sizeof(_SecurityAttributes),
         descriptor,
@@ -438,9 +563,8 @@ def relaunch_birth_protected_worker() -> int:
         [
             str(python),
             "-I",
-            "-c",
-            _PROTECTED_BOOTSTRAP,
-            str(binder),
+            str(launcher),
+            _PROTECTED_WORKER_ARG,
             *sys.argv[1:],
         ]
     )
@@ -451,6 +575,7 @@ def relaunch_birth_protected_worker() -> int:
     try:
         ctypes.set_last_error(0)
         if not create_process(
+            restricted_token,
             str(python),
             command_buffer,
             ctypes.byref(process_attributes),
@@ -475,10 +600,6 @@ def relaunch_birth_protected_worker() -> int:
         if not _raw_handle_value(safe_process):
             raise ctypes.WinError(ctypes.get_last_error())
 
-        # The primary thread handle can steer execution; dispose it while the child
-        # is still blocked in the launch bootstrap. Normal production also closes the
-        # creator's full hProcess before releasing that barrier. The test hook retains
-        # hProcess deliberately so the worker's real system-handle audit must reject.
         _close_handle(process_info.hThread)
         primary_thread_open = False
         if not retain_creator:
@@ -500,6 +621,7 @@ def relaunch_birth_protected_worker() -> int:
             _close_handle(process_info.hThread)
         if _raw_handle_value(safe_process):
             _close_handle(safe_process)
+        _close_handle(restricted_token)
         _close_handle(barrier)
         ctypes.WinDLL("kernel32", use_last_error=True).LocalFree(thread_descriptor)
         ctypes.WinDLL("kernel32", use_last_error=True).LocalFree(descriptor)
@@ -511,3 +633,9 @@ def relaunch_birth_protected_worker() -> int:
             os.environ.pop(_NONCE_ENV, None)
         else:
             os.environ[_NONCE_ENV] = old_nonce
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2 or sys.argv[1] != _PROTECTED_WORKER_ARG:
+        raise SystemExit("guarded PyInstaller launch boundary is internal-only")
+    _run_birth_protected_worker()

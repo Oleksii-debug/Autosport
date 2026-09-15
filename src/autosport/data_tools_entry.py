@@ -14,6 +14,8 @@ Usage:
   Autosport-Data.exe walk-forward-evaluate <bundle.json> [--output report.json]
   Autosport-Data.exe compare-strategies <run-summary> <run-summary> [...] [strategy-comparison arguments]
   Autosport-Data.exe repair-workspace [--workspace <workspace-path>]
+  Autosport-Data.exe export-evidence <workspace-path> --output <manifest.json>
+  Autosport-Data.exe verify-evidence <manifest.json> --workspace <workspace-path>
   Autosport-Data.exe nvda-evidence-template --release-zip <zip> --expected-source-sha <canonical-github-sha> --expected-package-sha256 <published-zip-sha256> --output <evidence.json>
   Autosport-Data.exe verify-nvda-evidence --release-zip <zip> --expected-source-sha <canonical-github-sha> --expected-package-sha256 <published-zip-sha256> --evidence <evidence.json> [--output <report.json>]
 
@@ -26,6 +28,8 @@ Commands:
   walk-forward-evaluate      Run the canonical strict causal walk-forward evaluator and emit machine-readable evidence.
   compare-strategies         Compare compatible completed paper strategy runs on the same sealed replay identity.
   repair-workspace           Reconcile a late-crashed economic run using the canonical fail-closed recovery path.
+  export-evidence            Export the canonical deterministic metadata-only workspace evidence manifest without secrets or raw provider data.
+  verify-evidence            Verify a previously exported evidence manifest against the canonical workspace evidence set.
   nvda-evidence-template     Create a physical NVDA test record bound to one exact packaged release candidate and independently supplied source/package trust anchors.
   verify-nvda-evidence      Fail closed if human-supplied NVDA evidence drifts from the exact release ZIP, external trust anchors, or required checks.
 
@@ -37,9 +41,10 @@ retention, source and redistribution claims. That checksum binding proves proven
 it is not an independent legal opinion and cannot create rights that the evidence does not actually
 grant. Local source-data rights remain the user's responsibility. Recovery never fabricates
 completion: an ambiguous workspace remains unresolved unless canonical transaction/base hashes prove
-the disposition. NVDA evidence validation checks a human-supplied record against independently
-obtained source/package trust anchors and exact candidate identity; it never proves that a physical
-test happened and never changes BUILD_INFO human/NVDA truth labels.
+the disposition. Evidence export remains metadata-only and never packages credentials, secrets,
+raw provider bytes, or the market database. NVDA evidence validation checks a human-supplied record
+against independently obtained source/package trust anchors and exact candidate identity; it never
+proves that a physical test happened and never changes BUILD_INFO human/NVDA truth labels.
 """
 
 
@@ -76,6 +81,14 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
         from autosport.cli import main as cli_main
 
         return cli_main(["repair-workspace", *forwarded])
+    if command == "export-evidence":
+        from autosport.evidence_export import main as evidence_export_main
+
+        return evidence_export_main(forwarded)
+    if command == "verify-evidence":
+        from autosport.evidence_export import verify_main as evidence_verify_main
+
+        return evidence_verify_main(forwarded)
     if command == "nvda-evidence-template":
         from autosport.nvda_acceptance import template_main
 

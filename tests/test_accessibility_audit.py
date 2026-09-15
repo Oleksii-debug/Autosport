@@ -1,6 +1,10 @@
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import autosport.accessibility_audit as accessibility_audit
 from autosport.accessibility_audit import summarize_description
 from autosport.gui import AUTOMATION_IDS, _SPEEDS, _STRATEGY_CHOICES, strategy_id_from_display
 from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
@@ -12,7 +16,7 @@ class _Named:
 
 
 class AccessibilityAuditTests(unittest.TestCase):
-    def _widget(self, automation_id, name, role="BUTTON", patterns=(), gaps=(), answers_rows=False):
+    def _widget(self, automation_id, name, role="PUSH_BUTTON", patterns=(), gaps=(), answers_rows=False):
         return SimpleNamespace(
             path=f".!widget{automation_id}",
             tk_class="Widget",
@@ -29,19 +33,19 @@ class AccessibilityAuditTests(unittest.TestCase):
         return SimpleNamespace(
             strategy=_Named("PROVIDER"),
             widgets=(
-                self._widget(AUTOMATION_IDS["strategy"], "Стратегія replay", role="COMBOBOX", patterns=("VALUE",)),
+                self._widget(AUTOMATION_IDS["strategy"], "Стратегія replay", role="COMBO_BOX", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["research_plan"], "Вибрати research plan", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["choose_dataset"], "Вибрати replay dataset", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["run_replay"], "Запустити paper replay", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["repair_workspace"], "Відновити workspace", patterns=("INVOKE",)),
-                self._widget(AUTOMATION_IDS["replay_speed"], "Швидкість replay", role="COMBOBOX", patterns=("VALUE",)),
-                self._widget(AUTOMATION_IDS["live_mode"], "Режим live observation", role="COMBOBOX", patterns=("VALUE",)),
+                self._widget(AUTOMATION_IDS["replay_speed"], "Швидкість replay", role="COMBO_BOX", patterns=("VALUE",)),
+                self._widget(AUTOMATION_IDS["live_mode"], "Режим live observation", role="COMBO_BOX", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_refresh"], "Оновити live snapshot", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["tickets"], "Paper tickets і результати", role="LIST", answers_rows=True),
                 self._widget(AUTOMATION_IDS["evaluation"], "Evaluation і portfolio evidence", role="LIST", answers_rows=True),
-                self._widget(AUTOMATION_IDS["log"], "Журнал виконання", role="EDIT", patterns=("VALUE",)),
+                self._widget(AUTOMATION_IDS["log"], "Журнал виконання", role="TEXT", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_quotes"], "Live quotes", role="LIST", answers_rows=True),
-                self._widget(WINDOWS_BANKROLL_AUTOMATION_ID, "Віртуальний банк", role="EDIT", patterns=("VALUE",)),
+                self._widget(WINDOWS_BANKROLL_AUTOMATION_ID, "Віртуальний банк", role="TEXT", patterns=("VALUE",)),
             ),
             provider_trouble=(),
             providers_stood_down_because=None,
@@ -83,6 +87,40 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
 
+    def test_wrong_semantic_roles_fail_closed(self):
+        cases = (
+            (AUTOMATION_IDS["choose_dataset"], "BUTTON", "PUSH_BUTTON"),
+            (AUTOMATION_IDS["replay_speed"], "COMBOBOX", "COMBO_BOX"),
+            (AUTOMATION_IDS["tickets"], "TEXT", "LIST"),
+            (AUTOMATION_IDS["log"], "EDIT", "TEXT"),
+            (WINDOWS_BANKROLL_AUTOMATION_ID, "EDIT", "TEXT"),
+        )
+        for automation_id, wrong_role, expected_role in cases:
+            with self.subTest(automation_id=automation_id):
+                description = self._passing_description()
+                widgets = list(description.widgets)
+                index = next(
+                    i for i, item in enumerate(widgets) if item.automation_id == automation_id
+                )
+                original = widgets[index]
+                widgets[index] = self._widget(
+                    automation_id,
+                    original.name,
+                    role=wrong_role,
+                    patterns=tuple(item.name for item in original.patterns),
+                    answers_rows=original.answers_rows,
+                )
+                report = self._summarize(
+                    SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)})
+                )
+                self.assertEqual(report["status"], "FAIL")
+                self.assertTrue(
+                    any(
+                        f"unexpected accessible role={wrong_role} expected={expected_role}" in failure
+                        for failure in report["failures"]
+                    )
+                )
+
     def test_editable_bankroll_summary_fails_closed(self):
         report = self._summarize(self._passing_description(), bankroll_readonly=False)
         self.assertEqual(report["status"], "FAIL")
@@ -123,7 +161,7 @@ class AccessibilityAuditTests(unittest.TestCase):
         widgets[index] = self._widget(
             WINDOWS_BANKROLL_AUTOMATION_ID,
             "Віртуальний банк",
-            role="EDIT",
+            role="TEXT",
             patterns=(),
         )
         report = self._summarize(SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)}))
@@ -160,6 +198,44 @@ class AccessibilityAuditTests(unittest.TestCase):
         report = self._summarize(SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)}))
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("list rows are not exposed" in item for item in report["failures"]))
+
+    def test_machine_evidence_publication_failure_preserves_existing_file(self):
+        class _AuditApp:
+            def update_idletasks(self):
+                return None
+
+            def update(self):
+                return None
+
+            def close_app(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "accessibility.json"
+            original = '{"status":"PREVIOUS"}\n'
+            destination.write_text(original, encoding="utf-8")
+            nonfinite_report = {
+                "status": "PASS",
+                "probe": float("nan"),
+                "human_tested": False,
+                "nvda_verified": False,
+                "real_money_execution": False,
+            }
+
+            with (
+                patch.object(accessibility_audit, "WindowsAutosportApp", return_value=_AuditApp()),
+                patch.object(accessibility_audit.tk_uia, "describe", return_value=object()),
+                patch.object(
+                    accessibility_audit,
+                    "summarize_description",
+                    return_value=nonfinite_report,
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    accessibility_audit.run_accessibility_audit(destination)
+
+            self.assertEqual(destination.read_text(encoding="utf-8"), original)
+            self.assertEqual(list(destination.parent.glob(f".{destination.name}.*.tmp")), [])
 
 
 if __name__ == "__main__":

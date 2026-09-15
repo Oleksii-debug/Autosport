@@ -21,7 +21,8 @@ class ReplayBenchmarkResult:
     event_count: int
     input_mode: str
     source_duration_seconds: float
-    recording_span_is_synthetic: bool
+    recording_span_is_synthetic: bool | None
+    recording_span_source: str
     input_load_elapsed_seconds: float | None
     engine_prepare_elapsed_seconds: float
     dispatch_elapsed_seconds: float
@@ -121,7 +122,8 @@ def _measure_events(
     events: list[MarketEvent],
     *,
     input_mode: str,
-    recording_span_is_synthetic: bool,
+    recording_span_is_synthetic: bool | None,
+    recording_span_source: str,
     input_load_elapsed_seconds: float | None = None,
     dataset_name: str | None = None,
     dataset_schema_version: int | None = None,
@@ -228,6 +230,7 @@ def _measure_events(
         input_mode=input_mode,
         source_duration_seconds=source_duration,
         recording_span_is_synthetic=recording_span_is_synthetic,
+        recording_span_source=recording_span_source,
         input_load_elapsed_seconds=input_load_elapsed_seconds,
         engine_prepare_elapsed_seconds=prepare_elapsed,
         dispatch_elapsed_seconds=dispatch_elapsed,
@@ -270,18 +273,20 @@ def run_replay_benchmark(
         events,
         input_mode="synthetic",
         recording_span_is_synthetic=True,
+        recording_span_source="synthetic-fixture-cadence",
         governed_dataset_input=False,
     )
 
 
 def run_replay_dataset_benchmark(dataset_root: str | Path) -> ReplayBenchmarkResult:
-    """Measure a canonical SHA-verified dataset without inventing its recording span.
+    """Measure a canonical SHA-verified dataset without inventing recording provenance.
 
     Dataset manifest/governance verification and market-event loading are measured as a
     separate input phase through the production ``load_dataset`` boundary. Engine preparation
-    and fastest event-driven dispatch remain separately observable. Schema-v2 governance is
-    surfaced as an input fact, not as proof that the corpus is representative or that a V1
-    performance target is met. ``target_claim`` therefore remains false on every run.
+    and fastest event-driven dispatch remain separately observable. The measured source span is
+    derived from dataset-observed timestamps; schema/governance identity does not prove whether
+    those timestamps came from a real, synthetic, or representative recording. ``target_claim``
+    therefore remains false on every run.
     """
 
     load_started = time.perf_counter_ns()
@@ -297,7 +302,8 @@ def run_replay_dataset_benchmark(dataset_root: str | Path) -> ReplayBenchmarkRes
     return _measure_events(
         events,
         input_mode="canonical-dataset",
-        recording_span_is_synthetic=False,
+        recording_span_is_synthetic=None,
+        recording_span_source="dataset-observed-timestamps",
         input_load_elapsed_seconds=load_elapsed,
         dataset_name=dataset.name,
         dataset_schema_version=dataset.schema_version,
@@ -319,7 +325,7 @@ def main() -> int:
         type=Path,
         help=(
             "Canonical dataset directory. Uses production manifest/hash/governance loading "
-            "and the dataset's real observed timestamp span."
+            "and the dataset-observed timestamp span without asserting recording provenance."
         ),
     )
     parser.add_argument(

@@ -81,6 +81,103 @@ finally:
 '''
 
 
+_FRESH_PROCESS_ACCESS_PROBE = r'''
+import ctypes
+import sys
+from ctypes import wintypes
+
+TOKEN_ADJUST_PRIVILEGES = 0x0020
+TOKEN_QUERY = 0x0008
+ERROR_ACCESS_DENIED = 5
+ERROR_NOT_ALL_ASSIGNED = 1300
+
+
+class Luid(ctypes.Structure):
+    _fields_ = (("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG))
+
+
+class LuidAndAttributes(ctypes.Structure):
+    _fields_ = (("Luid", Luid), ("Attributes", wintypes.DWORD))
+
+
+class TokenPrivileges(ctypes.Structure):
+    _fields_ = (("PrivilegeCount", wintypes.DWORD), ("Privileges", LuidAndAttributes * 1))
+
+
+target_pid = int(sys.argv[1])
+desired_access = int(sys.argv[2])
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+get_current_process = kernel32.GetCurrentProcess
+get_current_process.argtypes = ()
+get_current_process.restype = wintypes.HANDLE
+close_handle = kernel32.CloseHandle
+close_handle.argtypes = (wintypes.HANDLE,)
+close_handle.restype = wintypes.BOOL
+open_process = kernel32.OpenProcess
+open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+open_process.restype = wintypes.HANDLE
+open_process_token = advapi32.OpenProcessToken
+open_process_token.argtypes = (
+    wintypes.HANDLE,
+    wintypes.DWORD,
+    ctypes.POINTER(wintypes.HANDLE),
+)
+open_process_token.restype = wintypes.BOOL
+lookup_privilege_value = advapi32.LookupPrivilegeValueW
+lookup_privilege_value.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.POINTER(Luid))
+lookup_privilege_value.restype = wintypes.BOOL
+adjust_token_privileges = advapi32.AdjustTokenPrivileges
+adjust_token_privileges.argtypes = (
+    wintypes.HANDLE,
+    wintypes.BOOL,
+    ctypes.POINTER(TokenPrivileges),
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+)
+adjust_token_privileges.restype = wintypes.BOOL
+
+token = wintypes.HANDLE()
+if not open_process_token(
+    get_current_process(),
+    TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+    ctypes.byref(token),
+):
+    raise SystemExit(f"TOKEN_OPEN_FAILED:{ctypes.get_last_error()}")
+try:
+    debug_luid = Luid()
+    if not lookup_privilege_value(None, "SeDebugPrivilege", ctypes.byref(debug_luid)):
+        raise SystemExit(f"SEDEBUG_LOOKUP_FAILED:{ctypes.get_last_error()}")
+    state = TokenPrivileges()
+    state.PrivilegeCount = 1
+    state.Privileges[0].Luid = debug_luid
+    state.Privileges[0].Attributes = 0
+    ctypes.set_last_error(0)
+    if not adjust_token_privileges(token, False, ctypes.byref(state), 0, None, None):
+        raise SystemExit(f"SEDEBUG_DISABLE_FAILED:{ctypes.get_last_error()}")
+    privilege_error = ctypes.get_last_error()
+    if privilege_error not in (0, ERROR_NOT_ALL_ASSIGNED):
+        raise SystemExit(f"SEDEBUG_DISABLE_FAILED:{privilege_error}")
+finally:
+    if token:
+        close_handle(token)
+
+ctypes.set_last_error(0)
+handle = open_process(desired_access, False, target_pid)
+value = handle if isinstance(handle, int) else ctypes.cast(handle, ctypes.c_void_p).value
+if value:
+    close_handle(handle)
+    print("AVAILABLE", flush=True)
+    raise SystemExit(10)
+error = ctypes.get_last_error()
+if error == ERROR_ACCESS_DENIED:
+    print("DENIED", flush=True)
+    raise SystemExit(0)
+raise SystemExit(f"OPEN_PROCESS_FAILED:{error}")
+'''
+
+
 def _query_system_handles() -> list[tuple[int, int, int, int]]:
     """Capture process-handle authority from the Windows extended handle table."""
 
@@ -450,25 +547,30 @@ def _install_process_deny(raw_handle: Any, current_user_sid: str) -> bytes:
 
 
 def _fresh_process_access_available(desired_access: int) -> bool:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    open_process = kernel32.OpenProcess
-    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    open_process.restype = wintypes.HANDLE
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = (wintypes.HANDLE,)
-    close_handle.restype = wintypes.BOOL
-
-    ctypes.set_last_error(0)
-    raw_handle = open_process(desired_access, False, os.getpid())
-    value = raw_handle if isinstance(raw_handle, int) else ctypes.cast(raw_handle, ctypes.c_void_p).value
-    if value in {None, 0}:
-        error = ctypes.get_last_error()
-        if error == _ERROR_ACCESS_DENIED:
-            return False
-        raise ctypes.WinError(error)
-    if not close_handle(raw_handle):
-        raise ctypes.WinError(ctypes.get_last_error())
-    return True
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            _FRESH_PROCESS_ACCESS_PROBE,
+            str(os.getpid()),
+            str(desired_access),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    stdout = completed.stdout.strip()
+    if completed.returncode == 0 and stdout == "DENIED":
+        return False
+    if completed.returncode == 10 and stdout == "AVAILABLE":
+        return True
+    diagnostic = (completed.stdout + "\n" + completed.stderr).strip()
+    raise RuntimeError(
+        "fresh same-token process-access sibling probe failed: "
+        f"exit={completed.returncode}; {diagnostic or 'no diagnostic'}"
+    )
 
 
 def _open_self_identity_handle() -> Any:

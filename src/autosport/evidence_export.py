@@ -105,6 +105,68 @@ def _read_only_open_flags() -> int:
     return os.O_RDONLY | getattr(os, "O_BINARY", 0)
 
 
+def _open_retained_source_descriptor(path: Path) -> int:
+    """Open a source descriptor that stays authoritative through snapshot close.
+
+    Windows V1 needs a real common exclusion interval, not another finite recheck
+    sweep.  A retained CreateFile handle shares READ only, so once acquired it
+    denies later WRITE and DELETE/rename opens until every retained descriptor is
+    closed.  Existing incompatible write/delete handles also make acquisition fail
+    closed with ERROR_SHARING_VIOLATION.  Non-Windows keeps the existing descriptor
+    snapshot semantics under WorkspaceEconomicLock; its external namespace model is
+    unchanged by this Windows release hardening.
+    """
+
+    if os.name != "nt":
+        return os.open(path, _read_only_open_flags())
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    open_existing = 3
+    file_attribute_normal = 0x00000080
+    file_flag_open_reparse_point = 0x00200000
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    resolved_path = path.resolve(strict=True)
+    kernel_handle = create_file(
+        _windows_api_path(resolved_path),
+        generic_read,
+        file_share_read,
+        None,
+        open_existing,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    if kernel_handle == invalid_handle_value:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    try:
+        return msvcrt.open_osfhandle(kernel_handle, _read_only_open_flags())
+    except BaseException:
+        close_handle(kernel_handle)
+        raise
+
+
 def _path_still_matches_open_file(
     path: Path,
     descriptor: int,
@@ -158,7 +220,11 @@ def _open_and_hash_regular_file(path: Path) -> tuple[int, str]:
     if not stat.S_ISREG(before.st_mode):
         raise ValueError(f"canonical evidence path is not a regular file: {path.name}")
 
-    descriptor = os.open(path, _read_only_open_flags())
+    retained_snapshots = _RETAINED_SOURCE_SNAPSHOTS.get()
+    if retained_snapshots is None:
+        descriptor = os.open(path, _read_only_open_flags())
+    else:
+        descriptor = _open_retained_source_descriptor(path)
     descriptor_retained = False
     try:
         opened = os.fstat(descriptor)
@@ -176,7 +242,6 @@ def _open_and_hash_regular_file(path: Path) -> tuple[int, str]:
         if not _path_still_matches_open_file(path, descriptor, before):
             raise ValueError(f"canonical evidence path changed during snapshot: {path.name}")
 
-        retained_snapshots = _RETAINED_SOURCE_SNAPSHOTS.get()
         if retained_snapshots is not None:
             retained_snapshots.append(
                 (path, descriptor, before, opened, size, digest)
@@ -1320,8 +1385,9 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
             if _canonical_source_names(root) != names:
                 raise ValueError("workspace canonical evidence set changed during snapshot")
 
-            # Keep a final lightweight path/identity proof immediately before the
-            # retained descriptors close and the WorkspaceEconomicLock is released.
+            # On Windows each retained source handle denies WRITE and DELETE until
+            # all descriptors close, making this final path reproof occur inside one
+            # actual exclusion interval instead of relying on a finite sweep alone.
             for snapshot in retained_snapshots:
                 _reprove_retained_source_path(snapshot)
         except BaseException as exc:

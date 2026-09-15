@@ -729,6 +729,48 @@ class RunTransaction:
     def _read_canonical_file_snapshot(path: Path, label: str) -> VerifiedFileSnapshot:
         """Read exact canonical bytes while rejecting pathname indirection/replacement."""
 
+        def stable_metadata(left: os.stat_result, right: os.stat_result) -> bool:
+            return (
+                left.st_mode == right.st_mode
+                and left.st_size == right.st_size
+                and left.st_mtime_ns == right.st_mtime_ns
+                and left.st_ctime_ns == right.st_ctime_ns
+            )
+
+        def path_matches_open_handle(
+            handle: Any,
+            expected_path_stat: os.stat_result,
+        ) -> bool:
+            try:
+                current = os.stat(path, follow_symlinks=False)
+            except OSError:
+                return False
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or current.st_nlink != 1
+                or not stable_metadata(expected_path_stat, current)
+            ):
+                return False
+            try:
+                verification = path.open("rb")
+            except OSError:
+                return False
+            with verification:
+                try:
+                    same_file = os.path.sameopenfile(
+                        handle.fileno(),
+                        verification.fileno(),
+                    )
+                    current_after_open = os.stat(path, follow_symlinks=False)
+                except OSError:
+                    return False
+                return (
+                    same_file
+                    and stat.S_ISREG(current_after_open.st_mode)
+                    and current_after_open.st_nlink == 1
+                    and stable_metadata(expected_path_stat, current_after_open)
+                )
+
         try:
             path_before = os.stat(path, follow_symlinks=False)
         except FileNotFoundError as exc:
@@ -756,17 +798,14 @@ class RunTransaction:
         with handle:
             try:
                 opened_before = os.fstat(handle.fileno())
-                path_opened = os.stat(path, follow_symlinks=False)
             except OSError as exc:
                 raise RunTransactionError(
                     f"{label} canonical path changed while validating"
                 ) from exc
             if (
                 not stat.S_ISREG(opened_before.st_mode)
-                or not stat.S_ISREG(path_opened.st_mode)
                 or opened_before.st_nlink != 1
-                or path_opened.st_nlink != 1
-                or not os.path.samestat(opened_before, path_opened)
+                or not path_matches_open_handle(handle, path_before)
             ):
                 raise RunTransactionError(
                     f"{label} canonical path must be a stable regular non-symlink file"
@@ -775,19 +814,15 @@ class RunTransaction:
             try:
                 payload = handle.read()
                 opened_after = os.fstat(handle.fileno())
-                path_after = os.stat(path, follow_symlinks=False)
             except OSError as exc:
                 raise RunTransactionError(
                     f"{label} canonical path changed while validating"
                 ) from exc
             if (
                 not stat.S_ISREG(opened_after.st_mode)
-                or not stat.S_ISREG(path_after.st_mode)
                 or opened_after.st_nlink != 1
-                or path_after.st_nlink != 1
-                or not os.path.samestat(opened_before, opened_after)
-                or not os.path.samestat(opened_after, path_after)
-                or not os.path.samestat(path_before, path_after)
+                or not stable_metadata(opened_before, opened_after)
+                or not path_matches_open_handle(handle, path_before)
             ):
                 raise RunTransactionError(
                     f"{label} canonical path changed while validating"

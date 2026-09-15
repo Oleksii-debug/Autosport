@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import hashlib
 import json
 import os
@@ -8,12 +9,24 @@ import re
 import stat
 import subprocess
 import tempfile
+import tomllib
 from pathlib import Path, PurePosixPath
 
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_NORMALIZED_DIST_RE = re.compile(r"[-_.]+")
 _COPY_CHUNK_SIZE = 1024 * 1024
 _TRUSTED_VERIFIER_REPO_PATH = PurePosixPath("scripts/verify_source_checkout.py")
+_SAFE_EGG_INFO_FILES = frozenset(
+    {
+        "PKG-INFO",
+        "SOURCES.txt",
+        "dependency_links.txt",
+        "entry_points.txt",
+        "requires.txt",
+        "top_level.txt",
+    }
+)
 
 
 def _require_git_commit_sha(value: object, *, field: str) -> str:
@@ -258,6 +271,98 @@ def _is_expected_late_generated_ignored_path(path: str, *, allow_release_outputs
     return parts[0] in {"build", "dist"} or (len(parts) == 1 and parts[0].endswith(".spec"))
 
 
+def _project_egg_info_contract(repo_root: Path) -> tuple[PurePosixPath, dict[str, str]]:
+    pyproject = repo_root / "pyproject.toml"
+    try:
+        payload = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError("tracked pyproject.toml is not readable canonical TOML") from exc
+
+    project = payload.get("project")
+    if not isinstance(project, dict):
+        raise ValueError("tracked pyproject.toml is missing [project] metadata")
+    name = project.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("tracked pyproject.toml has invalid project.name")
+
+    scripts = project.get("scripts", {})
+    if not isinstance(scripts, dict) or not all(
+        isinstance(key, str)
+        and key.strip()
+        and isinstance(value, str)
+        and value.strip()
+        for key, value in scripts.items()
+    ):
+        raise ValueError("tracked pyproject.toml has invalid project.scripts metadata")
+
+    normalized = _NORMALIZED_DIST_RE.sub("_", name).lower()
+    return PurePosixPath("src") / f"{normalized}.egg-info", dict(scripts)
+
+
+def _validate_project_entry_points(
+    repo_root: Path,
+    relative_path: PurePosixPath,
+    *,
+    expected_scripts: dict[str, str],
+) -> None:
+    entry_points_path = repo_root.joinpath(*relative_path.parts)
+    try:
+        if entry_points_path.is_symlink() or not entry_points_path.is_file():
+            raise ValueError("editable project entry_points.txt must be a regular non-symlink file")
+        text = entry_points_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("editable project entry_points.txt is not readable UTF-8") from exc
+
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.optionxform = str
+    try:
+        parser.read_string(text)
+    except configparser.Error as exc:
+        raise ValueError("editable project entry_points.txt is not canonical INI") from exc
+
+    if set(parser.sections()) != {"console_scripts"}:
+        raise ValueError("editable project entry_points.txt does not match tracked pyproject.toml")
+    actual_scripts = {
+        name.strip(): value.strip()
+        for name, value in parser.items("console_scripts", raw=True)
+    }
+    if actual_scripts != expected_scripts:
+        raise ValueError("editable project entry_points.txt does not match tracked pyproject.toml")
+
+
+def _validate_generated_egg_info_paths(
+    repo_root: Path,
+    paths: list[PurePosixPath],
+) -> None:
+    if not paths:
+        return
+    expected_root, expected_scripts = _project_egg_info_contract(repo_root)
+    for relative in paths:
+        if relative.parent != expected_root or relative.name not in _SAFE_EGG_INFO_FILES:
+            raise ValueError(
+                "unexpected editable project egg-info metadata before release proof: "
+                f"{relative.as_posix()}"
+            )
+        target = repo_root.joinpath(*relative.parts)
+        try:
+            if target.is_symlink() or not target.is_file():
+                raise ValueError(
+                    "editable project egg-info metadata must be a regular non-symlink file: "
+                    f"{relative.as_posix()}"
+                )
+        except OSError as exc:
+            raise ValueError(
+                "unable to inspect editable project egg-info metadata before release proof: "
+                f"{relative.as_posix()}"
+            ) from exc
+        if relative.name == "entry_points.txt":
+            _validate_project_entry_points(
+                repo_root,
+                relative,
+                expected_scripts=expected_scripts,
+            )
+
+
 def _generated_build_inputs(repo_root: Path) -> tuple[list[PurePosixPath], list[PurePosixPath]]:
     paths: list[PurePosixPath] = []
     roots: set[PurePosixPath] = set()
@@ -274,6 +379,16 @@ def _generated_build_inputs(repo_root: Path) -> tuple[list[PurePosixPath], list[
 
 def clean_late_generated_build_inputs(repo_root: Path) -> None:
     paths, roots = _generated_build_inputs(repo_root)
+    egg_info_paths = [
+        relative
+        for relative in paths
+        if any(part.endswith(".egg-info") for part in relative.parts)
+    ]
+    # Generated project metadata is removable only after proving that it is the
+    # one canonical setuptools egg-info surface and that executable entry-point
+    # metadata exactly matches tracked pyproject.toml. Hostile metadata must be
+    # rejected, not silently sanitized into a passing source proof.
+    _validate_generated_egg_info_paths(repo_root, egg_info_paths)
     for relative in paths:
         target = repo_root.joinpath(*relative.parts)
         try:

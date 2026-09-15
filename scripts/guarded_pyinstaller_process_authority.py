@@ -4,6 +4,7 @@ import ctypes
 import importlib.util
 import os
 import pathlib
+import subprocess
 import sys
 from ctypes import wintypes
 from typing import Any, Callable
@@ -26,6 +27,10 @@ _NO_INHERITANCE = 0
 _NO_MULTIPLE_TRUSTEE = 0
 _TRUSTEE_IS_SID = 0
 _TRUSTEE_IS_UNKNOWN = 0
+_SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
+_STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
+_MAX_SYSTEM_HANDLE_SNAPSHOT_BYTES = 64 * 1024 * 1024
+_TEST_PRELAUNCH_DUP_HANDLE_ENV = "AUTOSPORT_TEST_PRELAUNCH_PROCESS_DUP_HANDLE_HELPER"
 _DANGEROUS_PROCESS_ACCESS = (
     _PROCESS_CREATE_THREAD
     | _PROCESS_VM_OPERATION
@@ -36,8 +41,153 @@ _DANGEROUS_PROCESS_ACCESS = (
 )
 
 
-def _require_birth_protected_worker() -> None:
-    """Move the release-sensitive binder behind a process-creation trust boundary."""
+class _SystemHandleTableEntryInfoEx(ctypes.Structure):
+    _fields_ = (
+        ("Object", ctypes.c_void_p),
+        ("UniqueProcessId", ctypes.c_size_t),
+        ("HandleValue", ctypes.c_size_t),
+        ("GrantedAccess", ctypes.c_uint32),
+        ("CreatorBackTraceIndex", ctypes.c_uint16),
+        ("ObjectTypeIndex", ctypes.c_uint16),
+        ("HandleAttributes", ctypes.c_uint32),
+        ("Reserved", ctypes.c_uint32),
+    )
+
+
+_TEST_DUP_HANDLE_HELPER = r'''
+import ctypes
+import sys
+from ctypes import wintypes
+
+PROCESS_DUP_HANDLE = 0x00000040
+pid = int(sys.argv[1])
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+open_process = kernel32.OpenProcess
+open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+open_process.restype = wintypes.HANDLE
+close_handle = kernel32.CloseHandle
+close_handle.argtypes = (wintypes.HANDLE,)
+close_handle.restype = wintypes.BOOL
+ctypes.set_last_error(0)
+handle = open_process(PROCESS_DUP_HANDLE, False, pid)
+value = handle if isinstance(handle, int) else ctypes.cast(handle, ctypes.c_void_p).value
+if not value:
+    raise SystemExit(f"OpenProcess(PROCESS_DUP_HANDLE) failed: {ctypes.get_last_error()}")
+print("READY", flush=True)
+try:
+    sys.stdin.buffer.read(1)
+finally:
+    close_handle(handle)
+'''
+
+
+def _query_system_handles() -> list[tuple[int, int, int, int]]:
+    """Capture process-handle authority from the Windows extended handle table."""
+
+    if os.name != "nt":
+        raise RuntimeError("process handle authority audit requires Windows")
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    query = ntdll.NtQuerySystemInformation
+    query.argtypes = (
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+    )
+    query.restype = ctypes.c_int32
+
+    size = 1024 * 1024
+    while size <= _MAX_SYSTEM_HANDLE_SNAPSHOT_BYTES:
+        buffer = ctypes.create_string_buffer(size)
+        returned = ctypes.c_uint32(0)
+        status = int(
+            query(
+                _SYSTEM_EXTENDED_HANDLE_INFORMATION,
+                ctypes.cast(buffer, ctypes.c_void_p),
+                size,
+                ctypes.byref(returned),
+            )
+        )
+        status_u32 = ctypes.c_uint32(status).value
+        if status_u32 == 0:
+            header_size = ctypes.sizeof(ctypes.c_size_t) * 2
+            if size < header_size:
+                raise RuntimeError("process handle authority snapshot header was truncated")
+            count = ctypes.c_size_t.from_buffer_copy(
+                buffer.raw[: ctypes.sizeof(ctypes.c_size_t)]
+            ).value
+            entry_size = ctypes.sizeof(_SystemHandleTableEntryInfoEx)
+            required = header_size + int(count) * entry_size
+            if required > size:
+                raise RuntimeError("process handle authority snapshot entries were truncated")
+            snapshot: list[tuple[int, int, int, int]] = []
+            for index in range(int(count)):
+                offset = header_size + index * entry_size
+                entry = _SystemHandleTableEntryInfoEx.from_buffer_copy(
+                    buffer.raw[offset : offset + entry_size]
+                )
+                snapshot.append(
+                    (
+                        int(entry.Object or 0),
+                        int(entry.UniqueProcessId),
+                        int(entry.HandleValue),
+                        int(entry.GrantedAccess),
+                    )
+                )
+            return snapshot
+        if status_u32 != _STATUS_INFO_LENGTH_MISMATCH:
+            raise RuntimeError(
+                "process handle authority snapshot failed: "
+                f"NTSTATUS=0x{status_u32:08x}"
+            )
+        requested = int(returned.value)
+        size = max(size * 2, requested + 64 * 1024)
+    raise RuntimeError("process handle authority snapshot exceeded bounded capture size")
+
+
+def _spawn_test_prelaunch_dup_handle_helper() -> subprocess.Popen[str] | None:
+    if os.environ.get(_TEST_PRELAUNCH_DUP_HANDLE_ENV) != "1":
+        return None
+    helper = subprocess.Popen(
+        [sys.executable, "-I", "-c", _TEST_DUP_HANDLE_HELPER, str(os.getpid())],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert helper.stdout is not None
+    ready = helper.stdout.readline().strip()
+    if ready == "READY":
+        return helper
+    stderr = ""
+    if helper.stderr is not None:
+        stderr = helper.stderr.read().strip()
+    helper.kill()
+    helper.wait()
+    raise RuntimeError(
+        "prelaunch PROCESS_DUP_HANDLE test helper could not acquire authority: "
+        f"{ready or stderr or f'exit {helper.returncode}'}"
+    )
+
+
+def _stop_test_prelaunch_dup_handle_helper(
+    helper: subprocess.Popen[str] | None,
+) -> None:
+    if helper is None:
+        return
+    if helper.stdin is not None:
+        helper.stdin.close()
+    try:
+        helper.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        helper.kill()
+        helper.wait()
+
+
+def _require_birth_protected_worker(
+    query_system_handles: Callable[[], list[tuple[int, int, int, int]]],
+) -> None:
+    """Move the release-sensitive binder behind a protected creator handoff."""
 
     if os.name != "nt":
         return
@@ -59,10 +209,22 @@ def _require_birth_protected_worker() -> None:
     launcher_spec.loader.exec_module(launcher)
     if launcher.protected_launch_attested():
         return
-    raise SystemExit(launcher.relaunch_birth_protected_worker())
 
-
-_require_birth_protected_worker()
+    helper = _spawn_test_prelaunch_dup_handle_helper()
+    creator_fence = ProcessDuplicationFence(query_system_handles)
+    try:
+        creator_fence.acquire(launcher._current_user_sid())
+        if helper is not None:
+            raise RuntimeError(
+                "prelaunch PROCESS_DUP_HANDLE adversary unexpectedly survived creator fence"
+            )
+        exit_code = launcher.relaunch_birth_protected_worker()
+    finally:
+        try:
+            creator_fence.release()
+        finally:
+            _stop_test_prelaunch_dup_handle_helper(helper)
+    raise SystemExit(exit_code)
 
 
 class _TrusteeW(ctypes.Structure):
@@ -427,3 +589,6 @@ class ProcessDuplicationFence:
             _restore_kernel_object_dacl(current_process, descriptor)
         finally:
             self._descriptor = None
+
+
+_require_birth_protected_worker(_query_system_handles)

@@ -55,9 +55,17 @@ def test_production_process_authority_requires_birth_protected_worker_boundary()
     authority = _PROCESS_AUTHORITY.read_text(encoding="utf-8")
     launcher = _LAUNCH_BOUNDARY.read_text(encoding="utf-8")
 
-    assert "_require_birth_protected_worker()" in authority
+    assert "def _require_birth_protected_worker(" in authority
+    assert "_require_birth_protected_worker(_query_system_handles)" in authority
+    assert "creator_fence.acquire(launcher._current_user_sid())" in authority
     assert "launcher.protected_launch_attested()" in authority
     assert "launcher.relaunch_birth_protected_worker()" in authority
+    assert authority.index(
+        "creator_fence.acquire(launcher._current_user_sid())"
+    ) < authority.index("launcher.relaunch_birth_protected_worker()")
+    assert authority.rindex(
+        "_require_birth_protected_worker(_query_system_handles)"
+    ) > authority.index("class ProcessDuplicationFence")
     assert "CreateProcessW" in launcher
     assert "_birth_security_descriptor" in launcher
     assert "_DANGEROUS_PROCESS_ACCESS = 0x000C006A" in launcher
@@ -166,6 +174,27 @@ def test_current_process_dangerous_handles_are_not_external_brokers(
     )
 
     fence._require_no_untrusted_preexisting_authority()
+
+
+@pytest.mark.skipif(
+    not _REAL_WINDOWS_PYINSTALLER,
+    reason="real Windows prelaunch process-authority regression",
+)
+def test_protected_launcher_rejects_external_preexisting_dup_handle_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_TEST_PRELAUNCH_PROCESS_DUP_HANDLE_HELPER", "1")
+
+    completed, _artifact, bound, digest = _PRODUCER_TESTS._run_real_pyinstaller_probe(
+        tmp_path
+    )
+
+    assert completed.returncode != 0
+    combined = completed.stdout + "\n" + completed.stderr
+    assert "pre-existing external dangerous process handle" in combined
+    assert not bound.exists()
+    assert not digest.exists()
 
 
 @pytest.mark.skipif(

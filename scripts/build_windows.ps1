@@ -78,6 +78,164 @@ namespace = {
 }
 exec(compile(data, str(path), "exec"), namespace)
 '@
+$trustedGitSourceOracleLauncher = @'
+import hashlib
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+git_executable = sys.argv[1]
+repo_root = pathlib.Path(sys.argv[2])
+source_sha = sys.argv[3]
+requested = json.loads(sys.argv[4])
+if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+    raise SystemExit("source_sha is not a canonical Git commit SHA")
+if requested is not None and (
+    not isinstance(requested, list)
+    or not all(isinstance(item, str) and item for item in requested)
+    or len(set(requested)) != len(requested)
+):
+    raise SystemExit("requested source paths must be null or a unique non-empty string list")
+
+env = os.environ.copy()
+for name in tuple(env):
+    if name.upper().startswith("GIT_"):
+        env.pop(name, None)
+env["GIT_NO_REPLACE_OBJECTS"] = "1"
+
+def git_bytes(*args):
+    try:
+        completed = subprocess.run(
+            [git_executable, *args],
+            cwd=repo_root,
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise SystemExit(f"exact Git source oracle failed: git {' '.join(args)}") from exc
+    return completed.stdout
+
+def blob_sha1(data):
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
+
+tree = git_bytes("ls-tree", "-r", "-z", "--full-tree", source_sha)
+entries = {}
+for record in tree.split(b"\0"):
+    if not record:
+        continue
+    try:
+        metadata, path_bytes = record.split(b"\t", 1)
+        mode, object_type, object_sha = metadata.split(b" ", 2)
+        path = path_bytes.decode("utf-8")
+        object_sha_text = object_sha.decode("ascii")
+    except (ValueError, UnicodeError) as exc:
+        raise SystemExit("unable to parse exact Git source tree") from exc
+    if object_type != b"blob" or mode not in {b"100644", b"100755"}:
+        raise SystemExit(f"unsupported exact Git source entry: {path}")
+    entries[path] = object_sha_text
+
+selected = sorted(entries) if requested is None else sorted(requested)
+manifest = {}
+for relative in selected:
+    pure = pathlib.PurePosixPath(relative)
+    if pure.is_absolute() or pure.as_posix() != relative or any(part in {"", ".", ".."} for part in pure.parts):
+        raise SystemExit(f"non-canonical exact Git source path: {relative}")
+    object_sha = entries.get(relative)
+    if object_sha is None:
+        raise SystemExit(f"exact Git source is missing required path: {relative}")
+    data = git_bytes("cat-file", "blob", object_sha)
+    if blob_sha1(data) != object_sha:
+        raise SystemExit(f"Git blob bytes do not match object identity: {relative}")
+    manifest[relative] = hashlib.sha256(data).hexdigest()
+
+print(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+'@
+$trustedSourceSnapshotVerifierLauncher = @'
+import hashlib
+import json
+import os
+import pathlib
+import re
+import stat
+import sys
+
+root = pathlib.Path(sys.argv[1])
+try:
+    manifest = json.loads(sys.stdin.read())
+except json.JSONDecodeError as exc:
+    raise SystemExit("source snapshot manifest is not valid JSON") from exc
+if not isinstance(manifest, dict) or not manifest:
+    raise SystemExit("source snapshot manifest must be a non-empty object")
+
+def identity(value):
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+    )
+
+def require_directory(path, label):
+    try:
+        value = path.lstat()
+    except OSError as exc:
+        raise SystemExit(f"source snapshot {label} is not readable: {path}") from exc
+    if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
+        raise SystemExit(f"source snapshot {label} must be a real directory: {path}")
+
+require_directory(root, "root")
+for relative, expected in sorted(manifest.items()):
+    if not isinstance(relative, str) or not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        raise SystemExit("source snapshot manifest contains a non-canonical entry")
+    pure = pathlib.PurePosixPath(relative)
+    if pure.is_absolute() or pure.as_posix() != relative or any(part in {"", ".", ".."} for part in pure.parts):
+        raise SystemExit(f"source snapshot manifest contains non-canonical path: {relative}")
+    parent = root
+    for part in pure.parts[:-1]:
+        parent = parent / part
+        require_directory(parent, "parent")
+    path = parent / pure.name
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise SystemExit(f"source snapshot is missing required file: {relative}") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise SystemExit(f"source snapshot required path is not a regular file: {relative}")
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode) or identity(opened) != identity(before):
+                raise SystemExit(f"source snapshot changed before capture: {relative}")
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            after_handle = os.fstat(handle.fileno())
+            if identity(after_handle) != identity(opened):
+                raise SystemExit(f"source snapshot changed during capture: {relative}")
+    except OSError as exc:
+        raise SystemExit(f"source snapshot required file is unreadable: {relative}") from exc
+    try:
+        after_path = path.lstat()
+    except OSError as exc:
+        raise SystemExit(f"source snapshot disappeared during capture: {relative}") from exc
+    if stat.S_ISLNK(after_path.st_mode) or not stat.S_ISREG(after_path.st_mode) or identity(after_path) != identity(before):
+        raise SystemExit(f"source snapshot was replaced during capture: {relative}")
+    actual = digest.hexdigest()
+    if actual != expected:
+        raise SystemExit(
+            f"source snapshot SHA-256 mismatch for {relative}: expected {expected}, got {actual}"
+        )
+
+print("SOURCE_SNAPSHOT=PASS")
+'@
 $trustedPackageLauncher = @'
 import hashlib
 import json
@@ -272,10 +430,18 @@ if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-sm
 python $sourceVerifier --source-sha $sourceSha --late-build-boundary
 if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport.exe exited $LASTEXITCODE" }
 
+# Derive the expected snapshot identity directly from exact Git blob objects
+# before archive extraction. This is deliberately independent of git archive and
+# its attribute processing, so host-local export-ignore/export-subst cannot
+# redefine the trusted bytes after source proof.
+$trustedBuildManifestLines = @(& $pythonExecutable -I -S -c $trustedGitSourceOracleLauncher $gitExecutable $repoRoot $sourceSha 'null')
+if ($LASTEXITCODE -ne 0) { throw "Exact build source Git oracle exited $LASTEXITCODE" }
+if ($trustedBuildManifestLines.Count -ne 1) { throw 'Exact build source Git oracle did not emit one canonical manifest' }
+$trustedBuildManifestJson = [string]$trustedBuildManifestLines[0]
+
 # Freeze every PyInstaller source/module input to exact source_sha bytes outside
-# the mutable checkout. The release source gate above proves the checkout, then
-# git archive reads the exact commit object; later worktree changes cannot change
-# either entry script or package modules consumed by PyInstaller.
+# the mutable checkout. The independent blob oracle above is checked at each
+# source-consuming boundary so post-extraction replacement fails closed.
 $trustedBuildArchive = Join-Path $boundArtifactRoot 'trusted-build-source.zip'
 $trustedBuildRoot = Join-Path $boundArtifactRoot 'trusted-build-source'
 & $gitExecutable archive --format=zip "--output=$trustedBuildArchive" $sourceSha
@@ -283,6 +449,8 @@ if ($LASTEXITCODE -ne 0) { throw "Exact build source archive exited $LASTEXITCOD
 if (Test-Path $trustedBuildRoot) { Remove-Item -LiteralPath $trustedBuildRoot -Recurse -Force }
 New-Item -ItemType Directory -Path $trustedBuildRoot | Out-Null
 Expand-Archive -LiteralPath $trustedBuildArchive -DestinationPath $trustedBuildRoot -Force
+$trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
+if ($LASTEXITCODE -ne 0) { throw "Exact build source snapshot verification before install exited $LASTEXITCODE" }
 foreach ($requiredBuildSource in @('pyproject.toml', 'src/autosport/windows_entry.py', 'src/autosport/data_tools_entry.py')) {
   $trustedBuildSource = Join-Path $trustedBuildRoot ($requiredBuildSource.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
   if (-not (Test-Path -LiteralPath $trustedBuildSource -PathType Leaf)) {
@@ -294,6 +462,8 @@ foreach ($requiredBuildSource in @('pyproject.toml', 'src/autosport/windows_entr
 # mutable checkout code after the final trusted source gate.
 & $pythonExecutable -I -m pip install --no-deps --force-reinstall $trustedBuildRoot
 if ($LASTEXITCODE -ne 0) { throw "Exact build source install exited $LASTEXITCODE" }
+$trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
+if ($LASTEXITCODE -ne 0) { throw "Exact build source snapshot verification before Autosport.exe exited $LASTEXITCODE" }
 
 Push-Location $trustedBuildRoot
 try {
@@ -308,6 +478,8 @@ if ($LASTEXITCODE -ne 0) { throw "Autosport.exe artifact binding exited $LASTEXI
 $autosportExeSha256 = (Get-Content -LiteralPath $autosportDigestPath -Raw).Trim()
 python $sourceVerifier --source-sha $sourceSha --late-build-boundary --allow-release-outputs
 if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport-Data.exe exited $LASTEXITCODE" }
+$trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
+if ($LASTEXITCODE -ne 0) { throw "Exact build source snapshot verification before Autosport-Data.exe exited $LASTEXITCODE" }
 Push-Location $trustedBuildRoot
 try {
   & $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
@@ -365,7 +537,7 @@ if ($restartRecoveryProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe rest
 python $sourceVerifier --bind-artifact $restartRecovery --bound-output $boundRestartRecoveryAudit --digest-output $restartRecoveryDigestPath
 if ($LASTEXITCODE -ne 0) { throw "Restart/recovery evidence binding exited $LASTEXITCODE" }
 $restartRecoverySha256 = (Get-Content -LiteralPath $restartRecoveryDigestPath -Raw).Trim()
-$restartRecoveryEvidence = Get-Content $boundRestartRecoveryAudit -Raw | ConvertFrom-Json
+$restartRecoveryEvidence = Get-Content $boundRestartRecovery -Raw | ConvertFrom-Json
 if ($restartRecoveryEvidence.status -ne 'PASS') { throw 'Packaged restart/recovery audit did not PASS' }
 if ($restartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Packaged restart audit did not prove persistent session reopen' }
 if ($restartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Packaged recovery audit did not prove transaction recovery' }
@@ -487,6 +659,19 @@ if ($LASTEXITCODE -ne 0) { throw "Bound keyboard evidence verification exited $L
 python $sourceVerifier --verify-artifact $boundRestartRecoveryAudit --expected-sha256 $restartRecoverySha256
 if ($LASTEXITCODE -ne 0) { throw "Bound restart/recovery evidence verification exited $LASTEXITCODE" }
 
+# Derive the three package-consumer identities from exact Git objects before the
+# archive is materialized. The isolated package launcher later hashes the bytes
+# it compiles/executes against this immutable in-memory oracle.
+$trustedPackagePathsJson = ConvertTo-Json -Compress -InputObject @(
+  'scripts/package_windows.py',
+  'src/autosport/release_package.py',
+  'src/autosport/data_tool_package.py'
+)
+$trustedPackageManifestLines = @(& $pythonExecutable -I -S -c $trustedGitSourceOracleLauncher $gitExecutable $repoRoot $sourceSha $trustedPackagePathsJson)
+if ($LASTEXITCODE -ne 0) { throw "Exact package source Git oracle exited $LASTEXITCODE" }
+if ($trustedPackageManifestLines.Count -ne 1) { throw 'Exact package source Git oracle did not emit one canonical manifest' }
+$trustedPackageManifestJson = [string]$trustedPackageManifestLines[0]
+
 # Execute the final package consumer only from exact source_sha bytes. The live
 # checkout paths can still mutate after the source gate, but those bytes are never
 # imported or executed by the package assembly process.
@@ -497,14 +682,10 @@ if ($LASTEXITCODE -ne 0) { throw "Exact package source archive exited $LASTEXITC
 if (Test-Path $trustedPackageRoot) { Remove-Item -LiteralPath $trustedPackageRoot -Recurse -Force }
 New-Item -ItemType Directory -Path $trustedPackageRoot | Out-Null
 Expand-Archive -LiteralPath $trustedPackageArchive -DestinationPath $trustedPackageRoot -Force
-$trustedPackageManifest = [ordered]@{}
-foreach ($relativePath in @('scripts/package_windows.py', 'src/autosport/release_package.py', 'src/autosport/data_tool_package.py')) {
-  $snapshotPath = Join-Path $trustedPackageRoot ($relativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
-  if (-not (Test-Path -LiteralPath $snapshotPath -PathType Leaf)) { throw "Trusted package source missing $relativePath" }
-  $trustedPackageManifest[$relativePath] = (Get-FileHash -LiteralPath $snapshotPath -Algorithm SHA256).Hash.ToLowerInvariant()
-}
+$trustedPackageManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedPackageRoot
+if ($LASTEXITCODE -ne 0) { throw "Exact package source snapshot verification exited $LASTEXITCODE" }
 $script:trustedPackageRoot = $trustedPackageRoot
-$script:trustedPackageManifestJson = ($trustedPackageManifest | ConvertTo-Json -Compress)
+$script:trustedPackageManifestJson = $trustedPackageManifestJson
 
 python scripts/package_windows.py `
   --exe $boundAutosportExe `

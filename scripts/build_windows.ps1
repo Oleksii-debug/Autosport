@@ -245,21 +245,58 @@ if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }
 if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
 python $sourceVerifier --source-sha $sourceSha --late-build-boundary
 if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport.exe exited $LASTEXITCODE" }
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
+
+# Freeze every PyInstaller source/module input to exact source_sha bytes outside
+# the mutable checkout. The release source gate above proves the checkout, then
+# git archive reads the exact commit object; later worktree changes cannot change
+# either entry script or package modules consumed by PyInstaller.
+$trustedBuildArchive = Join-Path $boundArtifactRoot 'trusted-build-source.zip'
+$trustedBuildRoot = Join-Path $boundArtifactRoot 'trusted-build-source'
+& $gitExecutable archive --format=zip "--output=$trustedBuildArchive" $sourceSha
+if ($LASTEXITCODE -ne 0) { throw "Exact build source archive exited $LASTEXITCODE" }
+if (Test-Path $trustedBuildRoot) { Remove-Item -LiteralPath $trustedBuildRoot -Recurse -Force }
+New-Item -ItemType Directory -Path $trustedBuildRoot | Out-Null
+Expand-Archive -LiteralPath $trustedBuildArchive -DestinationPath $trustedBuildRoot -Force
+foreach ($requiredBuildSource in @('pyproject.toml', 'src/autosport/windows_entry.py', 'src/autosport/data_tools_entry.py')) {
+  $trustedBuildSource = Join-Path $trustedBuildRoot ($requiredBuildSource.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+  if (-not (Test-Path -LiteralPath $trustedBuildSource -PathType Leaf)) {
+    throw "Exact build source snapshot is missing $requiredBuildSource"
+  }
+}
+# Replace the earlier editable checkout install with the exact snapshot package so
+# import/distribution metadata cannot route PyInstaller back into the live checkout.
+python -m pip install --no-deps --force-reinstall $trustedBuildRoot
+if ($LASTEXITCODE -ne 0) { throw "Exact build source install exited $LASTEXITCODE" }
+
+Push-Location $trustedBuildRoot
+try {
+  python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
+} finally {
+  Pop-Location
+}
 if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
-$builtAutosportExe = Join-Path $PWD 'dist/Autosport.exe'
+$builtAutosportExe = Join-Path $trustedBuildRoot 'dist/Autosport.exe'
 python $sourceVerifier --bind-artifact $builtAutosportExe --bound-output $boundAutosportExe --digest-output $autosportDigestPath
 if ($LASTEXITCODE -ne 0) { throw "Autosport.exe artifact binding exited $LASTEXITCODE" }
 $autosportExeSha256 = (Get-Content -LiteralPath $autosportDigestPath -Raw).Trim()
 python $sourceVerifier --source-sha $sourceSha --late-build-boundary --allow-release-outputs
 if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport-Data.exe exited $LASTEXITCODE" }
-python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
+Push-Location $trustedBuildRoot
+try {
+  python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
+} finally {
+  Pop-Location
+}
 if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }
-$builtDataExe = Join-Path $PWD 'dist/Autosport-Data.exe'
+$builtDataExe = Join-Path $trustedBuildRoot 'dist/Autosport-Data.exe'
 python $sourceVerifier --bind-artifact $builtDataExe --bound-output $boundDataExe --digest-output $dataDigestPath
 if ($LASTEXITCODE -ne 0) { throw "Autosport-Data.exe artifact binding exited $LASTEXITCODE" }
 $dataExeSha256 = (Get-Content -LiteralPath $dataDigestPath -Raw).Trim()
 
+$releaseDist = Join-Path $repoRoot 'dist'
+if (-not (Test-Path -LiteralPath $releaseDist -PathType Container)) {
+  New-Item -ItemType Directory -Path $releaseDist | Out-Null
+}
 $diag = Join-Path $PWD 'dist/packaged-diagnostic.json'
 if (Test-Path $diag) { Remove-Item -Force $diag }
 $process = Start-Process -FilePath $boundAutosportExe -ArgumentList '--diagnostic-output', $diag -Wait -PassThru

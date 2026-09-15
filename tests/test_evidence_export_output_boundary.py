@@ -125,3 +125,52 @@ def test_export_rechecks_destination_after_snapshot_before_publication(
     assert redirected is True
     assert not (workspace / "manifest.json").exists()
     assert not (outside / "manifest.json").exists()
+
+
+def test_export_binds_new_output_parent_before_atomic_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-boundary parent substitution must not redirect publication into workspace."""
+
+    workspace = _workspace_with_evidence(tmp_path)
+    capture = workspace / "capture"
+    capture.mkdir()
+    future_parent = tmp_path / "future-parent"
+    moved_parent = tmp_path / "future-parent-original"
+    destination = future_parent / "manifest.json"
+    real_writer = evidence_export.atomic_write_json
+    attack_attempted = False
+    rename_blocked = False
+
+    def redirect_parent_then_publish(path: Path, payload: dict[str, object]) -> None:
+        nonlocal attack_attempted, rename_blocked
+        attack_attempted = True
+        try:
+            future_parent.rename(moved_parent)
+        except OSError:
+            # Windows ancestry handles deliberately omit FILE_SHARE_DELETE, so this
+            # is the expected attack result there. POSIX permits the rename, but the
+            # descriptor-relative writer below remains bound to the moved directory.
+            rename_blocked = True
+        else:
+            try:
+                os.symlink(capture, future_parent, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                moved_parent.rename(future_parent)
+                pytest.fail(f"output parent was renameable but attack symlink failed: {exc}")
+        real_writer(path, payload)
+
+    monkeypatch.setattr(evidence_export, "atomic_write_json", redirect_parent_then_publish)
+
+    report = export_evidence_manifest(workspace, destination)
+
+    assert attack_attempted is True
+    assert not (capture / "manifest.json").exists()
+    if rename_blocked:
+        assert json.loads(destination.read_text(encoding="utf-8")) == report
+        assert not moved_parent.exists()
+    else:
+        assert future_parent.is_symlink()
+        published = moved_parent / "manifest.json"
+        assert json.loads(published.read_text(encoding="utf-8")) == report

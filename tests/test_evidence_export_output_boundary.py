@@ -151,17 +151,20 @@ def test_export_accepts_output_in_workspace_ancestor(tmp_path: Path) -> None:
     assert not (workspace / "manifest.json").exists()
 
 
+@pytest.mark.parametrize("attack_on_check", [1, 3])
 def test_bound_parent_cannot_cross_into_workspace_after_ancestry_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    attack_on_check: int,
 ) -> None:
-    """Attack the exact review seam: check returns, then rename before mutation."""
+    """Attack both check→create and final check→replace publication seams."""
 
     safe_parent = tmp_path / "safe-parent"
     safe_parent.mkdir()
     workspace = _workspace_with_evidence(safe_parent)
     destination = safe_parent / "manifest.json"
     captured_parent = workspace / "captured-parent"
+    check_count = 0
     attack_attempted = False
     rename_blocked = False
 
@@ -172,9 +175,10 @@ def test_bound_parent_cannot_cross_into_workspace_after_ancestry_check(
     real_require = getattr(evidence_export, seam_name)
 
     def require_then_attack(parent_handle: int, workspace_handle: int) -> None:
-        nonlocal attack_attempted, rename_blocked
+        nonlocal check_count, attack_attempted, rename_blocked
         real_require(parent_handle, workspace_handle)
-        if attack_attempted:
+        check_count += 1
+        if check_count != attack_on_check:
             return
         attack_attempted = True
         try:
@@ -188,6 +192,7 @@ def test_bound_parent_cannot_cross_into_workspace_after_ancestry_check(
 
     report = export_evidence_manifest(workspace, destination)
 
+    assert check_count >= attack_on_check
     assert attack_attempted is True
     assert rename_blocked is True
     assert json.loads(destination.read_text(encoding="utf-8")) == report

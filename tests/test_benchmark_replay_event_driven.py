@@ -89,6 +89,7 @@ def test_small_synthetic_benchmark_is_explicitly_non_release_evidence() -> None:
     assert result.input_mode == "synthetic"
     assert result.source_duration_seconds == 7.0
     assert result.recording_span_is_synthetic is True
+    assert result.recording_span_source == "synthetic-fixture-cadence"
     assert result.input_load_elapsed_seconds is None
     assert result.measured_input_pipeline_elapsed_seconds is None
     assert result.measured_input_pipeline_events_per_second is None
@@ -132,13 +133,14 @@ def test_small_synthetic_benchmark_is_explicitly_non_release_evidence() -> None:
     )
 
 
-def test_canonical_dataset_mode_binds_real_input_identity_and_span() -> None:
+def test_canonical_dataset_mode_binds_input_identity_without_recording_provenance_claim() -> None:
     dataset_root = Path(__file__).resolve().parents[1] / "examples" / "tt_demo"
 
     result = run_replay_dataset_benchmark(dataset_root)
 
     assert result.input_mode == "canonical-dataset"
-    assert result.recording_span_is_synthetic is False
+    assert result.recording_span_is_synthetic is None
+    assert result.recording_span_source == "dataset-observed-timestamps"
     assert result.event_count == result.accepted_events == result.durable_history_events
     assert result.event_count >= 2
     assert result.source_duration_seconds > 0

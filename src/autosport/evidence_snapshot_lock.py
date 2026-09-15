@@ -70,8 +70,46 @@ def _parse_windows_directory_changes(payload: bytes) -> tuple[tuple[int, str], .
         offset = next_offset
 
 
+def _windows_api_path(path: Path) -> str:
+    text = os.path.abspath(str(path))
+    if text.startswith("\\\\?\\"):
+        return text
+    if text.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + text[2:]
+    return "\\\\?\\" + text
+
+
+def _windows_final_path_from_handle(handle: int) -> Path:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_final_path_name = kernel32.GetFinalPathNameByHandleW
+    get_final_path_name.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    )
+    get_final_path_name.restype = wintypes.DWORD
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_final_path_name(handle, buffer, len(buffer), 0)
+    if length == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if length >= len(buffer):
+        raise OSError("Windows evidence workspace path is too long")
+
+    text = buffer.value
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[len("\\\\?\\UNC\\") :]
+    elif text.startswith("\\\\?\\"):
+        text = text[len("\\\\?\\") :]
+    return Path(text)
+
+
 class _WindowsWorkspaceChangeWatch:
-    """Observe workspace changes across one evidence snapshot interval."""
+    """Pin and observe one Windows workspace across an evidence snapshot."""
 
     _BUFFER_SIZE = 64 * 1024
 
@@ -96,6 +134,8 @@ class _WindowsWorkspaceChangeWatch:
         self._buffer: Any | None = None
         self._overlapped: Any | None = None
         self._resolved_workspace: Path | None = None
+        self._notify_filter: int | None = None
+        self._armed = False
         self._closed = False
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -154,14 +194,12 @@ class _WindowsWorkspaceChangeWatch:
         file_notify_change_security = 0x00000100
         invalid_handle_value = ctypes.c_void_p(-1).value
 
-        resolved = workspace.resolve(strict=True)
-        self._resolved_workspace = resolved
-        # ReadDirectoryChangesW reports changes within this directory but not a
-        # rename/delete of the watched directory object itself. Keep DELETE sharing
-        # disabled so the caller-visible workspace path cannot be renamed/replaced
-        # away from this authoritative handle during the snapshot interval.
+        # Open the caller-selected path itself first. Normal reparse processing is
+        # intentionally retained so a symlink/junction binds its target object. The
+        # resulting directory handle omits FILE_SHARE_DELETE, so that bound object
+        # cannot be renamed/deleted/replaced while we derive and use its final path.
         directory_handle = create_file(
-            str(resolved),
+            _windows_api_path(workspace),
             file_list_directory,
             file_share_read | file_share_write,
             None,
@@ -173,11 +211,21 @@ class _WindowsWorkspaceChangeWatch:
             raise ctypes.WinError(ctypes.get_last_error())
         self._directory_handle = int(directory_handle)
 
+        try:
+            self._resolved_workspace = _windows_final_path_from_handle(
+                self._directory_handle
+            )
+        except BaseException:
+            close_handle(directory_handle)
+            self._directory_handle = None
+            raise
+
         event_handle = create_event(None, True, False, None)
         if not event_handle:
             error = ctypes.WinError(ctypes.get_last_error())
             close_handle(directory_handle)
             self._directory_handle = None
+            self._resolved_workspace = None
             raise error
         self._event_handle = int(event_handle)
 
@@ -186,12 +234,7 @@ class _WindowsWorkspaceChangeWatch:
         overlapped.hEvent = event_handle
         self._buffer = buffer
         self._overlapped = overlapped
-
-        # Retained canonical-source handles are released immediately before this
-        # watcher is closed at context exit. Keep data/metadata notifications in
-        # scope so a same-name in-place write cannot cross that handoff interval
-        # silently after the retained handle has stopped denying WRITE.
-        notify_filter = (
+        self._notify_filter = (
             file_notify_change_file_name
             | file_notify_change_dir_name
             | file_notify_change_attributes
@@ -200,31 +243,49 @@ class _WindowsWorkspaceChangeWatch:
             | file_notify_change_creation
             | file_notify_change_security
         )
-        queued = read_changes(
+
+    @property
+    def resolved_workspace(self) -> Path:
+        workspace = self._resolved_workspace
+        if workspace is None:
+            raise RuntimeError("workspace change watch has no resolved root")
+        return workspace
+
+    def arm(self) -> None:
+        """Start observation after the canonical advisory lock is acquired."""
+
+        if self._closed:
+            raise RuntimeError("workspace change watch is already closed")
+        if self._armed:
+            return
+        directory_handle = self._directory_handle
+        buffer = self._buffer
+        overlapped = self._overlapped
+        notify_filter = self._notify_filter
+        if (
+            directory_handle is None
+            or buffer is None
+            or overlapped is None
+            or notify_filter is None
+        ):
+            raise RuntimeError("workspace change watch is not fully initialized")
+
+        queued = self._kernel32.ReadDirectoryChangesW(
             directory_handle,
             buffer,
             self._BUFFER_SIZE,
             False,
             notify_filter,
             None,
-            ctypes.byref(overlapped),
+            self._ctypes.byref(overlapped),
             None,
         )
         if not queued:
-            error = ctypes.WinError(ctypes.get_last_error())
-            close_handle(event_handle)
-            close_handle(directory_handle)
-            self._event_handle = None
-            self._directory_handle = None
-            self._buffer = None
-            self._overlapped = None
-            self._resolved_workspace = None
-            raise error
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+        self._armed = True
 
     def _create_linearization_sentinel(self) -> tuple[Path, int]:
-        workspace = self._resolved_workspace
-        if workspace is None:
-            raise RuntimeError("workspace change watch has no resolved root")
+        workspace = self.resolved_workspace
 
         ctypes = self._ctypes
         wintypes = self._wintypes
@@ -298,11 +359,80 @@ class _WindowsWorkspaceChangeWatch:
                 "evidence snapshot sentinel creation notification was not observed"
             )
 
+    def close_without_validation(self) -> None:
+        """Cleanup the pin/watch without treating cancellation as acceptance evidence."""
+
+        if self._closed:
+            return
+        self._closed = True
+
+        ctypes = self._ctypes
+        wintypes = self._wintypes
+        directory_handle = self._directory_handle
+        event_handle = self._event_handle
+        overlapped = self._overlapped
+        cleanup_error: BaseException | None = None
+
+        if self._armed and directory_handle is not None and overlapped is not None:
+            get_result = self._kernel32.GetOverlappedResult
+            get_result.argtypes = (
+                wintypes.HANDLE,
+                ctypes.POINTER(self._overlapped_type),
+                ctypes.POINTER(wintypes.DWORD),
+                wintypes.BOOL,
+            )
+            get_result.restype = wintypes.BOOL
+            cancel_io = self._kernel32.CancelIoEx
+            cancel_io.argtypes = (
+                wintypes.HANDLE,
+                ctypes.POINTER(self._overlapped_type),
+            )
+            cancel_io.restype = wintypes.BOOL
+
+            error_not_found = 1168
+            if not cancel_io(directory_handle, ctypes.byref(overlapped)):
+                cancel_error = ctypes.get_last_error()
+                if cancel_error != error_not_found:
+                    cleanup_error = ctypes.WinError(cancel_error)
+            transferred = wintypes.DWORD()
+            drained = get_result(
+                directory_handle,
+                ctypes.byref(overlapped),
+                ctypes.byref(transferred),
+                True,
+            )
+            if not drained:
+                drain_error = ctypes.get_last_error()
+                error_operation_aborted = 995
+                if drain_error != error_operation_aborted and cleanup_error is None:
+                    cleanup_error = ctypes.WinError(drain_error)
+
+        close_handle = self._kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        if event_handle is not None and not close_handle(event_handle) and cleanup_error is None:
+            cleanup_error = ctypes.WinError(ctypes.get_last_error())
+        if directory_handle is not None and not close_handle(directory_handle) and cleanup_error is None:
+            cleanup_error = ctypes.WinError(ctypes.get_last_error())
+
+        self._event_handle = None
+        self._directory_handle = None
+        self._buffer = None
+        self._overlapped = None
+        self._resolved_workspace = None
+        self._notify_filter = None
+        self._armed = False
+
+        if cleanup_error is not None:
+            raise cleanup_error
+
     def close_and_require_unchanged(self) -> None:
         """Linearize the Windows watcher and fail if an earlier change was observed."""
 
         if self._closed:
             return
+        if not self._armed:
+            raise RuntimeError("workspace change watch was not armed before linearization")
         self._closed = True
 
         ctypes = self._ctypes
@@ -341,17 +471,13 @@ class _WindowsWorkspaceChangeWatch:
         close_handle.restype = wintypes.BOOL
 
         error_not_found = 1168
-        sentinel: Path | None = None
         sentinel_handle: int | None = None
         request_drained = False
         primary_error: BaseException | None = None
         try:
-            # The previous implementation used CancelIoEx(ERROR_OPERATION_ABORTED)
-            # as negative evidence. Windows documents cancellation only as the I/O
-            # request's terminal status, not as proof that no directory change raced
-            # the cancellation. Instead create one unique watched entry. Its creation
-            # is the snapshot linearization point and must complete the already-pending
-            # ReadDirectoryChangesW request normally.
+            # Create one unique watched entry. Its creation is the positive snapshot
+            # linearization point and must complete the already-pending request
+            # normally; cancellation remains cleanup-only.
             sentinel, sentinel_handle = self._create_linearization_sentinel()
 
             transferred = wintypes.DWORD()
@@ -383,8 +509,6 @@ class _WindowsWorkspaceChangeWatch:
             cleanup_error: BaseException | None = None
 
             if not request_drained:
-                # Cleanup only. Cancellation status is deliberately never used as
-                # acceptance evidence for the snapshot.
                 if not cancel_io(directory_handle, ctypes.byref(overlapped)):
                     cancel_error = ctypes.get_last_error()
                     if cancel_error != error_not_found:
@@ -399,15 +523,11 @@ class _WindowsWorkspaceChangeWatch:
                 if not drained:
                     drain_error = ctypes.get_last_error()
                     error_operation_aborted = 995
-                    if (
-                        drain_error != error_operation_aborted
-                        and cleanup_error is None
-                    ):
+                    if drain_error != error_operation_aborted and cleanup_error is None:
                         cleanup_error = ctypes.WinError(drain_error)
 
             # Closing the retained native sentinel handle deletes exactly the
-            # object we created. No pathname unlink is used, so cleanup cannot
-            # remove a foreign replacement.
+            # object we created. No pathname unlink is used.
             if sentinel_handle is not None:
                 if not close_handle(sentinel_handle) and cleanup_error is None:
                     cleanup_error = ctypes.WinError(ctypes.get_last_error())
@@ -422,6 +542,8 @@ class _WindowsWorkspaceChangeWatch:
             self._buffer = None
             self._overlapped = None
             self._resolved_workspace = None
+            self._notify_filter = None
+            self._armed = False
 
             if primary_error is not None and cleanup_error is not None:
                 _add_secondary_failure_note(
@@ -437,62 +559,136 @@ class WorkspaceEconomicLock:
     """Evidence-only wrapper adding a Windows direct-filesystem snapshot boundary.
 
     The canonical WorkspaceEconomicLock remains the advisory writer-coordination
-    mechanism. This wrapper is imported only by evidence export/verification so
-    non-cooperating direct filesystem changes become observable without creating a
-    second lock/state architecture. Retained source handles in evidence_export keep
-    canonical member bytes/path identities stable through the final source reproof.
+    mechanism. On Windows this wrapper first pins the caller-selected directory
+    object without DELETE sharing, derives the authoritative final path from that
+    handle, then acquires the canonical lock and arms ReadDirectoryChangesW against
+    the same retained object. Retained source handles are expected to remain alive
+    through explicit ``linearize()`` before source cleanup.
     """
 
     def __init__(self, workspace: str | Path) -> None:
-        self.workspace = Path(workspace)
-        self._lock = _WorkspaceEconomicLock(self.workspace)
+        requested_workspace = Path(workspace)
         self._watch: _WindowsWorkspaceChangeWatch | None = None
+        self._entered = False
+        self._linearized = False
+
+        if os.name == "nt":
+            self._watch = _WindowsWorkspaceChangeWatch(requested_workspace)
+            self.workspace = self._watch.resolved_workspace
+        else:
+            # Preserve the predecessor evidence boundary: POSIX callers operate on
+            # one strict-resolved workspace target rather than a retargetable alias.
+            self.workspace = requested_workspace.resolve(strict=True)
+
+        try:
+            self._lock = _WorkspaceEconomicLock(self.workspace)
+        except BaseException as lock_error:
+            if self._watch is not None:
+                try:
+                    self._watch.close_without_validation()
+                except BaseException as cleanup_error:
+                    _add_secondary_failure_note(
+                        lock_error,
+                        "workspace object pin cleanup also failed",
+                        cleanup_error,
+                    )
+                self._watch = None
+            raise
+
+    def close(self) -> None:
+        """Cleanup an unentered/preflight Windows root pin without accepting a snapshot."""
+
+        if self._entered:
+            raise RuntimeError("cannot cleanup WorkspaceEconomicLock while it is entered")
+        if self._watch is not None:
+            watch = self._watch
+            self._watch = None
+            watch.close_without_validation()
 
     def __enter__(self) -> "WorkspaceEconomicLock":
+        if self._entered:
+            raise RuntimeError("WorkspaceEconomicLock is already entered")
         self._lock.acquire()
         try:
-            if os.name == "nt":
-                self._watch = _WindowsWorkspaceChangeWatch(self.workspace)
+            if self._watch is not None:
+                self._watch.arm()
         except BaseException as watch_error:
             try:
                 self._lock.release()
             except BaseException as release_error:
                 _add_secondary_failure_note(
                     watch_error,
-                    "WorkspaceEconomicLock release also failed after namespace watch acquisition failure",
+                    "WorkspaceEconomicLock release also failed after namespace watch arm failure",
                     release_error,
                 )
+            if self._watch is not None:
+                watch = self._watch
+                self._watch = None
+                try:
+                    watch.close_without_validation()
+                except BaseException as cleanup_error:
+                    _add_secondary_failure_note(
+                        watch_error,
+                        "workspace object pin cleanup also failed after watch arm failure",
+                        cleanup_error,
+                    )
             raise
+        self._entered = True
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        watch_error: BaseException | None = None
+    def linearize(self) -> None:
+        """Close the positive Windows watcher boundary while callers still hold sources."""
+
+        if not self._entered:
+            raise RuntimeError("WorkspaceEconomicLock must be entered before linearization")
+        if self._linearized:
+            return
         if self._watch is not None:
+            watch = self._watch
             try:
-                self._watch.close_and_require_unchanged()
-            except BaseException as error:
-                watch_error = error
+                watch.close_and_require_unchanged()
             finally:
                 self._watch = None
+        self._linearized = True
 
-        if exc_value is not None:
-            if watch_error is not None:
-                _add_secondary_failure_note(
-                    exc_value,
-                    "workspace also changed during the evidence snapshot",
-                    watch_error,
-                )
-            return self._lock.__exit__(exc_type, exc_value, traceback)
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if not self._entered:
+            return None
 
-        if watch_error is not None:
+        try:
+            if exc_value is not None:
+                watch_error: BaseException | None = None
+                if self._watch is not None:
+                    watch = self._watch
+                    self._watch = None
+                    try:
+                        watch.close_without_validation()
+                    except BaseException as error:
+                        watch_error = error
+                if watch_error is not None:
+                    _add_secondary_failure_note(
+                        exc_value,
+                        "workspace snapshot cleanup also failed",
+                        watch_error,
+                    )
+                return self._lock.__exit__(exc_type, exc_value, traceback)
+
+            # Backward-compatible direct wrapper use still receives a positive
+            # boundary. Evidence export/verify explicitly call linearize() before
+            # retained-source cleanup, so their context teardown is cleanup-only.
             try:
-                self._lock.release()
-            except BaseException as release_error:
-                _add_secondary_failure_note(
-                    watch_error,
-                    "WorkspaceEconomicLock release also failed after namespace boundary failure",
-                    release_error,
-                )
-            raise watch_error
+                self.linearize()
+            except BaseException as watch_error:
+                try:
+                    self._lock.release()
+                except BaseException as release_error:
+                    _add_secondary_failure_note(
+                        watch_error,
+                        "WorkspaceEconomicLock release also failed after namespace boundary failure",
+                        release_error,
+                    )
+                raise
 
-        return self._lock.__exit__(None, None, None)
+            return self._lock.__exit__(None, None, None)
+        finally:
+            self._entered = False

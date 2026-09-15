@@ -1321,174 +1321,190 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
     byte counts and SHA-256 digests.
     """
 
-    root = Path(workspace)
+    requested_root = Path(workspace)
     requested_destination = Path(output)
-    if not root.exists() or not root.is_dir():
-        raise ValueError("workspace must be an existing directory")
-    # Bind the caller's workspace alias to one concrete target before acquiring the
-    # economic lock/watcher. Every later discovery/open/reproof/publication check uses
-    # this authoritative root, so retargeting a symlink/junction cannot switch the
-    # evidence namespace away from the directory object protected by the snapshot.
-    root = _resolved(root, strict=True)
-    _resolve_output_destination(root, requested_destination)
+    try:
+        snapshot_lock = WorkspaceEconomicLock(requested_root)
+    except OSError as exc:
+        raise ValueError("workspace must be an existing accessible directory") from exc
 
-    # Refuse an empty/non-evidence directory before taking the economic lock so an
-    # export attempt does not create lock metadata in an unrelated empty directory.
-    if not _canonical_source_names(root):
-        raise ValueError("workspace contains no canonical exportable evidence")
+    root = snapshot_lock.workspace
+    try:
+        if not root.exists() or not root.is_dir():
+            raise ValueError("workspace must be an existing directory")
+        _resolve_output_destination(root, requested_destination)
 
-    # Keep the exclusive critical section limited to source discovery + hashing and
-    # close-boundary reproof. Publication remains outside this economic lock.
-    with WorkspaceEconomicLock(root):
-        names = _canonical_source_names(root)
-        if not names:
-            raise ValueError("workspace canonical evidence disappeared before snapshot")
+        # Refuse an empty/non-evidence directory before taking the economic lock so
+        # an export attempt does not create lock metadata in an unrelated empty
+        # directory. On Windows the caller-selected directory object is already
+        # pinned by snapshot_lock, so this preflight cannot race a root replacement.
+        if not _canonical_source_names(root):
+            raise ValueError("workspace contains no canonical exportable evidence")
 
-        retained_snapshots: list[
-            tuple[Path, int, os.stat_result, os.stat_result, int, str]
-        ] = []
-        retention_token = _RETAINED_SOURCE_SNAPSHOTS.set(retained_snapshots)
-        primary_error: BaseException | None = None
-        try:
-            files: list[dict[str, Any]] = []
-            for name in names:
-                size, digest = _open_and_hash_regular_file(root / name)
-                files.append(
-                    {
-                        "path": name,
-                        "size_bytes": size,
-                        "sha256": digest,
-                    }
-                )
+        # Keep the exclusive critical section limited to source discovery + hashing
+        # and close-boundary reproof. Publication remains outside this economic lock.
+        with snapshot_lock:
+            names = _canonical_source_names(root)
+            if not names:
+                raise ValueError("workspace canonical evidence disappeared before snapshot")
 
-            missing_fixed = [name for name in _FIXED_EVIDENCE_NAMES if name not in names]
-            run_summary_count = sum(_is_canonical_run_summary_name(name) for name in names)
-            payload: dict[str, Any] = {
-                "schema_version": _SCHEMA_VERSION,
-                "kind": _KIND,
-                "file_count": len(files),
-                "files": files,
-                "expected_fixed_evidence_paths": list(_FIXED_EVIDENCE_NAMES),
-                "missing_fixed_evidence_paths": missing_fixed,
-                "fixed_evidence_set_complete": not missing_fixed,
-                "run_summary_count": run_summary_count,
-                "file_contents_included": False,
-                "market_database_included": False,
-                "raw_historical_or_provider_bytes_included": False,
-                "environment_or_credential_values_included": False,
-                "arbitrary_workspace_files_included": False,
-                "real_money_execution": False,
-            }
-            payload["manifest_sha256"] = _manifest_sha256(payload)
-
-            # Re-read every originally hashed descriptor before snapshot close so
-            # mutation of an earlier member while a later member is being hashed
-            # cannot leave a stale digest in an otherwise unchanged name set.
-            for snapshot in retained_snapshots:
-                _reprove_retained_source_snapshot(snapshot)
-
-            if _canonical_source_names(root) != names:
-                raise ValueError("workspace canonical evidence set changed during snapshot")
-
-            # On Windows each retained source handle denies WRITE and DELETE until
-            # all descriptors close, making this final path reproof occur inside one
-            # actual exclusion interval instead of relying on a finite sweep alone.
-            for snapshot in retained_snapshots:
-                _reprove_retained_source_path(snapshot)
-        except BaseException as exc:
-            primary_error = exc
-            raise
-        finally:
-            _RETAINED_SOURCE_SNAPSHOTS.reset(retention_token)
-            cleanup_error: BaseException | None = None
-            for snapshot in retained_snapshots:
-                try:
-                    os.close(snapshot[1])
-                except OSError as exc:
-                    if cleanup_error is None:
-                        cleanup_error = exc
-            if primary_error is not None and cleanup_error is not None:
-                try:
-                    primary_error.add_note(
-                        f"retained evidence descriptor cleanup also failed: {cleanup_error}"
+            retained_snapshots: list[
+                tuple[Path, int, os.stat_result, os.stat_result, int, str]
+            ] = []
+            retention_token = _RETAINED_SOURCE_SNAPSHOTS.set(retained_snapshots)
+            primary_error: BaseException | None = None
+            try:
+                files: list[dict[str, Any]] = []
+                for name in names:
+                    size, digest = _open_and_hash_regular_file(root / name)
+                    files.append(
+                        {
+                            "path": name,
+                            "size_bytes": size,
+                            "sha256": digest,
+                        }
                     )
-                except BaseException:
-                    pass
-            elif primary_error is None and cleanup_error is not None:
-                raise cleanup_error
 
-    # Publication remains outside WorkspaceEconomicLock. Its resolved parent is a
-    # workspace ancestor, so it cannot be reparented into that workspace descendant;
-    # descriptor/handle-relative writes and caller-visible reproof remain defense in depth.
-    _publish_bound_output(root, requested_destination, payload)
-    return payload
+                missing_fixed = [name for name in _FIXED_EVIDENCE_NAMES if name not in names]
+                run_summary_count = sum(_is_canonical_run_summary_name(name) for name in names)
+                payload: dict[str, Any] = {
+                    "schema_version": _SCHEMA_VERSION,
+                    "kind": _KIND,
+                    "file_count": len(files),
+                    "files": files,
+                    "expected_fixed_evidence_paths": list(_FIXED_EVIDENCE_NAMES),
+                    "missing_fixed_evidence_paths": missing_fixed,
+                    "fixed_evidence_set_complete": not missing_fixed,
+                    "run_summary_count": run_summary_count,
+                    "file_contents_included": False,
+                    "market_database_included": False,
+                    "raw_historical_or_provider_bytes_included": False,
+                    "environment_or_credential_values_included": False,
+                    "arbitrary_workspace_files_included": False,
+                    "real_money_execution": False,
+                }
+                payload["manifest_sha256"] = _manifest_sha256(payload)
+
+                # Re-read every originally hashed descriptor before snapshot close so
+                # mutation of an earlier member while a later member is being hashed
+                # cannot leave a stale digest in an otherwise unchanged name set.
+                for snapshot in retained_snapshots:
+                    _reprove_retained_source_snapshot(snapshot)
+
+                if _canonical_source_names(root) != names:
+                    raise ValueError("workspace canonical evidence set changed during snapshot")
+
+                # On Windows each retained source handle denies WRITE and DELETE until
+                # all descriptors close. Re-prove paths, then positively linearize the
+                # already-armed namespace watcher while those exclusion handles are
+                # still alive. Only after that boundary may finally close descriptors.
+                for snapshot in retained_snapshots:
+                    _reprove_retained_source_path(snapshot)
+                snapshot_lock.linearize()
+            except BaseException as exc:
+                primary_error = exc
+                raise
+            finally:
+                _RETAINED_SOURCE_SNAPSHOTS.reset(retention_token)
+                cleanup_error: BaseException | None = None
+                for snapshot in retained_snapshots:
+                    try:
+                        os.close(snapshot[1])
+                    except OSError as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                if primary_error is not None and cleanup_error is not None:
+                    try:
+                        primary_error.add_note(
+                            f"retained evidence descriptor cleanup also failed: {cleanup_error}"
+                        )
+                    except BaseException:
+                        pass
+                elif primary_error is None and cleanup_error is not None:
+                    raise cleanup_error
+
+        # Publication remains outside WorkspaceEconomicLock. Its resolved parent is a
+        # workspace ancestor, so it cannot be reparented into that workspace descendant;
+        # descriptor/handle-relative writes and caller-visible reproof remain defense in depth.
+        _publish_bound_output(root, requested_destination, payload)
+        return payload
+    finally:
+        # Idempotent cleanup for a preflight failure before __enter__, or for an
+        # already-linearized/exited snapshot. This never treats cancellation as PASS.
+        snapshot_lock.close()
 
 
 def verify_evidence_manifest(manifest: str | Path, workspace: str | Path) -> dict[str, Any]:
     """Fail closed unless one manifest exactly matches current canonical workspace evidence."""
 
     manifest_path = Path(manifest)
-    root = Path(workspace)
-    payload = _load_manifest(manifest_path)
-    if not root.exists() or not root.is_dir():
-        raise ValueError("workspace must be an existing directory")
-    # Verification must bind the same caller-visible alias once, before the watcher
-    # is acquired, so a later junction/symlink retarget cannot switch the namespace
-    # whose membership and file digests are being compared with the manifest.
-    root = _resolved(root, strict=True)
+    requested_root = Path(workspace)
+    try:
+        snapshot_lock = WorkspaceEconomicLock(requested_root)
+    except OSError as exc:
+        raise ValueError("workspace must be an existing accessible directory") from exc
 
-    expected_files = {item["path"]: item for item in payload["files"]}
-    expected_names = tuple(expected_files)
-    with WorkspaceEconomicLock(root):
-        current_names = _canonical_source_names(root)
-        if current_names != expected_names:
-            raise ValueError("workspace canonical evidence set does not match manifest")
+    root = snapshot_lock.workspace
+    try:
+        payload = _load_manifest(manifest_path)
+        if not root.exists() or not root.is_dir():
+            raise ValueError("workspace must be an existing directory")
 
-        retained_snapshots: list[
-            tuple[Path, int, os.stat_result, os.stat_result, int, str]
-        ] = []
-        retention_token = _RETAINED_SOURCE_SNAPSHOTS.set(retained_snapshots)
-        primary_error: BaseException | None = None
-        try:
-            for name in current_names:
-                size, digest = _open_and_hash_regular_file(root / name)
-                expected = expected_files[name]
-                if size != expected["size_bytes"] or digest != expected["sha256"]:
-                    raise ValueError(f"workspace evidence does not match manifest: {name}")
-
-            # Verification must use the same coherent retained-source interval as
-            # export.  In particular, an earlier verified member may not become
-            # stale while a later member is being checked and still yield PASS.
-            for snapshot in retained_snapshots:
-                _reprove_retained_source_snapshot(snapshot)
-
-            if _canonical_source_names(root) != current_names:
+        expected_files = {item["path"]: item for item in payload["files"]}
+        expected_names = tuple(expected_files)
+        with snapshot_lock:
+            current_names = _canonical_source_names(root)
+            if current_names != expected_names:
                 raise ValueError("workspace canonical evidence set does not match manifest")
 
-            for snapshot in retained_snapshots:
-                _reprove_retained_source_path(snapshot)
-        except BaseException as exc:
-            primary_error = exc
-            raise
-        finally:
-            _RETAINED_SOURCE_SNAPSHOTS.reset(retention_token)
-            cleanup_error: BaseException | None = None
-            for snapshot in retained_snapshots:
-                try:
-                    os.close(snapshot[1])
-                except OSError as exc:
-                    if cleanup_error is None:
-                        cleanup_error = exc
-            if primary_error is not None and cleanup_error is not None:
-                try:
-                    primary_error.add_note(
-                        f"retained evidence descriptor cleanup also failed: {cleanup_error}"
-                    )
-                except BaseException:
-                    pass
-            elif primary_error is None and cleanup_error is not None:
-                raise cleanup_error
-    return payload
+            retained_snapshots: list[
+                tuple[Path, int, os.stat_result, os.stat_result, int, str]
+            ] = []
+            retention_token = _RETAINED_SOURCE_SNAPSHOTS.set(retained_snapshots)
+            primary_error: BaseException | None = None
+            try:
+                for name in current_names:
+                    size, digest = _open_and_hash_regular_file(root / name)
+                    expected = expected_files[name]
+                    if size != expected["size_bytes"] or digest != expected["sha256"]:
+                        raise ValueError(f"workspace evidence does not match manifest: {name}")
+
+                # Verification must use the same coherent retained-source interval as
+                # export. In particular, an earlier verified member may not become
+                # stale while a later member is being checked and still yield PASS.
+                for snapshot in retained_snapshots:
+                    _reprove_retained_source_snapshot(snapshot)
+
+                if _canonical_source_names(root) != current_names:
+                    raise ValueError("workspace canonical evidence set does not match manifest")
+
+                for snapshot in retained_snapshots:
+                    _reprove_retained_source_path(snapshot)
+                snapshot_lock.linearize()
+            except BaseException as exc:
+                primary_error = exc
+                raise
+            finally:
+                _RETAINED_SOURCE_SNAPSHOTS.reset(retention_token)
+                cleanup_error: BaseException | None = None
+                for snapshot in retained_snapshots:
+                    try:
+                        os.close(snapshot[1])
+                    except OSError as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                if primary_error is not None and cleanup_error is not None:
+                    try:
+                        primary_error.add_note(
+                            f"retained evidence descriptor cleanup also failed: {cleanup_error}"
+                        )
+                    except BaseException:
+                        pass
+                elif primary_error is None and cleanup_error is not None:
+                    raise cleanup_error
+        return payload
+    finally:
+        snapshot_lock.close()
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -67,6 +67,9 @@ if ($LASTEXITCODE -ne 0) { throw "Full pytest gate exited $LASTEXITCODE" }
 if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
 python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace
 if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }
+if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
+python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary
+if ($LASTEXITCODE -ne 0) { throw "Late source checkout integrity gate exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
 if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py

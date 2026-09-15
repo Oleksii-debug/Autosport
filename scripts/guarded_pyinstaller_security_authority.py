@@ -450,7 +450,12 @@ def _require_no_competing_mutation_handles(
                 last_exc = exc
                 continue
             if process_scope is None:
-                process_scope = _process_same_user_scope()
+                try:
+                    process_scope = _process_same_user_scope()
+                except Exception as scope_exc:
+                    raise RuntimeError(
+                        f"{label} has live uninspectable mutation-capable handle with unknown process owner"
+                    ) from scope_exc
             pid = row[1]
             same_user = process_scope.get(pid)
             if same_user is None:

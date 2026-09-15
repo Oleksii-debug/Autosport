@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 import tk_uia
 
 from .gui import AUTOMATION_IDS
+from .integrity import atomic_write_json
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 
 
@@ -26,6 +26,22 @@ _REQUIRED_PATTERNS = {
     WINDOWS_BANKROLL_AUTOMATION_ID: {"VALUE"},
 }
 
+_EXPECTED_ROLES = {
+    AUTOMATION_IDS["choose_dataset"]: "PUSH_BUTTON",
+    AUTOMATION_IDS["run_replay"]: "PUSH_BUTTON",
+    AUTOMATION_IDS["repair_workspace"]: "PUSH_BUTTON",
+    AUTOMATION_IDS["replay_speed"]: "COMBO_BOX",
+    AUTOMATION_IDS["live_mode"]: "COMBO_BOX",
+    AUTOMATION_IDS["live_refresh"]: "PUSH_BUTTON",
+    AUTOMATION_IDS["strategy"]: "COMBO_BOX",
+    AUTOMATION_IDS["research_plan"]: "PUSH_BUTTON",
+    AUTOMATION_IDS["tickets"]: "LIST",
+    AUTOMATION_IDS["log"]: "TEXT",
+    AUTOMATION_IDS["live_quotes"]: "LIST",
+    AUTOMATION_IDS["evaluation"]: "LIST",
+    WINDOWS_BANKROLL_AUTOMATION_ID: "TEXT",
+}
+
 _ROW_CONTROLS = {
     AUTOMATION_IDS["tickets"],
     AUTOMATION_IDS["live_quotes"],
@@ -41,6 +57,20 @@ _BLOCKING_GAPS = {
     "CANNOT_BE_PRESSED",
     "LEFT_TO_THE_PROXY",
 }
+
+
+def _safe_exception_detail(exc: Exception) -> str:
+    """Render audit failure evidence without trusting exception formatting."""
+
+    try:
+        exception_type = type.__getattribute__(type(exc), "__name__")
+    except BaseException:
+        exception_type = "Exception"
+    try:
+        rendered = str.__str__(str(exc))
+    except BaseException:
+        rendered = "exception details unavailable"
+    return f"{exception_type}: {rendered}"
 
 
 def _enum_name(value: Any) -> str | None:
@@ -76,10 +106,11 @@ def summarize_description(
             continue
         gap_names = sorted(_enum_name(gap) for gap in widget.gaps if _enum_name(gap))
         pattern_names = sorted(_enum_name(pattern) for pattern in widget.patterns if _enum_name(pattern))
+        role_name = _enum_name(widget.role)
         controls[int(automation_id)] = {
             "path": widget.path,
             "tk_class": widget.tk_class,
-            "role": _enum_name(widget.role),
+            "role": role_name,
             "name": widget.name,
             "automation_id": automation_id,
             "patterns": pattern_names,
@@ -88,8 +119,12 @@ def summarize_description(
         }
         if not widget.name:
             failures.append(f"automation_id={automation_id}: missing accessible name")
-        if widget.role is None:
-            failures.append(f"automation_id={automation_id}: missing accessible role")
+        expected_role = _EXPECTED_ROLES[int(automation_id)]
+        if role_name != expected_role:
+            actual_role = role_name if role_name is not None else "NONE"
+            failures.append(
+                f"automation_id={automation_id}: unexpected accessible role={actual_role} expected={expected_role}"
+            )
         blockers = sorted(set(gap_names) & _BLOCKING_GAPS)
         if blockers:
             failures.append(f"automation_id={automation_id}: blocking gaps={','.join(blockers)}")
@@ -149,7 +184,7 @@ def run_accessibility_audit(output_path: str | Path) -> int:
     except Exception as exc:
         report = {
             "status": "FAIL",
-            "failures": [f"{type(exc).__name__}: {exc}"],
+            "failures": [_safe_exception_detail(exc)],
             "evidence_scope": "accessibility prerequisite audit failed before completion",
             "human_tested": False,
             "nvda_verified": False,
@@ -161,5 +196,5 @@ def run_accessibility_audit(output_path: str | Path) -> int:
                 app.close_app()
             except Exception:
                 pass
-    destination.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_json(destination, report)
     return 0 if report.get("status") == "PASS" else 1

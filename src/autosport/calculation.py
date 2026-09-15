@@ -7,9 +7,11 @@ from decimal import (
     Context,
     Decimal,
     DecimalException,
+    DivisionByZero,
     Inexact,
     InvalidOperation,
     Overflow,
+    ROUND_HALF_EVEN,
     Underflow,
     localcontext,
 )
@@ -23,10 +25,24 @@ _MAX_ADJUSTED_EXPONENT = 100
 _MAX_MARKET_SELECTIONS = 1_000
 _MAX_SERIES_ITEMS = 10_000
 _MAX_PARLAY_LEGS = 100
-_CONTEXT = Context(prec=160, Emin=-999, Emax=999)
-_CONTEXT.traps[InvalidOperation] = True
-_CONTEXT.traps[Overflow] = True
-_CONTEXT.traps[Underflow] = True
+
+
+def _build_decimal_context() -> Context:
+    """Build the engine context without inheriting mutable process defaults."""
+
+    return Context(
+        prec=160,
+        rounding=ROUND_HALF_EVEN,
+        Emin=-999,
+        Emax=999,
+        capitals=1,
+        clamp=0,
+        flags=[],
+        traps=[InvalidOperation, DivisionByZero, Overflow, Underflow],
+    )
+
+
+_CONTEXT = _build_decimal_context()
 
 
 @dataclass(frozen=True, slots=True)

@@ -18,6 +18,7 @@ on:
       - 'src/autosport/run_registry.py'
       - 'src/autosport/run_transaction.py'
       - 'src/autosport/recovery.py'
+      - 'src/autosport/recovery_worker.py'
       - 'src/autosport/cli.py'
       - 'tests/test_endurance.py'
       - 'tests/test_transaction_recovery.py'

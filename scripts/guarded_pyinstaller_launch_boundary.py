@@ -30,7 +30,6 @@ _SDDL_REVISION_1 = 1
 _TOKEN_DUPLICATE = 0x0002
 _TOKEN_QUERY = 0x0008
 _DISABLE_MAX_PRIVILEGE = 0x00000001
-_SE_GROUP_ENABLED = 0x00000004
 _EVERYONE_SID = "S-1-1-0"
 _PROTECTED_MARKER_MODULE = "_autosport_birth_protected_worker"
 _PROTECTED_WORKER_ARG = "--autosport-birth-protected-worker"
@@ -240,8 +239,8 @@ def _create_restricted_primary_token() -> Any:
     # IsTokenRestricted only reports a token as restricted when it contains a
     # restricting-SID list. Keep normal user/system read reachability by using
     # both the concrete user SID and Everyone as restricting SIDs while still
-    # deleting nonessential privileges. This is a creation-time token property;
-    # it cannot be retrofitted onto the already-running ordinary creator.
+    # deleting nonessential privileges. CreateRestrictedToken requires Attributes
+    # to be zero for every SidsToRestrict entry; restricting SIDs are always enabled.
     sid_values = (_current_user_sid(), _EVERYONE_SID)
     sid_storage: list[ctypes.c_void_p] = []
     restricting_sids = (_SidAndAttributes * len(sid_values))()
@@ -252,7 +251,7 @@ def _create_restricted_primary_token() -> Any:
                 raise ctypes.WinError(ctypes.get_last_error())
             sid_storage.append(sid)
             restricting_sids[index].Sid = sid
-            restricting_sids[index].Attributes = _SE_GROUP_ENABLED
+            restricting_sids[index].Attributes = 0
 
         current = wintypes.HANDLE()
         if not open_process_token(
@@ -449,7 +448,7 @@ def _run_primary_thread_sibling_probe(python: pathlib.Path, thread_id: int) -> N
 
 
 def _run_birth_protected_worker() -> None:
-    """Execute the immutable sibling binder after the creator releases the barrier."""
+    """Execute the explicitly selected binder after the creator releases the barrier."""
 
     if os.name != "nt":
         raise RuntimeError("birth-protected binder worker requires Windows")
@@ -460,6 +459,8 @@ def _run_birth_protected_worker() -> None:
     nonce = os.environ.pop(_NONCE_ENV, "")
     if not barrier_name or not nonce or len(nonce) < 32:
         raise RuntimeError("protected binder launch attestation is missing")
+    if len(sys.argv) < 3 or sys.argv[1] != _PROTECTED_WORKER_ARG:
+        raise RuntimeError("protected binder launch arguments are incomplete")
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     open_event = kernel32.OpenEventW
@@ -480,9 +481,9 @@ def _run_birth_protected_worker() -> None:
         raise RuntimeError(f"protected binder launch barrier wait failed: 0x{result:08x}")
 
     launcher = pathlib.Path(__file__).resolve()
-    binder = launcher.with_name("guarded_pyinstaller_bind.py")
+    binder = pathlib.Path(sys.argv[2]).resolve()
     if not binder.is_file():
-        raise RuntimeError("protected binder launch cannot resolve immutable sibling binder")
+        raise RuntimeError("protected binder launch cannot resolve selected binder")
 
     marker = types.ModuleType(_PROTECTED_MARKER_MODULE)
     marker.nonce = nonce
@@ -491,7 +492,7 @@ def _run_birth_protected_worker() -> None:
     marker.binder_path = str(binder)
     sys.modules[_PROTECTED_MARKER_MODULE] = marker
 
-    binder_args = list(sys.argv[2:])
+    binder_args = list(sys.argv[3:])
     sys.argv = [str(binder), *binder_args]
     runpy.run_path(str(binder), run_name="__main__")
 
@@ -533,8 +534,6 @@ def relaunch_birth_protected_worker() -> int:
     set_event = kernel32.SetEvent
     set_event.argtypes = (wintypes.HANDLE,)
     set_event.restype = wintypes.BOOL
-    # Do not fall back to CreateProcessW: a restricted primary token is part of
-    # the birth attestation and cannot be retrofitted into the ordinary creator.
     create_process = advapi32.CreateProcessAsUserW
     create_process.argtypes = (
         wintypes.HANDLE,
@@ -594,6 +593,7 @@ def relaunch_birth_protected_worker() -> int:
             "-I",
             str(launcher),
             _PROTECTED_WORKER_ARG,
+            str(binder),
             *sys.argv[1:],
         ]
     )
@@ -665,6 +665,6 @@ def relaunch_birth_protected_worker() -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2 or sys.argv[1] != _PROTECTED_WORKER_ARG:
+    if len(sys.argv) < 3 or sys.argv[1] != _PROTECTED_WORKER_ARG:
         raise SystemExit("guarded PyInstaller launch boundary is internal-only")
     _run_birth_protected_worker()

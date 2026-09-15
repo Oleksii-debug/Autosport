@@ -10,6 +10,9 @@ _OWNER_RIGHTS_SID = "S-1-3-4"
 _READ_CONTROL = 0x00020000
 _WRITE_DAC = 0x00040000
 _WRITE_OWNER = 0x00080000
+_PROCESS_CREATE_THREAD = 0x00000002
+_PROCESS_VM_OPERATION = 0x00000008
+_PROCESS_VM_WRITE = 0x00000020
 _PROCESS_DUP_HANDLE = 0x00000040
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000
 _DACL_SECURITY_INFORMATION = 0x00000004
@@ -20,7 +23,14 @@ _NO_INHERITANCE = 0
 _NO_MULTIPLE_TRUSTEE = 0
 _TRUSTEE_IS_SID = 0
 _TRUSTEE_IS_UNKNOWN = 0
-_DANGEROUS_PROCESS_ACCESS = _PROCESS_DUP_HANDLE | _WRITE_DAC | _WRITE_OWNER
+_DANGEROUS_PROCESS_ACCESS = (
+    _PROCESS_CREATE_THREAD
+    | _PROCESS_VM_OPERATION
+    | _PROCESS_VM_WRITE
+    | _PROCESS_DUP_HANDLE
+    | _WRITE_DAC
+    | _WRITE_OWNER
+)
 
 
 class _TrusteeW(ctypes.Structure):
@@ -290,7 +300,7 @@ def _close_handle(raw_handle: Any) -> None:
 
 
 class ProcessDuplicationFence:
-    """Deny hostile same-token access that could duplicate retained WRITE_DAC handles."""
+    """Deny same-token process access that can duplicate or hijack retained authorities."""
 
     def __init__(
         self,
@@ -305,6 +315,9 @@ class ProcessDuplicationFence:
 
     def _require_fresh_dangerous_access_denied(self) -> None:
         for access, name in (
+            (_PROCESS_CREATE_THREAD, "PROCESS_CREATE_THREAD"),
+            (_PROCESS_VM_OPERATION, "PROCESS_VM_OPERATION"),
+            (_PROCESS_VM_WRITE, "PROCESS_VM_WRITE"),
             (_PROCESS_DUP_HANDLE, "PROCESS_DUP_HANDLE"),
             (_WRITE_DAC, "WRITE_DAC"),
             (_WRITE_OWNER, "WRITE_OWNER"),

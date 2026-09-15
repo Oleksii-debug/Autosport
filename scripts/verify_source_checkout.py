@@ -98,16 +98,67 @@ def _ignored_checkout_paths(repo_root: Path) -> list[str]:
 
 
 def _is_expected_late_generated_ignored_path(path: str) -> bool:
-    """Return True only for ignored outputs that cannot carry package/build metadata.
-
-    Repository-local ``*.egg-info`` is deliberately not accepted here. Editable metadata such as
-    ``entry_points.txt`` can affect package/plugin discovery and therefore PyInstaller analysis.
-    Allowing the whole egg-info family would leave build-consumed bytes outside the exact-source
-    proof. Bytecode and pytest caches are the only ignored families tolerated at this boundary.
-    """
+    """Allow only prior release outputs that are not live Python/package metadata inputs."""
 
     parts = PurePosixPath(path).parts
-    return "__pycache__" in parts or ".pytest_cache" in parts
+    if not parts:
+        return False
+    return (
+        parts[0] == ".pytest_cache"
+        or parts[0] == "build"
+        or parts[0] == "dist"
+        or (len(parts) == 1 and parts[0].endswith(".spec"))
+    )
+
+
+def _generated_build_inputs(
+    repo_root: Path,
+) -> tuple[list[PurePosixPath], list[PurePosixPath]]:
+    paths: list[PurePosixPath] = []
+    roots: set[PurePosixPath] = set()
+    for path in _ignored_checkout_paths(repo_root):
+        relative = PurePosixPath(path)
+        for index, part in enumerate(relative.parts):
+            if part == "__pycache__" or part.endswith(".egg-info"):
+                paths.append(relative)
+                roots.add(PurePosixPath(*relative.parts[: index + 1]))
+                break
+    ordered_roots = sorted(
+        roots,
+        key=lambda item: (len(item.parts), item.as_posix()),
+        reverse=True,
+    )
+    return paths, ordered_roots
+
+
+def clean_late_generated_build_inputs(repo_root: Path) -> None:
+    """Remove ignored executable/cache metadata before a late release proof.
+
+    Python bytecode caches and editable ``*.egg-info`` are generated during install/tests but can
+    affect later Python/PyInstaller source consumption. Only exact ignored paths reported by Git
+    are removed; tracked files are never selected for cleanup.
+    """
+
+    paths, roots = _generated_build_inputs(repo_root)
+    for relative in paths:
+        target = repo_root.joinpath(*relative.parts)
+        try:
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+        except OSError as exc:
+            raise ValueError(
+                f"unable to remove generated build input before release proof: {relative.as_posix()}"
+            ) from exc
+
+    for relative in roots:
+        target = repo_root.joinpath(*relative.parts)
+        try:
+            target.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Non-empty generated roots remain visible to the subsequent fail-closed proof.
+            pass
 
 
 def _format_dirty_preview(dirty: list[str]) -> str:
@@ -127,12 +178,7 @@ def _require_pristine_checkout(repo_root: Path) -> None:
 
 
 def _require_late_build_boundary_unchanged(repo_root: Path) -> None:
-    """Reject source/input changes at the late PyInstaller boundary.
-
-    Tracked/index changes and non-ignored untracked files always fail closed. Only Python bytecode
-    and pytest cache outputs are tolerated. Repository-local editable package metadata, including
-    ``*.egg-info``, is rejected because it can participate in package/plugin discovery.
-    """
+    """Reject source/input changes at every late source-consuming release boundary."""
 
     dirty = _ordinary_checkout_changes(repo_root)
     unexpected_ignored = [
@@ -143,7 +189,7 @@ def _require_late_build_boundary_unchanged(repo_root: Path) -> None:
     dirty.extend(f"ignored:{path}" for path in unexpected_ignored)
     if dirty:
         raise ValueError(
-            "release build source changed after initial preflight before PyInstaller: "
+            "release build source changed after initial preflight before source-consuming boundary: "
             f"{_format_dirty_preview(dirty)}"
         )
 
@@ -178,9 +224,11 @@ def main() -> int:
     parser.add_argument(
         "--late-build-boundary",
         action="store_true",
-        help="re-prove exact HEAD and reject post-preflight source changes before PyInstaller",
+        help="re-prove exact HEAD and reject post-preflight source/input changes",
     )
     args = parser.parse_args()
+    if args.late_build_boundary:
+        clean_late_generated_build_inputs(Path.cwd())
     verify_source_checkout(
         args.source_sha,
         repo_root=Path.cwd(),

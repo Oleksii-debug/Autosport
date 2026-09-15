@@ -102,9 +102,9 @@ def _lstat_or_none(path: Path) -> os.stat_result | None:
 def has_durable_workspace_history(workspace: str | Path) -> bool:
     """Return whether a missing registry would discard surviving economic/run evidence.
 
-    A pristine zero-byte Decision Ledger and an empty transaction directory are allowed
-    first-open artifacts. Everything else named here is durable product history and must
-    make missing-registry initialization fail closed.
+    A pristine readable zero-byte Decision Ledger and an empty transaction directory are
+    allowed first-open artifacts. Everything else named here is durable product history
+    or filesystem uncertainty and must make missing-registry initialization fail closed.
     """
 
     root = Path(workspace)
@@ -127,11 +127,17 @@ def has_durable_workspace_history(workspace: str | Path) -> bool:
     if _lstat_or_none(root / "paper_book.json") is not None:
         return True
 
-    ledger_stat = _lstat_or_none(root / "decisions.jsonl")
-    if ledger_stat is not None and (
-        not stat.S_ISREG(ledger_stat.st_mode) or ledger_stat.st_size > 0
-    ):
-        return True
+    ledger_path = root / "decisions.jsonl"
+    ledger_stat = _lstat_or_none(ledger_path)
+    if ledger_stat is not None:
+        if not stat.S_ISREG(ledger_stat.st_mode) or ledger_stat.st_size > 0:
+            return True
+        try:
+            with ledger_path.open("rb") as handle:
+                if handle.read(1):
+                    return True
+        except OSError:
+            return True
     return False
 
 
@@ -156,11 +162,28 @@ class RunRegistry:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self._read_existing()
+        except FileNotFoundError as exc:
+            raise ValueError("run registry is missing") from exc
+
+    @classmethod
+    def initialize_pristine(cls, path: str | Path) -> "RunRegistry":
+        """Explicitly create the first registry only for a verified pristine workspace.
+
+        Ordinary construction is a read/verification operation and never publishes missing
+        durable state. Product startup is the sole first-open creation boundary and uses
+        this method, which serializes publication with the canonical workspace economic lock.
+        """
+
+        registry = cls.__new__(cls)
+        registry.path = Path(path)
+        registry.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            registry._read_existing()
         except FileNotFoundError:
-            self._initialize_missing_registry()
+            registry._initialize_missing_registry()
+        return registry
 
     def _read_existing(self) -> dict:
         """Read only a canonical regular registry path without following aliases."""

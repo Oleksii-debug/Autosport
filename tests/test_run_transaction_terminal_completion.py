@@ -18,7 +18,7 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
         ledger = JsonlDecisionLedger(root / "decisions.jsonl")
         ledger.path.touch()
 
-        registry = RunRegistry(root / "run_registry.json")
+        registry = RunRegistry.initialize_pristine(root / "run_registry.json")
         market_sha256 = "a" * 64
         results_sha256 = "b" * 64
         strategy_id = "baseline-v1"
@@ -93,6 +93,35 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
             manifest = json.loads(detached.manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["phase"], "canonical_committed")
             self.assertEqual(registry.get(key)["status"], "in_progress")
+
+    def test_detached_completion_missing_registry_fails_without_recreation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx, registry, key, _summary, summary_path = self._prepare_canonical_commit(root)
+            registry.reconcile_completed_summary(key, summary_path, root / "paper_book.json")
+
+            registry_path = root / "run_registry.json"
+            durable_paths = (
+                tx.manifest_path,
+                root / "paper_book.json",
+                root / "decisions.jsonl",
+                summary_path,
+            )
+            durable_before = {path: path.read_bytes() for path in durable_paths}
+            registry_path.unlink()
+
+            detached = RunTransaction(root, tx.run_id)
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "transaction completion cannot validate terminal registry identity",
+            ):
+                detached.mark_registry_completed()
+
+            self.assertFalse(registry_path.exists())
+            self.assertEqual(
+                {path: path.read_bytes() for path in durable_paths},
+                durable_before,
+            )
 
     def test_detached_completion_rejects_terminal_registry_new_hash_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -74,7 +74,7 @@ class AutosportSession:
             self.book_path = self.workspace / "paper_book.json"
             self.book = PaperBook.load(self.book_path) if self.book_path.exists() else PaperBook(initial_bankroll)
             self.ledger = JsonlDecisionLedger(self.workspace / "decisions.jsonl")
-            self.registry = RunRegistry(self.workspace / "run_registry.json")
+            self.registry = RunRegistry.initialize_pristine(self.workspace / "run_registry.json")
             self.portfolio_engine = PortfolioEngine()
         except BaseException as initialization_error:
             # SQLiteMarketStore owns an OS file handle after construction. If any

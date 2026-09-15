@@ -17,6 +17,20 @@ _EXPECTED_NET_PROFIT = Decimal("-10")
 _EXPECTED_TICKET_COUNT = 1
 
 
+def _safe_exception_detail(exc: Exception) -> str:
+    """Render audit failure evidence without trusting exception formatting."""
+
+    try:
+        exception_type = type.__getattribute__(type(exc), "__name__")
+    except BaseException:
+        exception_type = "Exception"
+    try:
+        rendered = str.__str__(str(exc))
+    except BaseException:
+        rendered = "exception details unavailable"
+    return f"{exception_type}: {rendered}"
+
+
 def run_research_demo_audit(
     output_path: str | Path,
     demo_root: str | Path,
@@ -117,7 +131,7 @@ def run_research_demo_audit(
     except Exception as exc:
         payload = {
             "status": "FAIL",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": _safe_exception_detail(exc),
             "sample_fixture": True,
             "real_historical_market_proof": False,
             "profitability_claim": False,

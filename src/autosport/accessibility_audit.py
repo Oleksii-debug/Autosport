@@ -59,6 +59,20 @@ _BLOCKING_GAPS = {
 }
 
 
+def _safe_exception_detail(exc: Exception) -> str:
+    """Render audit failure evidence without trusting exception formatting."""
+
+    try:
+        exception_type = type.__getattribute__(type(exc), "__name__")
+    except BaseException:
+        exception_type = "Exception"
+    try:
+        rendered = str.__str__(str(exc))
+    except BaseException:
+        rendered = "exception details unavailable"
+    return f"{exception_type}: {rendered}"
+
+
 def _enum_name(value: Any) -> str | None:
     if value is None:
         return None
@@ -170,7 +184,7 @@ def run_accessibility_audit(output_path: str | Path) -> int:
     except Exception as exc:
         report = {
             "status": "FAIL",
-            "failures": [f"{type(exc).__name__}: {exc}"],
+            "failures": [_safe_exception_detail(exc)],
             "evidence_scope": "accessibility prerequisite audit failed before completion",
             "human_tested": False,
             "nvda_verified": False,

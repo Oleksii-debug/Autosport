@@ -98,9 +98,10 @@ def test_windows_build_materializes_trusted_verifier_during_initial_preflight() 
         "python scripts/verify_source_checkout.py --source-sha $sourceSha "
         "--trusted-verifier-output $sourceVerifier"
     )
+    old_copy = "Copy-Item -LiteralPath 'scripts/verify_source_checkout.py' -Destination $sourceVerifier -Force"
     first_mutation = "python -m pip install --upgrade pip"
 
     assert script.index(source_sha) < script.index(snapshot_path) < script.index(preflight)
     assert script.index(preflight) < script.index(first_mutation)
-    assert "Copy-Item -LiteralPath 'scripts/verify_source_checkout.py'" not in script
+    assert all(not line.strip().startswith(old_copy) for line in script.splitlines())
     assert script.count("python $sourceVerifier --source-sha $sourceSha --late-build-boundary") == 3

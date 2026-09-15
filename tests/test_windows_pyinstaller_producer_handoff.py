@@ -30,6 +30,7 @@ def _trusted_snapshot_verifier_source() -> str:
 def _run_real_pyinstaller_probe(
     tmp_path: Path,
     *,
+    write_before_final_fence: bool = False,
     replace_before_final_fence: bool = False,
     replace_after_final_fence: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
@@ -44,6 +45,8 @@ def _run_real_pyinstaller_probe(
     verifier_sha256 = hashlib.sha256(_SOURCE_VERIFIER.read_bytes()).hexdigest()
 
     env = os.environ.copy()
+    if write_before_final_fence:
+        env["AUTOSPORT_TEST_WRITE_BEFORE_FINAL_FENCE"] = "1"
     if replace_before_final_fence:
         env["AUTOSPORT_TEST_REPLACE_BEFORE_FINAL_FENCE"] = "1"
     if replace_after_final_fence:
@@ -130,6 +133,23 @@ def test_real_pyinstaller_normal_handoff_binds_final_output(tmp_path: Path) -> N
     assert len(digest_text) == 64
     assert all(character in "0123456789abcdef" for character in digest_text)
     assert hashlib.sha256(bound.read_bytes()).hexdigest() == digest_text
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or importlib.util.find_spec("PyInstaller") is None,
+    reason="real Windows PyInstaller regression",
+)
+def test_real_pyinstaller_same_object_write_fails_before_trusted_bind(tmp_path: Path) -> None:
+    completed, _artifact, bound, digest = _run_real_pyinstaller_probe(
+        tmp_path,
+        write_before_final_fence=True,
+    )
+
+    assert completed.returncode != 0
+    combined = completed.stdout + "\n" + completed.stderr
+    assert "same-object write blocked by retained producer artifact fence" in combined
+    assert not bound.exists()
+    assert not digest.exists()
 
 
 @pytest.mark.skipif(

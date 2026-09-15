@@ -250,7 +250,7 @@ def run(argv: list[str] | None = None) -> int:
         "final_identity": None,
         "guard_stream": None,
         "bound": False,
-        "test_replacement_injected": False,
+        "test_replacement_result": None,
     }
 
     def guarded_mtime(path):
@@ -265,7 +265,7 @@ def run(argv: list[str] | None = None) -> int:
 
             if (
                 os.environ.get("AUTOSPORT_TEST_REPLACE_PYINSTALLER_OUTPUT") == "1"
-                and not state["test_replacement_injected"]
+                and state["test_replacement_result"] is None
             ):
                 replacement = artifact.with_name(
                     f".{artifact.name}.replacement-{os.getpid()}"
@@ -274,14 +274,10 @@ def run(argv: list[str] | None = None) -> int:
                     original_copyfile(artifact, replacement)
                     try:
                         os.replace(replacement, artifact)
-                    except OSError as exc:
-                        state["test_replacement_injected"] = True
-                        raise RuntimeError(
-                            "PyInstaller output replacement blocked by retained final artifact fence"
-                        ) from exc
-                    raise RuntimeError(
-                        "PyInstaller output replacement unexpectedly succeeded after final artifact fence"
-                    )
+                    except OSError:
+                        state["test_replacement_result"] = "blocked"
+                    else:
+                        state["test_replacement_result"] = "succeeded"
                 finally:
                     try:
                         replacement.unlink()
@@ -303,6 +299,20 @@ def run(argv: list[str] | None = None) -> int:
             result = original_assemble(self)
         finally:
             state["producer_active"] = False
+
+        if os.environ.get("AUTOSPORT_TEST_REPLACE_PYINSTALLER_OUTPUT") == "1":
+            replacement_result = state["test_replacement_result"]
+            if replacement_result == "blocked":
+                raise RuntimeError(
+                    "PyInstaller output replacement blocked by retained final artifact fence"
+                )
+            if replacement_result == "succeeded":
+                raise RuntimeError(
+                    "PyInstaller output replacement unexpectedly succeeded after final artifact fence"
+                )
+            raise RuntimeError(
+                "PyInstaller output replacement test hook was not exercised at final artifact fence"
+            )
 
         final_identity = state["final_identity"]
         guard_stream = state["guard_stream"]

@@ -27,27 +27,22 @@ namespace Autosport.Release
         private const uint DANGEROUS_THREAD_ACCESS = 0x000C17B3;
         private const uint SAFE_THREAD_ACCESS = THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
 
+        private const uint TOKEN_DUPLICATE = 0x0002;
         private const uint TOKEN_QUERY = 0x0008;
         private const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
+        private const uint DISABLE_MAX_PRIVILEGE = 0x00000001;
         private const int ERROR_ACCESS_DENIED = 5;
         private const int ERROR_NOT_ALL_ASSIGNED = 1300;
         private const uint WAIT_OBJECT_0 = 0x00000000;
         private const uint INFINITE = 0xFFFFFFFF;
         private const uint SDDL_REVISION_1 = 1;
+        private const string EVERYONE_SID = "S-1-1-0";
 
+        private const string ProtectedWorkerArgument = "--autosport-birth-protected-worker";
         private const string BarrierEnvironment = "AUTOSPORT_BINDER_LAUNCH_BARRIER";
         private const string NonceEnvironment = "AUTOSPORT_BINDER_LAUNCH_NONCE";
         private const string TestSiblingProbeEnvironment =
             "AUTOSPORT_TEST_ORCHESTRATOR_BIRTH_PROCESS_SIBLING_PROBE";
-
-        private const string BootstrapLoader =
-            "import runpy,sys\n" +
-            "boundary=sys.argv[1]\n" +
-            "namespace=runpy.run_path(boundary, run_name='_autosport_launch_boundary_bootstrap')\n" +
-            "code=namespace.get('_PROTECTED_BOOTSTRAP')\n" +
-            "if not isinstance(code,str): raise SystemExit('protected bootstrap payload is unavailable')\n" +
-            "sys.argv=sys.argv[1:]\n" +
-            "exec(compile(code, boundary + ':_PROTECTED_BOOTSTRAP', 'exec'), {'__name__':'__main__'})\n";
 
         private const string SiblingProbe =
             "import ctypes,sys\n" +
@@ -92,6 +87,7 @@ namespace Autosport.Release
             public int dwXSize;
             public int dwYSize;
             public int dwXCountChars;
+            public int dwYCountChars;
             public int dwFillAttribute;
             public int dwFlags;
             public short wShowWindow;
@@ -132,6 +128,13 @@ namespace Autosport.Release
             public LuidAndAttributes Privileges;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SidAndAttributes
+        {
+            public IntPtr Sid;
+            public uint Attributes;
+        }
+
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -139,6 +142,12 @@ namespace Autosport.Release
             uint stringSDRevision,
             out IntPtr securityDescriptor,
             out uint securityDescriptorSize);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ConvertStringSidToSidW(
+            string stringSid,
+            out IntPtr sid);
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -164,19 +173,27 @@ namespace Autosport.Release
             IntPtr previousState,
             IntPtr returnLength);
 
-        [DllImport("kernel32.dll")]
-        private static extern IntPtr GetCurrentProcess();
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern IntPtr CreateEventW(
-            IntPtr eventAttributes,
-            [MarshalAs(UnmanagedType.Bool)] bool manualReset,
-            [MarshalAs(UnmanagedType.Bool)] bool initialState,
-            string name);
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CreateProcessW(
+        private static extern bool CreateRestrictedToken(
+            IntPtr existingTokenHandle,
+            uint flags,
+            uint disableSidCount,
+            IntPtr sidsToDisable,
+            uint deletePrivilegeCount,
+            IntPtr privilegesToDelete,
+            uint restrictedSidCount,
+            IntPtr sidsToRestrict,
+            out IntPtr newTokenHandle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsTokenRestricted(IntPtr tokenHandle);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateProcessAsUserW(
+            IntPtr token,
             string applicationName,
             StringBuilder commandLine,
             ref SecurityAttributes processAttributes,
@@ -187,6 +204,16 @@ namespace Autosport.Release
             string currentDirectory,
             ref StartupInfo startupInfo,
             out ProcessInformation processInformation);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateEventW(
+            IntPtr eventAttributes,
+            [MarshalAs(UnmanagedType.Bool)] bool manualReset,
+            [MarshalAs(UnmanagedType.Bool)] bool initialState,
+            string name);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr OpenProcess(
@@ -280,6 +307,102 @@ namespace Autosport.Release
             finally
             {
                 CloseHandle(token);
+            }
+        }
+
+        private static IntPtr CreateRestrictedPrimaryToken(string currentUserSid)
+        {
+            IntPtr currentToken = IntPtr.Zero;
+            IntPtr restrictedToken = IntPtr.Zero;
+            IntPtr currentUser = IntPtr.Zero;
+            IntPtr everyone = IntPtr.Zero;
+            IntPtr restrictingArray = IntPtr.Zero;
+            try
+            {
+                if (!OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_QUERY | TOKEN_DUPLICATE,
+                    out currentToken))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "orchestrator primary token cannot be opened");
+                }
+                if (!ConvertStringSidToSidW(currentUserSid, out currentUser))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "current-user restricting SID conversion failed");
+                }
+                if (!ConvertStringSidToSidW(EVERYONE_SID, out everyone))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Everyone restricting SID conversion failed");
+                }
+
+                int itemSize = Marshal.SizeOf(typeof(SidAndAttributes));
+                restrictingArray = Marshal.AllocHGlobal(itemSize * 2);
+                Marshal.StructureToPtr(
+                    new SidAndAttributes { Sid = currentUser, Attributes = 0 },
+                    restrictingArray,
+                    false);
+                Marshal.StructureToPtr(
+                    new SidAndAttributes { Sid = everyone, Attributes = 0 },
+                    IntPtr.Add(restrictingArray, itemSize),
+                    false);
+
+                if (!CreateRestrictedToken(
+                    currentToken,
+                    DISABLE_MAX_PRIVILEGE,
+                    0,
+                    IntPtr.Zero,
+                    0,
+                    IntPtr.Zero,
+                    2,
+                    restrictingArray,
+                    out restrictedToken))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "protected-worker restricted token creation failed");
+                }
+                if (restrictedToken == IntPtr.Zero || !IsTokenRestricted(restrictedToken))
+                {
+                    if (restrictedToken != IntPtr.Zero)
+                    {
+                        CloseHandle(restrictedToken);
+                        restrictedToken = IntPtr.Zero;
+                    }
+                    throw new InvalidOperationException(
+                        "protected-worker primary token lacks restricting SIDs");
+                }
+                IntPtr result = restrictedToken;
+                restrictedToken = IntPtr.Zero;
+                return result;
+            }
+            finally
+            {
+                if (restrictingArray != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(restrictingArray);
+                }
+                if (everyone != IntPtr.Zero)
+                {
+                    LocalFree(everyone);
+                }
+                if (currentUser != IntPtr.Zero)
+                {
+                    LocalFree(currentUser);
+                }
+                if (restrictedToken != IntPtr.Zero)
+                {
+                    CloseHandle(restrictedToken);
+                }
+                if (currentToken != IntPtr.Zero)
+                {
+                    CloseHandle(currentToken);
+                }
             }
         }
 
@@ -441,9 +564,8 @@ namespace Autosport.Release
             List<string> values = new List<string>();
             values.Add(pythonExecutable);
             values.Add("-I");
-            values.Add("-c");
-            values.Add(BootstrapLoader);
             values.Add(launchBoundary);
+            values.Add(ProtectedWorkerArgument);
             values.Add(binder);
             if (binderArguments != null)
             {
@@ -548,6 +670,7 @@ namespace Autosport.Release
 
             IntPtr processDescriptor = IntPtr.Zero;
             IntPtr threadDescriptor = IntPtr.Zero;
+            IntPtr restrictedToken = IntPtr.Zero;
             ProcessInformation processInfo = new ProcessInformation();
             IntPtr safeProcess = IntPtr.Zero;
             bool creatorProcessOpen = false;
@@ -566,6 +689,7 @@ namespace Autosport.Release
                     DANGEROUS_THREAD_ACCESS,
                     SAFE_THREAD_ACCESS,
                     "thread");
+                restrictedToken = CreateRestrictedPrimaryToken(currentUserSid);
                 SecurityAttributes processAttributes = new SecurityAttributes
                 {
                     nLength = Marshal.SizeOf(typeof(SecurityAttributes)),
@@ -596,7 +720,8 @@ namespace Autosport.Release
                         launchBoundary,
                         binder,
                         binderArguments));
-                if (!CreateProcessW(
+                if (!CreateProcessAsUserW(
+                    restrictedToken,
                     pythonExecutable,
                     commandLine,
                     ref processAttributes,
@@ -703,6 +828,10 @@ namespace Autosport.Release
                 if (safeProcess != IntPtr.Zero)
                 {
                     CloseHandle(safeProcess);
+                }
+                if (restrictedToken != IntPtr.Zero)
+                {
+                    CloseHandle(restrictedToken);
                 }
                 if (threadDescriptor != IntPtr.Zero)
                 {

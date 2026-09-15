@@ -33,6 +33,27 @@ def test_local_windows_build_runs_canonical_full_pytest_gate() -> None:
     assert 'if ($LASTEXITCODE -ne 0) { throw "Full pytest gate exited $LASTEXITCODE" }' in script
 
 
+def test_local_windows_build_reproves_source_immediately_before_pyinstaller() -> None:
+    script = _build_script_text()
+
+    dataset_smoke = "python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace"
+    smoke_cleanup = "if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }"
+    late_gate = "python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary"
+    late_gate_check = 'if ($LASTEXITCODE -ne 0) { throw "Late source checkout integrity gate exited $LASTEXITCODE" }'
+    first_build = "python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
+
+    dataset_index = script.index(dataset_smoke)
+    cleanup_index = script.index(smoke_cleanup, dataset_index)
+    late_gate_index = script.index(late_gate)
+    first_build_index = script.index(first_build)
+
+    assert dataset_index < cleanup_index < late_gate_index < first_build_index
+    assert script.index(late_gate_check) > late_gate_index
+    assert script.index(late_gate_check) < first_build_index
+    assert script.count(late_gate) == 1
+    assert script.count(smoke_cleanup) == 2
+
+
 def test_local_windows_build_fails_closed_on_release_native_steps() -> None:
     script = _build_script_text()
 

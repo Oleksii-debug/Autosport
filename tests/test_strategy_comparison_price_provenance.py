@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from autosport.run_transaction import RunTransaction
+from autosport.strategies import strategy_spec
 from autosport.strategy_comparison import compare_strategy_runs, load_strategy_run_summary
 
 
@@ -38,6 +39,7 @@ class StrategyComparisonPriceProvenanceTests(unittest.TestCase):
             "strategy_runtime": {
                 "strategy_id": strategy_id,
                 "canonical_strategy_id": strategy_id,
+                "agent_names": list(strategy_spec(strategy_id).agent_names),
                 "research_plan_sha256": None,
             },
             "market_price_truth": {

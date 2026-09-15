@@ -1,8 +1,8 @@
 import unittest
-from decimal import Decimal
+from decimal import Context, Decimal, localcontext
 
 from autosport.candidate_optimizer import PortfolioAwareCandidateOptimizer
-from autosport.candidate_search import CandidateLeg, ParlayCandidate
+from autosport.candidate_search import BeamParlayCandidateSearch, CandidateLeg, ParlayCandidate
 from autosport.scenario_search import ScenarioGroup, ScenarioOutcome
 
 
@@ -51,6 +51,52 @@ class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
                     "result_limit must be a positive non-boolean integer",
                 ):
                     PortfolioAwareCandidateOptimizer(result_limit=invalid)
+
+    def test_generated_candidate_validation_ignores_caller_decimal_context(self) -> None:
+        legs = [
+            CandidateLeg(
+                "e1|winner|a",
+                "e1",
+                Decimal("1.23456789"),
+                Decimal("0.87654321"),
+            ),
+            CandidateLeg(
+                "e2|winner|a",
+                "e2",
+                Decimal("1.98765432"),
+                Decimal("0.76543219"),
+            ),
+        ]
+        optimizer = PortfolioAwareCandidateOptimizer(
+            generator=BeamParlayCandidateSearch(
+                beam_width=10,
+                max_legs=2,
+                result_limit=10,
+            )
+        )
+
+        with localcontext(Context(prec=5)):
+            impacts = optimizer.optimize(
+                [],
+                legs,
+                _groups(),
+                stake="1",
+                minimum_legs=2,
+            )
+
+        self.assertEqual(len(impacts), 1)
+        self.assertEqual(
+            impacts[0].candidate.combined_odds,
+            Decimal("2.4538941998917848"),
+        )
+        self.assertEqual(
+            impacts[0].candidate.independent_probability,
+            Decimal("0.6709343888599299"),
+        )
+        self.assertEqual(
+            impacts[0].candidate.expected_profit_per_unit,
+            Decimal("0.646402005331321294939224914"),
+        )
 
     def test_equal_rank_candidates_have_input_order_independent_limit_selection(self) -> None:
         first = _candidate("e1")

@@ -317,9 +317,76 @@ print("SOURCE_SNAPSHOT=PASS")
 $trustedPackageLauncher = @'
 import hashlib
 import json
+import os
 import pathlib
+import re
+import stat
+import subprocess
 import sys
 import types
+
+bound_git_text = os.environ.get("AUTOSPORT_BOUND_GIT_EXECUTABLE")
+bound_git_sha256 = os.environ.get("AUTOSPORT_BOUND_GIT_SHA256")
+if not bound_git_text or not bound_git_sha256:
+    raise SystemExit("trusted package launcher is missing bound Git executable provenance")
+if re.fullmatch(r"[0-9a-f]{64}", bound_git_sha256) is None:
+    raise SystemExit("trusted package launcher received a non-canonical bound Git SHA-256")
+bound_git = pathlib.Path(bound_git_text)
+if not bound_git.is_absolute():
+    raise SystemExit("trusted package launcher requires an absolute bound Git executable path")
+try:
+    bound_git_before = bound_git.lstat()
+except OSError as exc:
+    raise SystemExit("bound Git executable is not readable") from exc
+if stat.S_ISLNK(bound_git_before.st_mode) or not stat.S_ISREG(bound_git_before.st_mode):
+    raise SystemExit("bound Git executable must be a regular non-symlink file")
+if int(getattr(bound_git_before, "st_file_attributes", 0)) & int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+    raise SystemExit("bound Git executable must not be a Windows reparse point")
+bound_git_bytes = bound_git.read_bytes()
+try:
+    bound_git_after = bound_git.lstat()
+except OSError as exc:
+    raise SystemExit("bound Git executable disappeared during verification") from exc
+bound_git_identity = (
+    int(bound_git_before.st_dev),
+    int(bound_git_before.st_ino),
+    int(bound_git_before.st_size),
+    int(bound_git_before.st_mtime_ns),
+)
+if bound_git_identity != (
+    int(bound_git_after.st_dev),
+    int(bound_git_after.st_ino),
+    int(bound_git_after.st_size),
+    int(bound_git_after.st_mtime_ns),
+):
+    raise SystemExit("bound Git executable changed during verification")
+if hashlib.sha256(bound_git_bytes).hexdigest() != bound_git_sha256:
+    raise SystemExit("bound Git executable SHA-256 mismatch")
+
+_original_popen = subprocess.Popen
+
+def _bound_git_popen(command, *args, **kwargs):
+    rewritten = command
+    if isinstance(command, (list, tuple)) and command:
+        first = os.fspath(command[0])
+        first_name = pathlib.Path(first).name.lower()
+        if first.lower() in {"git", "git.exe"}:
+            current = bound_git.lstat()
+            current_identity = (
+                int(current.st_dev),
+                int(current.st_ino),
+                int(current.st_size),
+                int(current.st_mtime_ns),
+            )
+            if current_identity != bound_git_identity:
+                raise RuntimeError("bound Git executable identity changed before package Git invocation")
+            rewritten = [str(bound_git), *command[1:]]
+        elif first_name in {"git", "git.exe"}:
+            if os.path.normcase(os.path.abspath(first)) != os.path.normcase(str(bound_git)):
+                raise RuntimeError("package consumer attempted to invoke an unbound Git executable")
+    return _original_popen(rewritten, *args, **kwargs)
+
+subprocess.Popen = _bound_git_popen
 
 root = pathlib.Path(sys.argv[1])
 manifest = json.loads(sys.argv[2])
@@ -413,8 +480,28 @@ Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' } | ForEach-Object {
 $env:GIT_NO_REPLACE_OBJECTS = '1'
 $gitCommands = @(Get-Command git -CommandType Application -ErrorAction Stop)
 if ($gitCommands.Count -lt 1) { throw 'Unable to resolve Git application' }
-$gitExecutable = [string]$gitCommands[0].Source
+$gitExecutable = [System.IO.Path]::GetFullPath([string]$gitCommands[0].Source)
 if ([string]::IsNullOrWhiteSpace($gitExecutable)) { throw 'Resolved Git application has an empty source path' }
+try {
+  $gitExecutableLock = [System.IO.File]::Open(
+    $gitExecutable,
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::Read
+  )
+} catch {
+  throw "Unable to acquire immutable Git executable read fence: $($_.Exception.Message)"
+}
+$gitExecutableHasher = [System.Security.Cryptography.SHA256]::Create()
+try {
+  $gitExecutableSha256 = ([System.BitConverter]::ToString($gitExecutableHasher.ComputeHash($gitExecutableLock))).Replace('-', '').ToLowerInvariant()
+} finally {
+  $gitExecutableHasher.Dispose()
+}
+if ($gitExecutableSha256 -notmatch '^[0-9a-f]{64}$') { throw 'Resolved Git executable SHA-256 is not canonical' }
+$gitExecutableLock.Position = 0
+$env:AUTOSPORT_BOUND_GIT_EXECUTABLE = $gitExecutable
+$env:AUTOSPORT_BOUND_GIT_SHA256 = $gitExecutableSha256
 
 $checkoutHead = (& $gitExecutable rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw "Unable to resolve checkout HEAD; git exited $LASTEXITCODE" }
@@ -948,7 +1035,9 @@ $trustedPackageManifestJson = [string]$trustedPackageManifestLines[0]
 
 # Execute the final package consumer only from exact source_sha bytes. The live
 # checkout paths can still mutate after the source gate, but those bytes are never
-# imported or executed by the package assembly process.
+# imported or executed by the package assembly process. Package-time Git calls
+# are forced through the same hash-bound, retained-fence executable resolved at
+# build bootstrap; PATH and checkout-local Git names cannot redefine the oracle.
 $trustedPackageArchive = Join-Path $boundArtifactRoot 'trusted-package-source.zip'
 $trustedPackageRoot = Join-Path $boundArtifactRoot 'trusted-package-source'
 & $gitExecutable archive --format=zip "--output=$trustedPackageArchive" $sourceSha -- scripts/package_windows.py src/autosport/release_package.py src/autosport/data_tool_package.py
@@ -1112,3 +1201,6 @@ $freshEvidence = [ordered]@{
 $freshEvidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $PWD 'dist/fresh-extraction-verification.json') -Encoding utf8
 Remove-Item -LiteralPath $sourceVerifier -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $boundArtifactRoot -Recurse -Force -ErrorAction SilentlyContinue
+$gitExecutableLock.Dispose()
+Remove-Item Env:AUTOSPORT_BOUND_GIT_EXECUTABLE -ErrorAction SilentlyContinue
+Remove-Item Env:AUTOSPORT_BOUND_GIT_SHA256 -ErrorAction SilentlyContinue

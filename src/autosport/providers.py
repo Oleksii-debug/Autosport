@@ -158,7 +158,7 @@ class ProviderBatch:
 
     def __post_init__(self) -> None:
         _validate_source_id(self.source_id)
-        if not isinstance(self.quotes, tuple):
+        if type(self.quotes) is not tuple:
             raise TypeError("provider batch quotes must be a tuple of ProviderQuote values")
         for quote in self.quotes:
             if not isinstance(quote, ProviderQuote):

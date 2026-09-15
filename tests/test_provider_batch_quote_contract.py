@@ -23,6 +23,21 @@ class _MalformedQuotesProvider:
         return ProviderBatch(self.source_id, self.quotes)  # type: ignore[arg-type]
 
 
+class _ChangingQuoteTuple(tuple):
+    def __new__(cls, quote: ProviderQuote) -> _ChangingQuoteTuple:
+        return super().__new__(cls, (quote,))
+
+    def __init__(self, quote: ProviderQuote) -> None:
+        del quote
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        if self.iterations == 1:
+            return tuple.__iter__(self)
+        return iter((object(),))
+
+
 def _quote() -> ProviderQuote:
     return ProviderQuote(
         provider_event_id="event-1",
@@ -39,13 +54,23 @@ class ProviderBatchQuoteContractTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "quotes must be a tuple"):
             ProviderBatch("fixture", [_quote()])  # type: ignore[arg-type]
 
+    def test_batch_rejects_tuple_subclass_before_iteration(self) -> None:
+        quotes = _ChangingQuoteTuple(_quote())
+
+        with self.assertRaisesRegex(TypeError, "quotes must be a tuple"):
+            ProviderBatch("fixture", quotes)
+
+        self.assertEqual(quotes.iterations, 0)
+
     def test_batch_rejects_non_quote_tuple_member(self) -> None:
         with self.assertRaisesRegex(TypeError, "quote must be ProviderQuote"):
             ProviderBatch("fixture", (_quote(), object()))  # type: ignore[arg-type]
 
     def test_malformed_quote_container_fails_before_market_persistence(self) -> None:
+        hostile_quotes = _ChangingQuoteTuple(_quote())
         cases = (
             ([_quote()], "quotes must be a tuple"),
+            (hostile_quotes, "quotes must be a tuple"),
             ((_quote(), object()), "quote must be ProviderQuote"),
         )
         for quotes, message in cases:
@@ -74,6 +99,8 @@ class ProviderBatchQuoteContractTests(unittest.TestCase):
                     self.assertIsNone(state.last_cursor)
                 finally:
                     store.close()
+
+        self.assertEqual(hostile_quotes.iterations, 0)
 
     def test_canonical_tuple_of_provider_quotes_remains_valid(self) -> None:
         quote = _quote()

@@ -29,6 +29,23 @@ def _add_secondary_failure_note(
         return
 
 
+def _stable_stat_metadata(left: os.stat_result, right: os.stat_result) -> bool:
+    """Compare metadata only within one stat domain, never path-stat to fstat identity."""
+
+    return (
+        left.st_mode == right.st_mode
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+    )
+
+
+def _open_read_only_descriptor(path: Path) -> int:
+    """Open a verification-only descriptor without mutating the persistent lock file."""
+
+    return os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+
+
 class WorkspaceEconomicLock:
     """Cross-process, crash-releasing exclusive lock for PaperBook/ledger mutations.
 
@@ -257,23 +274,71 @@ class WorkspaceEconomicLock:
         """Prove the opened handle is the current canonical single-link lock file."""
 
         try:
-            opened_stat = os.fstat(handle.fileno())
-            path_stat = os.stat(self.path, follow_symlinks=False)
+            opened_before = os.fstat(handle.fileno())
+            path_before = os.stat(self.path, follow_symlinks=False)
         except OSError as exc:
             raise WorkspaceEconomicLockError(
                 "workspace economic lock path changed during acquisition"
             ) from exc
-        self._require_regular_file(opened_stat)
-        self._require_regular_file(path_stat)
-        if not os.path.samestat(opened_stat, path_stat):
+        self._require_regular_file(opened_before)
+        self._require_regular_file(path_before)
+        self._require_single_link(opened_before)
+        self._require_single_link(path_before)
+
+        try:
+            verification_descriptor = _open_read_only_descriptor(self.path)
+        except OSError as exc:
             raise WorkspaceEconomicLockError(
                 "workspace economic lock path changed during acquisition"
-            )
-        # Only after proving both stat snapshots identify the same inode can link
-        # count describe aliases of the canonical lock rather than an unlinked old
-        # handle from a pathname-replacement race.
-        self._require_single_link(opened_stat)
-        self._require_single_link(path_stat)
+            ) from exc
+
+        validation_error: BaseException | None = None
+        try:
+            try:
+                verification_stat = os.fstat(verification_descriptor)
+                opened_after = os.fstat(handle.fileno())
+                path_after = os.stat(self.path, follow_symlinks=False)
+                same_open_file = os.path.sameopenfile(
+                    handle.fileno(),
+                    verification_descriptor,
+                )
+            except OSError as exc:
+                raise WorkspaceEconomicLockError(
+                    "workspace economic lock path changed during acquisition"
+                ) from exc
+
+            self._require_regular_file(verification_stat)
+            self._require_regular_file(opened_after)
+            self._require_regular_file(path_after)
+            self._require_single_link(verification_stat)
+            self._require_single_link(opened_after)
+            self._require_single_link(path_after)
+
+            if (
+                not same_open_file
+                or not _stable_stat_metadata(opened_before, opened_after)
+                or not _stable_stat_metadata(path_before, path_after)
+            ):
+                raise WorkspaceEconomicLockError(
+                    "workspace economic lock path changed during acquisition"
+                )
+        except BaseException as exc:
+            validation_error = exc
+            raise
+        finally:
+            try:
+                os.close(verification_descriptor)
+            except BaseException as close_error:
+                if validation_error is not None:
+                    _add_secondary_failure_note(
+                        validation_error,
+                        "workspace economic lock verification handle close also failed",
+                        close_error,
+                    )
+                else:
+                    raise WorkspaceEconomicLockError(
+                        "cannot close workspace economic lock verification handle"
+                    ) from close_error
 
     @staticmethod
     def _require_regular_file(path_stat: os.stat_result) -> None:

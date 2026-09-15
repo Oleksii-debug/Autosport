@@ -288,6 +288,52 @@ class SourceHealthStore:
             value["quality_flags"] = ()
         return SourceHealthState(**value)
 
+    @staticmethod
+    def _validate_success_update(
+        *,
+        received: int,
+        accepted: int,
+        rejected: int,
+        quality_flags: tuple[str, ...],
+    ) -> None:
+        _validate_nonnegative_count("received", received)
+        _validate_nonnegative_count("accepted", accepted)
+        _validate_nonnegative_count("rejected", rejected)
+        if accepted + rejected > received:
+            raise ValueError("accepted and rejected counts cannot exceed received")
+        _validate_quality_flags(quality_flags)
+
+    def _record_success_locked(
+        self,
+        state: SourceHealthState,
+        *,
+        now: str,
+        received: int,
+        accepted: int,
+        rejected: int,
+        cursor: str | None,
+        latest_source_ts: str | None,
+        quality_flags: tuple[str, ...],
+    ) -> SourceHealthState:
+        state.poll_count += 1
+        state.total_received += received
+        state.total_accepted += accepted
+        state.total_rejected += rejected
+        state.consecutive_failures = 0
+        state.last_success_at = now
+        state.last_error = None
+        state.last_cursor = cursor
+        if latest_source_ts is not None:
+            if state.latest_source_ts is None or (
+                parse_source_timestamp(latest_source_ts)
+                >= parse_source_timestamp(state.latest_source_ts)
+            ):
+                state.latest_source_ts = latest_source_ts
+        state.quality_flags = tuple(sorted(quality_flags))
+        state.status = "degraded" if state.quality_flags else "healthy"
+        self._put(state)
+        return state
+
     def record_success(
         self,
         source_id: str,
@@ -300,33 +346,78 @@ class SourceHealthStore:
         latest_source_ts: str | None,
         quality_flags: tuple[str, ...],
     ) -> SourceHealthState:
-        _validate_nonnegative_count("received", received)
-        _validate_nonnegative_count("accepted", accepted)
-        _validate_nonnegative_count("rejected", rejected)
-        if accepted + rejected > received:
-            raise ValueError("accepted and rejected counts cannot exceed received")
-        _validate_quality_flags(quality_flags)
+        self._validate_success_update(
+            received=received,
+            accepted=accepted,
+            rejected=rejected,
+            quality_flags=quality_flags,
+        )
 
         with self._writer_guard():
             state = self.get(source_id)
-            state.poll_count += 1
-            state.total_received += received
-            state.total_accepted += accepted
-            state.total_rejected += rejected
-            state.consecutive_failures = 0
-            state.last_success_at = now
-            state.last_error = None
-            state.last_cursor = cursor
-            if latest_source_ts is not None:
-                if state.latest_source_ts is None or (
-                    parse_source_timestamp(latest_source_ts)
-                    >= parse_source_timestamp(state.latest_source_ts)
-                ):
-                    state.latest_source_ts = latest_source_ts
-            state.quality_flags = tuple(sorted(quality_flags))
-            state.status = "degraded" if state.quality_flags else "healthy"
-            self._put(state)
-            return state
+            return self._record_success_locked(
+                state,
+                now=now,
+                received=received,
+                accepted=accepted,
+                rejected=rejected,
+                cursor=cursor,
+                latest_source_ts=latest_source_ts,
+                quality_flags=quality_flags,
+            )
+
+    def record_success_if_current(
+        self,
+        expected_before: SourceHealthState,
+        *,
+        ambiguous_after: SourceHealthState | None = None,
+        now: str,
+        received: int,
+        accepted: int,
+        rejected: int,
+        cursor: str | None,
+        latest_source_ts: str | None,
+        quality_flags: tuple[str, ...],
+    ) -> SourceHealthState:
+        """Apply one success only if the durable state still equals expected_before."""
+        if not isinstance(expected_before, SourceHealthState):
+            raise TypeError("expected_before must be SourceHealthState")
+        expected_before.validate()
+        if ambiguous_after is not None:
+            if not isinstance(ambiguous_after, SourceHealthState):
+                raise TypeError("ambiguous_after must be SourceHealthState or null")
+            ambiguous_after.validate()
+            if ambiguous_after.source_id != expected_before.source_id:
+                raise ValueError("ambiguous_after source_id must match expected_before")
+        self._validate_success_update(
+            received=received,
+            accepted=accepted,
+            rejected=rejected,
+            quality_flags=quality_flags,
+        )
+
+        with self._writer_guard():
+            current = self.get(expected_before.source_id)
+            if ambiguous_after is not None and current == ambiguous_after:
+                raise RuntimeError(
+                    "source health matches the expected post-state but this outcome "
+                    "cannot prove it performed that durable mutation; refusing ambiguous retry"
+                )
+            if current != expected_before:
+                raise RuntimeError(
+                    "source health changed since the committed ingestion outcome; "
+                    "refusing ambiguous retry"
+                )
+            return self._record_success_locked(
+                current,
+                now=now,
+                received=received,
+                accepted=accepted,
+                rejected=rejected,
+                cursor=cursor,
+                latest_source_ts=latest_source_ts,
+                quality_flags=quality_flags,
+            )
 
     def record_failure(self, source_id: str, *, now: str, error: BaseException) -> SourceHealthState:
         with self._writer_guard():

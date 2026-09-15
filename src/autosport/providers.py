@@ -168,7 +168,7 @@ class ProviderBatch:
         if type(self.quality_flags) is not tuple:
             raise TypeError("provider batch quality_flags must be a tuple of strings")
         for flag in self.quality_flags:
-            if not isinstance(flag, str):
+            if type(flag) is not str:
                 raise TypeError("provider batch quality flag must be str")
             if not flag or flag != flag.strip():
                 raise ValueError("provider batch quality flag must be non-empty and trimmed")

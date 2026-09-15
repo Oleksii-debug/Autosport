@@ -52,6 +52,26 @@ class _ChangingQualityFlagsTuple(tuple):
         return iter(("MUTATED_PROVIDER_WARNING",))
 
 
+class _ChangingQualityFlag(str):
+    def __new__(cls) -> _ChangingQualityFlag:
+        return super().__new__(cls, "PROVIDER_WARNING")
+
+    def __init__(self) -> None:
+        self.operations = 0
+        self.hash_calls = 0
+
+    def strip(self, chars: str | None = None) -> str:
+        self.operations += 1
+        return self
+
+    def __hash__(self) -> int:
+        self.operations += 1
+        self.hash_calls += 1
+        if self.hash_calls == 1:
+            return str.__hash__(self)
+        raise RuntimeError("quality flag hash changed after validation")
+
+
 def _quote() -> ProviderQuote:
     return ProviderQuote(
         provider_event_id="event-1",
@@ -102,6 +122,14 @@ class ProviderBatchQuoteContractTests(unittest.TestCase):
             ProviderBatch("fixture", (_quote(),), quality_flags=quality_flags)
 
         self.assertEqual(quality_flags.iterations, 0)
+
+    def test_batch_rejects_quality_flag_str_subclass_before_member_operations(self) -> None:
+        flag = _ChangingQualityFlag()
+
+        with self.assertRaisesRegex(TypeError, "quality flag must be str"):
+            ProviderBatch("fixture", (_quote(),), quality_flags=(flag,))
+
+        self.assertEqual(flag.operations, 0)
 
     def test_malformed_quote_container_fails_before_market_persistence(self) -> None:
         hostile_quotes = _ChangingQuoteTuple(_quote())
@@ -159,6 +187,40 @@ class ProviderBatchQuoteContractTests(unittest.TestCase):
                     )
 
                 self.assertEqual(quality_flags.iterations, 0)
+                self.assertEqual(store.events(), [])
+                state = health.get("fixture")
+                self.assertEqual(state.status, "failed")
+                self.assertEqual(state.poll_count, 1)
+                self.assertEqual(state.total_failures, 1)
+                self.assertEqual(state.total_received, 0)
+                self.assertEqual(state.total_accepted, 0)
+                self.assertEqual(state.total_rejected, 0)
+                self.assertIsNone(state.last_success_at)
+                self.assertIsNone(state.last_cursor)
+                self.assertEqual(state.quality_flags, ())
+            finally:
+                store.close()
+
+    def test_hostile_quality_flag_member_fails_before_market_or_success_progress(self) -> None:
+        flag = _ChangingQualityFlag()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    health_store=health,
+                    clock=lambda: "2026-09-14T09:10:01+00:00",
+                )
+
+                with self.assertRaisesRegex(TypeError, "quality flag must be str"):
+                    engine.poll_once(
+                        _MalformedQualityFlagsProvider((flag,)),
+                        max_items=10,
+                    )
+
+                self.assertEqual(flag.operations, 0)
                 self.assertEqual(store.events(), [])
                 state = health.get("fixture")
                 self.assertEqual(state.status, "failed")

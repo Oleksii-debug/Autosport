@@ -44,7 +44,7 @@ class RunRegistryGlobalRunIdIntegrityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "run_registry.json"
-            registry = RunRegistry(path)
+            registry = RunRegistry.initialize_pristine(path)
             base = self._begin(registry)
             self._complete(registry, base, root)
             before = path.read_bytes()
@@ -59,7 +59,7 @@ class RunRegistryGlobalRunIdIntegrityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "run_registry.json"
-            registry = RunRegistry(path)
+            registry = RunRegistry.initialize_pristine(path)
             base = self._begin(registry)
             self._complete(registry, base, root)
             before = path.read_bytes()
@@ -74,7 +74,7 @@ class RunRegistryGlobalRunIdIntegrityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "run_registry.json"
-            registry = RunRegistry(path)
+            registry = RunRegistry.initialize_pristine(path)
 
             first = self._begin(
                 registry,

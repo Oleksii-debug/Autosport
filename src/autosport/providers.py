@@ -70,24 +70,18 @@ def _validate_provider_timestamp(value: object, name: str) -> str:
     return timestamp
 
 
-def _validate_json_value(value: object, field: str) -> None:
-    """Require bounded durable JSON without type drift, cycles, or non-finite numbers."""
+def _snapshot_json_value(value: object, field: str) -> Any:
+    """Validate durable provider JSON while copying it into an independent value graph."""
 
-    stack: list[tuple[object, str, int, bool]] = [(value, field, 0, False)]
     active_containers: set[int] = set()
 
-    while stack:
-        current, path, depth, exiting = stack.pop()
-        if exiting:
-            active_containers.remove(id(current))
-            continue
-
+    def snapshot(current: object, path: str, depth: int) -> Any:
         if current is None or isinstance(current, (str, bool, int)):
-            continue
+            return current
         if isinstance(current, float):
             if not math.isfinite(current):
                 raise ValueError(f"{path} contains non-finite JSON number")
-            continue
+            return current
         if isinstance(current, (list, dict)):
             if depth > _MAX_PROVIDER_METADATA_NESTING:
                 raise ValueError(
@@ -98,20 +92,26 @@ def _validate_json_value(value: object, field: str) -> None:
             if container_id in active_containers:
                 raise ValueError(f"{path} contains cyclic JSON container")
             active_containers.add(container_id)
-            stack.append((current, path, depth, True))
+            try:
+                if isinstance(current, list):
+                    return [
+                        snapshot(item, f"{path}[{index}]", depth + 1)
+                        for index, item in enumerate(current)
+                    ]
 
-            if isinstance(current, list):
-                for index, item in enumerate(current):
-                    stack.append((item, f"{path}[{index}]", depth + 1, False))
-            else:
+                result: dict[str, Any] = {}
                 for key, item in current.items():
                     if not isinstance(key, str):
                         raise TypeError(f"{path} contains non-string JSON object key")
-                    stack.append((item, f"{path}.{key}", depth + 1, False))
-            continue
+                    result[key] = snapshot(item, f"{path}.{key}", depth + 1)
+                return result
+            finally:
+                active_containers.remove(container_id)
         raise TypeError(
             f"{path} contains non-canonical JSON value type {type(current).__name__}"
         )
+
+    return snapshot(value, field, 0)
 
 
 def _scoped_identity(source_id: str, provider_component: str) -> str:
@@ -205,7 +205,9 @@ class CanonicalNormalizer:
             score_state = _validate_provider_text(score_state, "score_state")
         if not isinstance(quote.metadata, dict):
             raise TypeError("metadata must be dict")
-        _validate_json_value(quote.metadata, "metadata")
+        metadata = _snapshot_json_value(quote.metadata, "metadata")
+        if not isinstance(metadata, dict):
+            raise TypeError("metadata must be dict")
         return MarketEvent(
             event_id=_scoped_identity(source_id, quote.provider_event_id),
             market_id=_scoped_identity(source_id, quote.provider_market_id),
@@ -219,7 +221,7 @@ class CanonicalNormalizer:
             source_ts=source_ts,
             ingest_ts=observed_ts,
             score_state=score_state,
-            metadata=dict(quote.metadata),
+            metadata=metadata,
         )
 
 

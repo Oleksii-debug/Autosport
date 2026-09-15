@@ -28,13 +28,32 @@ def test_independent_consumer_checks_producer_digest_before_mutable_json() -> No
     consumer = workflow[start:end]
 
     producer_expected = "$producerPackageSha = [string]$env:AUTOSPORT_PRODUCER_PACKAGE_SHA256"
-    producer_check = "$packageSha = Assert-ProducerPackageDigest -Path $package -Expected $producerPackageSha"
+    snapshot_capture = (
+        "python scripts/verify_source_checkout.py --bind-artifact $package "
+        "--bound-output $consumerPackage --digest-output $consumerDigestPath"
+    )
+    captured_digest = "$packageSha = (Get-Content -LiteralPath $consumerDigestPath -Raw).Trim()"
+    producer_check = "if ($packageSha -ne $producerPackageSha) {"
+    snapshot_check = (
+        "[void](Assert-ProducerPackageDigest -Path $consumerPackage "
+        "-Expected $producerPackageSha -Label 'Consumer-bound release ZIP snapshot')"
+    )
     mutable_json_read = "$verification = Get-Content $verificationPath -Raw | ConvertFrom-Json"
 
     assert producer_expected in consumer
+    assert snapshot_capture in consumer
+    assert captured_digest in consumer
     assert producer_check in consumer
+    assert snapshot_check in consumer
     assert mutable_json_read in consumer
-    assert consumer.index(producer_expected) < consumer.index(producer_check) < consumer.index(mutable_json_read)
+    assert (
+        consumer.index(producer_expected)
+        < consumer.index(snapshot_capture)
+        < consumer.index(captured_digest)
+        < consumer.index(producer_check)
+        < consumer.index(snapshot_check)
+        < consumer.index(mutable_json_read)
+    )
 
 
 def test_coordinated_zip_and_json_replacement_is_rejected_by_earlier_digest() -> None:

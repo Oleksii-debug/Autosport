@@ -7,6 +7,7 @@ import math
 import shutil
 import tempfile
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, TextIO
 
@@ -50,6 +51,40 @@ def _strict_json_float(value: str) -> float:
     return parsed
 
 
+def _validate_mcm_publish_time_range(
+    value: Any,
+    *,
+    path: Path,
+    line_number: int,
+) -> None:
+    """Fail closed before legacy parse when numeric ``mcm.pt`` cannot become a UTC timestamp."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return
+
+    try:
+        numeric = float(value)
+    except OverflowError as exc:
+        raise ValueError(
+            f"{path}: line {line_number} Betfair publish time pt is outside "
+            "representable epoch-millisecond range"
+        ) from exc
+
+    if not math.isfinite(numeric):
+        raise ValueError(
+            f"{path}: line {line_number} Betfair publish time pt must be finite "
+            "epoch milliseconds"
+        )
+
+    try:
+        datetime.fromtimestamp(numeric / 1000.0, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ValueError(
+            f"{path}: line {line_number} Betfair publish time pt is outside "
+            "representable epoch-millisecond range"
+        ) from exc
+
+
 def _validate_strict_json_inputs(inputs: Iterable[Path]) -> None:
     """Reject ambiguous/non-standard raw JSON before the legacy decoder sees it."""
 
@@ -73,6 +108,12 @@ def _validate_strict_json_inputs(inputs: Iterable[Path]) -> None:
                     if not isinstance(parsed, dict):
                         raise ValueError(
                             f"{path}: line {line_number} must be a JSON object"
+                        )
+                    if parsed.get("op") == "mcm":
+                        _validate_mcm_publish_time_range(
+                            parsed.get("pt"),
+                            path=path,
+                            line_number=line_number,
                         )
         except UnicodeError as exc:
             raise ValueError(f"{path}: Betfair historical input must be UTF-8 text") from exc

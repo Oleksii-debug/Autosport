@@ -126,6 +126,79 @@ class BetfairHistoricalReadOnceTests(unittest.TestCase):
             legacy_import.assert_not_called()
             self.assertFalse(output.exists())
 
+    def test_giant_integer_publish_time_fails_closed_at_public_boundary(self) -> None:
+        with TemporaryDirectory() as temporary:
+            tmp_path = Path(temporary)
+            source = tmp_path / "market.jsonl"
+            source.write_text(
+                '{"op":"mcm","pt":' + ("9" * 401) + '}\n',
+                encoding="utf-8",
+            )
+            output = tmp_path / "dataset"
+
+            with (
+                patch.object(read_once, "import_betfair_historical") as legacy_import,
+                patch("builtins.print") as emit,
+            ):
+                result = read_once.main(
+                    [
+                        str(source),
+                        "--output-dir",
+                        str(output),
+                        "--acquired-at",
+                        "2026-09-13T08:00:00Z",
+                        "--terms-reference",
+                        "terms",
+                        "--retention-basis",
+                        "basis",
+                    ]
+                )
+
+            self.assertEqual(result, 3)
+            legacy_import.assert_not_called()
+            self.assertFalse(output.exists())
+            self.assertTrue(
+                any(
+                    "betfair_historical_import=FAIL_CLOSED" in str(call.args[0])
+                    for call in emit.call_args_list
+                )
+            )
+
+    def test_finite_unrepresentable_publish_time_fails_closed_at_public_boundary(self) -> None:
+        with TemporaryDirectory() as temporary:
+            tmp_path = Path(temporary)
+            source = tmp_path / "market.jsonl"
+            source.write_text('{"op":"mcm","pt":1e300}\n', encoding="utf-8")
+            output = tmp_path / "dataset"
+
+            with (
+                patch.object(read_once, "import_betfair_historical") as legacy_import,
+                patch("builtins.print") as emit,
+            ):
+                result = read_once.main(
+                    [
+                        str(source),
+                        "--output-dir",
+                        str(output),
+                        "--acquired-at",
+                        "2026-09-13T08:00:00Z",
+                        "--terms-reference",
+                        "terms",
+                        "--retention-basis",
+                        "basis",
+                    ]
+                )
+
+            self.assertEqual(result, 3)
+            legacy_import.assert_not_called()
+            self.assertFalse(output.exists())
+            self.assertTrue(
+                any(
+                    "betfair_historical_import=FAIL_CLOSED" in str(call.args[0])
+                    for call in emit.call_args_list
+                )
+            )
+
     def test_truncated_compressed_inputs_fail_closed_at_user_facing_boundary(self) -> None:
         payload = b'{"op":"mcm","pt":1789372800000}\n'
         for suffix, compress in ((".bz2", bz2.compress), (".gz", gzip.compress)):

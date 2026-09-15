@@ -56,3 +56,35 @@ def test_canonical_snapshot_does_not_require_path_stat_identity_fields(
     )
 
     assert snapshot.payload == payload
+
+
+def test_canonical_snapshot_rejects_redirected_verification_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "paper_book.json"
+    replacement = tmp_path / "replacement.json"
+    source.write_bytes(b"same-size-old")
+    replacement.write_bytes(b"same-size-new")
+
+    real_open = Path.open
+    source_open_count = 0
+
+    def redirected_open(self: Path, *args, **kwargs):
+        nonlocal source_open_count
+        if self == source:
+            source_open_count += 1
+            if source_open_count >= 2:
+                return real_open(replacement, *args, **kwargs)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", redirected_open)
+
+    with pytest.raises(
+        run_transaction.RunTransactionError,
+        match="canonical path must be a stable regular non-symlink file",
+    ):
+        run_transaction.RunTransaction._read_canonical_file_snapshot(
+            source,
+            "PaperBook",
+        )

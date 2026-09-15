@@ -84,7 +84,10 @@ def test_local_windows_build_uses_trusted_snapshot_immediately_before_pyinstalle
     trusted_gate = "python $sourceVerifier --source-sha $sourceSha --late-build-boundary"
     live_late_gate = "python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary"
     gate_check = 'if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport.exe exited $LASTEXITCODE" }'
-    write_fence = '& icacls $trustedBuildRoot /deny "*${currentSid}:(OI)(CI)(W,D,DC)" /T /C'
+    write_fence = (
+        '& icacls $trustedBuildRoot /deny '
+        '"*${currentSid}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)" /T /C'
+    )
     locked_snapshot_gate = (
         "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "
         "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"

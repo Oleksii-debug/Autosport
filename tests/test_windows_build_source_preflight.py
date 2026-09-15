@@ -232,7 +232,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
                         late_build_boundary=True,
                     )
 
-    def test_cli_late_boundary_sanitizes_valid_generated_inputs_before_proof(self) -> None:
+    def test_cli_late_boundary_rejects_bytecode_cache_after_valid_egg_info_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source_sha = self._clean_repo(root)
@@ -259,11 +259,15 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
                         "--late-build-boundary",
                     ],
                 ):
-                    self.assertEqual(verify_source_checkout.main(), 0)
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        r"ignored:src/autosport/__pycache__/",
+                    ):
+                        verify_source_checkout.main()
             finally:
                 os.chdir(old_cwd)
 
-            self.assertFalse(cache.exists())
+            self.assertTrue(cache.exists())
             self.assertFalse(egg_info.exists())
 
     def test_cli_late_boundary_rejects_hostile_editable_entry_point_metadata(self) -> None:
@@ -301,7 +305,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
 
             self.assertTrue(hostile.exists())
 
-    def test_generated_build_input_cleanup_removes_cache_and_editable_metadata(self) -> None:
+    def test_generated_build_input_cleanup_removes_only_editable_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source_sha = self._clean_repo(root)
@@ -317,13 +321,17 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 verify_source_checkout.clean_late_generated_build_inputs(root)
-                self.assertFalse(cache.exists())
+                self.assertTrue(cache.exists())
                 self.assertFalse(egg_info.exists())
-                verify_source_checkout.verify_source_checkout(
-                    source_sha,
-                    repo_root=root,
-                    late_build_boundary=True,
-                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"ignored:src/autosport/__pycache__/",
+                ):
+                    verify_source_checkout.verify_source_checkout(
+                        source_sha,
+                        repo_root=root,
+                        late_build_boundary=True,
+                    )
 
     def test_later_boundary_rejects_post_first_build_tracked_package_input_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -461,6 +469,24 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         self.assertIn("fetch-depth: 0", workflow)
         self.assertIn(preflight, workflow)
         self.assertLess(workflow.index(preflight), workflow.index(build))
+
+    def test_post_build_release_consumers_use_verified_package_extractions(self) -> None:
+        workflow = Path(".github/workflows/windows-build.yml").read_text(encoding="utf-8")
+        nvda_smoke = Path("scripts/nvda_evidence_package_smoke.ps1").read_text(encoding="utf-8")
+        walk_forward = Path("scripts/walk_forward_package_smoke.ps1").read_text(encoding="utf-8")
+        forecast_origin = Path("scripts/walk_forward_origin_package_smoke.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("name: Materialize verified independent package extraction", workflow)
+        self.assertIn("AUTOSPORT_PACKAGED_EXE=", workflow)
+        self.assertIn("AUTOSPORT_PACKAGED_DATA_EXE=", workflow)
+        self.assertIn("Independent package Autosport.exe hash mismatch", workflow)
+        self.assertIn("Independent package Autosport-Data.exe hash mismatch", workflow)
+        self.assertNotIn("Join-Path $PWD 'dist/Autosport-Data.exe'", workflow)
+        self.assertNotIn("Join-Path $PWD 'dist/Autosport.exe'", workflow)
+
+        for script in (nvda_smoke, walk_forward, forecast_origin):
+            self.assertIn("$env:AUTOSPORT_PACKAGED_DATA_EXE", script)
+            self.assertNotIn("Join-Path $PWD 'dist/Autosport-Data.exe'", script)
 
 
 if __name__ == "__main__":

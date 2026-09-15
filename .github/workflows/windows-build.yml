@@ -37,6 +37,49 @@ jobs:
         run: python scripts/verify_source_checkout.py --source-sha $env:AUTOSPORT_SOURCE_SHA
       - shell: pwsh
         run: ./scripts/build_windows.ps1
+      - name: Materialize verified independent package extraction
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
+          $verificationPath = Join-Path $PWD 'dist/fresh-extraction-verification.json'
+          if (-not (Test-Path $package -PathType Leaf)) { throw 'Independent package extraction is missing release ZIP' }
+          if (-not (Test-Path $verificationPath -PathType Leaf)) { throw 'Independent package extraction is missing canonical fresh verification' }
+
+          $verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
+          if ($verification.status -ne 'PASS') { throw 'Canonical fresh extraction is not PASS before independent package extraction' }
+          if ([string]$verification.source_sha -ne [string]$env:AUTOSPORT_SOURCE_SHA) { throw 'Canonical fresh extraction source_sha does not match exact workflow head' }
+          $packageSha = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ([string]$verification.package_sha256 -ne $packageSha) { throw 'Release ZIP digest drifted after canonical fresh extraction' }
+
+          $postPackageExtractRoot = Join-Path $PWD '.build-post-package-extraction'
+          if (Test-Path $postPackageExtractRoot) { Remove-Item -Recurse -Force $postPackageExtractRoot }
+          New-Item -ItemType Directory -Path $postPackageExtractRoot | Out-Null
+          Expand-Archive -LiteralPath $package -DestinationPath $postPackageExtractRoot -Force
+          $postPackageRoot = Join-Path $postPackageExtractRoot 'Autosport-V1'
+          $buildInfoPath = Join-Path $postPackageRoot 'BUILD_INFO.json'
+          $packagedExe = Join-Path $postPackageRoot 'Autosport.exe'
+          $packagedDataExe = Join-Path $postPackageRoot 'Autosport-Data.exe'
+          foreach ($required in @($buildInfoPath, $packagedExe, $packagedDataExe)) {
+            if (-not (Test-Path $required -PathType Leaf)) { throw "Independent package extraction is missing required artifact: $required" }
+          }
+
+          $buildInfo = Get-Content $buildInfoPath -Raw | ConvertFrom-Json
+          if ([string]$buildInfo.source_sha -ne [string]$env:AUTOSPORT_SOURCE_SHA) { throw 'Independent package BUILD_INFO source_sha mismatch' }
+          if ($buildInfo.real_money_execution -ne $false -or $buildInfo.human_tested -ne $false -or $buildInfo.nvda_verified -ne $false) {
+            throw 'Independent package extraction violated prehuman truth labels'
+          }
+          $packagedExeSha = (Get-FileHash -LiteralPath $packagedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $packagedDataExeSha = (Get-FileHash -LiteralPath $packagedDataExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($packagedExeSha -ne [string]$buildInfo.autosport_exe_sha256) { throw 'Independent package Autosport.exe hash mismatch' }
+          if ($packagedDataExeSha -ne [string]$buildInfo.autosport_data_exe_sha256) { throw 'Independent package Autosport-Data.exe hash mismatch' }
+          if ($packagedExeSha -ne [string]$verification.autosport_exe_sha256) { throw 'Independent package Autosport.exe drifted from canonical fresh extraction' }
+          if ($packagedDataExeSha -ne [string]$verification.autosport_data_exe_sha256) { throw 'Independent package Autosport-Data.exe drifted from canonical fresh extraction' }
+
+          "AUTOSPORT_PACKAGED_ROOT=$postPackageRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AUTOSPORT_PACKAGED_EXE=$packagedExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AUTOSPORT_PACKAGED_DATA_EXE=$packagedDataExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Execute packaged NVDA evidence contract
         shell: pwsh
         run: ./scripts/nvda_evidence_package_smoke.ps1
@@ -45,8 +88,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $packagedDataExe = Join-Path $PWD 'dist/Autosport-Data.exe'
+          $packagedDataExe = [string]$env:AUTOSPORT_PACKAGED_DATA_EXE
           $freshDataExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
+          if ([string]::IsNullOrWhiteSpace($packagedDataExe)) { throw 'Packaged recovery smoke is missing verified package executable anchor' }
           if (-not (Test-Path $packagedDataExe -PathType Leaf)) { throw 'Packaged recovery smoke is missing Autosport-Data.exe' }
           if (-not (Test-Path $freshDataExe -PathType Leaf)) { throw 'Fresh-extracted recovery smoke is missing Autosport-Data.exe' }
 
@@ -94,9 +138,18 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
+          $packagedRoot = [string]$env:AUTOSPORT_PACKAGED_ROOT
+          $packagedExe = [string]$env:AUTOSPORT_PACKAGED_EXE
+          if ([string]::IsNullOrWhiteSpace($packagedRoot) -or [string]::IsNullOrWhiteSpace($packagedExe)) {
+            throw 'Packaged research demo audit is missing verified package extraction anchors'
+          }
+          $packagedDemo = Join-Path $packagedRoot 'examples/tt_demo'
+          if (-not (Test-Path $packagedExe -PathType Leaf)) { throw 'Packaged research demo audit is missing Autosport.exe' }
+          if (-not (Test-Path (Join-Path $packagedDemo 'research_plan.json') -PathType Leaf)) { throw 'Packaged research demo audit is missing shipped research plan' }
+
           $preAudit = Join-Path $PWD 'dist/research-demo-audit.json'
           if (Test-Path $preAudit) { Remove-Item -Force $preAudit }
-          $preProcess = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--research-demo-audit-output', $preAudit, (Join-Path $PWD 'examples/tt_demo') -Wait -PassThru
+          $preProcess = Start-Process -FilePath $packagedExe -ArgumentList '--research-demo-audit-output', $preAudit, $packagedDemo -Wait -PassThru
           if ($preProcess.ExitCode -ne 0) { throw "Packaged research demo audit exited $($preProcess.ExitCode)" }
           $preEvidence = Get-Content $preAudit -Raw | ConvertFrom-Json
           if ($preEvidence.status -ne 'PASS') { throw 'Packaged research demo audit did not PASS' }

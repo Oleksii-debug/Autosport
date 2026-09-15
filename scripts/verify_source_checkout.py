@@ -369,7 +369,7 @@ def _generated_build_inputs(repo_root: Path) -> tuple[list[PurePosixPath], list[
     for path in _ignored_checkout_paths(repo_root):
         relative = PurePosixPath(path)
         for index, part in enumerate(relative.parts):
-            if part == "__pycache__" or part.endswith(".egg-info"):
+            if part.endswith(".egg-info"):
                 paths.append(relative)
                 roots.add(PurePosixPath(*relative.parts[: index + 1]))
                 break

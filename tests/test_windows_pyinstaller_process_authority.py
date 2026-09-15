@@ -42,13 +42,11 @@ def test_preexisting_vm_write_authority_is_rejected(
 ) -> None:
     authority = _load_process_authority()
     current_pid = 101
-    parent_pid = 202
     hostile_pid = 303
     identity_handle = 0x123
     process_object = 0xABCDEF
 
     monkeypatch.setattr(authority.os, "getpid", lambda: current_pid)
-    monkeypatch.setattr(authority.os, "getppid", lambda: parent_pid)
     monkeypatch.setattr(authority, "_open_self_identity_handle", lambda: identity_handle)
     monkeypatch.setattr(authority, "_close_handle", lambda _handle: None)
 
@@ -69,11 +67,11 @@ def test_preexisting_vm_write_authority_is_rejected(
         ]
     )
 
-    with pytest.raises(RuntimeError, match="pre-existing untrusted dangerous process handle"):
+    with pytest.raises(RuntimeError, match="pre-existing external dangerous process handle"):
         fence._require_no_untrusted_preexisting_authority()
 
 
-def test_parent_process_remains_explicitly_trusted(
+def test_parent_process_dangerous_broker_authority_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     authority = _load_process_authority()
@@ -83,7 +81,6 @@ def test_parent_process_remains_explicitly_trusted(
     process_object = 0xABCDEF
 
     monkeypatch.setattr(authority.os, "getpid", lambda: current_pid)
-    monkeypatch.setattr(authority.os, "getppid", lambda: parent_pid)
     monkeypatch.setattr(authority, "_open_self_identity_handle", lambda: identity_handle)
     monkeypatch.setattr(authority, "_close_handle", lambda _handle: None)
 
@@ -98,6 +95,39 @@ def test_parent_process_remains_explicitly_trusted(
             (
                 process_object,
                 parent_pid,
+                0x789,
+                authority._PROCESS_DUP_HANDLE | authority._PROCESS_VM_WRITE,
+            ),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="pre-existing external dangerous process handle"):
+        fence._require_no_untrusted_preexisting_authority()
+
+
+def test_current_process_dangerous_handles_are_not_external_brokers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_process_authority()
+    current_pid = 101
+    identity_handle = 0x123
+    process_object = 0xABCDEF
+
+    monkeypatch.setattr(authority.os, "getpid", lambda: current_pid)
+    monkeypatch.setattr(authority, "_open_self_identity_handle", lambda: identity_handle)
+    monkeypatch.setattr(authority, "_close_handle", lambda _handle: None)
+
+    fence = authority.ProcessDuplicationFence(
+        lambda: [
+            (
+                process_object,
+                current_pid,
+                identity_handle,
+                authority._PROCESS_QUERY_LIMITED_INFORMATION,
+            ),
+            (
+                process_object,
+                current_pid,
                 0x789,
                 authority._PROCESS_DUP_HANDLE | authority._PROCESS_VM_WRITE,
             ),

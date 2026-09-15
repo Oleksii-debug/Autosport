@@ -17,6 +17,7 @@ _FILE_WRITE_DATA = 0x00000002
 _FILE_APPEND_DATA = 0x00000004
 _FILE_WRITE_EA = 0x00000010
 _FILE_DELETE_CHILD = 0x00000040
+_FILE_READ_ATTRIBUTES = 0x00000080
 _FILE_WRITE_ATTRIBUTES = 0x00000100
 _DELETE_ACCESS = 0x00010000
 _READ_CONTROL = 0x00020000
@@ -42,6 +43,8 @@ _STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
 _MAX_SYSTEM_HANDLE_SNAPSHOT_BYTES = 64 * 1024 * 1024
 _TEST_DACL_REWRITE_ENV = "AUTOSPORT_TEST_REWRITE_EXPECTED_DACL_AFTER_RESOURCE_END"
 _FILE_ID_INFO_CLASS = 18
+_FILE_PROCESS_IDS_USING_FILE_INFORMATION = 47
+_TARGET_PROCESS_IDS_BUFFER_BYTES = 64 * 1024
 _PROCESS_DUP_HANDLE = 0x00000040
 _DUPLICATE_SAME_ACCESS = 0x00000002
 _MAX_UNINSPECTABLE_HANDLE_RESCANS = 4
@@ -68,6 +71,13 @@ class _FileIdInfo(ctypes.Structure):
     _fields_ = (
         ("VolumeSerialNumber", ctypes.c_ulonglong),
         ("FileId", _FileId128),
+    )
+
+
+class _IoStatusBlock(ctypes.Structure):
+    _fields_ = (
+        ("StatusOrPointer", ctypes.c_void_p),
+        ("Information", ctypes.c_size_t),
     )
 
 
@@ -203,13 +213,79 @@ def _candidate_file_identity(pid: int, handle_value: int) -> tuple[int, bytes]:
         close_handle(process)
 
 
+def _target_process_ids_using_file(raw_handle: Any) -> set[int]:
+    """Return the exact PIDs Windows reports as using the retained target file object."""
+
+    if os.name != "nt":
+        raise RuntimeError("target process-id oracle requires Windows")
+
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    query = ntdll.NtQueryInformationFile
+    query.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_IoStatusBlock),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        ctypes.c_int,
+    )
+    query.restype = ctypes.c_int32
+
+    buffer = ctypes.create_string_buffer(_TARGET_PROCESS_IDS_BUFFER_BYTES)
+    io_status = _IoStatusBlock()
+    status = int(
+        query(
+            raw_handle,
+            ctypes.byref(io_status),
+            ctypes.cast(buffer, ctypes.c_void_p),
+            len(buffer),
+            _FILE_PROCESS_IDS_USING_FILE_INFORMATION,
+        )
+    )
+    status_u32 = ctypes.c_uint32(status).value
+    if status_u32 != 0:
+        raise RuntimeError(
+            "target process-id oracle failed: "
+            f"NTSTATUS=0x{status_u32:08x}"
+        )
+
+    returned = int(io_status.Information)
+    pointer_size = ctypes.sizeof(ctypes.c_size_t)
+    count_size = ctypes.sizeof(ctypes.c_ulong)
+    ids_offset = ((count_size + pointer_size - 1) // pointer_size) * pointer_size
+    if returned < ids_offset or returned > len(buffer):
+        raise RuntimeError("target process-id oracle response was truncated")
+    count = int(ctypes.c_ulong.from_buffer_copy(buffer.raw[:count_size]).value)
+    required = ids_offset + count * pointer_size
+    if required > returned or required > len(buffer):
+        raise RuntimeError("target process-id oracle response length was inconsistent")
+
+    process_ids: set[int] = set()
+    for index in range(count):
+        offset = ids_offset + index * pointer_size
+        pid = int(
+            ctypes.c_size_t.from_buffer_copy(
+                buffer.raw[offset : offset + pointer_size]
+            ).value
+        )
+        if pid <= 0 or pid > 0xFFFFFFFF:
+            raise RuntimeError("target process-id oracle returned an invalid PID")
+        process_ids.add(pid)
+
+    current_pid = os.getpid()
+    if current_pid not in process_ids:
+        raise RuntimeError(
+            "target process-id oracle did not enumerate trusted current-process handle"
+        )
+    return process_ids
+
+
 def _process_same_user_scope() -> dict[int, bool]:
     """Classify active Windows PIDs against the current user's SID without opening them.
 
-    This is used only for different-object candidates whose file identity cannot be
-    inspected. A missing/unknown owner remains fail-closed; a positively different-user
-    process is outside the same-user mutation threat boundary and is not target-file
-    evidence merely because its handle has the same kernel object type.
+    This is used only for same-type candidates whose stable file identity cannot be
+    inspected. A missing/unknown owner remains fail-closed. A positively different-user
+    process is not sufficient target disassociation: it still requires the retained
+    target's process-id oracle to prove that PID is not using the protected file object.
     """
 
     if os.name != "nt":
@@ -371,8 +447,9 @@ def _require_no_competing_mutation_handles(
     Uninspectable same-type candidates are deferred until the full snapshot has been
     scanned so a proven same-kernel-object competitor cannot be masked by unrelated
     hosted-runner authority. A live uninspectable current-user candidate fails closed;
-    a positively different-user process is not promoted to target-file evidence solely
-    from object type. Unknown owner classification and vanished-row churn fail closed.
+    a different-user candidate is ignored only after the retained target's process-id
+    oracle positively disassociates its PID and the exact handle-table row remains live.
+    Unknown owner/oracle states and vanished-row churn fail closed or bounded-rescan.
     Proven same-file competitors remain fatal regardless of user. During a native
     PyInstaller resource update, current-process data/delete handles are the trusted
     mutator and may remain; security-descriptor mutation authority is never exempted.
@@ -442,6 +519,7 @@ def _require_no_competing_mutation_handles(
 
     if uninspectable:
         process_scope: dict[int, bool] | None = None
+        target_process_ids: set[int] | None = None
         needs_rescan = False
         last_exc = uninspectable[-1][2]
         for row, candidate_type, exc in uninspectable:
@@ -466,6 +544,23 @@ def _require_no_competing_mutation_handles(
                 raise RuntimeError(
                     f"{label} has live same-user uninspectable mutation-capable handle"
                 ) from exc
+            if target_process_ids is None:
+                try:
+                    target_process_ids = _target_process_ids_using_file(raw_handle)
+                except Exception as oracle_exc:
+                    raise RuntimeError(
+                        f"{label} target process-id oracle is unavailable for live "
+                        "uninspectable mutation-capable handle"
+                    ) from oracle_exc
+            if pid in target_process_ids:
+                raise RuntimeError(
+                    f"{label} has live different-user uninspectable mutation-capable "
+                    "handle positively associated with target"
+                ) from exc
+            if not _snapshot_row_still_present(row, object_type=candidate_type):
+                needs_rescan = True
+                last_exc = exc
+                continue
         if not needs_rescan:
             return
         if _uninspectable_handle_rescans_remaining <= 0:
@@ -665,7 +760,7 @@ def install(wrapper: ModuleType) -> None:
         ctypes.set_last_error(0)
         raw_handle = create_file(
             str(path),
-            _READ_CONTROL | _WRITE_DAC,
+            _READ_CONTROL | _WRITE_DAC | _FILE_READ_ATTRIBUTES,
             share,
             None,
             core._OPEN_EXISTING,

@@ -16,7 +16,10 @@ from typing import Any
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _GENERIC_READ = 0x80000000
+_GENERIC_WRITE = 0x40000000
 _FILE_SHARE_READ = 0x00000001
+_FILE_SHARE_WRITE = 0x00000002
+_CREATE_ALWAYS = 2
 _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
@@ -85,19 +88,19 @@ def _require_regular_nonreparse(path: pathlib.Path, *, label: str) -> os.stat_re
     return value
 
 
-def _open_retained_read_fence(
+def _create_windows_stream(
     path: pathlib.Path,
     *,
-    expected_object_identity: tuple[int, int],
+    desired_access: int,
+    share_mode: int,
+    creation_disposition: int,
+    os_flags: int,
+    mode: str,
 ):
     if os.name != "nt":
         raise RuntimeError("guarded PyInstaller artifact binding is Windows-only")
 
     import msvcrt
-
-    before = _require_regular_nonreparse(path, label="PyInstaller output")
-    if _object_identity(before) != expected_object_identity:
-        raise RuntimeError("PyInstaller produced object identity changed before binding")
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     create_file = kernel32.CreateFileW
@@ -118,10 +121,10 @@ def _open_retained_read_fence(
     ctypes.set_last_error(0)
     raw_handle = create_file(
         str(path),
-        _GENERIC_READ,
-        _FILE_SHARE_READ,
+        desired_access,
+        share_mode,
         None,
-        _OPEN_EXISTING,
+        creation_disposition,
         _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
         None,
     )
@@ -136,18 +139,100 @@ def _open_retained_read_fence(
     try:
         descriptor = msvcrt.open_osfhandle(
             int(handle_value),
-            os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            os_flags | getattr(os, "O_BINARY", 0),
         )
     except BaseException:
         close_handle(raw_handle)
         raise
 
     try:
-        stream = os.fdopen(descriptor, "rb", closefd=True)
+        return os.fdopen(descriptor, mode, closefd=True)
     except BaseException:
         os.close(descriptor)
         raise
 
+
+def _copy_artifact_and_capture_identity(
+    src: str | os.PathLike[str],
+    dst: str | os.PathLike[str],
+) -> tuple[int, int]:
+    """Copy the initial artifact and capture identity from the still-open producing handle."""
+
+    destination = pathlib.Path(dst)
+    stream = _create_windows_stream(
+        destination,
+        desired_access=_GENERIC_READ | _GENERIC_WRITE,
+        share_mode=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        creation_disposition=_CREATE_ALWAYS,
+        os_flags=os.O_RDWR,
+        mode="w+b",
+    )
+    try:
+        with open(src, "rb") as source:
+            shutil.copyfileobj(source, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+        if os.environ.get("AUTOSPORT_TEST_REPLACE_PYINSTALLER_OUTPUT_BEFORE_IDENTITY") == "1":
+            replacement = destination.with_name(
+                f".{destination.name}.pre-identity-replacement-{os.getpid()}"
+            )
+            try:
+                with open(replacement, "wb") as replacement_stream:
+                    stream.seek(0)
+                    shutil.copyfileobj(stream, replacement_stream)
+                    replacement_stream.flush()
+                    os.fsync(replacement_stream.fileno())
+                stream.seek(0, os.SEEK_END)
+                os.replace(replacement, destination)
+            finally:
+                try:
+                    replacement.unlink()
+                except FileNotFoundError:
+                    pass
+
+        opened = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError(
+                f"initial PyInstaller output handle must be a regular file: {destination}"
+            )
+        if _windows_attributes(destination) & _FILE_ATTRIBUTE_REPARSE_POINT:
+            raise RuntimeError(
+                f"initial PyInstaller output must not be a Windows reparse point: {destination}"
+            )
+        current_path = _require_regular_nonreparse(
+            destination,
+            label="initial PyInstaller output",
+        )
+        if _object_identity(current_path) != _object_identity(opened):
+            raise RuntimeError(
+                "initial PyInstaller output pathname changed before identity capture"
+            )
+        return _object_identity(opened)
+    finally:
+        stream.close()
+
+
+def _open_retained_read_fence(
+    path: pathlib.Path,
+    *,
+    expected_object_identity: tuple[int, int],
+):
+    if os.name != "nt":
+        raise RuntimeError("guarded PyInstaller artifact binding is Windows-only")
+
+    before = _require_regular_nonreparse(path, label="PyInstaller output")
+    if _object_identity(before) != expected_object_identity:
+        raise RuntimeError("PyInstaller produced object identity changed before binding")
+
+    stream = _create_windows_stream(
+        path,
+        desired_access=_GENERIC_READ,
+        share_mode=_FILE_SHARE_READ,
+        creation_disposition=_OPEN_EXISTING,
+        os_flags=os.O_RDONLY,
+        mode="rb",
+    )
     try:
         opened = os.fstat(stream.fileno())
         if _object_identity(opened) != expected_object_identity:
@@ -247,14 +332,20 @@ def run(argv: list[str] | None = None) -> int:
     }
 
     def guarded_copyfile(src, dst, *copy_args, **copy_kwargs):
-        result = original_copyfile(src, dst, *copy_args, **copy_kwargs)
         if _normalized_path(dst) == artifact_key and state["initial_identity"] is None:
-            created = _require_regular_nonreparse(
-                pathlib.Path(dst),
-                label="initial PyInstaller output",
-            )
-            state["initial_identity"] = _object_identity(created)
-        return result
+            if copy_args:
+                raise RuntimeError("unexpected positional shutil.copyfile options for PyInstaller artifact")
+            unexpected = set(copy_kwargs) - {"follow_symlinks"}
+            if unexpected:
+                raise RuntimeError(
+                    "unexpected shutil.copyfile options for PyInstaller artifact: "
+                    + ", ".join(sorted(unexpected))
+                )
+            if copy_kwargs.get("follow_symlinks", True) is not True:
+                raise RuntimeError("PyInstaller artifact copy must follow the regular bootloader source")
+            state["initial_identity"] = _copy_artifact_and_capture_identity(src, dst)
+            return dst
+        return original_copyfile(src, dst, *copy_args, **copy_kwargs)
 
     def guarded_mtime(path):
         if _normalized_path(path) == artifact_key and state["guard_stream"] is None:

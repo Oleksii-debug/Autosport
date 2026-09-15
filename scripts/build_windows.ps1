@@ -58,6 +58,7 @@ $sourceSha = $env:AUTOSPORT_SOURCE_SHA
 if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
 python scripts/verify_source_checkout.py --source-sha $sourceSha
 if ($LASTEXITCODE -ne 0) { throw "Source checkout preflight exited $LASTEXITCODE" }
+$env:PYTHONDONTWRITEBYTECODE = '1'
 python -m pip install --upgrade pip
 if ($LASTEXITCODE -ne 0) { throw "pip upgrade exited $LASTEXITCODE" }
 python -m pip install -e '.[build,test]'
@@ -69,9 +70,11 @@ python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace
 if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }
 if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
 python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary
-if ($LASTEXITCODE -ne 0) { throw "Late source checkout integrity gate exited $LASTEXITCODE" }
+if ($LASTEXITCODE -ne 0) { throw "Late source checkout integrity gate before Autosport.exe exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
 if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
+python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary
+if ($LASTEXITCODE -ne 0) { throw "Late source checkout integrity gate before Autosport-Data.exe exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
 if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }
 
@@ -211,6 +214,8 @@ $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
 $packageVerification = Join-Path $PWD 'dist/package-verification.json'
 if (Test-Path $package) { Remove-Item -Force $package }
 if (Test-Path $packageVerification) { Remove-Item -Force $packageVerification }
+python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary
+if ($LASTEXITCODE -ne 0) { throw "Late source checkout integrity gate before package assembly exited $LASTEXITCODE" }
 python scripts/package_windows.py `
   --exe dist/Autosport.exe `
   --data-exe dist/Autosport-Data.exe `

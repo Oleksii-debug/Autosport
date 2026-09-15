@@ -149,6 +149,8 @@ class RecoveryReconciliationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session = AutosportSession(root, "10000")
+            with WorkspaceEconomicLock(root):
+                session._ensure_canonical_economic_base()
             session.close()
 
             registry = RunRegistry(root / "run_registry.json")

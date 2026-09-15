@@ -101,3 +101,68 @@ def test_distinct_file_objects_with_different_file_ids_are_not_rejected(
         label="unrelated retained handle",
         directory=False,
     )
+
+
+def test_uninspectable_live_candidate_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    security = _load_security_authority()
+    snapshot, trusted_handle, _candidate_pid, _candidate_handle = _snapshot(
+        security,
+        trusted_object=0xAAA2,
+        candidate_object=0xBBB2,
+    )
+    monkeypatch.setattr(security, "_query_system_handles", lambda: snapshot)
+    monkeypatch.setattr(
+        security,
+        "_file_identity",
+        lambda _handle: (0x1234, b"A" * 16),
+    )
+
+    def unavailable(_pid: int, _handle: int):
+        raise security._CandidateFileIdentityUnavailable("duplication denied")
+
+    monkeypatch.setattr(security, "_candidate_file_identity", unavailable)
+
+    with pytest.raises(RuntimeError, match="live uninspectable mutation-capable handle"):
+        security._require_no_competing_mutation_handles(
+            trusted_handle,
+            label="uninspectable retained handle",
+            directory=False,
+        )
+
+
+def test_uninspectable_candidate_may_be_ignored_only_after_positive_disappearance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    security = _load_security_authority()
+    snapshot, trusted_handle, _candidate_pid, _candidate_handle = _snapshot(
+        security,
+        trusted_object=0xAAA3,
+        candidate_object=0xBBB3,
+    )
+    refreshed = security._SystemHandleSnapshot()
+    trusted_row = snapshot[0]
+    refreshed.append(trusted_row)
+    refreshed.object_types[
+        (trusted_row[0], trusted_row[1], trusted_row[2])
+    ] = snapshot.object_types[(trusted_row[0], trusted_row[1], trusted_row[2])]
+    snapshots = iter([snapshot, refreshed])
+
+    monkeypatch.setattr(security, "_query_system_handles", lambda: next(snapshots))
+    monkeypatch.setattr(
+        security,
+        "_file_identity",
+        lambda _handle: (0x1234, b"A" * 16),
+    )
+
+    def unavailable(_pid: int, _handle: int):
+        raise security._CandidateFileIdentityUnavailable("handle closed during inspection")
+
+    monkeypatch.setattr(security, "_candidate_file_identity", unavailable)
+
+    security._require_no_competing_mutation_handles(
+        trusted_handle,
+        label="disappeared retained handle",
+        directory=False,
+    )

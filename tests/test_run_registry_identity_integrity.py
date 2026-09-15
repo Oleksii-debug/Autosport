@@ -10,7 +10,7 @@ class RunRegistryIdentityIntegrityTests(unittest.TestCase):
     def test_inconsistent_persisted_base_identity_fails_closed_before_silent_repeat(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "registry.json"
-            registry = RunRegistry(path)
+            registry = RunRegistry.initialize_pristine(path)
             key = registry.begin("a" * 64, "b" * 64, "strategy", "run-1")
             registry.complete(key)
 
@@ -24,7 +24,7 @@ class RunRegistryIdentityIntegrityTests(unittest.TestCase):
     def test_coherently_changed_identity_cannot_hide_behind_stale_experiment_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "registry.json"
-            registry = RunRegistry(path)
+            registry = RunRegistry.initialize_pristine(path)
             key = registry.begin("a" * 64, "b" * 64, "strategy", "run-1")
             registry.complete(key)
 
@@ -44,7 +44,7 @@ class RunRegistryIdentityIntegrityTests(unittest.TestCase):
     def test_begin_rejects_noncanonical_dataset_digest_before_persisting_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "registry.json"
-            registry = RunRegistry(path)
+            registry = RunRegistry.initialize_pristine(path)
 
             with self.assertRaisesRegex(ValueError, "canonical SHA-256"):
                 registry.begin("not-a-sha256", "b" * 64, "strategy", "run-1")
@@ -55,7 +55,7 @@ class RunRegistryIdentityIntegrityTests(unittest.TestCase):
     def test_self_consistent_nonhex_persisted_digest_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "registry.json"
-            registry = RunRegistry(path)
+            registry = RunRegistry.initialize_pristine(path)
             key = registry.begin("a" * 64, "b" * 64, "strategy", "run-1")
             registry.complete(key)
 
@@ -76,7 +76,7 @@ class RunRegistryIdentityIntegrityTests(unittest.TestCase):
     def test_self_consistent_uppercase_persisted_digest_is_not_canonical(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "registry.json"
-            registry = RunRegistry(path)
+            registry = RunRegistry.initialize_pristine(path)
             key = registry.begin("a" * 64, "b" * 64, "strategy", "run-1")
             registry.complete(key)
 

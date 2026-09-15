@@ -9,6 +9,37 @@ from unittest.mock import patch
 from autosport import integrity
 
 
+class EnsureDurableFileTests(unittest.TestCase):
+    def test_creates_missing_file_without_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "decisions.jsonl"
+
+            integrity.ensure_durable_file(destination)
+
+            self.assertTrue(destination.is_file())
+            self.assertEqual(destination.read_bytes(), b"")
+
+    def test_concurrent_create_before_open_preserves_new_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "decisions.jsonl"
+            original_open = Path.open
+            injected = False
+
+            def racing_open(path: Path, mode: str = "r", *args, **kwargs):
+                nonlocal injected
+                if path == destination and not injected:
+                    injected = True
+                    with original_open(path, "wb") as competitor:
+                        competitor.write(b"concurrent-state\n")
+                return original_open(path, mode, *args, **kwargs)
+
+            with patch.object(Path, "open", autospec=True, side_effect=racing_open):
+                integrity.ensure_durable_file(destination)
+
+            self.assertTrue(injected)
+            self.assertEqual(destination.read_bytes(), b"concurrent-state\n")
+
+
 class AtomicWriteJsonTests(unittest.TestCase):
     def test_concurrent_writers_serialize_publication_after_independent_temp_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

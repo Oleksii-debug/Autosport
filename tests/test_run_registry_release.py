@@ -23,7 +23,7 @@ class RunRegistryReleaseTests(unittest.TestCase):
 
     def test_unresolved_run_blocks_replay_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
-            registry = RunRegistry(Path(tmp) / "registry.json")
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "registry.json")
             registry.begin("a" * 64, "b" * 64, "strategy", "run-1")
             with self.assertRaises(UnresolvedExperimentError):
                 registry.begin("a" * 64, "b" * 64, "strategy", "run-2")
@@ -31,7 +31,7 @@ class RunRegistryReleaseTests(unittest.TestCase):
     def test_unknown_persisted_status_fails_closed_before_silent_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "registry.json"
-            registry = RunRegistry(path)
+            registry = RunRegistry.initialize_pristine(path)
             key = registry.begin("a" * 64, "b" * 64, "strategy", "run-1")
             registry.complete(key)
 

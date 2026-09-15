@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,7 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 import autosport.workspace_lock as workspace_lock
-from autosport.workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
+from autosport.workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
+)
 
 
 def _stat_without_path_identity(result: os.stat_result) -> SimpleNamespace:
@@ -32,6 +37,69 @@ def _stat_with_changed_path_metadata(result: os.stat_result) -> SimpleNamespace:
         st_ino=getattr(result, "st_ino", 0),
         st_dev=getattr(result, "st_dev", 0),
     )
+
+
+def _patch_lock_backend_error(
+    monkeypatch: pytest.MonkeyPatch,
+    error: OSError,
+) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        def fail_locking(_descriptor: int, _mode: int, _count: int) -> None:
+            raise error
+
+        monkeypatch.setattr(msvcrt, "locking", fail_locking)
+        return
+
+    import fcntl
+
+    def fail_flock(_descriptor: int, _operation: int) -> None:
+        raise error
+
+    monkeypatch.setattr(fcntl, "flock", fail_flock)
+
+
+def test_lock_backend_contention_has_distinct_busy_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = tmp_path / WorkspaceEconomicLock.FILE_NAME
+    lock_path.write_bytes(b"\0")
+    _patch_lock_backend_error(
+        monkeypatch,
+        BlockingIOError(errno.EAGAIN, "simulated active writer"),
+    )
+
+    with lock_path.open("r+b") as handle:
+        with pytest.raises(
+            WorkspaceEconomicLockBusyError,
+            match="another Autosport process owns",
+        ) as caught:
+            WorkspaceEconomicLock._lock_handle(handle)
+
+    assert isinstance(caught.value, WorkspaceEconomicLockError)
+
+
+def test_lock_backend_integrity_failure_is_not_busy_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = tmp_path / WorkspaceEconomicLock.FILE_NAME
+    lock_path.write_bytes(b"\0")
+    _patch_lock_backend_error(
+        monkeypatch,
+        OSError(errno.EBADF, "simulated invalid lock handle"),
+    )
+
+    with lock_path.open("r+b") as handle:
+        with pytest.raises(
+            WorkspaceEconomicLockError,
+            match="cannot acquire workspace economic-writer lock",
+        ) as caught:
+            WorkspaceEconomicLock._lock_handle(handle)
+
+    assert not isinstance(caught.value, WorkspaceEconomicLockBusyError)
 
 
 def test_lock_acquire_and_reacquire_do_not_require_path_stat_identity_fields(

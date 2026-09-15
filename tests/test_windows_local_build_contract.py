@@ -65,7 +65,7 @@ def test_local_windows_build_scalarizes_application_resolution() -> None:
     assert "(Get-Command git -CommandType Application -ErrorAction Stop).Source" not in script
     assert "(Get-Command python -CommandType Application -ErrorAction Stop).Source" not in script
     assert "$gitCommands = @(Get-Command git -CommandType Application -ErrorAction Stop)" in script
-    assert "$gitExecutable = [string]$gitCommands[0].Source" in script
+    assert "$gitExecutable = [System.IO.Path]::GetFullPath([string]$gitCommands[0].Source)" in script
     assert "$pythonCommands = @(Get-Command python -CommandType Application -ErrorAction Stop)" in script
     assert "$pythonExecutable = [string]$pythonCommands[0].Source" in script
     assert "Resolved Git application has an empty source path" in script

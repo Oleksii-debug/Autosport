@@ -179,8 +179,12 @@ def test_windows_build_bootstraps_exact_verifier_before_repository_python() -> N
 
     source_sha = "$sourceSha = $env:AUTOSPORT_SOURCE_SHA"
     exact_entry = "$verifierTreeEntry = (& $gitExecutable ls-tree $sourceSha -- 'scripts/verify_source_checkout.py').Trim()"
-    exact_blob = "$verifierBootstrap = Start-Process -FilePath $gitExecutable -ArgumentList @('cat-file', 'blob', $verifierBlobSha)"
-    digest = "$sourceVerifierSha256 = (Get-FileHash -LiteralPath $sourceVerifier -Algorithm SHA256).Hash.ToLowerInvariant()"
+    bootstrap_setup = "$verifierBootstrapInfo = [System.Diagnostics.ProcessStartInfo]::new()"
+    exact_blob_arg = "[void]$verifierBootstrapInfo.ArgumentList.Add($verifierBlobSha)"
+    exact_bytes = "$verifierBytes = $verifierBuffer.ToArray()"
+    digest = "$sourceVerifierSha256 = ([System.BitConverter]::ToString($verifierHasher.ComputeHash($verifierBytes))).Replace('-', '').ToLowerInvariant()"
+    publish_path = "$sourceVerifier = (New-TemporaryFile).FullName"
+    publish_bytes = "[System.IO.File]::WriteAllBytes($sourceVerifier, $verifierBytes)"
     preflight = "python $sourceVerifier --source-sha $sourceSha"
     first_mutation = "python -m pip install --upgrade pip"
     old_copy = "Copy-Item -LiteralPath 'scripts/verify_source_checkout.py' -Destination $sourceVerifier -Force"
@@ -189,9 +193,18 @@ def test_windows_build_bootstraps_exact_verifier_before_repository_python() -> N
     assert "Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' }" in script
     assert "$env:GIT_NO_REPLACE_OBJECTS = '1'" in script
     assert script.index(source_sha) < script.index(exact_entry)
-    assert script.index(exact_entry) < script.index(exact_blob)
-    assert script.index(exact_blob) < script.index(digest) < script.index(preflight)
-    assert script.index(preflight) < script.index(first_mutation)
+    assert (
+        script.index(exact_entry)
+        < script.index(bootstrap_setup)
+        < script.index(exact_blob_arg)
+        < script.index(exact_bytes)
+        < script.index(digest)
+        < script.index(publish_path)
+        < script.index(publish_bytes)
+        < script.index(preflight)
+        < script.index(first_mutation)
+    )
+    assert "Get-FileHash -LiteralPath $sourceVerifier -Algorithm SHA256" not in script
     assert all(not line.startswith(old_copy) for line in active_lines)
     assert "& $script:pythonExecutable -I -S -c $script:trustedVerifierLauncher" in script
     assert script.count("python $sourceVerifier --source-sha $sourceSha --late-build-boundary") == 3

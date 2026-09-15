@@ -167,37 +167,35 @@ def test_lock_rechecks_path_after_post_lock_descriptor_identity_proof(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pathname replacement during the final identity proof must fail closed."""
+    """A distinct current-path descriptor at the final proof must fail closed."""
 
     lock_path = tmp_path / WorkspaceEconomicLock.FILE_NAME
+    replacement = tmp_path / "post-proof-replacement-lock.bin"
     lock_path.write_bytes(b"\0")
-    real_stat = os.stat
-    real_sameopenfile = os.path.sameopenfile
-    state = {"sameopenfile_calls": 0, "replacement_visible": False}
+    replacement.write_bytes(b"\1")
 
-    def stat_with_post_identity_replacement(path, *args, **kwargs):
-        result = real_stat(path, *args, **kwargs)
-        if (
-            state["replacement_visible"]
-            and not isinstance(path, int)
-            and Path(path) == lock_path
-            and kwargs.get("follow_symlinks", True) is False
-        ):
-            return _stat_with_changed_path_metadata(result)
-        return result
+    real_verification_open = workspace_lock._open_read_only_descriptor
+    state = {"verification_open_calls": 0}
 
-    def sameopenfile_then_replace_path(first: int, second: int) -> bool:
-        result = real_sameopenfile(first, second)
-        state["sameopenfile_calls"] += 1
-        if state["sameopenfile_calls"] == 3:
-            # Two identity proofs complete the pre-lock checkpoint. The third call is
-            # the first proof in the post-OS-lock checkpoint; expose replacement after
-            # that proof so the following pathname observation must detect the change.
-            state["replacement_visible"] = True
-        return result
+    def redirect_final_current_path_open(path: Path) -> int:
+        if Path(path) == lock_path:
+            state["verification_open_calls"] += 1
+            if state["verification_open_calls"] == 4:
+                # Each identity checkpoint opens the canonical path twice. Redirect
+                # only the final fresh descriptor in the post-lock checkpoint to a
+                # distinct inode, modeling a pathname substitution after the first
+                # post-lock descriptor proof without relying on metadata drift.
+                return os.open(
+                    path=replacement,
+                    flags=os.O_RDONLY | getattr(os, "O_BINARY", 0),
+                )
+        return real_verification_open(path)
 
-    monkeypatch.setattr(workspace_lock.os, "stat", stat_with_post_identity_replacement)
-    monkeypatch.setattr(workspace_lock.os.path, "sameopenfile", sameopenfile_then_replace_path)
+    monkeypatch.setattr(
+        workspace_lock,
+        "_open_read_only_descriptor",
+        redirect_final_current_path_open,
+    )
 
     lock = WorkspaceEconomicLock(tmp_path)
     with pytest.raises(
@@ -206,9 +204,10 @@ def test_lock_rechecks_path_after_post_lock_descriptor_identity_proof(
     ):
         lock.acquire()
 
-    assert state["sameopenfile_calls"] == 4
+    assert state["verification_open_calls"] == 4
     assert lock._handle is None
     assert lock_path.read_bytes() == b"\0"
+    assert replacement.read_bytes() == b"\1"
 
 
 def test_lock_rejects_same_metadata_replacement_at_final_handle_boundary(

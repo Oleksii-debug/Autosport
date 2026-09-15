@@ -192,6 +192,12 @@ Add-Type -TypeDefinition $source -Language CSharp
 try {
   $handle = [Autosport.Release.TrustedDirectoryFence]::OpenReadFence($env:AUTOSPORT_FENCE_ROOT)
   try {
+    [Console]::Out.WriteLine('FENCE_READY')
+    [Console]::Out.Flush()
+    $release = [Console]::In.ReadLine()
+    if ($release -ne 'RELEASE') {
+      throw 'Production directory fence release handshake failed'
+    }
     [Console]::Out.WriteLine('FENCE=PASS')
   } finally {
     $handle.Dispose()
@@ -209,16 +215,48 @@ try {
 }
 """
 
-    def run_production_fence() -> subprocess.CompletedProcess[str]:
+    def production_fence_env() -> dict[str, str]:
         env = os.environ.copy()
         env["AUTOSPORT_FENCE_SOURCE"] = str(fence_source)
         env["AUTOSPORT_FENCE_ROOT"] = str(root)
+        return env
+
+    def run_production_fence() -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["powershell.exe", "-NoProfile", "-Command", production_fence_script],
+            input="RELEASE\n",
             capture_output=True,
             text=True,
-            env=env,
+            env=production_fence_env(),
         )
+
+    def start_production_fence() -> subprocess.Popen[str]:
+        process = subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-Command", production_fence_script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=production_fence_env(),
+        )
+        assert process.stdout is not None
+        ready = process.stdout.readline().strip()
+        if ready != "FENCE_READY":
+            stdout, stderr = process.communicate(timeout=10)
+            pytest.fail(
+                f"production fence did not become ready: {ready!r}; "
+                f"stdout={stdout!r}; stderr={stderr!r}; returncode={process.returncode}"
+            )
+        return process
+
+    def release_production_fence(process: subprocess.Popen[str]) -> tuple[str, str]:
+        assert process.stdin is not None
+        process.stdin.write("RELEASE\n")
+        process.stdin.flush()
+        stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, (stdout, stderr)
+        assert "FENCE=PASS" in stdout
+        return stdout, stderr
 
     sid_result = subprocess.run(
         [
@@ -268,7 +306,7 @@ try {
     share_all = file_share_read | file_share_write | file_share_delete
     hostile_handle = None
     reader_handle = None
-    fence_handle = None
+    production_fence = None
     acl_applied = False
     try:
         hostile_handle, hostile_error = open_directory(hostile_access, share_all)
@@ -308,21 +346,10 @@ try {
         apply_mutation_deny()
         acl_applied = True
 
-        production_allowed = run_production_fence()
-        assert production_allowed.returncode == 0, (
-            production_allowed.stdout,
-            production_allowed.stderr,
-        )
-        assert "FENCE=PASS" in production_allowed.stdout
+        production_fence = start_production_fence()
 
         assert close_handle(reader_handle)
         reader_handle = None
-
-        fence_handle, fence_error = open_directory(
-            file_list_directory,
-            file_share_read,
-        )
-        assert not is_invalid(fence_handle), fence_error
 
         remove_mutation_deny()
         acl_applied = False
@@ -332,12 +359,26 @@ try {
             close_handle(fresh_writer)
         assert is_invalid(fresh_writer)
         assert fresh_writer_error == error_sharing_violation
+
+        release_production_fence(production_fence)
+        production_fence = None
     finally:
+        if production_fence is not None:
+            if production_fence.poll() is None:
+                if production_fence.stdin is not None:
+                    try:
+                        production_fence.stdin.write("RELEASE\n")
+                        production_fence.stdin.flush()
+                    except (BrokenPipeError, OSError):
+                        pass
+                try:
+                    production_fence.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    production_fence.kill()
+                    production_fence.communicate()
         if hostile_handle is not None and not is_invalid(hostile_handle):
             close_handle(hostile_handle)
         if reader_handle is not None and not is_invalid(reader_handle):
             close_handle(reader_handle)
-        if fence_handle is not None and not is_invalid(fence_handle):
-            close_handle(fence_handle)
         if acl_applied:
             remove_mutation_deny()

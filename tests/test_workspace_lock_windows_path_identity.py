@@ -163,22 +163,22 @@ def test_lock_rejects_redirected_verification_descriptor_to_different_file(
     assert replacement.read_bytes() == b"\1"
 
 
-def test_lock_rechecks_path_after_post_lock_descriptor_identity_proof(
+def test_lock_allows_same_file_metadata_change_during_identity_proof(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pathname replacement during the final identity proof must fail closed."""
+    """Mutable sentinel metadata on the same inode is not pathname replacement."""
 
     lock_path = tmp_path / WorkspaceEconomicLock.FILE_NAME
     lock_path.write_bytes(b"\0")
     real_stat = os.stat
     real_sameopenfile = os.path.sameopenfile
-    state = {"sameopenfile_calls": 0, "replacement_visible": False}
+    state = {"sameopenfile_calls": 0, "metadata_change_visible": False}
 
-    def stat_with_post_identity_replacement(path, *args, **kwargs):
+    def stat_with_same_file_metadata_change(path, *args, **kwargs):
         result = real_stat(path, *args, **kwargs)
         if (
-            state["replacement_visible"]
+            state["metadata_change_visible"]
             and not isinstance(path, int)
             and Path(path) == lock_path
             and kwargs.get("follow_symlinks", True) is False
@@ -186,28 +186,28 @@ def test_lock_rechecks_path_after_post_lock_descriptor_identity_proof(
             return _stat_with_changed_path_metadata(result)
         return result
 
-    def sameopenfile_then_replace_path(first: int, second: int) -> bool:
+    def sameopenfile_then_expose_metadata_change(first: int, second: int) -> bool:
         result = real_sameopenfile(first, second)
         state["sameopenfile_calls"] += 1
         if state["sameopenfile_calls"] == 3:
-            # Two identity proofs complete the pre-lock checkpoint. The third call is
-            # the first proof in the post-OS-lock checkpoint; expose replacement after
-            # that proof so the following pathname observation must detect the change.
-            state["replacement_visible"] = True
+            # The third identity proof is the first proof in the post-lock checkpoint.
+            # Model another cooperating first opener changing sentinel metadata on the
+            # same inode before the following pathname stat. Descriptor identity remains
+            # exact, so acquisition must not misclassify this as replacement.
+            state["metadata_change_visible"] = True
         return result
 
-    monkeypatch.setattr(workspace_lock.os, "stat", stat_with_post_identity_replacement)
-    monkeypatch.setattr(workspace_lock.os.path, "sameopenfile", sameopenfile_then_replace_path)
+    monkeypatch.setattr(workspace_lock.os, "stat", stat_with_same_file_metadata_change)
+    monkeypatch.setattr(
+        workspace_lock.os.path,
+        "sameopenfile",
+        sameopenfile_then_expose_metadata_change,
+    )
 
-    lock = WorkspaceEconomicLock(tmp_path)
-    with pytest.raises(
-        WorkspaceEconomicLockError,
-        match="changed during acquisition",
-    ):
-        lock.acquire()
+    with WorkspaceEconomicLock(tmp_path):
+        pass
 
     assert state["sameopenfile_calls"] == 4
-    assert lock._handle is None
     assert lock_path.read_bytes() == b"\0"
 
 

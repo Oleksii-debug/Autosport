@@ -48,6 +48,29 @@ def test_evaluation_lines_fail_closed_on_excessive_json_nesting(tmp_path: Path) 
     assert lines[-1].startswith("Truth | paper simulation only")
 
 
+def test_evaluation_lines_fail_closed_on_standard_json_numeric_overflow(tmp_path: Path) -> None:
+    summary = tmp_path / "result.json"
+    summary.write_text(
+        (
+            '{"market_price_truth":{'
+            '"price_semantics":"canonical_observation_quote",'
+            '"executable_quote_verified":false,'
+            '"paper_fill_fidelity_verified":false,'
+            '"source_ids":[]},'
+            '"unrelated_numeric_overflow":1e400}'
+        ),
+        encoding="utf-8",
+    )
+
+    lines = evaluation_lines(_result(summary))
+
+    assert (
+        "Price truth | ERROR — run summary JSON is ambiguous or non-canonical: "
+        "non-finite JSON number: 1e400."
+    ) in lines
+    assert lines[-1].startswith("Truth | paper simulation only")
+
+
 def test_evaluation_lines_preserve_canonical_price_truth_rendering(tmp_path: Path) -> None:
     summary = tmp_path / "result.json"
     summary.write_text(

@@ -1237,6 +1237,9 @@ def export_evidence_manifest(workspace: str | Path, output: str | Path) -> dict[
                 }
             )
 
+        if _canonical_source_names(root) != names:
+            raise ValueError("workspace canonical evidence set changed during snapshot")
+
         missing_fixed = [name for name in _FIXED_EVIDENCE_NAMES if name not in names]
         run_summary_count = sum(_is_canonical_run_summary_name(name) for name in names)
         payload: dict[str, Any] = {

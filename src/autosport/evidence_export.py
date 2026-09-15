@@ -408,6 +408,15 @@ def _atomic_write_json_at_windows_directory(
         wintypes.ULONG,
     )
     nt_create_file.restype = wintypes.LONG
+    nt_set_information_file = ntdll.NtSetInformationFile
+    nt_set_information_file.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(IoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        wintypes.ULONG,
+    )
+    nt_set_information_file.restype = wintypes.LONG
     rtl_status_to_dos_error = ntdll.RtlNtStatusToDosError
     rtl_status_to_dos_error.argtypes = (wintypes.LONG,)
     rtl_status_to_dos_error.restype = wintypes.ULONG
@@ -447,7 +456,7 @@ def _atomic_write_json_at_windows_directory(
     file_non_directory_file = 0x00000040
     file_open_reparse_point = 0x00200000
     obj_case_insensitive = 0x00000040
-    file_rename_info_class = 3
+    file_rename_information_class = 10
     file_disposition_info_class = 4
 
     def relative_name(name: str) -> tuple[object, UnicodeString, ObjectAttributes]:
@@ -527,13 +536,16 @@ def _atomic_write_json_at_windows_directory(
         rename_info.RootDirectory = parent_handle
         rename_info.FileNameLength = len(destination_name.encode("utf-16-le"))
         rename_info.FileName = destination_name
-        if not set_file_information(
+        rename_io_status = IoStatusBlock()
+        rename_status = nt_set_information_file(
             temporary_handle,
-            file_rename_info_class,
+            ctypes.byref(rename_io_status),
             ctypes.byref(rename_info),
             ctypes.sizeof(rename_info),
-        ):
-            raise ctypes.WinError(ctypes.get_last_error())
+            file_rename_information_class,
+        )
+        if rename_status < 0:
+            raise ctypes.WinError(int(rtl_status_to_dos_error(rename_status)))
         renamed = True
     except BaseException as exc:
         primary_error = exc

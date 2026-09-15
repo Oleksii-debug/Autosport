@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +21,22 @@ def _trusted_package_launcher_source() -> str:
     return tail.split(end_marker, 1)[0]
 
 
-def _write_snapshot(root: Path) -> dict[str, str]:
+def _bound_git_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    executable = Path(sys.executable).resolve()
+    env["AUTOSPORT_BOUND_GIT_EXECUTABLE"] = str(executable)
+    env["AUTOSPORT_BOUND_GIT_SHA256"] = hashlib.sha256(executable.read_bytes()).hexdigest()
+    return env
+
+
+def _write_snapshot(root: Path, *, package_source: str | None = None) -> dict[str, str]:
+    if package_source is None:
+        package_source = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from autosport.data_tool_package import SENTINEL\n"
+            "Path(sys.argv[1]).write_text(SENTINEL, encoding='utf-8')\n"
+        )
     files = {
         "src/autosport/release_package.py": (
             "def _require_git_commit_sha(value, *, field):\n"
@@ -38,12 +54,7 @@ def _write_snapshot(root: Path) -> dict[str, str]:
             "def verify_portable_data_tool(*args, **kwargs):\n"
             "    return {}\n"
         ),
-        "scripts/package_windows.py": (
-            "import sys\n"
-            "from pathlib import Path\n"
-            "from autosport.data_tool_package import SENTINEL\n"
-            "Path(sys.argv[1]).write_text(SENTINEL, encoding='utf-8')\n"
-        ),
+        "scripts/package_windows.py": package_source,
     }
     manifest: dict[str, str] = {}
     for relative, content in files.items():
@@ -72,6 +83,7 @@ def test_trusted_package_launcher_executes_only_verified_snapshot_bytes(tmp_path
             json.dumps(manifest, sort_keys=True, separators=(",", ":")),
             str(marker),
         ],
+        env=_bound_git_environment(),
         capture_output=True,
         text=True,
     )
@@ -105,6 +117,7 @@ def test_trusted_package_launcher_rejects_mutated_import_before_execution(tmp_pa
             json.dumps(manifest, sort_keys=True, separators=(",", ":")),
             str(marker),
         ],
+        env=_bound_git_environment(),
         capture_output=True,
         text=True,
     )
@@ -112,6 +125,72 @@ def test_trusted_package_launcher_rejects_mutated_import_before_execution(tmp_pa
     assert completed.returncode != 0
     assert "trusted package source SHA-256 mismatch" in completed.stderr
     assert not hostile_marker.exists()
+    assert not marker.exists()
+
+
+def test_trusted_package_launcher_uses_bound_git_when_path_is_poisoned(tmp_path: Path) -> None:
+    launcher = _trusted_package_launcher_source()
+    root = tmp_path / "trusted-package-source"
+    marker = tmp_path / "bound-git-marker.txt"
+    payload = (
+        "from pathlib import Path; "
+        f"Path({str(marker)!r}).write_text('bound-git', encoding='utf-8')"
+    )
+    package_source = (
+        "import subprocess\n"
+        f"subprocess.run(['git', '-c', {payload!r}], check=True)\n"
+    )
+    manifest = _write_snapshot(root, package_source=package_source)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    env = _bound_git_environment()
+    env["PATH"] = str(empty_path)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            launcher,
+            str(root),
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert marker.read_text(encoding="utf-8") == "bound-git"
+
+
+def test_trusted_package_launcher_rejects_bound_git_digest_tampering(tmp_path: Path) -> None:
+    launcher = _trusted_package_launcher_source()
+    root = tmp_path / "trusted-package-source"
+    manifest = _write_snapshot(root)
+    marker = tmp_path / "marker.txt"
+    env = _bound_git_environment()
+    env["AUTOSPORT_BOUND_GIT_SHA256"] = "0" * 64
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            launcher,
+            str(root),
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+            str(marker),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "bound Git executable SHA-256 mismatch" in completed.stderr
     assert not marker.exists()
 
 
@@ -138,5 +217,9 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
     assert isolated_runner in script
     assert "$trustedPackageLauncher = @'" in script
     assert "sys.path.insert" not in launcher
+    assert "AUTOSPORT_BOUND_GIT_EXECUTABLE" in launcher
+    assert "AUTOSPORT_BOUND_GIT_SHA256" in launcher
+    assert "subprocess.Popen = _bound_git_popen" in launcher
+    assert "[System.IO.FileShare]::Read" in script
     assert 'load_module("autosport.release_package", "src/autosport/release_package.py")' in launcher
     assert 'load_module("autosport.data_tool_package", "src/autosport/data_tool_package.py")' in launcher

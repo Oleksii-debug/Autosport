@@ -284,7 +284,7 @@ if ($accessibility.nvda_verified -ne $false) { throw 'Machine accessibility audi
 $keyboard = Join-Path $PWD 'dist/keyboard-audit.json'
 if (Test-Path $keyboard) { Remove-Item -Force $keyboard }
 $keyboardProcess = Start-Process -FilePath $boundAutosportExe -ArgumentList '--keyboard-audit-output', $keyboard -Wait -PassThru
-if ($keyboardProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe keyboard audit exited $($keyboardProcess.ExitCode)" }
+if ($keyboardProcess.ExitCode -ne 0) { throw "Packaged keyboard audit exited $($keyboardProcess.ExitCode)" }
 python $sourceVerifier --bind-artifact $keyboard --bound-output $boundKeyboardAudit --digest-output $keyboardDigestPath
 if ($LASTEXITCODE -ne 0) { throw "Keyboard evidence binding exited $LASTEXITCODE" }
 $keyboardSha256 = (Get-Content -LiteralPath $keyboardDigestPath -Raw).Trim()
@@ -301,7 +301,7 @@ if ($restartRecoveryProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe rest
 python $sourceVerifier --bind-artifact $restartRecovery --bound-output $boundRestartRecoveryAudit --digest-output $restartRecoveryDigestPath
 if ($LASTEXITCODE -ne 0) { throw "Restart/recovery evidence binding exited $LASTEXITCODE" }
 $restartRecoverySha256 = (Get-Content -LiteralPath $restartRecoveryDigestPath -Raw).Trim()
-$restartRecoveryEvidence = Get-Content $boundRestartRecovery -Raw | ConvertFrom-Json
+$restartRecoveryEvidence = Get-Content $boundRestartRecoveryAudit -Raw | ConvertFrom-Json
 if ($restartRecoveryEvidence.status -ne 'PASS') { throw 'Packaged restart/recovery audit did not PASS' }
 if ($restartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Packaged restart audit did not prove persistent session reopen' }
 if ($restartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Packaged recovery audit did not prove transaction recovery' }

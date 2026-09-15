@@ -76,7 +76,7 @@ class EvaluationPaperStateIntegrityTests(unittest.TestCase):
         self.assertEqual(summary.final_balance, Decimal("1E+28"))
         self.assertEqual(summary.committed_stake, Decimal("0"))
         self.assertEqual(summary.settled_stake, Decimal("0"))
-        self.assertEqual(summary.net_profit, Decimal("0E+1"))
+        self.assertEqual(summary.net_profit, Decimal("0"))
         self.assertEqual(summary.roi, Decimal("0"))
 
     def test_derived_roi_decimal_range_failure_is_fail_closed_and_context_isolated(self) -> None:
@@ -153,6 +153,60 @@ class EvaluationPaperStateIntegrityTests(unittest.TestCase):
         self.assertEqual(summary.settled_stake, Decimal("3"))
         self.assertEqual(summary.roi, Decimal("-0.3333333333333333333333333333"))
 
+    def test_valid_open_stake_aggregate_can_exceed_working_precision(self) -> None:
+        book = PaperBook("1E+28")
+        large_leg = TicketLeg("event-open-large", "winner", "player-a", Decimal("2"))
+        small_leg = TicketLeg("event-open-small", "winner", "player-b", Decimal("2"))
+        book.open_ticket(
+            [large_leg],
+            "9999999999999999999999999999",
+            reason="exact large open stake",
+        )
+        book.open_ticket([small_leg], "0.9", reason="exact fractional open stake")
+        self.assertEqual(book.balance, Decimal("0.1"))
+
+        summary = evaluate(book)
+
+        self.assertEqual(
+            summary.committed_stake,
+            Decimal("9999999999999999999999999999.9"),
+        )
+        self.assertEqual(summary.settled_stake, Decimal("0"))
+        self.assertEqual(summary.net_profit, Decimal("0"))
+        self.assertEqual(summary.roi, Decimal("0"))
+
+    def test_valid_settled_stake_aggregate_can_exceed_working_precision(self) -> None:
+        book = PaperBook("1E+28")
+        large_leg = TicketLeg("event-settled-large", "winner", "player-a", Decimal("2"))
+        small_leg = TicketLeg("event-settled-small", "winner", "player-b", Decimal("2"))
+        large = book.open_ticket(
+            [large_leg],
+            "9999999999999999999999999999",
+            reason="exact large settled stake",
+        )
+        small = book.open_ticket(
+            [small_leg],
+            "0.9",
+            reason="exact fractional settled stake",
+        )
+        book.settle(small.ticket_id, set())
+        book.settle(large.ticket_id, set())
+        self.assertEqual(book.balance, Decimal("0.1"))
+
+        summary = evaluate(book)
+
+        self.assertEqual(summary.committed_stake, Decimal("0"))
+        self.assertEqual(
+            summary.settled_stake,
+            Decimal("9999999999999999999999999999.9"),
+        )
+        self.assertEqual(
+            summary.net_profit,
+            Decimal("-9999999999999999999999999999.9"),
+        )
+        self.assertEqual(summary.roi, Decimal("-1"))
+        self.assertEqual(summary.lost, 2)
+
     def test_canonical_parlay_settlement_rounding_remains_valid(self) -> None:
         book = PaperBook("10000")
         legs = tuple(
@@ -211,7 +265,7 @@ class EvaluationPaperStateIntegrityTests(unittest.TestCase):
 
         self.assertEqual(summary.final_balance, book.balance)
         self.assertEqual(summary.committed_stake, Decimal("0"))
-        self.assertEqual(summary.settled_stake, Decimal("246.90"))
+        self.assertEqual(summary.settled_stake, Decimal("246.9"))
         self.assertEqual(
             summary.net_profit,
             Decimal("57.91481234581481234581481"),

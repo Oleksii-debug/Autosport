@@ -5,7 +5,6 @@ from decimal import (
     Context,
     Decimal,
     DivisionByZero,
-    Inexact,
     InvalidOperation,
     Overflow,
     ROUND_HALF_EVEN,
@@ -33,8 +32,8 @@ class EvaluationSummary:
     void: int
 
 
-def _evaluation_decimal_context(*, exact: bool = False) -> Context:
-    """Return the deterministic context used for durable evaluation economics."""
+def _evaluation_decimal_context() -> Context:
+    """Return the deterministic context used for the intentionally rounded ROI."""
 
     # Context() inherits every unspecified policy field from mutable process-global
     # decimal.DefaultContext. Pin the complete policy so unrelated library/caller
@@ -53,13 +52,56 @@ def _evaluation_decimal_context(*, exact: bool = False) -> Context:
     context.traps[DivisionByZero] = True
     context.traps[Overflow] = True
     context.traps[Underflow] = True
-    if exact:
-        # Inexact means non-zero information was discarded. Rounded alone can be
-        # representation-only (for example 1E+28 + 0) and must not reject an
-        # otherwise exact canonical book.
-        context.traps[Inexact] = True
     context.clear_flags()
     return context
+
+
+def _exact_decimal_sum(values: tuple[Decimal, ...]) -> Decimal:
+    """Sum finite Decimals exactly without introducing a second working context."""
+
+    if not values:
+        return Decimal("0")
+
+    components: list[tuple[int, int]] = []
+    minimum_exponent: int | None = None
+    for value in values:
+        if not isinstance(value, Decimal) or not value.is_finite():
+            raise ValueError(_INVALID_EVALUATION_STATE)
+        parts = value.as_tuple()
+        exponent = parts.exponent
+        if not isinstance(exponent, int):
+            raise ValueError(_INVALID_EVALUATION_STATE)
+        coefficient = 0
+        for digit in parts.digits:
+            coefficient = coefficient * 10 + digit
+        if parts.sign:
+            coefficient = -coefficient
+        components.append((coefficient, exponent))
+        minimum_exponent = (
+            exponent
+            if minimum_exponent is None
+            else min(minimum_exponent, exponent)
+        )
+
+    if minimum_exponent is None:
+        return Decimal("0")
+
+    total = 0
+    for coefficient, exponent in components:
+        total += coefficient * (10 ** (exponent - minimum_exponent))
+
+    if total == 0:
+        return Decimal("0")
+
+    # Remove representation-only trailing zeroes without applying Decimal context.
+    canonical_exponent = minimum_exponent
+    while total % 10 == 0:
+        total //= 10
+        canonical_exponent += 1
+
+    sign = int(total < 0)
+    digits = Decimal(abs(total)).as_tuple().digits
+    return Decimal((sign, digits, canonical_exponent))
 
 
 def evaluate(book: PaperBook) -> EvaluationSummary:
@@ -69,32 +111,38 @@ def evaluate(book: PaperBook) -> EvaluationSummary:
         # Evaluation becomes durable run evidence. Since #322, PaperBook owns the
         # canonical economic reachability proof, including exact open/settle
         # chronology in its lifecycle witness and its private Decimal policy.
-        # Do not reconstruct a second chronology from ticket insertion order:
-        # Decimal addition is non-associative at the canonical 28-digit precision.
+        # Do not reconstruct a second chronology from ticket insertion order.
         with localcontext(_evaluation_decimal_context()):
             PaperBook._validate_loaded_state(book)
-            tickets = book.tickets
+            tickets = tuple(book.tickets.values())
             initial_bankroll = book.initial_bankroll
             final_balance = book.balance
-            settled = tuple(
-                ticket
-                for ticket in tickets.values()
-                if ticket.status is not TicketStatus.OPEN
-            )
 
-        # Aggregate/profit evidence must not silently lose non-zero information.
-        # Rounded without Inexact remains acceptable because it changes only the
-        # Decimal representation, not the numeric value.
-        with localcontext(_evaluation_decimal_context(exact=True)):
-            committed_stake = book.committed_stake
-            settled_stake = sum(
-                (ticket.stake for ticket in settled),
-                Decimal("0"),
+        settled = tuple(
+            ticket
+            for ticket in tickets
+            if ticket.status is not TicketStatus.OPEN
+        )
+        committed_stake = _exact_decimal_sum(
+            tuple(
+                ticket.stake
+                for ticket in tickets
+                if ticket.status is TicketStatus.OPEN
             )
-            net_profit = final_balance + committed_stake - initial_bankroll
+        )
+        settled_stake = _exact_decimal_sum(
+            tuple(ticket.stake for ticket in settled)
+        )
+        net_profit = _exact_decimal_sum(
+            (
+                final_balance,
+                committed_stake,
+                initial_bankroll.copy_negate(),
+            )
+        )
 
-        # ROI can be a legitimate non-terminating ratio, so canonical rounding is
-        # allowed only at this presentation/evaluation ratio step.
+        # ROI can be a legitimate non-terminating ratio, so canonical 28-digit
+        # rounding is intentional only at this presentation/evaluation ratio step.
         with localcontext(_evaluation_decimal_context()):
             roi = (
                 net_profit / settled_stake

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from .gui import AUTOMATION_IDS
+from .integrity import atomic_write_json
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 
 
@@ -34,6 +34,20 @@ _FOCUSABLE_CONTROLS = (
     "log",
     "bankroll",
 )
+
+
+def _safe_exception_detail(exc: Exception) -> str:
+    """Render audit failure evidence without trusting exception formatting."""
+
+    try:
+        exception_type = type.__getattribute__(type(exc), "__name__")
+    except BaseException:
+        exception_type = "Exception"
+    try:
+        rendered = str.__str__(str(exc))
+    except BaseException:
+        rendered = "exception details unavailable"
+    return f"{exception_type}: {rendered}"
 
 
 def summarize_keyboard_contract(
@@ -163,7 +177,7 @@ def run_keyboard_audit(output_path: str | Path) -> int:
     except Exception as exc:
         report = {
             "status": "FAIL",
-            "failures": [f"{type(exc).__name__}: {exc}"],
+            "failures": [_safe_exception_detail(exc)],
             "evidence_scope": "keyboard prerequisite audit failed before completion",
             "human_tested": False,
             "nvda_verified": False,
@@ -175,8 +189,5 @@ def run_keyboard_audit(output_path: str | Path) -> int:
                 app.close_app()
             except Exception:
                 pass
-    destination.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(destination, report)
     return 0 if report.get("status") == "PASS" else 1

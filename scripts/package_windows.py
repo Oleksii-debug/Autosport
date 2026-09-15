@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
@@ -12,6 +15,10 @@ from autosport.release_package import (
     build_windows_package,
     verify_windows_package,
 )
+
+
+_SHA256_HEX = frozenset("0123456789abcdef")
+_COPY_CHUNK_SIZE = 1024 * 1024
 
 
 def _git_output(repo_root: Path, *args: str) -> str:
@@ -133,10 +140,111 @@ def _bind_source_sha_to_checkout(source_sha: str, *, repo_root: Path) -> None:
         )
 
 
+def _require_sha256(value: str, *, field: str) -> str:
+    normalized = value.strip().lower()
+    if len(normalized) != 64 or any(character not in _SHA256_HEX for character in normalized):
+        raise ValueError(f"{field} must be exactly 64 lowercase hexadecimal characters")
+    return normalized
+
+
+def _file_identity(value: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+    )
+
+
+def _capture_verified_executable(
+    source: Path,
+    expected_sha256: str,
+    *,
+    snapshot_dir: Path,
+    snapshot_name: str,
+) -> Path:
+    """Capture a verified executable into a process-private package snapshot.
+
+    The outer PowerShell verifier proves the executable immediately before this
+    process starts. This function carries that proof across the subprocess boundary:
+    it hashes the single opened source handle, checks that the path still names that
+    same regular file before and after the copy, and only then publishes a private
+    snapshot for the release builders. The live handoff path is never consumed by a
+    builder after this function returns.
+    """
+
+    expected = _require_sha256(expected_sha256, field=f"{snapshot_name}_sha256")
+    source = source.absolute()
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    destination = snapshot_dir / snapshot_name
+    temporary_path: Path | None = None
+
+    try:
+        before_path = source.lstat()
+    except OSError as exc:
+        raise ValueError(f"{snapshot_name} handoff is not readable: {source}") from exc
+    if stat.S_ISLNK(before_path.st_mode) or not stat.S_ISREG(before_path.st_mode):
+        raise ValueError(f"{snapshot_name} handoff must be a regular non-symlink file")
+
+    digest = hashlib.sha256()
+    try:
+        with source.open("rb") as source_handle:
+            opened = os.fstat(source_handle.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise ValueError(f"{snapshot_name} opened handoff is not a regular file")
+            if _file_identity(opened) != _file_identity(before_path):
+                raise ValueError(f"{snapshot_name} handoff changed before capture")
+
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=f".{snapshot_name}.",
+                suffix=".tmp",
+                dir=snapshot_dir,
+                delete=False,
+            ) as destination_handle:
+                temporary_path = Path(destination_handle.name)
+                while True:
+                    chunk = source_handle.read(_COPY_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    destination_handle.write(chunk)
+                destination_handle.flush()
+                os.fsync(destination_handle.fileno())
+
+            after_handle = os.fstat(source_handle.fileno())
+            if _file_identity(after_handle) != _file_identity(opened):
+                raise ValueError(f"{snapshot_name} handoff changed during capture")
+
+        try:
+            after_path = source.lstat()
+        except OSError as exc:
+            raise ValueError(f"{snapshot_name} handoff disappeared during capture") from exc
+        if stat.S_ISLNK(after_path.st_mode) or not stat.S_ISREG(after_path.st_mode):
+            raise ValueError(f"{snapshot_name} handoff was replaced during capture")
+        if _file_identity(after_path) != _file_identity(before_path):
+            raise ValueError(f"{snapshot_name} handoff was replaced during capture")
+
+        actual = digest.hexdigest()
+        if actual != expected:
+            raise ValueError(
+                f"{snapshot_name} handoff SHA-256 mismatch: expected {expected}, got {actual}"
+            )
+
+        os.replace(temporary_path, destination)
+        temporary_path = None
+        return destination
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe", type=Path, required=True)
+    parser.add_argument("--exe-sha256", required=True)
     parser.add_argument("--data-exe", type=Path, required=True)
+    parser.add_argument("--data-exe-sha256", required=True)
     parser.add_argument("--start-file", type=Path, required=True)
     parser.add_argument("--example-dir", type=Path, required=True)
     parser.add_argument("--diagnostic", type=Path, required=True)
@@ -150,18 +258,34 @@ def main() -> int:
 
     _bind_source_sha_to_checkout(args.source_sha, repo_root=Path.cwd())
 
-    output, _base_digest = build_windows_package(
-        args.exe,
-        args.start_file,
-        args.example_dir,
-        args.diagnostic,
-        args.accessibility_audit,
-        args.keyboard_audit,
-        args.restart_recovery_audit,
-        args.output,
-        args.source_sha,
-    )
-    binding = bind_portable_data_tool(output, args.data_exe)
+    with tempfile.TemporaryDirectory(prefix="autosport-package-executables-") as snapshot_root:
+        snapshot_dir = Path(snapshot_root)
+        trusted_exe = _capture_verified_executable(
+            args.exe,
+            args.exe_sha256,
+            snapshot_dir=snapshot_dir,
+            snapshot_name="Autosport.exe",
+        )
+        trusted_data_exe = _capture_verified_executable(
+            args.data_exe,
+            args.data_exe_sha256,
+            snapshot_dir=snapshot_dir,
+            snapshot_name="Autosport-Data.exe",
+        )
+
+        output, _base_digest = build_windows_package(
+            trusted_exe,
+            args.start_file,
+            args.example_dir,
+            args.diagnostic,
+            args.accessibility_audit,
+            args.keyboard_audit,
+            args.restart_recovery_audit,
+            args.output,
+            args.source_sha,
+        )
+        binding = bind_portable_data_tool(output, trusted_data_exe)
+
     verification = verify_windows_package(output, expected_source_sha=args.source_sha)
     data_verification = verify_portable_data_tool(output)
     verification.update(data_verification)

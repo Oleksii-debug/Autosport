@@ -84,18 +84,29 @@ def test_local_windows_build_uses_trusted_snapshot_immediately_before_pyinstalle
     trusted_gate = "python $sourceVerifier --source-sha $sourceSha --late-build-boundary"
     live_late_gate = "python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary"
     gate_check = 'if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport.exe exited $LASTEXITCODE" }'
-    first_build = "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
+    write_fence = '& icacls $trustedBuildRoot /deny "*${currentSid}:(OI)(CI)(W,D,DC)" /T /C'
+    locked_snapshot_gate = (
+        "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "
+        "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
+    )
+    first_build = (
+        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
+        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+    )
 
     dataset_index = script.index(dataset_smoke)
     cleanup_index = script.index(smoke_cleanup, dataset_index)
     gate_index = script.index(trusted_gate)
+    fence_index = script.index(write_fence)
+    locked_gate_index = script.index(locked_snapshot_gate, fence_index)
     first_build_index = script.index(first_build)
 
     assert live_late_gate not in script
-    assert dataset_index < cleanup_index < gate_index < first_build_index
-    assert script.index(gate_check) > gate_index
-    assert script.index(gate_check) < first_build_index
+    assert dataset_index < cleanup_index < gate_index < fence_index < locked_gate_index < first_build_index
+    assert gate_index < script.index(gate_check) < fence_index
     assert script.count(trusted_gate) == 3
+    assert script.count(locked_snapshot_gate) == 4
     assert script.count(smoke_cleanup) == 2
 
 
@@ -104,8 +115,16 @@ def test_local_windows_build_phase_separates_later_release_outputs() -> None:
 
     strict_gate = "python $sourceVerifier --source-sha $sourceSha --late-build-boundary"
     release_gate = strict_gate + " --allow-release-outputs"
-    first_build = "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
-    second_build = "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py"
+    first_build = (
+        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
+        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+    )
+    second_build = (
+        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
+        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
+    )
     package_command = "python scripts/package_windows.py `"
 
     first_gate_index = script.index(strict_gate)
@@ -123,12 +142,20 @@ def test_local_windows_build_phase_separates_later_release_outputs() -> None:
 def test_local_windows_build_binds_pyinstaller_outputs_before_consumption() -> None:
     script = _build_script_text()
 
-    first_build = "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py"
+    first_build = (
+        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
+        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+    )
     first_bind = (
         "python $sourceVerifier --bind-artifact $builtAutosportExe "
         "--bound-output $boundAutosportExe --digest-output $autosportDigestPath"
     )
-    second_build = "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py"
+    second_build = (
+        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
+        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
+    )
     second_bind = (
         "python $sourceVerifier --bind-artifact $builtDataExe "
         "--bound-output $boundDataExe --digest-output $dataDigestPath"
@@ -156,11 +183,11 @@ def test_local_windows_build_fails_closed_on_release_native_steps() -> None:
             'if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }',
         ),
         (
-            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py",
+            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry",
             'if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }',
         ),
         (
-            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py",
+            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry",
             'if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }',
         ),
         (

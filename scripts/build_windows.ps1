@@ -58,6 +58,9 @@ $sourceSha = $env:AUTOSPORT_SOURCE_SHA
 if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
 python scripts/verify_source_checkout.py --source-sha $sourceSha
 if ($LASTEXITCODE -ne 0) { throw "Source checkout preflight exited $LASTEXITCODE" }
+$sourceVerifier = (New-TemporaryFile).FullName
+Copy-Item -LiteralPath 'scripts/verify_source_checkout.py' -Destination $sourceVerifier -Force
+$env:PYTHONDONTWRITEBYTECODE = '1'
 python -m pip install --upgrade pip
 if ($LASTEXITCODE -ne 0) { throw "pip upgrade exited $LASTEXITCODE" }
 python -m pip install -e '.[build,test]'
@@ -70,8 +73,12 @@ if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }
 if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
 python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary
 if ($LASTEXITCODE -ne 0) { throw "Late source checkout integrity gate exited $LASTEXITCODE" }
+python $sourceVerifier --source-sha $sourceSha --late-build-boundary
+if ($LASTEXITCODE -ne 0) { throw "Snapshot late source checkout integrity gate exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
 if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
+python $sourceVerifier --source-sha $sourceSha --late-build-boundary
+if ($LASTEXITCODE -ne 0) { throw "Snapshot late source checkout integrity gate exited $LASTEXITCODE" }
 python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
 if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }
 
@@ -211,6 +218,8 @@ $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
 $packageVerification = Join-Path $PWD 'dist/package-verification.json'
 if (Test-Path $package) { Remove-Item -Force $package }
 if (Test-Path $packageVerification) { Remove-Item -Force $packageVerification }
+python $sourceVerifier --source-sha $sourceSha --late-build-boundary
+if ($LASTEXITCODE -ne 0) { throw "Snapshot late source checkout integrity gate exited $LASTEXITCODE" }
 python scripts/package_windows.py `
   --exe dist/Autosport.exe `
   --data-exe dist/Autosport-Data.exe `
@@ -283,7 +292,7 @@ if (Test-Path $freshDiag) { Remove-Item -Force $freshDiag }
 $freshDiagProcess = Start-Process -FilePath $extractedExe -ArgumentList '--diagnostic-output', $freshDiag -Wait -PassThru
 if ($freshDiagProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe diagnostic exited $($freshDiagProcess.ExitCode)" }
 $freshDiagnostic = Get-Content $freshDiag -Raw | ConvertFrom-Json
-if ($freshDiagnostic.status -ne 'PASS') { throw 'Fresh-extracted Autosport.exe diagnostic did not PASS' }
+if ($freshDiagnostic.status -ne 'PASS') { throw 'Fresh-extracted diagnostic did not PASS' }
 if ($freshDiagnostic.real_money_execution -ne $false -or $freshDiagnostic.human_tested -ne $false -or $freshDiagnostic.nvda_verified -ne $false) {
   throw 'Fresh-extracted diagnostic violated release truth labels'
 }
@@ -354,3 +363,4 @@ $freshEvidence = [ordered]@{
   nvda_verified = $false
 }
 $freshEvidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $PWD 'dist/fresh-extraction-verification.json') -Encoding utf8
+Remove-Item -LiteralPath $sourceVerifier -Force -ErrorAction SilentlyContinue

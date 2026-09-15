@@ -261,7 +261,11 @@ class AutosportSession:
         return result
 
     def _ensure_canonical_economic_base(self) -> VerifiedDecisionLedgerSnapshot:
-        if self.registry.in_progress() or transaction_history_requires_recovery(self.workspace):
+        if self.registry.in_progress():
+            raise UnresolvedExperimentError(
+                "Workspace has an unresolved economic run; repair it before starting another paper experiment."
+            )
+        if transaction_history_requires_recovery(self.workspace):
             raise UnresolvedExperimentError(
                 "Workspace has unresolved transaction history; repair it before starting another paper experiment."
             )

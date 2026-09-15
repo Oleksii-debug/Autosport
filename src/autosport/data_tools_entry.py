@@ -43,13 +43,7 @@ test happened and never changes BUILD_INFO human/NVDA truth labels.
 """
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    if not args or args[0] in {"-h", "--help"}:
-        print(_USAGE)
-        return 0
-
-    command, forwarded = args[0], args[1:]
+def _dispatch(command: str, forwarded: list[str]) -> int:
     if command == "acquire":
         from autosport.historical_acquisition import main as acquisition_main
 
@@ -94,6 +88,43 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Autosport-Data: unknown command {command!r}\n")
     print(_USAGE)
     return 2
+
+
+def _expected_failure_message(command: str, exc: OSError | ValueError) -> str:
+    # Formatting belongs to the same packaged fail-closed boundary as dispatch.
+    # Exception subclasses are caller/library supplied: neither custom type metadata,
+    # __str__(), nor methods on a returned str subclass may recreate a traceback.
+    try:
+        exception_type = type.__getattribute__(type(exc), "__name__")
+    except BaseException:
+        exception_type = "Exception"
+    try:
+        rendered = str.__str__(str(exc))
+    except BaseException:
+        rendered = exception_type
+    detail = " ".join(rendered.splitlines()).strip()
+    if not detail:
+        detail = exception_type
+    return f"Autosport-Data: {command}=FAIL_CLOSED error={exception_type}: {detail}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args or args[0] in {"-h", "--help"}:
+        print(_USAGE)
+        return 0
+
+    command, forwarded = args[0], args[1:]
+    try:
+        return _dispatch(command, forwarded)
+    except (OSError, ValueError) as exc:
+        # This executable is a packaged user-facing boundary. Expected malformed
+        # local input and filesystem failures must be recoverable without a Python
+        # traceback. Deliberately do not catch RuntimeError, SystemExit or
+        # BaseException so programming failures and argparse exit semantics remain
+        # visible to qualification instead of being mislabeled as user-input errors.
+        print(_expected_failure_message(command, exc), file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":

@@ -98,6 +98,37 @@ class ProviderPayloadIsolationTests(unittest.TestCase):
         self.assertEqual(event.metadata, quote.metadata)
         self.assertIsNot(event.metadata, quote.metadata)
 
+    def test_normalizer_detaches_nested_provider_metadata_in_both_directions(self) -> None:
+        shared = {"ok": True}
+        nested: list[object] = [1, shared]
+        metadata: dict[str, object] = {
+            "nested": nested,
+            "same-again": shared,
+        }
+        quote = self._quote(metadata=metadata)
+
+        event = CanonicalNormalizer().normalize("fixture", quote)
+
+        self.assertEqual(event.metadata, metadata)
+        self.assertIsNot(event.metadata, metadata)
+        self.assertIsNot(event.metadata["nested"], nested)
+        self.assertIsNot(event.metadata["same-again"], shared)
+
+        shared["ok"] = False
+        nested.append("provider-only")
+        self.assertEqual(event.metadata["nested"], [1, {"ok": True}])
+        self.assertEqual(event.metadata["same-again"], {"ok": True})
+
+        event_nested = event.metadata["nested"]
+        self.assertIsInstance(event_nested, list)
+        event_nested.append("event-only")
+        event_same_again = event.metadata["same-again"]
+        self.assertIsInstance(event_same_again, dict)
+        event_same_again["event"] = True
+
+        self.assertEqual(nested, [1, {"ok": False}, "provider-only"])
+        self.assertEqual(shared, {"ok": False})
+
     def test_malformed_quote_is_rejected_without_rolling_back_valid_siblings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteMarketStore(Path(tmp) / "market.db")

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .ingestion import IngestionEngine, IngestionStats
+from .ingestion import CommittedIngestionHealthError, IngestionEngine, IngestionStats
 from .ingestion_health import IngestionPolicy, SourceHealthStore
 from .market_bus import MarketEventBus, MarketEventDeliveryError
 from .providers import MarketProvider, ProviderBatch
@@ -176,6 +176,13 @@ def _poll_acknowledged(
     for attempt in range(_MAX_BATCH_ATTEMPTS):
         try:
             stats = engine.poll_once(provider, max_items=max_items)
+        except CommittedIngestionHealthError:
+            # The ingestion boundary guarantees market persistence already committed.
+            # Retire this in-flight chunk before surfacing the health publication
+            # failure; replaying it would corrupt accepted/progress accounting.
+            if provider.has_inflight:
+                provider.acknowledge()
+            raise
         except MarketEventDeliveryError:
             # MarketEventBus raises this only after its storage transaction commits.
             # Do not replay already durable events merely because a subscriber failed.

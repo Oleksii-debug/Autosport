@@ -80,6 +80,7 @@ jobs:
           "AUTOSPORT_PACKAGED_ROOT=$postPackageRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AUTOSPORT_PACKAGED_EXE=$packagedExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AUTOSPORT_PACKAGED_DATA_EXE=$packagedDataExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AUTOSPORT_QUALIFIED_PACKAGE_SHA256=$packageSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Execute packaged NVDA evidence contract
         shell: pwsh
         run: ./scripts/nvda_evidence_package_smoke.ps1
@@ -219,7 +220,53 @@ jobs:
           name: Autosport-external-uia-failure-evidence
           path: dist/fresh-extraction-external-uia-audit.json
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@v4
+      - name: Reprove release ZIP immediately before artifact publication
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          function Assert-PackageDigest {
+            param(
+              [Parameter(Mandatory=$true)][string]$Path,
+              [Parameter(Mandatory=$true)][string]$Expected,
+              [Parameter(Mandatory=$true)][string]$Label
+            )
+            if (-not (Test-Path $Path -PathType Leaf)) { throw "$Label is missing: $Path" }
+            if ($Expected -notmatch '^[0-9a-f]{64}$') { throw "$Label expected SHA-256 is not canonical" }
+            $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $Expected) { throw "$Label SHA-256 mismatch: expected $Expected, got $actual" }
+          }
+
+          $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
+          $expected = [string]$env:AUTOSPORT_QUALIFIED_PACKAGE_SHA256
+          if ([string]::IsNullOrWhiteSpace($expected)) { throw 'Publication gate is missing qualified release ZIP SHA-256' }
+
+          $probe = Join-Path $env:RUNNER_TEMP 'autosport-publication-replacement-probe.zip'
+          $replacement = "$probe.replacement"
+          try {
+            Copy-Item -LiteralPath $package -Destination $probe -Force
+            Assert-PackageDigest -Path $probe -Expected $expected -Label 'Publication replacement probe before mutation'
+            Copy-Item -LiteralPath $package -Destination $replacement -Force
+            [System.IO.File]::AppendAllText($replacement, 'AUTOSPORT_PUBLICATION_REPLACEMENT', [System.Text.Encoding]::UTF8)
+            Remove-Item -LiteralPath $probe -Force
+            Move-Item -LiteralPath $replacement -Destination $probe
+
+            $rejected = $false
+            try {
+              Assert-PackageDigest -Path $probe -Expected $expected -Label 'Publication replacement probe after mutation'
+            } catch {
+              $rejected = $true
+            }
+            if (-not $rejected) { throw 'Publication digest verifier accepted a replaced package probe' }
+          } finally {
+            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $replacement -Force -ErrorAction SilentlyContinue
+          }
+
+          Assert-PackageDigest -Path $package -Expected $expected -Label 'Release ZIP immediately before artifact upload'
+      - name: Upload prehuman Windows candidate
+        id: upload_prehuman_candidate
+        uses: actions/upload-artifact@v4
         with:
           name: Autosport-V1-Windows-prehuman
           path: |
@@ -250,3 +297,22 @@ jobs:
             dist/nvda-evidence-packaged-template.json
             dist/nvda-evidence-fresh-extracted-template.json
           if-no-files-found: error
+      - name: Download exact uploaded candidate for publication identity proof
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.upload_prehuman_candidate.outputs.artifact-id }}
+          path: .uploaded-prehuman-proof
+      - name: Verify GitHub-stored release ZIP identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $expected = [string]$env:AUTOSPORT_QUALIFIED_PACKAGE_SHA256
+          if ($expected -notmatch '^[0-9a-f]{64}$') { throw 'Publication proof is missing canonical qualified release ZIP SHA-256' }
+          $proofRoot = Join-Path $PWD '.uploaded-prehuman-proof'
+          $uploadedPackages = @(Get-ChildItem -LiteralPath $proofRoot -Recurse -Filter 'Autosport-V1-windows-x64.zip' -File)
+          if ($uploadedPackages.Count -ne 1) { throw "Publication proof expected exactly one uploaded release ZIP, found $($uploadedPackages.Count)" }
+          $uploadedSha = (Get-FileHash -LiteralPath $uploadedPackages[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($uploadedSha -ne $expected) {
+            throw "GitHub-stored release ZIP SHA-256 mismatch: expected $expected, got $uploadedSha"
+          }

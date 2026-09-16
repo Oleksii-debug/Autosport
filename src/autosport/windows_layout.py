@@ -44,12 +44,16 @@ def compact_surface_heights(app: Any) -> None:
         getattr(app, name).pack_configure(pady=_SECTION_LABEL_PADY)
 
 
+def _surface_target_widget(app: Any, surface_key: str) -> Any | None:
+    """Return only a target that the current product shell actually exposes."""
+    target_name = SURFACE_BY_KEY[surface_key].target_widget
+    if target_name is None:
+        return None
+    return getattr(app, target_name, None)
+
+
 def _focus_surface_target(app: Any, surface_key: str) -> None:
-    surface = SURFACE_BY_KEY[surface_key]
-    if surface.target_widget is None:
-        app.shell_details.focus_set()
-        return
-    target = getattr(app, surface.target_widget, None)
+    target = _surface_target_widget(app, surface_key)
     if target is None:
         app.shell_details.focus_set()
         return
@@ -70,8 +74,12 @@ def _render_shell_surface(app: Any, surface_key: str, *, persist: bool) -> None:
     app.shell_details.delete(0, "end")
     for line in surface_detail_lines(surface):
         app.shell_details.insert("end", line)
+    # A declared target is not enough: the packaged app must expose that
+    # widget before the generic Open action can truthfully promise reachability.
+    # This keeps presentation-only/future surfaces fail-closed instead of
+    # silently focusing an unrelated control.
     app.shell_open_button.configure(
-        state=("normal" if surface.target_widget is not None else "disabled")
+        state=("normal" if _surface_target_widget(app, surface.key) is not None else "disabled")
     )
     if persist:
         save_surface_selection(app.workspace, surface.key)

@@ -236,3 +236,13 @@ def test_complete_request_has_no_new_child_proposals() -> None:
     assert proposal.residual_before == Decimal("0")
     assert proposal.proposed_total == Decimal("0")
     assert proposal.legs == ()
+
+
+def test_parent_plan_id_is_foreign_authority_reference_not_content_fingerprint() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+
+    smaller = _plan("40.00", (a, b))
+    larger = _plan("60.00", (a, b))
+
+    assert smaller.parent_plan_id == larger.parent_plan_id == _PLAN_ID
+    assert [leg.leg_id for leg in smaller.legs] != [leg.leg_id for leg in larger.legs]

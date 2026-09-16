@@ -50,8 +50,6 @@ def _focus_surface_target(app: Any, surface_key: str) -> None:
         app.shell_details.focus_set()
         return
     target = getattr(app, surface.target_widget, None)
-    if target is None and surface.target_widget == "bank_summary":
-        target = getattr(app, "tickets", None)
     if target is None:
         app.shell_details.focus_set()
         return

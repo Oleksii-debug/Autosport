@@ -112,6 +112,15 @@ Require-CanonicalHex -Value $packageSha -Length 64 -Label 'AUTOSPORT_QUALIFIED_P
 if ([string]::IsNullOrWhiteSpace($packagedRoot)) { throw 'AUTOSPORT_PACKAGED_ROOT is missing' }
 if ([string]::IsNullOrWhiteSpace($packagedDataExe)) { throw 'AUTOSPORT_PACKAGED_DATA_EXE is missing' }
 
+$authorityScript = Join-Path $PWD 'scripts/packaged_executable_authority.ps1'
+if (-not (Test-Path -LiteralPath $authorityScript -PathType Leaf)) {
+    throw "Canonical packaged executable authority helper is missing: $authorityScript"
+}
+. $authorityScript
+$producerIdentity = Get-AutosportProducerPackageIdentity -ExpectedPackageSha256 $packageSha -ExpectedSourceSha $sourceSha
+$producerDataExeSha = ([string]$producerIdentity.AutosportDataExeSha256).Trim().ToLowerInvariant()
+Require-CanonicalHex -Value $producerDataExeSha -Length 64 -Label 'producer-bound Autosport-Data.exe SHA-256'
+
 $buildInfoPath = Join-Path $packagedRoot 'BUILD_INFO.json'
 $freshDataExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
 $verificationPath = Join-Path $PWD 'dist/fresh-extraction-verification.json'
@@ -124,18 +133,21 @@ if ([string]$buildInfo.source_sha -ne $sourceSha) { throw 'BUILD_INFO source_sha
 if ($buildInfo.real_money_execution -ne $false -or $buildInfo.human_tested -ne $false -or $buildInfo.nvda_verified -ne $false) {
     throw 'BUILD_INFO violated prehuman truth labels'
 }
-$expectedDataExeSha = [string]$buildInfo.autosport_data_exe_sha256
+$expectedDataExeSha = ([string]$buildInfo.autosport_data_exe_sha256).Trim().ToLowerInvariant()
 Require-CanonicalHex -Value $expectedDataExeSha -Length 64 -Label 'BUILD_INFO autosport_data_exe_sha256'
+if ($expectedDataExeSha -ne $producerDataExeSha) {
+    throw 'BUILD_INFO Autosport-Data.exe hash is not bound to producer package identity'
+}
 $packagedDataExeSha = (Get-FileHash -LiteralPath $packagedDataExe -Algorithm SHA256).Hash.ToLowerInvariant()
 $freshDataExeSha = (Get-FileHash -LiteralPath $freshDataExe -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($packagedDataExeSha -ne $expectedDataExeSha) { throw 'Qualified packaged Autosport-Data.exe hash mismatch' }
-if ($freshDataExeSha -ne $expectedDataExeSha) { throw 'Fresh-extracted Autosport-Data.exe hash mismatch' }
+if ($packagedDataExeSha -ne $producerDataExeSha) { throw 'Qualified packaged Autosport-Data.exe hash mismatch' }
+if ($freshDataExeSha -ne $producerDataExeSha) { throw 'Fresh-extracted Autosport-Data.exe hash mismatch' }
 
 $verification = Get-Content -LiteralPath $verificationPath -Raw | ConvertFrom-Json
 if ($verification.status -ne 'PASS') { throw 'Fresh-extraction verification is not PASS' }
 if ([string]$verification.source_sha -ne $sourceSha) { throw 'Fresh-extraction verification source_sha mismatch' }
 if ([string]$verification.package_sha256 -ne $packageSha) { throw 'Fresh-extraction verification package_sha256 mismatch' }
-if ([string]$verification.autosport_data_exe_sha256 -ne $expectedDataExeSha) { throw 'Fresh-extraction verification Autosport-Data.exe hash mismatch' }
+if (([string]$verification.autosport_data_exe_sha256).Trim().ToLowerInvariant() -ne $producerDataExeSha) { throw 'Fresh-extraction verification Autosport-Data.exe hash mismatch' }
 if ($verification.real_money_execution -ne $false -or $verification.human_tested -ne $false -or $verification.nvda_verified -ne $false) {
     throw 'Fresh-extraction verification violated prehuman truth labels'
 }
@@ -160,7 +172,12 @@ $secretSentinel = 'AUTOSPORT_PACKAGE_SMOKE_SECRET_SENTINEL_DO_NOT_EXPORT_7D8A6B'
 [System.IO.File]::WriteAllText((Join-Path $workspace 'market.sqlite'), 'NON_CANONICAL_MARKET_BYTES' + "`n", $utf8)
 [System.IO.File]::WriteAllText((Join-Path $workspace 'raw-provider.bin'), 'NON_CANONICAL_PROVIDER_BYTES' + "`n", $utf8)
 
+$packagedAuthority = $null
+$freshAuthority = $null
 try {
+    $packagedAuthority = Open-AutosportQualifiedExecutable -Path $packagedDataExe -ExpectedSha256 $producerDataExeSha -Label 'Packaged evidence-smoke Autosport-Data.exe'
+    $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshDataExe -ExpectedSha256 $producerDataExeSha -Label 'Fresh-extracted evidence-smoke Autosport-Data.exe'
+
     $packagedRoundTrip = Invoke-EvidenceRoundTrip -Exe $packagedDataExe -Workspace $workspace -ManifestPath $packagedManifestPath -Label 'Packaged' -SecretSentinel $secretSentinel
     $freshRoundTrip = Invoke-EvidenceRoundTrip -Exe $freshDataExe -Workspace $workspace -ManifestPath $freshManifestPath -Label 'Fresh-extracted' -SecretSentinel $secretSentinel
 
@@ -180,10 +197,11 @@ try {
         status = 'PASS'
         source_sha = $sourceSha
         package_sha256 = $packageSha
-        autosport_data_exe_sha256 = $expectedDataExeSha
+        autosport_data_exe_sha256 = $producerDataExeSha
         packaged_export_verify_status = 'PASS'
         fresh_extracted_export_verify_status = 'PASS'
         tampered_workspace_verify_status = 'FAIL_CLOSED'
+        qualified_executable_authority_held = $true
         manifest_sha256 = [string]$packagedRoundTrip.Manifest.manifest_sha256
         manifest_file_sha256 = $packagedRoundTrip.FileSha256
         fixed_evidence_set_complete = $true
@@ -194,8 +212,10 @@ try {
         nvda_verified = $false
     }
     $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $resultPath -Encoding utf8
-    Write-Host "evidence_export_package_smoke=PASS source_sha=$sourceSha package_sha256=$packageSha autosport_data_exe_sha256=$expectedDataExeSha"
+    Write-Host "evidence_export_package_smoke=PASS source_sha=$sourceSha package_sha256=$packageSha autosport_data_exe_sha256=$producerDataExeSha"
 } finally {
+    if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
+    if ($null -ne $packagedAuthority) { $packagedAuthority.Dispose() }
     foreach ($path in @($workspace, $packagedManifestPath, $freshManifestPath)) {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue }
     }

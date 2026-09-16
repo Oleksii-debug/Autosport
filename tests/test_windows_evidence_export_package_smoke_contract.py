@@ -22,8 +22,11 @@ def test_packaged_evidence_smoke_binds_release_identity_before_execution() -> No
     assert "AUTOSPORT_PACKAGED_ROOT" in text
     assert "AUTOSPORT_PACKAGED_DATA_EXE" in text
     assert "fresh-extraction-verification.json" in text
+    assert "packaged_executable_authority.ps1" in text
+    assert "Get-AutosportProducerPackageIdentity" in text
     assert "BUILD_INFO source_sha does not match exact workflow head" in text
     assert "autosport_data_exe_sha256" in text
+    assert "BUILD_INFO Autosport-Data.exe hash is not bound to producer package identity" in text
     assert "Qualified packaged Autosport-Data.exe hash mismatch" in text
     assert "Fresh-extracted Autosport-Data.exe hash mismatch" in text
     assert "Fresh-extraction verification package_sha256 mismatch" in text
@@ -41,6 +44,35 @@ def test_packaged_evidence_smoke_executes_both_qualified_data_tools() -> None:
     assert "evidence_verify=PASS" in text
     assert "Evidence manifest identity changed between qualified packaged and fresh-extracted executables" in text
     assert "Evidence manifest bytes changed between qualified packaged and fresh-extracted executables" in text
+
+
+def test_packaged_evidence_smoke_holds_executable_authority_through_all_launches() -> None:
+    text = _smoke_text()
+
+    packaged_acquire = "Open-AutosportQualifiedExecutable -Path $packagedDataExe"
+    fresh_acquire = "Open-AutosportQualifiedExecutable -Path $freshDataExe"
+    first_round_trip = "$packagedRoundTrip = Invoke-EvidenceRoundTrip"
+    negative_probe = "$negative = Invoke-DataTool"
+    fresh_dispose = "$freshAuthority.Dispose()"
+    packaged_dispose = "$packagedAuthority.Dispose()"
+
+    for fragment in (
+        packaged_acquire,
+        fresh_acquire,
+        first_round_trip,
+        negative_probe,
+        fresh_dispose,
+        packaged_dispose,
+    ):
+        assert fragment in text
+
+    assert text.index(packaged_acquire) < text.index(first_round_trip)
+    assert text.index(fresh_acquire) < text.index(first_round_trip)
+    assert text.index(first_round_trip) < text.index(negative_probe)
+    assert text.index(negative_probe) < text.index(fresh_dispose)
+    assert text.index(negative_probe) < text.index(packaged_dispose)
+    assert "-ExpectedSha256 $producerDataExeSha" in text
+    assert "qualified_executable_authority_held = $true" in text
 
 
 def test_packaged_evidence_smoke_preserves_metadata_only_truth_boundary() -> None:

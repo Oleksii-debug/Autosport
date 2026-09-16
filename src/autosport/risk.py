@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import (
     Context,
     Decimal,
@@ -17,6 +18,120 @@ from .economic_goal import EconomicGoalContract
 from .paper import PaperBook
 
 
+def _canonical_context_text(name: str, value: str | None) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or not value or value != value.strip() or "\x00" in value:
+        raise ValueError(f"{name} must be a non-empty canonical string when supplied")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class ProposedTicketLegRiskContext:
+    """Identifiers known for one proposed leg, without inferred provider metadata."""
+
+    event_id: str
+    market_id: str
+    provider_id: str | None = None
+    sport_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _canonical_context_text("event_id", self.event_id)
+        _canonical_context_text("market_id", self.market_id)
+        if not self.event_id or not self.market_id:
+            raise ValueError("event_id and market_id are required")
+        _canonical_context_text("provider_id", self.provider_id)
+        _canonical_context_text("sport_id", self.sport_id)
+
+
+@dataclass(frozen=True, slots=True)
+class ProposedTicketRiskContext:
+    """Immutable, non-persistent evidence attached to one paper-risk proposal.
+
+    Optional facts remain absent rather than being inferred.  This type only
+    transports evidence to the existing risk boundary; constructing it does not
+    authorize or implement additional EconomicGoalContract ceilings.
+    """
+
+    legs: tuple[ProposedTicketLegRiskContext, ...]
+    bankroll_id: str | None = None
+    currency: str | None = None
+    session_id: str | None = None
+    day_id: str | None = None
+    measurement_window_id: str | None = None
+    quote_evidence_id: str | None = None
+    quote_source: str | None = None
+    quote_source_at: datetime | None = None
+    quote_observed_at: datetime | None = None
+    data_quality: Decimal | None = None
+    execution_slippage_fraction: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.legs, tuple) or not self.legs:
+            raise ValueError("legs must be a non-empty tuple")
+        if any(not isinstance(leg, ProposedTicketLegRiskContext) for leg in self.legs):
+            raise ValueError("legs must contain ProposedTicketLegRiskContext values")
+
+        for name in (
+            "bankroll_id",
+            "currency",
+            "session_id",
+            "day_id",
+            "measurement_window_id",
+            "quote_evidence_id",
+            "quote_source",
+        ):
+            _canonical_context_text(name, getattr(self, name))
+
+        if self.currency is not None and (
+            len(self.currency) != 3
+            or not self.currency.isascii()
+            or not self.currency.isalpha()
+            or self.currency != self.currency.upper()
+        ):
+            raise ValueError("currency must be a three-letter uppercase ASCII code")
+
+        for name in ("quote_source_at", "quote_observed_at"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, datetime)
+                or value.tzinfo is None
+                or value.utcoffset() is None
+            ):
+                raise ValueError(f"{name} must be a timezone-aware datetime when supplied")
+        if (
+            self.quote_source_at is not None
+            and self.quote_observed_at is not None
+            and self.quote_source_at > self.quote_observed_at
+        ):
+            raise ValueError("quote_source_at must not be after quote_observed_at")
+
+        if self.data_quality is not None:
+            if (
+                not isinstance(self.data_quality, Decimal)
+                or not self.data_quality.is_finite()
+                or self.data_quality < 0
+                or self.data_quality > 1
+            ):
+                raise ValueError("data_quality must be an exact Decimal between 0 and 1")
+        if self.execution_slippage_fraction is not None:
+            if (
+                not isinstance(self.execution_slippage_fraction, Decimal)
+                or not self.execution_slippage_fraction.is_finite()
+                or self.execution_slippage_fraction < 0
+            ):
+                raise ValueError(
+                    "execution_slippage_fraction must be a non-negative exact Decimal"
+                )
+
+    @property
+    def parlay_leg_count(self) -> int:
+        return len(self.legs)
+
+
 @dataclass(frozen=True, slots=True)
 class RiskDecision:
     allowed: bool
@@ -29,10 +144,9 @@ class PaperRiskPolicy:
 
     ``economic_goal`` can only tighten the locally provable executable limits in
     this policy: per-ticket stake, aggregate committed capital, concurrent open
-    paper positions, and the owner emergency stop.  Other EconomicGoalContract
-    dimensions deliberately remain outside this boundary because PaperRiskPolicy
-    has no authoritative session/day/drawdown/turnover/concentration, quote,
-    parlay, deny-list, bankroll-id, or currency context with which to prove them.
+    paper positions, and the owner emergency stop.  ProposedTicketRiskContext
+    adds typed proposal evidence and bankroll/currency identity binding but does
+    not itself authorize quote/parlay/deny-list/session/day ceiling execution.
     """
 
     max_ticket_fraction: Decimal = Decimal("0.02")
@@ -189,7 +303,18 @@ class PaperRiskPolicy:
             return None
         return values
 
-    def evaluate(self, book: PaperBook, stake: Decimal | str) -> RiskDecision:
+    def evaluate(
+        self,
+        book: PaperBook,
+        stake: Decimal | str,
+        *,
+        proposed_ticket_context: ProposedTicketRiskContext | None = None,
+    ) -> RiskDecision:
+        if proposed_ticket_context is not None and not isinstance(
+            proposed_ticket_context, ProposedTicketRiskContext
+        ):
+            return RiskDecision(False, "proposed ticket risk context is invalid")
+
         try:
             amount = Decimal(str(stake))
         except (InvalidOperation, ValueError):
@@ -206,6 +331,17 @@ class PaperRiskPolicy:
 
         goal = self.economic_goal
         if goal is not None:
+            if proposed_ticket_context is not None:
+                if (
+                    proposed_ticket_context.bankroll_id is not None
+                    and proposed_ticket_context.bankroll_id != goal.bankroll_id
+                ):
+                    return RiskDecision(False, "proposed ticket bankroll_id does not match economic goal")
+                if (
+                    proposed_ticket_context.currency is not None
+                    and proposed_ticket_context.currency != goal.currency
+                ):
+                    return RiskDecision(False, "proposed ticket currency does not match economic goal")
             if goal.emergency_stop:
                 return RiskDecision(False, "economic goal emergency stop is active")
             if goal.max_stake_amount is not None and amount > goal.max_stake_amount:

@@ -304,7 +304,11 @@ class PaperRiskPolicy:
                     quote = quotes_by_key[leg.quote_key]
                     quote_ts = quote.source_ts if quote.source_ts is not None else quote.observed_ts
                     _, quote_time = _canonical_context_timestamp("quote timestamp", quote_ts)
-                    age_seconds = Decimal(str((proposal_time - quote_time).total_seconds()))
+                    age_delta = proposal_time - quote_time
+                    age_seconds = (
+                        Decimal(age_delta.days * 86400 + age_delta.seconds)
+                        + (Decimal(age_delta.microseconds) / Decimal("1000000"))
+                    )
                     if age_seconds < 0:
                         return RiskDecision(False, "quote timestamp is after proposal timestamp")
                     if age_seconds > goal.max_quote_age_seconds:

@@ -278,7 +278,7 @@ class AutosportApp(tk.Tk):
         return text(
             "ui.strategy.status",
             strategy_id=spec.strategy_id,
-            label=spec.label,
+            label=text(f"ui.strategy.label.{spec.strategy_id}"),
             plan_requirement=plan_requirement,
             ticket_mode=ticket_mode,
         )

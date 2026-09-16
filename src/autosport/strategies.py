@@ -49,7 +49,7 @@ _STRATEGIES: dict[str, tuple[StrategySpec, StrategyFactory]] = {
     "baseline-v1": (
         StrategySpec(
             strategy_id="baseline-v1",
-            label="Базова стратегія тестового сценарію",
+            label="Fixture baseline",
             description=(
                 "Transparent deterministic paper baseline. It opens a fixed virtual stake only "
                 "for causal market events explicitly marked with a fixture paper_signal."
@@ -62,7 +62,7 @@ _STRATEGIES: dict[str, tuple[StrategySpec, StrategyFactory]] = {
     "observe-only-v1": (
         StrategySpec(
             strategy_id="observe-only-v1",
-            label="Лише спостереження",
+            label="Observe only",
             description=(
                 "Deterministic no-action control strategy. It mirrors the causal market stream "
                 "but never creates a paper ticket."
@@ -75,7 +75,7 @@ _STRATEGIES: dict[str, tuple[StrategySpec, StrategyFactory]] = {
     RESEARCH_STRATEGY_ID: (
         StrategySpec(
             strategy_id=RESEARCH_STRATEGY_ID,
-            label="Типізований дослідницький повтор",
+            label="Typed research replay",
             description=(
                 "Deterministic paper-only research path binding causal replay quotes to typed "
                 "evidence, ForecastRecord, critic, portfolio impact and PaperRiskPolicy."

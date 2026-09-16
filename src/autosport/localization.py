@@ -33,6 +33,9 @@ _UK_UA = MappingProxyType(
         "ui.live_mode.public_preview": "Публічний перегляд — без ключа",
         "ui.live_mode.api_key": "Ключ API із середовища",
         "ui.strategy.display": "{strategy_id}",
+        "ui.strategy.label.baseline-v1": "Базова стратегія тестового сценарію",
+        "ui.strategy.label.observe-only-v1": "Лише спостереження",
+        "ui.strategy.label.research-replay-v1": "Типізований дослідницький повтор",
         "ui.error.strategy.unknown_display": "Невідома канонічна стратегія: {display}",
         "ui.error.exception.message_unavailable": "{exception_type}: <повідомлення недоступне>",
         "ui.status.startup.ready": (
@@ -68,7 +71,7 @@ _UK_UA = MappingProxyType(
         ),
         "ui.status.research_plan.replay_busy": "План дослідження не можна змінювати під час економічного повтору.",
         "ui.info.research_plan.not_supported": (
-            "{strategy_id} не використовує план дослідження. Виберіть Typed research replay."
+            "{strategy_id} не використовує план дослідження. Виберіть research-replay-v1."
         ),
         "ui.status.research_plan.not_required_short": "{strategy_id}: план дослідження не потрібен.",
         "ui.dialog.research_plan.choose_title": "Вибрати план дослідження Autosport",

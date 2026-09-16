@@ -46,7 +46,7 @@ def test_strategy_status_uses_ukrainian_label_without_changing_identity(
 
     assert spec.strategy_id == strategy_id
     assert spec.agent_names == expected_agents
-    assert spec.label == expected_label
+    assert spec.label == legacy_english_label
     assert strategy_id in rendered
     assert expected_label in rendered
     assert legacy_english_label not in rendered

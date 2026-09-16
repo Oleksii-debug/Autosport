@@ -3,7 +3,7 @@ from decimal import Context, Decimal, localcontext
 
 from autosport.candidate_optimizer import PortfolioAwareCandidateOptimizer
 from autosport.candidate_search import BeamParlayCandidateSearch, CandidateLeg, ParlayCandidate
-from autosport.scenario_search import ScenarioGroup, ScenarioOutcome
+from autosport.scenario_search import ScenarioGroup, ScenarioOutcome, ScenarioSearchEngine
 
 
 def _candidate(event_id: str) -> ParlayCandidate:
@@ -21,6 +21,31 @@ def _candidate(event_id: str) -> ParlayCandidate:
     )
 
 
+def _two_leg_permutations() -> tuple[ParlayCandidate, ParlayCandidate]:
+    legs = (
+        CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        ),
+        CandidateLeg(
+            "e2|winner|a",
+            "e2",
+            Decimal("2"),
+            Decimal("0.5"),
+        ),
+    )
+    canonical = BeamParlayCandidateSearch._to_candidate(legs)
+    permuted = ParlayCandidate(
+        tuple(reversed(legs)),
+        canonical.combined_odds,
+        canonical.independent_probability,
+        canonical.expected_profit_per_unit,
+    )
+    return canonical, permuted
+
+
 def _groups() -> list[ScenarioGroup]:
     return [
         ScenarioGroup(
@@ -32,6 +57,16 @@ def _groups() -> list[ScenarioGroup]:
         )
         for event_id in ("e1", "e2")
     ]
+
+
+class _RecordingScenarioEngine(ScenarioSearchEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.ticket_id_snapshots: list[tuple[str, ...]] = []
+
+    def analyse(self, tickets, groups):
+        self.ticket_id_snapshots.append(tuple(ticket.ticket_id for ticket in tickets))
+        return super().analyse(tickets, groups)
 
 
 class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
@@ -121,6 +156,43 @@ class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
         self.assertEqual(
             forward[0].candidate.legs[0].quote_key,
             reversed_input[0].candidate.legs[0].quote_key,
+        )
+
+    def test_leg_permutations_share_canonical_identity_before_limit(self) -> None:
+        canonical, permuted = _two_leg_permutations()
+        forward_engine = _RecordingScenarioEngine()
+        reversed_engine = _RecordingScenarioEngine()
+
+        forward = PortfolioAwareCandidateOptimizer(
+            scenario_engine=forward_engine,
+            result_limit=2,
+        ).evaluate_candidates(
+            [],
+            [canonical, permuted],
+            _groups(),
+            stake="1",
+        )
+        reversed_input = PortfolioAwareCandidateOptimizer(
+            scenario_engine=reversed_engine,
+            result_limit=2,
+        ).evaluate_candidates(
+            [],
+            [permuted, canonical],
+            _groups(),
+            stake="1",
+        )
+
+        self.assertEqual(len(forward), 1)
+        self.assertEqual(len(reversed_input), 1)
+        self.assertEqual(len(forward_engine.ticket_id_snapshots), 2)
+        self.assertEqual(len(reversed_engine.ticket_id_snapshots), 2)
+        self.assertEqual(
+            tuple(leg.quote_key for leg in forward[0].candidate.legs),
+            tuple(leg.quote_key for leg in reversed_input[0].candidate.legs),
+        )
+        self.assertEqual(
+            forward_engine.ticket_id_snapshots[-1],
+            reversed_engine.ticket_id_snapshots[-1],
         )
 
 

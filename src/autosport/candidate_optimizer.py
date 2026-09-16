@@ -93,8 +93,17 @@ class PortfolioAwareCandidateOptimizer:
         open_existing = [ticket for ticket in existing_tickets if ticket.status is TicketStatus.OPEN]
         base_report = self.scenario_engine.analyse(open_existing, groups)
         ranked: list[CandidatePortfolioImpact] = []
+        seen_candidate_identities: set[
+            tuple[tuple[str, str, str, str, str], ...]
+        ] = set()
         for candidate in candidates:
-            synthetic = _candidate_ticket(candidate, amount, quote_to_group)
+            canonical_candidate = _canonical_candidate(candidate)
+            candidate_identity = _candidate_identity_key(canonical_candidate)
+            if candidate_identity in seen_candidate_identities:
+                continue
+            seen_candidate_identities.add(candidate_identity)
+
+            synthetic = _candidate_ticket(canonical_candidate, amount, quote_to_group)
             touched_groups = {quote_to_group[leg.quote_key] for leg in synthetic.legs}
             dependent = _dependent_existing_ticket_ids(open_existing, touched_groups, quote_to_group)
             with_report = self.scenario_engine.analyse(open_existing + [synthetic], groups)
@@ -121,7 +130,7 @@ class PortfolioAwareCandidateOptimizer:
 
             ranked.append(
                 CandidatePortfolioImpact(
-                    candidate=candidate,
+                    candidate=canonical_candidate,
                     stake=amount,
                     dependent_existing_ticket_ids=dependent,
                     base_report=base_report,
@@ -136,7 +145,7 @@ class PortfolioAwareCandidateOptimizer:
                     best_case_change_proven=best_proven,
                     ranking_risk_change=ranking_risk_change,
                     ranking_risk_truth=ranking_risk_truth,
-                    standalone_expected_profit=candidate.expected_profit_per_unit * amount,
+                    standalone_expected_profit=canonical_candidate.expected_profit_per_unit * amount,
                 )
             )
 
@@ -154,13 +163,41 @@ def _quote_group_map(groups: list[ScenarioGroup]) -> dict[str, int]:
     return mapping
 
 
+def _candidate_leg_identity_key(
+    leg: CandidateLeg,
+) -> tuple[str, str, str, str, str]:
+    return (
+        *leg.ticket_identity(),
+        str(leg.decimal_odds),
+        str(leg.probability),
+    )
+
+
+def _canonical_candidate(candidate: ParlayCandidate) -> ParlayCandidate:
+    if not candidate.legs:
+        raise ValueError("candidate requires at least one leg")
+
+    canonical_legs = tuple(sorted(candidate.legs, key=_candidate_leg_identity_key))
+
+    # Reuse the generator's canonical arithmetic authority instead of rebuilding
+    # candidate economics under mutable caller Decimal context. This also gives
+    # semantically equivalent leg permutations one canonical candidate form.
+    canonical = BeamParlayCandidateSearch._to_candidate(canonical_legs)
+    if candidate.combined_odds != canonical.combined_odds:
+        raise ValueError("candidate combined_odds does not match its legs")
+    if candidate.independent_probability != canonical.independent_probability:
+        raise ValueError("candidate independent_probability does not match its legs")
+    if candidate.expected_profit_per_unit != canonical.expected_profit_per_unit:
+        raise ValueError("candidate expected_profit_per_unit does not match its legs")
+    return canonical
+
+
 def _candidate_ticket(
     candidate: ParlayCandidate,
     stake: Decimal,
     quote_to_group: dict[str, int],
 ) -> PaperTicket:
-    if not candidate.legs:
-        raise ValueError("candidate requires at least one leg")
+    candidate = _canonical_candidate(candidate)
     ticket_legs: list[TicketLeg] = []
     touched_groups: set[int] = set()
     used_event_ids: set[str] = set()
@@ -183,20 +220,9 @@ def _candidate_ticket(
             raise ValueError("candidate leg probability must be between 0 and 1")
         ticket_legs.append(_ticket_leg_from_candidate(leg))
 
-    # Reuse the generator's canonical arithmetic authority instead of rebuilding
-    # candidate economics under mutable caller Decimal context.  This keeps
-    # validation stable after candidate_search pinned its precision/range policy.
-    canonical = BeamParlayCandidateSearch._to_candidate(tuple(candidate.legs))
-    if candidate.combined_odds != canonical.combined_odds:
-        raise ValueError("candidate combined_odds does not match its legs")
-    if candidate.independent_probability != canonical.independent_probability:
-        raise ValueError("candidate independent_probability does not match its legs")
-    if candidate.expected_profit_per_unit != canonical.expected_profit_per_unit:
-        raise ValueError("candidate expected_profit_per_unit does not match its legs")
-
     identity = json.dumps(
         {
-            "legs": [list(leg.ticket_identity()) for leg in candidate.legs],
+            "legs": [list(part) for part in _candidate_identity_key(candidate)],
             "stake": str(stake),
         },
         ensure_ascii=False,
@@ -259,16 +285,7 @@ def _candidate_identity_key(
 ) -> tuple[tuple[str, str, str, str, str], ...]:
     """Canonical deterministic tie-break independent of caller candidate order."""
 
-    return tuple(
-        sorted(
-            (
-                *leg.ticket_identity(),
-                str(leg.decimal_odds),
-                str(leg.probability),
-            )
-            for leg in candidate.legs
-        )
-    )
+    return tuple(sorted(_candidate_leg_identity_key(leg) for leg in candidate.legs))
 
 
 def _ranking_key(

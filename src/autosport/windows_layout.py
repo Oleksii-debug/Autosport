@@ -19,10 +19,10 @@ from .windows_surface_contract import (
 # window. Listboxes remain scrollable, so reducing visible rows does not remove
 # content or keyboard access.
 _SURFACE_HEIGHTS = {
-    "live_quotes": 4,
-    "tickets": 5,
-    "evaluation": 4,
-    "log": 5,
+    "live_quotes": 3,
+    "tickets": 4,
+    "evaluation": 3,
+    "log": 3,
 }
 
 WINDOWS_SHELL_AUTOMATION_IDS = {
@@ -140,7 +140,7 @@ def install_windows_product_shell(app: Any) -> None:
     )
     app.shell_state.pack(fill="x", pady=(6, 4))
 
-    app.shell_details = tk.Listbox(shell, height=4, takefocus=True)
+    app.shell_details = tk.Listbox(shell, height=2, takefocus=True)
     app.shell_details.pack(fill="x")
 
     app.bind("<F2>", lambda _event: app.shell_navigation.focus_set())

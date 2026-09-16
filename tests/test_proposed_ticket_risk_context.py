@@ -96,11 +96,22 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         self.assertEqual(context.bankroll_id, "paper-bankroll")
         self.assertEqual(context.currency, "USD")
 
-    def test_legacy_policy_call_remains_compatible(self) -> None:
+    def test_policy_without_economic_goal_keeps_quote_checks_disabled(self) -> None:
         decision = self._permissive_policy().evaluate(PaperBook("100"), Decimal("1"))
 
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.reason, "allowed")
+
+    def test_economic_goal_quote_controls_require_context(self) -> None:
+        decision = self._permissive_policy(self._goal()).evaluate(
+            PaperBook("100"), Decimal("1")
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "proposed ticket risk context is required for economic goal quote checks",
+        )
 
     def test_policy_accepts_valid_context_without_creating_new_state_authority(self) -> None:
         book = PaperBook("100")

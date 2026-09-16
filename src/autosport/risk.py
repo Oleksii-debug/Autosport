@@ -46,15 +46,15 @@ class ProposedTicketRiskContext:
     """Typed, non-persistent facts about one proposed paper ticket.
 
     ``legs`` are the canonical proposed event/market/selection identity and locked
-    odds. ``quotes`` reuse canonical MarketEvent source/quote identity; when quote
-    evidence is supplied it must cover every proposed leg exactly once. Optional
-    bankroll/currency and measurement-window identities are carried unchanged and
-    never inferred.
+    odds. ``quotes`` reuse canonical MarketEvent source/quote identity; quote
+    evidence must cover every proposed leg exactly once whenever an economic-goal
+    quote check is evaluated. ``proposal_ts`` binds freshness to the proposal
+    instant. Optional bankroll/currency and measurement-window identities are
+    carried unchanged and never inferred.
 
     This seam intentionally does not implement concentration, deny-list, parlay,
-    quote-freshness/slippage/data-quality, or session/day ceilings. Those remain
-    independent follow-on policy slices. Canonical sport identity is deliberately
-    absent until the upstream #339 identity authority exists.
+    or session/day ceilings. Canonical sport identity is deliberately absent until
+    the upstream #339 identity authority exists.
     """
 
     legs: tuple[TicketLeg, ...]
@@ -164,12 +164,13 @@ class PaperRiskPolicy:
     """Paper-lab guardrails. Limits are explicit and deterministic, never inferred by an LLM.
 
     ``economic_goal`` can only tighten the locally proven executable limits in
-    this policy: per-ticket stake, aggregate committed capital, concurrent open
-    paper positions, and the owner emergency stop. ``ProposedTicketRiskContext``
-    adds typed, non-persistent access to proposal/quote/window identity but this
-    seam does not silently activate additional owner ceilings. Concentration,
-    deny-list, parlay, quote, and session/day enforcement remain explicit
-    follow-on policy work.
+    this policy. It binds per-ticket stake, aggregate committed capital,
+    concurrent open paper positions, owner emergency stop, quote freshness,
+    execution slippage, and the available data-quality proof boundary.
+    ``ProposedTicketRiskContext`` is the typed, non-persistent evidence seam for
+    proposal-local quote checks; an active economic goal therefore fails closed
+    when that evidence seam is absent. Concentration, deny-list, parlay, and
+    session/day enforcement remain explicit follow-on policy work.
     """
 
     max_ticket_fraction: Decimal = Decimal("0.02")
@@ -317,7 +318,7 @@ class PaperRiskPolicy:
                     if quote.decimal_odds <= 0 or leg.locked_odds <= 0:
                         return RiskDecision(False, "quote or locked odds are invalid")
                     # Compare (quote - locked) / quote to the configured ceiling
-                    # as an exact rational inequality.  Decimal division can be
+                    # as an exact rational inequality. Decimal division can be
                     # repeating (for example 0.10 / 2.10 == 1/21), and this
                     # policy's protective Decimal context deliberately traps
                     # Inexact rather than silently rounding economic evidence.
@@ -327,9 +328,7 @@ class PaperRiskPolicy:
                         limit_num, limit_den = (
                             goal.max_execution_slippage_fraction.as_integer_ratio()
                         )
-                        adverse_num = (
-                            quote_num * locked_den - locked_num * quote_den
-                        )
+                        adverse_num = quote_num * locked_den - locked_num * quote_den
                         adverse_den = locked_den * quote_num
                         if adverse_num * limit_den > limit_num * adverse_den:
                             return RiskDecision(
@@ -340,7 +339,7 @@ class PaperRiskPolicy:
             return RiskDecision(False, "proposed ticket quote risk evidence is invalid")
 
         # MarketEvent has canonical generic metadata, but no canonical data-quality
-        # score contract.  Do not reinterpret provider metadata as owner-grade truth.
+        # score contract. Do not reinterpret provider metadata as owner-grade truth.
         if goal.minimum_data_quality > 0:
             return RiskDecision(
                 False,
@@ -428,10 +427,14 @@ class PaperRiskPolicy:
                     )
             if goal.emergency_stop:
                 return RiskDecision(False, "economic goal emergency stop is active")
-            if context is not None:
-                quote_decision = self._quote_risk_decision(goal, context)
-                if quote_decision is not None:
-                    return quote_decision
+            if context is None:
+                return RiskDecision(
+                    False,
+                    "proposed ticket risk context is required for economic goal quote checks",
+                )
+            quote_decision = self._quote_risk_decision(goal, context)
+            if quote_decision is not None:
+                return quote_decision
             if goal.max_stake_amount is not None and amount > goal.max_stake_amount:
                 return RiskDecision(False, "ticket exceeds economic goal absolute stake limit")
             if open_position_count >= goal.max_concurrent_positions:

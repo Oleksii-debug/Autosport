@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 from .domain import MarketEvent
@@ -25,8 +26,9 @@ class MarketMirror:
     """Deterministic in-memory mirror for normalized market quotes.
 
     The mirror is deliberately presentation- and provider-adapter-neutral: it stores
-    canonical ``MarketEvent`` values and enforces source-local ordering. Persistence,
-    provider polling and portfolio/economic decisions remain outside this boundary.
+    canonical ``MarketEvent`` values and enforces source-local ordering. Authoritative
+    persistence, provider polling and portfolio/economic decisions remain outside this
+    boundary.
     """
 
     _INACTIVE_STATUSES = frozenset({"suspended", "closed", "unavailable"})
@@ -39,6 +41,17 @@ class MarketMirror:
         # Include source identity so two providers using the same local IDs cannot
         # overwrite one another's state.
         return (event.source_id, event.quote_key)
+
+    @staticmethod
+    def _utc_timestamp(value: str) -> datetime | None:
+        """Parse one provider/observation timestamp, failing closed on bad input."""
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (AttributeError, ValueError):
+            return None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(timezone.utc)
 
     def apply(self, event: MarketEvent) -> MirrorApplyResult:
         """Apply one event iff it advances source-local sequence state.
@@ -108,40 +121,48 @@ class MarketMirror:
             (source_id, f"{event_id}|{market_id}|{selection_id}")
         )
 
-    def active_snapshot(self) -> tuple[MarketEvent, ...]:
-        """Return deterministic snapshot entries currently eligible for decisions.
+    def active_snapshot(
+        self,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+    ) -> tuple[MarketEvent, ...]:
+        """Return deterministic, active and fresh entries eligible for decisions.
 
-        The mirror preserves suspended/closed/unavailable observations for auditability
-        but does not expose them as active decision inputs through this helper.
+        ``source_ts`` is the preferred freshness clock because it represents provider
+        time. ``observed_ts`` is used only when source time is unavailable. Future,
+        over-age or malformed timestamps fail closed and remain visible only through
+        the full audit snapshot.
         """
-        return tuple(
-            event
-            for event in self.snapshot()
-            if event.status not in self._INACTIVE_STATUSES
-        )
+        if not isinstance(as_of, datetime):
+            raise TypeError("as_of must be a datetime")
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            raise ValueError("as_of must be timezone-aware")
+        if not isinstance(max_age, timedelta):
+            raise TypeError("max_age must be a timedelta")
+        if max_age < timedelta(0):
+            raise ValueError("max_age must be non-negative")
 
-    def persist(self, store: SQLiteMarketStore) -> int:
-        """Durably append the current mirror snapshot through canonical market storage.
-
-        The store's append-only history remains the persistence authority. The mirror
-        never writes SQLite tables directly and therefore cannot create a competing
-        schema or projection. Repeated persistence is idempotent at the store's
-        source/quote/sequence identity boundary.
-        """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
-        events = self.snapshot()
-        if not events:
-            return 0
-        return store.append_many(events)
+        boundary = as_of.astimezone(timezone.utc)
+        eligible: list[MarketEvent] = []
+        for event in self.snapshot():
+            if event.status in self._INACTIVE_STATUSES:
+                continue
+            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
+            if timestamp is None:
+                continue
+            age = boundary - timestamp
+            if timedelta(0) <= age <= max_age:
+                eligible.append(event)
+        return tuple(eligible)
 
     @classmethod
     def from_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
-        """Restore the latest source-specific mirror state from canonical history.
+        """Restore latest source-specific mirror state from authoritative history.
 
-        All authoritative history is replayed so source-local sequence protection is
-        reconstructed after restart. The mirror keeps only the latest quote per
-        source/quote key, while the store retains the complete durable event history.
+        The canonical store remains the only writer/owner of durable market history.
+        Replaying ``store.events()`` reconstructs source-local sequence protection after
+        restart without letting this mirror mutate the store's shared current projection.
         """
         if not isinstance(store, SQLiteMarketStore):
             raise TypeError("store must be a SQLiteMarketStore")

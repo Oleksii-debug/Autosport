@@ -332,7 +332,7 @@ class AutosportApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror(
                 text("ui.dialog.title"),
-                text("ui.error.research_plan.rejected", detail=exc),
+                text("ui.error.research_plan.rejected", detail=_safe_exception_text(exc)),
             )
             self.status.set(text("ui.status.research_plan.validation_failed"))
             return
@@ -640,7 +640,7 @@ class AutosportApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror(
                 text("ui.dialog.title"),
-                text("ui.error.recovery.configuration", detail=exc),
+                text("ui.error.recovery.configuration", detail=_safe_exception_text(exc)),
             )
             self.status.set(text("ui.status.recovery.configuration_rejected"))
             return
@@ -729,7 +729,7 @@ class AutosportApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror(
                 text("ui.dialog.title"),
-                text("ui.error.replay.configuration", detail=exc),
+                text("ui.error.replay.configuration", detail=_safe_exception_text(exc)),
             )
             self.status.set(text("ui.status.replay.configuration_rejected"))
             return

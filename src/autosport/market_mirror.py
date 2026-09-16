@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .domain import MarketEvent
+from .storage import SQLiteMarketStore
 
 
 class MirrorUpdate(str, Enum):
@@ -42,8 +43,8 @@ class MarketMirror:
     def apply(self, event: MarketEvent) -> MirrorApplyResult:
         """Apply one event iff it advances source-local sequence state.
 
-        A repeated identical sequence is idempotent.  A lower sequence is stale and
-        ignored.  Reusing an existing sequence for different content is a conflict
+        A repeated identical sequence is idempotent. A lower sequence is stale and
+        ignored. Reusing an existing sequence for different content is a conflict
         and fails closed rather than silently replacing canonical evidence.
         """
         if not isinstance(event, MarketEvent):
@@ -118,6 +119,36 @@ class MarketMirror:
             for event in self.snapshot()
             if event.status not in self._INACTIVE_STATUSES
         )
+
+    def persist(self, store: SQLiteMarketStore) -> int:
+        """Durably append the current mirror snapshot through canonical market storage.
+
+        The store's append-only history remains the persistence authority. The mirror
+        never writes SQLite tables directly and therefore cannot create a competing
+        schema or projection. Repeated persistence is idempotent at the store's
+        source/quote/sequence identity boundary.
+        """
+        if not isinstance(store, SQLiteMarketStore):
+            raise TypeError("store must be a SQLiteMarketStore")
+        events = self.snapshot()
+        if not events:
+            return 0
+        return store.append_many(events)
+
+    @classmethod
+    def from_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
+        """Restore the latest source-specific mirror state from canonical history.
+
+        All authoritative history is replayed so source-local sequence protection is
+        reconstructed after restart. The mirror keeps only the latest quote per
+        source/quote key, while the store retains the complete durable event history.
+        """
+        if not isinstance(store, SQLiteMarketStore):
+            raise TypeError("store must be a SQLiteMarketStore")
+        mirror = cls()
+        for event in store.events():
+            mirror.apply(event)
+        return mirror
 
     def __len__(self) -> int:
         return len(self._latest)

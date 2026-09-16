@@ -163,13 +163,22 @@ def _quote_group_map(groups: list[ScenarioGroup]) -> dict[str, int]:
     return mapping
 
 
+def _decimal_identity_key(value: Decimal) -> str:
+    """Exact context-independent identity for numerically equal finite Decimals."""
+
+    if not value.is_finite():
+        raise ValueError("decimal identity requires a finite value")
+    numerator, denominator = value.as_integer_ratio()
+    return f"{numerator}/{denominator}"
+
+
 def _candidate_leg_identity_key(
     leg: CandidateLeg,
 ) -> tuple[str, str, str, str, str]:
     return (
         *leg.ticket_identity(),
-        str(leg.decimal_odds),
-        str(leg.probability),
+        _decimal_identity_key(leg.decimal_odds),
+        _decimal_identity_key(leg.probability),
     )
 
 
@@ -233,7 +242,7 @@ def _candidate_ticket(
     identity = json.dumps(
         {
             "legs": [list(part) for part in _candidate_identity_key(candidate)],
-            "stake": str(stake),
+            "stake": _decimal_identity_key(stake),
         },
         ensure_ascii=False,
         sort_keys=True,

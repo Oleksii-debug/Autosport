@@ -46,6 +46,41 @@ def _two_leg_permutations() -> tuple[ParlayCandidate, ParlayCandidate]:
     return canonical, permuted
 
 
+def _scale_equivalent_two_leg_candidates() -> tuple[ParlayCandidate, ParlayCandidate]:
+    compact_legs = (
+        CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2.0"),
+            Decimal("0.5"),
+        ),
+        CandidateLeg(
+            "e2|winner|a",
+            "e2",
+            Decimal("2.0"),
+            Decimal("0.5"),
+        ),
+    )
+    scaled_legs = (
+        CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2.00"),
+            Decimal("0.50"),
+        ),
+        CandidateLeg(
+            "e2|winner|a",
+            "e2",
+            Decimal("2.00"),
+            Decimal("0.50"),
+        ),
+    )
+    return (
+        BeamParlayCandidateSearch._to_candidate(compact_legs),
+        BeamParlayCandidateSearch._to_candidate(scaled_legs),
+    )
+
+
 def _groups() -> list[ScenarioGroup]:
     return [
         ScenarioGroup(
@@ -193,6 +228,39 @@ class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
         self.assertEqual(
             forward_engine.ticket_id_snapshots[-1],
             reversed_engine.ticket_id_snapshots[-1],
+        )
+
+    def test_scale_equivalent_decimals_share_candidate_and_ticket_identity(self) -> None:
+        compact, scaled = _scale_equivalent_two_leg_candidates()
+        compact_first_engine = _RecordingScenarioEngine()
+        scaled_first_engine = _RecordingScenarioEngine()
+
+        compact_first = PortfolioAwareCandidateOptimizer(
+            scenario_engine=compact_first_engine,
+            result_limit=2,
+        ).evaluate_candidates(
+            [],
+            [compact, scaled],
+            _groups(),
+            stake=Decimal("1.0"),
+        )
+        scaled_first = PortfolioAwareCandidateOptimizer(
+            scenario_engine=scaled_first_engine,
+            result_limit=2,
+        ).evaluate_candidates(
+            [],
+            [scaled, compact],
+            _groups(),
+            stake=Decimal("1.00"),
+        )
+
+        self.assertEqual(len(compact_first), 1)
+        self.assertEqual(len(scaled_first), 1)
+        self.assertEqual(len(compact_first_engine.ticket_id_snapshots), 2)
+        self.assertEqual(len(scaled_first_engine.ticket_id_snapshots), 2)
+        self.assertEqual(
+            compact_first_engine.ticket_id_snapshots[-1],
+            scaled_first_engine.ticket_id_snapshots[-1],
         )
 
 

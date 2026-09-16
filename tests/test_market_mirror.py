@@ -1,8 +1,11 @@
 from decimal import Decimal
+import tempfile
 import unittest
+from pathlib import Path
 
 from autosport.domain import MarketEvent
 from autosport.market_mirror import MarketMirror, MirrorUpdate
+from autosport.storage import SQLiteMarketStore
 
 
 class MarketMirrorTests(unittest.TestCase):
@@ -107,6 +110,74 @@ class MarketMirrorTests(unittest.TestCase):
                 ("provider-b", "event-1|market-1|b"),
             ),
         )
+
+    def test_persist_and_reopen_restores_latest_state_and_sequence_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(db_path)
+            try:
+                mirror = MarketMirror()
+                mirror.apply(self.event(sequence=1, odds="2.00"))
+                mirror.apply(self.event(sequence=2, odds="2.20"))
+
+                self.assertEqual(mirror.persist(store), 1)
+                self.assertEqual(mirror.persist(store), 0)
+            finally:
+                store.close()
+
+            reopened_store = SQLiteMarketStore(db_path)
+            try:
+                restored = MarketMirror.from_store(reopened_store)
+                restored_event = restored.get(
+                    "provider-a", "event-1", "market-1", "selection-1"
+                )
+                self.assertIsNotNone(restored_event)
+                self.assertEqual(restored_event.decimal_odds, Decimal("2.20"))
+                self.assertEqual(restored_event.sequence, 2)
+
+                stale = restored.apply(self.event(sequence=1, odds="1.50"))
+                self.assertEqual(stale.status, MirrorUpdate.STALE)
+
+                forward = restored.apply(self.event(sequence=3, odds="2.40"))
+                self.assertEqual(forward.status, MirrorUpdate.APPLIED)
+                self.assertEqual(
+                    restored.get(
+                        "provider-a", "event-1", "market-1", "selection-1"
+                    ).decimal_odds,
+                    Decimal("2.40"),
+                )
+            finally:
+                reopened_store.close()
+
+    def test_persist_reopen_preserves_multiple_provider_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                mirror = MarketMirror()
+                mirror.apply(self.event(source="provider-a", sequence=4, odds="2.00"))
+                mirror.apply(self.event(source="provider-b", sequence=4, odds="1.80"))
+                self.assertEqual(mirror.persist(store), 2)
+            finally:
+                store.close()
+
+            reopened_store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                restored = MarketMirror.from_store(reopened_store)
+                self.assertEqual(len(restored), 2)
+                self.assertEqual(
+                    restored.get(
+                        "provider-a", "event-1", "market-1", "selection-1"
+                    ).decimal_odds,
+                    Decimal("2.00"),
+                )
+                self.assertEqual(
+                    restored.get(
+                        "provider-b", "event-1", "market-1", "selection-1"
+                    ).decimal_odds,
+                    Decimal("1.80"),
+                )
+            finally:
+                reopened_store.close()
 
 
 if __name__ == "__main__":

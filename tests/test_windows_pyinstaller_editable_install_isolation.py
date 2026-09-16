@@ -66,7 +66,7 @@ def test_windows_release_removes_editable_autosport_before_trusted_pyinstaller()
         isolated_probe,
     )
     first_pyinstaller = script.index(
-        "& $packagingPython -I $trustedPyInstallerBinder `",
+        "[Autosport.Release.BirthProtectedPyInstaller]::Run(",
         trusted_snapshot,
     )
 
@@ -83,6 +83,7 @@ def test_windows_release_removes_editable_autosport_before_trusted_pyinstaller()
     assert script.count("python -m pip uninstall --yes autosport-lab") == 1
     assert 'find_spec("autosport")' in script
     assert "installed autosport remains import-resolvable" in script
+    assert "& $packagingPython -I $trustedPyInstallerBinder `" not in script
 
 
 @pytest.mark.skipif(

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 
-_BUILD_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "build_windows.ps1"
+_BUILD_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "build_windows_body.ps1"
 
 
 def _build_script_text() -> str:

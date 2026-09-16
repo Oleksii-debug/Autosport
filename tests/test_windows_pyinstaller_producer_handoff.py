@@ -12,7 +12,7 @@ import pytest
 
 
 _ROOT = Path(__file__).resolve().parents[1]
-_BUILD_SCRIPT = _ROOT / "scripts" / "build_windows.ps1"
+_BUILD_SCRIPT = _ROOT / "scripts" / "build_windows_body.ps1"
 _GUARDED_PYINSTALLER = _ROOT / "scripts" / "guarded_pyinstaller_bind.py"
 _SOURCE_VERIFIER = _ROOT / "scripts" / "verify_source_checkout.py"
 

@@ -10,7 +10,7 @@ import pytest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BUILD_SCRIPT = ROOT / "scripts" / "build_windows.ps1"
+BUILD_SCRIPT = ROOT / "scripts" / "build_windows_body.ps1"
 
 
 def _build_script() -> str:

@@ -6,6 +6,7 @@ from autosport.windows_layout import (
     compact_surface_heights,
     configure_windows_product_shell_accessibility,
     install_windows_product_shell,
+    _surface_target_widget,
 )
 
 
@@ -67,3 +68,19 @@ def test_windows_product_shell_has_stable_uia_ids_and_keyboard_navigation():
     accessibility_source = inspect.getsource(configure_windows_product_shell_accessibility)
     for automation_id in WINDOWS_SHELL_AUTOMATION_IDS:
         assert f'WINDOWS_SHELL_AUTOMATION_IDS["{automation_id}"]' in accessibility_source
+
+
+def test_shell_target_requires_a_real_widget_before_open_is_authorized():
+    class App:
+        shell_details = object()
+
+    app = App()
+
+    # Paper Bank declares bank_summary in the surface contract, but the current
+    # packaged shell does not construct that widget. Open must therefore remain
+    # unavailable instead of redirecting focus to Tickets or shell details.
+    assert _surface_target_widget(app, "paper_bank") is None
+
+    bank_summary = object()
+    app.bank_summary = bank_summary
+    assert _surface_target_widget(app, "paper_bank") is bank_summary

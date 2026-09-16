@@ -22,6 +22,7 @@ class MarketMirrorTests(unittest.TestCase):
         status: str = "open",
         observed_ts: str = "2026-09-16T19:00:00+00:00",
         source_ts: str | None = None,
+        ingest_ts: str | None = None,
     ) -> MarketEvent:
         return MarketEvent(
             event_id=event,
@@ -33,6 +34,7 @@ class MarketMirrorTests(unittest.TestCase):
             sequence=sequence,
             status=status,
             source_ts=source_ts,
+            ingest_ts=ingest_ts or observed_ts,
         )
 
     def test_new_and_forward_updates_are_applied(self) -> None:
@@ -375,7 +377,6 @@ class MarketMirrorTests(unittest.TestCase):
             finally:
                 reopened_store.close()
 
-
     def test_replay_view_reconstructs_pre_update_state_without_future_leakage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
@@ -387,12 +388,50 @@ class MarketMirrorTests(unittest.TestCase):
                             odds="2.00",
                             observed_ts="2026-09-16T18:59:00+00:00",
                             source_ts="2026-09-16T18:58:55+00:00",
+                            ingest_ts="2026-09-16T18:59:01+00:00",
                         ),
                         self.event(
                             sequence=2,
                             odds="9.99",
                             observed_ts="2026-09-16T19:01:00+00:00",
                             source_ts="2026-09-16T18:59:30+00:00",
+                            ingest_ts="2026-09-16T19:01:01+00:00",
+                        ),
+                    ]
+                )
+
+                replay = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
+                    max_age=timedelta(minutes=5),
+                )
+
+                self.assertEqual(replay.revision, 1)
+                self.assertEqual(len(replay.events), 1)
+                self.assertEqual(replay.events[0].sequence, 1)
+                self.assertEqual(replay.events[0].decimal_odds, Decimal("2.00"))
+            finally:
+                store.close()
+
+    def test_replay_view_excludes_late_ingestion_even_when_provider_evidence_is_earlier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append_many(
+                    [
+                        self.event(
+                            sequence=1,
+                            odds="2.00",
+                            observed_ts="2026-09-16T18:58:30+00:00",
+                            source_ts="2026-09-16T18:58:20+00:00",
+                            ingest_ts="2026-09-16T18:58:40+00:00",
+                        ),
+                        self.event(
+                            sequence=2,
+                            odds="9.99",
+                            observed_ts="2026-09-16T18:59:20+00:00",
+                            source_ts="2026-09-16T18:59:10+00:00",
+                            ingest_ts="2026-09-16T19:01:00+00:00",
                         ),
                     ]
                 )

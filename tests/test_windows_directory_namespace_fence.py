@@ -51,7 +51,7 @@ def test_windows_build_holds_directory_namespace_fence_through_both_consumers() 
         "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "
         "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
     )
-    guarded_call = "& $packagingPython -I $trustedPyInstallerBinder `"
+    guarded_call = "[Autosport.Release.BirthProtectedPyInstaller]::Run("
     gui_start = "$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'"
     data_start = "$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'"
     directory_dispose = "$trustedBuildDirectoryLocks[$directoryLockIndex].Dispose()"
@@ -83,7 +83,7 @@ def test_windows_build_holds_directory_namespace_fence_through_both_consumers() 
         < remove_index
     )
     assert script.count(guarded_call) == 2
-    assert script.count("--verifier-sha256 $sourceVerifierSha256 `") == 2
+    assert script.count("'--verifier-sha256', $sourceVerifierSha256,") == 2
     assert "private const uint FILE_LIST_DIRECTORY = 0x00000001;" in script
     assert "private const uint FILE_SHARE_READ = 0x00000001;" in script
     assert "private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;" in script

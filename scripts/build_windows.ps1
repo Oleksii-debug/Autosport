@@ -333,7 +333,7 @@ try {
   if ($competingDeclarationMatches -ne 1) {
     throw "Creator-host fence expected exactly one competing-handle declaration; found $competingDeclarationMatches"
   }
-  $newCompetingDeclaration = "            int competing = 0;`n            string competingDetails = \"\";`n"
+  $newCompetingDeclaration = "            int competing = 0;`n            string competingDetails = `"`";`n"
   $creatorFenceText = $creatorFenceText.Replace($oldCompetingDeclaration, $newCompetingDeclaration)
 
   $oldCompetingIncrement = "                    competing++;`n"

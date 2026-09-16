@@ -6,6 +6,7 @@ from unittest.mock import patch
 import autosport.keyboard_audit as keyboard_audit
 from autosport.keyboard_audit import summarize_keyboard_contract
 from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
+from autosport.windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
 
 
 class KeyboardAuditTests(unittest.TestCase):
@@ -15,12 +16,18 @@ class KeyboardAuditTests(unittest.TestCase):
             "<Control-r>": True,
             "<Control-Shift-R>": True,
             "<Control-l>": True,
+            "<Control-Alt-Left>": True,
+            "<Control-Alt-Right>": True,
+            "<F2>": True,
             "<F6>": True,
             "<F7>": True,
             "<F8>": True,
         }
-        focus = {"<F6>": True, "<F7>": True, "<F8>": True}
+        focus = {"<F2>": True, "<F6>": True, "<F7>": True, "<F8>": True}
         reachable = [
+            "shell_navigation",
+            "shell_state",
+            "shell_details",
             "strategy",
             "research_plan",
             "choose_dataset",
@@ -41,30 +48,42 @@ class KeyboardAuditTests(unittest.TestCase):
         report = summarize_keyboard_contract(*self._passing())
         self.assertEqual(report["status"], "PASS")
         self.assertEqual(report["expected_automation_ids"]["bankroll"], WINDOWS_BANKROLL_AUTOMATION_ID)
+        self.assertEqual(
+            report["expected_automation_ids"]["shell_navigation"],
+            WINDOWS_SHELL_AUTOMATION_IDS["navigation"],
+        )
+        self.assertEqual(
+            report["expected_automation_ids"]["shell_state"],
+            WINDOWS_SHELL_AUTOMATION_IDS["state"],
+        )
+        self.assertEqual(
+            report["expected_automation_ids"]["shell_details"],
+            WINDOWS_SHELL_AUTOMATION_IDS["details"],
+        )
         self.assertFalse(report["human_tested"])
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["real_money_execution"])
 
     def test_missing_action_binding_fails_closed(self):
         bindings, focus, reachable = self._passing()
-        bindings["<Control-r>"] = False
+        bindings["<Control-Alt-Right>"] = False
         report = summarize_keyboard_contract(bindings, focus, reachable)
         self.assertEqual(report["status"], "FAIL")
-        self.assertTrue(any("<Control-r>" in item for item in report["failures"]))
+        self.assertTrue(any("<Control-Alt-Right>" in item for item in report["failures"]))
 
     def test_focus_shortcut_must_reach_exact_target(self):
         bindings, focus, reachable = self._passing()
-        focus["<F8>"] = False
+        focus["<F2>"] = False
         report = summarize_keyboard_contract(bindings, focus, reachable)
         self.assertEqual(report["status"], "FAIL")
-        self.assertTrue(any("<F8>" in item for item in report["failures"]))
+        self.assertTrue(any("<F2>" in item for item in report["failures"]))
 
     def test_all_critical_controls_must_be_tab_reachable(self):
         bindings, focus, reachable = self._passing()
-        reachable.remove("evaluation")
+        reachable.remove("shell_details")
         report = summarize_keyboard_contract(bindings, focus, reachable)
         self.assertEqual(report["status"], "FAIL")
-        self.assertTrue(any("evaluation" in item for item in report["failures"]))
+        self.assertTrue(any("shell_details" in item for item in report["failures"]))
 
     def test_bankroll_summary_must_be_tab_reachable(self):
         bindings, focus, reachable = self._passing()

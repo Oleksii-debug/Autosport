@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import os
 import tempfile
 import unittest
 import zipfile
@@ -8,7 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import autosport.data_tool_package as data_tool_package
+import autosport.release_package as release_package
 from autosport.release_package import build_windows_package, verify_windows_package
+from scripts.package_windows import _require_verified_package_digest
 
 
 class PortableDataToolSnapshotBindingTests(unittest.TestCase):
@@ -91,7 +95,7 @@ class PortableDataToolSnapshotBindingTests(unittest.TestCase):
                 )
 
     def test_binding_verifies_the_same_base_bytes_it_repackages(self) -> None:
-        """A valid path swap cannot launder previously captured unverified members."""
+        """A valid live-path swap cannot launder previously captured unverified members."""
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -99,8 +103,6 @@ class PortableDataToolSnapshotBindingTests(unittest.TestCase):
             valid_swap, _ = self._build_base(root / "swap", "swap")
             valid_swap_bytes = valid_swap.read_bytes()
 
-            # A is now self-inconsistent: payload bytes changed without updating its
-            # manifest/sums.  B remains a fully valid package with the same source SHA.
             self._rewrite_start_without_rehashing(package)
             with self.assertRaisesRegex(ValueError, "hash mismatch: WINDOWS_START_HERE.txt"):
                 verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
@@ -112,8 +114,6 @@ class PortableDataToolSnapshotBindingTests(unittest.TestCase):
             real_verify = verify_windows_package
 
             def swap_live_path_then_verify(path: str | Path, *, expected_source_sha: str):
-                # Simulate a semantically valid replacement of the caller-controlled
-                # live path exactly when the binder reaches its verification step.
                 package.write_bytes(valid_swap_bytes)
                 return real_verify(path, expected_source_sha=expected_source_sha)
 
@@ -128,10 +128,115 @@ class PortableDataToolSnapshotBindingTests(unittest.TestCase):
                 ):
                     data_tool_package.bind_portable_data_tool(package, data_exe)
 
-            # The adversary's valid B replacement remains untouched by the rejected
-            # bind. In particular, the binder did not repackage invalid captured A
-            # and bless it with fresh integrity metadata plus Autosport-Data.exe.
             self.assertEqual(package.read_bytes(), valid_swap_bytes)
+            with zipfile.ZipFile(package, "r") as archive:
+                self.assertNotIn("Autosport-V1/Autosport-Data.exe", archive.namelist())
+
+    def test_member_extraction_uses_immutable_capture_not_verifier_path(self) -> None:
+        """Members are parsed from captured bytes, removing the prior pathname split."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package, data_exe = self._build_base(root / "candidate", "candidate")
+            seen_sources: list[object] = []
+            real_read_members = data_tool_package._read_members
+
+            def record_source(source):
+                seen_sources.append(source)
+                self.assertIsInstance(source, io.BytesIO)
+                return real_read_members(source)
+
+            with patch.object(data_tool_package, "_read_members", side_effect=record_source):
+                binding = data_tool_package.bind_portable_data_tool(package, data_exe)
+
+            self.assertEqual(len(seen_sources), 1)
+            verification = data_tool_package.verify_portable_data_tool(package)
+            self.assertEqual(binding["package_sha256"], verification["package_sha256"])
+
+    def test_writer_digest_remains_bound_when_destination_is_replaced_after_publish(self) -> None:
+        """Writer identity is SHA(A), so a post-publish valid B cannot become this invocation's PASS."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package, data_exe = self._build_base(root / "candidate", "candidate")
+            valid_swap, swap_data_exe = self._build_base(root / "swap", "swap")
+            data_tool_package.bind_portable_data_tool(valid_swap, swap_data_exe)
+            valid_swap_bytes = valid_swap.read_bytes()
+            valid_swap_verification = data_tool_package.verify_portable_data_tool(valid_swap)
+
+            real_replace = os.replace
+
+            def replace_then_substitute(source, destination):
+                real_replace(source, destination)
+                Path(destination).write_bytes(valid_swap_bytes)
+
+            with patch.object(data_tool_package.os, "replace", side_effect=replace_then_substitute):
+                binding = data_tool_package.bind_portable_data_tool(package, data_exe)
+
+            self.assertEqual(package.read_bytes(), valid_swap_bytes)
+            verification = data_tool_package.verify_portable_data_tool(package)
+            self.assertEqual(
+                verification["package_sha256"],
+                valid_swap_verification["package_sha256"],
+            )
+            self.assertNotEqual(binding["package_sha256"], verification["package_sha256"])
+            with self.assertRaisesRegex(
+                ValueError,
+                "bound package digest does not match the exact verified package snapshot",
+            ):
+                _require_verified_package_digest(binding, verification)
+
+    def test_base_writer_digest_rejects_replacement_before_portable_bind(self) -> None:
+        """A valid base B cannot replace authored A and become this invocation's bind input."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate_root = root / "candidate"
+            package, data_exe = self._build_base(candidate_root, "candidate")
+            valid_swap, _ = self._build_base(root / "swap", "swap")
+            valid_swap_bytes = valid_swap.read_bytes()
+            valid_swap_sha = verify_windows_package(
+                valid_swap,
+                expected_source_sha=self.SOURCE_SHA,
+            )["package_sha256"]
+
+            real_replace = os.replace
+
+            def replace_then_substitute(source, destination):
+                real_replace(source, destination)
+                if Path(destination) == package:
+                    Path(destination).write_bytes(valid_swap_bytes)
+
+            with patch.object(
+                release_package.os,
+                "replace",
+                side_effect=replace_then_substitute,
+            ):
+                output, writer_sha = build_windows_package(
+                    candidate_root / "candidate-Autosport.exe",
+                    candidate_root / "candidate-WINDOWS_START_HERE.txt",
+                    candidate_root / "candidate-example",
+                    candidate_root / "candidate-diagnostic.json",
+                    candidate_root / "candidate-accessibility.json",
+                    candidate_root / "candidate-keyboard.json",
+                    candidate_root / "candidate-restart.json",
+                    package,
+                    self.SOURCE_SHA,
+                )
+
+            self.assertEqual(output, package)
+            self.assertEqual(package.read_bytes(), valid_swap_bytes)
+            self.assertNotEqual(writer_sha, valid_swap_sha)
+            with self.assertRaisesRegex(
+                ValueError,
+                "base release package digest does not match exact writer-bound package bytes",
+            ):
+                data_tool_package.bind_portable_data_tool(
+                    package,
+                    data_exe,
+                    expected_base_package_sha256=writer_sha,
+                )
+
             with zipfile.ZipFile(package, "r") as archive:
                 self.assertNotIn("Autosport-V1/Autosport-Data.exe", archive.namelist())
 

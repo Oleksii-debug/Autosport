@@ -14,6 +14,7 @@ from autosport.strategy_experiment import (
     ExperimentDecision,
     ExperimentRunCell,
     GuardrailRule,
+    ScientificProtocolBinding,
     evaluate_champion_challenger,
     load_champion_challenger_protocol_json,
 )
@@ -23,6 +24,33 @@ SHA_A = "a" * 64
 SHA_B = "b" * 64
 SHA_C = "c" * 64
 SHA_D = "d" * 64
+
+
+def _scientific_binding(**changes: object) -> ScientificProtocolBinding:
+    values = {
+        "research_protocol_id": "rp-strategy-v1",
+        "research_question_id": "rq-strategy-superiority-v1",
+        "research_question_sha256": SHA_B,
+        "hypothesis_id": "hyp-candidate-v2-improves-profit-v1",
+        "hypothesis_sha256": SHA_C,
+        "inclusion_criteria": "sealed governed football paper cases declared before evaluation",
+        "exclusion_criteria": "exclude unsealed, future-leaking, or unentitled data",
+        "lawful_source_requirements": "all source identities must have recorded entitlement/provenance",
+        "causal_cutoff": "decision-time availability only; no post-decision inputs",
+        "evaluation_design": "frozen multi-case temporal holdout/walk-forward evaluation",
+        "feature_set_version": "features-v1",
+        "uncertainty_method": "predeclared deterministic paired case deltas with reported limitations",
+        "multiple_comparison_control": "single declared challenger family; no post-hoc candidate search",
+        "robustness_checks": ("case-level guardrails", "source-identity sensitivity"),
+        "random_seed_policy": "deterministic; no stochastic component in this seam",
+        "stopping_rule": "evaluate every frozen candidate/case cell exactly once",
+        "promotion_rule": "challenger eligible only after minimum improvement and all guardrails pass",
+        "expected_artifacts": ("run summaries", "decision report", "protocol hash"),
+        "code_config_sha256": SHA_D,
+        "frozen_at_utc": "2026-09-16T16:00:00Z",
+    }
+    values.update(changes)
+    return ScientificProtocolBinding(**values)  # type: ignore[arg-type]
 
 
 def _evidence(
@@ -37,6 +65,8 @@ def _evidence(
     research_plan_sha256: str | None = None,
     price_source_ids: tuple[str, ...] = ("source-1",),
 ) -> StrategyRunEvidence:
+    if research_plan_sha256 is None:
+        research_plan_sha256 = _scientific_binding().binding_sha256
     return StrategyRunEvidence(
         source_path=f"/tmp/{run_id}.json",
         source_sha256=source_sha,
@@ -74,17 +104,20 @@ def _protocol(
     *, guardrails: tuple[GuardrailRule, ...] = ()
 ) -> ChampionChallengerProtocol:
     authority = "owner-authority-v1"
+    scientific = _scientific_binding()
     champion = CandidateRef(
         candidate_id="baseline-v1",
         canonical_strategy_id="baseline-v1",
         authority_fingerprint=authority,
         agent_composition_sha256=SHA_A,
+        research_plan_sha256=scientific.binding_sha256,
     )
     challenger = CandidateRef(
         candidate_id="candidate-v2",
         canonical_strategy_id="candidate-v2",
         authority_fingerprint=authority,
         agent_composition_sha256=SHA_A,
+        research_plan_sha256=scientific.binding_sha256,
     )
     case = EvaluationCase(
         case_id="case-1",
@@ -104,8 +137,9 @@ def _protocol(
     )
     return ChampionChallengerProtocol(
         experiment_id="exp-20260916-01",
-        research_question_id="rq-strategy-superiority-v1",
-        hypothesis_id="hyp-candidate-v2-improves-profit-v1",
+        research_question_id=scientific.research_question_id,
+        hypothesis_id=scientific.hypothesis_id,
+        scientific_protocol=scientific,
         champion=champion,
         challengers=(challenger,),
         cases=(case,),
@@ -151,29 +185,23 @@ def test_protocol_hash_is_deterministic_and_binds_frozen_research_identity() -> 
     second = _protocol()
     assert first.protocol_sha256 == second.protocol_sha256
 
-    changed_threshold = ChampionChallengerProtocol(
-        experiment_id=first.experiment_id,
-        research_question_id=first.research_question_id,
-        hypothesis_id=first.hypothesis_id,
-        champion=first.champion,
-        challengers=first.challengers,
-        cases=first.cases,
-        primary_metric=first.primary_metric,
-        minimum_total_improvement=Decimal("6"),
-    )
+    changed_threshold = replace(first, minimum_total_improvement=Decimal("6"))
     assert changed_threshold.protocol_sha256 != first.protocol_sha256
 
-    changed_hypothesis = ChampionChallengerProtocol(
-        experiment_id=first.experiment_id,
-        research_question_id=first.research_question_id,
-        hypothesis_id="hyp-different-v1",
-        champion=first.champion,
-        challengers=first.challengers,
-        cases=first.cases,
-        primary_metric=first.primary_metric,
-        minimum_total_improvement=first.minimum_total_improvement,
+    changed_science = _scientific_binding(robustness_checks=("different check",))
+    changed_champion = replace(
+        first.champion, research_plan_sha256=changed_science.binding_sha256
     )
-    assert changed_hypothesis.protocol_sha256 != first.protocol_sha256
+    changed_challenger = replace(
+        first.challengers[0], research_plan_sha256=changed_science.binding_sha256
+    )
+    changed_protocol = replace(
+        first,
+        scientific_protocol=changed_science,
+        champion=changed_champion,
+        challengers=(changed_challenger,),
+    )
+    assert changed_protocol.protocol_sha256 != first.protocol_sha256
 
 
 def test_candidate_runtime_identity_is_evidence_bound_not_free_form() -> None:
@@ -181,7 +209,6 @@ def test_candidate_runtime_identity_is_evidence_bound_not_free_form() -> None:
     payload = candidate.to_dict()
     assert "runtime_ref" not in payload
     assert payload["runtime_identity_sha256"] == candidate.runtime_identity_sha256
-
     changed = replace(candidate, research_plan_sha256=SHA_B)
     assert changed.runtime_identity_sha256 != candidate.runtime_identity_sha256
 
@@ -189,10 +216,7 @@ def test_candidate_runtime_identity_is_evidence_bound_not_free_form() -> None:
 def test_strict_protocol_json_round_trip_and_fail_closed_parsing() -> None:
     protocol = _protocol()
     raw = json.dumps(
-        protocol.canonical_dict(),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+        protocol.canonical_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     loaded = load_champion_challenger_protocol_json(raw)
     assert loaded.protocol_sha256 == protocol.protocol_sha256
@@ -202,47 +226,79 @@ def test_strict_protocol_json_round_trip_and_fail_closed_parsing() -> None:
         load_champion_challenger_protocol_json(
             '{"protocol_schema_version":1,"protocol_schema_version":1}'
         )
-
     with pytest.raises(ValueError, match="non-standard JSON constant"):
         load_champion_challenger_protocol_json(
             raw.replace('"minimum_total_improvement":"5"', '"minimum_total_improvement":NaN')
         )
-
     payload = protocol.canonical_dict()
     payload["champion"]["runtime_ref"] = "unbound:runtime"
     with pytest.raises(ValueError, match="unexpected=.*runtime_ref"):
         load_champion_challenger_protocol_json(json.dumps(payload))
-
     deeply_nested = '{"x":' + ("[" * 40) + "0" + ("]" * 40) + "}"
     with pytest.raises(ValueError, match="maximum depth"):
         load_champion_challenger_protocol_json(deeply_nested)
 
 
+def test_scientific_preregistration_is_required_and_bound_to_run_evidence() -> None:
+    scientific = _scientific_binding()
+    champion = CandidateRef("champion", "champion", "same", SHA_A)
+    challenger = CandidateRef("challenger", "challenger", "same", SHA_A)
+    with pytest.raises(ValueError, match="not bound to the frozen scientific protocol"):
+        ChampionChallengerProtocol(
+            experiment_id="exp",
+            research_question_id=scientific.research_question_id,
+            hypothesis_id=scientific.hypothesis_id,
+            scientific_protocol=scientific,
+            champion=champion,
+            challengers=(challenger,),
+            cases=(_protocol().cases[0],),
+            primary_metric="net_profit",
+        )
+
+    protocol = _protocol()
+    champion_cell, challenger_cell = _valid_cells()
+    mismatched = ExperimentRunCell(
+        challenger_cell.case_id,
+        challenger_cell.candidate_id,
+        replace(challenger_cell.evidence, research_plan_sha256=SHA_A),
+    )
+    with pytest.raises(ValueError, match="scientific preregistration identity mismatch"):
+        evaluate_champion_challenger(protocol, (champion_cell, mismatched))
+
+
+def test_missing_or_mutated_scientific_protocol_fields_fail_closed() -> None:
+    protocol = _protocol()
+    payload = protocol.canonical_dict()
+    del payload["scientific_protocol"]["robustness_checks"]
+    with pytest.raises(ValueError, match="fields mismatch"):
+        load_champion_challenger_protocol_json(json.dumps(payload))
+
+    payload = protocol.canonical_dict()
+    payload["scientific_protocol"]["promotion_rule"] = "post-hoc changed rule"
+    with pytest.raises(ValueError, match="binding_sha256 does not match"):
+        load_champion_challenger_protocol_json(json.dumps(payload))
+
+
 def test_permission_fingerprint_cannot_widen() -> None:
-    champion = CandidateRef("champion", "baseline-v1", "same", SHA_A)
-    challenger = CandidateRef("challenger", "candidate-v2", "wider", SHA_A)
-    case = _protocol().cases[0]
+    scientific = _scientific_binding()
+    champion = CandidateRef("champion", "baseline-v1", "same", SHA_A, scientific.binding_sha256)
+    challenger = CandidateRef("challenger", "candidate-v2", "wider", SHA_A, scientific.binding_sha256)
     with pytest.raises(PermissionError, match="may not widen or alter authority"):
         ChampionChallengerProtocol(
             experiment_id="exp",
-            research_question_id="rq",
-            hypothesis_id="hyp",
+            research_question_id=scientific.research_question_id,
+            hypothesis_id=scientific.hypothesis_id,
+            scientific_protocol=scientific,
             champion=champion,
             challengers=(challenger,),
-            cases=(case,),
+            cases=(_protocol().cases[0],),
             primary_metric="net_profit",
         )
 
 
 def test_complete_matrix_can_retain_champion_when_guardrail_fails() -> None:
     protocol = _protocol(
-        guardrails=(
-            GuardrailRule(
-                "final_balance",
-                higher_is_better=True,
-                max_regression=Decimal("0"),
-            ),
-        )
+        guardrails=(GuardrailRule("final_balance", max_regression=Decimal("0")),)
     )
     champion, challenger = _valid_cells()
     challenger = ExperimentRunCell(
@@ -250,13 +306,11 @@ def test_complete_matrix_can_retain_champion_when_guardrail_fails() -> None:
         challenger.candidate_id,
         replace(challenger.evidence, final_balance=Decimal("1009")),
     )
-
     report = evaluate_champion_challenger(protocol, (champion, challenger))
     assert report.decision is ExperimentDecision.RETAIN_CHAMPION
     assert report.selected_candidate_id == "baseline-v1"
     assert report.eligible_challenger_ids == ()
-    assert report.research_question_id == protocol.research_question_id
-    assert report.hypothesis_id == protocol.hypothesis_id
+    assert report.scientific_protocol_sha256 == protocol.scientific_protocol.binding_sha256
     assert report.to_dict()["truth"]["active_strategy_mutation"] is False
     assert report.to_dict()["truth"]["real_money_execution"] is False
 
@@ -264,12 +318,10 @@ def test_complete_matrix_can_retain_champion_when_guardrail_fails() -> None:
 def test_complete_matrix_selects_at_most_one_challenger() -> None:
     protocol = _protocol()
     report = evaluate_champion_challenger(protocol, _valid_cells())
-
     assert report.decision is ExperimentDecision.CHALLENGER_ELIGIBLE
     assert report.selected_candidate_id == "candidate-v2"
     assert report.eligible_challenger_ids == ("candidate-v2",)
     assert report.aggregate_primary_improvements["candidate-v2"] == Decimal("10")
-    assert report.authority_fingerprint == "owner-authority-v1"
 
 
 def test_declared_price_identity_including_sources_must_match_evidence() -> None:
@@ -280,7 +332,6 @@ def test_declared_price_identity_including_sources_must_match_evidence() -> None
         challenger.candidate_id,
         replace(challenger.evidence, price_source_ids=("source-2",)),
     )
-
     with pytest.raises(ValueError, match="dataset/price identity mismatch"):
         evaluate_champion_challenger(protocol, (champion, mismatched))
 
@@ -290,11 +341,8 @@ def test_matrix_rejects_duplicate_or_missing_evidence() -> None:
     champion, challenger = _valid_cells()
     with pytest.raises(ValueError, match="incomplete or unexpected"):
         evaluate_champion_challenger(protocol, (champion,))
-
     with pytest.raises(ValueError, match="duplicate candidate/case cells"):
-        evaluate_champion_challenger(
-            protocol, (champion, challenger, challenger)
-        )
+        evaluate_champion_challenger(protocol, (champion, challenger, challenger))
 
 
 def test_reused_summary_evidence_is_rejected() -> None:
@@ -312,33 +360,27 @@ def test_reused_summary_evidence_is_rejected() -> None:
 def test_case_and_candidate_mismatch_fail_closed() -> None:
     protocol = _protocol()
     champion, challenger = _valid_cells()
-
     with pytest.raises(ValueError, match="candidate mismatch"):
         ExperimentRunCell(
-            "case-1",
-            "candidate-v2",
-            replace(challenger.evidence, strategy_id="baseline-v1"),
+            "case-1", "candidate-v2", replace(challenger.evidence, strategy_id="baseline-v1")
         )
-
-    wrong_case_evidence = ExperimentRunCell(
+    wrong_case = ExperimentRunCell(
         challenger.case_id,
         challenger.candidate_id,
         replace(challenger.evidence, dataset_name="other-paper-case"),
     )
     with pytest.raises(ValueError, match="dataset/price identity mismatch"):
-        evaluate_champion_challenger(protocol, (champion, wrong_case_evidence))
+        evaluate_champion_challenger(protocol, (champion, wrong_case))
 
 
 def test_non_finite_and_noncanonical_numeric_values_fail_closed() -> None:
     with pytest.raises(ValueError, match="finite Decimal"):
         GuardrailRule("roi", max_regression=Decimal("NaN"))
-
     protocol = _protocol()
     payload = protocol.canonical_dict()
     payload["minimum_total_improvement"] = 5
     with pytest.raises(ValueError, match="canonical decimal string"):
         load_champion_challenger_protocol_json(json.dumps(payload))
-
     champion, challenger = _valid_cells()
     non_finite = ExperimentRunCell(
         challenger.case_id,
@@ -352,21 +394,13 @@ def test_non_finite_and_noncanonical_numeric_values_fail_closed() -> None:
 def test_equal_improvement_tie_breaks_by_candidate_id() -> None:
     base = _protocol()
     candidate_v3 = CandidateRef(
-        candidate_id="candidate-v3",
-        canonical_strategy_id="candidate-v3",
-        authority_fingerprint=base.champion.authority_fingerprint,
-        agent_composition_sha256=SHA_A,
+        "candidate-v3",
+        "candidate-v3",
+        base.champion.authority_fingerprint,
+        SHA_A,
+        base.scientific_protocol.binding_sha256,
     )
-    protocol = ChampionChallengerProtocol(
-        experiment_id=base.experiment_id,
-        research_question_id=base.research_question_id,
-        hypothesis_id=base.hypothesis_id,
-        champion=base.champion,
-        challengers=(candidate_v3, base.challengers[0]),
-        cases=base.cases,
-        primary_metric=base.primary_metric,
-        minimum_total_improvement=base.minimum_total_improvement,
-    )
+    protocol = replace(base, challengers=(candidate_v3, base.challengers[0]))
     champion, candidate_v2 = _valid_cells()
     candidate_v3_cell = ExperimentRunCell(
         "case-1",
@@ -381,7 +415,6 @@ def test_equal_improvement_tie_breaks_by_candidate_id() -> None:
             final_balance="1020",
         ),
     )
-
     report = evaluate_champion_challenger(
         protocol, (candidate_v3_cell, champion, candidate_v2)
     )
@@ -408,7 +441,6 @@ def test_null_or_negative_improvement_remains_explicit_retention_evidence(
             final_balance=Decimal(final_balance),
         ),
     )
-
     report = evaluate_champion_challenger(protocol, (champion, challenger))
     assert report.decision is ExperimentDecision.RETAIN_CHAMPION
     assert report.selected_candidate_id == protocol.champion.candidate_id
@@ -419,7 +451,6 @@ def test_null_or_negative_improvement_remains_explicit_retention_evidence(
 def test_decision_report_is_deterministic_across_input_order() -> None:
     protocol = _protocol()
     cells = _valid_cells()
-
-    forward = evaluate_champion_challenger(protocol, cells).to_dict()
-    reverse = evaluate_champion_challenger(protocol, tuple(reversed(cells))).to_dict()
-    assert forward == reverse
+    assert evaluate_champion_challenger(protocol, cells).to_dict() == evaluate_champion_challenger(
+        protocol, tuple(reversed(cells))
+    ).to_dict()

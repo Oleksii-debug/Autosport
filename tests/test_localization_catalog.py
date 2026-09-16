@@ -108,6 +108,7 @@ _RUNTIME_RECOVERY_KEYS = {
     "ui.warning.recovery.unresolved",
     "ui.status.recovery.ready_suffix",
     "ui.info.recovery.complete",
+    "ui.status.research_plan.identity_suffix",
     "ui.status.replay.recovery_busy",
     "ui.status.replay.recovery_required",
     "ui.evaluation.replay_failed",
@@ -162,6 +163,37 @@ def test_critical_catalog_strings_are_exact_ukrainian_presentation() -> None:
     assert text("ui.accessibility.strategy.name") == "Стратегія повтору"
     assert text("ui.accessibility.live_quotes.name") == "Поточні котирування"
     assert text("ui.accessibility.bankroll.name") == "Віртуальний банк"
+
+
+def test_remaining_runtime_presentation_residuals_are_localized_without_mutating_sha() -> None:
+    sha_prefix = "abcdef123456"
+    legacy_plan_identity = f"; plan={sha_prefix}…"
+
+    replay = text(
+        "ui.status.replay.running",
+        strategy_id="research-replay-v1",
+        plan_identity=legacy_plan_identity,
+    )
+    recovery = text(
+        "ui.status.recovery.running",
+        strategy_id="research-replay-v1",
+        plan_identity=legacy_plan_identity,
+    )
+
+    assert f"; план={sha_prefix}…" in replay
+    assert f"; план={sha_prefix}…" in recovery
+    assert "; plan=" not in replay
+    assert "; plan=" not in recovery
+    assert sha_prefix in replay
+    assert sha_prefix in recovery
+
+    live = text("ui.status.live.read_only_running")
+    assert "PaperBook" not in live
+    assert "Паперовий облік" in live
+
+    close = text("ui.status.close.replay_busy")
+    assert "commit" not in close
+    assert "фіксацію транзакції" in close
 
 
 def test_runtime_recovery_catalog_preserves_raw_identity_and_economic_values() -> None:

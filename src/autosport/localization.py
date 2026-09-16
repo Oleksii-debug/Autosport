@@ -85,6 +85,7 @@ _UK_UA = MappingProxyType(
         "ui.status.research_plan.bound": (
             "План дослідження перевірено і прив’язано до {strategy_id}; SHA-256={sha_short}…"
         ),
+        "ui.status.research_plan.identity_suffix": "; план={sha_suffix}",
         "ui.status.bank.recovery_required": (
             "Віртуальний банк: недоступний до успішного відновлення; робоча область: {workspace}"
         ),
@@ -150,7 +151,7 @@ _UK_UA = MappingProxyType(
         ),
         "ui.status.live.busy": "Поточний знімок уже виконується; дочекайтеся завершення поточного запиту.",
         "ui.status.live.running": "Поточний знімок виконується у фоновому процесі; інтерфейс залишається доступним.",
-        "ui.status.live.read_only_running": "Виконується живе спостереження лише для читання. PaperBook не змінюється.",
+        "ui.status.live.read_only_running": "Виконується живе спостереження лише для читання. Паперовий облік не змінюється.",
         "ui.error.live.snapshot": "Помилка поточного знімка: {detail}",
         "ui.status.live.failed": "Живе спостереження не оновлено; стан повтору/паперовий стан не змінено.",
         "ui.status.live.no_result": "Процес живого спостереження завершився без результату.",
@@ -320,7 +321,7 @@ _UK_UA = MappingProxyType(
         "ui.status.tickets.replay_running": "Повтор виконується; стан квитків оновиться після завершення транзакції.",
         "ui.status.close.replay_busy": (
             "Паперовий повтор ще виконується. Закриття програми заблоковано до завершення економічної транзакційної "
-            "межі, щоб процес не обірвав commit у довільній точці."
+            "межі, щоб процес не обірвав фіксацію транзакції у довільній точці."
         ),
         "ui.status.close.live_busy": (
             "Поточний знімок ще виконується. Закриття програми заблоковано до завершального стану живого спостереження, "
@@ -441,8 +442,24 @@ def text(key: str, *, locale: str = DEFAULT_LOCALE, **values: object) -> str:
         template = messages[key]
     except KeyError as exc:
         raise KeyError(f"missing localization key {key!r} for locale {locale!r}") from exc
+
+    render_values = values
+    plan_identity = values.get("plan_identity")
+    legacy_prefix = "; plan="
+    if isinstance(plan_identity, str) and plan_identity.startswith(legacy_prefix):
+        try:
+            suffix_template = messages["ui.status.research_plan.identity_suffix"]
+        except KeyError as exc:
+            raise KeyError(
+                f"missing localization key 'ui.status.research_plan.identity_suffix' for locale {locale!r}"
+            ) from exc
+        render_values = dict(values)
+        render_values["plan_identity"] = suffix_template.format_map(
+            {"sha_suffix": plan_identity[len(legacy_prefix):]}
+        )
+
     try:
-        return template.format_map(values)
+        return template.format_map(render_values)
     except KeyError as exc:
         missing = exc.args[0]
         raise KeyError(f"missing localization value {missing!r} for key {key!r}") from exc

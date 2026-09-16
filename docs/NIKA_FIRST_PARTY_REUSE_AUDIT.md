@@ -56,18 +56,21 @@ Autosport adaptation:
 - `tests/test_strategy_experiment.py`
 
 Adapted semantics:
-- explicit champion/challenger identities;
+- explicit experiment, research-question, hypothesis, champion and challenger identities;
 - frozen predeclared evaluation-case matrix and primary metric;
 - guardrails plus minimum improvement threshold;
 - authority/permission fingerprint invariance;
 - complete candidate × evaluation-case evidence coverage;
 - duplicate/reused evidence rejection;
-- deterministic recommendation report with previous-champion evidence and protocol SHA.
+- strict fail-closed protocol JSON loading rejects duplicate keys, non-standard constants, excessive nesting, unknown/missing fields and ambiguous numeric representations;
+- each evaluation case predeclares the complete canonical dataset/price identity, including `price_semantics`, executable-quote truth, paper-fill-fidelity truth and `price_source_ids`, before evidence is evaluated;
+- candidate runtime identity is a deterministic SHA-256 derived only from canonical `StrategyRunEvidence`-bound fields (`canonical_strategy_id`, agent composition and research-plan identity), not a free-form runtime reference;
+- deterministic recommendation report with previous-champion evidence, frozen research identities and protocol SHA.
 
 Autosport-specific constraints preserved:
 - consumes canonical `StrategyRunEvidence` from `strategy_comparison.py` rather than copying Nika's generic experiment runtime;
 - all economic metrics remain exact `Decimal` values and non-finite values fail closed;
-- canonical dataset/market/result/replay identities remain the source of truth;
+- canonical dataset/market/result/replay/price identities remain the source of truth, and the evaluator compares them against the frozen `EvaluationCase.identity` rather than self-accepting values from current evidence;
 - the seam has no persistence, strategy activation, PaperBook/RunRegistry/risk authority, bookmaker execution, or real-money capability;
 - negative/no-improvement results remain explicit `RETAIN_CHAMPION` evidence;
 - `REAL_MONEY_EXECUTION=false`, `HUMAN_TESTED=false`, `NVDA_VERIFIED=false` remain unchanged.

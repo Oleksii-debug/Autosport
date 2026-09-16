@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "autosport-lab"
 version = "0.1.0"
-description = "Windows-first agentic sports-market replay and paper-simulation laboratory"
+description = "Windows-first agentic sports-market intelligence, paper-proof and portfolio platform"
 requires-python = ">=3.11"
 dependencies = ["tk-uia==0.8.0"]
 

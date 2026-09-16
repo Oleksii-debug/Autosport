@@ -778,7 +778,10 @@ class AutosportApp(tk.Tk):
         self._refresh_tickets()
         self._set_evaluation_lines([text("ui.evaluation.running")])
         plan_identity = (
-            f"; plan={research_plan.source_sha256[:12]}…"
+            text(
+                "ui.status.research_plan.identity_suffix",
+                sha_suffix=f"{research_plan.source_sha256[:12]}…",
+            )
             if research_plan is not None
             else ""
         )

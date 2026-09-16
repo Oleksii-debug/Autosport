@@ -272,7 +272,10 @@ class WindowsAutosportApp(AutosportApp):
         self.bank.set(self._bank_text())
         self._refresh_tickets()
         plan_identity = (
-            f"; plan={research_plan.source_sha256[:12]}…"
+            text(
+                "ui.status.research_plan.identity_suffix",
+                sha_suffix=f"{research_plan.source_sha256[:12]}…",
+            )
             if research_plan is not None
             else ""
         )

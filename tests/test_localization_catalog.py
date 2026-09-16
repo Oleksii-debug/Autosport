@@ -20,6 +20,64 @@ from autosport.ui_model import (
 )
 
 
+_CRITICAL_UI_KEYS = {
+    "ui.app.title",
+    "ui.label.strategy",
+    "ui.label.speed",
+    "ui.label.live_mode",
+    "ui.label.live_quotes",
+    "ui.label.tickets",
+    "ui.label.evaluation",
+    "ui.label.log",
+    "ui.button.research_plan",
+    "ui.button.choose_dataset",
+    "ui.button.run_replay",
+    "ui.button.repair_workspace",
+    "ui.button.live_refresh",
+    "ui.speed.event_driven",
+    "ui.speed.realtime",
+    "ui.speed.10x",
+    "ui.speed.100x",
+    "ui.speed.1000x",
+    "ui.live_mode.public_preview",
+    "ui.live_mode.api_key",
+    "ui.strategy.display",
+    "ui.status.startup.ready",
+    "ui.status.startup.recovery_required",
+    "ui.status.dataset.none",
+    "ui.status.research_plan.baseline",
+    "ui.status.live.never",
+    "ui.status.live_quotes.empty",
+    "ui.status.evaluation.empty",
+    "ui.accessibility.strategy.name",
+    "ui.accessibility.strategy.description",
+    "ui.accessibility.research_plan.name",
+    "ui.accessibility.research_plan.description",
+    "ui.accessibility.choose_dataset.name",
+    "ui.accessibility.choose_dataset.description",
+    "ui.accessibility.run_replay.name",
+    "ui.accessibility.run_replay.description",
+    "ui.accessibility.repair_workspace.name",
+    "ui.accessibility.repair_workspace.description",
+    "ui.accessibility.replay_speed.name",
+    "ui.accessibility.replay_speed.description",
+    "ui.accessibility.live_mode.name",
+    "ui.accessibility.live_mode.description",
+    "ui.accessibility.live_refresh.name",
+    "ui.accessibility.live_refresh.description",
+    "ui.accessibility.live_quotes.name",
+    "ui.accessibility.live_quotes.description",
+    "ui.accessibility.tickets.name",
+    "ui.accessibility.tickets.description",
+    "ui.accessibility.evaluation.name",
+    "ui.accessibility.evaluation.description",
+    "ui.accessibility.log.name",
+    "ui.accessibility.log.description",
+    "ui.accessibility.bankroll.name",
+    "ui.accessibility.bankroll.description",
+}
+
+
 def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:
     assert DEFAULT_LOCALE == "uk-UA"
     assert CATALOG_VERSION == 1
@@ -28,7 +86,8 @@ def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:
     assert text("ui.boolean.false") == "ні"
 
     require_keys(
-        {
+        _CRITICAL_UI_KEYS
+        | {
             "ui.result.summary",
             "ui.evaluation.bankroll",
             "ui.evaluation.metrics",
@@ -48,6 +107,16 @@ def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:
         text("ui.result.summary", run_id="r")
     with pytest.raises(KeyError, match="missing localization keys"):
         require_keys({"ui.missing"})
+
+
+def test_critical_catalog_strings_are_exact_ukrainian_presentation() -> None:
+    assert text("ui.app.title") == "Автоспорт — V1 лабораторія паперового моделювання для Windows"
+    assert text("ui.button.run_replay") == "Запустити паперовий повтор"
+    assert text("ui.speed.event_driven") == "Подієвий — максимально швидко"
+    assert text("ui.live_mode.public_preview") == "Публічний перегляд — без ключа"
+    assert text("ui.accessibility.strategy.name") == "Стратегія повтору"
+    assert text("ui.accessibility.live_quotes.name") == "Поточні котирування"
+    assert text("ui.accessibility.bankroll.name") == "Віртуальний банк"
 
 
 def test_result_summary_localizes_labels_but_preserves_raw_economic_values() -> None:

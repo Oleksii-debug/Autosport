@@ -89,6 +89,11 @@ Adapt semantic locator/state/postcondition/drift/recovery patterns when Stage K 
 
 ### Nika effect/idempotency/recovery patterns -> real execution saga
 
+Potential donor areas:
+- `src/nika_core/runtime/idempotency.py`
+- `runtime_effect_journal.py`
+- runtime recovery/retry contracts and adversarial tests.
+
 Use as design/conformance donors for `ExecutionPlan/Attempt/Acknowledgement/Reconciliation/ExecutionSaga`, especially UNKNOWN external acknowledgement and no-blind-retry behavior. Do not create Nika Runtime #2 inside Autosport.
 
 ### Nika scheduler adapter -> 24/7 research trigger

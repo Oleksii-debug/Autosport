@@ -129,7 +129,7 @@ def test_production_process_authority_requires_birth_protected_worker_boundary()
     assert authority.rindex(
         "_require_birth_protected_worker(_query_system_handles)"
     ) > authority.index("class ProcessDuplicationFence")
-    assert "CreateProcessW" in launcher
+    assert "CreateProcessAsUserW" in launcher
     assert "_birth_security_descriptor" in launcher
     assert "_DANGEROUS_PROCESS_ACCESS = 0x000C006A" in launcher
     assert "_close_handle(process_info.hThread)" in launcher

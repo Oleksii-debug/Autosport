@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_EVEN, ROUND_UP, localcontext
 
 import pytest
 
@@ -35,6 +35,32 @@ def out_of_order_points() -> tuple[FeaturePoint, ...]:
         FeaturePoint(Decimal("1"), BASE + timedelta(minutes=10)),
         FeaturePoint(None, BASE + timedelta(minutes=5)),
     )
+
+
+def _statistical_outputs_under_ambient_context(
+    precision: int,
+    rounding: str,
+) -> tuple[tuple[Decimal | None, ...], tuple[Decimal, ...]]:
+    with localcontext() as ambient:
+        ambient.prec = precision
+        ambient.rounding = rounding
+        rolling = trailing_mean(
+            (
+                FeaturePoint(Decimal("1"), BASE),
+                FeaturePoint(Decimal("2"), BASE + timedelta(minutes=1)),
+                FeaturePoint(Decimal("2"), BASE + timedelta(minutes=2)),
+            ),
+            3,
+        )
+        scaler = TrainOnlyStandardizer()
+        scaler.fit(
+            [Decimal("1"), Decimal("2"), Decimal("4")],
+            partition=DatasetPartition.TRAIN,
+        )
+        transformed = scaler.transform(
+            [Decimal("1"), Decimal("2.5"), Decimal("4")]
+        )
+        return tuple(point.value for point in rolling), transformed
 
 
 def test_negative_shift_fails_closed() -> None:
@@ -72,6 +98,30 @@ def test_trailing_mean_uses_only_current_and_past_values() -> None:
 def test_trailing_mean_rejects_out_of_order_availability() -> None:
     with pytest.raises(FeatureLeakageError, match="nondecreasing available_at"):
         trailing_mean(out_of_order_points(), 2)
+
+
+def test_causal_decimal_statistics_ignore_ambient_precision_and_rounding() -> None:
+    baseline = _statistical_outputs_under_ambient_context(6, ROUND_DOWN)
+    for precision, rounding in (
+        (9, ROUND_UP),
+        (28, ROUND_HALF_EVEN),
+        (50, ROUND_FLOOR),
+    ):
+        assert _statistical_outputs_under_ambient_context(precision, rounding) == baseline
+
+    rolling, transformed = baseline
+    assert rolling[-1] is not None
+    assert rolling[-1] != Decimal("1.66666")
+    assert transformed[0] != transformed[-1]
+
+
+def test_causal_decimal_statistics_do_not_mutate_ambient_context() -> None:
+    with localcontext() as ambient:
+        ambient.prec = 7
+        ambient.rounding = ROUND_UP
+        _statistical_outputs_under_ambient_context(11, ROUND_DOWN)
+        assert ambient.prec == 7
+        assert ambient.rounding == ROUND_UP
 
 
 def test_backward_fill_fails_closed() -> None:

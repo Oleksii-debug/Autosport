@@ -216,6 +216,14 @@ def _snapshot_quote_at_cutoff(
     if type(event.decimal_odds) is not Decimal:
         raise ValueError("market event quote fields are not canonical")
 
+    # Preserve the service boundary's runtime diagnostics before adapting this
+    # already-materialized event to the stricter serialized ingress contract.
+    observed = _timestamp(event.observed_ts, field="observed_ts")
+    _timestamp(event.ingest_ts, field="ingest_ts")
+    if event.source_ts is not None:
+        _timestamp(event.source_ts, field="source_ts")
+    _validate_quote_identity_utf8(event)
+
     # Intentionally construct the validation payload from quote-only scalar
     # fields. Do not call event.to_dict(): that would traverse mutable metadata
     # which may contain outcome/future-only material irrelevant to a calculation.
@@ -236,10 +244,6 @@ def _snapshot_quote_at_cutoff(
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("market event quote fields are not canonical") from exc
 
-    observed = _timestamp(canonical.observed_ts, field="observed_ts")
-    _timestamp(canonical.ingest_ts, field="ingest_ts")
-    if canonical.source_ts is not None:
-        _timestamp(canonical.source_ts, field="source_ts")
     if observed > cutoff_value:
         raise ValueError("selected quote observed_ts is after the calculation causal cutoff")
 
@@ -274,6 +278,16 @@ def _timestamp(value: object, *, field: str) -> datetime:
         return parse_iso_timestamp(value)
     except (AttributeError, TypeError, ValueError) as exc:
         raise ValueError(f"{field} must be a timezone-aware ISO timestamp") from exc
+
+
+def _validate_quote_identity_utf8(event: MarketEvent) -> None:
+    for value in (event.event_id, event.market_id, event.selection_id, event.source_id):
+        if type(value) is not str:
+            continue
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("calculation evidence text must be valid UTF-8") from exc
 
 
 def _bind(

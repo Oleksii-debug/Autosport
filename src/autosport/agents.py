@@ -8,6 +8,7 @@ from typing import Iterable, Protocol
 
 from .decision_ledger import DecisionRecord, JsonlDecisionLedger
 from .domain import MarketEvent, TicketLeg
+from .market_mirror import MarketMirror
 from .paper import PaperBook
 
 
@@ -41,17 +42,28 @@ def agent_composition_sha256(agent_names: Iterable[object]) -> str:
 @dataclass(slots=True)
 class AgentContext:
     paper_book: PaperBook
-    latest_quotes: dict[str, MarketEvent] = field(default_factory=dict)
     event_count: int = 0
     replay_run_id: str = "unbound"
     decision_ledger: JsonlDecisionLedger | None = None
     notes: list[str] = field(default_factory=list)
+    market_mirror: MarketMirror = field(default_factory=MarketMirror)
+
+    @property
+    def latest_quotes(self) -> dict[tuple[str, str], MarketEvent]:
+        """Return a detached compatibility view keyed by provider + canonical quote.
+
+        The canonical ``MarketMirror`` is the only mutable decision-agent quote state.
+        Returning a fresh mapping prevents legacy callers from mutating a second mirror
+        and keeps provider identity explicit at this compatibility boundary.
+        """
+
+        return {
+            (event.source_id, event.quote_key): event
+            for event in self.market_mirror.snapshot()
+        }
 
     def market_context_hash(self) -> str:
-        projection = {
-            key: value.to_dict()
-            for key, value in sorted(self.latest_quotes.items())
-        }
+        projection = [event.to_dict() for event in self.market_mirror.snapshot()]
         canonical = json.dumps(projection, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -66,7 +78,7 @@ class MarketMirrorAgent:
     name = "market-mirror"
 
     def on_market_event(self, event: MarketEvent, context: AgentContext) -> None:
-        context.latest_quotes[event.quote_key] = event
+        context.market_mirror.apply(event)
         context.event_count += 1
 
 

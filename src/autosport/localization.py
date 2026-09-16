@@ -9,6 +9,8 @@ CATALOG_VERSION = 1
 
 _UK_UA = MappingProxyType(
     {
+        "ui.boolean.true": "так",
+        "ui.boolean.false": "ні",
         "ui.result.summary": (
             "Повтор {run_id}: подій={event_count}; баланс={balance}; "
             "чистий_результат={net_profit}; завершено={settled}; "
@@ -35,11 +37,11 @@ _UK_UA = MappingProxyType(
         "ui.price_truth.betfair_last_traded": (
             "Істина ціни | Спостереження Betfair last-traded/last-matched; "
             "виконувану котировку перевірено={executable}; "
-            "відповідність paper-fill перевірено={fill_fidelity}."
+            "відповідність паперового виконання перевірено={fill_fidelity}."
         ),
         "ui.price_truth.generic": (
             "Істина ціни | {price_semantics}; виконувану котировку перевірено={executable}; "
-            "відповідність paper-fill перевірено={fill_fidelity}."
+            "відповідність паперового виконання перевірено={fill_fidelity}."
         ),
         "ui.portfolio.mode.exact": (
             "точний — усі релевантні сценарії цього звіту портфеля перебрано"
@@ -71,7 +73,7 @@ _UK_UA = MappingProxyType(
         "ui.ticket.empty": "Паперові квитки ще відсутні.",
         "ui.observation.no_flags": "немає",
         "ui.observation.summary": (
-            "Live-знімок: джерело={source_id}; стан={health}; отримано={received}; "
+            "Поточний знімок: джерело={source_id}; стан={health}; отримано={received}; "
             "прийнято={accepted}; відхилено={rejected}; поточних={current}; "
             "прапорці якості={quality_flags}."
         ),
@@ -80,7 +82,7 @@ _UK_UA = MappingProxyType(
             "коефіцієнт {odds} | час джерела {source_time}"
         ),
         "ui.observation.unknown_time": "невідомий",
-        "ui.observation.empty": "Live-котирування ще відсутні.",
+        "ui.observation.empty": "Поточні котирування ще відсутні.",
     }
 )
 

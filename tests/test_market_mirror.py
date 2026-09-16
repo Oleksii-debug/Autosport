@@ -159,6 +159,24 @@ class MarketMirrorTests(unittest.TestCase):
         )
         self.assertEqual(tuple(event.selection_id for event in active), ("open",))
 
+    def test_unknown_status_remains_auditable_but_is_not_decision_eligible(self) -> None:
+        mirror = MarketMirror()
+        mirror.apply(self.event(selection="open", sequence=1, status="open"))
+        mirror.apply(
+            self.event(
+                selection="provider-paused",
+                sequence=1,
+                status="provider-paused",
+            )
+        )
+
+        self.assertEqual(len(mirror.snapshot()), 2)
+        active = mirror.active_snapshot(
+            as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=5),
+        )
+        self.assertEqual(tuple(event.selection_id for event in active), ("open",))
+
     def test_active_snapshot_excludes_future_expired_and_bad_time_entries(self) -> None:
         mirror = MarketMirror()
         mirror.apply(

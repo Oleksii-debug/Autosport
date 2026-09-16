@@ -27,6 +27,7 @@ _ERROR_ACCESS_DENIED = 5
 _WAIT_OBJECT_0 = 0x00000000
 _INFINITE = 0xFFFFFFFF
 _SDDL_REVISION_1 = 1
+_TOKEN_ASSIGN_PRIMARY = 0x0001
 _TOKEN_DUPLICATE = 0x0002
 _TOKEN_QUERY = 0x0008
 _DISABLE_MAX_PRIVILEGE = 0x00000001
@@ -256,7 +257,7 @@ def _create_restricted_primary_token() -> Any:
         current = wintypes.HANDLE()
         if not open_process_token(
             get_current_process(),
-            _TOKEN_QUERY | _TOKEN_DUPLICATE,
+            _TOKEN_QUERY | _TOKEN_DUPLICATE | _TOKEN_ASSIGN_PRIMARY,
             ctypes.byref(current),
         ):
             raise ctypes.WinError(ctypes.get_last_error())

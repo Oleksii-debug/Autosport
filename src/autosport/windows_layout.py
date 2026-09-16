@@ -52,6 +52,14 @@ def _surface_target_widget(app: Any, surface_key: str) -> Any | None:
     return getattr(app, target_name, None)
 
 
+def refresh_windows_shell_open_availability(app: Any) -> None:
+    """Refresh Open authority after late-bound Windows controls are installed."""
+    surface_key = app.shell_surface_key.get()
+    app.shell_open_button.configure(
+        state=("normal" if _surface_target_widget(app, surface_key) is not None else "disabled")
+    )
+
+
 def _focus_surface_target(app: Any, surface_key: str) -> None:
     target = _surface_target_widget(app, surface_key)
     if target is None:
@@ -78,9 +86,7 @@ def _render_shell_surface(app: Any, surface_key: str, *, persist: bool) -> None:
     # widget before the generic Open action can truthfully promise reachability.
     # This keeps presentation-only/future surfaces fail-closed instead of
     # silently focusing an unrelated control.
-    app.shell_open_button.configure(
-        state=("normal" if _surface_target_widget(app, surface.key) is not None else "disabled")
-    )
+    refresh_windows_shell_open_availability(app)
     if persist:
         save_surface_selection(app.workspace, surface.key)
 
@@ -198,7 +204,7 @@ def install_compact_windows_layout() -> None:
 
     The packaged entrypoint calls this before normal GUI startup and before the
     accessibility/keyboard audit entrypoints. The same layout is therefore
-    audited that Windows users actually receive; this is not an audit-only
+    audited that Windows users actually receive rather than an audit-only
     resize.
     """
     from .gui import AutosportApp
@@ -217,6 +223,11 @@ def install_compact_windows_layout() -> None:
     def configure_with_windows_shell(self) -> None:
         original_configure_accessibility(self)
         configure_windows_product_shell_accessibility(self)
+        # WindowsAutosportApp creates its read-only bank_summary only after the
+        # patched base _build() has installed and restored the shell selection.
+        # Re-check Open authority here, after the full subclass build returned
+        # and before user interaction begins, without re-persisting selection.
+        refresh_windows_shell_open_availability(self)
 
     AutosportApp._build = build_with_windows_budget
     AutosportApp._configure_accessibility = configure_with_windows_shell

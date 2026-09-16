@@ -5,7 +5,9 @@ from autosport.windows_layout import (
     WINDOWS_SHELL_DETAILS_VISIBLE_ROWS,
     compact_surface_heights,
     configure_windows_product_shell_accessibility,
+    install_compact_windows_layout,
     install_windows_product_shell,
+    refresh_windows_shell_open_availability,
     _surface_target_widget,
 )
 
@@ -69,18 +71,40 @@ def test_windows_product_shell_has_stable_uia_ids_and_keyboard_navigation():
     for automation_id in WINDOWS_SHELL_AUTOMATION_IDS:
         assert f'WINDOWS_SHELL_AUTOMATION_IDS["{automation_id}"]' in accessibility_source
 
+    install_source = inspect.getsource(install_compact_windows_layout)
+    assert "refresh_windows_shell_open_availability(self)" in install_source
+
 
 def test_shell_target_requires_a_real_widget_before_open_is_authorized():
+    class SurfaceKey:
+        def get(self):
+            return "paper_bank"
+
+    class OpenButton:
+        def __init__(self):
+            self.state = None
+
+        def configure(self, **kwargs):
+            self.state = kwargs["state"]
+
     class App:
-        shell_details = object()
+        shell_surface_key = SurfaceKey()
+        shell_open_button = OpenButton()
 
     app = App()
 
-    # Paper Bank declares bank_summary in the surface contract, but the current
-    # packaged shell does not construct that widget. Open must therefore remain
-    # unavailable instead of redirecting focus to Tickets or shell details.
+    # The shell is installed by the patched base build before WindowsAutosportApp
+    # creates its late-bound bank_summary. Persisted Paper Bank must fail closed
+    # at that first render rather than route to an unrelated control.
     assert _surface_target_widget(app, "paper_bank") is None
+    refresh_windows_shell_open_availability(app)
+    assert app.shell_open_button.state == "disabled"
 
+    # The accessibility-configuration phase runs after the subclass build has
+    # created bank_summary. Re-checking authority must make Open usable without
+    # changing the persisted surface selection.
     bank_summary = object()
     app.bank_summary = bank_summary
     assert _surface_target_widget(app, "paper_bank") is bank_summary
+    refresh_windows_shell_open_availability(app)
+    assert app.shell_open_button.state == "normal"

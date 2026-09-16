@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import threading
 import unittest
@@ -16,19 +17,26 @@ class MarketMirrorConcurrencyTests(unittest.TestCase):
         selection_id: str = "selection-1",
         sequence: int = 1,
         odds: str = "2.00",
+        status: str = "open",
+        observed_ts: str = "2026-09-16T20:00:00+00:00",
+        source_ts: str | None = "2026-09-16T19:59:59+00:00",
     ) -> MarketEvent:
         return MarketEvent(
             event_id=event_id,
             market_id=market_id,
             selection_id=selection_id,
             decimal_odds=Decimal(odds),
-            observed_ts="2026-09-16T20:00:00+00:00",
+            observed_ts=observed_ts,
             source_id=source,
             sequence=sequence,
-            status="open",
-            source_ts="2026-09-16T19:59:59+00:00",
+            status=status,
+            source_ts=source_ts,
             metadata={"seed": "canonical"},
         )
+
+    @staticmethod
+    def decision_time() -> datetime:
+        return datetime(2026, 9, 16, 20, 0, tzinfo=timezone.utc)
 
     def test_revision_advances_only_for_material_applied_updates(self) -> None:
         mirror = MarketMirror()
@@ -96,7 +104,69 @@ class MarketMirrorConcurrencyTests(unittest.TestCase):
         self.assertNotIn("consumer-local", canonical.events[0].metadata)
         self.assertEqual(canonical.revision, whole.revision)
 
-    def test_concurrent_updaters_and_readers_observe_coherent_monotonic_views(self) -> None:
+    def test_focused_active_view_applies_identity_and_freshness_in_one_revision(self) -> None:
+        mirror = MarketMirror()
+        mirror.apply(self.event(selection_id="fresh"))
+        mirror.apply(self.event(selection_id="suspended", status="suspended"))
+        mirror.apply(
+            self.event(
+                selection_id="stale",
+                source_ts="2026-09-16T19:40:00+00:00",
+            )
+        )
+        mirror.apply(
+            self.event(
+                selection_id="future",
+                source_ts="2026-09-16T20:00:01+00:00",
+            )
+        )
+        mirror.apply(
+            self.event(
+                source="provider-b",
+                selection_id="other-provider",
+            )
+        )
+        bad_time = self.event(selection_id="bad-time", source_ts=None)
+        bad_time = MarketEvent.from_dict(
+            {
+                **bad_time.to_dict(),
+                "observed_ts": "not-a-timestamp",
+            }
+        )
+        mirror.apply(bad_time)
+
+        audit = mirror.view(source_ids="provider-a")
+        decision = mirror.active_view(
+            as_of=self.decision_time(),
+            max_age=timedelta(minutes=5),
+            source_ids="provider-a",
+        )
+
+        self.assertEqual(decision.revision, audit.revision)
+        self.assertEqual(
+            tuple(event.selection_id for event in decision.events),
+            ("fresh",),
+        )
+        self.assertEqual(len(audit.events), 5)
+
+    def test_active_view_validates_freshness_boundary_before_capture(self) -> None:
+        mirror = MarketMirror()
+        mirror.apply(self.event())
+
+        with self.assertRaises(ValueError):
+            mirror.active_view(
+                as_of=datetime(2026, 9, 16, 20, 0),
+                max_age=timedelta(minutes=5),
+                source_ids="provider-a",
+            )
+        with self.assertRaises(ValueError):
+            mirror.active_view(
+                as_of=self.decision_time(),
+                max_age=timedelta(seconds=-1),
+                source_ids="provider-a",
+            )
+
+    def test_concurrent_updaters_and_focused_decision_readers_observe_coherent_views(self) -> None:
         mirror = MarketMirror()
         writer_count = 4
         updates_per_writer = 40
@@ -125,12 +195,22 @@ class MarketMirrorConcurrencyTests(unittest.TestCase):
                 start.wait()
                 previous_revision = 0
                 for _ in range(reads_per_reader):
-                    view = mirror.view()
+                    view = mirror.active_view(
+                        as_of=self.decision_time(),
+                        max_age=timedelta(minutes=5),
+                        source_ids={"provider-0", "provider-1"},
+                    )
                     self.assertGreaterEqual(view.revision, previous_revision)
                     keys = tuple(
                         (event.source_id, event.quote_key) for event in view.events
                     )
                     self.assertEqual(len(keys), len(set(keys)))
+                    self.assertTrue(
+                        all(
+                            event.source_id in {"provider-0", "provider-1"}
+                            for event in view.events
+                        )
+                    )
                     previous_revision = view.revision
             except BaseException as exc:  # pragma: no cover - reported below
                 errors.append(exc)
@@ -146,7 +226,10 @@ class MarketMirrorConcurrencyTests(unittest.TestCase):
             thread.join()
 
         self.assertEqual(errors, [])
-        final = mirror.view()
+        final = mirror.active_view(
+            as_of=self.decision_time(),
+            max_age=timedelta(minutes=5),
+        )
         self.assertEqual(final.revision, writer_count * updates_per_writer)
         self.assertEqual(len(final.events), writer_count)
         self.assertEqual(

@@ -155,9 +155,18 @@ class ParallelRoutingProposal:
                     "route state requires proposal legs covering the full positive residual"
                 )
         elif self.state is RoutingState.PARTIAL:
-            if residual <= 0 or proposed <= 0 or proposed >= residual or not self.legs:
+            if residual <= 0 or proposed >= residual:
                 raise RoutingContractError(
-                    "partial state requires proposal legs covering a strict residual subset"
+                    "partial state requires a positive uncovered residual"
+                )
+            if proposed == 0:
+                if self.legs or confirmed <= 0:
+                    raise RoutingContractError(
+                        "zero-proposal partial state requires prior confirmed stake and no legs"
+                    )
+            elif not self.legs:
+                raise RoutingContractError(
+                    "partial state with proposal authority requires proposal legs"
                 )
         elif self.state is RoutingState.UNEXECUTABLE:
             if residual <= 0 or proposed != 0 or self.legs:
@@ -234,8 +243,10 @@ def plan_equal_split_residual(
     child proposal identities.
 
     ``parent_plan_id`` is an opaque reference to parent authority owned by the canonical\n    #353 execution-plan layer. This proposal layer does not claim that the string itself\n    canonically identifies the parent plan content; child identities bind that foreign\n    reference together with this request, exact quote and proposed stake.\n\n    ``RoutingState.ROUTE`` means the full residual is covered by proposal legs.
-    ``RoutingState.PARTIAL`` means only a strict subset can be proposed with current
-    selected capacity. ``RoutingState.UNEXECUTABLE`` means none can be proposed.
+    ``RoutingState.PARTIAL`` means the request is already partially confirmed and/or
+    only a strict subset of the residual can be proposed with current selected capacity.
+    A zero-proposal PARTIAL is therefore valid only when prior confirmed stake exists.
+    ``RoutingState.UNEXECUTABLE`` means none can be proposed and nothing is confirmed.
     Neither state is an acknowledgement, receipt or real-execution result.
     """
 

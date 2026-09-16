@@ -31,16 +31,11 @@ def _git_blob_sha(data: bytes) -> str:
     ).hexdigest()
 
 
-def test_creator_host_privilege_drop_precedes_fence_and_exact_release_body() -> None:
+def test_creator_host_census_authority_is_removed_before_exact_release_body() -> None:
     bootstrap = _BOOTSTRAP.read_text(encoding="utf-8")
     fence_bootstrap = _FENCE_BOOTSTRAP.read_text(encoding="utf-8")
     body = _BODY.read_text(encoding="utf-8")
 
-    privilege_drop = (
-        "[Autosport.Release.CreatorHostPrivilegeBootstrap]::"
-        "RemoveSeDebugPrivilegeAndVerifyAbsent()"
-    )
-    fence_script_execute = "& $creatorFenceScriptBlock"
     fence = "$creatorFence = [Autosport.Release.CreatorHostFence]::Acquire()"
     body_lookup = (
         "$bodyEntry = (& $gitExecutable ls-tree $sourceSha -- "
@@ -53,23 +48,33 @@ def test_creator_host_privilege_drop_precedes_fence_and_exact_release_body() -> 
     assert _git_blob_sha(_FENCE_BOOTSTRAP.read_bytes()) == _REVIEWED_FENCE_BLOB
     assert _git_blob_sha(_BODY.read_bytes()) == _REVIEWED_BODY_BLOB
 
-    # The hosted-runner token must lose SeDebugPrivilege rather than merely have
-    # it disabled. A second assignment attempt must prove it is no longer assigned.
+    # A hosted runner may assign SeDebugPrivilege. It is enabled only for the
+    # trusted, pre-release handle census and is irreversibly removed in finally.
+    assert "private const uint SE_PRIVILEGE_ENABLED = 0x00000002;" in bootstrap
     assert "private const uint SE_PRIVILEGE_REMOVED = 0x00000004;" in bootstrap
     assert "private const int ERROR_NOT_ALL_ASSIGNED = 1300;" in bootstrap
+    assert "EnableSeDebugPrivilegeForCensusIfAssigned" in bootstrap
+    assert "Attributes = SE_PRIVILEGE_ENABLED" in bootstrap
     assert "Attributes = SE_PRIVILEGE_REMOVED" in bootstrap
-    assert bootstrap.count("AdjustTokenPrivileges(") >= 3  # declaration + remove + verify
-    assert "verificationError != ERROR_NOT_ALL_ASSIGNED" in bootstrap
-    assert "SeDebugPrivilege remained assigned after irreversible removal attempt" in bootstrap
+    assert "CreatorHostPrivilegeBootstrap.EnableSeDebugPrivilegeForCensusIfAssigned();" in bootstrap
+    assert "CreatorHostPrivilegeBootstrap.RemoveSeDebugPrivilegeAndVerifyAbsent();" in bootstrap
+    assert "RequireSeDebugNotAssigned();" in bootstrap
+    assert "AUTOSPORT_CREATOR_SEDEBUG_CENSUS_AUTHORITY=" in bootstrap
     assert "AUTOSPORT_CREATOR_SEDEBUG_REMOVAL=PASS" in bootstrap
+    assert "SeDebugPrivilege remained assigned after irreversible removal attempt" in bootstrap
 
-    # The existing creator fence is reused byte-for-byte from one read snapshot;
-    # the privilege drop happens before those bytes are parsed/executed.
+    # The previously reviewed fence remains the exact source input. The bootstrap
+    # accepts only that Git blob and applies two unique, deterministic substitutions.
     assert f"$expectedCreatorFenceBlob = '{_REVIEWED_FENCE_BLOB}'" in bootstrap
     assert "[System.IO.FileShare]::Read" in bootstrap
+    assert "$initialGuardMatches -ne 1" in bootstrap
+    assert "$censusMatches -ne 1" in bootstrap
+    assert "Creator-host census authority injection was not unique" in bootstrap
+    assert "Creator-host SeDebug removal injection was not unique" in bootstrap
     assert "[ScriptBlock]::Create($creatorFenceText)" in bootstrap
-    assert bootstrap.index(privilege_drop) < bootstrap.index(fence_script_execute)
 
+    # The exact source fence still owns DACL installation, pre-existing-handle
+    # census, fresh-open denial, and exact release-body loading.
     assert "private const uint DANGEROUS_PROCESS_ACCESS = 0x000C006A;" in fence_bootstrap
     assert "RequireNoUntrustedPreexistingAuthority();" in fence_bootstrap
     assert "RequireSeDebugNotAssigned();" in fence_bootstrap
@@ -192,6 +197,7 @@ def test_used_then_closed_vm_write_authority_cannot_reach_release_body(tmp_path:
 
     stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
     stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+    assert "AUTOSPORT_CREATOR_SEDEBUG_CENSUS_AUTHORITY=" in stdout, stderr
     assert "AUTOSPORT_CREATOR_SEDEBUG_REMOVAL=PASS" in stdout, stderr
     assert "AUTOSPORT_CREATOR_PRE_FENCE_MUTATION_OBSERVED=PASS" in stdout, stderr
     assert "AUTOSPORT_CREATOR_FENCE_FRESH_OPEN_DENIAL=PASS" in stdout, stderr

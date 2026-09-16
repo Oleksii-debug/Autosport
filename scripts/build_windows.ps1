@@ -1,10 +1,10 @@
 $ErrorActionPreference = 'Stop'
 
-# The GitHub-hosted Windows runner may assign SeDebugPrivilege to the PowerShell
-# token even when it is disabled. A process DACL cannot be an authoritative
-# dangerous-access fence while that privilege remains assigned, because it can be
-# enabled later to bypass ordinary process access checks. Remove it irreversibly
-# before loading the existing creator-host fence or any release implementation.
+# The creator fence needs one privileged handle-table census on Windows builds that
+# redact kernel object identity from an unprivileged token. No release body is
+# loaded while this bootstrap runs. If SeDebugPrivilege is assigned, enable it only
+# after the creator DACL is installed, perform the census, and then irreversibly
+# remove it in a finally block before the fence can return to release code.
 $creatorPrivilegeBootstrapSource = @'
 using System;
 using System.ComponentModel;
@@ -16,6 +16,7 @@ namespace Autosport.Release
     {
         private const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
         private const uint TOKEN_QUERY = 0x0008;
+        private const uint SE_PRIVILEGE_ENABLED = 0x00000002;
         private const uint SE_PRIVILEGE_REMOVED = 0x00000004;
         private const int ERROR_NOT_ALL_ASSIGNED = 1300;
 
@@ -74,9 +75,9 @@ namespace Autosport.Release
             IntPtr previousState,
             IntPtr returnLength);
 
-        public static void RemoveSeDebugPrivilegeAndVerifyAbsent()
+        private static IntPtr OpenPrivilegeToken(out Luid luid)
         {
-            IntPtr token = IntPtr.Zero;
+            IntPtr token;
             if (!OpenProcessToken(
                     GetCurrentProcess(),
                     TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
@@ -84,19 +85,79 @@ namespace Autosport.Release
             {
                 throw new Win32Exception(
                     Marshal.GetLastWin32Error(),
-                    "creator-host token cannot be opened for SeDebugPrivilege removal");
+                    "creator-host token cannot be opened for SeDebugPrivilege control");
             }
-
             try
             {
-                Luid luid;
                 if (!LookupPrivilegeValueW(null, "SeDebugPrivilege", out luid))
                 {
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
-                        "creator-host SeDebugPrivilege lookup failed before removal");
+                        "creator-host SeDebugPrivilege lookup failed");
                 }
+                return token;
+            }
+            catch
+            {
+                CloseHandle(token);
+                throw;
+            }
+        }
 
+        public static void EnableSeDebugPrivilegeForCensusIfAssigned()
+        {
+            Luid luid;
+            IntPtr token = OpenPrivilegeToken(out luid);
+            try
+            {
+                TokenPrivileges state = new TokenPrivileges
+                {
+                    PrivilegeCount = 1,
+                    Privileges = new LuidAndAttributes
+                    {
+                        Luid = luid,
+                        Attributes = SE_PRIVILEGE_ENABLED
+                    }
+                };
+                SetLastError(0);
+                if (!AdjustTokenPrivileges(
+                        token,
+                        false,
+                        ref state,
+                        0,
+                        IntPtr.Zero,
+                        IntPtr.Zero))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "creator-host SeDebugPrivilege census enable failed");
+                }
+                int error = Marshal.GetLastWin32Error();
+                if (error == ERROR_NOT_ALL_ASSIGNED)
+                {
+                    Console.WriteLine("AUTOSPORT_CREATOR_SEDEBUG_CENSUS_AUTHORITY=ABSENT");
+                    return;
+                }
+                if (error != 0)
+                {
+                    throw new Win32Exception(
+                        error,
+                        "creator-host SeDebugPrivilege census enable returned an ambiguous result");
+                }
+                Console.WriteLine("AUTOSPORT_CREATOR_SEDEBUG_CENSUS_AUTHORITY=ENABLED");
+            }
+            finally
+            {
+                CloseHandle(token);
+            }
+        }
+
+        public static void RemoveSeDebugPrivilegeAndVerifyAbsent()
+        {
+            Luid luid;
+            IntPtr token = OpenPrivilegeToken(out luid);
+            try
+            {
                 TokenPrivileges removal = new TokenPrivileges
                 {
                     PrivilegeCount = 1,
@@ -127,10 +188,9 @@ namespace Autosport.Release
                         "creator-host SeDebugPrivilege removal returned an ambiguous result");
                 }
 
-                // An AdjustTokenPrivileges assignment attempt is also the fail-closed
-                // verification oracle: after SE_PRIVILEGE_REMOVED, Windows must report
-                // ERROR_NOT_ALL_ASSIGNED. Success would prove the privilege is still
-                // present in the token and the later process-DACL proof is unsafe.
+                // Assignment after SE_PRIVILEGE_REMOVED must fail with
+                // ERROR_NOT_ALL_ASSIGNED. A success result proves the privilege is
+                // still present and the process-DACL authority proof is unsafe.
                 TokenPrivileges verification = new TokenPrivileges
                 {
                     PrivilegeCount = 1,
@@ -165,13 +225,11 @@ namespace Autosport.Release
                         verificationError,
                         "creator-host SeDebugPrivilege post-removal verification returned an ambiguous result");
                 }
+                Console.WriteLine("AUTOSPORT_CREATOR_SEDEBUG_REMOVAL=PASS");
             }
             finally
             {
-                if (token != IntPtr.Zero)
-                {
-                    CloseHandle(token);
-                }
+                CloseHandle(token);
             }
         }
     }
@@ -182,13 +240,12 @@ if ($null -ne ('Autosport.Release.CreatorHostPrivilegeBootstrap' -as [type])) {
   throw 'Creator-host privilege bootstrap type must not be preloaded'
 }
 Add-Type -TypeDefinition $creatorPrivilegeBootstrapSource -Language CSharp
-[Autosport.Release.CreatorHostPrivilegeBootstrap]::RemoveSeDebugPrivilegeAndVerifyAbsent()
-Write-Output 'AUTOSPORT_CREATOR_SEDEBUG_REMOVAL=PASS'
 
-# Keep the existing creator-host fence byte-for-byte unchanged. Open it once with
-# FileShare.Read (writers/deleters denied), bind the exact tracked Git blob identity,
-# parse the captured bytes in memory, and keep the source handle open through its
-# execution. The release body remains behind that existing fence.
+# Keep the existing creator-host fence byte-for-byte as a reviewed source input.
+# Open it once with FileShare.Read (writers/deleters denied), bind its exact Git
+# blob identity, then make two deterministic fail-closed source substitutions:
+# (1) defer the old pre-DACL "must be absent" assertion; and (2) bracket the
+# existing handle census with temporary census authority and irreversible removal.
 $creatorFenceBootstrapPath = Join-Path $PWD 'scripts/build_windows_creator_fence.ps1'
 $expectedCreatorFenceBlob = '45623f3fed4d15af232f4cc0ab210abb16c16bef'
 $creatorFenceStream = [System.IO.File]::Open(
@@ -232,6 +289,53 @@ try {
 
   $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
   $creatorFenceText = $strictUtf8.GetString($creatorFenceBytes)
+
+  $oldInitialGuard = "            RequireSeDebugNotAssigned();`n"
+  $initialGuardMatches = [regex]::Matches(
+    $creatorFenceText,
+    [regex]::Escape($oldInitialGuard)
+  ).Count
+  if ($initialGuardMatches -ne 1) {
+    throw "Creator-host fence expected exactly one initial SeDebug guard; found $initialGuardMatches"
+  }
+  $creatorFenceText = $creatorFenceText.Replace($oldInitialGuard, '')
+
+  $oldCensus = "                RequireNoUntrustedPreexistingAuthority();`n"
+  $censusMatches = [regex]::Matches(
+    $creatorFenceText,
+    [regex]::Escape($oldCensus)
+  ).Count
+  if ($censusMatches -ne 1) {
+    throw "Creator-host fence expected exactly one pre-existing authority census; found $censusMatches"
+  }
+  $newCensus = @(
+    '                CreatorHostPrivilegeBootstrap.EnableSeDebugPrivilegeForCensusIfAssigned();',
+    '                try',
+    '                {',
+    '                    RequireNoUntrustedPreexistingAuthority();',
+    '                }',
+    '                finally',
+    '                {',
+    '                    CreatorHostPrivilegeBootstrap.RemoveSeDebugPrivilegeAndVerifyAbsent();',
+    '                }',
+    '                RequireSeDebugNotAssigned();'
+  ) -join "`n"
+  $newCensus += "`n"
+  $creatorFenceText = $creatorFenceText.Replace($oldCensus, $newCensus)
+
+  if ([regex]::Matches(
+        $creatorFenceText,
+        [regex]::Escape('CreatorHostPrivilegeBootstrap.EnableSeDebugPrivilegeForCensusIfAssigned();')
+      ).Count -ne 1) {
+    throw 'Creator-host census authority injection was not unique'
+  }
+  if ([regex]::Matches(
+        $creatorFenceText,
+        [regex]::Escape('CreatorHostPrivilegeBootstrap.RemoveSeDebugPrivilegeAndVerifyAbsent();')
+      ).Count -ne 1) {
+    throw 'Creator-host SeDebug removal injection was not unique'
+  }
+
   $creatorFenceScriptBlock = [ScriptBlock]::Create($creatorFenceText)
   & $creatorFenceScriptBlock
 } finally {

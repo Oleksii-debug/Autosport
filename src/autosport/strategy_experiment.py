@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any, Iterable
 
@@ -52,6 +52,50 @@ def _require_decimal_instance(
     if not isinstance(value, Decimal):
         raise ValueError(f"{field} must be an exact Decimal")
     return _require_decimal(value, field, minimum=minimum)
+
+
+def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
+    """Return the exact signed coefficient and base-10 exponent of a finite Decimal."""
+
+    sign, digits, exponent = value.as_tuple()
+    coefficient = int("".join(str(digit) for digit in digits) or "0")
+    if sign:
+        coefficient = -coefficient
+    return coefficient, exponent
+
+
+def _exact_decimal_sum(values: Iterable[Decimal]) -> Decimal:
+    """Sum finite Decimals exactly without consulting the ambient Decimal context."""
+
+    decimals = tuple(_require_decimal_instance(value, "decimal") for value in values)
+    if not decimals:
+        return Decimal("0")
+    minimum_exponent = min(value.as_tuple().exponent for value in decimals)
+    scaled_total = 0
+    for value in decimals:
+        coefficient, exponent = _decimal_coefficient(value)
+        scaled_total += coefficient * (10 ** (exponent - minimum_exponent))
+    if scaled_total == 0:
+        return Decimal("0")
+    sign = 1 if scaled_total < 0 else 0
+    digits = tuple(int(char) for char in str(abs(scaled_total)))
+    return Decimal((sign, digits, minimum_exponent))
+
+
+def _exact_decimal_negate(value: Decimal) -> Decimal:
+    """Negate a finite Decimal without invoking context-sensitive arithmetic."""
+
+    value = _require_decimal_instance(value, "decimal")
+    sign, digits, exponent = value.as_tuple()
+    if all(digit == 0 for digit in digits):
+        return Decimal("0")
+    return Decimal((0 if sign else 1, digits, exponent))
+
+
+def _exact_decimal_difference(left: Decimal, right: Decimal) -> Decimal:
+    """Subtract two finite Decimals exactly and independently of ambient precision."""
+
+    return _exact_decimal_sum((left, _exact_decimal_negate(right)))
 
 
 def _require_bool(value: Any, field: str) -> bool:
@@ -766,19 +810,17 @@ def evaluate_champion_challenger(
         champion = by_key[(champion_id, case.case_id)]
         for challenger in protocol.challengers:
             candidate = by_key[(challenger.candidate_id, case.case_id)]
+            challenger_value = metric(candidate, protocol.primary_metric)
+            champion_value = metric(champion, protocol.primary_metric)
+            delta = _exact_decimal_difference(challenger_value, champion_value)
             case_metrics.append(
                 {
                     "case_id": case.case_id,
                     "candidate_id": challenger.candidate_id,
                     "primary_metric": protocol.primary_metric,
-                    "champion_value": str(metric(champion, protocol.primary_metric)),
-                    "challenger_value": str(
-                        metric(candidate, protocol.primary_metric)
-                    ),
-                    "delta": str(
-                        metric(candidate, protocol.primary_metric)
-                        - metric(champion, protocol.primary_metric)
-                    ),
+                    "champion_value": str(champion_value),
+                    "challenger_value": str(challenger_value),
+                    "delta": str(delta),
                     "guardrails": {
                         rule.metric: {
                             "champion": str(metric(champion, rule.metric)),
@@ -794,20 +836,21 @@ def evaluate_champion_challenger(
             )
 
     for challenger in protocol.challengers:
-        total = Decimal("0")
+        deltas: list[Decimal] = []
         guardrails_ok = True
         for case in protocol.cases:
             champion = by_key[(champion_id, case.case_id)]
             candidate = by_key[(challenger.candidate_id, case.case_id)]
             challenger_value = metric(candidate, protocol.primary_metric)
             champion_value = metric(champion, protocol.primary_metric)
-            delta = challenger_value - champion_value
-            total += delta if protocol.primary_higher_is_better else -delta
+            delta = _exact_decimal_difference(challenger_value, champion_value)
+            deltas.append(delta if protocol.primary_higher_is_better else _exact_decimal_negate(delta))
             if not all(
                 _guardrail_pass(rule, champion, candidate)
                 for rule in protocol.guardrails
             ):
                 guardrails_ok = False
+        total = _exact_decimal_sum(deltas)
         aggregate_improvements[challenger.candidate_id] = total
         if total >= protocol.minimum_total_improvement and guardrails_ok:
             eligible.append((challenger.candidate_id, total))
@@ -819,11 +862,6 @@ def evaluate_champion_challenger(
         if eligible
         else ExperimentDecision.RETAIN_CHAMPION
     )
-
-    with localcontext() as context:
-        context.prec = 80
-        for candidate_id, value in aggregate_improvements.items():
-            _require_decimal(value, f"aggregate improvement for {candidate_id}")
 
     return ExperimentDecisionReport(
         experiment_id=protocol.experiment_id,
@@ -859,9 +897,9 @@ def _guardrail_pass(
         getattr(challenger, rule.metric), f"challenger {rule.metric}"
     )
     regression = (
-        champion_value - challenger_value
+        _exact_decimal_difference(champion_value, challenger_value)
         if rule.higher_is_better
-        else challenger_value - champion_value
+        else _exact_decimal_difference(challenger_value, champion_value)
     )
     return regression <= rule.max_regression
 

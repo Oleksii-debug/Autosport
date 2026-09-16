@@ -5,13 +5,7 @@ $ErrorActionPreference = 'Stop'
 # loaded while this bootstrap runs. If SeDebugPrivilege is assigned, enable it only
 # after the creator DACL is installed, perform the census, and then irreversibly
 # remove it in a finally block before the fence can return to release code.
-$creatorPrivilegeBootstrapSource = @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-
-namespace Autosport.Release
-{
+$creatorPrivilegeBootstrapClassSource = @'
     public static class CreatorHostPrivilegeBootstrap
     {
         private const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
@@ -233,18 +227,13 @@ namespace Autosport.Release
             }
         }
     }
-}
 '@
-
-if ($null -ne ('Autosport.Release.CreatorHostPrivilegeBootstrap' -as [type])) {
-  throw 'Creator-host privilege bootstrap type must not be preloaded'
-}
-Add-Type -TypeDefinition $creatorPrivilegeBootstrapSource -Language CSharp
 
 # Keep the existing creator-host fence byte-for-byte as a reviewed source input.
 # Open it once with FileShare.Read (writers/deleters denied), bind its exact Git
-# blob identity, then make two deterministic fail-closed source substitutions:
-# (1) defer the old pre-DACL "must be absent" assertion; and (2) bracket the
+# blob identity, then make three deterministic fail-closed source substitutions:
+# (1) compile the privilege helper in the same C# source/assembly as the fence;
+# (2) defer the old pre-DACL "must be absent" assertion; and (3) bracket the
 # existing handle census with temporary census authority and irreversible removal.
 $creatorFenceBootstrapPath = Join-Path $PWD 'scripts/build_windows_creator_fence.ps1'
 $expectedCreatorFenceBlob = '45623f3fed4d15af232f4cc0ab210abb16c16bef'
@@ -290,6 +279,17 @@ try {
   $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
   $creatorFenceText = $strictUtf8.GetString($creatorFenceBytes)
 
+  $oldClassAnchor = "namespace Autosport.Release`n{`n    public sealed class CreatorHostFence"
+  $classAnchorMatches = [regex]::Matches(
+    $creatorFenceText,
+    [regex]::Escape($oldClassAnchor)
+  ).Count
+  if ($classAnchorMatches -ne 1) {
+    throw "Creator-host fence expected exactly one C# class anchor; found $classAnchorMatches"
+  }
+  $newClassAnchor = "namespace Autosport.Release`n{`n" + $creatorPrivilegeBootstrapClassSource + "`n`n    public sealed class CreatorHostFence"
+  $creatorFenceText = $creatorFenceText.Replace($oldClassAnchor, $newClassAnchor)
+
   $oldInitialGuard = "            RequireSeDebugNotAssigned();`n"
   $initialGuardMatches = [regex]::Matches(
     $creatorFenceText,
@@ -323,6 +323,12 @@ try {
   $newCensus += "`n"
   $creatorFenceText = $creatorFenceText.Replace($oldCensus, $newCensus)
 
+  if ([regex]::Matches(
+        $creatorFenceText,
+        [regex]::Escape('public static class CreatorHostPrivilegeBootstrap')
+      ).Count -ne 1) {
+    throw 'Creator-host privilege helper injection was not unique'
+  }
   if ([regex]::Matches(
         $creatorFenceText,
         [regex]::Escape('CreatorHostPrivilegeBootstrap.EnableSeDebugPrivilegeForCensusIfAssigned();')

@@ -122,3 +122,25 @@ def test_nonfinite_decimal_contract_inputs_fail_closed() -> None:
             probability=Decimal("NaN"),
             input_cutoff_ts="2026-09-16T16:00:00+00:00",
         )
+
+
+def test_opportunity_set_rejects_conflicting_decisions_for_same_facts() -> None:
+    quote = _quote()
+    waiting = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.WAIT,
+        quotes=(quote,),
+    )
+    actionable = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.ACTIONABLE,
+        quotes=(quote,),
+    )
+
+    assert waiting.opportunity_id != actionable.opportunity_id
+    assert waiting.conflict_key == actionable.conflict_key
+    with pytest.raises(
+        OpportunityContractError,
+        match="conflicting decisions for the same canonical opportunity",
+    ):
+        OpportunitySet((waiting, actionable))

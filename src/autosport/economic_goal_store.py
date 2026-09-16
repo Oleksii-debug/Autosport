@@ -1,8 +1,8 @@
 """Durable, versioned persistence for the owner EconomicGoalContract.
 
-This module is intentionally a narrow authority boundary.  It serializes the
+This module is intentionally a narrow authority boundary. It serializes the
 existing typed :class:`EconomicGoalContract` without turning that contract into
-an executable risk policy.  Automatic writers may only publish an immediate
+an executable risk policy. Automatic writers may only publish an immediate
 non-expanding successor of the already persisted owner contract.
 """
 
@@ -21,6 +21,7 @@ from .economic_goal import (
 )
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
+from .workspace_lock import WorkspaceEconomicLock
 
 
 ECONOMIC_GOAL_SCHEMA: Final = "autosport.economic_goal_contract"
@@ -81,7 +82,9 @@ _RESTRICTION_FIELDS: Final = (
 )
 
 
-def _require_exact_keys(name: str, value: dict[str, object], expected: frozenset[str]) -> None:
+def _require_exact_keys(
+    name: str, value: dict[str, object], expected: frozenset[str]
+) -> None:
     keys = frozenset(value)
     if keys != expected:
         missing = sorted(expected - keys)
@@ -102,6 +105,8 @@ def _decimal_text(name: str, value: object) -> Decimal:
         raise EconomicGoalContractError(f"{name} is not a valid Decimal string") from exc
     if not parsed.is_finite():
         raise EconomicGoalContractError(f"{name} must be finite")
+    if str(parsed) != value:
+        raise EconomicGoalContractError(f"{name} must use canonical Decimal text")
     return parsed
 
 
@@ -246,9 +251,12 @@ def economic_goal_from_json(text: str) -> EconomicGoalContract:
 class EconomicGoalStore:
     """Workspace-local durable owner-contract store.
 
-    ``initialize_owner`` is creation-only.  Automatic actors have only
-    ``persist_automatic_successor`` which reloads the durable predecessor and
-    applies the monotonic authority validator before the atomic publication.
+    ``initialize_owner`` is creation-only. Automatic actors have only
+    ``persist_automatic_successor`` which, under the canonical workspace economic
+    writer lock, reloads the durable predecessor and applies the monotonic authority
+    validator before atomic publication. The lock makes validation and publication
+    one cooperating-writer critical section so stale concurrent revisions cannot
+    overwrite a newly tightened authority state.
     """
 
     FILE_NAME: Final = "economic_goal_contract.json"
@@ -267,18 +275,20 @@ class EconomicGoalStore:
         return economic_goal_from_json(text)
 
     def initialize_owner(self, contract: EconomicGoalContract) -> None:
-        """Persist the first owner contract without exposing an overwrite API."""
+        """Create the first owner contract while holding the economic writer lock."""
 
-        if self.path.exists():
-            raise EconomicGoalContractError(
-                "persisted economic goal already exists; owner replacement requires "
-                "a separate authority boundary"
-            )
-        atomic_write_json(self.path, economic_goal_to_payload(contract))
+        with WorkspaceEconomicLock(self.workspace):
+            if self.path.exists():
+                raise EconomicGoalContractError(
+                    "persisted economic goal already exists; owner replacement requires "
+                    "a separate authority boundary"
+                )
+            atomic_write_json(self.path, economic_goal_to_payload(contract))
 
     def persist_automatic_successor(self, candidate: EconomicGoalContract) -> None:
-        """Atomically persist a machine revision only when authority cannot expand."""
+        """Publish one machine revision only when durable authority cannot expand."""
 
-        previous = self.load()
-        validate_automatic_transition(previous, candidate)
-        atomic_write_json(self.path, economic_goal_to_payload(candidate))
+        with WorkspaceEconomicLock(self.workspace):
+            previous = self.load()
+            validate_automatic_transition(previous, candidate)
+            atomic_write_json(self.path, economic_goal_to_payload(candidate))

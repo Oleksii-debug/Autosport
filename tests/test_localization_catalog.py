@@ -22,6 +22,7 @@ from autosport.ui_model import (
 
 _CRITICAL_UI_KEYS = {
     "ui.app.title",
+    "ui.dialog.title",
     "ui.label.strategy",
     "ui.label.speed",
     "ui.label.live_mode",
@@ -77,16 +78,59 @@ _CRITICAL_UI_KEYS = {
     "ui.accessibility.bankroll.description",
 }
 
+_RUNTIME_RECOVERY_KEYS = {
+    "ui.status.bank.pending",
+    "ui.status.bank.current",
+    "ui.status.windows.economic_unavailable",
+    "ui.status.windows.strategy_recovery_busy",
+    "ui.status.windows.research_plan_recovery_busy",
+    "ui.status.windows.dataset_recovery_busy",
+    "ui.status.windows.live_recovery_busy",
+    "ui.status.windows.live_recovery_blocked",
+    "ui.status.recovery.dataset_busy",
+    "ui.status.recovery.replay_busy",
+    "ui.status.recovery.live_busy",
+    "ui.status.recovery.already_busy",
+    "ui.error.recovery.configuration",
+    "ui.status.recovery.configuration_rejected",
+    "ui.error.recovery.teardown",
+    "ui.status.recovery.teardown_blocked",
+    "ui.status.recovery.start_failed",
+    "ui.status.recovery.running",
+    "ui.log.recovery.started",
+    "ui.error.recovery.worker",
+    "ui.status.recovery.blocked",
+    "ui.status.recovery.no_result",
+    "ui.error.recovery.identity_mismatch",
+    "ui.status.recovery.identity_mismatch",
+    "ui.recovery.summary",
+    "ui.status.recovery.unresolved_suffix",
+    "ui.warning.recovery.unresolved",
+    "ui.status.recovery.ready_suffix",
+    "ui.info.recovery.complete",
+    "ui.status.replay.recovery_busy",
+    "ui.status.replay.recovery_required",
+    "ui.evaluation.replay_failed",
+    "ui.status.replay.failed_recovery",
+    "ui.evaluation.no_terminal_result",
+    "ui.status.replay.no_terminal_result",
+    "ui.evaluation.reopen_failed",
+    "ui.error.replay.reopen",
+    "ui.status.replay.reopen_blocked",
+    "ui.status.close.recovery_busy",
+}
+
 
 def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:
     assert DEFAULT_LOCALE == "uk-UA"
-    assert CATALOG_VERSION == 1
+    assert CATALOG_VERSION == 2
     assert text("ui.ticket.empty") == "Паперові квитки ще відсутні."
     assert text("ui.boolean.true") == "так"
     assert text("ui.boolean.false") == "ні"
 
     require_keys(
         _CRITICAL_UI_KEYS
+        | _RUNTIME_RECOVERY_KEYS
         | {
             "ui.result.summary",
             "ui.evaluation.bankroll",
@@ -111,12 +155,45 @@ def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:
 
 def test_critical_catalog_strings_are_exact_ukrainian_presentation() -> None:
     assert text("ui.app.title") == "Автоспорт — V1 лабораторія паперового моделювання для Windows"
+    assert text("ui.dialog.title") == "Автоспорт"
     assert text("ui.button.run_replay") == "Запустити паперовий повтор"
     assert text("ui.speed.event_driven") == "Подієвий — максимально швидко"
     assert text("ui.live_mode.public_preview") == "Публічний перегляд — без ключа"
     assert text("ui.accessibility.strategy.name") == "Стратегія повтору"
     assert text("ui.accessibility.live_quotes.name") == "Поточні котирування"
     assert text("ui.accessibility.bankroll.name") == "Віртуальний банк"
+
+
+def test_runtime_recovery_catalog_preserves_raw_identity_and_economic_values() -> None:
+    bankroll = text(
+        "ui.status.bank.current",
+        balance=Decimal("10000.25"),
+        committed_stake=Decimal("17.50"),
+        strategy_id="research-replay-v1/raw",
+        workspace=r"C:\raw\workspace-17",
+    )
+    assert "10000.25" in bankroll
+    assert "17.50" in bankroll
+    assert "research-replay-v1/raw" in bankroll
+    assert r"C:\raw\workspace-17" in bankroll
+
+    mismatch = text(
+        "ui.error.recovery.identity_mismatch",
+        expected_workspace=r"C:\expected",
+        expected_strategy_id="baseline-v1",
+        received_workspace="PosixPath('/raw/provider/path')",
+        received_strategy_id="'provider-strategy:raw'",
+    )
+    assert r"C:\expected" in mismatch
+    assert "baseline-v1" in mismatch
+    assert "PosixPath('/raw/provider/path')" in mismatch
+    assert "'provider-strategy:raw'" in mismatch
+
+    recovery_error = text(
+        "ui.error.recovery.worker",
+        detail="RuntimeError: provider_raw_detail=ABC-123",
+    )
+    assert "RuntimeError: provider_raw_detail=ABC-123" in recovery_error
 
 
 def test_result_summary_localizes_labels_but_preserves_raw_economic_values() -> None:

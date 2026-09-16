@@ -7,6 +7,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from autosport.data_tool_package import _write_deterministic
 from autosport.data_tools_entry import main as data_tools_main
 from autosport.nvda_acceptance import create_template, validate_evidence, write_template
 
@@ -78,9 +79,7 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
         members["SHA256SUMS.txt"] = ("\n".join(sums) + "\n").encode("utf-8")
 
         package = root / "Autosport-V1-windows-x64.zip"
-        with zipfile.ZipFile(package, "w") as archive:
-            for relative, payload in sorted(members.items()):
-                archive.writestr(f"Autosport-V1/{relative}", payload)
+        _write_deterministic(package, members)
         return package
 
     @staticmethod

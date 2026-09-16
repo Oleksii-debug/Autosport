@@ -177,6 +177,16 @@ def _canonical_candidate(candidate: ParlayCandidate) -> ParlayCandidate:
     if not candidate.legs:
         raise ValueError("candidate requires at least one leg")
 
+    for leg in candidate.legs:
+        if not leg.decimal_odds.is_finite():
+            raise ValueError("candidate decimal odds must be finite")
+        if leg.decimal_odds <= 1:
+            raise ValueError("candidate decimal odds must be greater than 1")
+        if not leg.probability.is_finite():
+            raise ValueError("candidate leg probability must be finite")
+        if leg.probability < 0 or leg.probability > 1:
+            raise ValueError("candidate leg probability must be between 0 and 1")
+
     canonical_legs = tuple(sorted(candidate.legs, key=_candidate_leg_identity_key))
 
     # Reuse the generator's canonical arithmetic authority instead of rebuilding

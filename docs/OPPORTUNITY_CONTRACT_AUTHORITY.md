@@ -16,7 +16,7 @@
 - `ForecastRecord` owns forecast probability, model/data cutoff, causal provenance, and forecast evidence. `ForecastRef` stores only a reference snapshot and canonical forecast hash.
 - Candidate search/optimizer code owns candidate arithmetic and portfolio-impact calculations. Opportunity contracts do not recompute candidate economics.
 - `PortfolioEngine` and scenario-search authorities own exact/conservative/approximate portfolio-risk truth. `EvidenceRef` is only an opaque reference to that evidence.
-- `EconomicGoalContract` and `PaperRiskPolicy` own owner limits and executable paper-risk allow/deny decisions. A plan cannot widen either authority.
+- `ProposedTicketRiskContext` owns typed proposed-ticket leg/quote/window identity at the executable paper-risk boundary; `EconomicGoalContract` and `PaperRiskPolicy` own owner limits and executable paper-risk allow/deny decisions. A plan cannot widen or replace those authorities.
 - `PaperBook`, decision-ledger, settlement, and recovery code own bankroll, durable ticket/ledger state, lifecycle, settlement, and restart truth. `PortfolioPlan` does not mutate any of them.
 
 An `EvidenceRef` proves only which external authority/evidence item the snapshot says it depended on. The reference itself is not an approval, verification, freshness proof, or execution grant. Any future runtime activation must revalidate the authoritative objects at the activation boundary.
@@ -30,5 +30,11 @@ A positive `PlanAllocation` is permitted only for an `ACTIONABLE` opportunity an
 ## Identity and serialization
 
 All monetary/odds/probability values crossing this seam are exact `Decimal` values serialized as canonical decimal strings. Quote identity remains structured and includes provider/source plus sequence; ambiguous duplicate serialized quote keys are rejected rather than silently collapsed. Serialized IDs are verified on read, so payload tampering fails closed.
+
+## Residual Stage-C work outside this seam
+
+This contract does not implement opportunity generation, portfolio optimization or stake search, live-movement/lead-lag detection, arbitrage or dutching discovery, hedge/rebalance execution, bookmaker/provider integration, persistent live scheduling, or any paper/real-money placement path. Those future slices must reuse this seam plus their existing canonical data/risk/ledger authorities instead of creating competing identities or economic state.
+
+Sport identity also remains outside this seam until the canonical #339 authority exists. Strategy/model promotion remains governed by the research/scientific protocol rather than by the presence of an `Opportunity` or `PortfolioPlan` object.
 
 The seam has no GUI, Windows, bookmaker, scheduler, persistent-live-loop, F03 data mutation, paper placement, or real-money execution behavior. It does not change release truth: `REAL_MONEY_EXECUTION=false`, `HUMAN_TESTED=false`, `NVDA_VERIFIED=false`, and `V1_READY=false` remain governed by their existing release/evidence authorities.

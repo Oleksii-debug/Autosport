@@ -39,14 +39,22 @@ class MarketEventBus:
         self.subscribers.append(callback)
 
     def publish(self, event: MarketEvent) -> bool:
-        accepted = self.store.append_batch_accepted([event])
+        # Snapshot at the bus boundary before persistence. MarketEvent is frozen,
+        # but nested metadata is mutable; callers must not be able to rewrite the
+        # value that later subscriber delivery/failure evidence says was durable.
+        accepted = self.store.append_batch_accepted([deepcopy(event)])
         if not accepted:
             return False
         self._notify(accepted)
         return True
 
     def publish_many(self, events: Iterable[MarketEvent]) -> int:
-        accepted = self.store.append_batch_accepted(events)
+        # Snapshot each item before yielding it to storage. This matters for lazy
+        # iterables: after one item is persisted, advancing the producer may mutate
+        # an earlier input object before append_batch_accepted() returns. Storage,
+        # delivery, and accepted-event evidence must all stay bound to the same
+        # ingress value.
+        accepted = self.store.append_batch_accepted(deepcopy(event) for event in events)
         self._notify(accepted)
         return len(accepted)
 

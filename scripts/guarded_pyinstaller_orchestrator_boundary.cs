@@ -27,6 +27,7 @@ namespace Autosport.Release
         private const uint DANGEROUS_THREAD_ACCESS = 0x000C17B3;
         private const uint SAFE_THREAD_ACCESS = THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
 
+        private const uint TOKEN_ASSIGN_PRIMARY = 0x0001;
         private const uint TOKEN_DUPLICATE = 0x0002;
         private const uint TOKEN_QUERY = 0x0008;
         private const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
@@ -321,7 +322,7 @@ namespace Autosport.Release
             {
                 if (!OpenProcessToken(
                     GetCurrentProcess(),
-                    TOKEN_QUERY | TOKEN_DUPLICATE,
+                    TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
                     out currentToken))
                 {
                     throw new Win32Exception(

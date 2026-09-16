@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, Inexact, localcontext
 
 import pytest
 
@@ -62,11 +62,9 @@ def _evidence(
     net_profit: str,
     roi: str,
     final_balance: str,
-    research_plan_sha256: str | None = None,
+    research_plan_sha256: str,
     price_source_ids: tuple[str, ...] = ("source-1",),
 ) -> StrategyRunEvidence:
-    if research_plan_sha256 is None:
-        research_plan_sha256 = _scientific_binding().binding_sha256
     return StrategyRunEvidence(
         source_path=f"/tmp/{run_id}.json",
         source_sha256=source_sha,
@@ -100,11 +98,27 @@ def _evidence(
     )
 
 
+def _bind_protocol(
+    draft: ChampionChallengerProtocol,
+) -> ChampionChallengerProtocol:
+    plan_sha = draft.promotion_plan_sha256
+    return replace(
+        draft,
+        champion=replace(draft.champion, research_plan_sha256=plan_sha),
+        challengers=tuple(
+            replace(candidate, research_plan_sha256=plan_sha)
+            for candidate in draft.challengers
+        ),
+    )
+
+
 def _protocol(
     *, guardrails: tuple[GuardrailRule, ...] = ()
 ) -> ChampionChallengerProtocol:
     authority = "owner-authority-v1"
     scientific = _scientific_binding()
+    # The narrow scientific SHA is only a bootstrap placeholder. The returned
+    # immutable protocol binds candidates to the wider promotion-plan SHA.
     champion = CandidateRef(
         candidate_id="baseline-v1",
         canonical_strategy_id="baseline-v1",
@@ -135,7 +149,7 @@ def _protocol(
         price_source_ids=("source-1",),
         initial_bankroll=Decimal("1000"),
     )
-    return ChampionChallengerProtocol(
+    draft = ChampionChallengerProtocol(
         experiment_id="exp-20260916-01",
         research_question_id=scientific.research_question_id,
         hypothesis_id=scientific.hypothesis_id,
@@ -147,9 +161,14 @@ def _protocol(
         minimum_total_improvement=Decimal("5"),
         guardrails=guardrails,
     )
+    return _bind_protocol(draft)
 
 
-def _valid_cells() -> tuple[ExperimentRunCell, ExperimentRunCell]:
+def _valid_cells(
+    protocol: ChampionChallengerProtocol | None = None,
+) -> tuple[ExperimentRunCell, ExperimentRunCell]:
+    protocol = protocol or _protocol()
+    plan_sha = protocol.promotion_plan_sha256
     return (
         ExperimentRunCell(
             "case-1",
@@ -162,6 +181,7 @@ def _valid_cells() -> tuple[ExperimentRunCell, ExperimentRunCell]:
                 net_profit="10",
                 roi="0.1",
                 final_balance="1010",
+                research_plan_sha256=plan_sha,
             ),
         ),
         ExperimentRunCell(
@@ -175,6 +195,7 @@ def _valid_cells() -> tuple[ExperimentRunCell, ExperimentRunCell]:
                 net_profit="20",
                 roi="0.2",
                 final_balance="1020",
+                research_plan_sha256=plan_sha,
             ),
         ),
     )
@@ -184,24 +205,18 @@ def test_protocol_hash_is_deterministic_and_binds_frozen_research_identity() -> 
     first = _protocol()
     second = _protocol()
     assert first.protocol_sha256 == second.protocol_sha256
+    assert first.promotion_plan_sha256 == second.promotion_plan_sha256
+    assert first.champion.research_plan_sha256 == first.promotion_plan_sha256
 
     changed_threshold = replace(first, minimum_total_improvement=Decimal("6"))
     assert changed_threshold.protocol_sha256 != first.protocol_sha256
+    assert changed_threshold.promotion_plan_sha256 != first.promotion_plan_sha256
 
     changed_science = _scientific_binding(robustness_checks=("different check",))
-    changed_champion = replace(
-        first.champion, research_plan_sha256=changed_science.binding_sha256
-    )
-    changed_challenger = replace(
-        first.challengers[0], research_plan_sha256=changed_science.binding_sha256
-    )
-    changed_protocol = replace(
-        first,
-        scientific_protocol=changed_science,
-        champion=changed_champion,
-        challengers=(changed_challenger,),
-    )
+    changed_draft = replace(first, scientific_protocol=changed_science)
+    changed_protocol = _bind_protocol(changed_draft)
     assert changed_protocol.protocol_sha256 != first.protocol_sha256
+    assert changed_protocol.promotion_plan_sha256 != first.promotion_plan_sha256
 
 
 def test_candidate_runtime_identity_is_evidence_bound_not_free_form() -> None:
@@ -228,22 +243,29 @@ def test_strict_protocol_json_round_trip_and_fail_closed_parsing() -> None:
         )
     with pytest.raises(ValueError, match="non-standard JSON constant"):
         load_champion_challenger_protocol_json(
-            raw.replace('"minimum_total_improvement":"5"', '"minimum_total_improvement":NaN')
+            raw.replace(
+                '"minimum_total_improvement":"5"',
+                '"minimum_total_improvement":NaN',
+            )
         )
     payload = protocol.canonical_dict()
     payload["champion"]["runtime_ref"] = "unbound:runtime"
     with pytest.raises(ValueError, match="unexpected=.*runtime_ref"):
+        load_champion_challenger_protocol_json(json.dumps(payload))
+    payload = protocol.canonical_dict()
+    payload["promotion_plan_sha256"] = SHA_A
+    with pytest.raises(ValueError, match="does not match frozen promotion protocol"):
         load_champion_challenger_protocol_json(json.dumps(payload))
     deeply_nested = '{"x":' + ("[" * 40) + "0" + ("]" * 40) + "}"
     with pytest.raises(ValueError, match="maximum depth"):
         load_champion_challenger_protocol_json(deeply_nested)
 
 
-def test_scientific_preregistration_is_required_and_bound_to_run_evidence() -> None:
+def test_promotion_preregistration_is_required_and_bound_to_run_evidence() -> None:
     scientific = _scientific_binding()
     champion = CandidateRef("champion", "champion", "same", SHA_A)
     challenger = CandidateRef("challenger", "challenger", "same", SHA_A)
-    with pytest.raises(ValueError, match="not bound to the frozen scientific protocol"):
+    with pytest.raises(ValueError, match="lacks promotion preregistration"):
         ChampionChallengerProtocol(
             experiment_id="exp",
             research_question_id=scientific.research_question_id,
@@ -256,14 +278,48 @@ def test_scientific_preregistration_is_required_and_bound_to_run_evidence() -> N
         )
 
     protocol = _protocol()
-    champion_cell, challenger_cell = _valid_cells()
+    champion_cell, challenger_cell = _valid_cells(protocol)
     mismatched = ExperimentRunCell(
         challenger_cell.case_id,
         challenger_cell.candidate_id,
         replace(challenger_cell.evidence, research_plan_sha256=SHA_A),
     )
-    with pytest.raises(ValueError, match="scientific preregistration identity mismatch"):
+    with pytest.raises(ValueError, match="promotion preregistration identity mismatch"):
         evaluate_champion_challenger(protocol, (champion_cell, mismatched))
+
+
+def test_post_hoc_promotion_critical_mutations_cannot_reuse_existing_evidence() -> None:
+    protocol = _protocol()
+    cells = _valid_cells(protocol)
+    mutations = (
+        replace(protocol, minimum_total_improvement=Decimal("6")),
+        replace(protocol, primary_metric="roi"),
+        replace(protocol, primary_higher_is_better=False),
+        replace(
+            protocol,
+            guardrails=(GuardrailRule("roi", max_regression=Decimal("0.01")),),
+        ),
+        replace(
+            protocol,
+            cases=(replace(protocol.cases[0], price_source_ids=("source-2",)),),
+        ),
+        replace(
+            protocol,
+            challengers=(
+                replace(
+                    protocol.challengers[0],
+                    canonical_strategy_id="candidate-v2-posthoc",
+                ),
+            ),
+        ),
+    )
+    for mutated in mutations:
+        assert mutated.promotion_plan_sha256 != protocol.promotion_plan_sha256
+        with pytest.raises(
+            ValueError,
+            match="candidate run identity is not bound to the frozen promotion protocol",
+        ):
+            evaluate_champion_challenger(mutated, cells)
 
 
 def test_missing_or_mutated_scientific_protocol_fields_fail_closed() -> None:
@@ -281,8 +337,12 @@ def test_missing_or_mutated_scientific_protocol_fields_fail_closed() -> None:
 
 def test_permission_fingerprint_cannot_widen() -> None:
     scientific = _scientific_binding()
-    champion = CandidateRef("champion", "baseline-v1", "same", SHA_A, scientific.binding_sha256)
-    challenger = CandidateRef("challenger", "candidate-v2", "wider", SHA_A, scientific.binding_sha256)
+    champion = CandidateRef(
+        "champion", "baseline-v1", "same", SHA_A, scientific.binding_sha256
+    )
+    challenger = CandidateRef(
+        "challenger", "candidate-v2", "wider", SHA_A, scientific.binding_sha256
+    )
     with pytest.raises(PermissionError, match="may not widen or alter authority"):
         ChampionChallengerProtocol(
             experiment_id="exp",
@@ -300,7 +360,7 @@ def test_complete_matrix_can_retain_champion_when_guardrail_fails() -> None:
     protocol = _protocol(
         guardrails=(GuardrailRule("final_balance", max_regression=Decimal("0")),)
     )
-    champion, challenger = _valid_cells()
+    champion, challenger = _valid_cells(protocol)
     challenger = ExperimentRunCell(
         challenger.case_id,
         challenger.candidate_id,
@@ -311,13 +371,14 @@ def test_complete_matrix_can_retain_champion_when_guardrail_fails() -> None:
     assert report.selected_candidate_id == "baseline-v1"
     assert report.eligible_challenger_ids == ()
     assert report.scientific_protocol_sha256 == protocol.scientific_protocol.binding_sha256
+    assert report.promotion_plan_sha256 == protocol.promotion_plan_sha256
     assert report.to_dict()["truth"]["active_strategy_mutation"] is False
     assert report.to_dict()["truth"]["real_money_execution"] is False
 
 
 def test_complete_matrix_selects_at_most_one_challenger() -> None:
     protocol = _protocol()
-    report = evaluate_champion_challenger(protocol, _valid_cells())
+    report = evaluate_champion_challenger(protocol, _valid_cells(protocol))
     assert report.decision is ExperimentDecision.CHALLENGER_ELIGIBLE
     assert report.selected_candidate_id == "candidate-v2"
     assert report.eligible_challenger_ids == ("candidate-v2",)
@@ -326,7 +387,7 @@ def test_complete_matrix_selects_at_most_one_challenger() -> None:
 
 def test_declared_price_identity_including_sources_must_match_evidence() -> None:
     protocol = _protocol()
-    champion, challenger = _valid_cells()
+    champion, challenger = _valid_cells(protocol)
     mismatched = ExperimentRunCell(
         challenger.case_id,
         challenger.candidate_id,
@@ -338,7 +399,7 @@ def test_declared_price_identity_including_sources_must_match_evidence() -> None
 
 def test_matrix_rejects_duplicate_or_missing_evidence() -> None:
     protocol = _protocol()
-    champion, challenger = _valid_cells()
+    champion, challenger = _valid_cells(protocol)
     with pytest.raises(ValueError, match="incomplete or unexpected"):
         evaluate_champion_challenger(protocol, (champion,))
     with pytest.raises(ValueError, match="duplicate candidate/case cells"):
@@ -347,7 +408,7 @@ def test_matrix_rejects_duplicate_or_missing_evidence() -> None:
 
 def test_reused_summary_evidence_is_rejected() -> None:
     protocol = _protocol()
-    champion, challenger = _valid_cells()
+    champion, challenger = _valid_cells(protocol)
     challenger = ExperimentRunCell(
         challenger.case_id,
         challenger.candidate_id,
@@ -359,10 +420,12 @@ def test_reused_summary_evidence_is_rejected() -> None:
 
 def test_case_and_candidate_mismatch_fail_closed() -> None:
     protocol = _protocol()
-    champion, challenger = _valid_cells()
+    champion, challenger = _valid_cells(protocol)
     with pytest.raises(ValueError, match="candidate mismatch"):
         ExperimentRunCell(
-            "case-1", "candidate-v2", replace(challenger.evidence, strategy_id="baseline-v1")
+            "case-1",
+            "candidate-v2",
+            replace(challenger.evidence, strategy_id="baseline-v1"),
         )
     wrong_case = ExperimentRunCell(
         challenger.case_id,
@@ -381,7 +444,7 @@ def test_non_finite_and_noncanonical_numeric_values_fail_closed() -> None:
     payload["minimum_total_improvement"] = 5
     with pytest.raises(ValueError, match="canonical decimal string"):
         load_champion_challenger_protocol_json(json.dumps(payload))
-    champion, challenger = _valid_cells()
+    champion, challenger = _valid_cells(protocol)
     non_finite = ExperimentRunCell(
         challenger.case_id,
         challenger.candidate_id,
@@ -391,18 +454,28 @@ def test_non_finite_and_noncanonical_numeric_values_fail_closed() -> None:
         evaluate_champion_challenger(protocol, (champion, non_finite))
 
 
-def test_equal_improvement_tie_breaks_by_candidate_id() -> None:
+def _two_challenger_protocol() -> ChampionChallengerProtocol:
     base = _protocol()
     candidate_v3 = CandidateRef(
         "candidate-v3",
         "candidate-v3",
         base.champion.authority_fingerprint,
         SHA_A,
-        base.scientific_protocol.binding_sha256,
+        base.promotion_plan_sha256,
     )
-    protocol = replace(base, challengers=(candidate_v3, base.challengers[0]))
-    champion, candidate_v2 = _valid_cells()
-    candidate_v3_cell = ExperimentRunCell(
+    return _bind_protocol(
+        replace(base, challengers=(candidate_v3, base.challengers[0]))
+    )
+
+
+def _candidate_v3_cell(
+    protocol: ChampionChallengerProtocol,
+    *,
+    net_profit: str = "20",
+    roi: str = "0.2",
+    final_balance: str = "1020",
+) -> ExperimentRunCell:
+    return ExperimentRunCell(
         "case-1",
         "candidate-v3",
         _evidence(
@@ -410,16 +483,49 @@ def test_equal_improvement_tie_breaks_by_candidate_id() -> None:
             strategy_id="candidate-v3",
             canonical_strategy_id="candidate-v3",
             source_sha=SHA_C,
-            net_profit="20",
-            roi="0.2",
-            final_balance="1020",
+            net_profit=net_profit,
+            roi=roi,
+            final_balance=final_balance,
+            research_plan_sha256=protocol.promotion_plan_sha256,
         ),
     )
+
+
+def test_equal_improvement_tie_breaks_by_candidate_id() -> None:
+    protocol = _two_challenger_protocol()
+    champion, candidate_v2 = _valid_cells(protocol)
+    candidate_v3_cell = _candidate_v3_cell(protocol)
     report = evaluate_champion_challenger(
         protocol, (candidate_v3_cell, champion, candidate_v2)
     )
     assert report.selected_candidate_id == "candidate-v2"
     assert report.eligible_challenger_ids == ("candidate-v2", "candidate-v3")
+
+
+def test_eligible_sort_is_independent_of_decimal_context() -> None:
+    protocol = _two_challenger_protocol()
+    champion, candidate_v2 = _valid_cells(protocol)
+    candidate_v2 = ExperimentRunCell(
+        candidate_v2.case_id,
+        candidate_v2.candidate_id,
+        replace(
+            candidate_v2.evidence,
+            net_profit=Decimal("12355.67890123456789"),
+        ),
+    )
+    candidate_v3 = _candidate_v3_cell(
+        protocol,
+        net_profit="12354.67890123456789",
+        roi="0.2",
+        final_balance="1020",
+    )
+    with localcontext() as context:
+        context.prec = 2
+        context.traps[Inexact] = True
+        report = evaluate_champion_challenger(
+            protocol, (candidate_v3, champion, candidate_v2)
+        )
+    assert report.selected_candidate_id == "candidate-v2"
 
 
 @pytest.mark.parametrize(
@@ -430,7 +536,7 @@ def test_null_or_negative_improvement_remains_explicit_retention_evidence(
     net_profit: str, roi: str, final_balance: str
 ) -> None:
     protocol = _protocol()
-    champion, challenger = _valid_cells()
+    champion, challenger = _valid_cells(protocol)
     challenger = ExperimentRunCell(
         challenger.case_id,
         challenger.candidate_id,
@@ -450,7 +556,9 @@ def test_null_or_negative_improvement_remains_explicit_retention_evidence(
 
 def test_decision_report_is_deterministic_across_input_order() -> None:
     protocol = _protocol()
-    cells = _valid_cells()
-    assert evaluate_champion_challenger(protocol, cells).to_dict() == evaluate_champion_challenger(
+    cells = _valid_cells(protocol)
+    assert evaluate_champion_challenger(
+        protocol, cells
+    ).to_dict() == evaluate_champion_challenger(
         protocol, tuple(reversed(cells))
     ).to_dict()

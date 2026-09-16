@@ -312,6 +312,24 @@ class CalculationServiceTests(unittest.TestCase):
                         causal_cutoff_ts="2026-09-14T12:00:00+00:00",
                     )
 
+    def test_runtime_quote_timestamps_reject_str_subclasses_before_virtual_methods(self) -> None:
+        class TrapStr(str):
+            def strip(self, *args: object, **kwargs: object) -> str:
+                raise AssertionError("timestamp subclass virtual method must never be invoked")
+
+        for field in ("observed_ts", "ingest_ts", "source_ts"):
+            with self.subTest(field=field):
+                invalid = self._event()
+                value = getattr(invalid, field)
+                self.assertIsNotNone(value)
+                object.__setattr__(invalid, field, TrapStr(value))
+
+                with self.assertRaisesRegex(ValueError, "quote fields are not canonical"):
+                    self.service.implied_probability_for_event(
+                        invalid,
+                        causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+                    )
+
     def test_non_utf8_quote_identity_fails_closed_before_calculation(self) -> None:
         for field in ("event_id", "market_id", "selection_id", "source_id"):
             with self.subTest(field=field):

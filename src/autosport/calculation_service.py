@@ -215,6 +215,12 @@ def _snapshot_quote_at_cutoff(
         raise ValueError("market event market_type must be a MarketType")
     if type(event.decimal_odds) is not Decimal:
         raise ValueError("market event quote fields are not canonical")
+    if (
+        type(event.observed_ts) is not str
+        or type(event.ingest_ts) is not str
+        or (event.source_ts is not None and type(event.source_ts) is not str)
+    ):
+        raise ValueError("market event quote fields are not canonical")
 
     # Preserve the service boundary's runtime diagnostics before adapting this
     # already-materialized event to the stricter serialized ingress contract.

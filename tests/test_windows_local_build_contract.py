@@ -139,16 +139,20 @@ def test_local_windows_build_binds_pyinstaller_outputs_before_consumption() -> N
     script = _build_script_text()
 
     first_build_index, second_build_index = _guarded_pyinstaller_indices(script)
+    first_arguments = "$autosportPyInstallerArguments = [string[]]@(" 
     first_bind = "'--bound-output', $boundAutosportExe,"
     first_digest = "'--digest-output', $autosportDigestPath,"
+    second_arguments = "$dataPyInstallerArguments = [string[]]@(" 
     second_bind = "'--bound-output', $boundDataExe,"
     second_digest = "'--digest-output', $dataDigestPath,"
     verify_gui = "python $sourceVerifier --verify-artifact $boundAutosportExe --expected-sha256 $autosportExeSha256"
     verify_data = "python $sourceVerifier --verify-artifact $boundDataExe --expected-sha256 $dataExeSha256"
     package_command = "python scripts/package_windows.py `"
 
-    assert first_build_index < script.index(first_bind, first_build_index) < script.index(first_digest, first_build_index)
-    assert second_build_index < script.index(second_bind, second_build_index) < script.index(second_digest, second_build_index)
+    first_arguments_index = script.index(first_arguments)
+    second_arguments_index = script.index(second_arguments, first_build_index)
+    assert first_arguments_index < script.index(first_bind, first_arguments_index) < script.index(first_digest, first_arguments_index) < first_build_index
+    assert second_arguments_index < script.index(second_bind, second_arguments_index) < script.index(second_digest, second_arguments_index) < second_build_index
     assert script.count("[Autosport.Release.BirthProtectedPyInstaller]::Run(") == 2
     assert "& $packagingPython -I $trustedPyInstallerBinder `" not in script
     assert script.count("'--verifier-sha256', $sourceVerifierSha256,") == 2

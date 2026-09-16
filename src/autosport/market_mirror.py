@@ -43,6 +43,21 @@ class MarketMirror:
         return (event.source_id, event.quote_key)
 
     @staticmethod
+    def _same_sequence_payload(left: MarketEvent, right: MarketEvent) -> bool:
+        """Compare provider payload truth while ignoring local ingestion time.
+
+        ingest_ts records when this process ingested an observation, so a retry or
+        replay of the same provider sequence may legitimately receive a different
+        ingestion timestamp. Every provider/economic/provenance field remains part of
+        the conflict check.
+        """
+        left_payload = left.to_dict()
+        right_payload = right.to_dict()
+        left_payload.pop("ingest_ts", None)
+        right_payload.pop("ingest_ts", None)
+        return left_payload == right_payload
+
+    @staticmethod
     def _utc_timestamp(value: str) -> datetime | None:
         """Parse one provider/observation timestamp, failing closed on bad input."""
         try:
@@ -83,7 +98,7 @@ class MarketMirror:
             )
 
         if event.sequence == previous.sequence:
-            if event == previous:
+            if self._same_sequence_payload(event, previous):
                 return MirrorApplyResult(
                     MirrorUpdate.DUPLICATE,
                     event.quote_key,

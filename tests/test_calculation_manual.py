@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 
 import pytest
 
+import autosport.calculation_manual as calculation_manual
 from autosport.calculation import CalculationEngine
-from autosport.calculation_input import CalculationInputBoundary, CalculationInputLimits
+from autosport.calculation_input import (
+    CalculationInputBoundary,
+    CalculationInputLimits,
+    MANUAL_CALCULATION_INPUT,
+)
 from autosport.calculation_manual import ManualCalculationEvidence, ManualCalculationService
 
 
@@ -182,7 +188,6 @@ def test_default_numeric_arguments_also_cross_manual_input_boundary() -> None:
     boundary = CalculationInputBoundary(CalculationInputLimits(numeric_text_chars=1))
     service = ManualCalculationService(input_boundary=boundary)
 
-    # Defaults are canonical raw text, not hidden Decimal objects that bypass #330.
     _assert_same_result(
         service.expected_return("0", "2"),
         CalculationEngine().expected_return("0", "2", "1"),
@@ -278,3 +283,46 @@ def test_manual_service_rejects_subclassed_authority_collaborators() -> None:
         ManualCalculationService(engine=_EngineSubclass())
     with pytest.raises(ValueError, match="exact CalculationInputBoundary"):
         ManualCalculationService(input_boundary=_BoundarySubclass())
+
+
+def test_manual_evidence_rejects_forged_inner_result_even_with_matching_outer_hash() -> None:
+    valid = ManualCalculationService().expected_return("0.6", "2", "10")
+    first_key, _ = valid.result.outputs[0]
+    forged_outputs = ((first_key, "999"),) + valid.result.outputs[1:]
+    forged_result = replace(valid.result, outputs=forged_outputs)
+    matching_outer_hash = calculation_manual._sha256(
+        calculation_manual._evidence_payload(forged_result)
+    )
+
+    with pytest.raises(ValueError, match="result_hash"):
+        ManualCalculationEvidence(
+            service_version=valid.service_version,
+            input_mode=valid.input_mode,
+            result=forged_result,
+            real_money_execution=False,
+            evidence_sha256=matching_outer_hash,
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "numeric_text_chars",
+        "identifier_chars",
+        "identifier_utf8_bytes",
+        "collection_items",
+    ],
+)
+def test_manual_service_rejects_input_boundary_looser_than_canonical(field: str) -> None:
+    canonical = MANUAL_CALCULATION_INPUT.limits
+    values = {
+        "numeric_text_chars": canonical.numeric_text_chars,
+        "identifier_chars": canonical.identifier_chars,
+        "identifier_utf8_bytes": canonical.identifier_utf8_bytes,
+        "collection_items": canonical.collection_items,
+    }
+    values[field] += 1
+    boundary = CalculationInputBoundary(CalculationInputLimits(**values))
+
+    with pytest.raises(ValueError, match="must not be looser"):
+        ManualCalculationService(input_boundary=boundary)

@@ -9,9 +9,17 @@ from .calculation_input import CalculationInputBoundary, MANUAL_CALCULATION_INPU
 
 
 _SERVICE_VERSION = "manual-calculation-service-v1"
+_CALCULATION_VERSION = 1
+_ENGINE_VERSION = "calculation-engine-v1"
 _MAX_MARKET_SELECTIONS = 1_000
 _MAX_PARLAY_LEGS = 100
 _MAX_SERIES_ITEMS = 10_000
+_LIMIT_FIELDS = (
+    "numeric_text_chars",
+    "identifier_chars",
+    "identifier_utf8_bytes",
+    "collection_items",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,8 +39,7 @@ class ManualCalculationEvidence:
             raise ValueError("input_mode must be exactly 'manual'")
         if self.real_money_execution is not False:
             raise ValueError("real_money_execution must be exactly false")
-        if type(self.result) is not CalculationResult:
-            raise ValueError("result must be a CalculationResult")
+        _validate_calculation_result(self.result)
         expected = _sha256(_evidence_payload(self.result))
         if self.evidence_sha256 != expected:
             raise ValueError("evidence_sha256 does not match manual calculation evidence")
@@ -86,6 +93,8 @@ class ManualCalculationService:
             and type(input_boundary) is not CalculationInputBoundary
         ):
             raise ValueError("input_boundary must be an exact CalculationInputBoundary")
+        if input_boundary is not None:
+            _validate_input_boundary_limits(input_boundary)
         self._engine = engine if engine is not None else CalculationEngine()
         self._input = (
             input_boundary if input_boundary is not None else MANUAL_CALCULATION_INPUT
@@ -324,8 +333,7 @@ class ManualCalculationService:
 
     @staticmethod
     def _bind(result: CalculationResult) -> ManualCalculationEvidence:
-        if type(result) is not CalculationResult:
-            raise ValueError("calculation engine must return CalculationResult")
+        _validate_calculation_result(result)
         payload = _evidence_payload(result)
         digest = _sha256(payload)
         return ManualCalculationEvidence(
@@ -335,6 +343,130 @@ class ManualCalculationService:
             real_money_execution=False,
             evidence_sha256=digest,
         )
+
+
+def _validate_input_boundary_limits(boundary: CalculationInputBoundary) -> None:
+    canonical = MANUAL_CALCULATION_INPUT.limits
+    for field in _LIMIT_FIELDS:
+        supplied = getattr(boundary.limits, field)
+        maximum = getattr(canonical, field)
+        if supplied > maximum:
+            raise ValueError(
+                f"input_boundary {field} must not be looser than the canonical manual-input limit"
+            )
+
+
+def _validate_calculation_result(result: object) -> None:
+    if type(result) is not CalculationResult:
+        raise ValueError("result must be a CalculationResult")
+    if result.version != _CALCULATION_VERSION:
+        raise ValueError("calculation result version is not canonical")
+    if result.engine_version != _ENGINE_VERSION:
+        raise ValueError("calculation result engine_version is not canonical")
+    if result.classification not in {"exact", "approximate_decimal"}:
+        raise ValueError("calculation result classification is not canonical")
+
+    inputs = _validate_pairs(result.inputs, field="inputs")
+    input_units = _validate_pairs(result.input_units, field="input_units")
+    outputs = _validate_pairs(result.outputs, field="outputs")
+    output_units = _validate_pairs(result.output_units, field="output_units")
+    assumptions = _validate_text_tuple(result.assumptions, field="assumptions")
+    warnings = _validate_text_tuple(result.warnings, field="warnings")
+
+    if set(dict(inputs)) != set(dict(input_units)):
+        raise ValueError("calculation result input units do not match inputs")
+    if set(dict(outputs)) != set(dict(output_units)):
+        raise ValueError("calculation result output units do not match outputs")
+
+    input_payload = {
+        "calculation_id": _required_text(result.calculation_id, field="calculation_id"),
+        "version": _CALCULATION_VERSION,
+        "engine_version": _ENGINE_VERSION,
+        "method": _required_text(result.method, field="method"),
+        "inputs": dict(inputs),
+        "input_units": dict(input_units),
+        "assumptions": list(assumptions),
+    }
+    expected_input_hash = _canonical_hash(input_payload)
+    if result.input_hash != expected_input_hash:
+        raise ValueError("calculation result input_hash does not match canonical payload")
+
+    result_payload = {
+        **input_payload,
+        "classification": result.classification,
+        "outputs": dict(outputs),
+        "output_units": dict(output_units),
+        "warnings": list(warnings),
+        "input_hash": expected_input_hash,
+    }
+    expected_result_hash = _canonical_hash(result_payload)
+    if result.result_hash != expected_result_hash:
+        raise ValueError("calculation result result_hash does not match canonical payload")
+
+
+def _validate_pairs(value: object, *, field: str) -> tuple[tuple[str, str], ...]:
+    if type(value) is not tuple:
+        raise ValueError(f"calculation result {field} must be a tuple")
+    validated: list[tuple[str, str]] = []
+    for item in value:
+        if type(item) is not tuple or len(item) != 2:
+            raise ValueError(f"calculation result {field} entries must be pairs")
+        key, text = item
+        key = _required_text(key, field=f"{field} key")
+        if type(text) is not str:
+            raise ValueError(f"calculation result {field} values must be strings")
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                f"calculation result {field} values must be UTF-8 encodable"
+            ) from exc
+        validated.append((key, text))
+    result = tuple(validated)
+    if len({key for key, _ in result}) != len(result):
+        raise ValueError(f"calculation result {field} keys must be unique")
+    if result != tuple(sorted(result)):
+        raise ValueError(f"calculation result {field} must be canonically ordered")
+    return result
+
+
+def _validate_text_tuple(value: object, *, field: str) -> tuple[str, ...]:
+    if type(value) is not tuple:
+        raise ValueError(f"calculation result {field} must be a tuple")
+    for item in value:
+        if type(item) is not str:
+            raise ValueError(f"calculation result {field} entries must be strings")
+        try:
+            item.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                f"calculation result {field} entries must be UTF-8 encodable"
+            ) from exc
+    return value
+
+
+def _required_text(value: object, *, field: str) -> str:
+    if type(value) is not str or not value:
+        raise ValueError(f"calculation result {field} must be a non-empty string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"calculation result {field} must be UTF-8 encodable") from exc
+    return value
+
+
+def _canonical_hash(payload: object) -> str:
+    try:
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise ValueError("calculation result is not canonical UTF-8 JSON") from exc
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _evidence_payload(result: CalculationResult) -> dict[str, object]:

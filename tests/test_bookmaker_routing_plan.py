@@ -9,7 +9,10 @@ from autosport.bookmaker_routing import (
     VenueObservation,
     VenueQuote,
 )
-from autosport.bookmaker_routing_plan import plan_equal_split_residual
+from autosport.bookmaker_routing_plan import (
+    ParallelRoutingProposal,
+    plan_equal_split_residual,
+)
 from autosport.opportunity import QuoteRef
 
 
@@ -246,3 +249,34 @@ def test_parent_plan_id_is_foreign_authority_reference_not_content_fingerprint()
 
     assert smaller.parent_plan_id == larger.parent_plan_id == _PLAN_ID
     assert [leg.leg_id for leg in smaller.legs] != [leg.leg_id for leg in larger.legs]
+
+
+@pytest.mark.parametrize(
+    ("state", "residual", "proposed", "expect_legs"),
+    [
+        (RoutingState.ROUTE, "10.00", "0", False),
+        (RoutingState.PARTIAL, "10.00", "10.00", True),
+        (RoutingState.UNEXECUTABLE, "10.00", "1.00", True),
+    ],
+)
+def test_direct_proposal_construction_rejects_contradictory_state_authority(
+    state: RoutingState,
+    residual: str,
+    proposed: str,
+    expect_legs: bool,
+) -> None:
+    venue = _venue("book-a", "acct-a")
+    valid = _plan("10.00", (venue,))
+    legs = valid.legs if expect_legs else ()
+
+    with pytest.raises(RoutingContractError):
+        ParallelRoutingProposal(
+            state=state,
+            parent_plan_id=_PLAN_ID,
+            routing_request_id=_REQUEST_ID,
+            residual_before=Decimal(residual),
+            confirmed_total=Decimal("0"),
+            proposed_total=Decimal(proposed),
+            stake_quantum=Decimal("0.01"),
+            legs=legs,
+        )

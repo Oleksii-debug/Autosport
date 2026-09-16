@@ -31,7 +31,7 @@ class MarketMirror:
     boundary.
     """
 
-    _INACTIVE_STATUSES = frozenset({"suspended", "closed", "unavailable"})
+    _DECISION_ELIGIBLE_STATUSES = frozenset({"open"})
 
     def __init__(self) -> None:
         self._latest: dict[tuple[str, str], MarketEvent] = {}
@@ -146,10 +146,11 @@ class MarketMirror:
     ) -> tuple[MarketEvent, ...]:
         """Return deterministic, active and fresh entries eligible for decisions.
 
-        ``source_ts`` is the preferred freshness clock because it represents provider
-        time. ``observed_ts`` is used only when source time is unavailable. Future,
-        over-age or malformed timestamps fail closed and remain visible only through
-        the full audit snapshot.
+        Only explicitly recognized decision-eligible statuses are returned. Unknown,
+        inactive, future, over-age or malformed observations fail closed and remain
+        visible only through the full audit snapshot. ``source_ts`` is the preferred
+        freshness clock because it represents provider time; ``observed_ts`` is used
+        only when source time is unavailable.
         """
         if not isinstance(as_of, datetime):
             raise TypeError("as_of must be a datetime")
@@ -163,7 +164,7 @@ class MarketMirror:
         boundary = as_of.astimezone(timezone.utc)
         eligible: list[MarketEvent] = []
         for event in self.snapshot():
-            if event.status in self._INACTIVE_STATUSES:
+            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
                 continue
             timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
             if timestamp is None:

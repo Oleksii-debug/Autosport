@@ -16,6 +16,7 @@ class ExperimentDecision(StrEnum):
 
 
 _SUPPORTED_METRICS = {"net_profit", "roi", "final_balance"}
+_MAX_PROTOCOL_JSON_DEPTH = 32
 
 
 def _require_text(value: Any, field: str) -> str:
@@ -45,6 +46,55 @@ def _require_decimal(value: Any, field: str, *, minimum: Decimal | None = None) 
     return decimal
 
 
+def _require_decimal_instance(
+    value: Any, field: str, *, minimum: Decimal | None = None
+) -> Decimal:
+    if not isinstance(value, Decimal):
+        raise ValueError(f"{field} must be an exact Decimal")
+    return _require_decimal(value, field, minimum=minimum)
+
+
+def _require_bool(value: Any, field: str) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"{field} must be a boolean")
+    return value
+
+
+def _require_price_source_ids(value: Any, field: str = "price_source_ids") -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise ValueError(f"{field} must be a tuple of source identities")
+    normalized: list[str] = []
+    for index, item in enumerate(value):
+        normalized.append(_require_text(item, f"{field}[{index}]"))
+    if len(normalized) != len(set(normalized)):
+        raise ValueError(f"{field} must not contain duplicates")
+    return tuple(normalized)
+
+
+def _runtime_identity_sha256(
+    canonical_strategy_id: str,
+    agent_composition_sha256: str,
+    research_plan_sha256: str | None,
+) -> str:
+    payload = {
+        "canonical_strategy_id": _require_text(
+            canonical_strategy_id, "canonical_strategy_id"
+        ),
+        "agent_composition_sha256": _require_sha256(
+            agent_composition_sha256, "agent_composition_sha256"
+        ),
+        "research_plan_sha256": (
+            _require_sha256(research_plan_sha256, "research_plan_sha256")
+            if research_plan_sha256 is not None
+            else None
+        ),
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class EvaluationCase:
     case_id: str
@@ -56,6 +106,10 @@ class EvaluationCase:
     historical_import_identity: str | None
     replay_dataset_hash: str
     event_count: int
+    price_semantics: str
+    executable_quote_verified: bool
+    paper_fill_fidelity_verified: bool
+    price_source_ids: tuple[str, ...]
     initial_bankroll: Decimal
 
     def __post_init__(self) -> None:
@@ -71,19 +125,31 @@ class EvaluationCase:
         _require_sha256(self.replay_dataset_hash, "replay_dataset_hash")
         if type(self.event_count) is not int or self.event_count < 1:
             raise ValueError("event_count must be an integer >= 1")
-        _require_decimal(self.initial_bankroll, "initial_bankroll")
+        _require_text(self.price_semantics, "price_semantics")
+        _require_bool(self.executable_quote_verified, "executable_quote_verified")
+        _require_bool(self.paper_fill_fidelity_verified, "paper_fill_fidelity_verified")
+        _require_price_source_ids(self.price_source_ids)
+        _require_decimal_instance(self.initial_bankroll, "initial_bankroll")
 
     @property
     def identity(self) -> tuple[Any, ...]:
+        """Exact predeclared counterpart of StrategyRunEvidence.comparison_identity."""
+
         return (
             self.dataset_name,
             self.sport,
             self.dataset_schema_version,
             self.market_sha256.lower(),
             self.sealed_results_sha256.lower(),
-            self.historical_import_identity.lower() if self.historical_import_identity else None,
+            self.historical_import_identity.lower()
+            if self.historical_import_identity
+            else None,
             self.replay_dataset_hash.lower(),
             self.event_count,
+            self.price_semantics,
+            self.executable_quote_verified,
+            self.paper_fill_fidelity_verified,
+            self.price_source_ids,
             self.initial_bankroll,
         )
 
@@ -100,6 +166,10 @@ class EvaluationCase:
             else None,
             "replay_dataset_hash": self.replay_dataset_hash.lower(),
             "event_count": self.event_count,
+            "price_semantics": self.price_semantics,
+            "executable_quote_verified": self.executable_quote_verified,
+            "paper_fill_fidelity_verified": self.paper_fill_fidelity_verified,
+            "price_source_ids": list(self.price_source_ids),
             "initial_bankroll": str(self.initial_bankroll),
         }
 
@@ -108,23 +178,32 @@ class EvaluationCase:
 class CandidateRef:
     candidate_id: str
     canonical_strategy_id: str
-    runtime_ref: str
     authority_fingerprint: str
     agent_composition_sha256: str
     research_plan_sha256: str | None = None
 
     def __post_init__(self) -> None:
-        for field in ("candidate_id", "canonical_strategy_id", "runtime_ref", "authority_fingerprint"):
+        for field in ("candidate_id", "canonical_strategy_id", "authority_fingerprint"):
             _require_text(getattr(self, field), field)
         _require_sha256(self.agent_composition_sha256, "agent_composition_sha256")
         if self.research_plan_sha256 is not None:
             _require_sha256(self.research_plan_sha256, "research_plan_sha256")
 
+    @property
+    def runtime_identity_sha256(self) -> str:
+        """Evidence-bound runtime identity, derived only from canonical run fields."""
+
+        return _runtime_identity_sha256(
+            self.canonical_strategy_id,
+            self.agent_composition_sha256,
+            self.research_plan_sha256,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "candidate_id": self.candidate_id,
             "canonical_strategy_id": self.canonical_strategy_id,
-            "runtime_ref": self.runtime_ref,
+            "runtime_identity_sha256": self.runtime_identity_sha256,
             "authority_fingerprint": self.authority_fingerprint,
             "agent_composition_sha256": self.agent_composition_sha256.lower(),
             "research_plan_sha256": self.research_plan_sha256.lower()
@@ -142,7 +221,10 @@ class GuardrailRule:
     def __post_init__(self) -> None:
         if self.metric not in _SUPPORTED_METRICS:
             raise ValueError(f"unsupported guardrail metric: {self.metric}")
-        _require_decimal(self.max_regression, "max_regression", minimum=Decimal("0"))
+        _require_bool(self.higher_is_better, "higher_is_better")
+        _require_decimal_instance(
+            self.max_regression, "max_regression", minimum=Decimal("0")
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -155,6 +237,8 @@ class GuardrailRule:
 @dataclass(frozen=True, slots=True)
 class ChampionChallengerProtocol:
     experiment_id: str
+    research_question_id: str
+    hypothesis_id: str
     champion: CandidateRef
     challengers: tuple[CandidateRef, ...]
     cases: tuple[EvaluationCase, ...]
@@ -166,15 +250,36 @@ class ChampionChallengerProtocol:
 
     def __post_init__(self) -> None:
         _require_text(self.experiment_id, "experiment_id")
+        _require_text(self.research_question_id, "research_question_id")
+        _require_text(self.hypothesis_id, "hypothesis_id")
         if type(self.protocol_schema_version) is not int or self.protocol_schema_version != 1:
             raise ValueError("protocol_schema_version must be 1")
+        if not isinstance(self.champion, CandidateRef):
+            raise ValueError("champion must be a CandidateRef")
+        if not isinstance(self.challengers, tuple) or not all(
+            isinstance(candidate, CandidateRef) for candidate in self.challengers
+        ):
+            raise ValueError("challengers must be a tuple of CandidateRef values")
+        if not isinstance(self.cases, tuple) or not all(
+            isinstance(case, EvaluationCase) for case in self.cases
+        ):
+            raise ValueError("cases must be a tuple of EvaluationCase values")
+        if not isinstance(self.guardrails, tuple) or not all(
+            isinstance(rule, GuardrailRule) for rule in self.guardrails
+        ):
+            raise ValueError("guardrails must be a tuple of GuardrailRule values")
         if not self.challengers:
             raise ValueError("at least one challenger is required")
         if not self.cases:
             raise ValueError("at least one evaluation case is required")
         if self.primary_metric not in _SUPPORTED_METRICS:
             raise ValueError(f"unsupported primary metric: {self.primary_metric}")
-        _require_decimal(self.minimum_total_improvement, "minimum_total_improvement", minimum=Decimal("0"))
+        _require_decimal_instance(
+            self.minimum_total_improvement,
+            "minimum_total_improvement",
+            minimum=Decimal("0"),
+        )
+        _require_bool(self.primary_higher_is_better, "primary_higher_is_better")
 
         candidates = (self.champion, *self.challengers)
         candidate_ids = [candidate.candidate_id for candidate in candidates]
@@ -198,6 +303,8 @@ class ChampionChallengerProtocol:
         return {
             "protocol_schema_version": self.protocol_schema_version,
             "experiment_id": self.experiment_id,
+            "research_question_id": self.research_question_id,
+            "hypothesis_id": self.hypothesis_id,
             "champion": self.champion.to_dict(),
             "challengers": [candidate.to_dict() for candidate in self.challengers],
             "cases": [case.to_dict() for case in self.cases],
@@ -210,9 +317,295 @@ class ChampionChallengerProtocol:
     @property
     def protocol_sha256(self) -> str:
         canonical = json.dumps(
-            self.canonical_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            self.canonical_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _validate_json_depth(value: Any, *, depth: int = 0) -> None:
+    if depth > _MAX_PROTOCOL_JSON_DEPTH:
+        raise ValueError(
+            f"protocol JSON nesting exceeds maximum depth {_MAX_PROTOCOL_JSON_DEPTH}"
+        )
+    if isinstance(value, dict):
+        for item in value.values():
+            _validate_json_depth(item, depth=depth + 1)
+    elif isinstance(value, list):
+        for item in value:
+            _validate_json_depth(item, depth=depth + 1)
+
+
+def _decode_protocol_json(raw: str | bytes) -> dict[str, Any]:
+    if isinstance(raw, bytes):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("protocol must be valid UTF-8 JSON") from exc
+    elif isinstance(raw, str):
+        text = raw
+    else:
+        raise ValueError("protocol JSON input must be str or bytes")
+
+    def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"protocol contains duplicate JSON object key: {key}")
+            value[key] = item
+        return value
+
+    def _reject_nonstandard_constant(value: str) -> None:
+        raise ValueError(f"protocol contains non-standard JSON constant: {value}")
+
+    try:
+        payload = json.loads(
+            text,
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_nonstandard_constant,
+        )
+    except RecursionError as exc:
+        raise ValueError("protocol JSON nesting exceeds parser recursion limit") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError("protocol must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("protocol JSON root must be an object")
+    _validate_json_depth(payload)
+    return payload
+
+
+def _require_exact_keys(
+    payload: dict[str, Any], expected: set[str], field: str
+) -> None:
+    actual = set(payload)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise ValueError(
+            f"{field} fields mismatch: missing={missing} unexpected={extra}"
+        )
+
+
+def _require_json_object(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be an object")
+    return value
+
+
+def _require_json_array(value: Any, field: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be an array")
+    return value
+
+
+def _require_json_decimal(value: Any, field: str) -> Decimal:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a canonical decimal string")
+    return _require_decimal(value, field)
+
+
+def _candidate_from_dict(payload: dict[str, Any], field: str) -> CandidateRef:
+    expected = {
+        "candidate_id",
+        "canonical_strategy_id",
+        "runtime_identity_sha256",
+        "authority_fingerprint",
+        "agent_composition_sha256",
+        "research_plan_sha256",
+    }
+    _require_exact_keys(payload, expected, field)
+    research_plan_sha256 = payload["research_plan_sha256"]
+    if research_plan_sha256 is not None:
+        research_plan_sha256 = _require_sha256(
+            research_plan_sha256, f"{field}.research_plan_sha256"
+        )
+    candidate = CandidateRef(
+        candidate_id=_require_text(payload["candidate_id"], f"{field}.candidate_id"),
+        canonical_strategy_id=_require_text(
+            payload["canonical_strategy_id"], f"{field}.canonical_strategy_id"
+        ),
+        authority_fingerprint=_require_text(
+            payload["authority_fingerprint"], f"{field}.authority_fingerprint"
+        ),
+        agent_composition_sha256=_require_sha256(
+            payload["agent_composition_sha256"],
+            f"{field}.agent_composition_sha256",
+        ),
+        research_plan_sha256=research_plan_sha256,
+    )
+    declared_runtime_identity = _require_sha256(
+        payload["runtime_identity_sha256"], f"{field}.runtime_identity_sha256"
+    )
+    if declared_runtime_identity != candidate.runtime_identity_sha256:
+        raise ValueError(f"{field}.runtime_identity_sha256 does not match canonical runtime fields")
+    return candidate
+
+
+def _case_from_dict(payload: dict[str, Any], field: str) -> EvaluationCase:
+    expected = {
+        "case_id",
+        "dataset_name",
+        "sport",
+        "dataset_schema_version",
+        "market_sha256",
+        "sealed_results_sha256",
+        "historical_import_identity",
+        "replay_dataset_hash",
+        "event_count",
+        "price_semantics",
+        "executable_quote_verified",
+        "paper_fill_fidelity_verified",
+        "price_source_ids",
+        "initial_bankroll",
+    }
+    _require_exact_keys(payload, expected, field)
+    schema_version = payload["dataset_schema_version"]
+    if type(schema_version) is not int or schema_version < 1:
+        raise ValueError(f"{field}.dataset_schema_version must be an integer >= 1")
+    event_count = payload["event_count"]
+    if type(event_count) is not int or event_count < 1:
+        raise ValueError(f"{field}.event_count must be an integer >= 1")
+    historical_import_identity = payload["historical_import_identity"]
+    if historical_import_identity is not None:
+        historical_import_identity = _require_sha256(
+            historical_import_identity, f"{field}.historical_import_identity"
+        )
+    raw_source_ids = _require_json_array(
+        payload["price_source_ids"], f"{field}.price_source_ids"
+    )
+    source_ids = tuple(
+        _require_text(item, f"{field}.price_source_ids[{index}]")
+        for index, item in enumerate(raw_source_ids)
+    )
+    return EvaluationCase(
+        case_id=_require_text(payload["case_id"], f"{field}.case_id"),
+        dataset_name=_require_text(payload["dataset_name"], f"{field}.dataset_name"),
+        sport=_require_text(payload["sport"], f"{field}.sport"),
+        dataset_schema_version=schema_version,
+        market_sha256=_require_sha256(
+            payload["market_sha256"], f"{field}.market_sha256"
+        ),
+        sealed_results_sha256=_require_sha256(
+            payload["sealed_results_sha256"], f"{field}.sealed_results_sha256"
+        ),
+        historical_import_identity=historical_import_identity,
+        replay_dataset_hash=_require_sha256(
+            payload["replay_dataset_hash"], f"{field}.replay_dataset_hash"
+        ),
+        event_count=event_count,
+        price_semantics=_require_text(
+            payload["price_semantics"], f"{field}.price_semantics"
+        ),
+        executable_quote_verified=_require_bool(
+            payload["executable_quote_verified"],
+            f"{field}.executable_quote_verified",
+        ),
+        paper_fill_fidelity_verified=_require_bool(
+            payload["paper_fill_fidelity_verified"],
+            f"{field}.paper_fill_fidelity_verified",
+        ),
+        price_source_ids=source_ids,
+        initial_bankroll=_require_json_decimal(
+            payload["initial_bankroll"], f"{field}.initial_bankroll"
+        ),
+    )
+
+
+def _guardrail_from_dict(payload: dict[str, Any], field: str) -> GuardrailRule:
+    _require_exact_keys(
+        payload,
+        {"metric", "higher_is_better", "max_regression"},
+        field,
+    )
+    return GuardrailRule(
+        metric=_require_text(payload["metric"], f"{field}.metric"),
+        higher_is_better=_require_bool(
+            payload["higher_is_better"], f"{field}.higher_is_better"
+        ),
+        max_regression=_require_json_decimal(
+            payload["max_regression"], f"{field}.max_regression"
+        ),
+    )
+
+
+def load_champion_challenger_protocol_json(
+    raw: str | bytes,
+) -> ChampionChallengerProtocol:
+    """Load a frozen experiment protocol from strict canonical JSON.
+
+    Duplicate keys, non-standard constants, excessive nesting, unknown/missing
+    fields and ambiguous numeric types fail closed before evaluation.
+    """
+
+    payload = _decode_protocol_json(raw)
+    expected = {
+        "protocol_schema_version",
+        "experiment_id",
+        "research_question_id",
+        "hypothesis_id",
+        "champion",
+        "challengers",
+        "cases",
+        "primary_metric",
+        "minimum_total_improvement",
+        "primary_higher_is_better",
+        "guardrails",
+    }
+    _require_exact_keys(payload, expected, "protocol")
+
+    schema_version = payload["protocol_schema_version"]
+    if type(schema_version) is not int or schema_version != 1:
+        raise ValueError("protocol_schema_version must be 1")
+
+    champion = _candidate_from_dict(
+        _require_json_object(payload["champion"], "champion"), "champion"
+    )
+    raw_challengers = _require_json_array(payload["challengers"], "challengers")
+    challengers = tuple(
+        _candidate_from_dict(
+            _require_json_object(item, f"challengers[{index}]"),
+            f"challengers[{index}]",
+        )
+        for index, item in enumerate(raw_challengers)
+    )
+    raw_cases = _require_json_array(payload["cases"], "cases")
+    cases = tuple(
+        _case_from_dict(
+            _require_json_object(item, f"cases[{index}]"),
+            f"cases[{index}]",
+        )
+        for index, item in enumerate(raw_cases)
+    )
+    raw_guardrails = _require_json_array(payload["guardrails"], "guardrails")
+    guardrails = tuple(
+        _guardrail_from_dict(
+            _require_json_object(item, f"guardrails[{index}]"),
+            f"guardrails[{index}]",
+        )
+        for index, item in enumerate(raw_guardrails)
+    )
+
+    return ChampionChallengerProtocol(
+        experiment_id=_require_text(payload["experiment_id"], "experiment_id"),
+        research_question_id=_require_text(
+            payload["research_question_id"], "research_question_id"
+        ),
+        hypothesis_id=_require_text(payload["hypothesis_id"], "hypothesis_id"),
+        champion=champion,
+        challengers=challengers,
+        cases=cases,
+        primary_metric=_require_text(payload["primary_metric"], "primary_metric"),
+        minimum_total_improvement=_require_json_decimal(
+            payload["minimum_total_improvement"], "minimum_total_improvement"
+        ),
+        primary_higher_is_better=_require_bool(
+            payload["primary_higher_is_better"], "primary_higher_is_better"
+        ),
+        guardrails=guardrails,
+        protocol_schema_version=schema_version,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +617,8 @@ class ExperimentRunCell:
     def __post_init__(self) -> None:
         _require_text(self.case_id, "case_id")
         _require_text(self.candidate_id, "candidate_id")
+        if not isinstance(self.evidence, StrategyRunEvidence):
+            raise ValueError("evidence must be StrategyRunEvidence")
         if self.evidence.strategy_id != self.candidate_id:
             raise ValueError(
                 "strategy run evidence candidate mismatch: "
@@ -234,7 +629,10 @@ class ExperimentRunCell:
 @dataclass(frozen=True, slots=True)
 class ExperimentDecisionReport:
     experiment_id: str
+    research_question_id: str
+    hypothesis_id: str
     protocol_sha256: str
+    authority_fingerprint: str
     decision: ExperimentDecision
     selected_candidate_id: str
     previous_champion_id: str
@@ -249,14 +647,19 @@ class ExperimentDecisionReport:
             "schema_version": 1,
             "kind": "autosport_champion_challenger_decision",
             "experiment_id": self.experiment_id,
+            "research_question_id": self.research_question_id,
+            "hypothesis_id": self.hypothesis_id,
             "protocol_sha256": self.protocol_sha256,
+            "authority_fingerprint": self.authority_fingerprint,
             "decision": self.decision.value,
             "selected_candidate_id": self.selected_candidate_id,
             "previous_champion_id": self.previous_champion_id,
             "eligible_challenger_ids": list(self.eligible_challenger_ids),
             "aggregate_primary_improvements": {
                 candidate: str(value)
-                for candidate, value in sorted(self.aggregate_primary_improvements.items())
+                for candidate, value in sorted(
+                    self.aggregate_primary_improvements.items()
+                )
             },
             "case_metrics": list(self.case_metrics),
             "evidence_sha256s": list(self.evidence_sha256s),
@@ -300,42 +703,53 @@ def evaluate_champion_challenger(
     if actual != expected:
         missing = sorted(expected - actual)
         extra = sorted(actual - expected)
-        raise ValueError(f"experiment matrix is incomplete or unexpected: missing={missing} extra={extra}")
+        raise ValueError(
+            f"experiment matrix is incomplete or unexpected: missing={missing} extra={extra}"
+        )
 
-    candidates = {candidate.candidate_id: candidate for candidate in (protocol.champion, *protocol.challengers)}
+    candidates = {
+        candidate.candidate_id: candidate
+        for candidate in (protocol.champion, *protocol.challengers)
+    }
     cases = {case.case_id: case for case in protocol.cases}
-    by_key = {(cell.candidate_id, cell.case_id): cell.evidence for cell in cell_values}
+    by_key = {
+        (cell.candidate_id, cell.case_id): cell.evidence for cell in cell_values
+    }
 
     seen_run_ids: set[str] = set()
     seen_summary_hashes: set[str] = set()
     for (candidate_id, case_id), evidence in by_key.items():
         candidate = candidates[candidate_id]
         case = cases[case_id]
-        if evidence.comparison_identity != (
-            case.dataset_name,
-            case.sport,
-            case.dataset_schema_version,
-            case.market_sha256.lower(),
-            case.sealed_results_sha256.lower(),
-            case.historical_import_identity.lower() if case.historical_import_identity else None,
-            case.replay_dataset_hash.lower(),
-            case.event_count,
-            evidence.price_semantics,
-            evidence.executable_quote_verified,
-            evidence.paper_fill_fidelity_verified,
-            case.initial_bankroll,
-        ):
-            raise ValueError(f"evidence dataset/price identity mismatch for {candidate_id}/{case_id}")
+        if evidence.comparison_identity != case.identity:
+            raise ValueError(
+                f"evidence dataset/price identity mismatch for {candidate_id}/{case_id}"
+            )
         if evidence.canonical_strategy_id != candidate.canonical_strategy_id:
-            raise ValueError(f"canonical strategy identity mismatch for {candidate_id}/{case_id}")
+            raise ValueError(
+                f"canonical strategy identity mismatch for {candidate_id}/{case_id}"
+            )
         if evidence.agent_composition_sha256 != candidate.agent_composition_sha256.lower():
-            raise ValueError(f"agent composition identity mismatch for {candidate_id}/{case_id}")
+            raise ValueError(
+                f"agent composition identity mismatch for {candidate_id}/{case_id}"
+            )
         if evidence.research_plan_sha256 != candidate.research_plan_sha256:
-            raise ValueError(f"research-plan identity mismatch for {candidate_id}/{case_id}")
+            raise ValueError(
+                f"research-plan identity mismatch for {candidate_id}/{case_id}"
+            )
+        evidence_runtime_identity = _runtime_identity_sha256(
+            evidence.canonical_strategy_id,
+            evidence.agent_composition_sha256,
+            evidence.research_plan_sha256,
+        )
+        if evidence_runtime_identity != candidate.runtime_identity_sha256:
+            raise ValueError(f"runtime identity mismatch for {candidate_id}/{case_id}")
         if evidence.run_id in seen_run_ids:
             raise ValueError(f"run_id reused across experiment matrix: {evidence.run_id}")
         if evidence.source_sha256 in seen_summary_hashes:
-            raise ValueError(f"summary evidence reused across experiment matrix: {evidence.source_sha256}")
+            raise ValueError(
+                f"summary evidence reused across experiment matrix: {evidence.source_sha256}"
+            )
         seen_run_ids.add(evidence.run_id)
         seen_summary_hashes.add(evidence.source_sha256)
 
@@ -358,7 +772,9 @@ def evaluate_champion_challenger(
                     "candidate_id": challenger.candidate_id,
                     "primary_metric": protocol.primary_metric,
                     "champion_value": str(metric(champion, protocol.primary_metric)),
-                    "challenger_value": str(metric(candidate, protocol.primary_metric)),
+                    "challenger_value": str(
+                        metric(candidate, protocol.primary_metric)
+                    ),
                     "delta": str(
                         metric(candidate, protocol.primary_metric)
                         - metric(champion, protocol.primary_metric)
@@ -368,7 +784,9 @@ def evaluate_champion_challenger(
                             "champion": str(metric(champion, rule.metric)),
                             "challenger": str(metric(candidate, rule.metric)),
                             "allowed_regression": str(rule.max_regression),
-                            "passed": _guardrail_pass(rule, champion, candidate),
+                            "passed": _guardrail_pass(
+                                rule, champion, candidate
+                            ),
                         }
                         for rule in protocol.guardrails
                     },
@@ -386,7 +804,8 @@ def evaluate_champion_challenger(
             delta = challenger_value - champion_value
             total += delta if protocol.primary_higher_is_better else -delta
             if not all(
-                _guardrail_pass(rule, champion, candidate) for rule in protocol.guardrails
+                _guardrail_pass(rule, champion, candidate)
+                for rule in protocol.guardrails
             ):
                 guardrails_ok = False
         aggregate_improvements[challenger.candidate_id] = total
@@ -395,25 +814,36 @@ def evaluate_champion_challenger(
 
     eligible.sort(key=lambda item: (-item[1], item[0]))
     selected = eligible[0][0] if eligible else champion_id
-    decision = ExperimentDecision.CHALLENGER_ELIGIBLE if eligible else ExperimentDecision.RETAIN_CHAMPION
+    decision = (
+        ExperimentDecision.CHALLENGER_ELIGIBLE
+        if eligible
+        else ExperimentDecision.RETAIN_CHAMPION
+    )
 
     with localcontext() as context:
         context.prec = 80
-        # Re-check aggregate values under a deterministic high-precision Decimal context.
         for candidate_id, value in aggregate_improvements.items():
             _require_decimal(value, f"aggregate improvement for {candidate_id}")
 
     return ExperimentDecisionReport(
         experiment_id=protocol.experiment_id,
+        research_question_id=protocol.research_question_id,
+        hypothesis_id=protocol.hypothesis_id,
         protocol_sha256=protocol.protocol_sha256,
+        authority_fingerprint=protocol.champion.authority_fingerprint,
         decision=decision,
         selected_candidate_id=selected,
         previous_champion_id=champion_id,
-        eligible_challenger_ids=tuple(candidate_id for candidate_id, _ in eligible),
+        eligible_challenger_ids=tuple(
+            candidate_id for candidate_id, _ in eligible
+        ),
         aggregate_primary_improvements=aggregate_improvements,
         case_metrics=tuple(case_metrics),
         evidence_sha256s=tuple(sorted(seen_summary_hashes)),
-        donor_provenance={"repository": donor_repository, "reviewed_sha": donor_sha},
+        donor_provenance={
+            "repository": donor_repository,
+            "reviewed_sha": donor_sha,
+        },
     )
 
 
@@ -422,9 +852,17 @@ def _guardrail_pass(
     champion: StrategyRunEvidence,
     challenger: StrategyRunEvidence,
 ) -> bool:
-    champion_value = _require_decimal(getattr(champion, rule.metric), f"champion {rule.metric}")
-    challenger_value = _require_decimal(getattr(challenger, rule.metric), f"challenger {rule.metric}")
-    regression = champion_value - challenger_value if rule.higher_is_better else challenger_value - champion_value
+    champion_value = _require_decimal(
+        getattr(champion, rule.metric), f"champion {rule.metric}"
+    )
+    challenger_value = _require_decimal(
+        getattr(challenger, rule.metric), f"challenger {rule.metric}"
+    )
+    regression = (
+        champion_value - challenger_value
+        if rule.higher_is_better
+        else challenger_value - champion_value
+    )
     return regression <= rule.max_regression
 
 
@@ -437,4 +875,5 @@ __all__ = [
     "ExperimentRunCell",
     "GuardrailRule",
     "evaluate_champion_challenger",
+    "load_champion_challenger_protocol_json",
 ]

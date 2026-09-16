@@ -108,6 +108,18 @@ class MarketMirror:
             raise ValueError(f"{name} entries must be non-empty strings")
         return selected
 
+    @staticmethod
+    def _decision_boundary(*, as_of: datetime, max_age: timedelta) -> tuple[datetime, timedelta]:
+        if not isinstance(as_of, datetime):
+            raise TypeError("as_of must be a datetime")
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            raise ValueError("as_of must be timezone-aware")
+        if not isinstance(max_age, timedelta):
+            raise TypeError("max_age must be a timedelta")
+        if max_age < timedelta(0):
+            raise ValueError("max_age must be non-negative")
+        return as_of.astimezone(timezone.utc), max_age
+
     def apply(self, event: MarketEvent) -> MirrorApplyResult:
         """Apply one event iff it advances source-local sequence state.
 
@@ -205,6 +217,42 @@ class MarketMirror:
         )
         return MirrorSnapshot(revision=revision, events=filtered)
 
+    def active_view(
+        self,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+        source_ids: str | Iterable[str] | None = None,
+        event_ids: str | Iterable[str] | None = None,
+        market_ids: str | Iterable[str] | None = None,
+        selection_ids: str | Iterable[str] | None = None,
+    ) -> MirrorSnapshot:
+        """Return one revision-bearing focused view safe for decision consumption.
+
+        Identity selectors and freshness/status fencing are applied to the same captured
+        mirror revision. Unknown/inactive, future, over-age or malformed observations
+        fail closed while remaining available through ``view``/``snapshot`` for audit.
+        ``source_ts`` is preferred over the local observation clock when available.
+        """
+        boundary, age_limit = self._decision_boundary(as_of=as_of, max_age=max_age)
+        captured = self.view(
+            source_ids=source_ids,
+            event_ids=event_ids,
+            market_ids=market_ids,
+            selection_ids=selection_ids,
+        )
+        eligible: list[MarketEvent] = []
+        for event in captured.events:
+            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
+                continue
+            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
+            if timestamp is None:
+                continue
+            age = boundary - timestamp
+            if timedelta(0) <= age <= age_limit:
+                eligible.append(event)
+        return MirrorSnapshot(revision=captured.revision, events=tuple(eligible))
+
     def snapshot(self) -> tuple[MarketEvent, ...]:
         """Return a deterministic, ownership-isolated snapshot by source and quote."""
         return self.view().events
@@ -229,35 +277,8 @@ class MarketMirror:
         as_of: datetime,
         max_age: timedelta,
     ) -> tuple[MarketEvent, ...]:
-        """Return deterministic, active and fresh entries eligible for decisions.
-
-        Only explicitly recognized decision-eligible statuses are returned. Unknown,
-        inactive, future, over-age or malformed observations fail closed and remain
-        visible only through the full audit snapshot. ``source_ts`` is the preferred
-        freshness clock because it represents provider time; ``observed_ts`` is used
-        only when source time is unavailable.
-        """
-        if not isinstance(as_of, datetime):
-            raise TypeError("as_of must be a datetime")
-        if as_of.tzinfo is None or as_of.utcoffset() is None:
-            raise ValueError("as_of must be timezone-aware")
-        if not isinstance(max_age, timedelta):
-            raise TypeError("max_age must be a timedelta")
-        if max_age < timedelta(0):
-            raise ValueError("max_age must be non-negative")
-
-        boundary = as_of.astimezone(timezone.utc)
-        eligible: list[MarketEvent] = []
-        for event in self.snapshot():
-            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
-                continue
-            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
-            if timestamp is None:
-                continue
-            age = boundary - timestamp
-            if timedelta(0) <= age <= max_age:
-                eligible.append(event)
-        return tuple(eligible)
+        """Return the full decision-eligible event tuple for compatibility."""
+        return self.active_view(as_of=as_of, max_age=max_age).events
 
     @classmethod
     def from_store(cls, store: SQLiteMarketStore) -> "MarketMirror":

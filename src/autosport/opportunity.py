@@ -60,6 +60,21 @@ def _canonical_hash(value: object, field_name: str) -> str:
     return text
 
 
+def _finite_decimal(
+    value: object,
+    field_name: str,
+    *,
+    nonnegative: bool = False,
+) -> Decimal:
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise OpportunityContractError(
+            f"{field_name} must be an exact finite Decimal"
+        )
+    if nonnegative and (value < 0 or (value.is_zero() and value.is_signed())):
+        raise OpportunityContractError(f"{field_name} must be non-negative")
+    return value
+
+
 def _decimal_from_serialized(value: object, field_name: str) -> Decimal:
     if type(value) is not str or not value or value.strip() != value:
         raise OpportunityContractError(
@@ -78,21 +93,6 @@ def _decimal_from_serialized(value: object, field_name: str) -> Decimal:
     return result
 
 
-def _finite_decimal(
-    value: object,
-    field_name: str,
-    *,
-    nonnegative: bool = False,
-) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
-        raise OpportunityContractError(
-            f"{field_name} must be an exact finite Decimal"
-        )
-    if nonnegative and value < 0:
-        raise OpportunityContractError(f"{field_name} must be non-negative")
-    return value
-
-
 def _canonical_json_hash(payload: object) -> str:
     encoded = json.dumps(
         payload,
@@ -106,7 +106,7 @@ def _canonical_json_hash(payload: object) -> str:
 
 @dataclass(frozen=True, slots=True, order=True)
 class EvidenceRef:
-    """Opaque reference to evidence owned by another canonical authority."""
+    """Opaque pointer to evidence owned by another canonical authority."""
 
     authority: str
     reference: str
@@ -120,18 +120,31 @@ class EvidenceRef:
 
     @classmethod
     def from_dict(cls, raw: object) -> "EvidenceRef":
-        if type(raw) is not dict:
+        if type(raw) is not dict or set(raw) != {"authority", "reference"}:
             raise OpportunityContractError(
-                "evidence reference must be a JSON object"
-            )
-        if set(raw) != {"authority", "reference"}:
-            raise OpportunityContractError(
-                "evidence reference has unexpected fields"
+                "evidence reference must contain canonical fields"
             )
         return cls(
             authority=_canonical_text(raw["authority"], "evidence authority"),
             reference=_canonical_text(raw["reference"], "evidence reference"),
         )
+
+
+def _sorted_unique_evidence(
+    values: Iterable[EvidenceRef],
+    field_name: str,
+) -> tuple[EvidenceRef, ...]:
+    refs = tuple(values)
+    if any(not isinstance(item, EvidenceRef) for item in refs):
+        raise OpportunityContractError(
+            f"{field_name} must contain only EvidenceRef values"
+        )
+    ordered = tuple(sorted(refs))
+    if len(set(ordered)) != len(ordered):
+        raise OpportunityContractError(
+            f"{field_name} contains duplicate references"
+        )
+    return ordered
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,9 +169,9 @@ class QuoteRef:
             "observed_ts",
         ):
             _canonical_text(getattr(self, name), f"quote {name}")
-        if type(self.sequence) is not int:
+        if type(self.sequence) is not int or self.sequence < 0:
             raise OpportunityContractError(
-                "quote sequence must be a non-boolean int"
+                "quote sequence must be a non-negative non-boolean int"
             )
         odds = _finite_decimal(self.decimal_odds, "quote decimal_odds")
         if odds <= 1:
@@ -217,10 +230,6 @@ class QuoteRef:
 
     @classmethod
     def from_dict(cls, raw: object) -> "QuoteRef":
-        if type(raw) is not dict:
-            raise OpportunityContractError(
-                "quote reference must be a JSON object"
-            )
         expected = {
             "event_id",
             "market_id",
@@ -231,9 +240,9 @@ class QuoteRef:
             "observed_ts",
             "market_event_hash",
         }
-        if set(raw) != expected:
+        if type(raw) is not dict or set(raw) != expected:
             raise OpportunityContractError(
-                "quote reference has unexpected fields"
+                "quote reference must contain canonical fields"
             )
         sequence = raw["sequence"]
         if type(sequence) is not int:
@@ -308,10 +317,6 @@ class ForecastRef:
 
     @classmethod
     def from_dict(cls, raw: object) -> "ForecastRef":
-        if type(raw) is not dict:
-            raise OpportunityContractError(
-                "forecast reference must be a JSON object"
-            )
         expected = {
             "forecast_id",
             "forecast_hash",
@@ -319,9 +324,9 @@ class ForecastRef:
             "probability",
             "input_cutoff_ts",
         }
-        if set(raw) != expected:
+        if type(raw) is not dict or set(raw) != expected:
             raise OpportunityContractError(
-                "forecast reference has unexpected fields"
+                "forecast reference must contain canonical fields"
             )
         return cls(
             forecast_id=_canonical_text(raw["forecast_id"], "forecast_id"),
@@ -338,23 +343,6 @@ class ForecastRef:
                 raw["input_cutoff_ts"], "forecast input_cutoff_ts"
             ),
         )
-
-
-def _sorted_unique_evidence(
-    values: Iterable[EvidenceRef],
-    field_name: str,
-) -> tuple[EvidenceRef, ...]:
-    refs = tuple(values)
-    if any(not isinstance(item, EvidenceRef) for item in refs):
-        raise OpportunityContractError(
-            f"{field_name} must contain only EvidenceRef values"
-        )
-    ordered = tuple(sorted(refs))
-    if len(set(ordered)) != len(ordered):
-        raise OpportunityContractError(
-            f"{field_name} contains duplicate references"
-        )
-    return ordered
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,17 +430,28 @@ class Opportunity:
             ),
         )
 
+    def _decision_independent_payload(self) -> dict[str, Any]:
+        return {
+            "strategy_class": self.strategy_class.value,
+            "quotes": [item.to_dict() for item in self.quotes],
+            "forecasts": [item.to_dict() for item in self.forecasts],
+            "evidence_refs": [item.to_dict() for item in self.evidence_refs],
+        }
+
+    @property
+    def conflict_key(self) -> str:
+        """Stable identity for one evidence-defined opportunity before decision state."""
+
+        return _canonical_json_hash(self._decision_independent_payload())
+
     @property
     def opportunity_id(self) -> str:
         return _canonical_json_hash(self._identity_payload())
 
     def _identity_payload(self) -> dict[str, Any]:
         return {
-            "strategy_class": self.strategy_class.value,
+            **self._decision_independent_payload(),
             "decision": self.decision.value,
-            "quotes": [item.to_dict() for item in self.quotes],
-            "forecasts": [item.to_dict() for item in self.forecasts],
-            "evidence_refs": [item.to_dict() for item in self.evidence_refs],
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -463,10 +462,6 @@ class Opportunity:
 
     @classmethod
     def from_dict(cls, raw: object) -> "Opportunity":
-        if type(raw) is not dict:
-            raise OpportunityContractError(
-                "opportunity must be a JSON object"
-            )
         expected = {
             "opportunity_id",
             "strategy_class",
@@ -475,9 +470,9 @@ class Opportunity:
             "forecasts",
             "evidence_refs",
         }
-        if set(raw) != expected:
+        if type(raw) is not dict or set(raw) != expected:
             raise OpportunityContractError(
-                "opportunity has unexpected fields"
+                "opportunity must contain canonical fields"
             )
         try:
             strategy_class = StrategyClass(raw["strategy_class"])
@@ -539,6 +534,11 @@ class OpportunitySet:
         if len(set(ids)) != len(ids):
             raise OpportunityContractError(
                 "opportunity set contains duplicate members"
+            )
+        conflict_keys = [item.conflict_key for item in ordered]
+        if len(set(conflict_keys)) != len(conflict_keys):
+            raise OpportunityContractError(
+                "opportunity set contains conflicting decisions for the same canonical opportunity"
             )
         object.__setattr__(self, "opportunities", ordered)
 
@@ -741,10 +741,6 @@ class PortfolioPlan:
 
     @classmethod
     def from_dict(cls, raw: object) -> "PortfolioPlan":
-        if type(raw) is not dict:
-            raise OpportunityContractError(
-                "portfolio plan must be a JSON object"
-            )
         expected = {
             "plan_id",
             "opportunity_set",
@@ -754,9 +750,9 @@ class PortfolioPlan:
             "risk_evidence_refs",
             "ledger_state_refs",
         }
-        if set(raw) != expected:
+        if type(raw) is not dict or set(raw) != expected:
             raise OpportunityContractError(
-                "portfolio plan has unexpected fields"
+                "portfolio plan must contain canonical fields"
             )
         for name in (
             "allocations",

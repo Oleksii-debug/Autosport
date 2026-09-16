@@ -1,5 +1,88 @@
 $ErrorActionPreference = 'Stop'
 
+# The workflow PowerShell is only a trusted launch root. The process that first
+# executes release-sensitive creator logic is born behind process/thread deny
+# DACLs with a restricted primary token, and remains behind a barrier until the
+# launch root has closed its full creation-time process/thread handles.
+$releaseCreatorPythonCommands = @(Get-Command python -CommandType Application -ErrorAction Stop)
+if ($releaseCreatorPythonCommands.Count -lt 1) { throw 'Unable to resolve Python application for release-creator birth boundary' }
+$releaseCreatorPython = [string]$releaseCreatorPythonCommands[0].Source
+$releaseCreatorBirthProtected = ([string]$env:AUTOSPORT_RELEASE_CREATOR_BIRTH_PROTECTED -eq '1')
+if (-not $releaseCreatorBirthProtected) {
+  $releaseCreatorLauncher = Join-Path $PSScriptRoot 'guarded_release_creator_launch.py'
+  if (-not (Test-Path -LiteralPath $releaseCreatorLauncher -PathType Leaf)) { throw 'Release-creator birth launcher is missing' }
+  $releaseCreatorPowerShell = [string](Get-Process -Id $PID).Path
+  if ([string]::IsNullOrWhiteSpace($releaseCreatorPowerShell)) { throw 'Unable to resolve current PowerShell executable for release-creator birth boundary' }
+  & $releaseCreatorPython -I $releaseCreatorLauncher `
+    --powershell $releaseCreatorPowerShell `
+    --script $MyInvocation.MyCommand.Path `
+    --working-directory ([System.IO.Path]::GetFullPath([string]$PWD))
+  if ($LASTEXITCODE -ne 0) { throw "Birth-protected release creator exited $LASTEXITCODE" }
+  return
+}
+
+$releaseCreatorBarrierName = [string]$env:AUTOSPORT_RELEASE_CREATOR_BARRIER
+$releaseCreatorNonce = [string]$env:AUTOSPORT_RELEASE_CREATOR_NONCE
+if ([string]::IsNullOrWhiteSpace($releaseCreatorBarrierName) -or [string]::IsNullOrWhiteSpace($releaseCreatorNonce) -or $releaseCreatorNonce.Length -lt 32) { throw 'Birth-protected release creator attestation is incomplete' }
+$releaseCreatorBarrier = [System.Threading.EventWaitHandle]::OpenExisting($releaseCreatorBarrierName)
+try {
+  if (-not $releaseCreatorBarrier.WaitOne(60000)) { throw 'Birth-protected release creator barrier timed out' }
+} finally {
+  $releaseCreatorBarrier.Dispose()
+}
+Remove-Item Env:AUTOSPORT_RELEASE_CREATOR_BARRIER -ErrorAction SilentlyContinue
+Remove-Item Env:AUTOSPORT_RELEASE_CREATOR_NONCE -ErrorAction SilentlyContinue
+Remove-Item Env:AUTOSPORT_RELEASE_CREATOR_BIRTH_PROTECTED -ErrorAction SilentlyContinue
+
+$releaseCreatorAttestation = @'
+import ctypes
+import sys
+from ctypes import wintypes
+ERROR_ACCESS_DENIED=5
+TOKEN_QUERY=0x0008
+rights=(0x2,0x8,0x20,0x40,0x40000,0x80000)
+pid=int(sys.argv[1])
+k=ctypes.WinDLL("kernel32",use_last_error=True)
+a=ctypes.WinDLL("advapi32",use_last_error=True)
+k.GetCurrentProcess.restype=wintypes.HANDLE
+k.OpenProcess.argtypes=(wintypes.DWORD,wintypes.BOOL,wintypes.DWORD)
+k.OpenProcess.restype=wintypes.HANDLE
+k.CloseHandle.argtypes=(wintypes.HANDLE,)
+a.OpenProcessToken.argtypes=(wintypes.HANDLE,wintypes.DWORD,ctypes.POINTER(wintypes.HANDLE))
+a.OpenProcessToken.restype=wintypes.BOOL
+a.IsTokenRestricted.argtypes=(wintypes.HANDLE,)
+a.IsTokenRestricted.restype=wintypes.BOOL
+t=wintypes.HANDLE()
+if not a.OpenProcessToken(k.GetCurrentProcess(),TOKEN_QUERY,ctypes.byref(t)): raise SystemExit(f"release creator token open failed: {ctypes.get_last_error()}")
+try:
+    if not a.IsTokenRestricted(t): raise SystemExit("release creator token is not restricted")
+finally:
+    k.CloseHandle(t)
+for access in rights:
+    ctypes.set_last_error(0); h=k.OpenProcess(access,False,pid); v=h if isinstance(h,int) else ctypes.cast(h,ctypes.c_void_p).value
+    if v: k.CloseHandle(h); raise SystemExit(f"release creator dangerous access available: 0x{access:08x}")
+    e=ctypes.get_last_error()
+    if e!=ERROR_ACCESS_DENIED: raise SystemExit(f"release creator access probe 0x{access:08x} failed non-deny: {e}")
+print("PASS",flush=True)
+'@
+$releaseCreatorAttestationOutput = @(& $releaseCreatorPython -I -c $releaseCreatorAttestation $PID)
+if ($LASTEXITCODE -ne 0 -or $releaseCreatorAttestationOutput.Count -ne 1 -or [string]$releaseCreatorAttestationOutput[0] -ne 'PASS') { throw "Birth-protected release creator attestation failed: $($releaseCreatorAttestationOutput -join ' ')" }
+Write-Output 'AUTOSPORT_RELEASE_CREATOR_BIRTH_BOUNDARY=PASS'
+
+$releaseCreatorTestCoordination = [string]$env:AUTOSPORT_TEST_RELEASE_CREATOR_BIRTH_COORDINATION
+if (-not [string]::IsNullOrWhiteSpace($releaseCreatorTestCoordination)) {
+  [System.IO.File]::WriteAllText($releaseCreatorTestCoordination, "$PID`n", [System.Text.UTF8Encoding]::new($false))
+  Write-Output 'AUTOSPORT_RELEASE_CREATOR_BIRTH_TEST_READY=PASS'
+  $releaseCreatorTestRelease = $releaseCreatorTestCoordination + '.release'
+  $releaseCreatorTestDeadline = [DateTime]::UtcNow.AddSeconds(30)
+  while (-not (Test-Path -LiteralPath $releaseCreatorTestRelease -PathType Leaf)) {
+    if ([DateTime]::UtcNow -ge $releaseCreatorTestDeadline) { throw 'Birth-protected release creator test timed out waiting for release signal' }
+    Start-Sleep -Milliseconds 25
+  }
+  Write-Output 'AUTOSPORT_RELEASE_CREATOR_RELEASE_BODY_LOADED=false'
+  return
+}
+
 # The creator fence needs one privileged handle-table census on Windows builds that
 # redact kernel object identity from an unprivileged token. No release body is
 # loaded while this bootstrap runs. If SeDebugPrivilege is assigned, enable it only
@@ -325,6 +408,13 @@ try {
   $newCensus += "`n"
   $creatorFenceText = $creatorFenceText.Replace($oldCensus, $newCensus)
 
+  if ($releaseCreatorBirthProtected) {
+    $protectedCreatorCensus = "                RequireSeDebugNotAssigned();`n"
+    $injectedCreatorCensusMatches = [regex]::Matches($creatorFenceText, [regex]::Escape($newCensus)).Count
+    if ($injectedCreatorCensusMatches -ne 1) { throw "Birth-protected creator expected exactly one injected late census; found $injectedCreatorCensusMatches" }
+    $creatorFenceText = $creatorFenceText.Replace($newCensus, $protectedCreatorCensus)
+  }
+
   $oldCompetingDeclaration = "            int competing = 0;`n"
   $competingDeclarationMatches = [regex]::Matches(
     $creatorFenceText,
@@ -389,17 +479,18 @@ try {
       ).Count -ne 1) {
     throw 'Creator-host privilege helper injection was not unique'
   }
+  $expectedCreatorCensusCalls = if ($releaseCreatorBirthProtected) { 0 } else { 1 }
   if ([regex]::Matches(
         $creatorFenceText,
         [regex]::Escape('CreatorHostPrivilegeBootstrap.EnableSeDebugPrivilegeForCensusIfAssigned();')
-      ).Count -ne 1) {
-    throw 'Creator-host census authority injection was not unique'
+      ).Count -ne $expectedCreatorCensusCalls) {
+    throw "Creator-host census authority injection count did not match mode: expected $expectedCreatorCensusCalls"
   }
   if ([regex]::Matches(
         $creatorFenceText,
         [regex]::Escape('CreatorHostPrivilegeBootstrap.RemoveSeDebugPrivilegeAndVerifyAbsent();')
-      ).Count -ne 1) {
-    throw 'Creator-host SeDebug removal injection was not unique'
+      ).Count -ne $expectedCreatorCensusCalls) {
+    throw "Creator-host SeDebug removal injection count did not match mode: expected $expectedCreatorCensusCalls"
   }
   if ([regex]::Matches(
         $creatorFenceText,

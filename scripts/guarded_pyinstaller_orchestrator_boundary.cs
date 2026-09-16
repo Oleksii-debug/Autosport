@@ -734,6 +734,17 @@ namespace Autosport.Release
             }
         }
 
+        private static bool CurrentProcessTokenIsRestricted()
+        {
+            IntPtr token = IntPtr.Zero;
+            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, out token))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "orchestrator current token cannot be opened");
+            }
+            try { return IsTokenRestricted(token); }
+            finally { CloseHandle(token); }
+        }
+
         private static IntPtr CreateRestrictedPrimaryToken(string currentUserSid)
         {
             IntPtr currentToken = IntPtr.Zero;
@@ -1077,7 +1088,14 @@ namespace Autosport.Release
 
             RequireSeDebugNotAssigned();
             CreatorProcessFence creatorFence = new CreatorProcessFence();
-            creatorFence.Acquire(currentUserSid, pythonExecutable);
+            if (CurrentProcessTokenIsRestricted())
+            {
+                RequireFreshProcessAccessDenied(GetCurrentProcessId());
+            }
+            else
+            {
+                creatorFence.Acquire(currentUserSid, pythonExecutable);
+            }
 
             string nonce = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
             string barrierName =

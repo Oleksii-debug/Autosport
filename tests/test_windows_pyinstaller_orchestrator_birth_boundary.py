@@ -10,7 +10,7 @@ import pytest
 
 
 _ROOT = Path(__file__).resolve().parents[1]
-_BUILD_SCRIPT = _ROOT / "scripts" / "build_windows.ps1"
+_BUILD_SCRIPT = _ROOT / "scripts" / "build_windows_body.ps1"
 _ORCHESTRATOR_BOUNDARY = (
     _ROOT / "scripts" / "guarded_pyinstaller_orchestrator_boundary.cs"
 )
@@ -38,6 +38,8 @@ def test_release_build_moves_guarded_binder_creation_to_trusted_orchestrator() -
     assert "private const uint DANGEROUS_PROCESS_ACCESS = 0x000C006A;" in launcher
     assert "private const uint DANGEROUS_THREAD_ACCESS = 0x000C17B3;" in launcher
     assert "RequireSeDebugNotAssigned();" in launcher
+    assert "CurrentProcessTokenIsRestricted()" in launcher
+    assert "RequireFreshProcessAccessDenied(GetCurrentProcessId());" in launcher
     assert "CreateRestrictedToken(" in launcher
     assert "Attributes = 0" in launcher
     assert "CreateProcessAsUserW(" in launcher

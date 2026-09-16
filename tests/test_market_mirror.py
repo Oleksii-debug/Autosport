@@ -63,24 +63,43 @@ class MarketMirrorTests(unittest.TestCase):
         self.assertEqual(result.previous_sequence, 7)
         self.assertEqual(len(mirror), 1)
 
-    def test_same_sequence_retry_ignores_only_local_ingest_time(self) -> None:
+    def test_same_sequence_retry_ignores_local_receipt_clocks(self) -> None:
         mirror = MarketMirror()
-        first = self.event(sequence=7, odds="2.20")
-        retry = MarketEvent.from_dict({**first.to_dict(), "ingest_ts": "2026-09-16T19:01:00+00:00"})
+        first = self.event(
+            sequence=7,
+            odds="2.20",
+            source_ts="2026-09-16T18:59:59+00:00",
+        )
+        retry = MarketEvent.from_dict(
+            {
+                **first.to_dict(),
+                "observed_ts": "2026-09-16T19:00:01+00:00",
+                "ingest_ts": "2026-09-16T19:01:00+00:00",
+            }
+        )
 
+        self.assertNotEqual(first.observed_ts, retry.observed_ts)
         self.assertNotEqual(first.ingest_ts, retry.ingest_ts)
+        self.assertEqual(first.source_ts, retry.source_ts)
         self.assertEqual(mirror.apply(first).status, MirrorUpdate.APPLIED)
         self.assertEqual(mirror.apply(retry).status, MirrorUpdate.DUPLICATE)
         self.assertEqual(mirror.snapshot(), (first,))
 
-    def test_same_sequence_still_conflicts_on_observation_provenance(self) -> None:
+    def test_same_sequence_still_conflicts_on_provider_source_time(self) -> None:
         mirror = MarketMirror()
-        first = self.event(sequence=7, odds="2.20")
-        changed = MarketEvent.from_dict({
-            **first.to_dict(),
-            "observed_ts": "2026-09-16T19:00:01+00:00",
-            "ingest_ts": "2026-09-16T19:01:00+00:00",
-        })
+        first = self.event(
+            sequence=7,
+            odds="2.20",
+            source_ts="2026-09-16T18:59:59+00:00",
+        )
+        changed = MarketEvent.from_dict(
+            {
+                **first.to_dict(),
+                "observed_ts": "2026-09-16T19:00:01+00:00",
+                "ingest_ts": "2026-09-16T19:01:00+00:00",
+                "source_ts": "2026-09-16T19:00:00+00:00",
+            }
+        )
 
         mirror.apply(first)
         with self.assertRaises(ValueError):

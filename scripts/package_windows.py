@@ -305,6 +305,25 @@ def _require_sha256(value: str, *, field: str) -> str:
     return normalized
 
 
+def _require_verified_package_digest(
+    binding: dict[str, object],
+    verification: dict[str, object],
+) -> str:
+    """Fail closed unless a writer binding and later verifier identify the same ZIP bytes."""
+
+    bound_digest = binding.get("package_sha256")
+    verified_digest = verification.get("package_sha256")
+    if (
+        not isinstance(bound_digest, str)
+        or not isinstance(verified_digest, str)
+        or bound_digest != verified_digest
+    ):
+        raise ValueError(
+            "bound package digest does not match the exact verified package snapshot"
+        )
+    return verified_digest
+
+
 def _file_identity(value: os.stat_result) -> tuple[int, int, int, int]:
     return (
         int(value.st_dev),
@@ -499,7 +518,7 @@ def main() -> int:
             snapshot_name="restart-recovery-audit.json",
         )
 
-        output, _base_digest = build_windows_package(
+        output, base_digest = build_windows_package(
             trusted_exe,
             trusted_start_file,
             trusted_example_dir,
@@ -510,12 +529,22 @@ def main() -> int:
             args.output,
             args.source_sha,
         )
-        binding = bind_portable_data_tool(output, trusted_data_exe)
+        binding = bind_portable_data_tool(
+            output,
+            trusted_data_exe,
+            expected_base_package_sha256=base_digest,
+        )
 
-    verification = verify_windows_package(output, expected_source_sha=args.source_sha)
+    release_verification = verify_windows_package(
+        output,
+        expected_source_sha=args.source_sha,
+    )
+    package_sha = _require_verified_package_digest(binding, release_verification)
     data_verification = verify_portable_data_tool(output)
+    _require_verified_package_digest(binding, data_verification)
+    verification = dict(release_verification)
     verification.update(data_verification)
-    verification["package_sha256"] = binding["package_sha256"]
+    verification["package_sha256"] = package_sha
     if args.verification_output is not None:
         args.verification_output.parent.mkdir(parents=True, exist_ok=True)
         args.verification_output.write_text(
@@ -523,7 +552,7 @@ def main() -> int:
             encoding="utf-8",
         )
     print(f"PACKAGE={output}")
-    print(f"SHA256={binding['package_sha256']}")
+    print(f"SHA256={package_sha}")
     print("PACKAGE_VERIFICATION=PASS")
     print("PORTABLE_DATA_TOOLS=PASS")
     return 0

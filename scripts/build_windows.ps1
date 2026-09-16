@@ -155,6 +155,98 @@ for relative in selected:
 
 print(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
 '@
+$trustedPackagingRequirementsLauncher = @'
+import hashlib
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tomllib
+
+git_executable = sys.argv[1]
+repo_root = pathlib.Path(sys.argv[2])
+source_sha = sys.argv[3]
+if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+    raise SystemExit("source_sha is not a canonical Git commit SHA")
+
+env = os.environ.copy()
+for name in tuple(env):
+    if name.upper().startswith("GIT_"):
+        env.pop(name, None)
+env["GIT_NO_REPLACE_OBJECTS"] = "1"
+
+def git_bytes(*args):
+    try:
+        completed = subprocess.run(
+            [git_executable, *args],
+            cwd=repo_root,
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise SystemExit(
+            f"exact packaging requirement oracle failed: git {' '.join(args)}"
+        ) from exc
+    return completed.stdout
+
+def blob_sha1(data):
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
+
+entry = git_bytes("ls-tree", source_sha, "--", "pyproject.toml").decode("utf-8").strip()
+match = re.fullmatch(
+    r"(100644|100755) blob ([0-9a-f]{40})\tpyproject\.toml",
+    entry,
+)
+if match is None:
+    raise SystemExit("exact source does not contain one regular pyproject.toml blob")
+object_sha = match.group(2)
+data = git_bytes("cat-file", "blob", object_sha)
+if blob_sha1(data) != object_sha:
+    raise SystemExit("exact pyproject.toml bytes do not match Git object identity")
+try:
+    document = tomllib.loads(data.decode("utf-8"))
+except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    raise SystemExit("exact pyproject.toml is not valid UTF-8 TOML") from exc
+
+project = document.get("project")
+if not isinstance(project, dict):
+    raise SystemExit("exact pyproject.toml is missing [project]")
+dependencies = project.get("dependencies")
+optional = project.get("optional-dependencies")
+if not isinstance(dependencies, list) or not all(
+    isinstance(item, str) and item for item in dependencies
+):
+    raise SystemExit("exact [project].dependencies must be a non-empty-string list")
+if not isinstance(optional, dict):
+    raise SystemExit("exact pyproject.toml is missing [project.optional-dependencies]")
+build_dependencies = optional.get("build")
+if not isinstance(build_dependencies, list) or not all(
+    isinstance(item, str) and item for item in build_dependencies
+):
+    raise SystemExit("exact build optional dependencies must be a non-empty-string list")
+
+requirements = [*dependencies, *build_dependencies]
+if not requirements:
+    raise SystemExit("exact packaging requirement set is empty")
+exact_pin = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?=="
+    r"[A-Za-z0-9](?:[A-Za-z0-9._+!-]*[A-Za-z0-9])?"
+)
+for requirement in requirements:
+    if exact_pin.fullmatch(requirement) is None:
+        raise SystemExit(
+            "exact packaging requirement must be a simple == pin: "
+            f"{requirement!r}"
+        )
+normalized = [item.casefold() for item in requirements]
+if len(set(normalized)) != len(normalized):
+    raise SystemExit("exact packaging requirement set contains duplicates")
+print(json.dumps(sorted(requirements, key=str.casefold), separators=(",", ":")))
+'@
 $trustedSourceSnapshotVerifierLauncher = @'
 import hashlib
 import json
@@ -481,6 +573,47 @@ if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-sm
 python $sourceVerifier --source-sha $sourceSha --late-build-boundary
 if ($LASTEXITCODE -ne 0) { throw "Trusted source gate before Autosport.exe exited $LASTEXITCODE" }
 
+# Build artifact-relevant interpreter state only after the exact-source boundary.
+# Requirements come from source_sha:pyproject.toml through an exact Git oracle;
+# the live checkout and its editable test environment cannot define the package graph.
+$trustedPackagingRequirementLines = @(
+  & $pythonExecutable -I -S -c $trustedPackagingRequirementsLauncher $gitExecutable $repoRoot $sourceSha
+)
+if ($LASTEXITCODE -ne 0) { throw "Exact packaging-requirements Git oracle exited $LASTEXITCODE" }
+if ($trustedPackagingRequirementLines.Count -ne 1) {
+  throw 'Exact packaging-requirements Git oracle did not emit one canonical requirement list'
+}
+$trustedPackagingRequirementsJson = [string]$trustedPackagingRequirementLines[0]
+$trustedPackagingRequirements = @($trustedPackagingRequirementsJson | ConvertFrom-Json)
+if ($trustedPackagingRequirements.Count -eq 0) {
+  throw 'Exact packaging requirement set is empty'
+}
+
+$autosportResolutionProbe = @'
+import importlib.util
+
+spec = importlib.util.find_spec("autosport")
+if spec is not None:
+    locations = list(spec.submodule_search_locations or ())
+    raise SystemExit(
+        "autosport is unexpectedly import-resolvable in clean packaging environment: "
+        f"origin={spec.origin!r}, locations={locations!r}"
+    )
+'@
+$packagingVenv = Join-Path $boundArtifactRoot 'packaging-venv'
+& $pythonExecutable -I -S -m venv --clear $packagingVenv
+if ($LASTEXITCODE -ne 0) { throw "Clean packaging venv creation exited $LASTEXITCODE" }
+$packagingPython = Join-Path $packagingVenv 'Scripts/python.exe'
+if (-not (Test-Path -LiteralPath $packagingPython -PathType Leaf)) {
+  throw 'Clean packaging venv is missing Scripts/python.exe'
+}
+& $packagingPython -I -c $autosportResolutionProbe
+if ($LASTEXITCODE -ne 0) { throw "Pre-install packaging environment isolation proof exited $LASTEXITCODE" }
+& $packagingPython -I -m pip --isolated install --disable-pip-version-check --no-input @trustedPackagingRequirements
+if ($LASTEXITCODE -ne 0) { throw "Exact packaging dependency install exited $LASTEXITCODE" }
+& $packagingPython -I -c $autosportResolutionProbe
+if ($LASTEXITCODE -ne 0) { throw "Post-install packaging environment isolation proof exited $LASTEXITCODE" }
+
 # Derive the expected snapshot identity directly from exact Git blob objects
 # before archive extraction. This is deliberately independent of git archive and
 # its attribute processing, so host-local export-ignore/export-subst cannot
@@ -509,9 +642,9 @@ foreach ($requiredBuildSource in @('pyproject.toml', 'src/autosport/windows_entr
   }
 }
 
-# Dependencies were installed before the final source gate. Do not reinstall the
-# project from a writable snapshot after that gate. PyInstaller receives the
-# exact source tree explicitly through --paths and absolute entry paths.
+# The fresh packaging interpreter contains only exact-source-derived runtime/build
+# dependencies; the project itself is never installed there. PyInstaller receives
+# the exact source tree explicitly through --paths and absolute entry paths.
 $trustedBuildSrc = Join-Path $trustedBuildRoot 'src'
 $trustedGuiEntry = Join-Path $trustedBuildRoot 'src/autosport/windows_entry.py'
 $trustedDataEntry = Join-Path $trustedBuildRoot 'src/autosport/data_tools_entry.py'
@@ -667,7 +800,7 @@ try {
   $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
   if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification before Autosport.exe exited $LASTEXITCODE" }
 
-  & $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry
+  & $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry
   if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
   $builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'
   python $sourceVerifier --bind-artifact $builtAutosportExe --bound-output $boundAutosportExe --digest-output $autosportDigestPath
@@ -682,7 +815,7 @@ try {
   $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
   if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification before Autosport-Data.exe exited $LASTEXITCODE" }
 
-  & $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry
+  & $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --console --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry
   if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }
   $builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'
   python $sourceVerifier --bind-artifact $builtDataExe --bound-output $boundDataExe --digest-output $dataDigestPath

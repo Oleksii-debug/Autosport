@@ -63,6 +63,7 @@ class ProposedTicketRiskContext:
     currency: str | None = None
     measurement_window_start: str | None = None
     measurement_window_end: str | None = None
+    proposal_ts: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.legs) is not tuple or not self.legs:
@@ -122,6 +123,9 @@ class ProposedTicketRiskContext:
             raise ValueError(
                 "measurement window start and end must be supplied together"
             )
+        if self.proposal_ts is not None:
+            _canonical_context_timestamp("proposal_ts", self.proposal_ts)
+
         if self.measurement_window_start is not None:
             _, start = _canonical_context_timestamp(
                 "measurement_window_start", self.measurement_window_start
@@ -281,6 +285,54 @@ class PaperRiskPolicy:
             return None
         return initial_bankroll, balance, committed_stake, open_position_count
 
+    @staticmethod
+    def _quote_risk_decision(
+        goal: EconomicGoalContract,
+        context: ProposedTicketRiskContext,
+    ) -> RiskDecision | None:
+        """Enforce proposal-local quote controls from canonical supplied evidence."""
+        if not context.quotes:
+            return RiskDecision(False, "proposed ticket quote evidence is required")
+        if context.proposal_ts is None:
+            return RiskDecision(False, "proposal timestamp is required for quote risk checks")
+
+        try:
+            _, proposal_time = _canonical_context_timestamp("proposal_ts", context.proposal_ts)
+            quotes_by_key = {quote.quote_key: quote for quote in context.quotes}
+            with localcontext(PaperRiskPolicy._decimal_context()):
+                for leg in context.legs:
+                    quote = quotes_by_key[leg.quote_key]
+                    quote_ts = quote.source_ts if quote.source_ts is not None else quote.observed_ts
+                    _, quote_time = _canonical_context_timestamp("quote timestamp", quote_ts)
+                    age_seconds = Decimal(str((proposal_time - quote_time).total_seconds()))
+                    if age_seconds < 0:
+                        return RiskDecision(False, "quote timestamp is after proposal timestamp")
+                    if age_seconds > goal.max_quote_age_seconds:
+                        return RiskDecision(False, "quote exceeds economic goal maximum age")
+
+                    if quote.decimal_odds <= 0 or leg.locked_odds <= 0:
+                        return RiskDecision(False, "quote or locked odds are invalid")
+                    adverse_slippage = max(
+                        Decimal("0"),
+                        (quote.decimal_odds - leg.locked_odds) / quote.decimal_odds,
+                    )
+                    if adverse_slippage > goal.max_execution_slippage_fraction:
+                        return RiskDecision(
+                            False,
+                            "quote-to-proposal slippage exceeds economic goal limit",
+                        )
+        except (ArithmeticError, KeyError, TypeError, ValueError):
+            return RiskDecision(False, "proposed ticket quote risk evidence is invalid")
+
+        # MarketEvent has canonical generic metadata, but no canonical data-quality
+        # score contract.  Do not reinterpret provider metadata as owner-grade truth.
+        if goal.minimum_data_quality > 0:
+            return RiskDecision(
+                False,
+                "minimum data quality cannot be proven from canonical quote evidence",
+            )
+        return None
+
     def _effective_fraction_limits(self) -> tuple[Decimal, Decimal]:
         goal = self.economic_goal
         if goal is None:
@@ -361,6 +413,10 @@ class PaperRiskPolicy:
                     )
             if goal.emergency_stop:
                 return RiskDecision(False, "economic goal emergency stop is active")
+            if context is not None:
+                quote_decision = self._quote_risk_decision(goal, context)
+                if quote_decision is not None:
+                    return quote_decision
             if goal.max_stake_amount is not None and amount > goal.max_stake_amount:
                 return RiskDecision(False, "ticket exceeds economic goal absolute stake limit")
             if open_position_count >= goal.max_concurrent_positions:

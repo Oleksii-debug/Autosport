@@ -44,17 +44,19 @@ class MarketMirror:
 
     @staticmethod
     def _same_sequence_payload(left: MarketEvent, right: MarketEvent) -> bool:
-        """Compare provider payload truth while ignoring local ingestion time.
+        """Compare provider payload truth while ignoring local receipt clocks.
 
-        ingest_ts records when this process ingested an observation, so a retry or
-        replay of the same provider sequence may legitimately receive a different
-        ingestion timestamp. Every provider/economic/provenance field remains part of
-        the conflict check.
+        ``observed_ts`` and ``ingest_ts`` are local process timestamps. A retry or
+        replay of one provider sequence may legitimately receive different local
+        timestamps, and canonical storage uses the same identity rule. Provider time
+        (``source_ts``) and every economic/provider/provenance field remain part of the
+        conflict check.
         """
         left_payload = left.to_dict()
         right_payload = right.to_dict()
-        left_payload.pop("ingest_ts", None)
-        right_payload.pop("ingest_ts", None)
+        for local_clock in ("observed_ts", "ingest_ts"):
+            left_payload.pop(local_clock, None)
+            right_payload.pop(local_clock, None)
         return left_payload == right_payload
 
     @staticmethod

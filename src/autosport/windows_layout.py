@@ -22,7 +22,7 @@ _SURFACE_HEIGHTS = {
     "live_quotes": 3,
     "tickets": 4,
     "evaluation": 3,
-    "log": 3,
+    "log": 2,
 }
 
 WINDOWS_SHELL_AUTOMATION_IDS = {

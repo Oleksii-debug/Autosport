@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -195,24 +196,72 @@ class ParlayApiTableTennisProvider:
         self.transport = transport
         self.clock = clock
         self.sleeper = sleeper
+        self._pending_quotes: Iterator[ProviderQuote] | None = None
+        self._pending_quote: ProviderQuote | None = None
+        self._pending_cursor: str | None = None
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         max_items = _positive_nonboolean_int(max_items, field="max_items")
-        observed_ts = self.clock()
-        response = self._fetch()
-        events = self._event_list(response.payload)
-        quotes: list[ProviderQuote] = []
+        if self._pending_quotes is None:
+            observed_ts = self.clock()
+            response = self._fetch()
+            events = self._event_list(response.payload)
+            self._pending_quotes = self._snapshot_quotes(
+                events,
+                observed_ts,
+                response.status_code,
+            )
+            self._pending_quote = None
+            self._pending_cursor = observed_ts
+
+        cursor = self._pending_cursor
+        try:
+            quotes: list[ProviderQuote] = []
+            if self._pending_quote is not None:
+                quotes.append(self._pending_quote)
+                self._pending_quote = None
+
+            while len(quotes) < max_items:
+                try:
+                    quotes.append(next(self._pending_quotes))
+                except StopIteration:
+                    self._clear_pending_snapshot()
+                    return ProviderBatch(self.source_id, tuple(quotes), cursor=cursor)
+
+            try:
+                self._pending_quote = next(self._pending_quotes)
+            except StopIteration:
+                self._clear_pending_snapshot()
+                quality_flags: tuple[str, ...] = ()
+            else:
+                quality_flags = ("TRUNCATED_BATCH",)
+            return ProviderBatch(
+                self.source_id,
+                tuple(quotes),
+                cursor=cursor,
+                quality_flags=quality_flags,
+            )
+        except Exception:
+            # The pending iterator may fail only when a deferred event is first
+            # materialized. Never leave a closed/poisoned generator installed: a
+            # later read must perform a fresh provider acquisition rather than
+            # falsely succeeding with an empty batch and the stale cursor.
+            self._clear_pending_snapshot()
+            raise
+
+    def _snapshot_quotes(
+        self,
+        events: list[dict[str, Any]],
+        observed_ts: str,
+        http_status: int,
+    ) -> Iterator[ProviderQuote]:
         for event in events:
-            for quote in self._event_quotes(event, observed_ts, response.status_code):
-                if len(quotes) >= max_items:
-                    return ProviderBatch(
-                        self.source_id,
-                        tuple(quotes),
-                        cursor=observed_ts,
-                        quality_flags=("TRUNCATED_BATCH",),
-                    )
-                quotes.append(quote)
-        return ProviderBatch(self.source_id, tuple(quotes), cursor=observed_ts)
+            yield from self._event_quotes(event, observed_ts, http_status)
+
+    def _clear_pending_snapshot(self) -> None:
+        self._pending_quotes = None
+        self._pending_quote = None
+        self._pending_cursor = None
 
     def historical_coverage(self, date_from: str, date_to: str) -> HistoricalCoverageReport:
         """Verify the authenticated key's requested historical window and actual source coverage.
@@ -370,7 +419,7 @@ class ParlayApiTableTennisProvider:
         output: list[ProviderQuote] = []
         for bookmaker in bookmakers:
             if not isinstance(bookmaker, dict):
-                continue
+                raise ProviderPayloadError("bookmaker entries must be objects")
             if "key" in bookmaker:
                 raw_book_key = bookmaker["key"]
             elif "title" in bookmaker:
@@ -380,29 +429,37 @@ class ParlayApiTableTennisProvider:
             book_key = _provider_identity(raw_book_key, field="bookmaker identity")
             markets = bookmaker.get("markets", [])
             if not isinstance(markets, list):
-                continue
+                raise ProviderPayloadError("bookmaker markets must be a list")
             for market in markets:
                 if not isinstance(market, dict):
-                    continue
+                    raise ProviderPayloadError("market entries must be objects")
                 raw_market_key = market.get("key")
                 if raw_market_key is None or raw_market_key == "":
-                    continue
+                    raise ProviderPayloadError("market is missing key")
                 market_key = _provider_identity(raw_market_key, field="market key")
                 source_ts = _first_nonempty(market.get("last_update"), bookmaker.get("last_update"))
                 outcomes = market.get("outcomes", [])
                 if not isinstance(outcomes, list):
-                    continue
+                    raise ProviderPayloadError("market outcomes must be a list")
                 for outcome in outcomes:
                     if not isinstance(outcome, dict):
-                        continue
+                        raise ProviderPayloadError("outcome entries must be objects")
                     raw_selection = outcome.get("name")
                     if raw_selection is None or raw_selection == "":
-                        continue
+                        raise ProviderPayloadError("outcome is missing name")
                     selection = _provider_identity(raw_selection, field="outcome name")
-                    price = _decimal_price(outcome.get("price"))
+                    raw_price = outcome.get("price")
+                    price = _decimal_price(raw_price)
+                    if raw_price is not None and price is None:
+                        raise ProviderPayloadError(
+                            "outcome price must be finite decimal odds greater than 1"
+                        )
                     if price is None:
                         continue
-                    point = _decimal_optional(outcome.get("point"))
+                    raw_point = outcome.get("point")
+                    point = _decimal_optional(raw_point)
+                    if raw_point is not None and point is None:
+                        raise ProviderPayloadError("outcome point must be a finite decimal")
                     provider_market_id = _market_identity(book_key, market_key, point)
                     sequence = _sequence_from_timestamp(source_ts or observed_ts)
                     output.append(

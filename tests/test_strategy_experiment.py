@@ -307,3 +307,119 @@ def test_reused_summary_evidence_is_rejected() -> None:
     )
     with pytest.raises(ValueError, match="summary evidence reused"):
         evaluate_champion_challenger(protocol, (champion, challenger))
+
+
+def test_case_and_candidate_mismatch_fail_closed() -> None:
+    protocol = _protocol()
+    champion, challenger = _valid_cells()
+
+    with pytest.raises(ValueError, match="candidate mismatch"):
+        ExperimentRunCell(
+            "case-1",
+            "candidate-v2",
+            replace(challenger.evidence, strategy_id="baseline-v1"),
+        )
+
+    wrong_case_evidence = ExperimentRunCell(
+        challenger.case_id,
+        challenger.candidate_id,
+        replace(challenger.evidence, dataset_name="other-paper-case"),
+    )
+    with pytest.raises(ValueError, match="dataset/price identity mismatch"):
+        evaluate_champion_challenger(protocol, (champion, wrong_case_evidence))
+
+
+def test_non_finite_and_noncanonical_numeric_values_fail_closed() -> None:
+    with pytest.raises(ValueError, match="finite Decimal"):
+        GuardrailRule("roi", max_regression=Decimal("NaN"))
+
+    protocol = _protocol()
+    payload = protocol.canonical_dict()
+    payload["minimum_total_improvement"] = 5
+    with pytest.raises(ValueError, match="canonical decimal string"):
+        load_champion_challenger_protocol_json(json.dumps(payload))
+
+    champion, challenger = _valid_cells()
+    non_finite = ExperimentRunCell(
+        challenger.case_id,
+        challenger.candidate_id,
+        replace(challenger.evidence, net_profit=Decimal("NaN")),
+    )
+    with pytest.raises(ValueError, match="finite Decimal"):
+        evaluate_champion_challenger(protocol, (champion, non_finite))
+
+
+def test_equal_improvement_tie_breaks_by_candidate_id() -> None:
+    base = _protocol()
+    candidate_v3 = CandidateRef(
+        candidate_id="candidate-v3",
+        canonical_strategy_id="candidate-v3",
+        authority_fingerprint=base.champion.authority_fingerprint,
+        agent_composition_sha256=SHA_A,
+    )
+    protocol = ChampionChallengerProtocol(
+        experiment_id=base.experiment_id,
+        research_question_id=base.research_question_id,
+        hypothesis_id=base.hypothesis_id,
+        champion=base.champion,
+        challengers=(candidate_v3, base.challengers[0]),
+        cases=base.cases,
+        primary_metric=base.primary_metric,
+        minimum_total_improvement=base.minimum_total_improvement,
+    )
+    champion, candidate_v2 = _valid_cells()
+    candidate_v3_cell = ExperimentRunCell(
+        "case-1",
+        "candidate-v3",
+        _evidence(
+            run_id="run-challenger-v3",
+            strategy_id="candidate-v3",
+            canonical_strategy_id="candidate-v3",
+            source_sha=SHA_C,
+            net_profit="20",
+            roi="0.2",
+            final_balance="1020",
+        ),
+    )
+
+    report = evaluate_champion_challenger(
+        protocol, (candidate_v3_cell, champion, candidate_v2)
+    )
+    assert report.selected_candidate_id == "candidate-v2"
+    assert report.eligible_challenger_ids == ("candidate-v2", "candidate-v3")
+
+
+@pytest.mark.parametrize(
+    ("net_profit", "roi", "final_balance"),
+    (("10", "0.1", "1010"), ("5", "0.05", "1005")),
+)
+def test_null_or_negative_improvement_remains_explicit_retention_evidence(
+    net_profit: str, roi: str, final_balance: str
+) -> None:
+    protocol = _protocol()
+    champion, challenger = _valid_cells()
+    challenger = ExperimentRunCell(
+        challenger.case_id,
+        challenger.candidate_id,
+        replace(
+            challenger.evidence,
+            net_profit=Decimal(net_profit),
+            roi=Decimal(roi),
+            final_balance=Decimal(final_balance),
+        ),
+    )
+
+    report = evaluate_champion_challenger(protocol, (champion, challenger))
+    assert report.decision is ExperimentDecision.RETAIN_CHAMPION
+    assert report.selected_candidate_id == protocol.champion.candidate_id
+    assert report.eligible_challenger_ids == ()
+    assert report.evidence_sha256s == (SHA_A, SHA_B)
+
+
+def test_decision_report_is_deterministic_across_input_order() -> None:
+    protocol = _protocol()
+    cells = _valid_cells()
+
+    forward = evaluate_champion_challenger(protocol, cells).to_dict()
+    reverse = evaluate_champion_challenger(protocol, tuple(reversed(cells))).to_dict()
+    assert forward == reverse

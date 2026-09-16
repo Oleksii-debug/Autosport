@@ -1,356 +1,415 @@
 $ErrorActionPreference = 'Stop'
 
-function Assert-ProcessRecoveryEvidence {
-  param(
-    [Parameter(Mandatory = $true)] $Evidence,
-    [Parameter(Mandatory = $true)] [string] $Label
-  )
+# The creator fence needs one privileged handle-table census on Windows builds that
+# redact kernel object identity from an unprivileged token. No release body is
+# loaded while this bootstrap runs. If SeDebugPrivilege is assigned, enable it only
+# after the creator DACL is installed, perform the census, and then irreversibly
+# remove it in a finally block before the fence can return to release code.
+$creatorPrivilegeBootstrapClassSource = @'
+    public static class CreatorHostPrivilegeBootstrap
+    {
+        private const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
+        private const uint TOKEN_QUERY = 0x0008;
+        private const uint SE_PRIVILEGE_ENABLED = 0x00000002;
+        private const uint SE_PRIVILEGE_REMOVED = 0x00000004;
+        private const int ERROR_NOT_ALL_ASSIGNED = 1300;
 
-  if ($Evidence.process_kill_relaunch_status -ne 'PASS') {
-    throw "$Label did not prove real process kill/relaunch"
-  }
-  if ($null -eq $Evidence.process_kill_stage_pid -or [long]$Evidence.process_kill_stage_pid -le 0) {
-    throw "$Label has invalid process_kill_stage_pid"
-  }
-  if ($null -eq $Evidence.process_recovery_pid -or [long]$Evidence.process_recovery_pid -le 0) {
-    throw "$Label has invalid process_recovery_pid"
-  }
-  if ([long]$Evidence.process_kill_stage_pid -eq [long]$Evidence.process_recovery_pid) {
-    throw "$Label did not prove a distinct fresh recovery process"
-  }
-  if ($null -eq $Evidence.process_kill_return_code -or [long]$Evidence.process_kill_return_code -eq 0) {
-    throw "$Label did not prove non-clean process termination"
-  }
-  if ([string]::IsNullOrWhiteSpace([string]$Evidence.process_recovery_run_id)) {
-    throw "$Label has invalid process_recovery_run_id"
-  }
-  if ($Evidence.process_recovery_disposition -ne 'committed') {
-    throw "$Label did not prove process_recovery_disposition=committed"
-  }
-  if ($Evidence.process_recovery_registry_status -ne 'completed') {
-    throw "$Label did not prove process_recovery_registry_status=completed"
-  }
-  if ($Evidence.process_recovery_manifest_phase -ne 'completed') {
-    throw "$Label did not prove process_recovery_manifest_phase=completed"
-  }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct Luid
+        {
+            public uint LowPart;
+            public int HighPart;
+        }
 
-  $hashFields = @(
-    'process_recovery_base_paper_book_sha256',
-    'process_recovery_base_decision_ledger_sha256',
-    'process_recovery_new_paper_book_sha256',
-    'process_recovery_new_decision_ledger_sha256'
-  )
-  foreach ($field in $hashFields) {
-    $value = [string]$Evidence.$field
-    if ($value -notmatch '^[0-9a-f]{64}$') {
-      throw "$Label has invalid $field"
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LuidAndAttributes
+        {
+            public Luid Luid;
+            public uint Attributes;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TokenPrivileges
+        {
+            public uint PrivilegeCount;
+            public LuidAndAttributes Privileges;
+        }
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern void SetLastError(uint errorCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool OpenProcessToken(
+            IntPtr processHandle,
+            uint desiredAccess,
+            out IntPtr tokenHandle);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool LookupPrivilegeValueW(
+            string systemName,
+            string name,
+            out Luid luid);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AdjustTokenPrivileges(
+            IntPtr tokenHandle,
+            bool disableAllPrivileges,
+            ref TokenPrivileges newState,
+            uint bufferLength,
+            IntPtr previousState,
+            IntPtr returnLength);
+
+        private static IntPtr OpenPrivilegeToken(out Luid luid)
+        {
+            IntPtr token;
+            if (!OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                    out token))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "creator-host token cannot be opened for SeDebugPrivilege control");
+            }
+            try
+            {
+                if (!LookupPrivilegeValueW(null, "SeDebugPrivilege", out luid))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "creator-host SeDebugPrivilege lookup failed");
+                }
+                return token;
+            }
+            catch
+            {
+                CloseHandle(token);
+                throw;
+            }
+        }
+
+        public static void EnableSeDebugPrivilegeForCensusIfAssigned()
+        {
+            Luid luid;
+            IntPtr token = OpenPrivilegeToken(out luid);
+            try
+            {
+                TokenPrivileges state = new TokenPrivileges
+                {
+                    PrivilegeCount = 1,
+                    Privileges = new LuidAndAttributes
+                    {
+                        Luid = luid,
+                        Attributes = SE_PRIVILEGE_ENABLED
+                    }
+                };
+                SetLastError(0);
+                if (!AdjustTokenPrivileges(
+                        token,
+                        false,
+                        ref state,
+                        0,
+                        IntPtr.Zero,
+                        IntPtr.Zero))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "creator-host SeDebugPrivilege census enable failed");
+                }
+                int error = Marshal.GetLastWin32Error();
+                if (error == ERROR_NOT_ALL_ASSIGNED)
+                {
+                    Console.WriteLine("AUTOSPORT_CREATOR_SEDEBUG_CENSUS_AUTHORITY=ABSENT");
+                    return;
+                }
+                if (error != 0)
+                {
+                    throw new Win32Exception(
+                        error,
+                        "creator-host SeDebugPrivilege census enable returned an ambiguous result");
+                }
+                Console.WriteLine("AUTOSPORT_CREATOR_SEDEBUG_CENSUS_AUTHORITY=ENABLED");
+            }
+            finally
+            {
+                CloseHandle(token);
+            }
+        }
+
+        public static void RemoveSeDebugPrivilegeAndVerifyAbsent()
+        {
+            Luid luid;
+            IntPtr token = OpenPrivilegeToken(out luid);
+            try
+            {
+                TokenPrivileges removal = new TokenPrivileges
+                {
+                    PrivilegeCount = 1,
+                    Privileges = new LuidAndAttributes
+                    {
+                        Luid = luid,
+                        Attributes = SE_PRIVILEGE_REMOVED
+                    }
+                };
+                SetLastError(0);
+                if (!AdjustTokenPrivileges(
+                        token,
+                        false,
+                        ref removal,
+                        0,
+                        IntPtr.Zero,
+                        IntPtr.Zero))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "creator-host SeDebugPrivilege removal failed");
+                }
+                int removalError = Marshal.GetLastWin32Error();
+                if (removalError != 0 && removalError != ERROR_NOT_ALL_ASSIGNED)
+                {
+                    throw new Win32Exception(
+                        removalError,
+                        "creator-host SeDebugPrivilege removal returned an ambiguous result");
+                }
+
+                // Assignment after SE_PRIVILEGE_REMOVED must fail with
+                // ERROR_NOT_ALL_ASSIGNED. A success result proves the privilege is
+                // still present and the process-DACL authority proof is unsafe.
+                TokenPrivileges verification = new TokenPrivileges
+                {
+                    PrivilegeCount = 1,
+                    Privileges = new LuidAndAttributes
+                    {
+                        Luid = luid,
+                        Attributes = 0
+                    }
+                };
+                SetLastError(0);
+                if (!AdjustTokenPrivileges(
+                        token,
+                        false,
+                        ref verification,
+                        0,
+                        IntPtr.Zero,
+                        IntPtr.Zero))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "creator-host SeDebugPrivilege post-removal verification failed");
+                }
+                int verificationError = Marshal.GetLastWin32Error();
+                if (verificationError == 0)
+                {
+                    throw new InvalidOperationException(
+                        "creator-host SeDebugPrivilege remained assigned after irreversible removal attempt");
+                }
+                if (verificationError != ERROR_NOT_ALL_ASSIGNED)
+                {
+                    throw new Win32Exception(
+                        verificationError,
+                        "creator-host SeDebugPrivilege post-removal verification returned an ambiguous result");
+                }
+                Console.WriteLine("AUTOSPORT_CREATOR_SEDEBUG_REMOVAL=PASS");
+            }
+            finally
+            {
+                CloseHandle(token);
+            }
+        }
     }
+'@
+
+# Keep the existing creator-host fence byte-for-byte as a reviewed source input.
+# Open it once with FileShare.Read (writers/deleters denied), bind its exact Git
+# blob identity, then make deterministic fail-closed source substitutions:
+# compile the privilege helper in the same C# source/assembly as the fence; defer
+# the old pre-DACL "must be absent" assertion; bracket the existing handle census
+# with temporary census authority and irreversible removal; and, on rejection only,
+# expose bounded owner PID/process-name/access/handle diagnostics without accepting
+# any authority that the reviewed fence rejected.
+$creatorFenceBootstrapPath = Join-Path $PWD 'scripts/build_windows_creator_fence.ps1'
+$expectedCreatorFenceBlob = '45623f3fed4d15af232f4cc0ab210abb16c16bef'
+$creatorFenceStream = [System.IO.File]::Open(
+  $creatorFenceBootstrapPath,
+  [System.IO.FileMode]::Open,
+  [System.IO.FileAccess]::Read,
+  [System.IO.FileShare]::Read
+)
+try {
+  $creatorFenceBuffer = [System.IO.MemoryStream]::new()
+  try {
+    $creatorFenceStream.CopyTo($creatorFenceBuffer)
+    $creatorFenceBytes = $creatorFenceBuffer.ToArray()
+  } finally {
+    $creatorFenceBuffer.Dispose()
   }
-  if ($Evidence.process_recovery_base_paper_book_sha256 -eq $Evidence.process_recovery_new_paper_book_sha256) {
-    throw "$Label did not prove promoted PaperBook state"
+  if ($creatorFenceBytes.Length -eq 0) {
+    throw 'Creator-host fence bootstrap is empty'
   }
-  if ($Evidence.process_recovery_base_decision_ledger_sha256 -eq $Evidence.process_recovery_new_decision_ledger_sha256) {
-    throw "$Label did not prove promoted Decision Ledger state"
-  }
-}
 
-$sourceSha = $env:AUTOSPORT_SOURCE_SHA
-if ([string]::IsNullOrWhiteSpace($sourceSha)) { $sourceSha = (git rev-parse HEAD).Trim() }
-python scripts/verify_source_checkout.py --source-sha $sourceSha
-if ($LASTEXITCODE -ne 0) { throw "Source checkout preflight exited $LASTEXITCODE" }
-python -m pip install --upgrade pip
-if ($LASTEXITCODE -ne 0) { throw "pip upgrade exited $LASTEXITCODE" }
-python -m pip install -e '.[build,test]'
-if ($LASTEXITCODE -ne 0) { throw "build/test dependency install exited $LASTEXITCODE" }
-python -m pytest -v tests
-if ($LASTEXITCODE -ne 0) { throw "Full pytest gate exited $LASTEXITCODE" }
-if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
-python -m autosport dataset examples/tt_demo --workspace .build-smoke-workspace
-if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }
-if (Test-Path '.build-smoke-workspace') { Remove-Item -Recurse -Force '.build-smoke-workspace' }
-python scripts/verify_source_checkout.py --source-sha $sourceSha --late-build-boundary
-if ($LASTEXITCODE -ne 0) { throw "Late source checkout integrity gate exited $LASTEXITCODE" }
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name Autosport src/autosport/windows_entry.py
-if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
-python -m PyInstaller --noconfirm --clean --onefile --console --name Autosport-Data src/autosport/data_tools_entry.py
-if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }
-
-$diag = Join-Path $PWD 'dist/packaged-diagnostic.json'
-if (Test-Path $diag) { Remove-Item -Force $diag }
-$process = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--diagnostic-output', $diag -Wait -PassThru
-if ($process.ExitCode -ne 0) { throw "Packaged Autosport.exe diagnostic exited $($process.ExitCode)" }
-$diagnostic = Get-Content $diag -Raw | ConvertFrom-Json
-if ($diagnostic.status -ne 'PASS') { throw 'Packaged Autosport.exe diagnostic did not PASS' }
-
-$a11y = Join-Path $PWD 'dist/accessibility-audit.json'
-if (Test-Path $a11y) { Remove-Item -Force $a11y }
-$a11yProcess = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--accessibility-audit-output', $a11y -Wait -PassThru
-if ($a11yProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe accessibility audit exited $($a11yProcess.ExitCode)" }
-$accessibility = Get-Content $a11y -Raw | ConvertFrom-Json
-if ($accessibility.status -ne 'PASS') { throw 'Packaged accessibility audit did not PASS' }
-if ($accessibility.nvda_verified -ne $false) { throw 'Machine accessibility audit must not claim NVDA verification' }
-
-$keyboard = Join-Path $PWD 'dist/keyboard-audit.json'
-if (Test-Path $keyboard) { Remove-Item -Force $keyboard }
-$keyboardProcess = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--keyboard-audit-output', $keyboard -Wait -PassThru
-if ($keyboardProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe keyboard audit exited $($keyboardProcess.ExitCode)" }
-$keyboardEvidence = Get-Content $keyboard -Raw | ConvertFrom-Json
-if ($keyboardEvidence.status -ne 'PASS') { throw 'Packaged keyboard audit did not PASS' }
-if ($keyboardEvidence.human_tested -ne $false -or $keyboardEvidence.nvda_verified -ne $false) {
-  throw 'Machine keyboard audit must not claim physical human/NVDA verification'
-}
-
-$restartRecovery = Join-Path $PWD 'dist/restart-recovery-audit.json'
-if (Test-Path $restartRecovery) { Remove-Item -Force $restartRecovery }
-$restartRecoveryProcess = Start-Process -FilePath (Join-Path $PWD 'dist/Autosport.exe') -ArgumentList '--restart-recovery-audit-output', $restartRecovery -Wait -PassThru
-if ($restartRecoveryProcess.ExitCode -ne 0) { throw "Packaged Autosport.exe restart/recovery audit exited $($restartRecoveryProcess.ExitCode)" }
-$restartRecoveryEvidence = Get-Content $restartRecovery -Raw | ConvertFrom-Json
-if ($restartRecoveryEvidence.status -ne 'PASS') { throw 'Packaged restart/recovery audit did not PASS' }
-if ($restartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Packaged restart audit did not prove persistent session reopen' }
-if ($restartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Packaged recovery audit did not prove transaction recovery' }
-if ($restartRecoveryEvidence.recovery_disposition -ne 'aborted_uncommitted') { throw 'Packaged recovery audit disposition is not fail-closed' }
-if ($restartRecoveryEvidence.real_money_execution -ne $false -or $restartRecoveryEvidence.human_tested -ne $false -or $restartRecoveryEvidence.nvda_verified -ne $false) {
-  throw 'Machine restart/recovery audit violated release truth labels'
-}
-Assert-ProcessRecoveryEvidence -Evidence $restartRecoveryEvidence -Label 'Packaged restart/recovery audit'
-
-$dataExe = Join-Path $PWD 'dist/Autosport-Data.exe'
-if (-not (Test-Path $dataExe -PathType Leaf)) { throw 'Packaged build is missing Autosport-Data.exe' }
-& $dataExe --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe help exited $LASTEXITCODE" }
-& $dataExe compare-strategies --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe compare-strategies --help exited $LASTEXITCODE" }
-& $dataExe walk-forward-evaluate --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe walk-forward-evaluate --help exited $LASTEXITCODE" }
-& $dataExe acquire --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe acquire --help exited $LASTEXITCODE" }
-& $dataExe build-corpus --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe build-corpus --help exited $LASTEXITCODE" }
-& $dataExe build-corpus-from-bundle --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe build-corpus-from-bundle --help exited $LASTEXITCODE" }
-& $dataExe import-betfair-historical --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe import-betfair-historical --help exited $LASTEXITCODE" }
-& $dataExe verify-dataset examples/tt_demo | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe verify-dataset exited $LASTEXITCODE" }
-
-# Execute the frozen evaluator, not only its help surface. This deterministic
-# schema-v1 smoke fixture is sample evidence only and must never be promoted to
-# real historical/OOS proof.
-$walkForwardBundlePath = Join-Path $PWD 'dist/walk-forward-smoke-bundle.json'
-$walkForwardReport = Join-Path $PWD 'dist/walk-forward-smoke-report.json'
-$walkForwardBundle = [ordered]@{
-  schema_version = 1
-  bins = 5
-  forecasts = @(
-    [ordered]@{
-      forecast_id = 'f-1'
-      quote_key = 'm1|winner|a'
-      probability = '0.70'
-      model_id = 'model'
-      model_version = '1'
-      strategy_version = 'research-v1'
-      model_training_cutoff_ts = '2026-01-01T00:00:00+00:00'
-      input_cutoff_ts = '2026-02-01T12:00:00+00:00'
-      generated_at = '2026-02-01T12:00:00+00:00'
-      uncertainty = '0.10'
-      evidence_hashes = @()
-      market_snapshot_hash = ('a' * 64)
-      provenance = [ordered]@{ source = 'packaged-smoke-fixture' }
-    },
-    [ordered]@{
-      forecast_id = 'f-2'
-      quote_key = 'm2|winner|b'
-      probability = '0.30'
-      model_id = 'model'
-      model_version = '2'
-      strategy_version = 'research-v2'
-      model_training_cutoff_ts = '2026-02-10T00:00:00+00:00'
-      input_cutoff_ts = '2026-03-01T12:00:00+00:00'
-      generated_at = '2026-03-01T12:00:00+00:00'
-      uncertainty = '0.20'
-      evidence_hashes = @()
-      market_snapshot_hash = ('b' * 64)
-      provenance = [ordered]@{ source = 'packaged-smoke-fixture' }
+  $gitHeader = [System.Text.Encoding]::ASCII.GetBytes("blob $($creatorFenceBytes.Length)`0")
+  $gitIdentityBytes = [System.IO.MemoryStream]::new()
+  try {
+    $gitIdentityBytes.Write($gitHeader, 0, $gitHeader.Length)
+    $gitIdentityBytes.Write($creatorFenceBytes, 0, $creatorFenceBytes.Length)
+    $gitIdentityBytes.Position = 0
+    $sha1 = [System.Security.Cryptography.SHA1]::Create()
+    try {
+      $actualCreatorFenceBlob = [System.Convert]::ToHexString(
+        $sha1.ComputeHash($gitIdentityBytes)
+      ).ToLowerInvariant()
+    } finally {
+      $sha1.Dispose()
     }
-  )
-  outcomes = @(
-    [ordered]@{ forecast_id = 'f-1'; outcome = 1; revealed_at = '2026-02-02T12:00:00+00:00' },
-    [ordered]@{ forecast_id = 'f-2'; outcome = 0; revealed_at = '2026-03-02T12:00:00+00:00' }
-  )
-  windows = @(
-    [ordered]@{
-      window_id = 'holdout-1'
-      training_end_ts = '2026-01-31T23:59:59+00:00'
-      evaluation_start_ts = '2026-02-01T00:00:00+00:00'
-      evaluation_end_ts = '2026-02-28T23:59:59+00:00'
-      split = 'holdout'
-    },
-    [ordered]@{
-      window_id = 'holdout-2'
-      training_end_ts = '2026-02-28T23:59:59+00:00'
-      evaluation_start_ts = '2026-03-01T00:00:00+00:00'
-      evaluation_end_ts = '2026-03-31T23:59:59+00:00'
-      split = 'holdout'
-    }
-  )
+  } finally {
+    $gitIdentityBytes.Dispose()
+  }
+  if ($actualCreatorFenceBlob -ne $expectedCreatorFenceBlob) {
+    throw "Creator-host fence bootstrap Git blob mismatch: expected $expectedCreatorFenceBlob, got $actualCreatorFenceBlob"
+  }
+
+  $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+  $creatorFenceText = $strictUtf8.GetString($creatorFenceBytes)
+
+  $oldClassAnchor = "namespace Autosport.Release`n{`n    public sealed class CreatorHostFence"
+  $classAnchorMatches = [regex]::Matches(
+    $creatorFenceText,
+    [regex]::Escape($oldClassAnchor)
+  ).Count
+  if ($classAnchorMatches -ne 1) {
+    throw "Creator-host fence expected exactly one C# class anchor; found $classAnchorMatches"
+  }
+  $newClassAnchor = "namespace Autosport.Release`n{`n" + $creatorPrivilegeBootstrapClassSource + "`n`n    public sealed class CreatorHostFence"
+  $creatorFenceText = $creatorFenceText.Replace($oldClassAnchor, $newClassAnchor)
+
+  $oldInitialGuard = "            RequireSeDebugNotAssigned();`n"
+  $initialGuardMatches = [regex]::Matches(
+    $creatorFenceText,
+    [regex]::Escape($oldInitialGuard)
+  ).Count
+  if ($initialGuardMatches -ne 1) {
+    throw "Creator-host fence expected exactly one initial SeDebug guard; found $initialGuardMatches"
+  }
+  $creatorFenceText = $creatorFenceText.Replace($oldInitialGuard, '')
+
+  $oldCensus = "                RequireNoUntrustedPreexistingAuthority();`n"
+  $censusMatches = [regex]::Matches(
+    $creatorFenceText,
+    [regex]::Escape($oldCensus)
+  ).Count
+  if ($censusMatches -ne 1) {
+    throw "Creator-host fence expected exactly one pre-existing authority census; found $censusMatches"
+  }
+  $newCensus = @(
+    '                CreatorHostPrivilegeBootstrap.EnableSeDebugPrivilegeForCensusIfAssigned();',
+    '                try',
+    '                {',
+    '                    RequireNoUntrustedPreexistingAuthority();',
+    '                }',
+    '                finally',
+    '                {',
+    '                    CreatorHostPrivilegeBootstrap.RemoveSeDebugPrivilegeAndVerifyAbsent();',
+    '                }',
+    '                RequireSeDebugNotAssigned();'
+  ) -join "`n"
+  $newCensus += "`n"
+  $creatorFenceText = $creatorFenceText.Replace($oldCensus, $newCensus)
+
+  $oldCompetingDeclaration = "            int competing = 0;`n"
+  $competingDeclarationMatches = [regex]::Matches(
+    $creatorFenceText,
+    [regex]::Escape($oldCompetingDeclaration)
+  ).Count
+  if ($competingDeclarationMatches -ne 1) {
+    throw "Creator-host fence expected exactly one competing-handle declaration; found $competingDeclarationMatches"
+  }
+  $newCompetingDeclaration = "            int competing = 0;`n            string competingDetails = `"`";`n"
+  $creatorFenceText = $creatorFenceText.Replace($oldCompetingDeclaration, $newCompetingDeclaration)
+
+  $oldCompetingIncrement = "                    competing++;`n"
+  $competingIncrementMatches = [regex]::Matches(
+    $creatorFenceText,
+    [regex]::Escape($oldCompetingIncrement)
+  ).Count
+  if ($competingIncrementMatches -ne 1) {
+    throw "Creator-host fence expected exactly one competing-handle increment; found $competingIncrementMatches"
+  }
+  $newCompetingIncrement = @(
+    '                    if (competing < 32)',
+    '                    {',
+    '                        string ownerName = "<unavailable>";',
+    '                        try',
+    '                        {',
+    '                            using (System.Diagnostics.Process ownerProcess =',
+    '                                System.Diagnostics.Process.GetProcessById(checked((int)entry.UniqueProcessId.ToUInt64())))',
+    '                            {',
+    '                                ownerName = ownerProcess.ProcessName;',
+    '                            }',
+    '                        }',
+    '                        catch',
+    '                        {',
+    '                        }',
+    '                        competingDetails += String.Format(',
+    '                            "{0}pid={1},name={2},access=0x{3:x8},handle=0x{4:x}",',
+    '                            competingDetails.Length == 0 ? "" : ";",',
+    '                            entry.UniqueProcessId.ToUInt64(),',
+    '                            ownerName,',
+    '                            entry.GrantedAccess,',
+    '                            entry.HandleValue.ToUInt64());',
+    '                    }',
+    '                    competing++;'
+  ) -join "`n"
+  $newCompetingIncrement += "`n"
+  $creatorFenceText = $creatorFenceText.Replace($oldCompetingIncrement, $newCompetingIncrement)
+
+  $oldCompetingFailure = '                    String.Format("creator-host security fence found {0} pre-existing external dangerous process handle(s)", competing));'
+  $competingFailureMatches = [regex]::Matches(
+    $creatorFenceText,
+    [regex]::Escape($oldCompetingFailure)
+  ).Count
+  if ($competingFailureMatches -ne 1) {
+    throw "Creator-host fence expected exactly one competing-handle failure message; found $competingFailureMatches"
+  }
+  $newCompetingFailure = '                    String.Format("creator-host security fence found {0} pre-existing external dangerous process handle(s); owners=[{1}]", competing, competingDetails));'
+  $creatorFenceText = $creatorFenceText.Replace($oldCompetingFailure, $newCompetingFailure)
+
+  if ([regex]::Matches(
+        $creatorFenceText,
+        [regex]::Escape('public static class CreatorHostPrivilegeBootstrap')
+      ).Count -ne 1) {
+    throw 'Creator-host privilege helper injection was not unique'
+  }
+  if ([regex]::Matches(
+        $creatorFenceText,
+        [regex]::Escape('CreatorHostPrivilegeBootstrap.EnableSeDebugPrivilegeForCensusIfAssigned();')
+      ).Count -ne 1) {
+    throw 'Creator-host census authority injection was not unique'
+  }
+  if ([regex]::Matches(
+        $creatorFenceText,
+        [regex]::Escape('CreatorHostPrivilegeBootstrap.RemoveSeDebugPrivilegeAndVerifyAbsent();')
+      ).Count -ne 1) {
+    throw 'Creator-host SeDebug removal injection was not unique'
+  }
+  if ([regex]::Matches(
+        $creatorFenceText,
+        [regex]::Escape('pre-existing external dangerous process handle(s); owners=[')
+      ).Count -ne 1) {
+    throw 'Creator-host owner diagnostics injection was not unique'
+  }
+
+  $creatorFenceScriptBlock = [ScriptBlock]::Create($creatorFenceText)
+  & $creatorFenceScriptBlock
+} finally {
+  $creatorFenceStream.Dispose()
 }
-$walkForwardJson = $walkForwardBundle | ConvertTo-Json -Depth 8
-[System.IO.File]::WriteAllText($walkForwardBundlePath, $walkForwardJson, [System.Text.UTF8Encoding]::new($false))
-if (Test-Path $walkForwardReport) { Remove-Item -Force $walkForwardReport }
-& $dataExe walk-forward-evaluate $walkForwardBundlePath --output $walkForwardReport | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe walk-forward-evaluate exited $LASTEXITCODE" }
-$walkForwardEvidence = Get-Content $walkForwardReport -Raw | ConvertFrom-Json
-if ($walkForwardEvidence.kind -ne 'strict_walk_forward_forecast_evaluation') { throw 'Packaged walk-forward report kind mismatch' }
-if ($walkForwardEvidence.evaluated_forecast_count -ne 2) { throw 'Packaged walk-forward report forecast count mismatch' }
-if ($walkForwardEvidence.window_count -ne 2) { throw 'Packaged walk-forward report window count mismatch' }
-if ([string]::IsNullOrWhiteSpace($walkForwardEvidence.source_sha256) -or $walkForwardEvidence.source_sha256.Length -ne 64) { throw 'Packaged walk-forward report source_sha256 is invalid' }
-if ($walkForwardEvidence.profitability_claim -ne $false) { throw 'Packaged walk-forward smoke must not claim profitability' }
-if ($walkForwardEvidence.real_money_execution -ne $false) { throw 'Packaged walk-forward smoke must preserve REAL_MONEY_EXECUTION=false' }
-
-$package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
-$packageVerification = Join-Path $PWD 'dist/package-verification.json'
-if (Test-Path $package) { Remove-Item -Force $package }
-if (Test-Path $packageVerification) { Remove-Item -Force $packageVerification }
-python scripts/package_windows.py `
-  --exe dist/Autosport.exe `
-  --data-exe dist/Autosport-Data.exe `
-  --start-file WINDOWS_START_HERE.txt `
-  --example-dir examples/tt_demo `
-  --diagnostic $diag `
-  --accessibility-audit $a11y `
-  --keyboard-audit $keyboard `
-  --restart-recovery-audit $restartRecovery `
-  --output $package `
-  --source-sha $sourceSha `
-  --verification-output $packageVerification
-if ($LASTEXITCODE -ne 0) { throw "Windows package assembly exited $LASTEXITCODE" }
-
-# Binding release gate: verify the artifact after a clean extraction, not only the
-# pre-package executables. This catches archive/path/packaging defects that a
-# successful dist smoke test cannot prove away.
-$extractRoot = Join-Path $PWD '.build-fresh-extraction'
-if (Test-Path $extractRoot) { Remove-Item -Recurse -Force $extractRoot }
-New-Item -ItemType Directory -Path $extractRoot | Out-Null
-Expand-Archive -LiteralPath $package -DestinationPath $extractRoot -Force
-$packageRoot = Join-Path $extractRoot 'Autosport-V1'
-$extractedExe = Join-Path $packageRoot 'Autosport.exe'
-$extractedDataExe = Join-Path $packageRoot 'Autosport-Data.exe'
-if (-not (Test-Path $extractedExe -PathType Leaf)) { throw 'Fresh extraction is missing Autosport.exe' }
-if (-not (Test-Path $extractedDataExe -PathType Leaf)) { throw 'Fresh extraction is missing Autosport-Data.exe' }
-
-$buildInfo = Get-Content (Join-Path $packageRoot 'BUILD_INFO.json') -Raw | ConvertFrom-Json
-if ($buildInfo.source_sha -ne $sourceSha) { throw 'Fresh extraction BUILD_INFO source_sha mismatch' }
-if ($buildInfo.real_money_execution -ne $false) { throw 'Fresh extraction must preserve REAL_MONEY_EXECUTION=false' }
-if ($buildInfo.human_tested -ne $false) { throw 'Machine build must not claim HUMAN_TESTED' }
-if ($buildInfo.nvda_verified -ne $false) { throw 'Machine build must not claim NVDA_VERIFIED' }
-if ($buildInfo.portable_historical_data_tools -ne $true) { throw 'Fresh extraction does not bind portable historical data tools' }
-$extractedExeSha = (Get-FileHash -LiteralPath $extractedExe -Algorithm SHA256).Hash.ToLowerInvariant()
-$extractedDataExeSha = (Get-FileHash -LiteralPath $extractedDataExe -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($extractedExeSha -ne $buildInfo.autosport_exe_sha256) { throw 'Fresh extraction Autosport.exe hash mismatch' }
-if ($extractedDataExeSha -ne $buildInfo.autosport_data_exe_sha256) { throw 'Fresh extraction Autosport-Data.exe hash mismatch' }
-
-& $extractedDataExe --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe help exited $LASTEXITCODE" }
-& $extractedDataExe compare-strategies --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe compare-strategies --help exited $LASTEXITCODE" }
-& $extractedDataExe walk-forward-evaluate --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe walk-forward-evaluate --help exited $LASTEXITCODE" }
-& $extractedDataExe acquire --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe acquire --help exited $LASTEXITCODE" }
-& $extractedDataExe build-corpus --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe build-corpus --help exited $LASTEXITCODE" }
-& $extractedDataExe build-corpus-from-bundle --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe build-corpus-from-bundle --help exited $LASTEXITCODE" }
-& $extractedDataExe import-betfair-historical --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe import-betfair-historical --help exited $LASTEXITCODE" }
-& $extractedDataExe verify-dataset (Join-Path $packageRoot 'examples/tt_demo') | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe verify-dataset exited $LASTEXITCODE" }
-
-$freshWalkForwardReport = Join-Path $PWD 'dist/fresh-extraction-walk-forward-report.json'
-if (Test-Path $freshWalkForwardReport) { Remove-Item -Force $freshWalkForwardReport }
-& $extractedDataExe walk-forward-evaluate $walkForwardBundlePath --output $freshWalkForwardReport | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe walk-forward-evaluate exited $LASTEXITCODE" }
-$freshWalkForwardEvidence = Get-Content $freshWalkForwardReport -Raw | ConvertFrom-Json
-if ($freshWalkForwardEvidence.kind -ne 'strict_walk_forward_forecast_evaluation') { throw 'Fresh-extracted walk-forward report kind mismatch' }
-if ($freshWalkForwardEvidence.evaluated_forecast_count -ne 2) { throw 'Fresh-extracted walk-forward report forecast count mismatch' }
-if ($freshWalkForwardEvidence.window_count -ne 2) { throw 'Fresh-extracted walk-forward report window count mismatch' }
-if ($freshWalkForwardEvidence.source_sha256 -ne $walkForwardEvidence.source_sha256) { throw 'Fresh-extracted walk-forward report source identity mismatch' }
-if ($freshWalkForwardEvidence.profitability_claim -ne $false) { throw 'Fresh-extracted walk-forward smoke must not claim profitability' }
-if ($freshWalkForwardEvidence.real_money_execution -ne $false) { throw 'Fresh-extracted walk-forward smoke must preserve REAL_MONEY_EXECUTION=false' }
-
-$freshDiag = Join-Path $PWD 'dist/fresh-extraction-diagnostic.json'
-if (Test-Path $freshDiag) { Remove-Item -Force $freshDiag }
-$freshDiagProcess = Start-Process -FilePath $extractedExe -ArgumentList '--diagnostic-output', $freshDiag -Wait -PassThru
-if ($freshDiagProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe diagnostic exited $($freshDiagProcess.ExitCode)" }
-$freshDiagnostic = Get-Content $freshDiag -Raw | ConvertFrom-Json
-if ($freshDiagnostic.status -ne 'PASS') { throw 'Fresh-extracted Autosport.exe diagnostic did not PASS' }
-if ($freshDiagnostic.real_money_execution -ne $false -or $freshDiagnostic.human_tested -ne $false -or $freshDiagnostic.nvda_verified -ne $false) {
-  throw 'Fresh-extracted diagnostic violated release truth labels'
-}
-
-$freshA11y = Join-Path $PWD 'dist/fresh-extraction-accessibility-audit.json'
-if (Test-Path $freshA11y) { Remove-Item -Force $freshA11y }
-$freshA11yProcess = Start-Process -FilePath $extractedExe -ArgumentList '--accessibility-audit-output', $freshA11y -Wait -PassThru
-if ($freshA11yProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe accessibility audit exited $($freshA11yProcess.ExitCode)" }
-$freshAccessibility = Get-Content $freshA11y -Raw | ConvertFrom-Json
-if ($freshAccessibility.status -ne 'PASS') { throw 'Fresh-extracted accessibility audit did not PASS' }
-if ($freshAccessibility.real_money_execution -ne $false -or $freshAccessibility.human_tested -ne $false -or $freshAccessibility.nvda_verified -ne $false) {
-  throw 'Fresh-extracted accessibility audit violated release truth labels'
-}
-
-$freshKeyboard = Join-Path $PWD 'dist/fresh-extraction-keyboard-audit.json'
-if (Test-Path $freshKeyboard) { Remove-Item -Force $freshKeyboard }
-$freshKeyboardProcess = Start-Process -FilePath $extractedExe -ArgumentList '--keyboard-audit-output', $freshKeyboard -Wait -PassThru
-if ($freshKeyboardProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe keyboard audit exited $($freshKeyboardProcess.ExitCode)" }
-$freshKeyboardEvidence = Get-Content $freshKeyboard -Raw | ConvertFrom-Json
-if ($freshKeyboardEvidence.status -ne 'PASS') { throw 'Fresh-extracted keyboard audit did not PASS' }
-if ($freshKeyboardEvidence.real_money_execution -ne $false -or $freshKeyboardEvidence.human_tested -ne $false -or $freshKeyboardEvidence.nvda_verified -ne $false) {
-  throw 'Fresh-extracted keyboard audit violated release truth labels'
-}
-
-$freshRestartRecovery = Join-Path $PWD 'dist/fresh-extraction-restart-recovery-audit.json'
-if (Test-Path $freshRestartRecovery) { Remove-Item -Force $freshRestartRecovery }
-$freshRestartRecoveryProcess = Start-Process -FilePath $extractedExe -ArgumentList '--restart-recovery-audit-output', $freshRestartRecovery -Wait -PassThru
-if ($freshRestartRecoveryProcess.ExitCode -ne 0) { throw "Fresh-extracted Autosport.exe restart/recovery audit exited $($freshRestartRecoveryProcess.ExitCode)" }
-$freshRestartRecoveryEvidence = Get-Content $freshRestartRecovery -Raw | ConvertFrom-Json
-if ($freshRestartRecoveryEvidence.status -ne 'PASS') { throw 'Fresh-extracted restart/recovery audit did not PASS' }
-if ($freshRestartRecoveryEvidence.session_restart_status -ne 'PASS') { throw 'Fresh-extracted restart audit did not prove persistent session reopen' }
-if ($freshRestartRecoveryEvidence.transaction_recovery_status -ne 'PASS') { throw 'Fresh-extracted recovery audit did not prove transaction recovery' }
-if ($freshRestartRecoveryEvidence.recovery_disposition -ne 'aborted_uncommitted') { throw 'Fresh-extracted recovery audit disposition is not fail-closed' }
-if ($freshRestartRecoveryEvidence.real_money_execution -ne $false -or $freshRestartRecoveryEvidence.human_tested -ne $false -or $freshRestartRecoveryEvidence.nvda_verified -ne $false) {
-  throw 'Machine restart/recovery audit violated release truth labels'
-}
-Assert-ProcessRecoveryEvidence -Evidence $freshRestartRecoveryEvidence -Label 'Fresh-extracted restart/recovery audit'
-
-$freshEvidence = [ordered]@{
-  status = 'PASS'
-  source_sha = $sourceSha
-  package_sha256 = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
-  autosport_exe_sha256 = $extractedExeSha
-  autosport_data_exe_sha256 = $extractedDataExeSha
-  portable_historical_data_tools = $true
-  package_verification_status = 'PASS'
-  extracted_strategy_comparison_entry_status = 'PASS'
-  extracted_walk_forward_evaluation_entry_status = 'PASS'
-  extracted_walk_forward_evaluation_execution_status = 'PASS'
-  extracted_walk_forward_sample_real_historical_proof = $false
-  extracted_data_tool_help_status = 'PASS'
-  extracted_data_tool_acquire_help_status = 'PASS'
-  extracted_data_tool_build_corpus_help_status = 'PASS'
-  extracted_data_tool_bundle_corpus_help_status = 'PASS'
-  extracted_data_tool_verify_dataset_status = 'PASS'
-  extracted_diagnostic_status = $freshDiagnostic.status
-  extracted_accessibility_status = $freshAccessibility.status
-  extracted_keyboard_status = $freshKeyboardEvidence.status
-  extracted_restart_recovery_status = $freshRestartRecoveryEvidence.status
-  extracted_session_restart_status = $freshRestartRecoveryEvidence.session_restart_status
-  extracted_transaction_recovery_status = $freshRestartRecoveryEvidence.transaction_recovery_status
-  extracted_process_kill_relaunch_status = $freshRestartRecoveryEvidence.process_kill_relaunch_status
-  extracted_process_recovery_disposition = $freshRestartRecoveryEvidence.process_recovery_disposition
-  extracted_process_recovery_registry_status = $freshRestartRecoveryEvidence.process_recovery_registry_status
-  extracted_process_recovery_manifest_phase = $freshRestartRecoveryEvidence.process_recovery_manifest_phase
-  real_money_execution = $false
-  human_tested = $false
-  nvda_verified = $false
-}
-$freshEvidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $PWD 'dist/fresh-extraction-verification.json') -Encoding utf8

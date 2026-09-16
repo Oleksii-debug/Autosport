@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal, localcontext
 
 from autosport.strategy_comparison import StrategyRunEvidence
@@ -108,10 +109,10 @@ def _evidence(
 def test_threshold_decision_is_independent_of_ambient_decimal_precision() -> None:
     authority = "owner-authority-v1"
     scientific = _scientific()
-    plan_sha = scientific.binding_sha256
-    champion = CandidateRef("champion", "champion", authority, SHA_A, plan_sha)
-    challenger = CandidateRef("challenger", "challenger", authority, SHA_A, plan_sha)
-    protocol = ChampionChallengerProtocol(
+    bootstrap_sha = scientific.binding_sha256
+    champion = CandidateRef("champion", "champion", authority, SHA_A, bootstrap_sha)
+    challenger = CandidateRef("challenger", "challenger", authority, SHA_A, bootstrap_sha)
+    draft = ChampionChallengerProtocol(
         experiment_id="exp-decimal-context",
         research_question_id=scientific.research_question_id,
         hypothesis_id=scientific.hypothesis_id,
@@ -121,6 +122,14 @@ def test_threshold_decision_is_independent_of_ambient_decimal_precision() -> Non
         cases=(_case(),),
         primary_metric="net_profit",
         minimum_total_improvement=Decimal("0.0000000000000000000000000001"),
+    )
+    plan_sha = draft.promotion_plan_sha256
+    protocol = replace(
+        draft,
+        champion=replace(draft.champion, research_plan_sha256=plan_sha),
+        challengers=(
+            replace(draft.challengers[0], research_plan_sha256=plan_sha),
+        ),
     )
     cells = (
         ExperimentRunCell(
@@ -153,6 +162,7 @@ def test_threshold_decision_is_independent_of_ambient_decimal_precision() -> Non
 
     assert report.decision is ExperimentDecision.CHALLENGER_ELIGIBLE
     assert report.selected_candidate_id == "challenger"
+    assert report.promotion_plan_sha256 == plan_sha
     assert report.aggregate_primary_improvements["challenger"] == Decimal(
         "0.0000000000000000000000000002"
     )

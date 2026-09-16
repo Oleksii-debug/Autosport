@@ -27,10 +27,10 @@ from enum import StrEnum
 
 
 # Statistical feature transforms must not inherit an unrelated caller's
-# Decimal precision or rounding mode. 64 significant digits is the explicit
-# Autosport causal-feature arithmetic contract for non-terminating division
-# and square-root results; exact finite operations remain exact when they fit.
-_CAUSAL_DECIMAL_CONTEXT = Context(prec=64, rounding=ROUND_HALF_EVEN)
+# Decimal precision or rounding mode. 28 significant digits with
+# ROUND_HALF_EVEN preserves Python Decimal's ordinary default arithmetic while
+# making the causal-feature contract explicit and independent of ambient state.
+_CAUSAL_DECIMAL_CONTEXT = Context(prec=28, rounding=ROUND_HALF_EVEN)
 
 
 class CausalFeatureError(ValueError):

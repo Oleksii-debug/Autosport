@@ -102,6 +102,11 @@ def test_packaged_evidence_smoke_preserves_metadata_only_truth_boundary() -> Non
     ):
         assert canonical_name in text
 
+    assert "$expectedManifestKeys = @(" in text
+    assert "manifest fields do not match schema version 1" in text
+    assert "expected fixed evidence paths mismatch" in text
+    assert "missing fixed evidence paths must be empty" in text
+    assert "truth field $field must be exact boolean false" in text
     assert "$expectedFileRecordKeys = @('path', 'sha256', 'size_bytes')" in text
     assert "evidence file record keys mismatch" in text
     assert "evidence file record path must be a string" in text
@@ -119,7 +124,7 @@ def test_packaged_evidence_smoke_preserves_metadata_only_truth_boundary() -> Non
     assert "nvda_verified = $false" in text
 
 
-def test_packaged_evidence_smoke_rejects_content_like_file_record_field() -> None:
+def test_packaged_evidence_smoke_rejects_content_like_manifest_fields() -> None:
     shell = _powershell()
     if shell is None:
         pytest.skip("PowerShell adversarial manifest check is Windows-specific")
@@ -152,42 +157,70 @@ foreach ($name in @('Require-CanonicalHex', 'Assert-EvidenceManifestContract')) 
     Invoke-Expression $definition.Extent.Text
 }
 
-$sha = '0' * 64
-$files = @(
-    [pscustomobject][ordered]@{path='decisions.jsonl'; size_bytes=1; sha256=$sha; content='FORGED-CONTENT'},
-    [pscustomobject][ordered]@{path='paper_book.json'; size_bytes=1; sha256=$sha},
-    [pscustomobject][ordered]@{path='run_registry.json'; size_bytes=1; sha256=$sha},
-    [pscustomobject][ordered]@{path='source_health.json'; size_bytes=1; sha256=$sha}
-)
-$manifest = [pscustomobject][ordered]@{
-    schema_version = 1
-    kind = 'autosport-workspace-evidence-manifest'
-    file_count = 4
-    files = $files
-    fixed_evidence_set_complete = $true
-    run_summary_count = 0
-    file_contents_included = $false
-    market_database_included = $false
-    raw_historical_or_provider_bytes_included = $false
-    environment_or_credential_values_included = $false
-    arbitrary_workspace_files_included = $false
-    real_money_execution = $false
-    manifest_sha256 = $sha
+function New-CanonicalManifest {
+    param([switch]$ExtraFileField, [switch]$ExtraRootField)
+    $sha = '0' * 64
+    if ($ExtraFileField) {
+        $first = [pscustomobject][ordered]@{path='decisions.jsonl'; size_bytes=1; sha256=$sha; content='FORGED-CONTENT'}
+    } else {
+        $first = [pscustomobject][ordered]@{path='decisions.jsonl'; size_bytes=1; sha256=$sha}
+    }
+    $manifest = [pscustomobject][ordered]@{
+        schema_version = 1
+        kind = 'autosport-workspace-evidence-manifest'
+        file_count = 4
+        files = @(
+            $first,
+            [pscustomobject][ordered]@{path='paper_book.json'; size_bytes=1; sha256=$sha},
+            [pscustomobject][ordered]@{path='run_registry.json'; size_bytes=1; sha256=$sha},
+            [pscustomobject][ordered]@{path='source_health.json'; size_bytes=1; sha256=$sha}
+        )
+        expected_fixed_evidence_paths = @('decisions.jsonl', 'paper_book.json', 'run_registry.json', 'source_health.json')
+        missing_fixed_evidence_paths = @()
+        fixed_evidence_set_complete = $true
+        run_summary_count = 0
+        file_contents_included = $false
+        market_database_included = $false
+        raw_historical_or_provider_bytes_included = $false
+        environment_or_credential_values_included = $false
+        arbitrary_workspace_files_included = $false
+        real_money_execution = $false
+        manifest_sha256 = $sha
+    }
+    if ($ExtraRootField) {
+        $manifest | Add-Member -NotePropertyName content -NotePropertyValue 'FORGED-ROOT-CONTENT'
+    }
+    return $manifest
 }
-try {
-    Assert-EvidenceManifestContract `
-        -Manifest $manifest `
-        -RawManifest ($manifest | ConvertTo-Json -Depth 6) `
-        -Label 'Adversarial' `
-        -SecretSentinel 'NOT-PRESENT'
-    Write-Error 'forged content-like file record field was accepted'
-    exit 2
-} catch {
-    if ($_.Exception.Message -notmatch 'evidence file record keys mismatch') {
-        Write-Error $_.Exception.Message
-        exit 3
+
+function Assert-ManifestRejected {
+    param([Parameter(Mandatory = $true)]$Manifest, [Parameter(Mandatory = $true)][string]$ExpectedMessage)
+    $rejected = $false
+    try {
+        Assert-EvidenceManifestContract `
+            -Manifest $Manifest `
+            -RawManifest ($Manifest | ConvertTo-Json -Depth 6) `
+            -Label 'Adversarial' `
+            -SecretSentinel 'NOT-PRESENT'
+    } catch {
+        if ($_.Exception.Message -notmatch $ExpectedMessage) {
+            Write-Error $_.Exception.Message
+            exit 3
+        }
+        $rejected = $true
+    }
+    if (-not $rejected) {
+        Write-Error "forged manifest was accepted; expected: $ExpectedMessage"
+        exit 2
     }
 }
+
+Assert-ManifestRejected `
+    -Manifest (New-CanonicalManifest -ExtraFileField) `
+    -ExpectedMessage 'evidence file record keys mismatch'
+Assert-ManifestRejected `
+    -Manifest (New-CanonicalManifest -ExtraRootField) `
+    -ExpectedMessage 'manifest fields do not match schema version 1'
 """
     subprocess.run(
         [

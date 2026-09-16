@@ -39,10 +39,69 @@ function Assert-EvidenceManifestContract {
         [Parameter(Mandatory = $true)][string]$SecretSentinel
     )
 
-    if ($Manifest.schema_version -ne 1) { throw "$Label manifest schema_version mismatch" }
-    if ($Manifest.kind -ne 'autosport-workspace-evidence-manifest') { throw "$Label manifest kind mismatch" }
-    if ($Manifest.fixed_evidence_set_complete -ne $true) { throw "$Label fixed evidence set is incomplete" }
-    if ($Manifest.run_summary_count -ne 0) { throw "$Label unexpected run summary count" }
+    $expectedPaths = @('decisions.jsonl', 'paper_book.json', 'run_registry.json', 'source_health.json')
+    $expectedManifestKeys = @(
+        'schema_version',
+        'kind',
+        'file_count',
+        'files',
+        'expected_fixed_evidence_paths',
+        'missing_fixed_evidence_paths',
+        'fixed_evidence_set_complete',
+        'run_summary_count',
+        'file_contents_included',
+        'market_database_included',
+        'raw_historical_or_provider_bytes_included',
+        'environment_or_credential_values_included',
+        'arbitrary_workspace_files_included',
+        'real_money_execution',
+        'manifest_sha256'
+    )
+    $actualManifestKeys = @($Manifest.PSObject.Properties.Name)
+    if (
+        $actualManifestKeys.Count -ne $expectedManifestKeys.Count -or
+        (Compare-Object -ReferenceObject $expectedManifestKeys -DifferenceObject $actualManifestKeys)
+    ) {
+        throw "$Label manifest fields do not match schema version 1"
+    }
+
+    if ((($Manifest.schema_version -isnot [int]) -and ($Manifest.schema_version -isnot [long])) -or $Manifest.schema_version -ne 1) {
+        throw "$Label manifest schema_version must be exact integer 1"
+    }
+    if (($Manifest.kind -isnot [string]) -or $Manifest.kind -ne 'autosport-workspace-evidence-manifest') {
+        throw "$Label manifest kind mismatch"
+    }
+    if (($Manifest.file_count -isnot [int]) -and ($Manifest.file_count -isnot [long])) {
+        throw "$Label manifest file_count must be an integer"
+    }
+    if ([long]$Manifest.file_count -ne $expectedPaths.Count) {
+        throw "$Label canonical evidence file count mismatch"
+    }
+    if ($Manifest.files -isnot [System.Array]) {
+        throw "$Label manifest files must be an array"
+    }
+    if ($Manifest.expected_fixed_evidence_paths -isnot [System.Array]) {
+        throw "$Label expected fixed evidence paths must be an array"
+    }
+    $manifestExpectedPaths = @($Manifest.expected_fixed_evidence_paths)
+    if (
+        $manifestExpectedPaths.Count -ne $expectedPaths.Count -or
+        ($manifestExpectedPaths -join "`n") -ne ($expectedPaths -join "`n")
+    ) {
+        throw "$Label expected fixed evidence paths mismatch"
+    }
+    if ($Manifest.missing_fixed_evidence_paths -isnot [System.Array]) {
+        throw "$Label missing fixed evidence paths must be an array"
+    }
+    if (@($Manifest.missing_fixed_evidence_paths).Count -ne 0) {
+        throw "$Label missing fixed evidence paths must be empty"
+    }
+    if (($Manifest.fixed_evidence_set_complete -isnot [bool]) -or (-not $Manifest.fixed_evidence_set_complete)) {
+        throw "$Label fixed evidence set is incomplete"
+    }
+    if ((($Manifest.run_summary_count -isnot [int]) -and ($Manifest.run_summary_count -isnot [long])) -or $Manifest.run_summary_count -ne 0) {
+        throw "$Label unexpected run summary count"
+    }
 
     foreach ($field in @(
         'file_contents_included',
@@ -52,20 +111,22 @@ function Assert-EvidenceManifestContract {
         'arbitrary_workspace_files_included',
         'real_money_execution'
     )) {
-        if ($Manifest.$field -ne $false) { throw "$Label truth field $field must remain false" }
+        $truthValue = $Manifest.$field
+        if (($truthValue -isnot [bool]) -or $truthValue) {
+            throw "$Label truth field $field must be exact boolean false"
+        }
     }
 
-    $expectedPaths = @('decisions.jsonl', 'paper_book.json', 'run_registry.json', 'source_health.json')
-    $expectedFileRecordKeys = @('path', 'sha256', 'size_bytes')
+    $expectedFileRecordKeys = @('path', 'size_bytes', 'sha256')
     $actualPaths = @()
     foreach ($record in @($Manifest.files)) {
         if ($null -eq $record) {
             throw "$Label evidence file record is missing"
         }
-        $actualFileRecordKeys = @($record.PSObject.Properties.Name | Sort-Object)
+        $actualFileRecordKeys = @($record.PSObject.Properties.Name)
         if (
             $actualFileRecordKeys.Count -ne $expectedFileRecordKeys.Count -or
-            ($actualFileRecordKeys -join "`n") -ne ($expectedFileRecordKeys -join "`n")
+            (Compare-Object -ReferenceObject $expectedFileRecordKeys -DifferenceObject $actualFileRecordKeys)
         ) {
             throw "$Label evidence file record keys mismatch"
         }
@@ -84,7 +145,7 @@ function Assert-EvidenceManifestContract {
         $actualPaths += $record.path
     }
 
-    if ($Manifest.file_count -ne $expectedPaths.Count -or $actualPaths.Count -ne $expectedPaths.Count) {
+    if ($actualPaths.Count -ne $expectedPaths.Count) {
         throw "$Label canonical evidence file count mismatch"
     }
     if (($actualPaths -join "`n") -ne ($expectedPaths -join "`n")) {

@@ -256,7 +256,7 @@ def test_parent_plan_id_is_foreign_authority_reference_not_content_fingerprint()
     [
         (RoutingState.ROUTE, "10.00", "0", False),
         (RoutingState.PARTIAL, "10.00", "10.00", True),
-        (RoutingState.UNEXECUTABLE, "10.00", "1.00", True),
+        (RoutingState.UNEXECUTABLE, "10.00", "10.00", True),
     ],
 )
 def test_direct_proposal_construction_rejects_contradictory_state_authority(

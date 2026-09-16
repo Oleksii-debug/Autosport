@@ -84,10 +84,9 @@ def test_critical_gui_catalog_is_complete_and_ukrainian_first() -> None:
 
 
 def test_localized_combo_labels_keep_typed_semantic_payloads_stable() -> None:
-    # The localization layer owns only display text. The typed values below remain
-    # the semantic authority consumed by replay/live code.
-    assert set(_SPEEDS.values()) == {0.0, 1.0, 10.0, 100.0, 1000.0}
-    assert set(_LIVE_MODES.values()) == {True, False}
+    # Localization owns display text only. Typed values remain semantic authority.
+    assert list(_SPEEDS.values()) == [0.0, 1.0, 10.0, 100.0, 1000.0]
+    assert list(_LIVE_MODES.values()) == [True, False]
     assert set(_STRATEGY_CHOICES.values()) == {
         "baseline-v1",
         "observe-only-v1",
@@ -96,17 +95,19 @@ def test_localized_combo_labels_keep_typed_semantic_payloads_stable() -> None:
     for display, strategy_id in _STRATEGY_CHOICES.items():
         assert strategy_id_from_display(display) == strategy_id
 
-    assert {
+    localized_speeds = {
         text("ui.speed.event_driven"): 0.0,
         text("ui.speed.realtime"): 1.0,
         text("ui.speed.10x"): 10.0,
         text("ui.speed.100x"): 100.0,
         text("ui.speed.1000x"): 1000.0,
-    }.values() == _SPEEDS.values()
-    assert {
+    }
+    localized_live_modes = {
         text("ui.live_mode.public_preview"): True,
         text("ui.live_mode.api_key"): False,
-    }.values() == _LIVE_MODES.values()
+    }
+    assert list(localized_speeds.values()) == list(_SPEEDS.values())
+    assert list(localized_live_modes.values()) == list(_LIVE_MODES.values())
 
 
 def test_accessibility_ids_and_keyboard_bindings_are_identity_fences() -> None:

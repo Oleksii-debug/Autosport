@@ -69,8 +69,12 @@ def _market_price_truth_line(result: SessionResult) -> str:
     except ValueError as exc:
         return text("ui.price_truth.error.explicit", detail=exc)
 
-    executable = str(truth.executable_quote_verified).lower()
-    fill_fidelity = str(truth.paper_fill_fidelity_verified).lower()
+    executable = text(
+        "ui.boolean.true" if truth.executable_quote_verified else "ui.boolean.false"
+    )
+    fill_fidelity = text(
+        "ui.boolean.true" if truth.paper_fill_fidelity_verified else "ui.boolean.false"
+    )
     if "last_traded" in truth.price_semantics:
         return text(
             "ui.price_truth.betfair_last_traded",
@@ -150,7 +154,11 @@ def ticket_lines(session) -> list[str]:
 
 
 def observation_summary(result: ObservationResult) -> str:
-    flags = ", ".join(result.stats.quality_flags) if result.stats.quality_flags else text("ui.observation.no_flags")
+    flags = (
+        ", ".join(result.stats.quality_flags)
+        if result.stats.quality_flags
+        else text("ui.observation.no_flags")
+    )
     return text(
         "ui.observation.summary",
         source_id=result.stats.source_id,

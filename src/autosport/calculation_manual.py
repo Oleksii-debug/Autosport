@@ -97,7 +97,9 @@ class ManualCalculationService:
             _validate_input_boundary_limits(input_boundary)
         self._engine = engine if engine is not None else CalculationEngine()
         self._input = (
-            input_boundary if input_boundary is not None else MANUAL_CALCULATION_INPUT
+            CalculationInputBoundary(input_boundary.limits)
+            if input_boundary is not None
+            else MANUAL_CALCULATION_INPUT
         )
 
     def odds_conversion(self, decimal_odds: object) -> ManualCalculationEvidence:
@@ -359,12 +361,19 @@ def _validate_input_boundary_limits(boundary: CalculationInputBoundary) -> None:
 def _validate_calculation_result(result: object) -> None:
     if type(result) is not CalculationResult:
         raise ValueError("result must be a CalculationResult")
-    if result.version != _CALCULATION_VERSION:
+    if type(result.version) is not int or result.version != _CALCULATION_VERSION:
         raise ValueError("calculation result version is not canonical")
-    if result.engine_version != _ENGINE_VERSION:
+    if type(result.engine_version) is not str or result.engine_version != _ENGINE_VERSION:
         raise ValueError("calculation result engine_version is not canonical")
-    if result.classification not in {"exact", "approximate_decimal"}:
+    if type(result.classification) is not str or result.classification not in {
+        "exact",
+        "approximate_decimal",
+    }:
         raise ValueError("calculation result classification is not canonical")
+    if type(result.input_hash) is not str:
+        raise ValueError("calculation result input_hash must be a string")
+    if type(result.result_hash) is not str:
+        raise ValueError("calculation result result_hash must be a string")
 
     inputs = _validate_pairs(result.inputs, field="inputs")
     input_units = _validate_pairs(result.input_units, field="input_units")

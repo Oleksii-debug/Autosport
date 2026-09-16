@@ -191,7 +191,11 @@ def economic_goal_from_payload(payload: object) -> EconomicGoalContract:
     if root["schema"] != ECONOMIC_GOAL_SCHEMA:
         raise EconomicGoalContractError("unsupported economic goal schema")
     version = root["schema_version"]
-    if isinstance(version, bool) or version != ECONOMIC_GOAL_SCHEMA_VERSION:
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != ECONOMIC_GOAL_SCHEMA_VERSION
+    ):
         raise EconomicGoalContractError("unsupported economic goal schema_version")
 
     raw_contract = root["contract"]

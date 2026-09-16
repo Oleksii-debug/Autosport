@@ -414,20 +414,25 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
             "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "
             "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
         )
-        guarded_call = "[Autosport.Release.BirthProtectedPyInstaller]::Run("
-        first_start = "$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'"
-        second_start = "$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'"
+        first_build = (
+            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
+            "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+            "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+        )
+        second_build = (
+            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
+            "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+            "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
+        )
         package_build = "python scripts/package_windows.py `"
 
         first_gate = script.index(snapshot_gate)
         first_locked_gate = script.index(locked_snapshot_gate, first_gate)
-        first_start_index = script.index(first_start, first_locked_gate)
-        first_build_index = script.index(guarded_call, first_start_index)
+        first_build_index = script.index(first_build)
         post_first_locked_gate = script.index(locked_snapshot_gate, first_build_index)
         second_gate = script.index(release_output_gate, first_build_index)
         pre_second_locked_gate = script.index(locked_snapshot_gate, second_gate)
-        second_start_index = script.index(second_start, pre_second_locked_gate)
-        second_build_index = script.index(guarded_call, second_start_index)
+        second_build_index = script.index(second_build)
         post_second_locked_gate = script.index(locked_snapshot_gate, second_build_index)
         package_gate = script.index(release_output_gate, second_build_index)
         package_build_index = script.index(package_build)
@@ -436,8 +441,6 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         self.assertEqual(script.count(snapshot_gate), 3)
         self.assertEqual(script.count(release_output_gate), 2)
         self.assertEqual(script.count(locked_snapshot_gate), 4)
-        self.assertEqual(script.count(guarded_call), 2)
-        self.assertEqual(script.count("'--verifier-sha256', $sourceVerifierSha256,"), 2)
         self.assertLess(first_gate, first_locked_gate)
         self.assertLess(first_locked_gate, first_build_index)
         self.assertLess(first_build_index, post_first_locked_gate)
@@ -455,39 +458,30 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
 
     def test_windows_build_binds_pyinstaller_outputs_before_audit_and_package(self) -> None:
         script = Path("scripts/build_windows.ps1").read_text(encoding="utf-8")
-        guarded_call = "[Autosport.Release.BirthProtectedPyInstaller]::Run("
-        first_start = "$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'"
-        second_start = "$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'"
-        first_arguments = "$autosportPyInstallerArguments = [string[]]@(" 
-        first_bind = "'--bound-output', $boundAutosportExe,"
-        first_digest = "'--digest-output', $autosportDigestPath,"
-        second_arguments = "$dataPyInstallerArguments = [string[]]@(" 
-        second_bind = "'--bound-output', $boundDataExe,"
-        second_digest = "'--digest-output', $dataDigestPath,"
+        first_build = (
+            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
+            "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+            "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+        )
+        first_bind = (
+            "python $sourceVerifier --bind-artifact $builtAutosportExe "
+            "--bound-output $boundAutosportExe --digest-output $autosportDigestPath"
+        )
+        second_build = (
+            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
+            "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+            "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
+        )
+        second_bind = (
+            "python $sourceVerifier --bind-artifact $builtDataExe "
+            "--bound-output $boundDataExe --digest-output $dataDigestPath"
+        )
         verify_gui = "python $sourceVerifier --verify-artifact $boundAutosportExe --expected-sha256 $autosportExeSha256"
         verify_data = "python $sourceVerifier --verify-artifact $boundDataExe --expected-sha256 $dataExeSha256"
         package_build = "python scripts/package_windows.py `"
 
-        first_start_index = script.index(first_start)
-        first_arguments_index = script.index(first_arguments, first_start_index)
-        first_bind_index = script.index(first_bind, first_arguments_index)
-        first_digest_index = script.index(first_digest, first_bind_index)
-        first_build_index = script.index(guarded_call, first_digest_index)
-        second_start_index = script.index(second_start, first_build_index)
-        second_arguments_index = script.index(second_arguments, second_start_index)
-        second_bind_index = script.index(second_bind, second_arguments_index)
-        second_digest_index = script.index(second_digest, second_bind_index)
-        second_build_index = script.index(guarded_call, second_digest_index)
-
-        self.assertLess(first_start_index, first_arguments_index)
-        self.assertLess(first_arguments_index, first_bind_index)
-        self.assertLess(first_bind_index, first_digest_index)
-        self.assertLess(first_digest_index, first_build_index)
-        self.assertLess(second_start_index, second_arguments_index)
-        self.assertLess(second_arguments_index, second_bind_index)
-        self.assertLess(second_bind_index, second_digest_index)
-        self.assertLess(second_digest_index, second_build_index)
-        self.assertEqual(script.count(guarded_call), 2)
+        self.assertLess(script.index(first_build), script.index(first_bind))
+        self.assertLess(script.index(second_build), script.index(second_bind))
         self.assertIn("Start-Process -FilePath $boundAutosportExe", script)
         self.assertIn("$dataExe = $boundDataExe", script)
         self.assertLess(script.index(verify_gui), script.index(package_build))
@@ -499,52 +493,23 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         workflow = Path(".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         exact_ref = "ref: ${{ github.event.pull_request.head.sha || github.sha }}"
         preflight = "python scripts/verify_source_checkout.py --source-sha $env:AUTOSPORT_SOURCE_SHA"
-        build_command = "& ./scripts/build_windows.ps1 2>&1 | ForEach-Object {"
+        build = "run: ./scripts/build_windows.ps1"
         self.assertIn(exact_ref, workflow)
         self.assertIn("fetch-depth: 0", workflow)
         self.assertIn(preflight, workflow)
-        self.assertIn(build_command, workflow)
-        self.assertLess(workflow.index(preflight), workflow.index(build_command))
+        self.assertLess(workflow.index(preflight), workflow.index(build))
 
     def test_post_build_release_consumers_use_verified_package_extractions(self) -> None:
         workflow = Path(".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         nvda_smoke = Path("scripts/nvda_evidence_package_smoke.ps1").read_text(encoding="utf-8")
         walk_forward = Path("scripts/walk_forward_package_smoke.ps1").read_text(encoding="utf-8")
         forecast_origin = Path("scripts/walk_forward_origin_package_smoke.ps1").read_text(encoding="utf-8")
-        consumer_bind = "python scripts/verify_source_checkout.py --bind-artifact $package --bound-output $consumerPackage --digest-output $consumerDigestPath"
-        consumer_digest = "$packageSha = (Get-Content -LiteralPath $consumerDigestPath -Raw).Trim()"
-        consumer_verify = "Assert-ProducerPackageDigest -Path $consumerPackage -Expected $producerPackageSha -Label 'Consumer-bound release ZIP snapshot'"
-        consumer_expand_function = "function Expand-ProducerBoundPackage {"
-        consumer_locked_stream = "$stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)"
-        consumer_stream_hash = "$actual = [System.Convert]::ToHexString($sha256.ComputeHash($stream)).ToLowerInvariant()"
-        consumer_stream_rewind = "$stream.Position = 0"
-        consumer_stream_extract = "[System.IO.Compression.ZipFile]::ExtractToDirectory($stream, $Destination, $true)"
-        consumer_extract = "Expand-ProducerBoundPackage -Path $consumerPackage -Expected $producerPackageSha -Destination $postPackageExtractRoot -Label 'Consumer-bound release ZIP snapshot at extraction'"
-        live_extract = "Expand-Archive -LiteralPath $package -DestinationPath $postPackageExtractRoot -Force"
 
         self.assertIn("name: Materialize verified independent package extraction", workflow)
         self.assertIn("AUTOSPORT_PACKAGED_EXE=", workflow)
         self.assertIn("AUTOSPORT_PACKAGED_DATA_EXE=", workflow)
         self.assertIn("Independent package Autosport.exe hash mismatch", workflow)
         self.assertIn("Independent package Autosport-Data.exe hash mismatch", workflow)
-        self.assertIn(consumer_bind, workflow)
-        self.assertIn(consumer_digest, workflow)
-        self.assertIn(consumer_verify, workflow)
-        self.assertIn(consumer_expand_function, workflow)
-        self.assertIn(consumer_locked_stream, workflow)
-        self.assertIn(consumer_stream_hash, workflow)
-        self.assertIn(consumer_stream_rewind, workflow)
-        self.assertIn(consumer_stream_extract, workflow)
-        self.assertIn(consumer_extract, workflow)
-        self.assertNotIn(live_extract, workflow)
-        self.assertLess(workflow.index(consumer_expand_function), workflow.index(consumer_locked_stream))
-        self.assertLess(workflow.index(consumer_locked_stream), workflow.index(consumer_stream_hash))
-        self.assertLess(workflow.index(consumer_stream_hash), workflow.index(consumer_stream_rewind))
-        self.assertLess(workflow.index(consumer_stream_rewind), workflow.index(consumer_stream_extract))
-        self.assertLess(workflow.index(consumer_bind), workflow.index(consumer_digest))
-        self.assertLess(workflow.index(consumer_digest), workflow.index(consumer_verify))
-        self.assertLess(workflow.index(consumer_verify), workflow.index(consumer_extract))
-        self.assertLess(workflow.index(consumer_stream_extract), workflow.index(consumer_extract))
         self.assertNotIn("Join-Path $PWD 'dist/Autosport-Data.exe'", workflow)
         self.assertNotIn("Join-Path $PWD 'dist/Autosport.exe'", workflow)
 

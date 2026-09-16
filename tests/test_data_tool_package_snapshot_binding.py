@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import tempfile
 import unittest
@@ -103,11 +102,6 @@ class PortableDataToolSnapshotBindingTests(unittest.TestCase):
             # A is now self-inconsistent: payload bytes changed without updating its
             # manifest/sums.  B remains a fully valid package with the same source SHA.
             self._rewrite_start_without_rehashing(package)
-            expected_base_package_sha256 = hashlib.sha256(package.read_bytes()).hexdigest()
-            with zipfile.ZipFile(package, "r") as archive:
-                expected_autosport_exe_sha256 = hashlib.sha256(
-                    archive.read("Autosport-V1/Autosport.exe")
-                ).hexdigest()
             with self.assertRaisesRegex(ValueError, "hash mismatch: WINDOWS_START_HERE.txt"):
                 verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
             self.assertEqual(
@@ -132,12 +126,7 @@ class PortableDataToolSnapshotBindingTests(unittest.TestCase):
                     ValueError,
                     "hash mismatch: WINDOWS_START_HERE.txt",
                 ):
-                    data_tool_package.bind_portable_data_tool(
-                        package,
-                        data_exe,
-                        expected_base_package_sha256=expected_base_package_sha256,
-                        expected_autosport_exe_sha256=expected_autosport_exe_sha256,
-                    )
+                    data_tool_package.bind_portable_data_tool(package, data_exe)
 
             # The adversary's valid B replacement remains untouched by the rejected
             # bind. In particular, the binder did not repackage invalid captured A

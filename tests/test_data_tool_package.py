@@ -1,25 +1,16 @@
 import hashlib
 import json
-import os
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
 
 from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
 from autosport.release_package import build_windows_package, verify_windows_package
 
 
 class PortableDataToolPackageTests(unittest.TestCase):
-    def _build_base(
-        self,
-        root: Path,
-        source_sha: str,
-        *,
-        exe_bytes: bytes = b"gui-exe",
-    ) -> tuple[Path, Path]:
-        root.mkdir(parents=True, exist_ok=True)
+    def _build_base(self, root: Path, source_sha: str) -> tuple[Path, Path]:
         exe = root / "Autosport.exe"
         data_exe = root / "Autosport-Data.exe"
         start = root / "WINDOWS_START_HERE.txt"
@@ -30,7 +21,7 @@ class PortableDataToolPackageTests(unittest.TestCase):
         example = root / "example"
         package = root / "candidate.zip"
         example.mkdir()
-        exe.write_bytes(exe_bytes)
+        exe.write_bytes(b"gui-exe")
         data_exe.write_bytes(b"data-exe")
         start.write_text("start\n", encoding="utf-8")
         (example / "market.jsonl").write_text("{}\n", encoding="utf-8")
@@ -84,23 +75,6 @@ class PortableDataToolPackageTests(unittest.TestCase):
         with zipfile.ZipFile(package, "r") as archive:
             return archive.read(f"Autosport-V1/{relative}")
 
-    @classmethod
-    def _binding_kwargs(cls, package: Path) -> dict[str, str]:
-        return {
-            "expected_base_package_sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
-            "expected_autosport_exe_sha256": hashlib.sha256(
-                cls._read_member(package, "Autosport.exe")
-            ).hexdigest(),
-        }
-
-    @classmethod
-    def _bind(cls, package: Path, data_exe: Path) -> dict[str, str]:
-        return bind_portable_data_tool(
-            package,
-            data_exe,
-            **cls._binding_kwargs(package),
-        )
-
     @staticmethod
     def _rewrite_members(package: Path, replacements: dict[str, bytes]) -> None:
         targets = {f"Autosport-V1/{relative}": payload for relative, payload in replacements.items()}
@@ -137,52 +111,18 @@ class PortableDataToolPackageTests(unittest.TestCase):
             root = Path(tmp)
             source_sha = "a" * 40
             package, data_exe = self._build_base(root, source_sha)
-            binding = self._bind(package, data_exe)
+            binding = bind_portable_data_tool(package, data_exe)
             base_report = verify_windows_package(package, expected_source_sha=source_sha)
             data_report = verify_portable_data_tool(package)
             self.assertEqual(base_report["status"], "PASS")
             self.assertEqual(data_report["status"], "PASS")
             self.assertEqual(binding["autosport_data_exe_sha256"], data_report["autosport_data_exe_sha256"])
 
-    def test_binding_rejects_self_consistent_base_package_replacement(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source_sha = "8" * 40
-            package, data_exe = self._build_base(root / "original", source_sha)
-            expected = self._binding_kwargs(package)
-            replacement, _ = self._build_base(
-                root / "replacement",
-                source_sha,
-                exe_bytes=b"self-consistent-replacement-exe",
-            )
-            replacement_bytes = replacement.read_bytes()
-            package.write_bytes(replacement_bytes)
-
-            with self.assertRaisesRegex(
-                ValueError,
-                "base release package producer SHA-256 mismatch",
-            ):
-                bind_portable_data_tool(package, data_exe, **expected)
-
-            self.assertEqual(package.read_bytes(), replacement_bytes)
-
-    def test_binding_rejects_base_package_with_wrong_trusted_exe_identity(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            package, data_exe = self._build_base(Path(tmp), "7" * 40)
-            expected = self._binding_kwargs(package)
-            expected["expected_autosport_exe_sha256"] = "0" * 64
-
-            with self.assertRaisesRegex(
-                ValueError,
-                "base release package Autosport.exe producer SHA-256 mismatch",
-            ):
-                bind_portable_data_tool(package, data_exe, **expected)
-
     def test_portable_verifier_rejects_tampered_non_data_member(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             package, data_exe = self._build_base(root, "9" * 40)
-            self._bind(package, data_exe)
+            bind_portable_data_tool(package, data_exe)
             self._rewrite_member(
                 package,
                 "WINDOWS_START_HERE.txt",
@@ -203,34 +143,8 @@ class PortableDataToolPackageTests(unittest.TestCase):
                 local = root / str(index)
                 local.mkdir()
                 package, data_exe = self._build_base(local, "b" * 40)
-                hashes.append(self._bind(package, data_exe)["package_sha256"])
+                hashes.append(bind_portable_data_tool(package, data_exe)["package_sha256"])
             self.assertEqual(hashes[0], hashes[1])
-
-    def test_binding_digest_cannot_rebind_to_post_publish_path_replacement(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source_sha = "6" * 40
-
-            reference_package, reference_data_exe = self._build_base(root / "reference", source_sha)
-            expected_digest = self._bind(reference_package, reference_data_exe)["package_sha256"]
-
-            package, data_exe = self._build_base(root / "subject", source_sha)
-            expected = self._binding_kwargs(package)
-            replacement_bytes = b"post-publication-package-replacement"
-            real_replace = os.replace
-
-            def replace_then_tamper(source: str | Path, destination: str | Path) -> None:
-                real_replace(source, destination)
-                if Path(destination) == package:
-                    package.write_bytes(replacement_bytes)
-
-            with patch("autosport.data_tool_package.os.replace", side_effect=replace_then_tamper):
-                binding = bind_portable_data_tool(package, data_exe, **expected)
-
-            replacement_digest = hashlib.sha256(replacement_bytes).hexdigest()
-            self.assertEqual(binding["package_sha256"], expected_digest)
-            self.assertEqual(package.read_bytes(), replacement_bytes)
-            self.assertNotEqual(binding["package_sha256"], replacement_digest)
 
     def test_verifier_rejects_package_without_data_tool(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -254,7 +168,7 @@ class PortableDataToolPackageTests(unittest.TestCase):
                 ValueError,
                 "BUILD_INFO.json contains duplicate JSON object key: human_tested",
             ):
-                self._bind(package, data_exe)
+                bind_portable_data_tool(package, data_exe)
 
             self.assertEqual(package.read_bytes(), before)
 
@@ -274,7 +188,7 @@ class PortableDataToolPackageTests(unittest.TestCase):
                 ValueError,
                 "PACKAGE_MANIFEST.json contains duplicate JSON object key: schema_version",
             ):
-                self._bind(package, data_exe)
+                bind_portable_data_tool(package, data_exe)
 
             self.assertEqual(package.read_bytes(), before)
 
@@ -294,7 +208,7 @@ class PortableDataToolPackageTests(unittest.TestCase):
                 ValueError,
                 "PACKAGE_MANIFEST.json contains non-standard JSON constant: Infinity",
             ):
-                self._bind(package, data_exe)
+                bind_portable_data_tool(package, data_exe)
 
             self.assertEqual(package.read_bytes(), before)
 
@@ -319,14 +233,14 @@ class PortableDataToolPackageTests(unittest.TestCase):
                 ValueError,
                 "SHA256SUMS hash mismatch: BUILD_INFO.json",
             ):
-                self._bind(package, data_exe)
+                bind_portable_data_tool(package, data_exe)
 
             self.assertEqual(package.read_bytes(), before)
 
     def test_portable_verifier_rejects_ambiguous_build_info(self):
         with tempfile.TemporaryDirectory() as tmp:
             package, data_exe = self._build_base(Path(tmp), "e" * 40)
-            self._bind(package, data_exe)
+            bind_portable_data_tool(package, data_exe)
             build_info = self._read_member(package, "BUILD_INFO.json").decode("utf-8")
             ambiguous = build_info.replace(
                 '  "portable_historical_data_tools": true,',

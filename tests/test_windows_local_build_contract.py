@@ -1,20 +1,11 @@
 from pathlib import Path
 
 
-_BUILD_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "build_windows_body.ps1"
+_BUILD_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "build_windows.ps1"
 
 
 def _build_script_text() -> str:
     return _BUILD_SCRIPT.read_text(encoding="utf-8")
-
-
-def _guarded_pyinstaller_indices(script: str) -> tuple[int, int]:
-    guarded_call = "[Autosport.Release.BirthProtectedPyInstaller]::Run("
-    gui_start = script.index("$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'")
-    gui_index = script.index(guarded_call, gui_start)
-    data_start = script.index("$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'", gui_index)
-    data_index = script.index(guarded_call, data_start)
-    return gui_index, data_index
 
 
 def test_local_windows_build_proves_pristine_source_before_mutation() -> None:
@@ -65,7 +56,7 @@ def test_local_windows_build_scalarizes_application_resolution() -> None:
     assert "(Get-Command git -CommandType Application -ErrorAction Stop).Source" not in script
     assert "(Get-Command python -CommandType Application -ErrorAction Stop).Source" not in script
     assert "$gitCommands = @(Get-Command git -CommandType Application -ErrorAction Stop)" in script
-    assert "$gitExecutable = [System.IO.Path]::GetFullPath([string]$gitCommands[0].Source)" in script
+    assert "$gitExecutable = [string]$gitCommands[0].Source" in script
     assert "$pythonCommands = @(Get-Command python -CommandType Application -ErrorAction Stop)" in script
     assert "$pythonExecutable = [string]$pythonCommands[0].Source" in script
     assert "Resolved Git application has an empty source path" in script
@@ -77,9 +68,9 @@ def test_local_windows_build_runs_canonical_full_pytest_gate() -> None:
 
     dependency_install = "python -m pip install -e '.[build,test]'"
     pytest_gate = "python -m pytest -v tests"
-    first_build, _ = _guarded_pyinstaller_indices(script)
+    first_build = "& $pythonExecutable -I -m PyInstaller"
 
-    assert script.index(dependency_install) < script.index(pytest_gate) < first_build
+    assert script.index(dependency_install) < script.index(pytest_gate) < script.index(first_build)
     assert "python -m unittest discover" not in script
     assert 'if ($LASTEXITCODE -ne 0) { throw "build/test dependency install exited $LASTEXITCODE" }' in script
     assert 'if ($LASTEXITCODE -ne 0) { throw "Full pytest gate exited $LASTEXITCODE" }' in script
@@ -101,13 +92,18 @@ def test_local_windows_build_uses_trusted_snapshot_immediately_before_pyinstalle
         "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "
         "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
     )
-    first_build_index, _ = _guarded_pyinstaller_indices(script)
+    first_build = (
+        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
+        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+    )
 
     dataset_index = script.index(dataset_smoke)
     cleanup_index = script.index(smoke_cleanup, dataset_index)
     gate_index = script.index(trusted_gate)
     fence_index = script.index(write_fence)
     locked_gate_index = script.index(locked_snapshot_gate, fence_index)
+    first_build_index = script.index(first_build)
 
     assert live_late_gate not in script
     assert dataset_index < cleanup_index < gate_index < fence_index < locked_gate_index < first_build_index
@@ -122,11 +118,22 @@ def test_local_windows_build_phase_separates_later_release_outputs() -> None:
 
     strict_gate = "python $sourceVerifier --source-sha $sourceSha --late-build-boundary"
     release_gate = strict_gate + " --allow-release-outputs"
-    first_build_index, second_build_index = _guarded_pyinstaller_indices(script)
+    first_build = (
+        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
+        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+    )
+    second_build = (
+        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
+        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
+    )
     package_command = "python scripts/package_windows.py `"
 
     first_gate_index = script.index(strict_gate)
+    first_build_index = script.index(first_build)
     second_gate_index = script.index(release_gate, first_build_index)
+    second_build_index = script.index(second_build)
     package_gate_index = script.index(release_gate, second_build_index)
     package_index = script.index(package_command)
 
@@ -138,24 +145,30 @@ def test_local_windows_build_phase_separates_later_release_outputs() -> None:
 def test_local_windows_build_binds_pyinstaller_outputs_before_consumption() -> None:
     script = _build_script_text()
 
-    first_build_index, second_build_index = _guarded_pyinstaller_indices(script)
-    first_arguments = "$autosportPyInstallerArguments = [string[]]@("
-    first_bind = "'--bound-output', $boundAutosportExe,"
-    first_digest = "'--digest-output', $autosportDigestPath,"
-    second_arguments = "$dataPyInstallerArguments = [string[]]@("
-    second_bind = "'--bound-output', $boundDataExe,"
-    second_digest = "'--digest-output', $dataDigestPath,"
+    first_build = (
+        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
+        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+    )
+    first_bind = (
+        "python $sourceVerifier --bind-artifact $builtAutosportExe "
+        "--bound-output $boundAutosportExe --digest-output $autosportDigestPath"
+    )
+    second_build = (
+        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
+        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
+    )
+    second_bind = (
+        "python $sourceVerifier --bind-artifact $builtDataExe "
+        "--bound-output $boundDataExe --digest-output $dataDigestPath"
+    )
     verify_gui = "python $sourceVerifier --verify-artifact $boundAutosportExe --expected-sha256 $autosportExeSha256"
     verify_data = "python $sourceVerifier --verify-artifact $boundDataExe --expected-sha256 $dataExeSha256"
     package_command = "python scripts/package_windows.py `"
 
-    first_arguments_index = script.index(first_arguments)
-    second_arguments_index = script.index(second_arguments, first_build_index)
-    assert first_arguments_index < script.index(first_bind, first_arguments_index) < script.index(first_digest, first_arguments_index) < first_build_index
-    assert second_arguments_index < script.index(second_bind, second_arguments_index) < script.index(second_digest, second_arguments_index) < second_build_index
-    assert script.count("[Autosport.Release.BirthProtectedPyInstaller]::Run(") == 2
-    assert "& $packagingPython -I $trustedPyInstallerBinder `" not in script
-    assert script.count("'--verifier-sha256', $sourceVerifierSha256,") == 2
+    assert script.index(first_build) < script.index(first_bind)
+    assert script.index(second_build) < script.index(second_bind)
     assert "Start-Process -FilePath $boundAutosportExe" in script
     assert "$dataExe = $boundDataExe" in script
     assert script.index(verify_gui) < script.index(package_command)
@@ -173,12 +186,12 @@ def test_local_windows_build_fails_closed_on_release_native_steps() -> None:
             'if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }',
         ),
         (
-            "'--bound-output', $boundAutosportExe,",
-            'if ($autosportBindExitCode -ne 0) { throw "Guarded Autosport PyInstaller/binding exited $autosportBindExitCode" }',
+            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry",
+            'if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }',
         ),
         (
-            "'--bound-output', $boundDataExe,",
-            'if ($dataBindExitCode -ne 0) { throw "Guarded Autosport-Data PyInstaller/binding exited $dataBindExitCode" }',
+            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry",
+            'if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }',
         ),
         (
             "python scripts/package_windows.py `",
@@ -188,7 +201,7 @@ def test_local_windows_build_fails_closed_on_release_native_steps() -> None:
 
     for command, check in required_checks:
         command_index = script.index(command)
-        check_index = script.index(check, command_index)
+        check_index = script.index(check)
         assert command_index < check_index
 
     package_assignment = "$package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'"

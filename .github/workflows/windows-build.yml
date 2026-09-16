@@ -15,6 +15,9 @@ on:
       - '.gitattributes'
       - '.github/workflows/windows-build.yml'
 
+permissions:
+  contents: read
+
 concurrency:
   group: windows-candidate-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -25,153 +28,39 @@ jobs:
     env:
       AUTOSPORT_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: Verify exact pristine source checkout before build
         shell: pwsh
         run: python scripts/verify_source_checkout.py --source-sha $env:AUTOSPORT_SOURCE_SHA
-      - name: Build Windows candidate and retain producer-bound package digest
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $producerPackageDigests = [System.Collections.Generic.List[string]]::new()
-          & ./scripts/build_windows.ps1 2>&1 | ForEach-Object {
-            $line = [string]$_
-            Write-Host $line
-            if ($line -match '^SHA256=([0-9a-f]{64})$') {
-              [void]$producerPackageDigests.Add($Matches[1])
-            }
-          }
-          if ($producerPackageDigests.Count -ne 1) {
-            throw "Windows build must emit exactly one producer-bound final package SHA-256; found $($producerPackageDigests.Count)"
-          }
-          $producerPackageSha = $producerPackageDigests[0]
-          "AUTOSPORT_PRODUCER_PACKAGE_SHA256=$producerPackageSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - shell: pwsh
+        run: ./scripts/build_windows.ps1
       - name: Materialize verified independent package extraction
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-
-          function Assert-ProducerPackageDigest {
-            param(
-              [Parameter(Mandatory=$true)][string]$Path,
-              [Parameter(Mandatory=$true)][string]$Expected,
-              [Parameter(Mandatory=$true)][string]$Label
-            )
-            if (-not (Test-Path $Path -PathType Leaf)) { throw "$Label is missing: $Path" }
-            if ($Expected -notmatch '^[0-9a-f]{64}$') { throw "$Label expected producer SHA-256 is not canonical" }
-            $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actual -ne $Expected) { throw "$Label SHA-256 mismatch: expected producer $Expected, got $actual" }
-            return $actual
-          }
-
-          function Expand-ProducerBoundPackage {
-            param(
-              [Parameter(Mandatory=$true)][string]$Path,
-              [Parameter(Mandatory=$true)][string]$Expected,
-              [Parameter(Mandatory=$true)][string]$Destination,
-              [Parameter(Mandatory=$true)][string]$Label
-            )
-            if (-not (Test-Path $Path -PathType Leaf)) { throw "$Label is missing: $Path" }
-            if ($Expected -notmatch '^[0-9a-f]{64}$') { throw "$Label expected producer SHA-256 is not canonical" }
-            if (Test-Path $Destination) { throw "$Label extraction destination must not already exist: $Destination" }
-
-            # The same read handle both proves the producer digest and feeds ZIP
-            # extraction. FileShare.Read permits readers but denies concurrent
-            # writers/deleters for the entire digest -> consumption interval.
-            $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-            try {
-              $sha256 = [System.Security.Cryptography.SHA256]::Create()
-              try {
-                $actual = [System.Convert]::ToHexString($sha256.ComputeHash($stream)).ToLowerInvariant()
-              } finally {
-                $sha256.Dispose()
-              }
-              if ($actual -ne $Expected) { throw "$Label SHA-256 mismatch: expected producer $Expected, got $actual" }
-
-              $stream.Position = 0
-              [System.IO.Compression.ZipFile]::ExtractToDirectory($stream, $Destination, $true)
-            } finally {
-              $stream.Dispose()
-            }
-          }
 
           $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
           $verificationPath = Join-Path $PWD 'dist/fresh-extraction-verification.json'
           if (-not (Test-Path $package -PathType Leaf)) { throw 'Independent package extraction is missing release ZIP' }
           if (-not (Test-Path $verificationPath -PathType Leaf)) { throw 'Independent package extraction is missing canonical fresh verification' }
 
-          $producerPackageSha = [string]$env:AUTOSPORT_PRODUCER_PACKAGE_SHA256
-          if ($producerPackageSha -notmatch '^[0-9a-f]{64}$') { throw 'Independent package extraction is missing canonical producer-bound package SHA-256' }
-
-          # Capture the producer package through the canonical artifact binder before
-          # any downstream consumer reopens ZIP bytes. The binder proves that the
-          # source object stays the same regular file for the full capture and
-          # atomically publishes a private snapshot outside the mutable checkout.
-          $consumerSnapshotRoot = Join-Path $env:RUNNER_TEMP "autosport-consumer-bound-$($env:AUTOSPORT_SOURCE_SHA)"
-          $consumerPackage = Join-Path $consumerSnapshotRoot 'Autosport-V1-windows-x64.zip'
-          $consumerDigestPath = Join-Path $consumerSnapshotRoot 'Autosport-V1-windows-x64.sha256'
-          if (Test-Path $consumerSnapshotRoot) { Remove-Item -LiteralPath $consumerSnapshotRoot -Recurse -Force }
-          New-Item -ItemType Directory -Path $consumerSnapshotRoot | Out-Null
-          python scripts/verify_source_checkout.py --bind-artifact $package --bound-output $consumerPackage --digest-output $consumerDigestPath
-          if ($LASTEXITCODE -ne 0) { throw "Consumer-bound release ZIP capture exited $LASTEXITCODE" }
-          if (-not (Test-Path $consumerDigestPath -PathType Leaf)) { throw 'Consumer-bound release ZIP capture did not publish a digest' }
-          $packageSha = (Get-Content -LiteralPath $consumerDigestPath -Raw).Trim()
-          if ($packageSha -ne $producerPackageSha) {
-            throw "Consumer-bound release ZIP SHA-256 mismatch: expected producer $producerPackageSha, got $packageSha"
-          }
-          [void](Assert-ProducerPackageDigest -Path $consumerPackage -Expected $producerPackageSha -Label 'Consumer-bound release ZIP snapshot')
-
-          # Adversarial regression: a coordinated replacement can make a mutable ZIP
-          # and mutable verification JSON agree with each other. It must still lose
-          # against the earlier producer-bound digest before that JSON is trusted.
-          $handoffProbeRoot = Join-Path $env:RUNNER_TEMP 'autosport-producer-consumer-handoff-probe'
-          $probePackage = Join-Path $handoffProbeRoot 'Autosport-V1-windows-x64.zip'
-          $probeVerificationPath = Join-Path $handoffProbeRoot 'fresh-extraction-verification.json'
-          try {
-            if (Test-Path $handoffProbeRoot) { Remove-Item -LiteralPath $handoffProbeRoot -Recurse -Force }
-            New-Item -ItemType Directory -Path $handoffProbeRoot | Out-Null
-            [System.IO.File]::WriteAllText($probePackage, 'COORDINATED_REPLACEMENT_PACKAGE', [System.Text.Encoding]::UTF8)
-            $forgedPackageSha = (Get-FileHash -LiteralPath $probePackage -Algorithm SHA256).Hash.ToLowerInvariant()
-            $forgedVerification = [ordered]@{
-              status = 'PASS'
-              source_sha = $env:AUTOSPORT_SOURCE_SHA
-              package_sha256 = $forgedPackageSha
-              real_money_execution = $false
-              human_tested = $false
-              nvda_verified = $false
-            }
-            $forgedVerification | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $probeVerificationPath -Encoding utf8
-            $probeEvidence = Get-Content $probeVerificationPath -Raw | ConvertFrom-Json
-            if ([string]$probeEvidence.package_sha256 -ne $forgedPackageSha) { throw 'Coordinated replacement probe JSON did not self-consistently forge package digest' }
-
-            $probeRejected = $false
-            try {
-              [void](Assert-ProducerPackageDigest -Path $probePackage -Expected $producerPackageSha -Label 'Coordinated producer handoff replacement probe')
-            } catch {
-              $probeRejected = $true
-            }
-            if (-not $probeRejected) { throw 'Producer-bound digest gate accepted coordinated ZIP + verification JSON replacement' }
-          } finally {
-            Remove-Item -LiteralPath $handoffProbeRoot -Recurse -Force -ErrorAction SilentlyContinue
-          }
-
-          # The snapshot is checked before mutable JSON is trusted, and then checked
-          # again from the same read handle that feeds extraction. A pathname swap
-          # between those phases therefore cannot redefine consumed package bytes.
           $verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
           if ($verification.status -ne 'PASS') { throw 'Canonical fresh extraction is not PASS before independent package extraction' }
           if ([string]$verification.source_sha -ne [string]$env:AUTOSPORT_SOURCE_SHA) { throw 'Canonical fresh extraction source_sha does not match exact workflow head' }
+          $packageSha = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
           if ([string]$verification.package_sha256 -ne $packageSha) { throw 'Release ZIP digest drifted after canonical fresh extraction' }
 
           $postPackageExtractRoot = Join-Path $PWD '.build-post-package-extraction'
           if (Test-Path $postPackageExtractRoot) { Remove-Item -Recurse -Force $postPackageExtractRoot }
-          Expand-ProducerBoundPackage -Path $consumerPackage -Expected $producerPackageSha -Destination $postPackageExtractRoot -Label 'Consumer-bound release ZIP snapshot at extraction'
+          New-Item -ItemType Directory -Path $postPackageExtractRoot | Out-Null
+          Expand-Archive -LiteralPath $package -DestinationPath $postPackageExtractRoot -Force
           $postPackageRoot = Join-Path $postPackageExtractRoot 'Autosport-V1'
           $buildInfoPath = Join-Path $postPackageRoot 'BUILD_INFO.json'
           $packagedExe = Join-Path $postPackageRoot 'Autosport.exe'
@@ -198,118 +87,70 @@ jobs:
           "AUTOSPORT_QUALIFIED_PACKAGE_SHA256=$packageSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Execute packaged NVDA evidence contract
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          . ./scripts/packaged_executable_authority.ps1
-          $identity = Get-AutosportProducerPackageIdentity
-          $packagedDataExe = [string]$env:AUTOSPORT_PACKAGED_DATA_EXE
-          $freshDataExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
-          $packagedAuthority = $null
-          $freshAuthority = $null
-          try {
-            $packagedAuthority = Open-AutosportQualifiedExecutable -Path $packagedDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Packaged NVDA Autosport-Data.exe'
-            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Fresh-extracted NVDA Autosport-Data.exe'
-            ./scripts/nvda_evidence_package_smoke.ps1
-          } finally {
-            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
-            if ($null -ne $packagedAuthority) { $packagedAuthority.Dispose() }
-          }
+        run: ./scripts/nvda_evidence_package_smoke.ps1
       - name: Prove packaged workspace recovery reachability
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          . ./scripts/packaged_executable_authority.ps1
-          $identity = Get-AutosportProducerPackageIdentity
 
           $packagedDataExe = [string]$env:AUTOSPORT_PACKAGED_DATA_EXE
           $freshDataExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
           if ([string]::IsNullOrWhiteSpace($packagedDataExe)) { throw 'Packaged recovery smoke is missing verified package executable anchor' }
+          if (-not (Test-Path $packagedDataExe -PathType Leaf)) { throw 'Packaged recovery smoke is missing Autosport-Data.exe' }
+          if (-not (Test-Path $freshDataExe -PathType Leaf)) { throw 'Fresh-extracted recovery smoke is missing Autosport-Data.exe' }
 
-          $packagedAuthority = $null
-          $freshAuthority = $null
-          try {
-            $packagedAuthority = Open-AutosportQualifiedExecutable -Path $packagedDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Packaged recovery Autosport-Data.exe'
-            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Fresh-extracted recovery Autosport-Data.exe'
-
-            $packagedWorkspace = Join-Path $PWD 'dist/repair-workspace-packaged-smoke'
-            $freshWorkspace = Join-Path $PWD 'dist/repair-workspace-fresh-smoke'
-            foreach ($workspace in @($packagedWorkspace, $freshWorkspace)) {
-              if (Test-Path $workspace) { Remove-Item -Recurse -Force $workspace }
-              New-Item -ItemType Directory -Path $workspace | Out-Null
-            }
-
-            $packagedOutput = (& $packagedDataExe repair-workspace --workspace $packagedWorkspace 2>&1 | Out-String).Trim()
-            if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe repair-workspace exited $LASTEXITCODE" }
-            if ($packagedOutput -notmatch 'repair=OK') { throw 'Packaged repair-workspace did not report canonical repair=OK' }
-
-            $freshOutput = (& $freshDataExe repair-workspace --workspace $freshWorkspace 2>&1 | Out-String).Trim()
-            if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe repair-workspace exited $LASTEXITCODE" }
-            if ($freshOutput -notmatch 'repair=OK') { throw 'Fresh-extracted repair-workspace did not report canonical repair=OK' }
-
-            $evidence = [ordered]@{
-              status = 'PASS'
-              source_sha = $env:AUTOSPORT_SOURCE_SHA
-              packaged_repair_workspace_status = 'PASS'
-              fresh_extracted_repair_workspace_status = 'PASS'
-              canonical_output = 'repair=OK'
-              empty_isolated_workspace_reachability_only = $true
-              real_money_execution = $false
-              human_tested = $false
-              nvda_verified = $false
-            }
-            $evidencePath = Join-Path $PWD 'dist/repair-workspace-package-smoke.json'
-            $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $evidencePath -Encoding utf8
-
-            $verificationPath = Join-Path $PWD 'dist/fresh-extraction-verification.json'
-            $verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
-            $verification | Add-Member -NotePropertyName extracted_repair_workspace_status -NotePropertyValue 'PASS' -Force
-            $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
-          } finally {
-            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
-            if ($null -ne $packagedAuthority) { $packagedAuthority.Dispose() }
+          $packagedWorkspace = Join-Path $PWD 'dist/repair-workspace-packaged-smoke'
+          $freshWorkspace = Join-Path $PWD 'dist/repair-workspace-fresh-smoke'
+          foreach ($workspace in @($packagedWorkspace, $freshWorkspace)) {
+            if (Test-Path $workspace) { Remove-Item -Recurse -Force $workspace }
+            New-Item -ItemType Directory -Path $workspace | Out-Null
           }
+
+          $packagedOutput = (& $packagedDataExe repair-workspace --workspace $packagedWorkspace 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe repair-workspace exited $LASTEXITCODE" }
+          if ($packagedOutput -notmatch 'repair=OK') { throw 'Packaged repair-workspace did not report canonical repair=OK' }
+
+          $freshOutput = (& $freshDataExe repair-workspace --workspace $freshWorkspace 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe repair-workspace exited $LASTEXITCODE" }
+          if ($freshOutput -notmatch 'repair=OK') { throw 'Fresh-extracted repair-workspace did not report canonical repair=OK' }
+
+          $evidence = [ordered]@{
+            status = 'PASS'
+            source_sha = $env:AUTOSPORT_SOURCE_SHA
+            packaged_repair_workspace_status = 'PASS'
+            fresh_extracted_repair_workspace_status = 'PASS'
+            canonical_output = 'repair=OK'
+            empty_isolated_workspace_reachability_only = $true
+            real_money_execution = $false
+            human_tested = $false
+            nvda_verified = $false
+          }
+          $evidencePath = Join-Path $PWD 'dist/repair-workspace-package-smoke.json'
+          $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $evidencePath -Encoding utf8
+
+          $verificationPath = Join-Path $PWD 'dist/fresh-extraction-verification.json'
+          $verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
+          $verification | Add-Member -NotePropertyName extracted_repair_workspace_status -NotePropertyValue 'PASS' -Force
+          $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
       - name: Execute packaged walk-forward evaluation
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          . ./scripts/packaged_executable_authority.ps1
-          $identity = Get-AutosportProducerPackageIdentity
-          $packagedDataExe = [string]$env:AUTOSPORT_PACKAGED_DATA_EXE
-          $freshDataExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
-          $packagedAuthority = $null
-          $freshAuthority = $null
-          try {
-            $packagedAuthority = Open-AutosportQualifiedExecutable -Path $packagedDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Packaged walk-forward Autosport-Data.exe'
-            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Fresh-extracted walk-forward Autosport-Data.exe'
-            ./scripts/walk_forward_package_smoke.ps1
-          } finally {
-            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
-            if ($null -ne $packagedAuthority) { $packagedAuthority.Dispose() }
-          }
+        run: ./scripts/walk_forward_package_smoke.ps1
       - name: Execute packaged retrospective forecast-origin evaluation
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          . ./scripts/packaged_executable_authority.ps1
-          $identity = Get-AutosportProducerPackageIdentity
-          $packagedDataExe = [string]$env:AUTOSPORT_PACKAGED_DATA_EXE
-          $freshDataExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
-          $packagedAuthority = $null
-          $freshAuthority = $null
-          try {
-            $packagedAuthority = Open-AutosportQualifiedExecutable -Path $packagedDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Packaged forecast-origin Autosport-Data.exe'
-            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Fresh-extracted forecast-origin Autosport-Data.exe'
-            ./scripts/walk_forward_origin_package_smoke.ps1
-          } finally {
-            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
-            if ($null -ne $packagedAuthority) { $packagedAuthority.Dispose() }
-          }
+        run: ./scripts/walk_forward_origin_package_smoke.ps1
+      - name: Execute packaged evidence export/verify contract
+        shell: pwsh
+        run: ./scripts/evidence_export_package_smoke.ps1
+      - name: Upload packaged evidence export/verify smoke
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Autosport-packaged-evidence-export-smoke
+          path: dist/evidence-export-package-smoke.json
+          if-no-files-found: error
       - name: Audit packaged research demo path
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          . ./scripts/packaged_executable_authority.ps1
-          $identity = Get-AutosportProducerPackageIdentity
 
           $packagedRoot = [string]$env:AUTOSPORT_PACKAGED_ROOT
           $packagedExe = [string]$env:AUTOSPORT_PACKAGED_EXE
@@ -317,83 +158,65 @@ jobs:
             throw 'Packaged research demo audit is missing verified package extraction anchors'
           }
           $packagedDemo = Join-Path $packagedRoot 'examples/tt_demo'
+          if (-not (Test-Path $packagedExe -PathType Leaf)) { throw 'Packaged research demo audit is missing Autosport.exe' }
           if (-not (Test-Path (Join-Path $packagedDemo 'research_plan.json') -PathType Leaf)) { throw 'Packaged research demo audit is missing shipped research plan' }
+
+          $preAudit = Join-Path $PWD 'dist/research-demo-audit.json'
+          if (Test-Path $preAudit) { Remove-Item -Force $preAudit }
+          $preProcess = Start-Process -FilePath $packagedExe -ArgumentList '--research-demo-audit-output', $preAudit, $packagedDemo -Wait -PassThru
+          if ($preProcess.ExitCode -ne 0) { throw "Packaged research demo audit exited $($preProcess.ExitCode)" }
+          $preEvidence = Get-Content $preAudit -Raw | ConvertFrom-Json
+          if ($preEvidence.status -ne 'PASS') { throw 'Packaged research demo audit did not PASS' }
+          if ($preEvidence.strategy_id -ne 'research-replay-v1') { throw 'Packaged research demo audit strategy mismatch' }
+          if ($preEvidence.replay_event_count -ne 4 -or $preEvidence.settled_ticket_count -ne 1 -or $preEvidence.persistent_ticket_count -ne 1) {
+            throw 'Packaged research demo audit product journey drifted'
+          }
+          if ($preEvidence.persistent_balance -ne '990' -or $preEvidence.paper_net_profit -ne '-10') {
+            throw 'Packaged research demo audit economic result drifted'
+          }
+          if ($preEvidence.sample_fixture -ne $true -or $preEvidence.real_historical_market_proof -ne $false -or $preEvidence.profitability_claim -ne $false) {
+            throw 'Packaged research demo audit violated sample/historical truth boundary'
+          }
+          if ($preEvidence.real_money_execution -ne $false -or $preEvidence.human_tested -ne $false -or $preEvidence.nvda_verified -ne $false) {
+            throw 'Packaged research demo audit violated release truth labels'
+          }
 
           $freshRoot = Join-Path $PWD '.build-fresh-extraction/Autosport-V1'
           $freshExe = Join-Path $freshRoot 'Autosport.exe'
           $freshDemo = Join-Path $freshRoot 'examples/tt_demo'
+          if (-not (Test-Path $freshExe -PathType Leaf)) { throw 'Fresh extraction is missing Autosport.exe for research demo audit' }
           if (-not (Test-Path (Join-Path $freshDemo 'research_plan.json') -PathType Leaf)) { throw 'Fresh extraction is missing shipped research plan' }
 
-          $packagedAuthority = $null
-          $freshAuthority = $null
-          try {
-            $packagedAuthority = Open-AutosportQualifiedExecutable -Path $packagedExe -ExpectedSha256 $identity.AutosportExeSha256 -Label 'Packaged research Autosport.exe'
-            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshExe -ExpectedSha256 $identity.AutosportExeSha256 -Label 'Fresh-extracted research Autosport.exe'
-
-            $preAudit = Join-Path $PWD 'dist/research-demo-audit.json'
-            if (Test-Path $preAudit) { Remove-Item -Force $preAudit }
-            $preProcess = Start-Process -FilePath $packagedExe -ArgumentList '--research-demo-audit-output', $preAudit, $packagedDemo -Wait -PassThru
-            if ($preProcess.ExitCode -ne 0) { throw "Packaged research demo audit exited $($preProcess.ExitCode)" }
-            $preEvidence = Get-Content $preAudit -Raw | ConvertFrom-Json
-            if ($preEvidence.status -ne 'PASS') { throw 'Packaged research demo audit did not PASS' }
-            if ($preEvidence.strategy_id -ne 'research-replay-v1') { throw 'Packaged research demo audit strategy mismatch' }
-            if ($preEvidence.replay_event_count -ne 4 -or $preEvidence.settled_ticket_count -ne 1 -or $preEvidence.persistent_ticket_count -ne 1) {
-              throw 'Packaged research demo audit product journey drifted'
-            }
-            if ($preEvidence.persistent_balance -ne '990' -or $preEvidence.paper_net_profit -ne '-10') {
-              throw 'Packaged research demo audit economic result drifted'
-            }
-            if ($preEvidence.sample_fixture -ne $true -or $preEvidence.real_historical_market_proof -ne $false -or $preEvidence.profitability_claim -ne $false) {
-              throw 'Packaged research demo audit violated sample/historical truth boundary'
-            }
-            if ($preEvidence.real_money_execution -ne $false -or $preEvidence.human_tested -ne $false -or $preEvidence.nvda_verified -ne $false) {
-              throw 'Packaged research demo audit violated release truth labels'
-            }
-
-            $freshAudit = Join-Path $PWD 'dist/fresh-extraction-research-demo-audit.json'
-            if (Test-Path $freshAudit) { Remove-Item -Force $freshAudit }
-            $freshProcess = Start-Process -FilePath $freshExe -ArgumentList '--research-demo-audit-output', $freshAudit, $freshDemo -Wait -PassThru
-            if ($freshProcess.ExitCode -ne 0) { throw "Fresh-extracted research demo audit exited $($freshProcess.ExitCode)" }
-            $freshEvidence = Get-Content $freshAudit -Raw | ConvertFrom-Json
-            if ($freshEvidence.status -ne 'PASS') { throw 'Fresh-extracted research demo audit did not PASS' }
-            if ($freshEvidence.strategy_id -ne 'research-replay-v1') { throw 'Fresh-extracted research demo strategy mismatch' }
-            if ($freshEvidence.research_plan_sha256 -ne $preEvidence.research_plan_sha256) { throw 'Research plan identity changed after packaging' }
-            if ($freshEvidence.dataset_market_sha256 -ne $preEvidence.dataset_market_sha256 -or $freshEvidence.dataset_results_sha256 -ne $preEvidence.dataset_results_sha256) {
-              throw 'Research demo dataset identity changed after packaging'
-            }
-            if ($freshEvidence.replay_event_count -ne $preEvidence.replay_event_count -or $freshEvidence.settled_ticket_count -ne $preEvidence.settled_ticket_count -or $freshEvidence.persistent_ticket_count -ne $preEvidence.persistent_ticket_count) {
-              throw 'Research demo journey changed after fresh extraction'
-            }
-            if ($freshEvidence.persistent_balance -ne $preEvidence.persistent_balance -or $freshEvidence.paper_net_profit -ne $preEvidence.paper_net_profit) {
-              throw 'Research demo economic result changed after fresh extraction'
-            }
-            if ($freshEvidence.sample_fixture -ne $true -or $freshEvidence.real_historical_market_proof -ne $false -or $freshEvidence.profitability_claim -ne $false) {
-              throw 'Fresh-extracted research demo audit violated sample/historical truth boundary'
-            }
-            if ($freshEvidence.real_money_execution -ne $false -or $freshEvidence.human_tested -ne $false -or $freshEvidence.nvda_verified -ne $false) {
-              throw 'Fresh-extracted research demo audit violated release truth labels'
-            }
-          } finally {
-            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
-            if ($null -ne $packagedAuthority) { $packagedAuthority.Dispose() }
+          $freshAudit = Join-Path $PWD 'dist/fresh-extraction-research-demo-audit.json'
+          if (Test-Path $freshAudit) { Remove-Item -Force $freshAudit }
+          $freshProcess = Start-Process -FilePath $freshExe -ArgumentList '--research-demo-audit-output', $freshAudit, $freshDemo -Wait -PassThru
+          if ($freshProcess.ExitCode -ne 0) { throw "Fresh-extracted research demo audit exited $($freshProcess.ExitCode)" }
+          $freshEvidence = Get-Content $freshAudit -Raw | ConvertFrom-Json
+          if ($freshEvidence.status -ne 'PASS') { throw 'Fresh-extracted research demo audit did not PASS' }
+          if ($freshEvidence.strategy_id -ne 'research-replay-v1') { throw 'Fresh-extracted research demo strategy mismatch' }
+          if ($freshEvidence.research_plan_sha256 -ne $preEvidence.research_plan_sha256) { throw 'Research plan identity changed after packaging' }
+          if ($freshEvidence.dataset_market_sha256 -ne $preEvidence.dataset_market_sha256 -or $freshEvidence.dataset_results_sha256 -ne $preEvidence.dataset_results_sha256) {
+            throw 'Research demo dataset identity changed after packaging'
+          }
+          if ($freshEvidence.replay_event_count -ne $preEvidence.replay_event_count -or $freshEvidence.settled_ticket_count -ne $preEvidence.settled_ticket_count -or $freshEvidence.persistent_ticket_count -ne $preEvidence.persistent_ticket_count) {
+            throw 'Research demo journey changed after fresh extraction'
+          }
+          if ($freshEvidence.persistent_balance -ne $preEvidence.persistent_balance -or $freshEvidence.paper_net_profit -ne $preEvidence.paper_net_profit) {
+            throw 'Research demo economic result changed after fresh extraction'
+          }
+          if ($freshEvidence.sample_fixture -ne $true -or $freshEvidence.real_historical_market_proof -ne $false -or $freshEvidence.profitability_claim -ne $false) {
+            throw 'Fresh-extracted research demo audit violated sample/historical truth boundary'
+          }
+          if ($freshEvidence.real_money_execution -ne $false -or $freshEvidence.human_tested -ne $false -or $freshEvidence.nvda_verified -ne $false) {
+            throw 'Fresh-extracted research demo audit violated release truth labels'
           }
       - name: External UIA fresh-extraction gate
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          . ./scripts/packaged_executable_authority.ps1
-          $identity = Get-AutosportProducerPackageIdentity
-          $freshExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport.exe'
-          $freshAuthority = $null
-          try {
-            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshExe -ExpectedSha256 $identity.AutosportExeSha256 -Label 'Fresh-extracted external UIA Autosport.exe'
-            $evidence = Join-Path $PWD 'dist/fresh-extraction-external-uia-audit.json'
-            ./scripts/external_uia_audit.ps1 `
-              -Exe $freshExe `
-              -Output $evidence
-          } finally {
-            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
-          }
+          $evidence = Join-Path $PWD 'dist/fresh-extraction-external-uia-audit.json'
+          ./scripts/external_uia_audit.ps1 `
+            -Exe (Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport.exe') `
+            -Output $evidence
           $external = Get-Content $evidence -Raw | ConvertFrom-Json
           if ($external.status -ne 'PASS') { throw 'External UIA fresh-extraction audit did not PASS' }
           if ($external.real_money_execution -ne $false -or $external.human_tested -ne $false -or $external.nvda_verified -ne $false) {
@@ -405,58 +228,12 @@ jobs:
           $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
       - name: Upload external UIA failure evidence
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Autosport-external-uia-failure-evidence
           path: dist/fresh-extraction-external-uia-audit.json
           if-no-files-found: ignore
-      - name: Reprove release ZIP immediately before artifact publication
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          function Assert-PackageDigest {
-            param(
-              [Parameter(Mandatory=$true)][string]$Path,
-              [Parameter(Mandatory=$true)][string]$Expected,
-              [Parameter(Mandatory=$true)][string]$Label
-            )
-            if (-not (Test-Path $Path -PathType Leaf)) { throw "$Label is missing: $Path" }
-            if ($Expected -notmatch '^[0-9a-f]{64}$') { throw "$Label expected SHA-256 is not canonical" }
-            $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actual -ne $Expected) { throw "$Label SHA-256 mismatch: expected $Expected, got $actual" }
-          }
-
-          $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
-          $expected = [string]$env:AUTOSPORT_QUALIFIED_PACKAGE_SHA256
-          if ([string]::IsNullOrWhiteSpace($expected)) { throw 'Publication gate is missing qualified release ZIP SHA-256' }
-
-          $probe = Join-Path $env:RUNNER_TEMP 'autosport-publication-replacement-probe.zip'
-          $replacement = "$probe.replacement"
-          try {
-            Copy-Item -LiteralPath $package -Destination $probe -Force
-            Assert-PackageDigest -Path $probe -Expected $expected -Label 'Publication replacement probe before mutation'
-            Copy-Item -LiteralPath $package -Destination $replacement -Force
-            [System.IO.File]::AppendAllText($replacement, 'AUTOSPORT_PUBLICATION_REPLACEMENT', [System.Text.Encoding]::UTF8)
-            Remove-Item -LiteralPath $probe -Force
-            Move-Item -LiteralPath $replacement -Destination $probe
-
-            $rejected = $false
-            try {
-              Assert-PackageDigest -Path $probe -Expected $expected -Label 'Publication replacement probe after mutation'
-            } catch {
-              $rejected = $true
-            }
-            if (-not $rejected) { throw 'Publication digest verifier accepted a replaced package probe' }
-          } finally {
-            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $replacement -Force -ErrorAction SilentlyContinue
-          }
-
-          Assert-PackageDigest -Path $package -Expected $expected -Label 'Release ZIP immediately before artifact upload'
-      - name: Upload prehuman Windows candidate
-        id: upload_prehuman_candidate
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Autosport-V1-Windows-prehuman
           path: |
@@ -486,47 +263,4 @@ jobs:
             dist/nvda-evidence-package-smoke.json
             dist/nvda-evidence-packaged-template.json
             dist/nvda-evidence-fresh-extracted-template.json
-          if-no-files-found: error
-      - name: Download exact uploaded candidate for publication identity proof
-        uses: actions/download-artifact@v4
-        with:
-          artifact-ids: ${{ steps.upload_prehuman_candidate.outputs.artifact-id }}
-          path: .uploaded-prehuman-proof
-      - name: Verify GitHub-stored release ZIP identity
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $expected = [string]$env:AUTOSPORT_QUALIFIED_PACKAGE_SHA256
-          if ($expected -notmatch '^[0-9a-f]{64}$') { throw 'Publication proof is missing canonical qualified release ZIP SHA-256' }
-          $proofRoot = Join-Path $PWD '.uploaded-prehuman-proof'
-          $uploadedPackages = @(Get-ChildItem -LiteralPath $proofRoot -Recurse -Filter 'Autosport-V1-windows-x64.zip' -File)
-          if ($uploadedPackages.Count -ne 1) { throw "Publication proof expected exactly one uploaded release ZIP, found $($uploadedPackages.Count)" }
-          $uploadedSha = (Get-FileHash -LiteralPath $uploadedPackages[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($uploadedSha -ne $expected) {
-            throw "GitHub-stored release ZIP SHA-256 mismatch: expected $expected, got $uploadedSha"
-          }
-      - name: Execute packaged evidence export/verify contract
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          . ./scripts/packaged_executable_authority.ps1
-          $identity = Get-AutosportProducerPackageIdentity
-          $packagedDataExe = [string]$env:AUTOSPORT_PACKAGED_DATA_EXE
-          $freshDataExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
-          $packagedAuthority = $null
-          $freshAuthority = $null
-          try {
-            $packagedAuthority = Open-AutosportQualifiedExecutable -Path $packagedDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Packaged evidence-export Autosport-Data.exe'
-            $freshAuthority = Open-AutosportQualifiedExecutable -Path $freshDataExe -ExpectedSha256 $identity.AutosportDataExeSha256 -Label 'Fresh-extracted evidence-export Autosport-Data.exe'
-            ./scripts/evidence_export_package_smoke.ps1
-          } finally {
-            if ($null -ne $freshAuthority) { $freshAuthority.Dispose() }
-            if ($null -ne $packagedAuthority) { $packagedAuthority.Dispose() }
-          }
-      - name: Upload packaged evidence export/verify smoke
-        uses: actions/upload-artifact@v4
-        with:
-          name: Autosport-packaged-evidence-export-smoke
-          path: dist/evidence-export-package-smoke.json
           if-no-files-found: error

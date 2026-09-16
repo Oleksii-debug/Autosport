@@ -36,8 +36,20 @@ jobs:
           path.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
           PY
           python scripts/pr348_repair_once.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/guarded_release_creator_launch.py')
+          text = path.read_text(encoding='utf-8')
+          old = r'barrier_name = "Local\AutosportReleaseCreator-"'
+          new = r'barrier_name = r"Local\AutosportReleaseCreator-"'
+          if text.count(old) != 1:
+              raise SystemExit(f'generated barrier-name anchor count: {text.count(old)}')
+          path.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
+          PY
       - name: Static syntax
-        run: python -m py_compile scripts/guarded_release_creator_launch.py
+        run: python -W error -m py_compile scripts/guarded_release_creator_launch.py
+      - name: Install focused test runner
+        run: python -m pip install --disable-pip-version-check pytest
       - name: Focused release-boundary tests
         run: python -m pytest -q tests/test_windows_creator_host_bootstrap.py tests/test_windows_pyinstaller_orchestrator_birth_boundary.py
       - name: Commit same-lineage repair

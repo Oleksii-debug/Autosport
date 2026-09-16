@@ -1,7 +1,10 @@
 import unittest
 from decimal import Context, Decimal, localcontext
 
-from autosport.candidate_optimizer import PortfolioAwareCandidateOptimizer
+from autosport.candidate_optimizer import (
+    PortfolioAwareCandidateOptimizer,
+    _decimal_identity_key,
+)
 from autosport.candidate_search import BeamParlayCandidateSearch, CandidateLeg, ParlayCandidate
 from autosport.scenario_search import ScenarioGroup, ScenarioOutcome, ScenarioSearchEngine
 
@@ -229,6 +232,41 @@ class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
             forward_engine.ticket_id_snapshots[-1],
             reversed_engine.ticket_id_snapshots[-1],
         )
+
+    def test_decimal_identity_is_scale_equivalent_without_exponent_expansion(self) -> None:
+        self.assertEqual(
+            _decimal_identity_key(Decimal("2.0")),
+            _decimal_identity_key(Decimal("2.00")),
+        )
+        self.assertEqual(
+            _decimal_identity_key(Decimal("-0.00")),
+            _decimal_identity_key(Decimal("0")),
+        )
+
+        huge = Decimal("1E+1000000")
+        self.assertEqual(_decimal_identity_key(huge), "0:1:1000000")
+        leg = CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            huge,
+            Decimal("0.5"),
+        )
+        candidate = ParlayCandidate(
+            (leg,),
+            huge,
+            Decimal("0.5"),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "candidate combined economics exceed Decimal range",
+        ):
+            PortfolioAwareCandidateOptimizer().evaluate_candidates(
+                [],
+                [candidate],
+                _groups(),
+                stake="1",
+            )
 
     def test_scale_equivalent_decimals_share_candidate_and_ticket_identity(self) -> None:
         compact, scaled = _scale_equivalent_two_leg_candidates()

@@ -164,12 +164,23 @@ def _quote_group_map(groups: list[ScenarioGroup]) -> dict[str, int]:
 
 
 def _decimal_identity_key(value: Decimal) -> str:
-    """Exact context-independent identity for numerically equal finite Decimals."""
+    """Exact context-independent numeric identity bounded by stored coefficient digits."""
 
     if not value.is_finite():
         raise ValueError("decimal identity requires a finite value")
-    numerator, denominator = value.as_integer_ratio()
-    return f"{numerator}/{denominator}"
+    if value.is_zero():
+        return "0:0:0"
+
+    parts = value.as_tuple()
+    exponent = parts.exponent
+    if not isinstance(exponent, int):
+        raise ValueError("decimal identity requires a finite value")
+    digits = list(parts.digits)
+    while digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    coefficient = "".join(str(digit) for digit in digits)
+    return f"{parts.sign}:{coefficient}:{exponent}"
 
 
 def _candidate_leg_identity_key(

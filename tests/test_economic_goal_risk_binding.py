@@ -68,6 +68,13 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "ticket exceeds economic goal absolute stake limit")
 
+    def test_zero_owner_absolute_stake_amount_denies_every_positive_new_stake(self) -> None:
+        policy = self._policy(self._goal(max_stake_amount=Decimal("0")))
+        decision = policy.evaluate(PaperBook("100"), Decimal("0.000000000000000000000000001"))
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "ticket exceeds economic goal absolute stake limit")
+
     def test_owner_capital_at_risk_counts_existing_open_exposure_plus_proposed_stake(self) -> None:
         book = PaperBook("100")
         book.open_ticket([self._leg()], Decimal("15"))
@@ -77,6 +84,21 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
 
         self.assertTrue(policy.evaluate(book, Decimal("5")).allowed)
         decision = policy.evaluate(book, Decimal("5.01"))
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "aggregate committed stake limit exceeded")
+
+    def test_settled_historical_stake_does_not_count_as_current_capital_at_risk(self) -> None:
+        book = PaperBook("100")
+        settled = book.open_ticket([self._leg()], Decimal("15"))
+        book.settle(settled.ticket_id, {settled.legs[0].quote_key})
+        policy = self._policy(
+            self._goal(max_capital_at_risk_fraction=Decimal("0.10"))
+        )
+
+        self.assertEqual(book.committed_stake, Decimal("0"))
+        self.assertTrue(policy.evaluate(book, Decimal("10")).allowed)
+        decision = policy.evaluate(book, Decimal("10.01"))
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "aggregate committed stake limit exceeded")

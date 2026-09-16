@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from autosport.gui import AutosportApp
+from autosport.localization import text
 
 
 class _BrokenTextError(RuntimeError):
@@ -107,7 +108,7 @@ def test_startup_exception_with_broken_str_keeps_shell_reachable(tmp_path: Path)
     assert app.session is None
     assert app._startup_economic_error == "_BrokenTextError: <message unavailable>"
     assert app._recovery_required_workspaces == {workspace}
-    assert "Read-only live snapshot доступний" in app.status.value
+    assert app.status.value == text("ui.status.startup.recovery_required")
     assert "недоступний до успішного recovery" in app.bank.value
 
 
@@ -130,7 +131,7 @@ def test_startup_exception_with_hostile_type_metadata_and_str_keeps_shell_reacha
     assert app.session is None
     assert app._startup_economic_error == "_BrokenMetadataAndTextError: <message unavailable>"
     assert app._recovery_required_workspaces == {workspace}
-    assert "Read-only live snapshot доступний" in app.status.value
+    assert app.status.value == text("ui.status.startup.recovery_required")
 
 
 def test_teardown_exception_with_broken_str_still_quarantines_and_returns_false(

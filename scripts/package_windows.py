@@ -5,13 +5,10 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
-from autosport.release_package import (
-    _require_git_commit_sha,
-    build_windows_package,
-    verify_windows_package,
-)
+from autosport.release_package import _require_git_commit_sha, build_windows_package
 
 
 def _git_output(repo_root: Path, *args: str) -> str:
@@ -133,6 +130,25 @@ def _bind_source_sha_to_checkout(source_sha: str, *, repo_root: Path) -> None:
         )
 
 
+def _require_verified_package_digest(
+    binding: dict[str, Any],
+    verification: dict[str, Any],
+) -> str:
+    """Fail closed unless bind and one-snapshot verification identify the same ZIP bytes."""
+
+    bound_digest = binding.get("package_sha256")
+    verified_digest = verification.get("package_sha256")
+    if (
+        not isinstance(bound_digest, str)
+        or not isinstance(verified_digest, str)
+        or bound_digest != verified_digest
+    ):
+        raise ValueError(
+            "bound package digest does not match the exact verified package snapshot"
+        )
+    return verified_digest
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe", type=Path, required=True)
@@ -150,7 +166,7 @@ def main() -> int:
 
     _bind_source_sha_to_checkout(args.source_sha, repo_root=Path.cwd())
 
-    output, _base_digest = build_windows_package(
+    output, base_digest = build_windows_package(
         args.exe,
         args.start_file,
         args.example_dir,
@@ -161,11 +177,13 @@ def main() -> int:
         args.output,
         args.source_sha,
     )
-    binding = bind_portable_data_tool(output, args.data_exe)
-    verification = verify_windows_package(output, expected_source_sha=args.source_sha)
-    data_verification = verify_portable_data_tool(output)
-    verification.update(data_verification)
-    verification["package_sha256"] = binding["package_sha256"]
+    binding = bind_portable_data_tool(
+        output,
+        args.data_exe,
+        expected_base_package_sha256=base_digest,
+    )
+    verification = verify_portable_data_tool(output)
+    package_sha = _require_verified_package_digest(binding, verification)
     if args.verification_output is not None:
         args.verification_output.parent.mkdir(parents=True, exist_ok=True)
         args.verification_output.write_text(
@@ -173,7 +191,7 @@ def main() -> int:
             encoding="utf-8",
         )
     print(f"PACKAGE={output}")
-    print(f"SHA256={binding['package_sha256']}")
+    print(f"SHA256={package_sha}")
     print("PACKAGE_VERIFICATION=PASS")
     print("PORTABLE_DATA_TOOLS=PASS")
     return 0

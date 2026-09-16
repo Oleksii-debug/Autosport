@@ -30,6 +30,13 @@ def points() -> tuple[FeaturePoint, ...]:
     )
 
 
+def out_of_order_points() -> tuple[FeaturePoint, ...]:
+    return (
+        FeaturePoint(Decimal("1"), BASE + timedelta(minutes=10)),
+        FeaturePoint(None, BASE + timedelta(minutes=5)),
+    )
+
+
 def test_negative_shift_fails_closed() -> None:
     with pytest.raises(FeatureLeakageError, match="negative shift"):
         causal_shift(points(), -1)
@@ -45,6 +52,11 @@ def test_positive_shift_preserves_decision_time_and_only_uses_past_values() -> N
     )
 
 
+def test_shift_rejects_out_of_order_availability() -> None:
+    with pytest.raises(FeatureLeakageError, match="nondecreasing available_at"):
+        causal_shift(out_of_order_points(), 1)
+
+
 def test_centered_window_fails_closed() -> None:
     with pytest.raises(FeatureLeakageError, match="centered"):
         trailing_mean(points(), 3, centered=True)
@@ -55,6 +67,11 @@ def test_trailing_mean_uses_only_current_and_past_values() -> None:
     assert result[0].value == Decimal("1")
     assert result[1].value == Decimal("1")
     assert result[2].value == Decimal("3")
+
+
+def test_trailing_mean_rejects_out_of_order_availability() -> None:
+    with pytest.raises(FeatureLeakageError, match="nondecreasing available_at"):
+        trailing_mean(out_of_order_points(), 2)
 
 
 def test_backward_fill_fails_closed() -> None:
@@ -69,6 +86,21 @@ def test_forward_fill_never_reads_a_later_value() -> None:
         Decimal("1"),
         Decimal("3"),
     ]
+
+
+def test_forward_fill_rejects_out_of_order_availability() -> None:
+    with pytest.raises(FeatureLeakageError, match="nondecreasing available_at"):
+        fill_missing(out_of_order_points())
+
+
+def test_equal_availability_is_valid_for_index_ordered_transforms() -> None:
+    equal_time = (
+        FeaturePoint(Decimal("1"), BASE),
+        FeaturePoint(None, BASE),
+    )
+    assert causal_shift(equal_time, 1)[1].value == Decimal("1")
+    assert trailing_mean(equal_time, 2)[1].value == Decimal("1")
+    assert fill_missing(equal_time)[1].value == Decimal("1")
 
 
 def test_train_only_standardizer_rejects_validation_and_test_fit() -> None:

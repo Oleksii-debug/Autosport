@@ -100,6 +100,20 @@ class FeatureLineage:
         object.__setattr__(self, "available_at", available_at)
 
 
+def _require_nondecreasing_availability(
+    points: Sequence[FeaturePoint],
+) -> None:
+    """Reject index-ordered transforms whose availability moves backward."""
+
+    previous: datetime | None = None
+    for point in points:
+        if previous is not None and point.available_at < previous:
+            raise FeatureLeakageError(
+                "feature points must be ordered by nondecreasing available_at"
+            )
+        previous = point.available_at
+
+
 def causal_shift(
     points: Sequence[FeaturePoint], periods: int
 ) -> tuple[FeaturePoint, ...]:
@@ -107,6 +121,7 @@ def causal_shift(
 
     if periods < 0:
         raise FeatureLeakageError("negative shift would expose future values")
+    _require_nondecreasing_availability(points)
     if periods == 0:
         return tuple(points)
 
@@ -132,6 +147,7 @@ def trailing_mean(
         raise FeatureLeakageError("centered rolling windows use future observations")
     if window <= 0:
         raise CausalFeatureError("window must be positive")
+    _require_nondecreasing_availability(points)
 
     result: list[FeaturePoint] = []
     for index, point in enumerate(points):
@@ -161,6 +177,7 @@ def fill_missing(
         raise FeatureLeakageError(
             "only forward fill is causal; backward/non-causal fill is forbidden"
         )
+    _require_nondecreasing_availability(points)
 
     last: Decimal | None = None
     result: list[FeaturePoint] = []

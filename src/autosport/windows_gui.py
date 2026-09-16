@@ -25,7 +25,10 @@ def _safe_exception_detail(exc: BaseException) -> str:
     try:
         detail = str(exc)
     except BaseException:
-        return f"{exception_type}: exception details unavailable"
+        return text(
+            "ui.error.exception.message_unavailable",
+            exception_type=exception_type,
+        )
     return f"{exception_type}: {detail}"
 
 

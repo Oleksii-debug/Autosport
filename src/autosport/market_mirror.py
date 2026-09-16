@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from threading import RLock
 
 from .domain import MarketEvent
 from .storage import SQLiteMarketStore
@@ -23,6 +25,14 @@ class MirrorApplyResult:
     current_sequence: int
 
 
+@dataclass(frozen=True, slots=True)
+class MirrorSnapshot:
+    """One coherent point-in-time mirror view for decision consumers."""
+
+    revision: int
+    events: tuple[MarketEvent, ...]
+
+
 class MarketMirror:
     """Deterministic in-memory mirror for normalized market quotes.
 
@@ -36,6 +46,8 @@ class MarketMirror:
 
     def __init__(self) -> None:
         self._latest: dict[tuple[str, str], MarketEvent] = {}
+        self._revision = 0
+        self._lock = RLock()
 
     @staticmethod
     def _key(event: MarketEvent) -> tuple[str, str]:
@@ -76,65 +88,126 @@ class MarketMirror:
             return None
         return parsed.astimezone(timezone.utc)
 
+    @staticmethod
+    def _selector(
+        values: str | Iterable[str] | None,
+        *,
+        name: str,
+    ) -> frozenset[str] | None:
+        """Normalize a focused-view selector without treating one ID as characters."""
+        if values is None:
+            return None
+        if isinstance(values, str):
+            selected = frozenset({values})
+        else:
+            try:
+                selected = frozenset(values)
+            except TypeError as exc:
+                raise TypeError(f"{name} must be a string or iterable of strings") from exc
+        if any(not isinstance(value, str) or not value for value in selected):
+            raise ValueError(f"{name} entries must be non-empty strings")
+        return selected
+
     def apply(self, event: MarketEvent) -> MirrorApplyResult:
         """Apply one event iff it advances source-local sequence state.
 
         A repeated identical sequence is idempotent. A lower sequence is stale and
         ignored. Reusing an existing sequence for different content is a conflict
-        and fails closed rather than silently replacing canonical evidence.
+        and fails closed rather than silently replacing canonical evidence. Material
+        updates are serialized with readers and advance one mirror-wide revision.
         """
         if not isinstance(event, MarketEvent):
             raise TypeError("event must be a MarketEvent")
 
         key = self._key(event)
-        previous = self._latest.get(key)
-        if previous is None:
-            self._latest[key] = self._snapshot_event(event)
-            return MirrorApplyResult(
-                MirrorUpdate.APPLIED,
-                event.source_id,
-                event.quote_key,
-                None,
-                event.sequence,
-            )
-
-        if event.sequence < previous.sequence:
-            return MirrorApplyResult(
-                MirrorUpdate.STALE,
-                event.source_id,
-                event.quote_key,
-                previous.sequence,
-                previous.sequence,
-            )
-
-        if event.sequence == previous.sequence:
-            if self._same_sequence_payload(event, previous):
+        with self._lock:
+            previous = self._latest.get(key)
+            if previous is None:
+                self._latest[key] = self._snapshot_event(event)
+                self._revision += 1
                 return MirrorApplyResult(
-                    MirrorUpdate.DUPLICATE,
+                    MirrorUpdate.APPLIED,
+                    event.source_id,
+                    event.quote_key,
+                    None,
+                    event.sequence,
+                )
+
+            if event.sequence < previous.sequence:
+                return MirrorApplyResult(
+                    MirrorUpdate.STALE,
                     event.source_id,
                     event.quote_key,
                     previous.sequence,
                     previous.sequence,
                 )
-            raise ValueError(
-                "conflicting MarketEvent payload reused an existing source-local sequence"
+
+            if event.sequence == previous.sequence:
+                if self._same_sequence_payload(event, previous):
+                    return MirrorApplyResult(
+                        MirrorUpdate.DUPLICATE,
+                        event.source_id,
+                        event.quote_key,
+                        previous.sequence,
+                        previous.sequence,
+                    )
+                raise ValueError(
+                    "conflicting MarketEvent payload reused an existing source-local sequence"
+                )
+
+            self._latest[key] = self._snapshot_event(event)
+            self._revision += 1
+            return MirrorApplyResult(
+                MirrorUpdate.APPLIED,
+                event.source_id,
+                event.quote_key,
+                previous.sequence,
+                event.sequence,
             )
 
-        self._latest[key] = self._snapshot_event(event)
-        return MirrorApplyResult(
-            MirrorUpdate.APPLIED,
-            event.source_id,
-            event.quote_key,
-            previous.sequence,
-            event.sequence,
+    def view(
+        self,
+        *,
+        source_ids: str | Iterable[str] | None = None,
+        event_ids: str | Iterable[str] | None = None,
+        market_ids: str | Iterable[str] | None = None,
+        selection_ids: str | Iterable[str] | None = None,
+    ) -> MirrorSnapshot:
+        """Capture one coherent revision and optionally filter it for a consumer.
+
+        Filtering happens only over isolated values captured from the canonical mirror;
+        it never creates a second mutable market-state authority. The revision lets a
+        decision consumer detect whether two requested views came from the same mirror
+        state while an updater is active.
+        """
+        selected_sources = self._selector(source_ids, name="source_ids")
+        selected_events = self._selector(event_ids, name="event_ids")
+        selected_markets = self._selector(market_ids, name="market_ids")
+        selected_selections = self._selector(selection_ids, name="selection_ids")
+
+        with self._lock:
+            revision = self._revision
+            events = tuple(
+                self._snapshot_event(event)
+                for _, event in sorted(self._latest.items(), key=lambda item: item[0])
+            )
+
+        filtered = tuple(
+            event
+            for event in events
+            if (selected_sources is None or event.source_id in selected_sources)
+            and (selected_events is None or event.event_id in selected_events)
+            and (selected_markets is None or event.market_id in selected_markets)
+            and (
+                selected_selections is None
+                or event.selection_id in selected_selections
+            )
         )
+        return MirrorSnapshot(revision=revision, events=filtered)
 
     def snapshot(self) -> tuple[MarketEvent, ...]:
         """Return a deterministic, ownership-isolated snapshot by source and quote."""
-        return tuple(
-            self._snapshot_event(event)
-            for _, event in sorted(self._latest.items(), key=lambda item: item[0])
-        )
+        return self.view().events
 
     def get(
         self,
@@ -144,10 +217,11 @@ class MarketMirror:
         selection_id: str,
     ) -> MarketEvent | None:
         """Return an isolated copy of the latest source-specific quote, if present."""
-        event = self._latest.get(
-            (source_id, f"{event_id}|{market_id}|{selection_id}")
-        )
-        return None if event is None else self._snapshot_event(event)
+        with self._lock:
+            event = self._latest.get(
+                (source_id, f"{event_id}|{market_id}|{selection_id}")
+            )
+            return None if event is None else self._snapshot_event(event)
 
     def active_snapshot(
         self,
@@ -201,4 +275,5 @@ class MarketMirror:
         return mirror
 
     def __len__(self) -> int:
-        return len(self._latest)
+        with self._lock:
+            return len(self._latest)

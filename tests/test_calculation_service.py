@@ -297,6 +297,21 @@ class CalculationServiceTests(unittest.TestCase):
                 causal_cutoff_ts="2026-09-14T12:00:00+00:00",
             )
 
+    def test_runtime_quote_odds_must_remain_exact_decimal_before_serialization(self) -> None:
+        class DecimalSubclass(Decimal):
+            pass
+
+        for decimal_odds in ("2.50", 2.5, DecimalSubclass("2.50")):
+            with self.subTest(decimal_odds=repr(decimal_odds)):
+                invalid = self._event()
+                object.__setattr__(invalid, "decimal_odds", decimal_odds)
+
+                with self.assertRaisesRegex(ValueError, "quote fields are not canonical"):
+                    self.service.implied_probability_for_event(
+                        invalid,
+                        causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+                    )
+
     def test_non_utf8_quote_identity_fails_closed_before_calculation(self) -> None:
         for field in ("event_id", "market_id", "selection_id", "source_id"):
             with self.subTest(field=field):

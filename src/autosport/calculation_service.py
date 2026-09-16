@@ -213,6 +213,8 @@ def _snapshot_quote_at_cutoff(
         raise ValueError("event must be a MarketEvent")
     if not isinstance(event.market_type, MarketType):
         raise ValueError("market event market_type must be a MarketType")
+    if type(event.decimal_odds) is not Decimal:
+        raise ValueError("market event quote fields are not canonical")
 
     # Intentionally construct the validation payload from quote-only scalar
     # fields. Do not call event.to_dict(): that would traverse mutable metadata
@@ -221,7 +223,7 @@ def _snapshot_quote_at_cutoff(
         "event_id": event.event_id,
         "market_id": event.market_id,
         "selection_id": event.selection_id,
-        "decimal_odds": event.decimal_odds,
+        "decimal_odds": str(event.decimal_odds),
         "observed_ts": event.observed_ts,
         "source_id": event.source_id,
         "sequence": event.sequence,

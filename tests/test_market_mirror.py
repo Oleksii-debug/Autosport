@@ -376,5 +376,85 @@ class MarketMirrorTests(unittest.TestCase):
                 reopened_store.close()
 
 
+    def test_replay_view_reconstructs_pre_update_state_without_future_leakage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append_many(
+                    [
+                        self.event(
+                            sequence=1,
+                            odds="2.00",
+                            observed_ts="2026-09-16T18:59:00+00:00",
+                            source_ts="2026-09-16T18:58:55+00:00",
+                        ),
+                        self.event(
+                            sequence=2,
+                            odds="9.99",
+                            observed_ts="2026-09-16T19:01:00+00:00",
+                            source_ts="2026-09-16T18:59:30+00:00",
+                        ),
+                    ]
+                )
+
+                replay = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
+                    max_age=timedelta(minutes=5),
+                )
+
+                self.assertEqual(replay.revision, 1)
+                self.assertEqual(len(replay.events), 1)
+                self.assertEqual(replay.events[0].sequence, 1)
+                self.assertEqual(replay.events[0].decimal_odds, Decimal("2.00"))
+            finally:
+                store.close()
+
+    def test_replay_view_applies_live_freshness_and_focused_selectors_at_one_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append_many(
+                    [
+                        self.event(
+                            source="provider-a",
+                            selection="wanted",
+                            observed_ts="2026-09-16T18:59:30+00:00",
+                        ),
+                        self.event(
+                            source="provider-a",
+                            selection="stale",
+                            observed_ts="2026-09-16T18:40:00+00:00",
+                        ),
+                        self.event(
+                            source="provider-b",
+                            selection="other",
+                            observed_ts="2026-09-16T18:59:40+00:00",
+                        ),
+                        self.event(
+                            source="provider-a",
+                            selection="future",
+                            observed_ts="2026-09-16T19:00:01+00:00",
+                        ),
+                    ]
+                )
+
+                replay = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
+                    max_age=timedelta(minutes=5),
+                    source_ids="provider-a",
+                    selection_ids={"wanted", "stale", "future"},
+                )
+
+                self.assertEqual(replay.revision, 3)
+                self.assertEqual(
+                    tuple(event.selection_id for event in replay.events),
+                    ("wanted",),
+                )
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

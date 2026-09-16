@@ -94,6 +94,19 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         )
         self.assertEqual(leg.event_id, " event-1")
 
+    def test_quote_key_delimiter_cannot_enter_parallel_identity_definition(self) -> None:
+        leg = self._leg(event_id="event|1")
+        context = ProposedTicketRiskContext(legs=(leg,))
+
+        decision = self._policy().evaluate(PaperBook("100"), "10", context)
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "proposed-ticket risk context is invalid",
+        )
+        self.assertEqual(leg.event_id, "event|1")
+
     def test_duplicate_proposed_leg_identity_is_rejected_as_ambiguous(self) -> None:
         leg = self._leg()
         context = ProposedTicketRiskContext(legs=(leg, leg))

@@ -1,7 +1,8 @@
 $ErrorActionPreference = 'Stop'
 
 $package = Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip'
-$packagedDataExe = Join-Path $PWD 'dist/Autosport-Data.exe'
+$packagedDataExe = [string]$env:AUTOSPORT_PACKAGED_DATA_EXE
+if ([string]::IsNullOrWhiteSpace($packagedDataExe)) { throw 'AUTOSPORT_PACKAGED_DATA_EXE verified package extraction anchor is missing' }
 $packageRoot = Join-Path $PWD '.build-fresh-extraction/Autosport-V1'
 $freshDataExe = Join-Path $packageRoot 'Autosport-Data.exe'
 $buildInfoPath = Join-Path $packageRoot 'BUILD_INFO.json'

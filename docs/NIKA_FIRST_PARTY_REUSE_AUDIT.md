@@ -44,23 +44,40 @@ Imported/adapted semantics:
 
 Autosport dataset/replay/evidence authorities remain unchanged.
 
+## NIKA-REUSE-02 — evidence-bound champion/challenger decision seam
+
+Donor reviewed:
+- `Oleksii-debug/Nika-Core/src/nika_core/experiments/contracts.py`
+- `Oleksii-debug/Nika-Core/src/nika_core/experiments/engine.py`
+- reviewed donor SHA: `2f7be3389109d7dd6fb3bae40540fe0cf2eba695`
+
+Autosport adaptation:
+- `src/autosport/strategy_experiment.py`
+- `tests/test_strategy_experiment.py`
+
+Adapted semantics:
+- explicit experiment, research-question, hypothesis, champion and challenger identities;
+- frozen predeclared evaluation-case matrix and primary metric;
+- guardrails plus minimum improvement threshold;
+- authority/permission fingerprint invariance;
+- complete candidate × evaluation-case evidence coverage;
+- duplicate/reused evidence rejection;
+- strict fail-closed protocol JSON loading rejects duplicate keys, non-standard constants, excessive nesting, unknown/missing fields and ambiguous numeric representations;
+- each evaluation case predeclares the complete canonical dataset/price identity, including `price_semantics`, executable-quote truth, paper-fill-fidelity truth and `price_source_ids`, before evidence is evaluated;
+- candidate runtime identity is a deterministic SHA-256 derived only from canonical `StrategyRunEvidence`-bound fields (`canonical_strategy_id`, agent composition and research-plan identity), not a free-form runtime reference;
+- deterministic recommendation report with previous-champion evidence, frozen research identities and protocol SHA.
+
+Autosport-specific constraints preserved:
+- consumes canonical `StrategyRunEvidence` from `strategy_comparison.py` rather than copying Nika's generic experiment runtime;
+- all economic metrics remain exact `Decimal` values and non-finite values fail closed;
+- canonical dataset/market/result/replay/price identities remain the source of truth, and the evaluator compares them against the frozen `EvaluationCase.identity` rather than self-accepting values from current evidence;
+- the seam has no persistence, strategy activation, PaperBook/RunRegistry/risk authority, bookmaker execution, or real-money capability;
+- negative/no-improvement results remain explicit `RETAIN_CHAMPION` evidence;
+- `REAL_MONEY_EXECUTION=false`, `HUMAN_TESTED=false`, `NVDA_VERIFIED=false` remain unchanged.
+
+The implementation is a thin Autosport adapter rather than a copy of Nika's repository/runtime. Nika's float-based experiment engine, generic repository and lifecycle state machine were intentionally not imported as parallel Autosport authorities.
+
 ## Adapt later when the dependency becomes active
-
-### Nika experiments -> Autosport Strategy/Model Factory
-
-Potential donor areas:
-- `src/nika_core/experiments/contracts.py`
-- `engine.py`
-- `repository.py`
-
-Useful concepts:
-- explicit champion/challenger identity;
-- replay-set identity;
-- promotion policy/guardrails;
-- promoted/rolled-back states;
-- permission fingerprint invariant preventing a challenger from widening authority.
-
-Do not copy wholesale until compared against Autosport `strategy_comparison.py`, `evaluation_bundle.py`, `run_registry.py` and existing Issue #213 work. Autosport already owns sealed economic evidence and betting-specific promotion truth.
 
 ### Nika semantic interaction -> future Bookmaker adapter
 
@@ -123,7 +140,7 @@ Nika-Core is first-party source owned in the same GitHub account, but Nika itsel
 ## Next exact order
 
 1. Land/qualify `NIKA-REUSE-01` causal feature guards.
-2. Compare Nika experiment/promotion contracts against Autosport current strategy/evaluation/run registries; adapt only the missing semantics.
+2. Land/qualify `NIKA-REUSE-02` evidence-bound champion/challenger decision seam.
 3. Compare Nika semantic interaction contracts/tests and draft the minimum Autosport bookmaker interaction port without opening a second browser authority.
 4. Map Nika effect-journal/idempotency adversaries to Autosport future real execution saga.
 5. Reassess scheduler/capability/model-gateway reuse only when those Autosport stages become live dependencies.

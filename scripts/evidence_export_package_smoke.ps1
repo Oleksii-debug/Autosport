@@ -311,3 +311,7 @@ try {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
+
+# The tamper probe is expected to leave LASTEXITCODE=3 after its verified fail-closed result.
+# All assertions and cleanup have completed successfully here, so normalize the standalone smoke exit.
+exit 0

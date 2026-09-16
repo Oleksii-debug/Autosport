@@ -223,7 +223,8 @@ function Invoke-ForecastOriginPackageSmoke {
   return $report
 }
 
-$preExe = Join-Path $PWD 'dist/Autosport-Data.exe'
+$preExe = [string]$env:AUTOSPORT_PACKAGED_DATA_EXE
+if ([string]::IsNullOrWhiteSpace($preExe)) { throw 'AUTOSPORT_PACKAGED_DATA_EXE verified package extraction anchor is missing' }
 $freshExe = Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe'
 $preReport = Invoke-ForecastOriginPackageSmoke -Exe $preExe -Output $preReportPath -Label 'Packaged'
 $freshReport = Invoke-ForecastOriginPackageSmoke -Exe $freshExe -Output $freshReportPath -Label 'Fresh-extracted'

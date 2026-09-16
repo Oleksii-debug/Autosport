@@ -22,8 +22,15 @@ imported here.
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 from enum import StrEnum
+
+
+# Statistical feature transforms must not inherit an unrelated caller's
+# Decimal precision or rounding mode. 28 significant digits with
+# ROUND_HALF_EVEN preserves Python Decimal's ordinary default arithmetic while
+# making the causal-feature contract explicit and independent of ambient state.
+_CAUSAL_DECIMAL_CONTEXT = Context(prec=28, rounding=ROUND_HALF_EVEN)
 
 
 class CausalFeatureError(ValueError):
@@ -157,11 +164,12 @@ def trailing_mean(
             for candidate in points[start : index + 1]
             if candidate.value is not None
         ]
-        mean = (
-            None
-            if not values
-            else sum(values, Decimal(0)) / Decimal(len(values))
-        )
+        with localcontext(_CAUSAL_DECIMAL_CONTEXT):
+            mean = (
+                None
+                if not values
+                else sum(values, Decimal(0)) / Decimal(len(values))
+            )
         result.append(FeaturePoint(mean, point.available_at))
     return tuple(result)
 
@@ -216,13 +224,15 @@ class TrainOnlyStandardizer:
         if not materialized:
             raise CausalFeatureError("cannot fit empty values")
 
-        mean = sum(materialized, Decimal(0)) / Decimal(len(materialized))
-        variance = (
-            sum((value - mean) ** 2 for value in materialized)
-            / Decimal(len(materialized))
-        )
+        with localcontext(_CAUSAL_DECIMAL_CONTEXT):
+            mean = sum(materialized, Decimal(0)) / Decimal(len(materialized))
+            variance = (
+                sum((value - mean) ** 2 for value in materialized)
+                / Decimal(len(materialized))
+            )
+            scale = variance.sqrt() if variance > 0 else Decimal(1)
         self._mean = mean
-        self._scale = variance.sqrt() if variance > 0 else Decimal(1)
+        self._scale = scale
         self._fitted = True
 
     def transform(self, values: Iterable[Decimal]) -> tuple[Decimal, ...]:
@@ -230,10 +240,11 @@ class TrainOnlyStandardizer:
             raise FeatureLeakageError(
                 "standardizer must be fit on train data before transform"
             )
-        return tuple(
-            (Decimal(value) - self._mean) / self._scale
-            for value in values
-        )
+        with localcontext(_CAUSAL_DECIMAL_CONTEXT):
+            return tuple(
+                (Decimal(value) - self._mean) / self._scale
+                for value in values
+            )
 
 
 class AvailabilityCache:

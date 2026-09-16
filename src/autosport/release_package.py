@@ -230,11 +230,18 @@ def _require_canonical_zip_local_headers(
     snapshot: Any,
     infos: list[zipfile.ZipInfo],
 ) -> None:
-    """Require each raw local-file header to match its canonical central record."""
+    """Require canonical local records and a byte-exhaustive ZIP structure."""
 
     original_position = snapshot.tell()
     try:
+        expected_local_offset = 0
         for info in infos:
+            if info.header_offset != expected_local_offset:
+                raise ValueError(
+                    "release package contains unclaimed bytes before local header: "
+                    f"{info.filename}"
+                )
+
             snapshot.seek(info.header_offset)
             raw_header = snapshot.read(_ZIP_LOCAL_HEADER.size)
             if len(raw_header) != _ZIP_LOCAL_HEADER.size:
@@ -310,6 +317,49 @@ def _require_canonical_zip_local_headers(
                     "release package local header metadata does not match canonical "
                     f"central metadata: {info.filename}"
                 )
+
+            expected_local_offset = snapshot.tell() + info.compress_size
+
+        eocd = struct.Struct("<IHHHHIIH")
+        snapshot.seek(0, os.SEEK_END)
+        snapshot_size = snapshot.tell()
+        eocd_offset = snapshot_size - eocd.size
+        if eocd_offset < expected_local_offset:
+            raise ValueError("release package end-of-central-directory is truncated")
+        snapshot.seek(eocd_offset)
+        raw_eocd = snapshot.read(eocd.size)
+        if len(raw_eocd) != eocd.size:
+            raise ValueError("release package end-of-central-directory is truncated")
+        (
+            eocd_signature,
+            disk_number,
+            central_directory_disk,
+            entries_on_disk,
+            entries_total,
+            central_directory_size,
+            central_directory_offset,
+            comment_length,
+        ) = eocd.unpack(raw_eocd)
+        if (
+            eocd_signature != 0x06054B50
+            or disk_number != 0
+            or central_directory_disk != 0
+            or entries_on_disk != len(infos)
+            or entries_total != len(infos)
+            or comment_length != 0
+        ):
+            raise ValueError(
+                "release package end-of-central-directory is not canonical"
+            )
+        if central_directory_offset != expected_local_offset:
+            raise ValueError(
+                "release package contains unclaimed bytes between local records "
+                "and central directory"
+            )
+        if central_directory_offset + central_directory_size != eocd_offset:
+            raise ValueError(
+                "release package central-directory span is not canonical"
+            )
     finally:
         snapshot.seek(original_position)
 

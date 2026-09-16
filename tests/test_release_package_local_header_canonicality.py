@@ -125,6 +125,26 @@ class ReleasePackageLocalHeaderCanonicalityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "local header metadata"):
                 verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
 
+    def test_opaque_prefix_is_rejected_even_when_payloads_are_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(Path(temporary))
+            before = self._read_members(package)
+            package.write_bytes(b"OPAQUE-PREFIX-" + package.read_bytes())
+
+            self.assertEqual(self._read_members(package), before)
+            with self.assertRaisesRegex(ValueError, "unclaimed bytes before local header"):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
+    def test_post_eocd_suffix_is_rejected_even_when_payloads_are_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(Path(temporary))
+            before = self._read_members(package)
+            package.write_bytes(package.read_bytes() + b"OPAQUE-SUFFIX")
+
+            self.assertEqual(self._read_members(package), before)
+            with self.assertRaisesRegex(ValueError, "end-of-central-directory"):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
 
 if __name__ == "__main__":
     unittest.main()

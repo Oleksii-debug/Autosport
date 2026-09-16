@@ -56,14 +56,44 @@ function Assert-EvidenceManifestContract {
     }
 
     $expectedPaths = @('decisions.jsonl', 'paper_book.json', 'run_registry.json', 'source_health.json')
-    $actualPaths = @($Manifest.files | ForEach-Object { [string]$_.path })
+    $expectedFileRecordKeys = @('path', 'sha256', 'size_bytes')
+    $actualPaths = @()
+    foreach ($record in @($Manifest.files)) {
+        if ($null -eq $record) {
+            throw "$Label evidence file record is missing"
+        }
+        $actualFileRecordKeys = @($record.PSObject.Properties.Name | Sort-Object)
+        if (
+            $actualFileRecordKeys.Count -ne $expectedFileRecordKeys.Count -or
+            ($actualFileRecordKeys -join "`n") -ne ($expectedFileRecordKeys -join "`n")
+        ) {
+            throw "$Label evidence file record keys mismatch"
+        }
+        if ($record.path -isnot [string]) {
+            throw "$Label evidence file record path must be a string"
+        }
+        if (($record.size_bytes -isnot [int]) -and ($record.size_bytes -isnot [long])) {
+            throw "$Label evidence file record size_bytes must be an integer"
+        }
+        if ([long]$record.size_bytes -lt 0) {
+            throw "$Label evidence file record size_bytes must be non-negative"
+        }
+        if (($record.sha256 -isnot [string]) -or ($record.sha256 -notmatch '^[0-9a-f]{64}$')) {
+            throw "$Label evidence file record sha256 is invalid"
+        }
+        $actualPaths += $record.path
+    }
+
     if ($Manifest.file_count -ne $expectedPaths.Count -or $actualPaths.Count -ne $expectedPaths.Count) {
         throw "$Label canonical evidence file count mismatch"
     }
-    if (Compare-Object -ReferenceObject $expectedPaths -DifferenceObject $actualPaths) {
-        throw "$Label canonical evidence path set mismatch"
+    if (($actualPaths -join "`n") -ne ($expectedPaths -join "`n")) {
+        throw "$Label canonical evidence path set/order mismatch"
     }
-    Require-CanonicalHex -Value ([string]$Manifest.manifest_sha256) -Length 64 -Label "$Label manifest_sha256"
+    if ($Manifest.manifest_sha256 -isnot [string]) {
+        throw "$Label manifest_sha256 must be a string"
+    }
+    Require-CanonicalHex -Value $Manifest.manifest_sha256 -Length 64 -Label "$Label manifest_sha256"
 
     foreach ($forbidden in @($SecretSentinel, 'credential.env', 'market.sqlite', 'raw-provider.bin')) {
         if ($RawManifest.Contains($forbidden)) {

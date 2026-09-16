@@ -14,6 +14,12 @@ def _smoke_text() -> str:
     return SMOKE.read_text(encoding="utf-8")
 
 
+def _powershell() -> str | None:
+    if os.name != "nt":
+        return None
+    return shutil.which("pwsh") or shutil.which("powershell")
+
+
 def test_packaged_evidence_smoke_binds_release_identity_before_execution() -> None:
     text = _smoke_text()
 
@@ -96,6 +102,13 @@ def test_packaged_evidence_smoke_preserves_metadata_only_truth_boundary() -> Non
     ):
         assert canonical_name in text
 
+    assert "$expectedFileRecordKeys = @('path', 'sha256', 'size_bytes')" in text
+    assert "evidence file record keys mismatch" in text
+    assert "evidence file record path must be a string" in text
+    assert "evidence file record size_bytes must be an integer" in text
+    assert "evidence file record size_bytes must be non-negative" in text
+    assert "evidence file record sha256 is invalid" in text
+    assert "canonical evidence path set/order mismatch" in text
     assert "AUTOSPORT_PACKAGE_SMOKE_SECRET_SENTINEL_DO_NOT_EXPORT_7D8A6B" in text
     assert "credential.env" in text
     assert "market.sqlite" in text
@@ -104,6 +117,92 @@ def test_packaged_evidence_smoke_preserves_metadata_only_truth_boundary() -> Non
     assert "real_money_execution = $false" in text
     assert "human_tested = $false" in text
     assert "nvda_verified = $false" in text
+
+
+def test_packaged_evidence_smoke_rejects_content_like_file_record_field() -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell adversarial manifest check is Windows-specific")
+
+    target_env = "AUTOSPORT_POWERSHELL_CONTRACT_TARGET"
+    env = os.environ.copy()
+    env[target_env] = str(SMOKE)
+    command = r"""
+$tokens = $null
+$errors = $null
+$target = $env:AUTOSPORT_POWERSHELL_CONTRACT_TARGET
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($target, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) {
+    $errors | ForEach-Object { Write-Error $_.Message }
+    exit 1
+}
+foreach ($name in @('Require-CanonicalHex', 'Assert-EvidenceManifestContract')) {
+    $definition = $ast.Find(
+        {
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq $name
+        },
+        $true
+    )
+    if ($null -eq $definition) {
+        Write-Error "missing function: $name"
+        exit 1
+    }
+    Invoke-Expression $definition.Extent.Text
+}
+
+$sha = '0' * 64
+$files = @(
+    [pscustomobject][ordered]@{path='decisions.jsonl'; size_bytes=1; sha256=$sha; content='FORGED-CONTENT'},
+    [pscustomobject][ordered]@{path='paper_book.json'; size_bytes=1; sha256=$sha},
+    [pscustomobject][ordered]@{path='run_registry.json'; size_bytes=1; sha256=$sha},
+    [pscustomobject][ordered]@{path='source_health.json'; size_bytes=1; sha256=$sha}
+)
+$manifest = [pscustomobject][ordered]@{
+    schema_version = 1
+    kind = 'autosport-workspace-evidence-manifest'
+    file_count = 4
+    files = $files
+    fixed_evidence_set_complete = $true
+    run_summary_count = 0
+    file_contents_included = $false
+    market_database_included = $false
+    raw_historical_or_provider_bytes_included = $false
+    environment_or_credential_values_included = $false
+    arbitrary_workspace_files_included = $false
+    real_money_execution = $false
+    manifest_sha256 = $sha
+}
+try {
+    Assert-EvidenceManifestContract `
+        -Manifest $manifest `
+        -RawManifest ($manifest | ConvertTo-Json -Depth 6) `
+        -Label 'Adversarial' `
+        -SecretSentinel 'NOT-PRESENT'
+    Write-Error 'forged content-like file record field was accepted'
+    exit 2
+} catch {
+    if ($_.Exception.Message -notmatch 'evidence file record keys mismatch') {
+        Write-Error $_.Exception.Message
+        exit 3
+    }
+}
+"""
+    subprocess.run(
+        [
+            shell,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
 
 
 def test_packaged_evidence_smoke_has_fail_closed_tamper_probe() -> None:
@@ -120,12 +219,9 @@ def test_packaged_evidence_smoke_has_fail_closed_tamper_probe() -> None:
 
 
 def test_packaged_evidence_smoke_parses_with_powershell_on_windows() -> None:
-    if os.name != "nt":
-        pytest.skip("PowerShell parser check is Windows-specific")
-
-    shell = shutil.which("pwsh") or shutil.which("powershell")
+    shell = _powershell()
     if shell is None:
-        pytest.skip("PowerShell is unavailable")
+        pytest.skip("PowerShell parser check is Windows-specific")
 
     target_env = "AUTOSPORT_POWERSHELL_PARSE_TARGET"
     env = os.environ.copy()

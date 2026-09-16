@@ -20,13 +20,14 @@ class OpportunityContractError(ValueError):
 
 
 class StrategyClass(str, Enum):
-    PREDICTIVE = "predictive"
-    LIVE_MOVEMENT = "live-movement"
-    LEAD_LAG = "lead-lag"
+    """Canonical strategy-class vocabulary from binding decision contract #356."""
+
+    PREDICTIVE_EDGE = "predictive_edge"
+    LIVE_PRICE_MOVEMENT = "live_price_movement"
     ARBITRAGE = "arbitrage"
     DUTCHING = "dutching"
-    HEDGE_REBALANCE = "hedge-rebalance"
-    PARLAY_HYBRID = "parlay-hybrid"
+    HEDGE_REBALANCE = "hedge_rebalance"
+    HYBRID = "hybrid"
 
 
 class OpportunityDecision(str, Enum):
@@ -51,6 +52,12 @@ def _canonical_text(value: object, field_name: str) -> str:
     return value
 
 
+def _optional_text(value: object, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _canonical_text(value, field_name)
+
+
 def _canonical_hash(value: object, field_name: str) -> str:
     text = _canonical_text(value, field_name)
     if len(text) != 64 or any(character not in _SHA256_HEX for character in text):
@@ -58,6 +65,12 @@ def _canonical_hash(value: object, field_name: str) -> str:
             f"{field_name} must be a canonical lowercase SHA-256 digest"
         )
     return text
+
+
+def _optional_hash(value: object, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _canonical_hash(value, field_name)
 
 
 def _finite_decimal(
@@ -158,7 +171,10 @@ class QuoteRef:
     sequence: int
     decimal_odds: Decimal
     observed_ts: str
+    source_ts: str | None
+    ingest_ts: str
     market_event_hash: str
+    market_snapshot_hash: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -167,8 +183,10 @@ class QuoteRef:
             "selection_id",
             "source_id",
             "observed_ts",
+            "ingest_ts",
         ):
             _canonical_text(getattr(self, name), f"quote {name}")
+        _optional_text(self.source_ts, "quote source_ts")
         if type(self.sequence) is not int or self.sequence < 0:
             raise OpportunityContractError(
                 "quote sequence must be a non-negative non-boolean int"
@@ -179,6 +197,7 @@ class QuoteRef:
                 "quote decimal_odds must be greater than 1"
             )
         _canonical_hash(self.market_event_hash, "market_event_hash")
+        _optional_hash(self.market_snapshot_hash, "market_snapshot_hash")
 
     @property
     def quote_key(self) -> str:
@@ -195,7 +214,12 @@ class QuoteRef:
         )
 
     @classmethod
-    def from_market_event(cls, event: MarketEvent) -> "QuoteRef":
+    def from_market_event(
+        cls,
+        event: MarketEvent,
+        *,
+        market_snapshot_hash: str | None = None,
+    ) -> "QuoteRef":
         if not isinstance(event, MarketEvent):
             raise OpportunityContractError("quote source must be a MarketEvent")
         try:
@@ -213,7 +237,13 @@ class QuoteRef:
             sequence=canonical.sequence,
             decimal_odds=canonical.decimal_odds,
             observed_ts=canonical.observed_ts,
+            source_ts=canonical.source_ts,
+            ingest_ts=canonical.ingest_ts,
             market_event_hash=_canonical_json_hash(payload),
+            market_snapshot_hash=_optional_hash(
+                market_snapshot_hash,
+                "market_snapshot_hash",
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -225,7 +255,10 @@ class QuoteRef:
             "sequence": self.sequence,
             "decimal_odds": str(self.decimal_odds),
             "observed_ts": self.observed_ts,
+            "source_ts": self.source_ts,
+            "ingest_ts": self.ingest_ts,
             "market_event_hash": self.market_event_hash,
+            "market_snapshot_hash": self.market_snapshot_hash,
         }
 
     @classmethod
@@ -238,7 +271,10 @@ class QuoteRef:
             "sequence",
             "decimal_odds",
             "observed_ts",
+            "source_ts",
+            "ingest_ts",
             "market_event_hash",
+            "market_snapshot_hash",
         }
         if type(raw) is not dict or set(raw) != expected:
             raise OpportunityContractError(
@@ -263,21 +299,28 @@ class QuoteRef:
             observed_ts=_canonical_text(
                 raw["observed_ts"], "quote observed_ts"
             ),
+            source_ts=_optional_text(raw["source_ts"], "quote source_ts"),
+            ingest_ts=_canonical_text(raw["ingest_ts"], "quote ingest_ts"),
             market_event_hash=_canonical_hash(
                 raw["market_event_hash"], "market_event_hash"
+            ),
+            market_snapshot_hash=_optional_hash(
+                raw["market_snapshot_hash"], "market_snapshot_hash"
             ),
         )
 
 
 @dataclass(frozen=True, slots=True)
 class ForecastRef:
-    """Minimal immutable reference to canonical causal ForecastRecord evidence."""
+    """Causal forecast evidence bound to one exact QuoteRef snapshot."""
 
     forecast_id: str
     forecast_hash: str
     quote_key: str
     probability: Decimal
     input_cutoff_ts: str
+    market_snapshot_hash: str
+    quote_market_event_hash: str
 
     def __post_init__(self) -> None:
         _canonical_text(self.forecast_id, "forecast_id")
@@ -291,12 +334,39 @@ class ForecastRef:
                 "forecast probability must be between 0 and 1"
             )
         _canonical_text(self.input_cutoff_ts, "forecast input_cutoff_ts")
+        _canonical_hash(self.market_snapshot_hash, "market_snapshot_hash")
+        _canonical_hash(
+            self.quote_market_event_hash,
+            "quote_market_event_hash",
+        )
 
     @classmethod
-    def from_forecast(cls, forecast: ForecastRecord) -> "ForecastRef":
+    def from_forecast(
+        cls,
+        forecast: ForecastRecord,
+        quote: QuoteRef,
+    ) -> "ForecastRef":
         if not isinstance(forecast, ForecastRecord):
             raise OpportunityContractError(
                 "forecast source must be a ForecastRecord"
+            )
+        if not isinstance(quote, QuoteRef):
+            raise OpportunityContractError("forecast quote must be a QuoteRef")
+        if forecast.quote_key != quote.quote_key:
+            raise OpportunityContractError(
+                "forecast quote_key does not match bound QuoteRef"
+            )
+        if forecast.market_snapshot_hash is None:
+            raise OpportunityContractError(
+                "forecast requires canonical market_snapshot_hash evidence"
+            )
+        if quote.market_snapshot_hash is None:
+            raise OpportunityContractError(
+                "bound QuoteRef requires market_snapshot_hash for forecast evidence"
+            )
+        if forecast.market_snapshot_hash != quote.market_snapshot_hash:
+            raise OpportunityContractError(
+                "forecast market snapshot does not match bound QuoteRef"
             )
         return cls(
             forecast_id=forecast.forecast_id,
@@ -304,6 +374,8 @@ class ForecastRef:
             quote_key=forecast.quote_key,
             probability=forecast.probability,
             input_cutoff_ts=forecast.input_cutoff_ts,
+            market_snapshot_hash=forecast.market_snapshot_hash,
+            quote_market_event_hash=quote.market_event_hash,
         )
 
     def to_dict(self) -> dict[str, str]:
@@ -313,6 +385,8 @@ class ForecastRef:
             "quote_key": self.quote_key,
             "probability": str(self.probability),
             "input_cutoff_ts": self.input_cutoff_ts,
+            "market_snapshot_hash": self.market_snapshot_hash,
+            "quote_market_event_hash": self.quote_market_event_hash,
         }
 
     @classmethod
@@ -323,6 +397,8 @@ class ForecastRef:
             "quote_key",
             "probability",
             "input_cutoff_ts",
+            "market_snapshot_hash",
+            "quote_market_event_hash",
         }
         if type(raw) is not dict or set(raw) != expected:
             raise OpportunityContractError(
@@ -342,6 +418,12 @@ class ForecastRef:
             input_cutoff_ts=_canonical_text(
                 raw["input_cutoff_ts"], "forecast input_cutoff_ts"
             ),
+            market_snapshot_hash=_canonical_hash(
+                raw["market_snapshot_hash"], "market_snapshot_hash"
+            ),
+            quote_market_event_hash=_canonical_hash(
+                raw["quote_market_event_hash"], "quote_market_event_hash"
+            ),
         )
 
 
@@ -350,6 +432,7 @@ class Opportunity:
     strategy_class: StrategyClass
     decision: OpportunityDecision
     quotes: tuple[QuoteRef, ...]
+    claims_probability_edge: bool = False
     forecasts: tuple[ForecastRef, ...] = ()
     evidence_refs: tuple[EvidenceRef, ...] = ()
 
@@ -361,6 +444,24 @@ class Opportunity:
         if not isinstance(self.decision, OpportunityDecision):
             raise OpportunityContractError(
                 "decision must be an OpportunityDecision"
+            )
+        if type(self.claims_probability_edge) is not bool:
+            raise OpportunityContractError(
+                "claims_probability_edge must be a boolean"
+            )
+        if (
+            self.strategy_class is StrategyClass.PREDICTIVE_EDGE
+            and not self.claims_probability_edge
+        ):
+            raise OpportunityContractError(
+                "PREDICTIVE_EDGE must claim a probability edge"
+            )
+        if self.claims_probability_edge and self.strategy_class not in {
+            StrategyClass.PREDICTIVE_EDGE,
+            StrategyClass.HYBRID,
+        }:
+            raise OpportunityContractError(
+                "probability edge is supported only for PREDICTIVE_EDGE or HYBRID"
             )
 
         quotes = tuple(self.quotes)
@@ -409,16 +510,27 @@ class Opportunity:
             raise OpportunityContractError(
                 "opportunity contains duplicate forecast evidence"
             )
-        quote_key_set = set(quote_keys)
-        if any(item.quote_key not in quote_key_set for item in forecasts):
-            raise OpportunityContractError(
-                "forecast reference does not belong to an opportunity quote"
-            )
-        if self.strategy_class is StrategyClass.PREDICTIVE:
-            covered = {item.quote_key for item in forecasts}
-            if covered != quote_key_set:
+
+        quote_by_key = {item.quote_key: item for item in quotes}
+        for forecast in forecasts:
+            quote = quote_by_key.get(forecast.quote_key)
+            if quote is None:
                 raise OpportunityContractError(
-                    "predictive opportunity requires forecast evidence for every quote"
+                    "forecast reference does not belong to an opportunity quote"
+                )
+            if (
+                forecast.quote_market_event_hash != quote.market_event_hash
+                or forecast.market_snapshot_hash != quote.market_snapshot_hash
+            ):
+                raise OpportunityContractError(
+                    "forecast evidence does not bind the exact opportunity quote snapshot"
+                )
+
+        if self.claims_probability_edge:
+            covered = {item.quote_key for item in forecasts}
+            if covered != set(quote_by_key):
+                raise OpportunityContractError(
+                    "probability-edge opportunity requires forecast evidence for every quote"
                 )
         object.__setattr__(self, "forecasts", forecasts)
         object.__setattr__(
@@ -433,6 +545,7 @@ class Opportunity:
     def _decision_independent_payload(self) -> dict[str, Any]:
         return {
             "strategy_class": self.strategy_class.value,
+            "claims_probability_edge": self.claims_probability_edge,
             "quotes": [item.to_dict() for item in self.quotes],
             "forecasts": [item.to_dict() for item in self.forecasts],
             "evidence_refs": [item.to_dict() for item in self.evidence_refs],
@@ -466,6 +579,7 @@ class Opportunity:
             "opportunity_id",
             "strategy_class",
             "decision",
+            "claims_probability_edge",
             "quotes",
             "forecasts",
             "evidence_refs",
@@ -481,6 +595,10 @@ class Opportunity:
             raise OpportunityContractError(
                 "opportunity enum value is unsupported"
             ) from exc
+        if type(raw["claims_probability_edge"]) is not bool:
+            raise OpportunityContractError(
+                "claims_probability_edge must be a boolean"
+            )
         if (
             type(raw["quotes"]) is not list
             or type(raw["forecasts"]) is not list
@@ -495,6 +613,7 @@ class Opportunity:
             quotes=tuple(
                 QuoteRef.from_dict(item) for item in raw["quotes"]
             ),
+            claims_probability_edge=raw["claims_probability_edge"],
             forecasts=tuple(
                 ForecastRef.from_dict(item) for item in raw["forecasts"]
             ),

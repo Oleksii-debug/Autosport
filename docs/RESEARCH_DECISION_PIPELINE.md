@@ -2,11 +2,13 @@
 
 Autosport separates research reasoning from deterministic paper execution.
 
-The V1 research decision path is:
+The current V1 predictive research decision path is:
 
 `ResearchEvidence -> ForecastRecord -> deterministic critic -> portfolio-aware impact -> PaperRiskPolicy -> PaperBook + Decision Ledger`
 
 No LLM, network request or bookmaker write action exists inside this path.
+
+This forecast-bound path is intentional for the present predictive paper journey; it is **not** a product-wide requirement that every mature strategy fabricate a directional forecast. GitHub Issue #356 defines the post-V1 generic opportunity contract: forecasting remains required for predictive/hybrid probability-edge intents, while pure arbitrage, dutching and some hedge/rebalance intents may instead be validated from causal executable quote structure plus complete terminal-state economics. The V1 pipeline is preserved as a predictive adapter rather than rewritten on the release path.
 
 ## Typed role outputs
 
@@ -27,7 +29,9 @@ Evidence cannot become available before it was observed.
 
 ### Forecast
 
-The existing immutable `ForecastRecord` remains the forecast contract. The critic requires causal timestamps and verifies that candidate probability comes from that record rather than an independently supplied number.
+The existing immutable `ForecastRecord` remains the forecast contract for predictive intents. The critic requires causal timestamps and verifies that candidate probability comes from that record rather than an independently supplied number.
+
+A future generic opportunity path must not synthesize a `ForecastRecord` merely to satisfy this interface. Strategy classes without a probability-edge claim must use their own bounded validator under #356 while preserving the same causal evidence, portfolio, risk and ledger authorities.
 
 ### Critic
 
@@ -54,6 +58,8 @@ The decision keeps the optimizer's exact/approximate truth labels. Policy may re
 
 `PaperRiskPolicy` is evaluated immediately before the paper ticket can be opened.
 
+For mature live opportunity classes, whole-portfolio authority remains mandatory even when forecast is absent. Arbitrage/dutching/hedge claims that use `OUTCOME_INDEPENDENT_POSITIVE` must satisfy Issue #355's complete-terminal-state and exact executable-plan contract, including stake vector, settlement semantics, limits/granularity, applicable costs, quote freshness/slippage and partial-acceptance/execution sequencing risk.
+
 ### Strategy / Audit
 
 `ResearchDecisionPipeline.decide_and_open(...)` opens only a virtual PaperBook ticket when every critic, portfolio-policy and risk gate passes.
@@ -69,6 +75,8 @@ Both approvals and rejections are written as `DecisionRecord` entries with:
 - PaperRiskPolicy result;
 - deterministic pre-decision context hash;
 - `real_money_execution=false`.
+
+The later generic contract must preserve equivalent auditability while binding strategy class, exact event/market/selection/provider identities, source/receive timestamps, quote freshness, evidence/provenance hashes, portfolio identity, decision timestamp, strategy/model/config identity, exact/approximate/completeness truth and risk-policy result.
 
 ## Transaction boundary
 

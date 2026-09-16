@@ -171,6 +171,50 @@ class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
             Decimal("0.646402005331321294939224914"),
         )
 
+    def test_scaled_standalone_ev_ranking_ignores_caller_decimal_context(self) -> None:
+        higher_ev = BeamParlayCandidateSearch._to_candidate(
+            (
+                CandidateLeg(
+                    "e1|winner|a",
+                    "e1",
+                    Decimal("2"),
+                    Decimal("0.10"),
+                ),
+            )
+        )
+        lower_ev = BeamParlayCandidateSearch._to_candidate(
+            (
+                CandidateLeg(
+                    "e1|winner|a",
+                    "e1",
+                    Decimal("2"),
+                    Decimal("0.09"),
+                ),
+            )
+        )
+        optimizer = PortfolioAwareCandidateOptimizer(result_limit=1)
+
+        normal = optimizer.evaluate_candidates(
+            [],
+            [higher_ev, lower_ev],
+            _groups(),
+            stake="1",
+        )
+        with localcontext(Context(prec=1)):
+            hostile = optimizer.evaluate_candidates(
+                [],
+                [higher_ev, lower_ev],
+                _groups(),
+                stake="1",
+            )
+
+        self.assertEqual(len(normal), 1)
+        self.assertEqual(len(hostile), 1)
+        self.assertEqual(normal[0].candidate.legs[0].probability, Decimal("0.10"))
+        self.assertEqual(hostile[0].candidate.legs[0].probability, Decimal("0.10"))
+        self.assertEqual(normal[0].standalone_expected_profit, Decimal("-0.80"))
+        self.assertEqual(hostile[0].standalone_expected_profit, Decimal("-0.80"))
+
     def test_equal_rank_candidates_have_input_order_independent_limit_selection(self) -> None:
         first = _candidate("e1")
         second = _candidate("e2")

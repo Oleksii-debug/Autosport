@@ -3,9 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, DecimalException, Overflow, Underflow, localcontext
 
-from .candidate_search import BeamParlayCandidateSearch, CandidateLeg, ParlayCandidate
+from .candidate_search import (
+    _CANDIDATE_DECIMAL_CONTEXT,
+    BeamParlayCandidateSearch,
+    CandidateLeg,
+    ParlayCandidate,
+)
 from .domain import PaperTicket, TicketLeg, TicketStatus
 from .scenario_search import ScenarioGroup, ScenarioSearchEngine, ScenarioSearchReport
 
@@ -145,12 +150,33 @@ class PortfolioAwareCandidateOptimizer:
                     best_case_change_proven=best_proven,
                     ranking_risk_change=ranking_risk_change,
                     ranking_risk_truth=ranking_risk_truth,
-                    standalone_expected_profit=canonical_candidate.expected_profit_per_unit * amount,
+                    standalone_expected_profit=_scale_standalone_expected_profit(
+                        canonical_candidate.expected_profit_per_unit,
+                        amount,
+                    ),
                 )
             )
 
         ranked.sort(key=_ranking_key, reverse=True)
         return ranked[: self.result_limit]
+
+
+def _scale_standalone_expected_profit(
+    expected_profit_per_unit: Decimal,
+    stake: Decimal,
+) -> Decimal:
+    """Scale canonical candidate EV without inheriting caller Decimal context."""
+
+    try:
+        with localcontext(_CANDIDATE_DECIMAL_CONTEXT) as context:
+            context.clear_flags()
+            value = expected_profit_per_unit * stake
+            range_lost = context.flags[Overflow] or context.flags[Underflow]
+    except DecimalException as exc:
+        raise ValueError("candidate standalone expected profit exceeds Decimal range") from exc
+    if range_lost or not value.is_finite():
+        raise ValueError("candidate standalone expected profit exceeds Decimal range")
+    return value
 
 
 def _quote_group_map(groups: list[ScenarioGroup]) -> dict[str, int]:

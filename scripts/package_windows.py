@@ -26,6 +26,7 @@ def _git_output(repo_root: Path, *args: str) -> str:
         completed = subprocess.run(
             ["git", *args],
             cwd=repo_root,
+            env=_exact_git_environment(),
             check=True,
             capture_output=True,
             text=True,
@@ -43,6 +44,7 @@ def _fetch_source_commit(repo_root: Path, source_sha: str) -> None:
         subprocess.run(
             ["git", "fetch", "--no-tags", "--depth=1", "origin", source_sha],
             cwd=repo_root,
+            env=_exact_git_environment(),
             check=True,
             capture_output=True,
             text=True,
@@ -161,6 +163,109 @@ def _exact_git_bytes(repo_root: Path, *args: str) -> bytes:
     except (OSError, subprocess.CalledProcessError) as exc:
         raise ValueError(f"unable to materialize exact package source with git {' '.join(args)}") from exc
     return completed.stdout
+
+
+def _exact_checkout_tree(repo_root: Path, source_sha: str) -> dict[bytes, tuple[bytes, bytes]]:
+    """Return exact regular tracked entries as raw path -> (mode, blob sha)."""
+
+    raw = _exact_git_bytes(
+        repo_root,
+        "ls-tree",
+        "-r",
+        "-z",
+        "--full-tree",
+        source_sha,
+    )
+    entries: dict[bytes, tuple[bytes, bytes]] = {}
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, path_bytes = record.split(b"\t", 1)
+            mode, object_type, object_sha = metadata.split(b" ", 2)
+        except ValueError as exc:
+            raise ValueError("unable to parse exact release source tree") from exc
+        if object_type != b"blob" or mode not in {b"100644", b"100755"}:
+            display_path = path_bytes.decode("utf-8", errors="backslashreplace")
+            raise ValueError(f"unsupported tracked release source entry: {display_path}")
+        if len(object_sha) != 40 or any(character not in b"0123456789abcdef" for character in object_sha):
+            raise ValueError("exact release source tree returned a noncanonical blob identity")
+        if path_bytes in entries:
+            raise ValueError("exact release source tree returned a duplicate path")
+        entries[path_bytes] = (mode, object_sha)
+    if not entries:
+        raise ValueError("exact release source tree is empty")
+    return entries
+
+
+def _require_checkout_matches_exact_source(repo_root: Path, source_sha: str) -> None:
+    """Prove the package-time index and raw tracked bytes equal exact source_sha.
+
+    This deliberately does not trust ``git status``/``git diff`` or clean filters.
+    It compares stage-0 index identity to the exact commit tree and hashes the raw
+    filesystem bytes directly, so assume-unchanged/skip-worktree and mutable
+    ``.git`` clean-filter/attribute state cannot hide a tracked source mutation.
+    """
+
+    expected = _exact_checkout_tree(repo_root, source_sha)
+
+    index_raw = _exact_git_bytes(repo_root, "ls-files", "--stage", "-z")
+    actual_index: dict[bytes, tuple[bytes, bytes]] = {}
+    for record in index_raw.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, path_bytes = record.split(b"\t", 1)
+            mode, object_sha, stage = metadata.split(b" ", 2)
+        except ValueError as exc:
+            raise ValueError("unable to parse release checkout index") from exc
+        if stage != b"0":
+            raise ValueError("release checkout contains a non-stage-0 index entry")
+        if path_bytes in actual_index:
+            raise ValueError("release checkout index contains a duplicate path")
+        actual_index[path_bytes] = (mode, object_sha)
+    if actual_index != expected:
+        raise ValueError("release checkout index does not exactly match source_sha")
+
+    verbose_index = _exact_git_bytes(repo_root, "ls-files", "-v", "-z")
+    verbose_paths: set[bytes] = set()
+    for record in verbose_index.split(b"\0"):
+        if not record:
+            continue
+        if not record.startswith(b"H "):
+            raise ValueError("release checkout index contains assume-unchanged/skip-worktree masking")
+        path_bytes = record[2:]
+        if path_bytes in verbose_paths:
+            raise ValueError("release checkout masking census contains a duplicate path")
+        verbose_paths.add(path_bytes)
+    if verbose_paths != set(expected):
+        raise ValueError("release checkout masking census does not match source_sha paths")
+
+    for path_bytes, (_mode, expected_blob) in expected.items():
+        try:
+            relative = PurePosixPath(path_bytes.decode("utf-8", errors="strict"))
+        except UnicodeDecodeError as exc:
+            raise ValueError("release source paths must be valid UTF-8") from exc
+        path = repo_root.joinpath(*relative.parts)
+        try:
+            path_stat = path.lstat()
+            data = path.read_bytes()
+            after_stat = path.lstat()
+        except OSError as exc:
+            raise ValueError(f"tracked release source is unreadable: {relative.as_posix()}") from exc
+        if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+            raise ValueError(f"tracked release source is not a regular file: {relative.as_posix()}")
+        if _file_identity(path_stat) != _file_identity(after_stat):
+            raise ValueError(f"tracked release source changed while hashing: {relative.as_posix()}")
+        blob_header = f"blob {len(data)}\0".encode("ascii")
+        actual_blob = hashlib.sha1(
+            blob_header + data,
+            usedforsecurity=False,
+        ).hexdigest().encode("ascii")
+        if actual_blob != expected_blob:
+            raise ValueError(
+                f"raw tracked release source differs from source_sha: {relative.as_posix()}"
+            )
 
 
 def _repo_relative_path(repo_root: Path, requested: Path, *, field: str) -> PurePosixPath:
@@ -471,6 +576,7 @@ def main() -> int:
 
     repo_root = Path.cwd()
     _bind_source_sha_to_checkout(args.source_sha, repo_root=repo_root)
+    _require_checkout_matches_exact_source(repo_root, args.source_sha)
 
     with tempfile.TemporaryDirectory(prefix="autosport-package-inputs-") as snapshot_root:
         snapshot_dir = Path(snapshot_root)

@@ -44,6 +44,11 @@ class MarketMirror:
         return (event.source_id, event.quote_key)
 
     @staticmethod
+    def _snapshot_event(event: MarketEvent) -> MarketEvent:
+        """Own an independent canonical value snapshot, including nested metadata."""
+        return MarketEvent.from_dict(event.to_dict())
+
+    @staticmethod
     def _same_sequence_payload(left: MarketEvent, right: MarketEvent) -> bool:
         """Compare provider payload truth while ignoring local receipt clocks.
 
@@ -84,7 +89,7 @@ class MarketMirror:
         key = self._key(event)
         previous = self._latest.get(key)
         if previous is None:
-            self._latest[key] = event
+            self._latest[key] = self._snapshot_event(event)
             return MirrorApplyResult(
                 MirrorUpdate.APPLIED,
                 event.source_id,
@@ -115,7 +120,7 @@ class MarketMirror:
                 "conflicting MarketEvent payload reused an existing source-local sequence"
             )
 
-        self._latest[key] = event
+        self._latest[key] = self._snapshot_event(event)
         return MirrorApplyResult(
             MirrorUpdate.APPLIED,
             event.source_id,
@@ -125,9 +130,9 @@ class MarketMirror:
         )
 
     def snapshot(self) -> tuple[MarketEvent, ...]:
-        """Return a deterministic snapshot ordered by source and quote identity."""
+        """Return a deterministic, ownership-isolated snapshot by source and quote."""
         return tuple(
-            event
+            self._snapshot_event(event)
             for _, event in sorted(self._latest.items(), key=lambda item: item[0])
         )
 
@@ -138,10 +143,11 @@ class MarketMirror:
         market_id: str,
         selection_id: str,
     ) -> MarketEvent | None:
-        """Return the latest source-specific quote, if present."""
-        return self._latest.get(
+        """Return an isolated copy of the latest source-specific quote, if present."""
+        event = self._latest.get(
             (source_id, f"{event_id}|{market_id}|{selection_id}")
         )
+        return None if event is None else self._snapshot_event(event)
 
     def active_snapshot(
         self,

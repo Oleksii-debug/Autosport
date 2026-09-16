@@ -23,7 +23,19 @@ jobs:
         with:
           python-version: '3.12'
       - name: Apply exact same-lineage repair
-        run: python scripts/pr348_repair_once.py
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/pr348_repair_once.py')
+          text = path.read_text(encoding='utf-8')
+          old = "            string nonce =\n'''"
+          new = "            string nonce = Guid.NewGuid().ToString(\"N\") + Guid.NewGuid().ToString(\"N\");\n'''"
+          if text.count(old) != 2:
+              raise SystemExit(f'one-shot nonce anchor count: {text.count(old)}')
+          path.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
+          PY
+          python scripts/pr348_repair_once.py
       - name: Static syntax
         run: python -m py_compile scripts/guarded_release_creator_launch.py
       - name: Focused release-boundary tests

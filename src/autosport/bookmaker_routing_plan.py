@@ -141,10 +141,29 @@ class ParallelRoutingProposal:
             raise RoutingContractError("proposal leg stakes must sum to proposed_total")
         if any(divmod(leg.proposed_stake, quantum)[1] != 0 for leg in self.legs):
             raise RoutingContractError("every proposal leg must respect stake_quantum")
-        if self.state is RoutingState.BLOCKED_UNKNOWN and self.legs:
-            raise RoutingContractError("unknown external effect cannot have proposal legs")
-        if self.state is RoutingState.COMPLETE and (self.legs or proposed != 0 or residual != 0):
-            raise RoutingContractError("complete routing cannot have residual proposal")
+        if self.state is RoutingState.BLOCKED_UNKNOWN:
+            if self.legs or proposed != 0:
+                raise RoutingContractError(
+                    "unknown external effect cannot have proposal authority"
+                )
+        elif self.state is RoutingState.COMPLETE:
+            if self.legs or proposed != 0 or residual != 0:
+                raise RoutingContractError("complete routing cannot have residual proposal")
+        elif self.state is RoutingState.ROUTE:
+            if residual <= 0 or proposed != residual or not self.legs:
+                raise RoutingContractError(
+                    "route state requires proposal legs covering the full positive residual"
+                )
+        elif self.state is RoutingState.PARTIAL:
+            if residual <= 0 or proposed <= 0 or proposed >= residual or not self.legs:
+                raise RoutingContractError(
+                    "partial state requires proposal legs covering a strict residual subset"
+                )
+        elif self.state is RoutingState.UNEXECUTABLE:
+            if residual <= 0 or proposed != 0 or self.legs:
+                raise RoutingContractError(
+                    "unexecutable state requires positive residual and no proposal authority"
+                )
 
 
 def _equal_split_units(total_units: int, capacity_units: tuple[int, ...]) -> tuple[int, ...]:

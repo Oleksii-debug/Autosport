@@ -26,6 +26,7 @@ class KeyboardAuditTests(unittest.TestCase):
         focus = {"<F2>": True, "<F6>": True, "<F7>": True, "<F8>": True}
         reachable = [
             "shell_navigation",
+            "shell_open",
             "shell_state",
             "shell_details",
             "strategy",
@@ -42,7 +43,7 @@ class KeyboardAuditTests(unittest.TestCase):
             "log",
             "bankroll",
         ]
-        return bindings, focus, reachable
+        return bindings, focus, reachable, list(reversed(reachable))
 
     def test_keyboard_contract_passes_without_claiming_nvda(self):
         report = summarize_keyboard_contract(*self._passing())
@@ -51,6 +52,10 @@ class KeyboardAuditTests(unittest.TestCase):
         self.assertEqual(
             report["expected_automation_ids"]["shell_navigation"],
             WINDOWS_SHELL_AUTOMATION_IDS["navigation"],
+        )
+        self.assertEqual(
+            report["expected_automation_ids"]["shell_open"],
+            WINDOWS_SHELL_AUTOMATION_IDS["open"],
         )
         self.assertEqual(
             report["expected_automation_ids"]["shell_state"],
@@ -65,30 +70,52 @@ class KeyboardAuditTests(unittest.TestCase):
         self.assertFalse(report["real_money_execution"])
 
     def test_missing_action_binding_fails_closed(self):
-        bindings, focus, reachable = self._passing()
+        bindings, focus, reachable, reverse_reachable = self._passing()
         bindings["<Control-Alt-Right>"] = False
-        report = summarize_keyboard_contract(bindings, focus, reachable)
+        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("<Control-Alt-Right>" in item for item in report["failures"]))
 
     def test_focus_shortcut_must_reach_exact_target(self):
-        bindings, focus, reachable = self._passing()
+        bindings, focus, reachable, reverse_reachable = self._passing()
         focus["<F2>"] = False
-        report = summarize_keyboard_contract(bindings, focus, reachable)
+        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("<F2>" in item for item in report["failures"]))
 
     def test_all_critical_controls_must_be_tab_reachable(self):
-        bindings, focus, reachable = self._passing()
+        bindings, focus, reachable, reverse_reachable = self._passing()
         reachable.remove("shell_details")
-        report = summarize_keyboard_contract(bindings, focus, reachable)
+        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("shell_details" in item for item in report["failures"]))
 
-    def test_bankroll_summary_must_be_tab_reachable(self):
-        bindings, focus, reachable = self._passing()
-        reachable.remove("bankroll")
+    def test_shell_open_action_must_be_tab_reachable(self):
+        bindings, focus, reachable, reverse_reachable = self._passing()
+        reachable.remove("shell_open")
+        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(any("shell_open" in item for item in report["failures"]))
+
+    def test_reverse_tab_must_reach_all_critical_controls(self):
+        bindings, focus, reachable, reverse_reachable = self._passing()
+        reverse_reachable.remove("shell_open")
+        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(
+            any("Shift+Tab" in item and "shell_open" in item for item in report["failures"])
+        )
+
+    def test_missing_reverse_tab_evidence_fails_closed(self):
+        bindings, focus, reachable, _reverse_reachable = self._passing()
         report = summarize_keyboard_contract(bindings, focus, reachable)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertIn("Shift+Tab traversal evidence missing", report["failures"])
+
+    def test_bankroll_summary_must_be_tab_reachable(self):
+        bindings, focus, reachable, reverse_reachable = self._passing()
+        reachable.remove("bankroll")
+        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("bankroll" in item for item in report["failures"]))
 

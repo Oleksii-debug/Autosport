@@ -107,7 +107,7 @@ def test_packaged_evidence_smoke_preserves_metadata_only_truth_boundary() -> Non
     assert "expected fixed evidence paths mismatch" in text
     assert "missing fixed evidence paths must be empty" in text
     assert "truth field $field must be exact boolean false" in text
-    assert "$expectedFileRecordKeys = @('path', 'sha256', 'size_bytes')" in text
+    assert "$expectedFileRecordKeys = @('path', 'size_bytes', 'sha256')" in text
     assert "evidence file record keys mismatch" in text
     assert "evidence file record path must be a string" in text
     assert "evidence file record size_bytes must be an integer" in text

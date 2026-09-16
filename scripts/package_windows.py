@@ -518,7 +518,7 @@ def main() -> int:
             snapshot_name="restart-recovery-audit.json",
         )
 
-        output, _base_digest = build_windows_package(
+        output, base_digest = build_windows_package(
             trusted_exe,
             trusted_start_file,
             trusted_example_dir,
@@ -529,7 +529,11 @@ def main() -> int:
             args.output,
             args.source_sha,
         )
-        binding = bind_portable_data_tool(output, trusted_data_exe)
+        binding = bind_portable_data_tool(
+            output,
+            trusted_data_exe,
+            expected_base_package_sha256=base_digest,
+        )
 
     release_verification = verify_windows_package(
         output,

@@ -228,7 +228,11 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
             ):
                 self.assertEqual(package_windows.main(), 0)
 
-            bind_mock.assert_called_once_with(output, root / "Autosport-Data.exe")
+            bind_mock.assert_called_once_with(
+                output,
+                root / "Autosport-Data.exe",
+                expected_base_package_sha256="0" * 64,
+            )
             report = json.loads((root / "verification.json").read_text(encoding="utf-8"))
             self.assertEqual(report, expected_report)
             print_mock.assert_any_call(f"SHA256={digest}")

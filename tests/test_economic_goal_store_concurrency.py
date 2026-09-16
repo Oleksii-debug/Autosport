@@ -67,6 +67,26 @@ def test_automatic_writer_cannot_validate_or_publish_behind_active_economic_writ
         assert process.exitcode == 0
 
 
+def test_stale_sibling_revision_cannot_replace_newly_tightened_authority(tmp_path) -> None:
+    previous = _goal()
+    tighter = replace(previous, revision=2, max_stake_fraction=Decimal("0.01"))
+    stale_sibling = replace(
+        previous,
+        revision=2,
+        max_stake_fraction=Decimal("0.015"),
+    )
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(previous)
+    store.persist_automatic_successor(tighter)
+    committed = store.path.read_bytes()
+
+    with pytest.raises(EconomicGoalContractError, match="advance revision"):
+        store.persist_automatic_successor(stale_sibling)
+
+    assert store.path.read_bytes() == committed
+    assert EconomicGoalStore(tmp_path).load() == tighter
+
+
 def test_noncanonical_decimal_text_is_rejected_in_persisted_authority() -> None:
     payload = economic_goal_to_payload(_goal())
     body = payload["contract"]

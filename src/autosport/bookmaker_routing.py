@@ -67,17 +67,26 @@ class VenueQuote:
 
 @dataclass(frozen=True, slots=True)
 class VenueObservation:
-    """Externally reconciled effect; this is evidence input, not a receipt ledger."""
+    """Externally reconciled effect bound to one routing request and exact quote."""
 
     venue_id: str
     account_id: str
     effect: ExternalEffect
+    routing_request_id: str
+    quote: QuoteRef
     confirmed_accepted: Decimal = Decimal("0")
     observation_id: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.venue_id, "observation venue_id")
         _text(self.account_id, "observation account_id")
+        _text(self.routing_request_id, "observation routing_request_id")
+        if not isinstance(self.quote, QuoteRef):
+            raise RoutingContractError("observation quote must be QuoteRef")
+        if self.quote.source_id != self.venue_id:
+            raise RoutingContractError(
+                "observation venue_id must match observation quote source_id"
+            )
         if not isinstance(self.effect, ExternalEffect):
             raise RoutingContractError("effect must be ExternalEffect")
         accepted = _amount(self.confirmed_accepted, "confirmed_accepted")
@@ -106,17 +115,21 @@ def route_residual(
     requested_stake: Decimal,
     selected_venues: Iterable[VenueQuote],
     observations: Iterable[VenueObservation] = (),
+    *,
+    routing_request_id: str,
 ) -> RoutingDecision:
     """Choose the next preselected venue without creating execution/receipt authority.
 
-    Only externally confirmed ACCEPTED observations reduce the residual. Any UNKNOWN
-    external effect blocks retry/reroute even when arithmetic would otherwise look
-    complete, because the missing acknowledgement may represent a real placement.
-    MARKET_REFUSED is scoped to that venue/market request and never disables the
-    account globally. Acceptance ceilings cap each proposed routing amount.
+    Only externally confirmed ACCEPTED observations bound to this exact routing
+    request and selected QuoteRef reduce the residual. Any UNKNOWN external effect
+    blocks retry/reroute even when arithmetic would otherwise look complete, because
+    the missing acknowledgement may represent a real placement. MARKET_REFUSED is
+    scoped to this request's selected quote and never disables the account globally.
+    Acceptance ceilings cap each proposed routing amount.
     """
 
     requested = _amount(requested_stake, "requested_stake", positive=True)
+    request_id = _text(routing_request_id, "routing_request_id")
     venues = tuple(selected_venues)
     if not venues:
         raise RoutingContractError("at least one selected venue is required")
@@ -153,6 +166,15 @@ def route_residual(
         if identity not in by_identity:
             raise RoutingContractError(
                 "observation references an unselected venue/account"
+            )
+        if item.routing_request_id != request_id:
+            raise RoutingContractError(
+                "observation routing_request_id does not match routing request"
+            )
+        selected_quote = by_identity[identity].quote
+        if item.quote != selected_quote:
+            raise RoutingContractError(
+                "observation quote does not exactly match selected venue quote"
             )
         if counts[identity] > 1 and item.observation_id is None:
             raise RoutingContractError(

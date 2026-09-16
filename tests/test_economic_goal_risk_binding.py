@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from decimal import Decimal, localcontext
 
 from autosport.domain import TicketLeg
@@ -99,11 +100,13 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "economic goal concurrent position limit exceeded")
 
-    def test_owner_emergency_stop_denies_without_mutating_book_or_decimal_context(self) -> None:
+    def test_owner_emergency_stop_denies_without_mutating_book_goal_or_decimal_context(self) -> None:
         book = PaperBook("100")
         ticket = book.open_ticket([self._leg()], Decimal("10"))
-        policy = self._policy(self._goal(emergency_stop=True))
-        before = (
+        goal = self._goal(emergency_stop=True)
+        goal_before = replace(goal)
+        policy = self._policy(goal)
+        book_before = (
             book.balance,
             book.committed_stake,
             tuple(
@@ -120,7 +123,7 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             decision = policy.evaluate(book, Decimal("1"))
             self.assertFalse(any(caller.flags.values()))
 
-        after = (
+        book_after = (
             book.balance,
             book.committed_stake,
             tuple(
@@ -130,7 +133,9 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         )
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "economic goal emergency stop is active")
-        self.assertEqual(after, before)
+        self.assertEqual(book_after, book_before)
+        self.assertEqual(goal, goal_before)
+        self.assertIs(policy.economic_goal, goal)
         self.assertEqual(book.tickets[ticket.ticket_id], ticket)
 
     def test_non_contract_economic_goal_is_rejected_at_policy_construction(self) -> None:

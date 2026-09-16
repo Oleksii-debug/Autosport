@@ -10,6 +10,7 @@ import tk_uia
 from .dataset import ReplayDataset, load_dataset
 from .dataset_worker import OneShotDatasetValidationWorker
 from .live_observation import OneShotObservationWorker, observe_workspace_once
+from .localization import text
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .paths import default_workspace
 from .recovery import reconcile_late_crashes
@@ -35,23 +36,27 @@ from .ui_model import (
 
 
 _SPEEDS = {
-    "Подієвий — максимально швидко": 0.0,
-    "1× реальний час": 1.0,
-    "10×": 10.0,
-    "100×": 100.0,
-    "1000×": 1000.0,
+    text("ui.speed.event_driven"): 0.0,
+    text("ui.speed.realtime"): 1.0,
+    text("ui.speed.10x"): 10.0,
+    text("ui.speed.100x"): 100.0,
+    text("ui.speed.1000x"): 1000.0,
 }
 _LIVE_MODES = {
-    "Public preview — без ключа": True,
-    "API key з environment": False,
+    text("ui.live_mode.public_preview"): True,
+    text("ui.live_mode.api_key"): False,
 }
 _STRATEGY_CHOICES = {
-    f"{spec.label} — {spec.strategy_id}": spec.strategy_id
+    text("ui.strategy.display", strategy_id=spec.strategy_id): spec.strategy_id
     for spec in available_strategies()
 }
 _DEFAULT_STRATEGY_TEXT = next(
     label for label, strategy_id in _STRATEGY_CHOICES.items()
     if strategy_id == "baseline-v1"
+)
+_DEFAULT_SPEED_TEXT = next(label for label, speed in _SPEEDS.items() if speed == 0.0)
+_DEFAULT_LIVE_MODE_TEXT = next(
+    label for label, public_preview in _LIVE_MODES.items() if public_preview is True
 )
 
 AUTOMATION_IDS = {
@@ -94,7 +99,7 @@ def _safe_exception_text(exc: BaseException) -> str:
 class AutosportApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Автоспорт — V1 Windows Paper Lab")
+        self.title(text("ui.app.title"))
         self.geometry("1080x860")
         self.minsize(820, 680)
         self.dataset_path: Path | None = None
@@ -118,22 +123,19 @@ class AutosportApp(tk.Tk):
         self._active_research_plan: ResearchStrategyPlan | None = None
         self._closing = False
         startup_status = (
-            "Готово. Виберіть папку replay dataset або оновіть live snapshot."
+            text("ui.status.startup.ready")
             if self._startup_economic_error is None
-            else (
-                "Economic session не пройшла startup validation; paper replay для baseline workspace "
-                "заблоковано до recovery. Read-only live snapshot доступний через Control+L."
-            )
+            else text("ui.status.startup.recovery_required")
         )
         self.status = tk.StringVar(value=startup_status)
         self.bank = tk.StringVar(value=self._bank_text())
-        self.dataset_text = tk.StringVar(value="Dataset не вибраний.")
+        self.dataset_text = tk.StringVar(value=text("ui.status.dataset.none"))
         self.strategy_text = tk.StringVar(value=_DEFAULT_STRATEGY_TEXT)
         self.strategy_status = tk.StringVar(value=self._strategy_status_text())
-        self.research_plan_text = tk.StringVar(value="Research plan: не потрібен для baseline-v1.")
-        self.speed_text = tk.StringVar(value="Подієвий — максимально швидко")
-        self.live_mode_text = tk.StringVar(value="Public preview — без ключа")
-        self.live_status = tk.StringVar(value="Live snapshot ще не завантажувався.")
+        self.research_plan_text = tk.StringVar(value=text("ui.status.research_plan.baseline"))
+        self.speed_text = tk.StringVar(value=_DEFAULT_SPEED_TEXT)
+        self.live_mode_text = tk.StringVar(value=_DEFAULT_LIVE_MODE_TEXT)
+        self.live_status = tk.StringVar(value=text("ui.status.live.never"))
         self._build()
         self.update_idletasks()
         self._configure_accessibility()
@@ -142,14 +144,14 @@ class AutosportApp(tk.Tk):
     def _build(self) -> None:
         frame = ttk.Frame(self, padding=16)
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Автоспорт — V1 Windows Paper Lab", font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        ttk.Label(frame, text=text("ui.app.title"), font=("Segoe UI", 16, "bold")).pack(anchor="w")
         ttk.Label(frame, textvariable=self.bank, wraplength=1000).pack(anchor="w", pady=(12, 4))
         ttk.Label(frame, textvariable=self.dataset_text, wraplength=1000).pack(anchor="w", pady=(0, 4))
         ttk.Label(frame, textvariable=self.status, wraplength=1000).pack(anchor="w", pady=(0, 10))
 
         strategy_controls = ttk.Frame(frame)
         strategy_controls.pack(fill="x", pady=(0, 4))
-        self.strategy_label = ttk.Label(strategy_controls, text="Стратегія:")
+        self.strategy_label = ttk.Label(strategy_controls, text=text("ui.label.strategy"))
         self.strategy_label.pack(side="left", padx=(0, 4))
         self.strategy = ttk.Combobox(
             strategy_controls,
@@ -163,7 +165,7 @@ class AutosportApp(tk.Tk):
         self.strategy.bind("<<ComboboxSelected>>", self._on_strategy_changed)
         self.research_plan_button = ttk.Button(
             strategy_controls,
-            text="Вибрати research plan",
+            text=text("ui.button.research_plan"),
             command=self.choose_research_plan,
         )
         self.research_plan_button.pack(side="left")
@@ -172,17 +174,17 @@ class AutosportApp(tk.Tk):
 
         controls = ttk.Frame(frame)
         controls.pack(fill="x")
-        self.choose_button = ttk.Button(controls, text="Вибрати dataset", command=self.choose_dataset)
+        self.choose_button = ttk.Button(controls, text=text("ui.button.choose_dataset"), command=self.choose_dataset)
         self.choose_button.pack(side="left", padx=(0, 8))
-        self.run_button = ttk.Button(controls, text="Запустити paper replay", command=self.run_dataset)
+        self.run_button = ttk.Button(controls, text=text("ui.button.run_replay"), command=self.run_dataset)
         self.run_button.pack(side="left", padx=(0, 8))
         self.repair_button = ttk.Button(
             controls,
-            text="Відновити workspace",
+            text=text("ui.button.repair_workspace"),
             command=self.repair_workspace,
         )
         self.repair_button.pack(side="left", padx=(0, 8))
-        self.speed_label = ttk.Label(controls, text="Швидкість:")
+        self.speed_label = ttk.Label(controls, text=text("ui.label.speed"))
         self.speed_label.pack(side="left", padx=(8, 4))
         self.speed = ttk.Combobox(
             controls,
@@ -196,7 +198,7 @@ class AutosportApp(tk.Tk):
 
         live_controls = ttk.Frame(frame)
         live_controls.pack(fill="x", pady=(14, 0))
-        self.live_mode_label = ttk.Label(live_controls, text="Live режим:")
+        self.live_mode_label = ttk.Label(live_controls, text=text("ui.label.live_mode"))
         self.live_mode_label.pack(side="left", padx=(0, 4))
         self.live_mode = ttk.Combobox(
             live_controls,
@@ -209,27 +211,27 @@ class AutosportApp(tk.Tk):
         self.live_mode.pack(side="left", padx=(0, 8))
         self.live_refresh_button = ttk.Button(
             live_controls,
-            text="Оновити live snapshot",
+            text=text("ui.button.live_refresh"),
             command=self.refresh_live_snapshot,
         )
         self.live_refresh_button.pack(side="left")
         ttk.Label(frame, textvariable=self.live_status, wraplength=1000).pack(anchor="w", pady=(6, 4))
-        self.live_quotes_label = ttk.Label(frame, text="Live quotes")
+        self.live_quotes_label = ttk.Label(frame, text=text("ui.label.live_quotes"))
         self.live_quotes_label.pack(anchor="w", pady=(4, 4))
         self.live_quotes = tk.Listbox(frame, height=6, takefocus=True)
         self.live_quotes.pack(fill="x")
-        self._set_live_lines(["Live quotes ще відсутні."])
+        self._set_live_lines([text("ui.status.live_quotes.empty")])
 
-        self.tickets_label = ttk.Label(frame, text="Paper tickets і результати")
+        self.tickets_label = ttk.Label(frame, text=text("ui.label.tickets"))
         self.tickets_label.pack(anchor="w", pady=(14, 4))
         self.tickets = tk.Listbox(frame, height=7, takefocus=True)
         self.tickets.pack(fill="x")
-        self.evaluation_label = ttk.Label(frame, text="Evaluation і portfolio evidence")
+        self.evaluation_label = ttk.Label(frame, text=text("ui.label.evaluation"))
         self.evaluation_label.pack(anchor="w", pady=(14, 4))
         self.evaluation = tk.Listbox(frame, height=5, takefocus=True)
         self.evaluation.pack(fill="x")
-        self._set_evaluation_lines(["Evaluation ще відсутня. Запустіть paper replay."])
-        self.log_label = ttk.Label(frame, text="Журнал")
+        self._set_evaluation_lines([text("ui.status.evaluation.empty")])
+        self.log_label = ttk.Label(frame, text=text("ui.label.log"))
         self.log_label.pack(anchor="w", pady=(14, 4))
         self.log = tk.Text(frame, height=9, wrap="word", takefocus=True)
         self.log.pack(fill="both", expand=True)
@@ -246,18 +248,18 @@ class AutosportApp(tk.Tk):
     def _configure_accessibility(self) -> None:
         self.accessibility_strategy = tk_uia.enable(self)
         controls = (
-            (self.strategy, "Стратегія replay", "Canonical selectable strategy implementation. Для Typed research replay потрібен research plan.", AUTOMATION_IDS["strategy"]),
-            (self.research_plan_button, "Вибрати research plan", "Вибирає та валідовує typed causal research-plan JSON для research-replay-v1.", AUTOMATION_IDS["research_plan"]),
-            (self.choose_button, "Вибрати replay dataset", "Відкриває вибір папки replay dataset і перевіряє його у фоновому read-only worker. Гаряча клавіша Control+O.", AUTOMATION_IDS["choose_dataset"]),
-            (self.run_button, "Запустити paper replay", "Запускає causal paper replay для вибраного dataset і canonical strategy. Гаряча клавіша Control+R.", AUTOMATION_IDS["run_replay"]),
-            (self.repair_button, "Відновити workspace", "Запускає fail-closed crash recovery для workspace вибраної canonical strategy. Гаряча клавіша Control+Shift+R.", AUTOMATION_IDS["repair_workspace"]),
-            (self.speed, "Швидкість replay", "Вибір подієвого, 1×, 10×, 100× або 1000× режиму replay.", AUTOMATION_IDS["replay_speed"]),
-            (self.live_mode, "Режим live observation", "Public preview без ключа або authenticated API key з environment.", AUTOMATION_IDS["live_mode"]),
-            (self.live_refresh_button, "Оновити live snapshot", "Запускає один read-only table-tennis snapshot у worker thread. Гаряча клавіша Control+L.", AUTOMATION_IDS["live_refresh"]),
-            (self.live_quotes, "Live quotes", "Поточні read-only quotes останнього snapshot. F7 переводить сюди фокус.", AUTOMATION_IDS["live_quotes"]),
-            (self.tickets, "Paper tickets і результати", "Список віртуальних tickets та їх поточних результатів. F6 переводить сюди фокус.", AUTOMATION_IDS["tickets"]),
-            (self.evaluation, "Evaluation і portfolio evidence", "Підсумок останнього terminal paper replay: bankroll, ROI, ticket outcomes і truth-labelled portfolio scenarios. F8 переводить сюди фокус.", AUTOMATION_IDS["evaluation"]),
-            (self.log, "Журнал виконання", "Текстовий журнал replay, observation, settlement та evaluation.", AUTOMATION_IDS["log"]),
+            (self.strategy, text("ui.accessibility.strategy.name"), text("ui.accessibility.strategy.description"), AUTOMATION_IDS["strategy"]),
+            (self.research_plan_button, text("ui.accessibility.research_plan.name"), text("ui.accessibility.research_plan.description"), AUTOMATION_IDS["research_plan"]),
+            (self.choose_button, text("ui.accessibility.choose_dataset.name"), text("ui.accessibility.choose_dataset.description"), AUTOMATION_IDS["choose_dataset"]),
+            (self.run_button, text("ui.accessibility.run_replay.name"), text("ui.accessibility.run_replay.description"), AUTOMATION_IDS["run_replay"]),
+            (self.repair_button, text("ui.accessibility.repair_workspace.name"), text("ui.accessibility.repair_workspace.description"), AUTOMATION_IDS["repair_workspace"]),
+            (self.speed, text("ui.accessibility.replay_speed.name"), text("ui.accessibility.replay_speed.description"), AUTOMATION_IDS["replay_speed"]),
+            (self.live_mode, text("ui.accessibility.live_mode.name"), text("ui.accessibility.live_mode.description"), AUTOMATION_IDS["live_mode"]),
+            (self.live_refresh_button, text("ui.accessibility.live_refresh.name"), text("ui.accessibility.live_refresh.description"), AUTOMATION_IDS["live_refresh"]),
+            (self.live_quotes, text("ui.accessibility.live_quotes.name"), text("ui.accessibility.live_quotes.description"), AUTOMATION_IDS["live_quotes"]),
+            (self.tickets, text("ui.accessibility.tickets.name"), text("ui.accessibility.tickets.description"), AUTOMATION_IDS["tickets"]),
+            (self.evaluation, text("ui.accessibility.evaluation.name"), text("ui.accessibility.evaluation.description"), AUTOMATION_IDS["evaluation"]),
+            (self.log, text("ui.accessibility.log.name"), text("ui.accessibility.log.description"), AUTOMATION_IDS["log"]),
         )
         for widget, name, description, automation_id in controls:
             tk_uia.set_acc_name(widget, name)

@@ -69,6 +69,7 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
         return (
             patch.object(sys, "argv", self._argv(root)),
             patch.object(package_windows, "_bind_source_sha_to_checkout"),
+            patch.object(package_windows, "_require_checkout_matches_exact_source"),
             patch.object(
                 package_windows,
                 "_materialize_exact_static_payload",
@@ -108,12 +109,13 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             output = root / "candidate.zip"
-            argv_patch, source_patch, static_patch, exe_patch, evidence_patch, build_patch = (
+            argv_patch, source_patch, checkout_patch, static_patch, exe_patch, evidence_patch, build_patch = (
                 self._common_patches(root, output)
             )
             with (
                 argv_patch,
                 source_patch,
+                checkout_patch,
                 static_patch,
                 exe_patch,
                 evidence_patch,
@@ -143,12 +145,13 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
             root = Path(tmp)
             output = root / "candidate.zip"
             digest = "1" * 64
-            argv_patch, source_patch, static_patch, exe_patch, evidence_patch, build_patch = (
+            argv_patch, source_patch, checkout_patch, static_patch, exe_patch, evidence_patch, build_patch = (
                 self._common_patches(root, output)
             )
             with (
                 argv_patch,
                 source_patch,
+                checkout_patch,
                 static_patch,
                 exe_patch,
                 evidence_patch,
@@ -199,12 +202,13 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
             expected_report = dict(release_verification)
             expected_report.update(data_verification)
             expected_report["package_sha256"] = digest
-            argv_patch, source_patch, static_patch, exe_patch, evidence_patch, build_patch = (
+            argv_patch, source_patch, checkout_patch, static_patch, exe_patch, evidence_patch, build_patch = (
                 self._common_patches(root, output)
             )
             with (
                 argv_patch,
                 source_patch,
+                checkout_patch,
                 static_patch,
                 exe_patch,
                 evidence_patch,

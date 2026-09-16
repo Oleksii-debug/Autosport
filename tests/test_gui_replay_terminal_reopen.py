@@ -119,13 +119,13 @@ def test_terminal_replay_reopen_failure_is_contained_and_requires_recovery() -> 
     assert app._busy_states == [False]
     assert "недоступний" in app.bank.value
     assert app.tickets.lines == [
-        "Replay завершено, але economic session state недоступний; виконайте recovery workspace."
+        "Повтор завершено, але стан економічного сеансу недоступний; виконайте відновлення робочої області."
     ]
     assert app._evaluation == [
-        "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
+        "Оцінювання недоступне: повторне відкриття робочої області після повтору не пройшло закриту при помилці перевірку."
     ]
     assert Path("economic-workspace") in app._recovery_required_workspaces
-    assert "terminal state не можна безпечно підтвердити" in app.status.value
+    assert "Завершальний стан повтору не можна безпечно підтвердити" in app.status.value
     assert any("workspace state failed validation" in line for line in app._logs)
     showerror.assert_called_once()
 
@@ -148,9 +148,9 @@ def test_replay_error_never_reopens_or_publishes_uncertain_economic_state() -> N
     assert stale.closed
     _assert_economic_state_hidden(app)
     assert Path("economic-workspace") in app._recovery_required_workspaces
-    assert "механічно" in app.status.value
+    assert "лишається прихованим до відновлення" in app.status.value
     assert app._evaluation == [
-        "Evaluation недоступна: replay не досяг terminal settlement/evaluation boundary."
+        "Оцінювання недоступне: повтор не досяг завершальної межі розрахунку результатів та оцінювання."
     ]
     showerror.assert_called_once()
 
@@ -172,9 +172,9 @@ def test_missing_terminal_result_never_reopens_or_publishes_uncertain_economic_s
     assert stale.closed
     _assert_economic_state_hidden(app)
     assert Path("economic-workspace") in app._recovery_required_workspaces
-    assert "механічно заблоковано" in app.status.value
+    assert "лишається прихованим до відновлення" in app.status.value
     assert app._evaluation == [
-        "Evaluation недоступна: worker не повернув terminal SessionResult."
+        "Оцінювання недоступне: процес не повернув завершальний SessionResult."
     ]
 
 
@@ -227,7 +227,7 @@ def test_reopen_failure_blocks_second_run_until_successful_exact_workspace_recov
 
     assert run_worker.start_calls == 0
     assert exact_workspace in app._recovery_required_workspaces
-    assert "Paper replay заблоковано" in app.status.value
+    assert "Паперовий повтор заблоковано" in app.status.value
     showwarning.assert_called_once()
 
     clean_report = SimpleNamespace(
@@ -341,7 +341,7 @@ def test_unresolved_recovery_keeps_economic_state_hidden_and_does_not_reopen() -
     assert reopen_calls == []
     _assert_economic_state_hidden(app)
     assert exact_workspace in app._recovery_required_workspaces
-    assert "economic state приховано" in app.status.value
+    assert "економічний стан лишається прихованим" in app.status.value
     showwarning.assert_called_once()
 
 
@@ -378,7 +378,7 @@ def test_resolved_recovery_reopens_before_publishing_and_clears_exact_workspace(
     assert "10000" in app.bank.value
     assert app.tickets.lines == ["FRESH RECOVERED TICKET"]
     assert exact_workspace not in app._recovery_required_workspaces
-    assert "готовий" in app.status.value
+    assert "Робоча область готова" in app.status.value
     showinfo.assert_called_once()
 
 

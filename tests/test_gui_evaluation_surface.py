@@ -147,4 +147,4 @@ def test_gui_wires_evaluation_to_keyboard_uia_and_terminal_result_without_tk_sta
     assert 'text("ui.accessibility.evaluation.description")' in accessibility_source
     assert 'AUTOMATION_IDS["evaluation"]' in accessibility_source
     assert "self._set_evaluation_lines(evaluation_lines(result))" in poll_source
-    assert "Evaluation недоступна" in poll_source
+    assert 'text("ui.evaluation.replay_failed")' in poll_source

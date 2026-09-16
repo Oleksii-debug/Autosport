@@ -39,7 +39,10 @@ def test_recovery_configuration_error_with_broken_str_stays_fail_closed() -> Non
 
     expected = text(
         "ui.error.recovery.configuration",
-        detail="_BrokenTextError: exception details unavailable",
+        detail=text(
+            "ui.error.exception.message_unavailable",
+            exception_type="_BrokenTextError",
+        ),
     )
     assert app.status.value == text("ui.status.recovery.configuration_rejected")
     showerror.assert_called_once_with(text("ui.dialog.title"), expected)

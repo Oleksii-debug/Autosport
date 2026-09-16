@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
+
+from .integrity import atomic_write_json
+from .json_integrity import strict_json_loads
 
 SurfacePhase = Literal["v1-active", "visible-disabled", "presentation-only"]
 
@@ -226,8 +227,8 @@ def load_surface_selection(workspace: str | Path) -> str:
     """Read presentation-only shell state; corruption fails soft to Home."""
     path = shell_state_path(workspace)
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        raw = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, TypeError, ValueError):
         return DEFAULT_SURFACE_KEY
     key = raw.get("surface_key") if isinstance(raw, dict) else None
     return key if isinstance(key, str) and key in SURFACE_BY_KEY else DEFAULT_SURFACE_KEY
@@ -238,19 +239,9 @@ def save_surface_selection(workspace: str | Path, surface_key: str) -> bool:
     if surface_key not in SURFACE_BY_KEY:
         return False
     path = shell_state_path(workspace)
-    tmp = path.with_name(f".{path.name}.tmp")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(
-            json.dumps({"version": 1, "surface_key": surface_key}, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(tmp, path)
+        atomic_write_json(path, {"version": 1, "surface_key": surface_key})
     except (OSError, UnicodeError, TypeError, ValueError):
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
         return False
     return True
 

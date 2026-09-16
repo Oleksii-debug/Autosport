@@ -259,7 +259,7 @@ class ReleasePackageZipCanonicalityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             package = self._build_candidate(Path(temporary))
             self._rewrite_archive(package, archive_comment=b"repacked")
-            with self.assertRaisesRegex(ValueError, "archive comment"):
+            with self.assertRaisesRegex(ValueError, "end-of-central-directory"):
                 verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
 
     def test_payload_equivalent_member_extra_metadata_is_rejected(self) -> None:

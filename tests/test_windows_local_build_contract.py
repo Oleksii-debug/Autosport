@@ -9,7 +9,7 @@ def _build_script_text() -> str:
 
 
 def _guarded_pyinstaller_indices(script: str) -> tuple[int, int]:
-    guarded_call = "& $packagingPython -I $trustedPyInstallerBinder `"
+    guarded_call = "[Autosport.Release.BirthProtectedPyInstaller]::Run("
     gui_start = script.index("$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'")
     gui_index = script.index(guarded_call, gui_start)
     data_start = script.index("$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'", gui_index)
@@ -139,18 +139,19 @@ def test_local_windows_build_binds_pyinstaller_outputs_before_consumption() -> N
     script = _build_script_text()
 
     first_build_index, second_build_index = _guarded_pyinstaller_indices(script)
-    first_bind = "--bound-output $boundAutosportExe `"
-    first_digest = "--digest-output $autosportDigestPath `"
-    second_bind = "--bound-output $boundDataExe `"
-    second_digest = "--digest-output $dataDigestPath `"
+    first_bind = "'--bound-output', $boundAutosportExe,"
+    first_digest = "'--digest-output', $autosportDigestPath,"
+    second_bind = "'--bound-output', $boundDataExe,"
+    second_digest = "'--digest-output', $dataDigestPath,"
     verify_gui = "python $sourceVerifier --verify-artifact $boundAutosportExe --expected-sha256 $autosportExeSha256"
     verify_data = "python $sourceVerifier --verify-artifact $boundDataExe --expected-sha256 $dataExeSha256"
     package_command = "python scripts/package_windows.py `"
 
     assert first_build_index < script.index(first_bind, first_build_index) < script.index(first_digest, first_build_index)
     assert second_build_index < script.index(second_bind, second_build_index) < script.index(second_digest, second_build_index)
-    assert script.count("& $packagingPython -I $trustedPyInstallerBinder `") == 2
-    assert script.count("--verifier-sha256 $sourceVerifierSha256 `") == 2
+    assert script.count("[Autosport.Release.BirthProtectedPyInstaller]::Run(") == 2
+    assert "& $packagingPython -I $trustedPyInstallerBinder `" not in script
+    assert script.count("'--verifier-sha256', $sourceVerifierSha256,") == 2
     assert "Start-Process -FilePath $boundAutosportExe" in script
     assert "$dataExe = $boundDataExe" in script
     assert script.index(verify_gui) < script.index(package_command)
@@ -168,11 +169,11 @@ def test_local_windows_build_fails_closed_on_release_native_steps() -> None:
             'if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }',
         ),
         (
-            "--bound-output $boundAutosportExe `",
+            "'--bound-output', $boundAutosportExe,",
             'if ($LASTEXITCODE -ne 0) { throw "Guarded Autosport PyInstaller/binding exited $LASTEXITCODE" }',
         ),
         (
-            "--bound-output $boundDataExe `",
+            "'--bound-output', $boundDataExe,",
             'if ($LASTEXITCODE -ne 0) { throw "Guarded Autosport-Data PyInstaller/binding exited $LASTEXITCODE" }',
         ),
         (

@@ -39,6 +39,22 @@ class ScenarioSearchTests(unittest.TestCase):
         self.assertLessEqual(report.conservative_floor, report.observed_worst)
         self.assertGreaterEqual(report.conservative_ceiling, report.observed_best)
 
+    def test_search_limits_reject_non_positive_or_non_integer_values(self):
+        invalid_values = (0, -1, True, 1.0, "1")
+        for field in ("exact_state_limit", "branch_node_limit", "sample_count"):
+            for value in invalid_values:
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(ValueError, f"^{field} must be a positive non-boolean integer$"):
+                        ScenarioSearchEngine(**{field: value})
+
+    def test_search_seed_requires_non_boolean_integer(self):
+        for value in (True, 1.0, "17", None):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "^seed must be a non-boolean integer$"):
+                    ScenarioSearchEngine(seed=value)
+        self.assertEqual(ScenarioSearchEngine(seed=0).seed, 0)
+        self.assertEqual(ScenarioSearchEngine(seed=-17).seed, -17)
+
     def test_dependency_index_returns_only_affected_tickets(self):
         book = PaperBook("100")
         a = TicketLeg("e1", "winner", "a", Decimal("2"))

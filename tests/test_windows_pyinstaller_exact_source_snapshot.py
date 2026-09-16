@@ -60,7 +60,7 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
         "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "
         "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
     )
-    guarded_call = "& $packagingPython -I $trustedPyInstallerBinder `"
+    guarded_call = "[Autosport.Release.BirthProtectedPyInstaller]::Run("
     gui_bound_source = "$builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'"
     data_bound_source = "$builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'"
 
@@ -117,8 +117,9 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
     post_gate = script[gate_index:]
     assert "python -m PyInstaller" not in post_gate
     assert "& $pythonExecutable -I -m PyInstaller" not in post_gate
+    assert "& $packagingPython -I $trustedPyInstallerBinder `" not in post_gate
     assert post_gate.count(guarded_call) == 2
-    assert post_gate.count("--verifier-sha256 $sourceVerifierSha256 `") == 2
+    assert post_gate.count("'--verifier-sha256', $sourceVerifierSha256,") == 2
 
 
 def test_snapshot_verifier_rejects_added_membership_after_materialization(tmp_path: Path) -> None:

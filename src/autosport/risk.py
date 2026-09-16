@@ -13,6 +13,7 @@ from decimal import (
 )
 
 from .domain import PaperTicket, TicketStatus
+from .economic_goal import EconomicGoalContract
 from .paper import PaperBook
 
 
@@ -24,11 +25,20 @@ class RiskDecision:
 
 @dataclass(frozen=True, slots=True)
 class PaperRiskPolicy:
-    """Paper-lab guardrails. Limits are explicit and deterministic, never inferred by an LLM."""
+    """Paper-lab guardrails. Limits are explicit and deterministic, never inferred by an LLM.
+
+    ``economic_goal`` can only tighten the locally provable executable limits in
+    this policy: per-ticket stake, aggregate committed capital, concurrent open
+    paper positions, and the owner emergency stop.  Other EconomicGoalContract
+    dimensions deliberately remain outside this boundary because PaperRiskPolicy
+    has no authoritative session/day/drawdown/turnover/concentration, quote,
+    parlay, deny-list, bankroll-id, or currency context with which to prove them.
+    """
 
     max_ticket_fraction: Decimal = Decimal("0.02")
     max_committed_fraction: Decimal = Decimal("0.20")
     minimum_cash_reserve_fraction: Decimal = Decimal("0.20")
+    economic_goal: EconomicGoalContract | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -46,6 +56,10 @@ class PaperRiskPolicy:
             if value < 0 or value > 1:
                 raise ValueError(f"{field_name} must be between 0 and 1 inclusive")
             object.__setattr__(self, field_name, value)
+        if self.economic_goal is not None and not isinstance(
+            self.economic_goal, EconomicGoalContract
+        ):
+            raise TypeError("economic_goal must be an EconomicGoalContract or None")
 
     @staticmethod
     def _decimal_context() -> Context:
@@ -95,7 +109,9 @@ class PaperRiskPolicy:
             return sum(values, Decimal("0"))
 
     @classmethod
-    def _book_state(cls, book: PaperBook) -> tuple[Decimal, Decimal, Decimal] | None:
+    def _book_state(
+        cls, book: PaperBook
+    ) -> tuple[Decimal, Decimal, Decimal, int] | None:
         try:
             tickets = book.tickets
             if not isinstance(tickets, dict):
@@ -115,13 +131,13 @@ class PaperRiskPolicy:
             PaperBook._validate_loaded_state(book)
             initial_bankroll = book.initial_bankroll
             balance = book.balance
-            committed_stake = cls._exact_positive_sum(
-                tuple(
-                    ticket.stake
-                    for ticket in tickets.values()
-                    if ticket.status is TicketStatus.OPEN
-                )
+            open_tickets = tuple(
+                ticket for ticket in tickets.values() if ticket.status is TicketStatus.OPEN
             )
+            committed_stake = cls._exact_positive_sum(
+                tuple(ticket.stake for ticket in open_tickets)
+            )
+            open_position_count = len(open_tickets)
         except (ArithmeticError, AttributeError, TypeError, ValueError):
             return None
 
@@ -130,7 +146,16 @@ class PaperRiskPolicy:
             return None
         if initial_bankroll <= 0 or balance < 0 or committed_stake < 0:
             return None
-        return values
+        return initial_bankroll, balance, committed_stake, open_position_count
+
+    def _effective_fraction_limits(self) -> tuple[Decimal, Decimal]:
+        goal = self.economic_goal
+        if goal is None:
+            return self.max_ticket_fraction, self.max_committed_fraction
+        return (
+            min(self.max_ticket_fraction, goal.max_stake_fraction),
+            min(self.max_committed_fraction, goal.max_capital_at_risk_fraction),
+        )
 
     def _derived_risk_values(
         self,
@@ -140,10 +165,11 @@ class PaperRiskPolicy:
         amount: Decimal,
     ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | None:
         try:
+            ticket_fraction, committed_fraction = self._effective_fraction_limits()
             # Protective caps/reserve remain fail-closed on any limit-relaxing rounding.
             with localcontext(self._decimal_context()):
-                ticket_limit = initial_bankroll * self.max_ticket_fraction
-                committed_limit = initial_bankroll * self.max_committed_fraction
+                ticket_limit = initial_bankroll * ticket_fraction
+                committed_limit = initial_bankroll * committed_fraction
                 remaining_balance = balance - amount
                 reserve_limit = initial_bankroll * self.minimum_cash_reserve_fraction
             # Exposure itself can legitimately require more than 28 significant digits even
@@ -176,7 +202,16 @@ class PaperRiskPolicy:
         state = self._book_state(book)
         if state is None:
             return RiskDecision(False, "virtual bankroll state is invalid")
-        initial_bankroll, balance, committed_stake = state
+        initial_bankroll, balance, committed_stake, open_position_count = state
+
+        goal = self.economic_goal
+        if goal is not None:
+            if goal.emergency_stop:
+                return RiskDecision(False, "economic goal emergency stop is active")
+            if goal.max_stake_amount is not None and amount > goal.max_stake_amount:
+                return RiskDecision(False, "ticket exceeds economic goal absolute stake limit")
+            if open_position_count >= goal.max_concurrent_positions:
+                return RiskDecision(False, "economic goal concurrent position limit exceeded")
 
         derived = self._derived_risk_values(initial_bankroll, balance, committed_stake, amount)
         if derived is None:

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -38,6 +39,8 @@ _ZIP_RESERVED = 0
 _ZIP_INTERNAL_ATTR = 0
 _ZIP_VOLUME = 0
 _ZIP_UTF8_FLAG = 0x800
+_ZIP_LOCAL_HEADER = struct.Struct("<IHHHHHIIIHH")
+_ZIP_LOCAL_HEADER_SIGNATURE = 0x04034B50
 
 
 class _DuplicateJsonKeyError(ValueError):
@@ -223,6 +226,94 @@ def _require_canonical_zip_metadata(
             )
 
 
+def _require_canonical_zip_local_headers(
+    snapshot: Any,
+    infos: list[zipfile.ZipInfo],
+) -> None:
+    """Require each raw local-file header to match its canonical central record."""
+
+    original_position = snapshot.tell()
+    try:
+        for info in infos:
+            snapshot.seek(info.header_offset)
+            raw_header = snapshot.read(_ZIP_LOCAL_HEADER.size)
+            if len(raw_header) != _ZIP_LOCAL_HEADER.size:
+                raise ValueError(
+                    f"release package has truncated local header: {info.filename}"
+                )
+            (
+                signature,
+                extract_version,
+                flag_bits,
+                compress_type,
+                dos_time,
+                dos_date,
+                crc,
+                compress_size,
+                file_size,
+                filename_length,
+                extra_length,
+            ) = _ZIP_LOCAL_HEADER.unpack(raw_header)
+            if signature != _ZIP_LOCAL_HEADER_SIGNATURE:
+                raise ValueError(
+                    f"release package has invalid local header signature: {info.filename}"
+                )
+
+            raw_filename = snapshot.read(filename_length)
+            local_extra = snapshot.read(extra_length)
+            if len(raw_filename) != filename_length or len(local_extra) != extra_length:
+                raise ValueError(
+                    f"release package has truncated local header metadata: {info.filename}"
+                )
+
+            encoding = "utf-8" if info.flag_bits & _ZIP_UTF8_FLAG else "cp437"
+            try:
+                expected_filename = info.filename.encode(encoding)
+            except UnicodeEncodeError as exc:
+                raise ValueError(
+                    f"release package local header filename encoding mismatch: {info.filename}"
+                ) from exc
+
+            year, month, day, hour, minute, second = info.date_time
+            expected_dos_time = (hour << 11) | (minute << 5) | (second // 2)
+            expected_dos_date = ((year - 1980) << 9) | (month << 5) | day
+            expected_header = (
+                info.extract_version,
+                info.flag_bits,
+                info.compress_type,
+                expected_dos_time,
+                expected_dos_date,
+                info.CRC,
+                info.compress_size,
+                info.file_size,
+                len(expected_filename),
+                len(info.extra),
+            )
+            observed_header = (
+                extract_version,
+                flag_bits,
+                compress_type,
+                dos_time,
+                dos_date,
+                crc,
+                compress_size,
+                file_size,
+                filename_length,
+                extra_length,
+            )
+            if (
+                observed_header != expected_header
+                or raw_filename != expected_filename
+                or local_extra != info.extra
+            ):
+                raise ValueError(
+                    "release package local header metadata does not match canonical "
+                    f"central metadata: {info.filename}"
+                )
+    finally:
+        snapshot.seek(original_position)
+
+
 def _require_process_recovery_evidence(payload: dict[str, Any], label: str) -> None:
     if payload.get("process_kill_relaunch_status") != "PASS":
         raise ValueError(f"{label} does not prove real process kill/relaunch PASS")
@@ -401,6 +492,7 @@ def verify_windows_package(
                     )
                 windows_keys[windows_key] = name
                 members[relative] = archive.read(name)
+            _require_canonical_zip_local_headers(snapshot, infos)
 
     required = {
         "Autosport.exe",

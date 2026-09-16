@@ -1,8 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import (
+    Context,
+    Decimal,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    ROUND_HALF_EVEN,
+    Underflow,
+    localcontext,
+)
 
+from .domain import PaperTicket, TicketStatus
 from .paper import PaperBook
 
 
@@ -37,6 +47,122 @@ class PaperRiskPolicy:
                 raise ValueError(f"{field_name} must be between 0 and 1 inclusive")
             object.__setattr__(self, field_name, value)
 
+    @staticmethod
+    def _decimal_context() -> Context:
+        context = Context(prec=28, Emin=-999999, Emax=999999)
+        context.traps[Inexact] = True
+        context.traps[InvalidOperation] = True
+        context.traps[Overflow] = True
+        context.traps[Underflow] = True
+        context.clear_flags()
+        return context
+
+    @staticmethod
+    def _exact_positive_sum(values: tuple[Decimal, ...]) -> Decimal:
+        """Sum canonical non-negative exposure exactly, independent of caller context."""
+        if not values:
+            return Decimal("0")
+        min_exponent: int | None = None
+        max_adjusted: int | None = None
+        nonzero_count = 0
+        for value in values:
+            if not isinstance(value, Decimal) or not value.is_finite() or value < 0:
+                raise ValueError("committed exposure must contain non-negative finite Decimal values")
+            if value.is_zero():
+                continue
+            decimal_tuple = value.as_tuple()
+            exponent = int(decimal_tuple.exponent)
+            adjusted = exponent + len(decimal_tuple.digits) - 1
+            min_exponent = exponent if min_exponent is None else min(min_exponent, exponent)
+            max_adjusted = adjusted if max_adjusted is None else max(max_adjusted, adjusted)
+            nonzero_count += 1
+        if nonzero_count == 0:
+            return Decimal("0")
+        assert min_exponent is not None and max_adjusted is not None
+        required_precision = max_adjusted - min_exponent + 1 + len(str(nonzero_count))
+        context = Context(
+            prec=max(1, required_precision),
+            rounding=ROUND_HALF_EVEN,
+            Emin=-999999,
+            Emax=999999,
+        )
+        context.traps[Inexact] = True
+        context.traps[InvalidOperation] = True
+        context.traps[Overflow] = True
+        context.traps[Underflow] = True
+        context.clear_flags()
+        with localcontext(context):
+            return sum(values, Decimal("0"))
+
+    @classmethod
+    def _book_state(cls, book: PaperBook) -> tuple[Decimal, Decimal, Decimal] | None:
+        try:
+            tickets = book.tickets
+            if not isinstance(tickets, dict):
+                return None
+            for ticket_key, ticket in tickets.items():
+                if not isinstance(ticket, PaperTicket) or not isinstance(ticket.status, TicketStatus):
+                    return None
+                if (
+                    not isinstance(ticket.ticket_id, str)
+                    or not ticket.ticket_id
+                    or ticket_key != ticket.ticket_id
+                ):
+                    return None
+
+            # PaperBook owns canonical lifecycle/settlement semantics. Do not impose the
+            # risk context's Inexact trap on that validator.
+            PaperBook._validate_loaded_state(book)
+            initial_bankroll = book.initial_bankroll
+            balance = book.balance
+            committed_stake = cls._exact_positive_sum(
+                tuple(
+                    ticket.stake
+                    for ticket in tickets.values()
+                    if ticket.status is TicketStatus.OPEN
+                )
+            )
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
+            return None
+
+        values = (initial_bankroll, balance, committed_stake)
+        if any(not isinstance(value, Decimal) or not value.is_finite() for value in values):
+            return None
+        if initial_bankroll <= 0 or balance < 0 or committed_stake < 0:
+            return None
+        return values
+
+    def _derived_risk_values(
+        self,
+        initial_bankroll: Decimal,
+        balance: Decimal,
+        committed_stake: Decimal,
+        amount: Decimal,
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | None:
+        try:
+            # Protective caps/reserve remain fail-closed on any limit-relaxing rounding.
+            with localcontext(self._decimal_context()):
+                ticket_limit = initial_bankroll * self.max_ticket_fraction
+                committed_limit = initial_bankroll * self.max_committed_fraction
+                remaining_balance = balance - amount
+                reserve_limit = initial_bankroll * self.minimum_cash_reserve_fraction
+            # Exposure itself can legitimately require more than 28 significant digits even
+            # when every PaperBook debit was canonical, so aggregate it exactly.
+            aggregate_committed = self._exact_positive_sum((committed_stake, amount))
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+
+        values = (
+            ticket_limit,
+            aggregate_committed,
+            committed_limit,
+            remaining_balance,
+            reserve_limit,
+        )
+        if any(not value.is_finite() for value in values):
+            return None
+        return values
+
     def evaluate(self, book: PaperBook, stake: Decimal | str) -> RiskDecision:
         try:
             amount = Decimal(str(stake))
@@ -46,10 +172,21 @@ class PaperRiskPolicy:
             return RiskDecision(False, "stake must be a finite decimal")
         if amount <= 0:
             return RiskDecision(False, "stake must be positive")
-        if amount > book.initial_bankroll * self.max_ticket_fraction:
+
+        state = self._book_state(book)
+        if state is None:
+            return RiskDecision(False, "virtual bankroll state is invalid")
+        initial_bankroll, balance, committed_stake = state
+
+        derived = self._derived_risk_values(initial_bankroll, balance, committed_stake, amount)
+        if derived is None:
+            return RiskDecision(False, "virtual bankroll state is invalid")
+        ticket_limit, aggregate_committed, committed_limit, remaining_balance, reserve_limit = derived
+
+        if amount > ticket_limit:
             return RiskDecision(False, "ticket exceeds configured bankroll fraction")
-        if book.committed_stake + amount > book.initial_bankroll * self.max_committed_fraction:
+        if aggregate_committed > committed_limit:
             return RiskDecision(False, "aggregate committed stake limit exceeded")
-        if book.balance - amount < book.initial_bankroll * self.minimum_cash_reserve_fraction:
+        if remaining_balance < reserve_limit:
             return RiskDecision(False, "minimum virtual cash reserve would be violated")
         return RiskDecision(True, "allowed")

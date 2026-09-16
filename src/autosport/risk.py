@@ -316,15 +316,26 @@ class PaperRiskPolicy:
 
                     if quote.decimal_odds <= 0 or leg.locked_odds <= 0:
                         return RiskDecision(False, "quote or locked odds are invalid")
-                    adverse_slippage = max(
-                        Decimal("0"),
-                        (quote.decimal_odds - leg.locked_odds) / quote.decimal_odds,
-                    )
-                    if adverse_slippage > goal.max_execution_slippage_fraction:
-                        return RiskDecision(
-                            False,
-                            "quote-to-proposal slippage exceeds economic goal limit",
+                    # Compare (quote - locked) / quote to the configured ceiling
+                    # as an exact rational inequality.  Decimal division can be
+                    # repeating (for example 0.10 / 2.10 == 1/21), and this
+                    # policy's protective Decimal context deliberately traps
+                    # Inexact rather than silently rounding economic evidence.
+                    if quote.decimal_odds > leg.locked_odds:
+                        quote_num, quote_den = quote.decimal_odds.as_integer_ratio()
+                        locked_num, locked_den = leg.locked_odds.as_integer_ratio()
+                        limit_num, limit_den = (
+                            goal.max_execution_slippage_fraction.as_integer_ratio()
                         )
+                        adverse_num = (
+                            quote_num * locked_den - locked_num * quote_den
+                        )
+                        adverse_den = locked_den * quote_num
+                        if adverse_num * limit_den > limit_num * adverse_den:
+                            return RiskDecision(
+                                False,
+                                "quote-to-proposal slippage exceeds economic goal limit",
+                            )
         except (ArithmeticError, KeyError, TypeError, ValueError):
             return RiskDecision(False, "proposed ticket quote risk evidence is invalid")
 

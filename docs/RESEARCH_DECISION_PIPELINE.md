@@ -1,18 +1,12 @@
 # Typed research decision pipeline
 
-## Scope of this document
+Autosport separates research reasoning from deterministic paper execution.
 
-The current V1 pipeline is a **predictive paper strategy path**, not the permanent definition of every mature Autosport opportunity.
-
-Current V1 path:
+The V1 research decision path is:
 
 `ResearchEvidence -> ForecastRecord -> deterministic critic -> portfolio-aware impact -> PaperRiskPolicy -> PaperBook + Decision Ledger`
 
-This path remains valid for V1 and should not be rewritten merely to satisfy future architecture while release-critical work remains.
-
-However, Autosport's mature strategy set also includes live price movement, arbitrage, dutching, hedging/rebalancing and hybrid portfolio strategies. Some of those do not require a directional winner forecast. The successor generic contract is tracked by Issue #356 and live economic truth by #355.
-
-No LLM, network request or bookmaker write action exists inside the current V1 path.
+No LLM, network request or bookmaker write action exists inside this path.
 
 ## Typed role outputs
 
@@ -31,15 +25,11 @@ No LLM, network request or bookmaker write action exists inside the current V1 p
 
 Evidence cannot become available before it was observed.
 
-### Forecast — current predictive V1 strategy class
+### Forecast
 
-The immutable `ForecastRecord` remains the forecast contract for **predictive** V1 decisions. The critic verifies that candidate probability comes from that record rather than an independently supplied number.
+The existing immutable `ForecastRecord` remains the forecast contract. The critic requires causal timestamps and verifies that candidate probability comes from that record rather than an independently supplied number.
 
-A ForecastRecord is therefore mandatory when a strategy claims a predictive probability edge.
-
-It is **not** a permanent global requirement for future pure arbitrage/dutching/hedging opportunities whose proof is price/portfolio based rather than directional.
-
-### Critic — current predictive path
+### Critic
 
 `DeterministicResearchCritic` verifies, per candidate leg:
 
@@ -64,8 +54,6 @@ The decision keeps the optimizer's exact/approximate truth labels. Policy may re
 
 `PaperRiskPolicy` is evaluated immediately before the paper ticket can be opened.
 
-The whole portfolio is authoritative over a candidate considered in isolation.
-
 ### Strategy / Audit
 
 `ResearchDecisionPipeline.decide_and_open(...)` opens only a virtual PaperBook ticket when every critic, portfolio-policy and risk gate passes.
@@ -75,7 +63,7 @@ Both approvals and rejections are written as `DecisionRecord` entries with:
 - causal decision timestamp;
 - candidate identity and economics;
 - critic verdict and leg-level reasons;
-- forecast ids/hashes/versions/cutoffs for this predictive path;
+- forecast ids/hashes/versions/cutoffs;
 - evidence ids/hashes/quality flags;
 - portfolio risk deltas and truth label;
 - PaperRiskPolicy result;
@@ -84,52 +72,19 @@ Both approvals and rejections are written as `DecisionRecord` entries with:
 
 ## Transaction boundary
 
-When this pipeline is used inside a persistent dataset run, its PaperBook and Decision Ledger must be the staged objects owned by the canonical run transaction. That gives the research decision the same early-crash atomicity as the rest of the paper run.
+When this pipeline is used inside a persistent dataset run, its PaperBook and Decision Ledger must be the staged objects owned by the run transaction introduced in PR #24. That gives the research decision the same early-crash atomicity as the rest of the paper run.
 
 The pipeline itself does not create a cross-process lock and does not authorize multiple economic writers in one workspace.
 
-## Mature generic opportunity successor — Issue #356
-
-After V1, the mature decision shape should become strategy-class aware rather than forecast-mandatory:
-
-`CausalOpportunityEvidence -> OpportunityIntent(strategy_class) -> strategy-specific validator -> whole-portfolio/min-P&L engine -> RiskPolicy -> PaperPlan/ExecutionPlan -> ledger`.
-
-Minimum strategy classes:
-
-- `PREDICTIVE_EDGE`;
-- `LIVE_PRICE_MOVEMENT`;
-- `ARBITRAGE`;
-- `DUTCHING`;
-- `HEDGE_REBALANCE`;
-- `HYBRID`.
-
-Shared evidence must bind event/market/selection/provider identity, causal timestamps, quote values/freshness, provenance, current portfolio, decision time, strategy/config identity and exact/approx/completeness truth.
-
-Predictive/hybrid probability claims additionally require forecast origin/cutoff/probability/uncertainty/calibration evidence.
-
-Pure arbitrage/dutching/hedge intents instead require the appropriate exact quote/state, settlement, stake-vector and complete terminal-state economic evidence when making an outcome-independent claim.
-
-## Outcome-independent truth
-
-The decision layer must not translate a positive expected value or a sampled portfolio surface into a guaranteed-profit claim.
-
-`OUTCOME_INDEPENDENT_POSITIVE` is allowed only when #355's complete-terminal-state contract is satisfied and, before real money moves, #353 also proves exact execution feasibility.
-
 ## Non-claims
 
-A green current V1 research decision means the supplied typed evidence, forecast, portfolio and risk policies allowed a **paper predictive action**. It does not prove:
+A green research decision means the supplied typed evidence, forecast, portfolio and risk policies allowed a paper action. It does not prove:
 
 - forecast accuracy;
 - profitability;
-- independence/completeness of scenario groups beyond what was proven;
-- live quote executability;
+- independence of scenario groups;
 - bookmaker fill/execution;
 - legal right to retain or redistribute provider data;
 - human/NVDA acceptance.
 
-Real-money execution is currently absent/disabled. That is a current implementation fact, **not** the mature product boundary.
-
-`REAL_MONEY_EXECUTION=false`
-`HUMAN_TESTED=false`
-`NVDA_VERIFIED=false`
-`V1_READY=false`
+Real-money execution remains absent.

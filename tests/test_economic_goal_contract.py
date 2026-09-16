@@ -38,7 +38,7 @@ def _goal(**changes: object) -> EconomicGoalContract:
         "minimum_data_quality": Decimal("0.70"),
         "max_concurrent_positions": 5,
         "max_parlay_legs": 4,
-        "automation_level": AutomationLevel.PAPER_AUTOMATION,
+        "automation_level": AutomationLevel.SUPERVISED_EXECUTION,
         "emergency_stop": False,
         "blocked_sports": frozenset({"greyhound"}),
         "blocked_providers": frozenset({"provider:test"}),
@@ -55,6 +55,25 @@ def test_contract_is_immutable_and_accepts_unicode_identity() -> None:
     assert hash(goal)
     with pytest.raises(FrozenInstanceError):
         goal.currency = "USD"  # type: ignore[misc]
+
+
+def test_automation_levels_match_canonical_execution_contract() -> None:
+    assert [
+        (AutomationLevel.ANALYSIS_ONLY.name, int(AutomationLevel.ANALYSIS_ONLY)),
+        (AutomationLevel.RECOMMENDATION.name, int(AutomationLevel.RECOMMENDATION)),
+        (
+            AutomationLevel.SUPERVISED_EXECUTION.name,
+            int(AutomationLevel.SUPERVISED_EXECUTION),
+        ),
+        (AutomationLevel.BOUNDED_AUTONOMY.name, int(AutomationLevel.BOUNDED_AUTONOMY)),
+        (AutomationLevel.HIGHER_AUTONOMY.name, int(AutomationLevel.HIGHER_AUTONOMY)),
+    ] == [
+        ("ANALYSIS_ONLY", 0),
+        ("RECOMMENDATION", 1),
+        ("SUPERVISED_EXECUTION", 2),
+        ("BOUNDED_AUTONOMY", 3),
+        ("HIGHER_AUTONOMY", 4),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -157,6 +176,18 @@ def test_automatic_transition_rejects_authority_expansion(
 ) -> None:
     previous = _goal()
     candidate = replace(previous, revision=2, **{field: value})
+
+    with pytest.raises(EconomicGoalContractError):
+        validate_automatic_transition(previous, candidate)
+
+
+def test_automatic_transition_rejects_supervised_to_bounded_execution() -> None:
+    previous = _goal(automation_level=AutomationLevel.SUPERVISED_EXECUTION)
+    candidate = replace(
+        previous,
+        revision=2,
+        automation_level=AutomationLevel.BOUNDED_AUTONOMY,
+    )
 
     with pytest.raises(EconomicGoalContractError):
         validate_automatic_transition(previous, candidate)

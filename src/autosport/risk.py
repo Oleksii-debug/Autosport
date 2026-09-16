@@ -46,15 +46,15 @@ class ProposedTicketRiskContext:
     """Typed, non-persistent facts about one proposed paper ticket.
 
     ``legs`` are the canonical proposed event/market/selection identity and locked
-    odds. ``quotes`` reuse canonical MarketEvent source/quote identity; when quote
-    evidence is supplied it must cover every proposed leg exactly once. Optional
-    bankroll/currency and measurement-window identities are carried unchanged and
-    never inferred.
+    odds. ``quotes`` reuse canonical MarketEvent source/quote identity; quote
+    evidence must cover every proposed leg exactly once whenever an economic-goal
+    quote check is evaluated. ``proposal_ts`` binds freshness to the proposal
+    instant. Optional bankroll/currency and measurement-window identities are
+    carried unchanged and never inferred.
 
     This seam intentionally does not implement concentration, deny-list, parlay,
-    quote-freshness/slippage/data-quality, or session/day ceilings. Those remain
-    independent follow-on policy slices. Canonical sport identity is deliberately
-    absent until the upstream #339 identity authority exists.
+    or session/day ceilings. Canonical sport identity is deliberately absent until
+    the upstream #339 identity authority exists.
     """
 
     legs: tuple[TicketLeg, ...]
@@ -63,6 +63,7 @@ class ProposedTicketRiskContext:
     currency: str | None = None
     measurement_window_start: str | None = None
     measurement_window_end: str | None = None
+    proposal_ts: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.legs) is not tuple or not self.legs:
@@ -122,6 +123,9 @@ class ProposedTicketRiskContext:
             raise ValueError(
                 "measurement window start and end must be supplied together"
             )
+        if self.proposal_ts is not None:
+            _canonical_context_timestamp("proposal_ts", self.proposal_ts)
+
         if self.measurement_window_start is not None:
             _, start = _canonical_context_timestamp(
                 "measurement_window_start", self.measurement_window_start
@@ -160,12 +164,13 @@ class PaperRiskPolicy:
     """Paper-lab guardrails. Limits are explicit and deterministic, never inferred by an LLM.
 
     ``economic_goal`` can only tighten the locally proven executable limits in
-    this policy: per-ticket stake, aggregate committed capital, concurrent open
-    paper positions, and the owner emergency stop. ``ProposedTicketRiskContext``
-    adds typed, non-persistent access to proposal/quote/window identity but this
-    seam does not silently activate additional owner ceilings. Concentration,
-    deny-list, parlay, quote, and session/day enforcement remain explicit
-    follow-on policy work.
+    this policy. It binds per-ticket stake, aggregate committed capital,
+    concurrent open paper positions, owner emergency stop, quote freshness,
+    execution slippage, and the available data-quality proof boundary.
+    ``ProposedTicketRiskContext`` is the typed, non-persistent evidence seam for
+    proposal-local quote checks; an active economic goal therefore fails closed
+    when that evidence seam is absent. Concentration, deny-list, parlay, and
+    session/day enforcement remain explicit follow-on policy work.
     """
 
     max_ticket_fraction: Decimal = Decimal("0.02")
@@ -281,6 +286,67 @@ class PaperRiskPolicy:
             return None
         return initial_bankroll, balance, committed_stake, open_position_count
 
+    @staticmethod
+    def _quote_risk_decision(
+        goal: EconomicGoalContract,
+        context: ProposedTicketRiskContext,
+    ) -> RiskDecision | None:
+        """Enforce proposal-local quote controls from canonical supplied evidence."""
+        if not context.quotes:
+            return RiskDecision(False, "proposed ticket quote evidence is required")
+        if context.proposal_ts is None:
+            return RiskDecision(False, "proposal timestamp is required for quote risk checks")
+
+        try:
+            _, proposal_time = _canonical_context_timestamp("proposal_ts", context.proposal_ts)
+            quotes_by_key = {quote.quote_key: quote for quote in context.quotes}
+            with localcontext(PaperRiskPolicy._decimal_context()):
+                for leg in context.legs:
+                    quote = quotes_by_key[leg.quote_key]
+                    quote_ts = quote.source_ts if quote.source_ts is not None else quote.observed_ts
+                    _, quote_time = _canonical_context_timestamp("quote timestamp", quote_ts)
+                    age_delta = proposal_time - quote_time
+                    age_seconds = (
+                        Decimal(age_delta.days * 86400 + age_delta.seconds)
+                        + (Decimal(age_delta.microseconds) / Decimal("1000000"))
+                    )
+                    if age_seconds < 0:
+                        return RiskDecision(False, "quote timestamp is after proposal timestamp")
+                    if age_seconds > goal.max_quote_age_seconds:
+                        return RiskDecision(False, "quote exceeds economic goal maximum age")
+
+                    if quote.decimal_odds <= 0 or leg.locked_odds <= 0:
+                        return RiskDecision(False, "quote or locked odds are invalid")
+                    # Compare (quote - locked) / quote to the configured ceiling
+                    # as an exact rational inequality. Decimal division can be
+                    # repeating (for example 0.10 / 2.10 == 1/21), and this
+                    # policy's protective Decimal context deliberately traps
+                    # Inexact rather than silently rounding economic evidence.
+                    if quote.decimal_odds > leg.locked_odds:
+                        quote_num, quote_den = quote.decimal_odds.as_integer_ratio()
+                        locked_num, locked_den = leg.locked_odds.as_integer_ratio()
+                        limit_num, limit_den = (
+                            goal.max_execution_slippage_fraction.as_integer_ratio()
+                        )
+                        adverse_num = quote_num * locked_den - locked_num * quote_den
+                        adverse_den = locked_den * quote_num
+                        if adverse_num * limit_den > limit_num * adverse_den:
+                            return RiskDecision(
+                                False,
+                                "quote-to-proposal slippage exceeds economic goal limit",
+                            )
+        except (ArithmeticError, KeyError, TypeError, ValueError):
+            return RiskDecision(False, "proposed ticket quote risk evidence is invalid")
+
+        # MarketEvent has canonical generic metadata, but no canonical data-quality
+        # score contract. Do not reinterpret provider metadata as owner-grade truth.
+        if goal.minimum_data_quality > 0:
+            return RiskDecision(
+                False,
+                "minimum data quality cannot be proven from canonical quote evidence",
+            )
+        return None
+
     def _effective_fraction_limits(self) -> tuple[Decimal, Decimal]:
         goal = self.economic_goal
         if goal is None:
@@ -361,6 +427,14 @@ class PaperRiskPolicy:
                     )
             if goal.emergency_stop:
                 return RiskDecision(False, "economic goal emergency stop is active")
+            if context is None:
+                return RiskDecision(
+                    False,
+                    "proposed ticket risk context is required for economic goal quote checks",
+                )
+            quote_decision = self._quote_risk_decision(goal, context)
+            if quote_decision is not None:
+                return quote_decision
             if goal.max_stake_amount is not None and amount > goal.max_stake_amount:
                 return RiskDecision(False, "ticket exceeds economic goal absolute stake limit")
             if open_position_count >= goal.max_concurrent_positions:

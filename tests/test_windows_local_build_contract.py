@@ -139,10 +139,10 @@ def test_local_windows_build_binds_pyinstaller_outputs_before_consumption() -> N
     script = _build_script_text()
 
     first_build_index, second_build_index = _guarded_pyinstaller_indices(script)
-    first_arguments = "$autosportPyInstallerArguments = [string[]]@(" 
+    first_arguments = "$autosportPyInstallerArguments = [string[]]@("
     first_bind = "'--bound-output', $boundAutosportExe,"
     first_digest = "'--digest-output', $autosportDigestPath,"
-    second_arguments = "$dataPyInstallerArguments = [string[]]@(" 
+    second_arguments = "$dataPyInstallerArguments = [string[]]@("
     second_bind = "'--bound-output', $boundDataExe,"
     second_digest = "'--digest-output', $dataDigestPath,"
     verify_gui = "python $sourceVerifier --verify-artifact $boundAutosportExe --expected-sha256 $autosportExeSha256"
@@ -174,11 +174,11 @@ def test_local_windows_build_fails_closed_on_release_native_steps() -> None:
         ),
         (
             "'--bound-output', $boundAutosportExe,",
-            'if ($LASTEXITCODE -ne 0) { throw "Guarded Autosport PyInstaller/binding exited $LASTEXITCODE" }',
+            'if ($autosportBindExitCode -ne 0) { throw "Guarded Autosport PyInstaller/binding exited $autosportBindExitCode" }',
         ),
         (
             "'--bound-output', $boundDataExe,",
-            'if ($LASTEXITCODE -ne 0) { throw "Guarded Autosport-Data PyInstaller/binding exited $LASTEXITCODE" }',
+            'if ($dataBindExitCode -ne 0) { throw "Guarded Autosport-Data PyInstaller/binding exited $dataBindExitCode" }',
         ),
         (
             "python scripts/package_windows.py `",

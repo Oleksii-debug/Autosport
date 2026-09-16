@@ -58,7 +58,15 @@ def test_packaging_interpreter_is_created_after_late_source_gate_and_owns_both_b
     )
 
     assert late_gate < requirement_oracle < venv_create < dependency_install < exact_snapshot
-    assert script.count("& $packagingPython -I $trustedPyInstallerBinder `") == 2
+    native_call = "[Autosport.Release.BirthProtectedPyInstaller]::Run("
+    trusted_launch_tuple = (
+        "$packagingPython,\n"
+        "    $trustedPyInstallerLaunchBoundary,\n"
+        "    $trustedPyInstallerBinder,"
+    )
+    assert script.count(native_call) == 2
+    assert script.count(trusted_launch_tuple) == 2
+    assert "& $packagingPython -I $trustedPyInstallerBinder `" not in script
     assert "& $pythonExecutable -I $trustedPyInstallerBinder `" not in script
     assert script.count("& $packagingPython -I -c $autosportResolutionProbe") == 2
     assert "--disable-pip-version-check --no-input" in script

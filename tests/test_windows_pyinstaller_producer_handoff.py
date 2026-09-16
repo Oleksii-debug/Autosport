@@ -233,6 +233,8 @@ def test_windows_build_invokes_guarded_pyinstaller_for_both_release_executables(
     script = _BUILD_SCRIPT.read_text(encoding="utf-8")
     guarded_calls = script.count("scripts/guarded_pyinstaller_bind.py")
     assert guarded_calls >= 1
-    assert script.count("--verifier-sha256 $sourceVerifierSha256") == 2
-    assert script.count("--bound-output $boundAutosportExe") == 1
-    assert script.count("--bound-output $boundDataExe") == 1
+    assert script.count("[Autosport.Release.BirthProtectedPyInstaller]::Run(") == 2
+    assert script.count("'--verifier-sha256', $sourceVerifierSha256,") == 2
+    assert script.count("'--bound-output', $boundAutosportExe,") == 1
+    assert script.count("'--bound-output', $boundDataExe,") == 1
+    assert "& $packagingPython -I $trustedPyInstallerBinder `" not in script

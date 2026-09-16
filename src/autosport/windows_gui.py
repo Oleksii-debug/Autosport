@@ -200,7 +200,10 @@ class WindowsAutosportApp(AutosportApp):
         except Exception as exc:
             messagebox.showerror(
                 text("ui.dialog.title"),
-                text("ui.error.recovery.configuration", detail=exc),
+                text(
+                    "ui.error.recovery.configuration",
+                    detail=_safe_exception_detail(exc),
+                ),
             )
             self.status.set(text("ui.status.recovery.configuration_rejected"))
             return

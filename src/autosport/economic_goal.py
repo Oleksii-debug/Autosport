@@ -27,17 +27,20 @@ class EconomicObjective(str, Enum):
 
 
 class AutomationLevel(IntEnum):
-    """Maximum autonomy permitted by the owner-level contract.
+    """Maximum execution autonomy permitted by the owner-level contract.
 
+    Values intentionally match the canonical automation levels in Issue #353.
     The ordering is security-sensitive: a larger value represents strictly more
-    authority.  Merely selecting a level here does not create an execution path.
+    money-moving authority. Merely selecting a level here does not create an
+    execution path, and paper-mode automation is deliberately not encoded in this
+    real-execution authority dimension.
     """
 
     ANALYSIS_ONLY = 0
     RECOMMENDATION = 1
-    PAPER_AUTOMATION = 2
-    SUPERVISED_EXECUTION = 3
-    BOUNDED_AUTONOMY = 4
+    SUPERVISED_EXECUTION = 2
+    BOUNDED_AUTONOMY = 3
+    HIGHER_AUTONOMY = 4
 
 
 _ZERO: Final = Decimal("0")

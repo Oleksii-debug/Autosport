@@ -52,12 +52,12 @@ def test_windows_build_holds_directory_namespace_fence_through_both_consumers() 
         "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
     )
     gui_build = (
-        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
+        "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
         "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
         "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
     )
     data_build = (
-        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
+        "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --console "
         "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
         "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
     )

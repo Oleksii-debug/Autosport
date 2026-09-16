@@ -415,12 +415,12 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
             "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
         )
         first_build = (
-            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
+            "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
             "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
             "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
         )
         second_build = (
-            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
+            "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --console "
             "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
             "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
         )
@@ -459,7 +459,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
     def test_windows_build_binds_pyinstaller_outputs_before_audit_and_package(self) -> None:
         script = Path("scripts/build_windows.ps1").read_text(encoding="utf-8")
         first_build = (
-            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
+            "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
             "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
             "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
         )
@@ -468,7 +468,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
             "--bound-output $boundAutosportExe --digest-output $autosportDigestPath"
         )
         second_build = (
-            "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
+            "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --console "
             "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
             "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
         )

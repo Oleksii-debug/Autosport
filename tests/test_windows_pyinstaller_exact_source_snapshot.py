@@ -61,12 +61,12 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
         "$trustedSourceSnapshotVerifierLauncher $trustedBuildRoot"
     )
     gui_build = (
-        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --windowed "
+        "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
         "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
         "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
     )
     data_build = (
-        "& $pythonExecutable -I -m PyInstaller --noconfirm --clean --onefile --console "
+        "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --console "
         "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
         "--specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry"
     )
@@ -125,7 +125,8 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
 
     post_gate = script[gate_index:]
     assert "python -m PyInstaller" not in post_gate
-    assert post_gate.count("& $pythonExecutable -I -m PyInstaller") == 2
+    assert post_gate.count("& $packagingPython -I -m PyInstaller") == 2
+    assert "& $pythonExecutable -I -m PyInstaller" not in post_gate
 
 
 def test_snapshot_verifier_rejects_added_membership_after_materialization(tmp_path: Path) -> None:

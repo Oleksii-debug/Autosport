@@ -295,10 +295,11 @@ class MarketMirror:
         """Reconstruct exactly the decision-visible mirror state at as_of.
 
         Replay is read-only over canonical append-only history. Events whose local
-        observation instant is after as_of are never applied, even when their
-        provider timestamp is older, so later-received evidence cannot leak into an
-        earlier decision. The reconstructed mirror then applies the same canonical
-        status/freshness/selectors contract as a live active_view.
+        observation or ingestion/receipt instant is after as_of are never applied,
+        even when their provider timestamp is older, so later-received evidence cannot
+        leak into an earlier decision. Malformed causal clocks fail closed. The
+        reconstructed mirror then applies the same canonical status/freshness/selectors
+        contract as a live active_view.
         """
         if not isinstance(store, SQLiteMarketStore):
             raise TypeError("store must be a SQLiteMarketStore")
@@ -306,9 +307,10 @@ class MarketMirror:
         mirror = cls()
         for event in store.events():
             observed = cls._utc_timestamp(event.observed_ts)
-            if observed is None:
+            ingested = cls._utc_timestamp(event.ingest_ts)
+            if observed is None or ingested is None:
                 continue
-            if observed <= boundary:
+            if observed <= boundary and ingested <= boundary:
                 mirror.apply(event)
         return mirror.active_view(
             as_of=boundary,

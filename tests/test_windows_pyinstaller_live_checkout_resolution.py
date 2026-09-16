@@ -34,14 +34,15 @@ def _write_package(root: Path, *, marker: str) -> Path:
 def test_windows_release_invokes_both_pyinstaller_analyses_from_trusted_snapshot_path() -> None:
     script = _BUILD_SCRIPT.read_text(encoding="utf-8")
 
-    guarded_call = "& $packagingPython -I $trustedPyInstallerBinder `"
-    trusted_path = "--paths $trustedBuildSrc `"
+    guarded_call = "[Autosport.Release.BirthProtectedPyInstaller]::Run("
+    trusted_path = "'--paths', $trustedBuildSrc,"
 
     assert script.count(guarded_call) == 2
     assert script.count(trusted_path) == 2
     assert "$trustedGuiEntry" in script
     assert "$trustedDataEntry" in script
     assert "Push-Location $trustedBuildRoot" not in script
+    assert "& $packagingPython -I $trustedPyInstallerBinder `" not in script
 
 
 @pytest.mark.skipif(

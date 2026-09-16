@@ -23,7 +23,7 @@ class _Value:
 def test_recovery_configuration_error_with_broken_str_stays_fail_closed() -> None:
     app = object.__new__(WindowsAutosportApp)
     app._closing = False
-    app._dataset_busy = False
+    app.dataset_worker = SimpleNamespace(busy=False)
     app.replay_worker = SimpleNamespace(busy=False)
     app.live_worker = SimpleNamespace(busy=False)
     app.recovery_worker = SimpleNamespace(busy=False)

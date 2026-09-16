@@ -15,24 +15,44 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
 
     @staticmethod
     def _argv(root: Path) -> list[str]:
+        hashes = {
+            "exe": "1" * 64,
+            "data": "2" * 64,
+            "diagnostic": "3" * 64,
+            "accessibility": "4" * 64,
+            "keyboard": "5" * 64,
+            "restart": "6" * 64,
+        }
         return [
             "package_windows.py",
             "--exe",
             str(root / "Autosport.exe"),
+            "--exe-sha256",
+            hashes["exe"],
             "--data-exe",
             str(root / "Autosport-Data.exe"),
+            "--data-exe-sha256",
+            hashes["data"],
             "--start-file",
             str(root / "WINDOWS_START_HERE.txt"),
             "--example-dir",
             str(root / "example"),
             "--diagnostic",
             str(root / "diagnostic.json"),
+            "--diagnostic-sha256",
+            hashes["diagnostic"],
             "--accessibility-audit",
             str(root / "accessibility.json"),
+            "--accessibility-audit-sha256",
+            hashes["accessibility"],
             "--keyboard-audit",
             str(root / "keyboard.json"),
+            "--keyboard-audit-sha256",
+            hashes["keyboard"],
             "--restart-recovery-audit",
             str(root / "restart.json"),
+            "--restart-recovery-audit-sha256",
+            hashes["restart"],
             "--output",
             str(root / "candidate.zip"),
             "--source-sha",
@@ -40,6 +60,39 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
             "--verification-output",
             str(root / "verification.json"),
         ]
+
+    @staticmethod
+    def _capture_passthrough(source: Path, *_args, **_kwargs) -> Path:
+        return source
+
+    def _common_patches(self, root: Path, output: Path):
+        return (
+            patch.object(sys, "argv", self._argv(root)),
+            patch.object(package_windows, "_bind_source_sha_to_checkout"),
+            patch.object(
+                package_windows,
+                "_materialize_exact_static_payload",
+                return_value=(
+                    root / "WINDOWS_START_HERE.txt",
+                    root / "example",
+                ),
+            ),
+            patch.object(
+                package_windows,
+                "_capture_verified_executable",
+                side_effect=self._capture_passthrough,
+            ),
+            patch.object(
+                package_windows,
+                "_capture_verified_evidence",
+                side_effect=self._capture_passthrough,
+            ),
+            patch.object(
+                package_windows,
+                "build_windows_package",
+                return_value=(output, "0" * 64),
+            ),
+        )
 
     def test_digest_helper_rejects_stale_binding(self) -> None:
         with self.assertRaisesRegex(
@@ -51,37 +104,69 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
                 {"package_sha256": "2" * 64},
             )
 
-    def test_main_rejects_package_replacement_between_bind_and_verification(self) -> None:
+    def test_main_rejects_release_snapshot_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             output = root / "candidate.zip"
-            base_digest = "0" * 64
+            argv_patch, source_patch, static_patch, exe_patch, evidence_patch, build_patch = (
+                self._common_patches(root, output)
+            )
             with (
-                patch.object(sys, "argv", self._argv(root)),
-                patch.object(package_windows, "_bind_source_sha_to_checkout"),
-                patch.object(
-                    package_windows,
-                    "build_windows_package",
-                    return_value=(output, base_digest),
-                ),
+                argv_patch,
+                source_patch,
+                static_patch,
+                exe_patch,
+                evidence_patch,
+                build_patch,
                 patch.object(
                     package_windows,
                     "bind_portable_data_tool",
-                    return_value={
-                        "autosport_data_exe_sha256": "3" * 64,
-                        "package_sha256": "1" * 64,
-                    },
-                ) as bind_mock,
+                    return_value={"package_sha256": "1" * 64},
+                ),
+                patch.object(
+                    package_windows,
+                    "verify_windows_package",
+                    return_value={"package_sha256": "2" * 64},
+                ),
+                patch.object(package_windows, "verify_portable_data_tool") as data_verify,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "bound package digest does not match the exact verified package snapshot",
+                ):
+                    package_windows.main()
+            data_verify.assert_not_called()
+            self.assertFalse((root / "verification.json").exists())
+
+    def test_main_rejects_portable_snapshot_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "candidate.zip"
+            digest = "1" * 64
+            argv_patch, source_patch, static_patch, exe_patch, evidence_patch, build_patch = (
+                self._common_patches(root, output)
+            )
+            with (
+                argv_patch,
+                source_patch,
+                static_patch,
+                exe_patch,
+                evidence_patch,
+                build_patch,
+                patch.object(
+                    package_windows,
+                    "bind_portable_data_tool",
+                    return_value={"package_sha256": digest},
+                ),
+                patch.object(
+                    package_windows,
+                    "verify_windows_package",
+                    return_value={"package_sha256": digest},
+                ),
                 patch.object(
                     package_windows,
                     "verify_portable_data_tool",
-                    return_value={
-                        "status": "PASS",
-                        "source_sha": self.SOURCE_SHA,
-                        "package_sha256": "2" * 64,
-                        "autosport_data_exe_sha256": "3" * 64,
-                        "portable_historical_data_tools": True,
-                    },
+                    return_value={"package_sha256": "2" * 64},
                 ),
             ):
                 with self.assertRaisesRegex(
@@ -89,63 +174,63 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
                     "bound package digest does not match the exact verified package snapshot",
                 ):
                     package_windows.main()
-
-            bind_mock.assert_called_once_with(
-                output,
-                root / "Autosport-Data.exe",
-                expected_base_package_sha256=base_digest,
-            )
             self.assertFalse((root / "verification.json").exists())
 
-    def test_main_emits_digest_from_composite_verified_snapshot(self) -> None:
+    def test_main_emits_digest_only_after_both_verifiers_match_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             output = root / "candidate.zip"
-            base_digest = "0" * 64
             digest = "4" * 64
-            verification = {
+            release_verification = {
                 "status": "PASS",
                 "source_sha": self.SOURCE_SHA,
                 "package_sha256": digest,
                 "autosport_exe_sha256": "5" * 64,
-                "autosport_data_exe_sha256": "6" * 64,
-                "portable_historical_data_tools": True,
                 "real_money_execution": False,
                 "human_tested": False,
                 "nvda_verified": False,
             }
+            data_verification = {
+                "status": "PASS",
+                "package_sha256": digest,
+                "autosport_data_exe_sha256": "6" * 64,
+                "portable_historical_data_tools": True,
+            }
+            expected_report = dict(release_verification)
+            expected_report.update(data_verification)
+            expected_report["package_sha256"] = digest
+            argv_patch, source_patch, static_patch, exe_patch, evidence_patch, build_patch = (
+                self._common_patches(root, output)
+            )
             with (
-                patch.object(sys, "argv", self._argv(root)),
-                patch.object(package_windows, "_bind_source_sha_to_checkout"),
-                patch.object(
-                    package_windows,
-                    "build_windows_package",
-                    return_value=(output, base_digest),
-                ),
+                argv_patch,
+                source_patch,
+                static_patch,
+                exe_patch,
+                evidence_patch,
+                build_patch,
                 patch.object(
                     package_windows,
                     "bind_portable_data_tool",
-                    return_value={
-                        "autosport_data_exe_sha256": "6" * 64,
-                        "package_sha256": digest,
-                    },
+                    return_value={"package_sha256": digest},
                 ) as bind_mock,
                 patch.object(
                     package_windows,
+                    "verify_windows_package",
+                    return_value=release_verification,
+                ),
+                patch.object(
+                    package_windows,
                     "verify_portable_data_tool",
-                    return_value=verification,
+                    return_value=data_verification,
                 ),
                 patch("builtins.print") as print_mock,
             ):
                 self.assertEqual(package_windows.main(), 0)
 
-            bind_mock.assert_called_once_with(
-                output,
-                root / "Autosport-Data.exe",
-                expected_base_package_sha256=base_digest,
-            )
+            bind_mock.assert_called_once_with(output, root / "Autosport-Data.exe")
             report = json.loads((root / "verification.json").read_text(encoding="utf-8"))
-            self.assertEqual(report, verification)
+            self.assertEqual(report, expected_report)
             print_mock.assert_any_call(f"SHA256={digest}")
 
 

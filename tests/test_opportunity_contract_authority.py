@@ -108,6 +108,8 @@ def test_nonfinite_decimal_contract_inputs_fail_closed() -> None:
             sequence=1,
             decimal_odds=Decimal("Infinity"),
             observed_ts="2026-09-16T16:00:00+00:00",
+            source_ts="2026-09-16T15:59:59+00:00",
+            ingest_ts="2026-09-16T16:00:01+00:00",
             market_event_hash=_HASH,
         )
 
@@ -121,6 +123,8 @@ def test_nonfinite_decimal_contract_inputs_fail_closed() -> None:
             quote_key="event|market|selection",
             probability=Decimal("NaN"),
             input_cutoff_ts="2026-09-16T16:00:00+00:00",
+            market_snapshot_hash=_HASH,
+            quote_market_event_hash=_HASH,
         )
 
 

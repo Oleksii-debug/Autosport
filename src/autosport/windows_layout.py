@@ -16,14 +16,17 @@ from .windows_surface_contract import (
 )
 
 # Keep every critical surface mapped inside the canonical 1080x860 Windows
-# window. Listboxes remain scrollable, so reducing visible rows does not remove
-# content or keyboard access.
+# window. Scrolling surfaces retain their full content, while the Windows-only
+# wrapper removes excess vertical chrome so the final execution log remains
+# mapped after the product shell is inserted.
 _SURFACE_HEIGHTS = {
     "live_quotes": 3,
     "tickets": 4,
     "evaluation": 3,
     "log": 2,
 }
+_SECTION_LABEL_PADY = (6, 2)
+WINDOWS_SHELL_DETAILS_VISIBLE_ROWS = 1
 
 WINDOWS_SHELL_AUTOMATION_IDS = {
     "navigation": 301,
@@ -37,6 +40,8 @@ def compact_surface_heights(app: Any) -> None:
     """Apply the Windows V1 vertical budget without weakening UIA gates."""
     for name, height in _SURFACE_HEIGHTS.items():
         getattr(app, name).configure(height=height)
+    for name in ("tickets_label", "evaluation_label", "log_label"):
+        getattr(app, name).pack_configure(pady=_SECTION_LABEL_PADY)
 
 
 def _focus_surface_target(app: Any, surface_key: str) -> None:
@@ -99,12 +104,12 @@ def install_windows_product_shell(app: Any) -> None:
     if frame is None:
         raise RuntimeError("Autosport root frame is missing")
 
-    shell = ttk.LabelFrame(frame, text="Навігація продукту", padding=(8, 6))
+    shell = ttk.LabelFrame(frame, text="Навігація продукту", padding=(8, 4))
     first = frame.winfo_children()[0] if frame.winfo_children() else None
     if first is None:
-        shell.pack(fill="x", pady=(0, 8))
+        shell.pack(fill="x", pady=(0, 4))
     else:
-        shell.pack(fill="x", pady=(0, 8), before=first)
+        shell.pack(fill="x", pady=(0, 4), before=first)
 
     app.shell_surface_key = tk.StringVar()
     app.shell_surface_display = tk.StringVar()
@@ -138,9 +143,13 @@ def install_windows_product_shell(app: Any) -> None:
         state="readonly",
         takefocus=True,
     )
-    app.shell_state.pack(fill="x", pady=(6, 4))
+    app.shell_state.pack(fill="x", pady=(4, 2))
 
-    app.shell_details = tk.Listbox(shell, height=2, takefocus=True)
+    app.shell_details = tk.Listbox(
+        shell,
+        height=WINDOWS_SHELL_DETAILS_VISIBLE_ROWS,
+        takefocus=True,
+    )
     app.shell_details.pack(fill="x")
 
     app.bind("<F2>", lambda _event: app.shell_navigation.focus_set())

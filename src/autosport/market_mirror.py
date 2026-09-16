@@ -17,6 +17,7 @@ class MirrorUpdate(str, Enum):
 @dataclass(frozen=True, slots=True)
 class MirrorApplyResult:
     status: MirrorUpdate
+    source_id: str
     quote_key: str
     previous_sequence: int | None
     current_sequence: int
@@ -86,6 +87,7 @@ class MarketMirror:
             self._latest[key] = event
             return MirrorApplyResult(
                 MirrorUpdate.APPLIED,
+                event.source_id,
                 event.quote_key,
                 None,
                 event.sequence,
@@ -94,6 +96,7 @@ class MarketMirror:
         if event.sequence < previous.sequence:
             return MirrorApplyResult(
                 MirrorUpdate.STALE,
+                event.source_id,
                 event.quote_key,
                 previous.sequence,
                 previous.sequence,
@@ -103,6 +106,7 @@ class MarketMirror:
             if self._same_sequence_payload(event, previous):
                 return MirrorApplyResult(
                     MirrorUpdate.DUPLICATE,
+                    event.source_id,
                     event.quote_key,
                     previous.sequence,
                     previous.sequence,
@@ -114,6 +118,7 @@ class MarketMirror:
         self._latest[key] = event
         return MirrorApplyResult(
             MirrorUpdate.APPLIED,
+            event.source_id,
             event.quote_key,
             previous.sequence,
             event.sequence,

@@ -121,7 +121,7 @@ def test_choose_dataset_validates_off_tk_thread_and_publishes_only_terminal_resu
         assert app.dataset_text.value == "previous dataset summary"
         assert app._busy_states == [True]
         assert app._scheduled[0][0] == 100
-        assert "фоновому read-only worker" in app.status.value
+        assert "фоновому процесі лише для читання" in app.status.value
 
         release.set()
         deadline = time.monotonic() + 2.0
@@ -132,7 +132,7 @@ def test_choose_dataset_validates_off_tk_thread_and_publishes_only_terminal_resu
         assert app.dataset_path == selected
         assert app._busy_states == [True, False]
         assert "responsive corpus" in app.dataset_text.value
-        assert app.status.value == "Dataset перевірено. Можна запускати replay."
+        assert app.status.value == "Набір даних перевірено. Можна запускати повтор."
         showerror.assert_not_called()
 
 
@@ -157,7 +157,7 @@ def test_terminal_validation_failure_preserves_last_known_good_dataset(
     assert "не змінено" in app.status.value
     showerror.assert_called_once_with(
         "Автоспорт",
-        "Dataset відхилено: ValueError: market dataset hash mismatch",
+        "Набір даних відхилено: ValueError: market dataset hash mismatch",
     )
 
 
@@ -198,7 +198,7 @@ def test_terminal_result_for_different_folder_fails_closed(tmp_path: Path) -> No
 
     assert app.dataset_path == previous
     assert app.dataset_text.value == "previous dataset summary"
-    assert "identity mismatch" in app.status.value
+    assert "невідповідність ідентичності" in app.status.value
     showerror.assert_called_once()
 
 
@@ -206,20 +206,20 @@ def test_dataset_validation_blocks_replay_live_and_both_recovery_paths() -> None
     app = _bare_app(dataset_worker=SimpleNamespace(busy=True))
 
     AutosportApp.run_dataset(app)
-    assert "dataset validation" in app.status.value
+    assert "перевірка набору даних" in app.status.value
 
     AutosportApp.refresh_live_snapshot(app)
-    assert "dataset validation" in app.live_status.value
+    assert "перевірка набору даних" in app.live_status.value
 
     AutosportApp.repair_workspace(app)
-    assert "dataset validation" in app.status.value
+    assert "перевірка набору даних" in app.status.value
 
     windows_app = object.__new__(WindowsAutosportApp)
     windows_app._closing = False
     windows_app.dataset_worker = SimpleNamespace(busy=True)
     windows_app.status = _Value()
     WindowsAutosportApp.repair_workspace(windows_app)
-    assert "dataset validation" in windows_app.status.value
+    assert "перевірка набору даних" in windows_app.status.value
 
 
 def test_replay_control_restore_cannot_enable_controls_while_dataset_is_busy() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import (
     Context,
     Decimal,
@@ -12,9 +13,140 @@ from decimal import (
     localcontext,
 )
 
-from .domain import PaperTicket, TicketStatus
+from .domain import MarketEvent, PaperTicket, TicketLeg, TicketStatus
 from .economic_goal import EconomicGoalContract
 from .paper import PaperBook
+
+
+def _canonical_context_text(name: str, value: object) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise ValueError(f"{name} must be a non-empty canonical string")
+    if "\x00" in value:
+        raise ValueError(f"{name} must not contain NUL")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
+    return value
+
+
+def _canonical_context_timestamp(name: str, value: object) -> tuple[str, datetime]:
+    timestamp = _canonical_context_text(name, value)
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be valid ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware ISO-8601")
+    return timestamp, parsed
+
+
+@dataclass(frozen=True, slots=True)
+class ProposedTicketRiskContext:
+    """Typed, non-persistent facts about one proposed paper ticket.
+
+    ``legs`` are the canonical proposed event/market/selection identity and locked
+    odds. ``quotes`` reuse canonical MarketEvent source/quote identity; when quote
+    evidence is supplied it must cover every proposed leg exactly once. Optional
+    bankroll/currency and measurement-window identities are carried unchanged and
+    never inferred.
+
+    This seam intentionally does not implement concentration, deny-list, parlay,
+    quote-freshness/slippage/data-quality, or session/day ceilings. Those remain
+    independent follow-on policy slices. Canonical sport identity is deliberately
+    absent until the upstream #339 identity authority exists.
+    """
+
+    legs: tuple[TicketLeg, ...]
+    quotes: tuple[MarketEvent, ...] = ()
+    bankroll_id: str | None = None
+    currency: str | None = None
+    measurement_window_start: str | None = None
+    measurement_window_end: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.legs) is not tuple or not self.legs:
+            raise ValueError("proposed ticket context requires a non-empty tuple of legs")
+
+        leg_keys: set[str] = set()
+        for leg in self.legs:
+            try:
+                PaperBook._validate_ticket_leg(leg)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ValueError("proposed ticket context contains an invalid leg") from exc
+            if leg.quote_key in leg_keys:
+                raise ValueError("proposed ticket context contains duplicate leg identity")
+            leg_keys.add(leg.quote_key)
+
+        if type(self.quotes) is not tuple:
+            raise ValueError("proposed ticket quotes must be a tuple")
+
+        quote_keys: set[str] = set()
+        for quote in self.quotes:
+            if type(quote) is not MarketEvent:
+                raise ValueError("proposed ticket context contains an invalid quote")
+            try:
+                validated_quote = MarketEvent.from_dict(quote.to_dict())
+                _canonical_context_timestamp("quote observed_ts", quote.observed_ts)
+                if quote.source_ts is not None:
+                    _canonical_context_timestamp("quote source_ts", quote.source_ts)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ValueError("proposed ticket context contains an invalid quote") from exc
+            if validated_quote != quote:
+                raise ValueError("proposed ticket context contains a non-canonical quote")
+            if quote.quote_key in quote_keys:
+                raise ValueError("proposed ticket context contains duplicate quote identity")
+            quote_keys.add(quote.quote_key)
+
+        if quote_keys and quote_keys != leg_keys:
+            raise ValueError(
+                "proposed ticket quote evidence must cover every proposed leg exactly once"
+            )
+
+        if (self.bankroll_id is None) != (self.currency is None):
+            raise ValueError("bankroll_id and currency must be supplied together")
+        if self.bankroll_id is not None:
+            _canonical_context_text("bankroll_id", self.bankroll_id)
+            currency = _canonical_context_text("currency", self.currency)
+            if (
+                len(currency) != 3
+                or not currency.isascii()
+                or not currency.isalpha()
+                or currency != currency.upper()
+            ):
+                raise ValueError("currency must be a three-letter uppercase ASCII code")
+
+        if (self.measurement_window_start is None) != (
+            self.measurement_window_end is None
+        ):
+            raise ValueError(
+                "measurement window start and end must be supplied together"
+            )
+        if self.measurement_window_start is not None:
+            _, start = _canonical_context_timestamp(
+                "measurement_window_start", self.measurement_window_start
+            )
+            _, end = _canonical_context_timestamp(
+                "measurement_window_end", self.measurement_window_end
+            )
+            if start > end:
+                raise ValueError("measurement window start must not be after end")
+
+    @property
+    def parlay_leg_count(self) -> int:
+        return len(self.legs)
+
+    @property
+    def event_ids(self) -> frozenset[str]:
+        return frozenset(leg.event_id for leg in self.legs)
+
+    @property
+    def market_ids(self) -> frozenset[str]:
+        return frozenset(leg.market_id for leg in self.legs)
+
+    @property
+    def source_ids(self) -> frozenset[str]:
+        return frozenset(quote.source_id for quote in self.quotes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,12 +159,13 @@ class RiskDecision:
 class PaperRiskPolicy:
     """Paper-lab guardrails. Limits are explicit and deterministic, never inferred by an LLM.
 
-    ``economic_goal`` can only tighten the locally provable executable limits in
+    ``economic_goal`` can only tighten the locally proven executable limits in
     this policy: per-ticket stake, aggregate committed capital, concurrent open
-    paper positions, and the owner emergency stop.  Other EconomicGoalContract
-    dimensions deliberately remain outside this boundary because PaperRiskPolicy
-    has no authoritative session/day/drawdown/turnover/concentration, quote,
-    parlay, deny-list, bankroll-id, or currency context with which to prove them.
+    paper positions, and the owner emergency stop. ``ProposedTicketRiskContext``
+    adds typed, non-persistent access to proposal/quote/window identity but this
+    seam does not silently activate additional owner ceilings. Concentration,
+    deny-list, parlay, quote, and session/day enforcement remain explicit
+    follow-on policy work.
     """
 
     max_ticket_fraction: Decimal = Decimal("0.02")
@@ -189,7 +322,16 @@ class PaperRiskPolicy:
             return None
         return values
 
-    def evaluate(self, book: PaperBook, stake: Decimal | str) -> RiskDecision:
+    def evaluate(
+        self,
+        book: PaperBook,
+        stake: Decimal | str,
+        *,
+        context: ProposedTicketRiskContext | None = None,
+    ) -> RiskDecision:
+        if context is not None and not isinstance(context, ProposedTicketRiskContext):
+            return RiskDecision(False, "proposed ticket risk context is invalid")
+
         try:
             amount = Decimal(str(stake))
         except (InvalidOperation, ValueError):
@@ -206,6 +348,17 @@ class PaperRiskPolicy:
 
         goal = self.economic_goal
         if goal is not None:
+            if context is not None and context.bankroll_id is not None:
+                if context.bankroll_id != goal.bankroll_id:
+                    return RiskDecision(
+                        False,
+                        "proposed ticket bankroll identity does not match economic goal",
+                    )
+                if context.currency != goal.currency:
+                    return RiskDecision(
+                        False,
+                        "proposed ticket currency does not match economic goal",
+                    )
             if goal.emergency_stop:
                 return RiskDecision(False, "economic goal emergency stop is active")
             if goal.max_stake_amount is not None and amount > goal.max_stake_amount:

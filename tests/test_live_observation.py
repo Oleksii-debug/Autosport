@@ -272,12 +272,12 @@ class LiveObservationTests(unittest.TestCase):
             result = self._observe(tmp)
             summary = observation_summary(result)
             lines = observation_quote_lines(result)
-            self.assertIn("health=healthy", summary)
-            self.assertIn("current=2", summary)
+            self.assertIn("стан=healthy", summary)
+            self.assertIn("поточних=2", summary)
             self.assertEqual(len(lines), 2)
             self.assertIn("player-a", lines[0])
-            self.assertIn("odds 1.80", lines[0])
-            self.assertIn("source time 2026-09-12T19:59:59+00:00", lines[0])
+            self.assertIn("коефіцієнт 1.80", lines[0])
+            self.assertIn("час джерела 2026-09-12T19:59:59+00:00", lines[0])
 
 
 if __name__ == "__main__":

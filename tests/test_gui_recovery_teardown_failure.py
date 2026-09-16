@@ -86,7 +86,7 @@ def test_uncertain_state_is_hidden_before_raising_session_teardown() -> None:
     assert app.tickets.lines == ["ECONOMIC STATE QUARANTINED"]
     assert Path("economic-workspace") in app._recovery_required_workspaces
     assert any(
-        "secondary=OSError: simulated session close failure" in line
+        "вторинна_помилка=OSError: simulated session close failure" in line
         for line in app._logs
     )
 
@@ -110,11 +110,11 @@ def test_replay_primary_error_survives_raising_session_teardown() -> None:
     assert app.session is None
     assert "9999" not in app.bank.value
     assert Path("economic-workspace") in app._recovery_required_workspaces
-    assert any("secondary=OSError: simulated session close failure" in line for line in app._logs)
-    assert any("Paper replay помилка: RuntimeError: replay failed" in line for line in app._logs)
+    assert any("вторинна_помилка=OSError: simulated session close failure" in line for line in app._logs)
+    assert any("Помилка паперового повтору: RuntimeError: replay failed" in line for line in app._logs)
     showerror.assert_called_once_with(
         "Автоспорт",
-        "Paper replay помилка: RuntimeError: replay failed",
+        "Помилка паперового повтору: RuntimeError: replay failed",
     )
 
 
@@ -140,8 +140,8 @@ def test_recovery_stops_before_reconcile_after_pre_reconcile_teardown_failure() 
     assert "9999" not in app.bank.value
     assert "недоступний" in app.bank.value
     assert exact_workspace in app._recovery_required_workspaces
-    assert any("secondary=OSError: simulated session close failure" in line for line in app._logs)
-    assert any("session teardown" in line for line in app._logs)
-    assert "не завершено" in app.status.value
+    assert any("вторинна_помилка=OSError: simulated session close failure" in line for line in app._logs)
+    assert any("попередній економічний сеанс" in line for line in app._logs)
+    assert "не запущено" in app.status.value
     showerror.assert_called_once()
-    assert "session teardown" in showerror.call_args.args[1]
+    assert "попередній економічний сеанс" in showerror.call_args.args[1]

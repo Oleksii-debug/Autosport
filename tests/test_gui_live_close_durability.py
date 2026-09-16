@@ -51,9 +51,9 @@ class GuiLiveCloseDurabilityTests(unittest.TestCase):
         self.assertFalse(session.closed)
         self.assertFalse(app._destroyed)
         self.assertTrue(app._bell_rang)
-        self.assertIn("Live snapshot", app.status.value)
+        self.assertIn("Поточний знімок", app.status.value)
         self.assertIn("Закриття програми заблоковано", app.live_status.value)
-        self.assertTrue(any("persistence boundary" in line for line in app._logs))
+        self.assertTrue(any("межу збереження" in line for line in app._logs))
 
         app.live_worker.busy = False
         WindowsAutosportApp.close_app(app)

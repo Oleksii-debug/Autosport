@@ -77,8 +77,8 @@ class WindowsRecoveryUnresolvedVisibilityTests(unittest.TestCase):
             self.assertEqual(app._visible_recovery_views, [None])
             self.assertIn(workspace, app._recovery_blocked_workspaces)
             self.assertEqual(app._recovery_blocked_workspace, workspace)
-            self.assertIn("economic state лишається прихованим", app.status.value)
-            self.assertTrue(any("unresolved=1" in line for line in app._logs))
+            self.assertIn("економічний стан лишається прихованим", app.status.value)
+            self.assertTrue(any("невирішених=1" in line for line in app._logs))
             warning.assert_called_once()
             info.assert_not_called()
 

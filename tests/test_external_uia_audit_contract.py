@@ -11,7 +11,8 @@ def test_external_uia_audit_covers_packaged_bankroll_summary() -> None:
     windows_gui = _WINDOWS_GUI.read_text(encoding="utf-8")
 
     assert "WINDOWS_BANKROLL_AUTOMATION_ID = 205" in windows_gui
-    assert 'tk_uia.set_acc_name(self.bank_summary, "Віртуальний банк")' in windows_gui
+    assert 'text("ui.accessibility.bankroll.name")' in windows_gui
+    assert 'text("ui.accessibility.bankroll.description")' in windows_gui
 
     expected = (
         "[ordered]@{ key = 'bankroll'; automation_id = '205'; "

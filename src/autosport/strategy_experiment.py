@@ -147,9 +147,9 @@ class ScientificProtocolBinding:
     """Narrow immutable binding to durable #367 research preregistration.
 
     This deliberately is not a second research registry. The durable question and
-    hypothesis remain external objects identified by hashes. The binding captures
-    the promotion-critical preregistration fields and its SHA must already be
-    present in each candidate run as ``research_plan_sha256``.
+    hypothesis remain external objects identified by hashes. This binding is one
+    component of the wider immutable promotion-plan commitment carried by run
+    evidence as ``research_plan_sha256``.
     """
 
     research_protocol_id: str
@@ -337,6 +337,14 @@ class CandidateRef:
             self.research_plan_sha256,
         )
 
+    def promotion_identity_dict(self) -> dict[str, Any]:
+        return {
+            "candidate_id": self.candidate_id,
+            "canonical_strategy_id": self.canonical_strategy_id,
+            "authority_fingerprint": self.authority_fingerprint,
+            "agent_composition_sha256": self.agent_composition_sha256.lower(),
+        }
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "candidate_id": self.candidate_id,
@@ -436,19 +444,61 @@ class ChampionChallengerProtocol:
         fingerprints = {candidate.authority_fingerprint for candidate in candidates}
         if len(fingerprints) != 1:
             raise PermissionError("experiment candidates may not widen or alter authority")
-
-        preregistration_sha = self.scientific_protocol.binding_sha256
         for candidate in candidates:
-            if candidate.research_plan_sha256 != preregistration_sha:
-                raise ValueError(
-                    "candidate run identity is not bound to the frozen scientific protocol"
-                )
+            if candidate.research_plan_sha256 is None:
+                raise ValueError("candidate run identity lacks promotion preregistration")
 
         guardrail_metrics = [rule.metric for rule in self.guardrails]
         if len(guardrail_metrics) != len(set(guardrail_metrics)):
             raise ValueError("guardrail metrics must be unique")
         if self.primary_metric in guardrail_metrics:
             raise ValueError("primary metric must not also be a guardrail")
+
+    def promotion_plan_dict(self) -> dict[str, Any]:
+        """Return the non-circular, promotion-critical preregistration payload.
+
+        Candidate research-plan/runtime hashes are intentionally excluded because
+        those hashes must themselves bind this payload before any evaluation can
+        produce a promotion-capable recommendation.
+        """
+        return {
+            "protocol_schema_version": self.protocol_schema_version,
+            "experiment_id": self.experiment_id,
+            "research_question_id": self.research_question_id,
+            "hypothesis_id": self.hypothesis_id,
+            "scientific_protocol": {
+                **self.scientific_protocol.canonical_dict(),
+                "binding_sha256": self.scientific_protocol.binding_sha256,
+            },
+            "champion": self.champion.promotion_identity_dict(),
+            "challengers": [
+                candidate.promotion_identity_dict() for candidate in self.challengers
+            ],
+            "cases": [case.to_dict() for case in self.cases],
+            "primary_metric": self.primary_metric,
+            "minimum_total_improvement": str(self.minimum_total_improvement),
+            "primary_higher_is_better": self.primary_higher_is_better,
+            "guardrails": [rule.to_dict() for rule in self.guardrails],
+        }
+
+    @property
+    def promotion_plan_sha256(self) -> str:
+        canonical = json.dumps(
+            self.promotion_plan_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def require_frozen_promotion_plan(self) -> str:
+        expected = self.promotion_plan_sha256
+        for candidate in (self.champion, *self.challengers):
+            if candidate.research_plan_sha256 != expected:
+                raise ValueError(
+                    "candidate run identity is not bound to the frozen promotion protocol"
+                )
+        return expected
 
     def canonical_dict(self) -> dict[str, Any]:
         return {
@@ -460,6 +510,7 @@ class ChampionChallengerProtocol:
                 **self.scientific_protocol.canonical_dict(),
                 "binding_sha256": self.scientific_protocol.binding_sha256,
             },
+            "promotion_plan_sha256": self.promotion_plan_sha256,
             "champion": self.champion.to_dict(),
             "challengers": [candidate.to_dict() for candidate in self.challengers],
             "cases": [case.to_dict() for case in self.cases],
@@ -601,26 +652,69 @@ def _scientific_protocol_from_dict(payload: dict[str, Any]) -> ScientificProtoco
     if type(version) is not int or version < 1:
         raise ValueError("scientific_protocol.protocol_version must be an integer >= 1")
     binding = ScientificProtocolBinding(
-        research_protocol_id=_require_text(payload["research_protocol_id"], "scientific_protocol.research_protocol_id"),
-        research_question_id=_require_text(payload["research_question_id"], "scientific_protocol.research_question_id"),
-        research_question_sha256=_require_sha256(payload["research_question_sha256"], "scientific_protocol.research_question_sha256"),
-        hypothesis_id=_require_text(payload["hypothesis_id"], "scientific_protocol.hypothesis_id"),
-        hypothesis_sha256=_require_sha256(payload["hypothesis_sha256"], "scientific_protocol.hypothesis_sha256"),
-        inclusion_criteria=_require_text(payload["inclusion_criteria"], "scientific_protocol.inclusion_criteria"),
-        exclusion_criteria=_require_text(payload["exclusion_criteria"], "scientific_protocol.exclusion_criteria"),
-        lawful_source_requirements=_require_text(payload["lawful_source_requirements"], "scientific_protocol.lawful_source_requirements"),
-        causal_cutoff=_require_text(payload["causal_cutoff"], "scientific_protocol.causal_cutoff"),
-        evaluation_design=_require_text(payload["evaluation_design"], "scientific_protocol.evaluation_design"),
-        feature_set_version=_require_text(payload["feature_set_version"], "scientific_protocol.feature_set_version"),
-        uncertainty_method=_require_text(payload["uncertainty_method"], "scientific_protocol.uncertainty_method"),
-        multiple_comparison_control=_require_text(payload["multiple_comparison_control"], "scientific_protocol.multiple_comparison_control"),
-        robustness_checks=_json_text_tuple(payload["robustness_checks"], "scientific_protocol.robustness_checks"),
-        random_seed_policy=_require_text(payload["random_seed_policy"], "scientific_protocol.random_seed_policy"),
-        stopping_rule=_require_text(payload["stopping_rule"], "scientific_protocol.stopping_rule"),
-        promotion_rule=_require_text(payload["promotion_rule"], "scientific_protocol.promotion_rule"),
-        expected_artifacts=_json_text_tuple(payload["expected_artifacts"], "scientific_protocol.expected_artifacts"),
-        code_config_sha256=_require_sha256(payload["code_config_sha256"], "scientific_protocol.code_config_sha256"),
-        frozen_at_utc=_require_text(payload["frozen_at_utc"], "scientific_protocol.frozen_at_utc"),
+        research_protocol_id=_require_text(
+            payload["research_protocol_id"], "scientific_protocol.research_protocol_id"
+        ),
+        research_question_id=_require_text(
+            payload["research_question_id"], "scientific_protocol.research_question_id"
+        ),
+        research_question_sha256=_require_sha256(
+            payload["research_question_sha256"],
+            "scientific_protocol.research_question_sha256",
+        ),
+        hypothesis_id=_require_text(
+            payload["hypothesis_id"], "scientific_protocol.hypothesis_id"
+        ),
+        hypothesis_sha256=_require_sha256(
+            payload["hypothesis_sha256"], "scientific_protocol.hypothesis_sha256"
+        ),
+        inclusion_criteria=_require_text(
+            payload["inclusion_criteria"], "scientific_protocol.inclusion_criteria"
+        ),
+        exclusion_criteria=_require_text(
+            payload["exclusion_criteria"], "scientific_protocol.exclusion_criteria"
+        ),
+        lawful_source_requirements=_require_text(
+            payload["lawful_source_requirements"],
+            "scientific_protocol.lawful_source_requirements",
+        ),
+        causal_cutoff=_require_text(
+            payload["causal_cutoff"], "scientific_protocol.causal_cutoff"
+        ),
+        evaluation_design=_require_text(
+            payload["evaluation_design"], "scientific_protocol.evaluation_design"
+        ),
+        feature_set_version=_require_text(
+            payload["feature_set_version"], "scientific_protocol.feature_set_version"
+        ),
+        uncertainty_method=_require_text(
+            payload["uncertainty_method"], "scientific_protocol.uncertainty_method"
+        ),
+        multiple_comparison_control=_require_text(
+            payload["multiple_comparison_control"],
+            "scientific_protocol.multiple_comparison_control",
+        ),
+        robustness_checks=_json_text_tuple(
+            payload["robustness_checks"], "scientific_protocol.robustness_checks"
+        ),
+        random_seed_policy=_require_text(
+            payload["random_seed_policy"], "scientific_protocol.random_seed_policy"
+        ),
+        stopping_rule=_require_text(
+            payload["stopping_rule"], "scientific_protocol.stopping_rule"
+        ),
+        promotion_rule=_require_text(
+            payload["promotion_rule"], "scientific_protocol.promotion_rule"
+        ),
+        expected_artifacts=_json_text_tuple(
+            payload["expected_artifacts"], "scientific_protocol.expected_artifacts"
+        ),
+        code_config_sha256=_require_sha256(
+            payload["code_config_sha256"], "scientific_protocol.code_config_sha256"
+        ),
+        frozen_at_utc=_require_text(
+            payload["frozen_at_utc"], "scientific_protocol.frozen_at_utc"
+        ),
         protocol_version=version,
     )
     declared = _require_sha256(
@@ -650,9 +744,15 @@ def _candidate_from_dict(payload: dict[str, Any], field: str) -> CandidateRef:
         )
     candidate = CandidateRef(
         candidate_id=_require_text(payload["candidate_id"], f"{field}.candidate_id"),
-        canonical_strategy_id=_require_text(payload["canonical_strategy_id"], f"{field}.canonical_strategy_id"),
-        authority_fingerprint=_require_text(payload["authority_fingerprint"], f"{field}.authority_fingerprint"),
-        agent_composition_sha256=_require_sha256(payload["agent_composition_sha256"], f"{field}.agent_composition_sha256"),
+        canonical_strategy_id=_require_text(
+            payload["canonical_strategy_id"], f"{field}.canonical_strategy_id"
+        ),
+        authority_fingerprint=_require_text(
+            payload["authority_fingerprint"], f"{field}.authority_fingerprint"
+        ),
+        agent_composition_sha256=_require_sha256(
+            payload["agent_composition_sha256"], f"{field}.agent_composition_sha256"
+        ),
         research_plan_sha256=research_plan_sha256,
     )
     declared = _require_sha256(
@@ -667,11 +767,20 @@ def _candidate_from_dict(payload: dict[str, Any], field: str) -> CandidateRef:
 
 def _case_from_dict(payload: dict[str, Any], field: str) -> EvaluationCase:
     expected = {
-        "case_id", "dataset_name", "sport", "dataset_schema_version",
-        "market_sha256", "sealed_results_sha256", "historical_import_identity",
-        "replay_dataset_hash", "event_count", "price_semantics",
-        "executable_quote_verified", "paper_fill_fidelity_verified",
-        "price_source_ids", "initial_bankroll",
+        "case_id",
+        "dataset_name",
+        "sport",
+        "dataset_schema_version",
+        "market_sha256",
+        "sealed_results_sha256",
+        "historical_import_identity",
+        "replay_dataset_hash",
+        "event_count",
+        "price_semantics",
+        "executable_quote_verified",
+        "paper_fill_fidelity_verified",
+        "price_source_ids",
+        "initial_bankroll",
     }
     _require_exact_keys(payload, expected, field)
     schema_version = payload["dataset_schema_version"]
@@ -688,16 +797,33 @@ def _case_from_dict(payload: dict[str, Any], field: str) -> EvaluationCase:
         dataset_name=_require_text(payload["dataset_name"], f"{field}.dataset_name"),
         sport=_require_text(payload["sport"], f"{field}.sport"),
         dataset_schema_version=schema_version,
-        market_sha256=_require_sha256(payload["market_sha256"], f"{field}.market_sha256"),
-        sealed_results_sha256=_require_sha256(payload["sealed_results_sha256"], f"{field}.sealed_results_sha256"),
+        market_sha256=_require_sha256(
+            payload["market_sha256"], f"{field}.market_sha256"
+        ),
+        sealed_results_sha256=_require_sha256(
+            payload["sealed_results_sha256"], f"{field}.sealed_results_sha256"
+        ),
         historical_import_identity=historical,
-        replay_dataset_hash=_require_sha256(payload["replay_dataset_hash"], f"{field}.replay_dataset_hash"),
+        replay_dataset_hash=_require_sha256(
+            payload["replay_dataset_hash"], f"{field}.replay_dataset_hash"
+        ),
         event_count=event_count,
-        price_semantics=_require_text(payload["price_semantics"], f"{field}.price_semantics"),
-        executable_quote_verified=_require_bool(payload["executable_quote_verified"], f"{field}.executable_quote_verified"),
-        paper_fill_fidelity_verified=_require_bool(payload["paper_fill_fidelity_verified"], f"{field}.paper_fill_fidelity_verified"),
-        price_source_ids=_json_text_tuple(payload["price_source_ids"], f"{field}.price_source_ids"),
-        initial_bankroll=_require_json_decimal(payload["initial_bankroll"], f"{field}.initial_bankroll"),
+        price_semantics=_require_text(
+            payload["price_semantics"], f"{field}.price_semantics"
+        ),
+        executable_quote_verified=_require_bool(
+            payload["executable_quote_verified"], f"{field}.executable_quote_verified"
+        ),
+        paper_fill_fidelity_verified=_require_bool(
+            payload["paper_fill_fidelity_verified"],
+            f"{field}.paper_fill_fidelity_verified",
+        ),
+        price_source_ids=_json_text_tuple(
+            payload["price_source_ids"], f"{field}.price_source_ids"
+        ),
+        initial_bankroll=_require_json_decimal(
+            payload["initial_bankroll"], f"{field}.initial_bankroll"
+        ),
     )
 
 
@@ -707,8 +833,12 @@ def _guardrail_from_dict(payload: dict[str, Any], field: str) -> GuardrailRule:
     )
     return GuardrailRule(
         metric=_require_text(payload["metric"], f"{field}.metric"),
-        higher_is_better=_require_bool(payload["higher_is_better"], f"{field}.higher_is_better"),
-        max_regression=_require_json_decimal(payload["max_regression"], f"{field}.max_regression"),
+        higher_is_better=_require_bool(
+            payload["higher_is_better"], f"{field}.higher_is_better"
+        ),
+        max_regression=_require_json_decimal(
+            payload["max_regression"], f"{field}.max_regression"
+        ),
     )
 
 
@@ -717,15 +847,27 @@ def load_champion_challenger_protocol_json(
 ) -> ChampionChallengerProtocol:
     payload = _decode_protocol_json(raw)
     expected = {
-        "protocol_schema_version", "experiment_id", "research_question_id",
-        "hypothesis_id", "scientific_protocol", "champion", "challengers",
-        "cases", "primary_metric", "minimum_total_improvement",
-        "primary_higher_is_better", "guardrails",
+        "protocol_schema_version",
+        "experiment_id",
+        "research_question_id",
+        "hypothesis_id",
+        "scientific_protocol",
+        "promotion_plan_sha256",
+        "champion",
+        "challengers",
+        "cases",
+        "primary_metric",
+        "minimum_total_improvement",
+        "primary_higher_is_better",
+        "guardrails",
     }
     _require_exact_keys(payload, expected, "protocol")
     schema_version = payload["protocol_schema_version"]
     if type(schema_version) is not int or schema_version != 1:
         raise ValueError("protocol_schema_version must be 1")
+    declared_promotion_plan_sha256 = _require_sha256(
+        payload["promotion_plan_sha256"], "promotion_plan_sha256"
+    )
     scientific_protocol = _scientific_protocol_from_dict(
         _require_json_object(payload["scientific_protocol"], "scientific_protocol")
     )
@@ -755,20 +897,32 @@ def load_champion_challenger_protocol_json(
             _require_json_array(payload["guardrails"], "guardrails")
         )
     )
-    return ChampionChallengerProtocol(
+    protocol = ChampionChallengerProtocol(
         experiment_id=_require_text(payload["experiment_id"], "experiment_id"),
-        research_question_id=_require_text(payload["research_question_id"], "research_question_id"),
+        research_question_id=_require_text(
+            payload["research_question_id"], "research_question_id"
+        ),
         hypothesis_id=_require_text(payload["hypothesis_id"], "hypothesis_id"),
         scientific_protocol=scientific_protocol,
         champion=champion,
         challengers=challengers,
         cases=cases,
         primary_metric=_require_text(payload["primary_metric"], "primary_metric"),
-        minimum_total_improvement=_require_json_decimal(payload["minimum_total_improvement"], "minimum_total_improvement"),
-        primary_higher_is_better=_require_bool(payload["primary_higher_is_better"], "primary_higher_is_better"),
+        minimum_total_improvement=_require_json_decimal(
+            payload["minimum_total_improvement"], "minimum_total_improvement"
+        ),
+        primary_higher_is_better=_require_bool(
+            payload["primary_higher_is_better"], "primary_higher_is_better"
+        ),
         guardrails=guardrails,
         protocol_schema_version=schema_version,
     )
+    if declared_promotion_plan_sha256 != protocol.promotion_plan_sha256:
+        raise ValueError(
+            "promotion_plan_sha256 does not match frozen promotion protocol"
+        )
+    protocol.require_frozen_promotion_plan()
+    return protocol
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,6 +949,7 @@ class ExperimentDecisionReport:
     research_question_id: str
     hypothesis_id: str
     scientific_protocol_sha256: str
+    promotion_plan_sha256: str
     protocol_sha256: str
     authority_fingerprint: str
     decision: ExperimentDecision
@@ -814,6 +969,7 @@ class ExperimentDecisionReport:
             "research_question_id": self.research_question_id,
             "hypothesis_id": self.hypothesis_id,
             "scientific_protocol_sha256": self.scientific_protocol_sha256,
+            "promotion_plan_sha256": self.promotion_plan_sha256,
             "protocol_sha256": self.protocol_sha256,
             "authority_fingerprint": self.authority_fingerprint,
             "decision": self.decision.value,
@@ -848,6 +1004,7 @@ def evaluate_champion_challenger(
     donor_repository: str = "Oleksii-debug/Nika-Core",
     donor_sha: str = "2f7be3389109d7dd6fb3bae40540fe0cf2eba695",
 ) -> ExperimentDecisionReport:
+    frozen_promotion_sha = protocol.require_frozen_promotion_plan()
     cell_values = tuple(cells)
     expected = {
         (candidate.candidate_id, case.case_id)
@@ -890,9 +1047,9 @@ def evaluate_champion_challenger(
             raise ValueError(
                 f"agent composition identity mismatch for {candidate_id}/{case_id}"
             )
-        if evidence.research_plan_sha256 != frozen_scientific_sha:
+        if evidence.research_plan_sha256 != frozen_promotion_sha:
             raise ValueError(
-                f"scientific preregistration identity mismatch for {candidate_id}/{case_id}"
+                f"promotion preregistration identity mismatch for {candidate_id}/{case_id}"
             )
         if evidence.research_plan_sha256 != candidate.research_plan_sha256:
             raise ValueError(
@@ -972,7 +1129,10 @@ def evaluate_champion_challenger(
         if total >= protocol.minimum_total_improvement and guardrails_ok:
             eligible.append((challenger.candidate_id, total))
 
-    eligible.sort(key=lambda item: (-item[1], item[0]))
+    # Two stable sorts preserve candidate-id tie breaking without applying unary
+    # minus to Decimal values (unary Decimal operations are ambient-context aware).
+    eligible.sort(key=lambda item: item[0])
+    eligible.sort(key=lambda item: item[1], reverse=True)
     selected = eligible[0][0] if eligible else champion_id
     decision = (
         ExperimentDecision.CHALLENGER_ELIGIBLE
@@ -984,6 +1144,7 @@ def evaluate_champion_challenger(
         research_question_id=protocol.research_question_id,
         hypothesis_id=protocol.hypothesis_id,
         scientific_protocol_sha256=frozen_scientific_sha,
+        promotion_plan_sha256=frozen_promotion_sha,
         protocol_sha256=protocol.protocol_sha256,
         authority_fingerprint=protocol.champion.authority_fingerprint,
         decision=decision,

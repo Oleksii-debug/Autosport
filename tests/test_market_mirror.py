@@ -129,9 +129,17 @@ class MarketMirrorTests(unittest.TestCase):
 
     def test_provider_identity_prevents_cross_provider_aliasing(self) -> None:
         mirror = MarketMirror()
-        mirror.apply(self.event(source="provider-a", sequence=1, odds="2.00"))
-        mirror.apply(self.event(source="provider-b", sequence=1, odds="1.90"))
+        provider_a_result = mirror.apply(
+            self.event(source="provider-a", sequence=1, odds="2.00")
+        )
+        provider_b_result = mirror.apply(
+            self.event(source="provider-b", sequence=1, odds="1.90")
+        )
 
+        self.assertEqual(provider_a_result.quote_key, provider_b_result.quote_key)
+        self.assertEqual(provider_a_result.source_id, "provider-a")
+        self.assertEqual(provider_b_result.source_id, "provider-b")
+        self.assertNotEqual(provider_a_result.source_id, provider_b_result.source_id)
         self.assertEqual(len(mirror), 2)
         self.assertEqual(
             mirror.get(

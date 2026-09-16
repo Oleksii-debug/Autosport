@@ -204,20 +204,11 @@ class PaperRiskPolicy:
 
         quote_keys: set[str] = set()
         for leg in proposal.legs:
-            if not isinstance(leg, TicketLeg):
-                return False
-            for identity in (leg.event_id, leg.market_id, leg.selection_id):
-                if (
-                    type(identity) is not str
-                    or not identity
-                    or identity != identity.strip()
-                ):
-                    return False
-            if (
-                not isinstance(leg.locked_odds, Decimal)
-                or not leg.locked_odds.is_finite()
-                or leg.locked_odds <= 1
-            ):
+            try:
+                # Reuse PaperBook's canonical TicketLeg validator so proposal
+                # identity cannot become a looser parallel definition.
+                PaperBook._validate_ticket_leg(leg)
+            except (AttributeError, TypeError, ValueError):
                 return False
             if leg.quote_key in quote_keys:
                 return False

@@ -38,13 +38,30 @@ jobs:
           python scripts/pr348_repair_once.py
           python - <<'PY'
           from pathlib import Path
-          path = Path('scripts/guarded_release_creator_launch.py')
-          text = path.read_text(encoding='utf-8')
+
+          launcher = Path('scripts/guarded_release_creator_launch.py')
+          text = launcher.read_text(encoding='utf-8')
           old = r'barrier_name = "Local\AutosportReleaseCreator-"'
           new = r'barrier_name = r"Local\AutosportReleaseCreator-"'
           if text.count(old) != 1:
               raise SystemExit(f'generated barrier-name anchor count: {text.count(old)}')
-          path.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
+          launcher.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
+
+          creator_test = Path('tests/test_windows_creator_host_bootstrap.py')
+          text = creator_test.read_text(encoding='utf-8')
+          old = 'assert "creator-host build body blob is not the reviewed predecessor body" in fence_bootstrap'
+          new = 'assert "build body blob is not the reviewed predecessor body" in fence_bootstrap'
+          if text.count(old) != 1:
+              raise SystemExit(f'creator-test message anchor count: {text.count(old)}')
+          creator_test.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
+
+          orchestrator_test = Path('tests/test_windows_pyinstaller_orchestrator_birth_boundary.py')
+          text = orchestrator_test.read_text(encoding='utf-8')
+          old = '_BUILD_SCRIPT = _ROOT / "scripts" / "build_windows.ps1"'
+          new = '_BUILD_SCRIPT = _ROOT / "scripts" / "build_windows_body.ps1"'
+          if text.count(old) != 1:
+              raise SystemExit(f'orchestrator-test build-body anchor count: {text.count(old)}')
+          orchestrator_test.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
           PY
       - name: Static syntax
         run: python -W error -m py_compile scripts/guarded_release_creator_launch.py

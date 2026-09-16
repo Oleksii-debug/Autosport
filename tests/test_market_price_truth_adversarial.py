@@ -69,7 +69,7 @@ class MarketPriceTruthAdversarialTests(unittest.TestCase):
             )
             line = _market_price_truth_line(SimpleNamespace(result_path=str(path)))
 
-        self.assertTrue(line.startswith("Price truth | ERROR —"))
+        self.assertTrue(line.startswith("Істина ціни | ПОМИЛКА —"))
         self.assertIn("malformed", line)
         self.assertNotIn("unspecified_or_mixed_observation", line)
 

@@ -97,13 +97,13 @@ class WindowsRecoveryTeardownFailureTests(unittest.TestCase):
             self.assertTrue(app._workspace_requires_recovery(selected_workspace))
             self.assertEqual(app.bank.value, "hidden")
             self.assertEqual(app._ticket_sessions, [None])
-            self.assertIn("previous economic session teardown failed", app.status.value)
+            self.assertIn("не вдалося завершити попередній економічний сеанс", app.status.value)
             self.assertTrue(
                 any("RuntimeError: teardown exploded" in line for line in app._logs),
                 app._logs,
             )
             error.assert_called_once()
-            self.assertIn("previous economic session teardown failed", error.call_args.args[1])
+            self.assertIn("не вдалося завершити попередній економічний сеанс", error.call_args.args[1])
 
             # Recovering the newly selected target later must not silently clear
             # the independent quarantine for the prior session whose teardown was
@@ -199,8 +199,8 @@ class WindowsRecoveryTeardownFailureTests(unittest.TestCase):
             self.assertTrue(app._workspace_requires_recovery(selected_workspace))
             self.assertEqual(app.bank.value, "hidden")
             self.assertEqual(app._ticket_sessions, [None])
-            self.assertIn("previous economic session teardown failed", app.status.value)
-            fallback = "_HostileTeardownError: exception details unavailable"
+            self.assertIn("не вдалося завершити попередній економічний сеанс", app.status.value)
+            fallback = "_HostileTeardownError: <повідомлення недоступне>"
             self.assertTrue(any(fallback in line for line in app._logs), app._logs)
             error.assert_called_once()
             self.assertIn(fallback, error.call_args.args[1])

@@ -70,16 +70,16 @@ class WindowsPostReplayReopenFailureTests(unittest.TestCase):
             self.assertIsNone(app._recovery_view)
             self.assertTrue(app._workspace_requires_recovery(workspace))
             self.assertEqual(app._recovery_blocked_workspaces, {workspace})
-            self.assertIn("оновлюється після replay", app.bank.value)
+            self.assertIn("оновлюється після повтору", app.bank.value)
             self.assertEqual(app._ticket_sessions, [None])
             self.assertEqual(
                 app._evaluation_lines,
                 [
-                    "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
+                    "Оцінювання недоступне: повторне відкриття робочої області після повтору не пройшло закриту при помилці перевірку."
                 ],
             )
-            self.assertIn("заблоковано fail-closed", app.status.value)
-            fallback = "_HostileReopenError: exception details unavailable"
+            self.assertIn("заблоковано закрито при помилці", app.status.value)
+            fallback = "_HostileReopenError: <повідомлення недоступне>"
             self.assertTrue(any(fallback in line for line in app._logs), app._logs)
             error.assert_called_once()
             self.assertIn(fallback, error.call_args.args[1])
@@ -102,12 +102,12 @@ class WindowsPostReplayReopenFailureTests(unittest.TestCase):
             self.assertIsNone(app._recovery_view)
             self.assertTrue(app._workspace_requires_recovery(workspace))
             self.assertEqual(app._recovery_blocked_workspaces, {workspace})
-            self.assertIn("оновлюється після replay", app.bank.value)
+            self.assertIn("оновлюється після повтору", app.bank.value)
             self.assertEqual(app._ticket_sessions, [None])
             self.assertEqual(
                 app._evaluation_lines,
                 [
-                    "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
+                    "Оцінювання недоступне: повторне відкриття робочої області після повтору не пройшло закриту при помилці перевірку."
                 ],
             )
             error.assert_not_called()

@@ -85,9 +85,9 @@ def test_replay_start_teardown_failure_detaches_and_quarantines_exact_prior_work
     assert app._active_workspace == prior_workspace
     assert app._recovery_required_workspaces == {prior_workspace}
     assert selected_workspace not in app._recovery_required_workspaces
-    assert "недоступний до підтвердженого terminal state/recovery" in app.bank.value
-    assert any("previous economic session state приховано" in line for line in app.tickets.lines)
-    assert any("workspace=" in line and str(prior_workspace) in line for line in logs)
-    assert any("target replay не стартував" in line for line in logs)
+    assert "недоступний до підтвердженого завершального стану/відновлення" in app.bank.value
+    assert any("стан попереднього економічного сеансу приховано" in line for line in app.tickets.lines)
+    assert any("робоча область=" in line and str(prior_workspace) in line for line in logs)
+    assert any("цільовий повтор не стартував" in line for line in logs)
     showerror.assert_called_once()
-    assert "previous economic session teardown failed" in showerror.call_args.args[1]
+    assert "не вдалося завершити попередній економічний сеанс" in showerror.call_args.args[1]

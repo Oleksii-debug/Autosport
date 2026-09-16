@@ -2,16 +2,45 @@ import unittest
 from dataclasses import replace
 from decimal import Decimal, localcontext
 
-from autosport.domain import TicketLeg
+from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
-from autosport.risk import PaperRiskPolicy
+from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 
 
 class EconomicGoalRiskBindingTests(unittest.TestCase):
     @staticmethod
     def _leg() -> TicketLeg:
         return TicketLeg("event-1", "market-1", "selection-1", Decimal("2"))
+
+    @classmethod
+    def _context(cls) -> ProposedTicketRiskContext:
+        leg = cls._leg()
+        quote = MarketEvent(
+            event_id=leg.event_id,
+            market_id=leg.market_id,
+            selection_id=leg.selection_id,
+            decimal_odds=leg.locked_odds,
+            observed_ts="2026-09-16T15:00:00+00:00",
+            source_id="provider-1",
+            sequence=1,
+            source_ts="2026-09-16T14:59:59+00:00",
+            ingest_ts="2026-09-16T15:00:01+00:00",
+        )
+        return ProposedTicketRiskContext(
+            legs=(leg,),
+            quotes=(quote,),
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+
+    @classmethod
+    def _evaluate(
+        cls,
+        policy: PaperRiskPolicy,
+        book: PaperBook,
+        stake: Decimal,
+    ):
+        return policy.evaluate(book, stake, context=cls._context())
 
     @staticmethod
     def _goal(**overrides: object) -> EconomicGoalContract:
@@ -42,8 +71,8 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         policy = self._policy(self._goal(max_stake_fraction=Decimal("0.10")))
         book = PaperBook("100")
 
-        self.assertTrue(policy.evaluate(book, Decimal("10")).allowed)
-        decision = policy.evaluate(book, Decimal("10.01"))
+        self.assertTrue(self._evaluate(policy, book, Decimal("10")).allowed)
+        decision = self._evaluate(policy, book, Decimal("10.01"))
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "ticket exceeds configured bankroll fraction")
@@ -55,22 +84,26 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         )
         book = PaperBook("100")
 
-        self.assertTrue(policy.evaluate(book, Decimal("5")).allowed)
-        self.assertFalse(policy.evaluate(book, Decimal("5.01")).allowed)
+        self.assertTrue(self._evaluate(policy, book, Decimal("5")).allowed)
+        self.assertFalse(self._evaluate(policy, book, Decimal("5.01")).allowed)
 
     def test_owner_absolute_stake_amount_is_exact_and_inclusive(self) -> None:
         policy = self._policy(self._goal(max_stake_amount=Decimal("7.50")))
         book = PaperBook("100")
 
-        self.assertTrue(policy.evaluate(book, Decimal("7.50")).allowed)
-        decision = policy.evaluate(book, Decimal("7.500000000000000000000000001"))
+        self.assertTrue(self._evaluate(policy, book, Decimal("7.50")).allowed)
+        decision = self._evaluate(
+            policy, book, Decimal("7.500000000000000000000000001")
+        )
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "ticket exceeds economic goal absolute stake limit")
 
     def test_zero_owner_absolute_stake_amount_denies_every_positive_new_stake(self) -> None:
         policy = self._policy(self._goal(max_stake_amount=Decimal("0")))
-        decision = policy.evaluate(PaperBook("100"), Decimal("0.000000000000000000000000001"))
+        decision = self._evaluate(
+            policy, PaperBook("100"), Decimal("0.000000000000000000000000001")
+        )
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "ticket exceeds economic goal absolute stake limit")
@@ -82,8 +115,8 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             self._goal(max_capital_at_risk_fraction=Decimal("0.20"))
         )
 
-        self.assertTrue(policy.evaluate(book, Decimal("5")).allowed)
-        decision = policy.evaluate(book, Decimal("5.01"))
+        self.assertTrue(self._evaluate(policy, book, Decimal("5")).allowed)
+        decision = self._evaluate(policy, book, Decimal("5.01"))
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "aggregate committed stake limit exceeded")
@@ -97,8 +130,8 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         )
 
         self.assertEqual(book.committed_stake, Decimal("0"))
-        self.assertTrue(policy.evaluate(book, Decimal("10")).allowed)
-        decision = policy.evaluate(book, Decimal("10.01"))
+        self.assertTrue(self._evaluate(policy, book, Decimal("10")).allowed)
+        decision = self._evaluate(policy, book, Decimal("10.01"))
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "aggregate committed stake limit exceeded")
@@ -108,16 +141,16 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         ticket = book.open_ticket([self._leg()], Decimal("10"))
         policy = self._policy(self._goal(max_concurrent_positions=1))
 
-        blocked = policy.evaluate(book, Decimal("1"))
+        blocked = self._evaluate(policy, book, Decimal("1"))
         self.assertFalse(blocked.allowed)
         self.assertEqual(blocked.reason, "economic goal concurrent position limit exceeded")
 
         book.settle(ticket.ticket_id, {ticket.legs[0].quote_key})
-        self.assertTrue(policy.evaluate(book, Decimal("1")).allowed)
+        self.assertTrue(self._evaluate(policy, book, Decimal("1")).allowed)
 
     def test_zero_owner_concurrent_position_limit_denies_first_new_exposure(self) -> None:
         policy = self._policy(self._goal(max_concurrent_positions=0))
-        decision = policy.evaluate(PaperBook("100"), Decimal("1"))
+        decision = self._evaluate(policy, PaperBook("100"), Decimal("1"))
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "economic goal concurrent position limit exceeded")

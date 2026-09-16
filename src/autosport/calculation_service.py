@@ -213,6 +213,22 @@ def _snapshot_quote_at_cutoff(
         raise ValueError("event must be a MarketEvent")
     if not isinstance(event.market_type, MarketType):
         raise ValueError("market event market_type must be a MarketType")
+    if type(event.decimal_odds) is not Decimal:
+        raise ValueError("market event quote fields are not canonical")
+    if (
+        type(event.observed_ts) is not str
+        or type(event.ingest_ts) is not str
+        or (event.source_ts is not None and type(event.source_ts) is not str)
+    ):
+        raise ValueError("market event quote fields are not canonical")
+
+    # Preserve the service boundary's runtime diagnostics before adapting this
+    # already-materialized event to the stricter serialized ingress contract.
+    observed = _timestamp(event.observed_ts, field="observed_ts")
+    _timestamp(event.ingest_ts, field="ingest_ts")
+    if event.source_ts is not None:
+        _timestamp(event.source_ts, field="source_ts")
+    _validate_quote_identity_utf8(event)
 
     # Intentionally construct the validation payload from quote-only scalar
     # fields. Do not call event.to_dict(): that would traverse mutable metadata
@@ -221,7 +237,7 @@ def _snapshot_quote_at_cutoff(
         "event_id": event.event_id,
         "market_id": event.market_id,
         "selection_id": event.selection_id,
-        "decimal_odds": event.decimal_odds,
+        "decimal_odds": str(event.decimal_odds),
         "observed_ts": event.observed_ts,
         "source_id": event.source_id,
         "sequence": event.sequence,
@@ -234,10 +250,6 @@ def _snapshot_quote_at_cutoff(
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("market event quote fields are not canonical") from exc
 
-    observed = _timestamp(canonical.observed_ts, field="observed_ts")
-    _timestamp(canonical.ingest_ts, field="ingest_ts")
-    if canonical.source_ts is not None:
-        _timestamp(canonical.source_ts, field="source_ts")
     if observed > cutoff_value:
         raise ValueError("selected quote observed_ts is after the calculation causal cutoff")
 
@@ -272,6 +284,16 @@ def _timestamp(value: object, *, field: str) -> datetime:
         return parse_iso_timestamp(value)
     except (AttributeError, TypeError, ValueError) as exc:
         raise ValueError(f"{field} must be a timezone-aware ISO timestamp") from exc
+
+
+def _validate_quote_identity_utf8(event: MarketEvent) -> None:
+    for value in (event.event_id, event.market_id, event.selection_id, event.source_id):
+        if type(value) is not str:
+            continue
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("calculation evidence text must be valid UTF-8") from exc
 
 
 def _bind(

@@ -69,6 +69,7 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
         return (
             patch.object(sys, "argv", self._argv(root)),
             patch.object(package_windows, "_bind_source_sha_to_checkout"),
+            patch.object(package_windows, "_require_checkout_matches_exact_source"),
             patch.object(
                 package_windows,
                 "_materialize_exact_static_payload",

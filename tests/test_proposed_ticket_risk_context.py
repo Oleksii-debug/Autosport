@@ -47,6 +47,8 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
             "max_stake_fraction": Decimal("1"),
             "max_capital_at_risk_fraction": Decimal("1"),
             "max_concurrent_positions": 10,
+            "max_execution_slippage_fraction": Decimal("1"),
+            "max_quote_age_seconds": Decimal("3600"),
         }
         values.update(overrides)
         return EconomicGoalContract(**values)  # type: ignore[arg-type]
@@ -57,6 +59,7 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         values: dict[str, object] = {
             "legs": (leg,),
             "quotes": (cls._quote(leg),),
+            "proposal_ts": "2026-09-16T15:00:02+00:00",
         }
         values.update(overrides)
         return ProposedTicketRiskContext(**values)  # type: ignore[arg-type]
@@ -205,6 +208,90 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
             wrong_currency.reason,
             "proposed ticket currency does not match economic goal",
         )
+
+    def test_quote_age_exact_boundary_and_stale_quote_fail_closed(self) -> None:
+        context = self._context(proposal_ts="2026-09-16T15:00:04+00:00")
+        at_boundary = self._permissive_policy(
+            self._goal(max_quote_age_seconds=Decimal("5"))
+        ).evaluate(PaperBook("100"), Decimal("1"), context=context)
+        self.assertTrue(at_boundary.allowed)
+
+        stale = self._permissive_policy(
+            self._goal(max_quote_age_seconds=Decimal("4.999"))
+        ).evaluate(PaperBook("100"), Decimal("1"), context=context)
+        self.assertFalse(stale.allowed)
+        self.assertEqual(stale.reason, "quote exceeds economic goal maximum age")
+
+    def test_missing_or_reversed_proposal_timestamp_fails_closed(self) -> None:
+        missing = self._context(proposal_ts=None)
+        decision = self._permissive_policy(self._goal()).evaluate(
+            PaperBook("100"), Decimal("1"), context=missing
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "proposal timestamp is required for quote risk checks")
+
+        reversed_time = self._context(proposal_ts="2026-09-16T14:59:58+00:00")
+        decision = self._permissive_policy(self._goal()).evaluate(
+            PaperBook("100"), Decimal("1"), context=reversed_time
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "quote timestamp is after proposal timestamp")
+
+    def test_adverse_slippage_is_exact_bounded_and_improvement_is_not_penalized(self) -> None:
+        leg = self._leg()
+        quote = self._quote(leg)
+        context = ProposedTicketRiskContext(
+            legs=(leg,),
+            quotes=(quote,),
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+        exact = (quote.decimal_odds - leg.locked_odds) / quote.decimal_odds
+
+        allowed = self._permissive_policy(
+            self._goal(max_execution_slippage_fraction=exact)
+        ).evaluate(PaperBook("100"), Decimal("1"), context=context)
+        self.assertTrue(allowed.allowed)
+
+        blocked = self._permissive_policy(
+            self._goal(max_execution_slippage_fraction=exact - Decimal("0.0000001"))
+        ).evaluate(PaperBook("100"), Decimal("1"), context=context)
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(
+            blocked.reason,
+            "quote-to-proposal slippage exceeds economic goal limit",
+        )
+
+        improved_leg = TicketLeg("event-1", "market-1", "selection-1", Decimal("2.20"))
+        improved_context = ProposedTicketRiskContext(
+            legs=(improved_leg,),
+            quotes=(self._quote(improved_leg),),
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+        improved = self._permissive_policy(
+            self._goal(max_execution_slippage_fraction=Decimal("0"))
+        ).evaluate(PaperBook("100"), Decimal("1"), context=improved_context)
+        self.assertTrue(improved.allowed)
+
+    def test_positive_data_quality_floor_fails_closed_without_canonical_quality_contract(self) -> None:
+        decision = self._permissive_policy(
+            self._goal(minimum_data_quality=Decimal("0.1"))
+        ).evaluate(PaperBook("100"), Decimal("1"), context=self._context())
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "minimum data quality cannot be proven from canonical quote evidence",
+        )
+
+    def test_context_without_quote_evidence_fails_closed_for_goal_quote_checks(self) -> None:
+        context = ProposedTicketRiskContext(
+            legs=(self._leg(),),
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+        decision = self._permissive_policy(self._goal()).evaluate(
+            PaperBook("100"), Decimal("1"), context=context
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "proposed ticket quote evidence is required")
 
     def test_existing_economic_goal_limit_remains_authoritative_with_context(self) -> None:
         policy = self._permissive_policy(

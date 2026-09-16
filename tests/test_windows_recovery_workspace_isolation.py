@@ -103,7 +103,7 @@ class WindowsRecoveryWorkspaceIsolationTests(unittest.TestCase):
                 WindowsAutosportApp.run_dataset(app)
 
             parent_run.assert_not_called()
-            self.assertIn("заблоковано fail-closed", app.status.value)
+            self.assertIn("заблоковано закрито при помилці", app.status.value)
 
     def test_research_plan_runtime_strategy_identity_is_accepted(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -145,7 +145,7 @@ class WindowsRecoveryWorkspaceIsolationTests(unittest.TestCase):
             self.assertIs(app._recovery_view, view)
             self.assertNotIn(workspace, app._recovery_blocked_workspaces)
             self.assertIsNone(app._recovery_blocked_workspace)
-            self.assertIn("Workspace готовий", app.status.value)
+            self.assertIn("Робоча область готова", app.status.value)
             info.assert_called_once()
             error.assert_not_called()
 
@@ -190,8 +190,8 @@ class WindowsRecoveryWorkspaceIsolationTests(unittest.TestCase):
             self.assertEqual(app._recovery_blocked_workspace, workspace_a)
             self.assertIn(workspace_a, app._recovery_blocked_workspaces)
             self.assertIn(workspace_b, app._recovery_blocked_workspaces)
-            self.assertIn("terminal result не відповідає", app.status.value)
-            self.assertTrue(any("terminal identity mismatch" in line for line in app._logs))
+            self.assertIn("Завершальний результат відновлення не відповідає", app.status.value)
+            self.assertTrue(any("Невідповідність ідентичності" in line for line in app._logs))
             error.assert_called_once()
             info.assert_not_called()
 
@@ -230,7 +230,7 @@ class WindowsRecoveryWorkspaceIsolationTests(unittest.TestCase):
             self.assertIsNone(app._recovery_view)
             self.assertEqual(app._recovery_blocked_workspace, workspace)
             self.assertEqual(app._recovery_blocked_workspaces, {workspace})
-            self.assertIn("terminal result не відповідає", app.status.value)
+            self.assertIn("Завершальний результат відновлення не відповідає", app.status.value)
             self.assertTrue(any("wrong-strategy" in line for line in app._logs))
             error.assert_called_once()
 
@@ -251,7 +251,7 @@ class WindowsRecoveryWorkspaceIsolationTests(unittest.TestCase):
             self.assertIsNone(app.session)
             self.assertIn(workspace, app._recovery_blocked_workspaces)
             self.assertEqual(app._recovery_blocked_workspace, workspace)
-            self.assertIn("прихованим до recovery", app.status.value)
+            self.assertIn("прихованим до відновлення", app.status.value)
             self.assertEqual(app._busy_states, [False])
             self.assertEqual(app._ticket_refreshes, 1)
             error.assert_called_once()
@@ -259,7 +259,7 @@ class WindowsRecoveryWorkspaceIsolationTests(unittest.TestCase):
             with patch.object(AutosportApp, "run_dataset") as parent_run:
                 WindowsAutosportApp.run_dataset(app)
             parent_run.assert_not_called()
-            self.assertIn("заблоковано fail-closed", app.status.value)
+            self.assertIn("заблоковано закрито при помилці", app.status.value)
 
     def test_missing_terminal_replay_result_quarantines_workspace(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -277,8 +277,8 @@ class WindowsRecoveryWorkspaceIsolationTests(unittest.TestCase):
             self.assertIsNone(app.session)
             self.assertIn(workspace, app._recovery_blocked_workspaces)
             self.assertEqual(app._recovery_blocked_workspace, workspace)
-            self.assertIn("прихованим до recovery", app.status.value)
-            self.assertIn("worker не повернув terminal", app._evaluation[0])
+            self.assertIn("прихованим до відновлення", app.status.value)
+            self.assertIn("процес не повернув завершальний", app._evaluation[0])
             self.assertEqual(app._ticket_refreshes, 1)
 
     def test_post_replay_reopen_failure_is_user_visible_and_quarantines_workspace(self) -> None:
@@ -295,8 +295,8 @@ class WindowsRecoveryWorkspaceIsolationTests(unittest.TestCase):
             self.assertIsNone(app.session)
             self.assertIn(workspace, app._recovery_blocked_workspaces)
             self.assertEqual(app._recovery_blocked_workspace, workspace)
-            self.assertIn("terminal state не можна безпечно підтвердити", app.status.value)
-            self.assertIn("post-replay workspace reopen", app._evaluation[0])
+            self.assertIn("Завершальний стан повтору не можна безпечно підтвердити", app.status.value)
+            self.assertIn("повторне відкриття робочої області після повтору", app._evaluation[0])
             self.assertTrue(any("workspace state failed validation" in line for line in app._logs))
             error.assert_called_once()
 

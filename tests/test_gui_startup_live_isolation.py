@@ -10,6 +10,7 @@ import pytest
 
 from autosport.gui import AutosportApp
 from autosport.live_observation import observe_workspace_once
+from autosport.localization import text
 from autosport.providers import ProviderBatch, ProviderQuote
 from autosport.session import AutosportSession
 from autosport.windows_gui import WindowsAutosportApp
@@ -185,14 +186,14 @@ def test_corrupt_economic_startup_keeps_shell_and_live_observation_reachable(tmp
     assert app.session is None
     assert app._startup_economic_error == "ValueError: corrupt paper state"
     assert workspace in app._recovery_required_workspaces
-    assert "Read-only live snapshot доступний" in app.status.value
-    assert "недоступний до успішного recovery" in app.bank.value
+    assert app.status.value == text("ui.status.startup.recovery_required")
+    assert "недоступний до успішного відновлення" in app.bank.value
 
     live_result = object()
     provider = object()
     app.replay_worker = SimpleNamespace(busy=False)
     app.live_worker = _ImmediateWorker()
-    app.live_mode_text = _Value("Public preview — без ключа")
+    app.live_mode_text = _Value(text("ui.live_mode.public_preview"))
     app.live_status = _Value()
     app.live_refresh_button = _Button()
     scheduled: list[tuple[int, object]] = []
@@ -209,7 +210,7 @@ def test_corrupt_economic_startup_keeps_shell_and_live_observation_reachable(tmp
     provider_factory.assert_called_once_with(None, public_preview=True)
     observe.assert_called_once_with(workspace, provider, max_items=250)
     assert app.live_refresh_button.states == [("disabled",)]
-    assert "read-only live observation" in app.status.value
+    assert "живе спостереження лише для читання" in app.status.value
     assert scheduled and scheduled[0][0] == 100
 
     replay_worker = _NeverStartWorker()
@@ -226,7 +227,7 @@ def test_corrupt_economic_startup_keeps_shell_and_live_observation_reachable(tmp
         AutosportApp.run_dataset(app)
 
     assert replay_worker.start_calls == 0
-    assert "непідтверджений terminal state" in app.status.value
+    assert "непідтверджений завершальний стан" in app.status.value
     showwarning.assert_called_once()
 
 
@@ -279,7 +280,7 @@ def test_windows_startup_uses_native_recovery_quarantine_and_replay_unblocks(tmp
 
     assert app._startup_economic_error == "ValueError: corrupt paper state"
     assert replay_worker.start_calls == 1
-    assert "Replay виконується" in app.status.value
+    assert "Повтор виконується" in app.status.value
 
 
 def test_valid_economic_startup_preserves_existing_ready_state(tmp_path: Path) -> None:

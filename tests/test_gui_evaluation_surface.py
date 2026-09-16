@@ -57,43 +57,43 @@ def test_evaluation_lines_publish_terminal_paper_metrics_and_truth_boundary(tmp_
     result_path = _write_run_summary(tmp_path / "run-summary.json")
     lines = evaluation_lines(_result(mode="exact", result_path=result_path))
 
-    assert lines[0] == "Replay 12345678 | events 17 | settled tickets 2"
-    assert "initial 10000" in lines[1]
-    assert "final 10025" in lines[1]
-    assert "settled stake 100" in lines[1]
-    assert "net 25" in lines[2]
+    assert lines[0] == "Повтор 12345678 | події 17 | завершені квитки 2"
+    assert "початковий 10000" in lines[1]
+    assert "кінцевий 10025" in lines[1]
+    assert "завершена сума ставок 100" in lines[1]
+    assert "чистий результат 25" in lines[2]
     assert "ROI 0.25" in lines[2]
-    assert "won 1" in lines[2]
-    assert "lost 1" in lines[2]
-    assert "exact — усі релевантні сценарії цього portfolio report перебрано" in lines[3]
-    assert "scenarios 4" in lines[3]
-    assert "executable quote verified=false" in lines[4]
-    assert "paper fill fidelity verified=false" in lines[4]
-    assert "не є доказом майбутньої profitability" in lines[5]
+    assert "виграно 1" in lines[2]
+    assert "програно 1" in lines[2]
+    assert "точний — усі релевантні сценарії цього звіту портфеля перебрано" in lines[3]
+    assert "сценарії 4" in lines[3]
+    assert "виконувану котировку перевірено=ні" in lines[4]
+    assert "відповідність паперового виконання перевірено=ні" in lines[4]
+    assert "це оцінювання не є доказом майбутньої прибутковості" in lines[5]
 
 
 def test_approximate_portfolio_never_presents_sampled_bounds_as_guarantees(tmp_path: Path):
     result_path = _write_run_summary(tmp_path / "run-summary.json")
     lines = evaluation_lines(_result(mode="approximate", result_path=result_path))
 
-    assert "approximate — сценарії sampled" in lines[3]
-    assert "гарантії worst/best не заявляються" in lines[3]
-    assert "scenarios 20000" in lines[3]
-    assert "executable quote verified=false" in lines[4]
-    assert "paper fill fidelity verified=false" in lines[4]
-    assert "не є доказом майбутньої profitability" in lines[5]
+    assert "наближений — сценарії вибіркові" in lines[3]
+    assert "гарантії найгіршого/найкращого не заявляються" in lines[3]
+    assert "сценарії 20000" in lines[3]
+    assert "виконувану котировку перевірено=ні" in lines[4]
+    assert "відповідність паперового виконання перевірено=ні" in lines[4]
+    assert "це оцінювання не є доказом майбутньої прибутковості" in lines[5]
 
 
 def test_evaluation_lines_fail_closed_when_run_summary_evidence_is_missing(tmp_path: Path):
     lines = evaluation_lines(_result(mode="exact", result_path=tmp_path / "missing-run-summary.json"))
 
-    assert lines[4] == "Price truth | ERROR — run summary evidence is missing or unreadable."
+    assert lines[4] == "Істина ціни | ПОМИЛКА — доказ підсумку запуску відсутній або не читається."
 
 
 def test_evaluation_lines_fail_closed_when_run_summary_evidence_is_unreadable(tmp_path: Path):
     lines = evaluation_lines(_result(mode="exact", result_path=tmp_path))
 
-    assert lines[4] == "Price truth | ERROR — run summary evidence is missing or unreadable."
+    assert lines[4] == "Істина ціни | ПОМИЛКА — доказ підсумку запуску відсутній або не читається."
 
 
 def test_evaluation_lines_fail_closed_when_run_summary_is_not_utf8(tmp_path: Path):
@@ -102,7 +102,7 @@ def test_evaluation_lines_fail_closed_when_run_summary_is_not_utf8(tmp_path: Pat
 
     lines = evaluation_lines(_result(mode="exact", result_path=result_path))
 
-    assert lines[4] == "Price truth | ERROR — run summary evidence is missing or unreadable."
+    assert lines[4] == "Істина ціни | ПОМИЛКА — доказ підсумку запуску відсутній або не читається."
 
 
 def test_evaluation_lines_reject_duplicate_run_summary_keys(tmp_path: Path):
@@ -115,7 +115,7 @@ def test_evaluation_lines_reject_duplicate_run_summary_keys(tmp_path: Path):
     lines = evaluation_lines(_result(mode="exact", result_path=result_path))
 
     assert lines[4] == (
-        "Price truth | ERROR — run summary JSON is ambiguous or non-canonical: "
+        "Істина ціни | ПОМИЛКА — JSON підсумку запуску неоднозначний або неканонічний: "
         "duplicate object key: market_price_truth."
     )
 
@@ -130,7 +130,7 @@ def test_evaluation_lines_reject_nonfinite_json_constants(tmp_path: Path):
     lines = evaluation_lines(_result(mode="exact", result_path=result_path))
 
     assert lines[4] == (
-        "Price truth | ERROR — run summary JSON is ambiguous or non-canonical: "
+        "Істина ціни | ПОМИЛКА — JSON підсумку запуску неоднозначний або неканонічний: "
         "non-finite JSON constant: NaN."
     )
 
@@ -143,7 +143,8 @@ def test_gui_wires_evaluation_to_keyboard_uia_and_terminal_result_without_tk_sta
     assert AUTOMATION_IDS["evaluation"] == 204
     assert "self.evaluation = tk.Listbox" in build_source
     assert 'self.bind("<F8>"' in build_source
-    assert '"Evaluation і portfolio evidence"' in accessibility_source
+    assert 'text("ui.accessibility.evaluation.name")' in accessibility_source
+    assert 'text("ui.accessibility.evaluation.description")' in accessibility_source
     assert 'AUTOMATION_IDS["evaluation"]' in accessibility_source
     assert "self._set_evaluation_lines(evaluation_lines(result))" in poll_source
-    assert "Evaluation недоступна" in poll_source
+    assert 'text("ui.evaluation.replay_failed")' in poll_source

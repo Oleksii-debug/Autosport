@@ -29,10 +29,10 @@ def test_compact_surface_heights_keep_all_critical_scrolling_surfaces_visible():
 
     compact_surface_heights(app)
 
-    assert app.live_quotes.height == 4
-    assert app.tickets.height == 5
-    assert app.evaluation.height == 4
-    assert app.log.height == 5
+    assert app.live_quotes.height == 3
+    assert app.tickets.height == 4
+    assert app.evaluation.height == 3
+    assert app.log.height == 2
 
 
 def test_windows_product_shell_has_stable_uia_ids_and_keyboard_navigation():

@@ -145,6 +145,10 @@ class EconomicGoalContract:
     max_day_loss_fraction: Decimal = Decimal("0.05")
     max_drawdown_fraction: Decimal = Decimal("0.20")
     max_capital_at_risk_fraction: Decimal = Decimal("0.20")
+    max_event_concentration_fraction: Decimal = Decimal("1")
+    max_market_concentration_fraction: Decimal = Decimal("1")
+    max_provider_concentration_fraction: Decimal = Decimal("1")
+    max_sport_concentration_fraction: Decimal = Decimal("1")
     max_turnover_fraction: Decimal = Decimal("1")
     max_risk_of_ruin: Decimal = Decimal("0.01")
     max_execution_slippage_fraction: Decimal = Decimal("0.01")
@@ -185,6 +189,19 @@ class EconomicGoalContract:
         _fraction("max_drawdown_fraction", self.max_drawdown_fraction)
         _fraction(
             "max_capital_at_risk_fraction", self.max_capital_at_risk_fraction
+        )
+        _fraction(
+            "max_event_concentration_fraction", self.max_event_concentration_fraction
+        )
+        _fraction(
+            "max_market_concentration_fraction", self.max_market_concentration_fraction
+        )
+        _fraction(
+            "max_provider_concentration_fraction",
+            self.max_provider_concentration_fraction,
+        )
+        _fraction(
+            "max_sport_concentration_fraction", self.max_sport_concentration_fraction
         )
         _nonnegative_decimal("max_turnover_fraction", self.max_turnover_fraction)
         _fraction("max_risk_of_ruin", self.max_risk_of_ruin)
@@ -329,6 +346,26 @@ def validate_automatic_transition(
         "max_capital_at_risk_fraction",
         previous.max_capital_at_risk_fraction,
         candidate.max_capital_at_risk_fraction,
+    )
+    _require_cap_not_increased(
+        "max_event_concentration_fraction",
+        previous.max_event_concentration_fraction,
+        candidate.max_event_concentration_fraction,
+    )
+    _require_cap_not_increased(
+        "max_market_concentration_fraction",
+        previous.max_market_concentration_fraction,
+        candidate.max_market_concentration_fraction,
+    )
+    _require_cap_not_increased(
+        "max_provider_concentration_fraction",
+        previous.max_provider_concentration_fraction,
+        candidate.max_provider_concentration_fraction,
+    )
+    _require_cap_not_increased(
+        "max_sport_concentration_fraction",
+        previous.max_sport_concentration_fraction,
+        candidate.max_sport_concentration_fraction,
     )
     _require_cap_not_increased(
         "max_turnover_fraction",

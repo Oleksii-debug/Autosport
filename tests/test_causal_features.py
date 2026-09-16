@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_EVEN, ROUND_UP, localcontext
+from decimal import (
+    Decimal,
+    ROUND_DOWN,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    ROUND_UP,
+    localcontext,
+)
 
 import pytest
 

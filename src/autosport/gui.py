@@ -79,7 +79,7 @@ def strategy_id_from_display(display: str) -> str:
     try:
         return _STRATEGY_CHOICES[display]
     except KeyError as exc:
-        raise ValueError(text("ui.error.strategy.unknown_display", display=display!r)) from exc
+        raise ValueError(text("ui.error.strategy.unknown_display", display=repr(display))) from exc
 
 
 def _safe_exception_text(exc: BaseException) -> str:

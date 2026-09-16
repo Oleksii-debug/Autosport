@@ -231,10 +231,12 @@ $creatorPrivilegeBootstrapClassSource = @'
 
 # Keep the existing creator-host fence byte-for-byte as a reviewed source input.
 # Open it once with FileShare.Read (writers/deleters denied), bind its exact Git
-# blob identity, then make three deterministic fail-closed source substitutions:
-# (1) compile the privilege helper in the same C# source/assembly as the fence;
-# (2) defer the old pre-DACL "must be absent" assertion; and (3) bracket the
-# existing handle census with temporary census authority and irreversible removal.
+# blob identity, then make deterministic fail-closed source substitutions:
+# compile the privilege helper in the same C# source/assembly as the fence; defer
+# the old pre-DACL "must be absent" assertion; bracket the existing handle census
+# with temporary census authority and irreversible removal; and, on rejection only,
+# expose bounded owner PID/process-name/access/handle diagnostics without accepting
+# any authority that the reviewed fence rejected.
 $creatorFenceBootstrapPath = Join-Path $PWD 'scripts/build_windows_creator_fence.ps1'
 $expectedCreatorFenceBlob = '45623f3fed4d15af232f4cc0ab210abb16c16bef'
 $creatorFenceStream = [System.IO.File]::Open(
@@ -323,6 +325,64 @@ try {
   $newCensus += "`n"
   $creatorFenceText = $creatorFenceText.Replace($oldCensus, $newCensus)
 
+  $oldCompetingDeclaration = "            int competing = 0;`n"
+  $competingDeclarationMatches = [regex]::Matches(
+    $creatorFenceText,
+    [regex]::Escape($oldCompetingDeclaration)
+  ).Count
+  if ($competingDeclarationMatches -ne 1) {
+    throw "Creator-host fence expected exactly one competing-handle declaration; found $competingDeclarationMatches"
+  }
+  $newCompetingDeclaration = "            int competing = 0;`n            string competingDetails = \"\";`n"
+  $creatorFenceText = $creatorFenceText.Replace($oldCompetingDeclaration, $newCompetingDeclaration)
+
+  $oldCompetingIncrement = "                    competing++;`n"
+  $competingIncrementMatches = [regex]::Matches(
+    $creatorFenceText,
+    [regex]::Escape($oldCompetingIncrement)
+  ).Count
+  if ($competingIncrementMatches -ne 1) {
+    throw "Creator-host fence expected exactly one competing-handle increment; found $competingIncrementMatches"
+  }
+  $newCompetingIncrement = @(
+    '                    if (competing < 32)',
+    '                    {',
+    '                        string ownerName = "<unavailable>";',
+    '                        try',
+    '                        {',
+    '                            using (System.Diagnostics.Process ownerProcess =',
+    '                                System.Diagnostics.Process.GetProcessById(checked((int)entry.UniqueProcessId.ToUInt64())))',
+    '                            {',
+    '                                ownerName = ownerProcess.ProcessName;',
+    '                            }',
+    '                        }',
+    '                        catch',
+    '                        {',
+    '                        }',
+    '                        competingDetails += String.Format(',
+    '                            "{0}pid={1},name={2},access=0x{3:x8},handle=0x{4:x}",',
+    '                            competingDetails.Length == 0 ? "" : ";",',
+    '                            entry.UniqueProcessId.ToUInt64(),',
+    '                            ownerName,',
+    '                            entry.GrantedAccess,',
+    '                            entry.HandleValue.ToUInt64());',
+    '                    }',
+    '                    competing++;'
+  ) -join "`n"
+  $newCompetingIncrement += "`n"
+  $creatorFenceText = $creatorFenceText.Replace($oldCompetingIncrement, $newCompetingIncrement)
+
+  $oldCompetingFailure = '                    String.Format("creator-host security fence found {0} pre-existing external dangerous process handle(s)", competing));'
+  $competingFailureMatches = [regex]::Matches(
+    $creatorFenceText,
+    [regex]::Escape($oldCompetingFailure)
+  ).Count
+  if ($competingFailureMatches -ne 1) {
+    throw "Creator-host fence expected exactly one competing-handle failure message; found $competingFailureMatches"
+  }
+  $newCompetingFailure = '                    String.Format("creator-host security fence found {0} pre-existing external dangerous process handle(s); owners=[{1}]", competing, competingDetails));'
+  $creatorFenceText = $creatorFenceText.Replace($oldCompetingFailure, $newCompetingFailure)
+
   if ([regex]::Matches(
         $creatorFenceText,
         [regex]::Escape('public static class CreatorHostPrivilegeBootstrap')
@@ -340,6 +400,12 @@ try {
         [regex]::Escape('CreatorHostPrivilegeBootstrap.RemoveSeDebugPrivilegeAndVerifyAbsent();')
       ).Count -ne 1) {
     throw 'Creator-host SeDebug removal injection was not unique'
+  }
+  if ([regex]::Matches(
+        $creatorFenceText,
+        [regex]::Escape('pre-existing external dangerous process handle(s); owners=[')
+      ).Count -ne 1) {
+    throw 'Creator-host owner diagnostics injection was not unique'
   }
 
   $creatorFenceScriptBlock = [ScriptBlock]::Create($creatorFenceText)

@@ -6,6 +6,7 @@ from tkinter import messagebox, ttk
 import tk_uia
 
 from .gui import AutosportApp
+from .localization import text
 from .recovery_worker import OneShotRecoveryWorker, RecoverySessionView, recover_workspace_once
 from .replay_worker import workspace_for_strategy
 from .ui_model import evaluation_lines, result_summary, ticket_lines
@@ -77,10 +78,10 @@ class WindowsAutosportApp(AutosportApp):
 
     def _configure_accessibility(self) -> None:
         super()._configure_accessibility()
-        tk_uia.set_acc_name(self.bank_summary, "Віртуальний банк")
+        tk_uia.set_acc_name(self.bank_summary, text("ui.accessibility.bankroll.name"))
         tk_uia.set_acc_description(
             self.bank_summary,
-            "Read-only summary поточного virtual bankroll, committed paper stake, canonical strategy та workspace. Доступний через Tab traversal.",
+            text("ui.accessibility.bankroll.description"),
         )
         tk_uia.set_automation_id(self.bank_summary, WINDOWS_BANKROLL_AUTOMATION_ID)
 

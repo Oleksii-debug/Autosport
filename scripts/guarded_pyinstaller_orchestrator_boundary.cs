@@ -38,6 +38,18 @@ namespace Autosport.Release
         private const uint INFINITE = 0xFFFFFFFF;
         private const uint SDDL_REVISION_1 = 1;
         private const string EVERYONE_SID = "S-1-1-0";
+        private const string OWNER_RIGHTS_SID = "S-1-3-4";
+
+        private const uint SE_KERNEL_OBJECT = 6;
+        private const uint DACL_SECURITY_INFORMATION = 0x00000004;
+        private const int DENY_ACCESS = 3;
+        private const uint NO_INHERITANCE = 0;
+        private const int NO_MULTIPLE_TRUSTEE = 0;
+        private const int TRUSTEE_IS_SID = 0;
+        private const int TRUSTEE_IS_UNKNOWN = 0;
+        private const int SYSTEM_EXTENDED_HANDLE_INFORMATION = 64;
+        private const uint STATUS_INFO_LENGTH_MISMATCH = 0xC0000004;
+        private const int MAX_SYSTEM_HANDLE_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 
         private const string ProtectedWorkerArgument = "--autosport-birth-protected-worker";
         private const string BarrierEnvironment = "AUTOSPORT_BINDER_LAUNCH_BARRIER";
@@ -136,6 +148,38 @@ namespace Autosport.Release
             public uint Attributes;
         }
 
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct Trustee
+        {
+            public IntPtr pMultipleTrustee;
+            public int MultipleTrusteeOperation;
+            public int TrusteeForm;
+            public int TrusteeType;
+            public IntPtr ptstrName;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct ExplicitAccess
+        {
+            public uint grfAccessPermissions;
+            public int grfAccessMode;
+            public uint grfInheritance;
+            public Trustee Trustee;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SystemHandleTableEntryInfoEx
+        {
+            public IntPtr Object;
+            public UIntPtr UniqueProcessId;
+            public UIntPtr HandleValue;
+            public uint GrantedAccess;
+            public ushort CreatorBackTraceIndex;
+            public ushort ObjectTypeIndex;
+            public uint HandleAttributes;
+            public uint Reserved;
+        }
+
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -206,8 +250,46 @@ namespace Autosport.Release
             ref StartupInfo startupInfo,
             out ProcessInformation processInformation);
 
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint SetEntriesInAclW(
+            uint countOfExplicitEntries,
+            [In] ExplicitAccess[] explicitEntries,
+            IntPtr oldAcl,
+            out IntPtr newAcl);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern uint GetSecurityInfo(
+            IntPtr handle,
+            uint objectType,
+            uint securityInfo,
+            out IntPtr owner,
+            out IntPtr group,
+            out IntPtr dacl,
+            out IntPtr sacl,
+            out IntPtr securityDescriptor);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern uint SetSecurityInfo(
+            IntPtr handle,
+            uint objectType,
+            uint securityInfo,
+            IntPtr owner,
+            IntPtr group,
+            IntPtr dacl,
+            IntPtr sacl);
+
+        [DllImport("ntdll.dll")]
+        private static extern int NtQuerySystemInformation(
+            int systemInformationClass,
+            IntPtr systemInformation,
+            uint systemInformationLength,
+            out uint returnLength);
+
         [DllImport("kernel32.dll")]
         private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentProcessId();
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr CreateEventW(
@@ -249,6 +331,347 @@ namespace Autosport.Release
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr LocalFree(IntPtr memory);
+
+        private sealed class CreatorProcessFence : IDisposable
+        {
+            private IntPtr originalSecurityDescriptor;
+            private IntPtr originalDacl;
+            private bool installed;
+
+            public void Acquire(string currentUserSid, string pythonExecutable)
+            {
+                if (installed)
+                {
+                    return;
+                }
+
+                IntPtr owner;
+                IntPtr group;
+                IntPtr dacl;
+                IntPtr sacl;
+                IntPtr securityDescriptor;
+                uint securityError = GetSecurityInfo(
+                    GetCurrentProcess(),
+                    SE_KERNEL_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    out owner,
+                    out group,
+                    out dacl,
+                    out sacl,
+                    out securityDescriptor);
+                if (securityError != 0)
+                {
+                    throw new Win32Exception(
+                        unchecked((int)securityError),
+                        "trusted creator process DACL cannot be captured");
+                }
+                if (securityDescriptor == IntPtr.Zero || dacl == IntPtr.Zero)
+                {
+                    if (securityDescriptor != IntPtr.Zero)
+                    {
+                        LocalFree(securityDescriptor);
+                    }
+                    throw new InvalidOperationException(
+                        "trusted creator process DACL is unavailable or NULL");
+                }
+
+                IntPtr currentUser = IntPtr.Zero;
+                IntPtr ownerRights = IntPtr.Zero;
+                IntPtr newAcl = IntPtr.Zero;
+                bool daclInstalled = false;
+                try
+                {
+                    if (!ConvertStringSidToSidW(currentUserSid, out currentUser))
+                    {
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "trusted creator current-user SID conversion failed");
+                    }
+                    if (!ConvertStringSidToSidW(OWNER_RIGHTS_SID, out ownerRights))
+                    {
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "trusted creator OWNER RIGHTS SID conversion failed");
+                    }
+
+                    ExplicitAccess[] entries = new ExplicitAccess[2];
+                    entries[0] = DenyEntry(currentUser);
+                    entries[1] = DenyEntry(ownerRights);
+                    uint aclError = SetEntriesInAclW(
+                        unchecked((uint)entries.Length),
+                        entries,
+                        dacl,
+                        out newAcl);
+                    if (aclError != 0 || newAcl == IntPtr.Zero)
+                    {
+                        throw new Win32Exception(
+                            unchecked((int)aclError),
+                            "trusted creator process deny ACL cannot be built");
+                    }
+                    uint setError = SetSecurityInfo(
+                        GetCurrentProcess(),
+                        SE_KERNEL_OBJECT,
+                        DACL_SECURITY_INFORMATION,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        newAcl,
+                        IntPtr.Zero);
+                    if (setError != 0)
+                    {
+                        throw new Win32Exception(
+                            unchecked((int)setError),
+                            "trusted creator process deny ACL cannot be installed");
+                    }
+                    daclInstalled = true;
+
+                    RequireNoUntrustedPreexistingCreatorAuthority();
+                    RunHostileSiblingProbe(pythonExecutable, GetCurrentProcessId());
+
+                    originalSecurityDescriptor = securityDescriptor;
+                    originalDacl = dacl;
+                    securityDescriptor = IntPtr.Zero;
+                    installed = true;
+                }
+                catch
+                {
+                    if (daclInstalled)
+                    {
+                        uint restoreError = SetSecurityInfo(
+                            GetCurrentProcess(),
+                            SE_KERNEL_OBJECT,
+                            DACL_SECURITY_INFORMATION,
+                            IntPtr.Zero,
+                            IntPtr.Zero,
+                            dacl,
+                            IntPtr.Zero);
+                        if (restoreError != 0)
+                        {
+                            throw new Win32Exception(
+                                unchecked((int)restoreError),
+                                "trusted creator process DACL restoration failed after fence rejection");
+                        }
+                    }
+                    throw;
+                }
+                finally
+                {
+                    if (newAcl != IntPtr.Zero)
+                    {
+                        LocalFree(newAcl);
+                    }
+                    if (ownerRights != IntPtr.Zero)
+                    {
+                        LocalFree(ownerRights);
+                    }
+                    if (currentUser != IntPtr.Zero)
+                    {
+                        LocalFree(currentUser);
+                    }
+                    if (securityDescriptor != IntPtr.Zero)
+                    {
+                        LocalFree(securityDescriptor);
+                    }
+                }
+            }
+
+            public void Dispose()
+            {
+                if (!installed)
+                {
+                    return;
+                }
+                try
+                {
+                    uint error = SetSecurityInfo(
+                        GetCurrentProcess(),
+                        SE_KERNEL_OBJECT,
+                        DACL_SECURITY_INFORMATION,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        originalDacl,
+                        IntPtr.Zero);
+                    if (error != 0)
+                    {
+                        throw new Win32Exception(
+                            unchecked((int)error),
+                            "trusted creator process DACL restoration failed");
+                    }
+                }
+                finally
+                {
+                    if (originalSecurityDescriptor != IntPtr.Zero)
+                    {
+                        LocalFree(originalSecurityDescriptor);
+                    }
+                    originalSecurityDescriptor = IntPtr.Zero;
+                    originalDacl = IntPtr.Zero;
+                    installed = false;
+                }
+            }
+
+            private static ExplicitAccess DenyEntry(IntPtr sid)
+            {
+                return new ExplicitAccess
+                {
+                    grfAccessPermissions = DANGEROUS_PROCESS_ACCESS,
+                    grfAccessMode = DENY_ACCESS,
+                    grfInheritance = NO_INHERITANCE,
+                    Trustee = new Trustee
+                    {
+                        pMultipleTrustee = IntPtr.Zero,
+                        MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE,
+                        TrusteeForm = TRUSTEE_IS_SID,
+                        TrusteeType = TRUSTEE_IS_UNKNOWN,
+                        ptstrName = sid
+                    }
+                };
+            }
+        }
+
+        private static void RequireNoUntrustedPreexistingCreatorAuthority()
+        {
+            uint currentPid = GetCurrentProcessId();
+            IntPtr identityHandle = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                currentPid);
+            if (identityHandle == IntPtr.Zero)
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "trusted creator process identity handle cannot be opened");
+            }
+
+            try
+            {
+                IntPtr buffer = IntPtr.Zero;
+                int size = 1024 * 1024;
+                while (size <= MAX_SYSTEM_HANDLE_SNAPSHOT_BYTES)
+                {
+                    try
+                    {
+                        buffer = Marshal.AllocHGlobal(size);
+                        uint returned;
+                        int status = NtQuerySystemInformation(
+                            SYSTEM_EXTENDED_HANDLE_INFORMATION,
+                            buffer,
+                            unchecked((uint)size),
+                            out returned);
+                        uint statusCode = unchecked((uint)status);
+                        if (statusCode == 0)
+                        {
+                            AuditCreatorHandleSnapshot(
+                                buffer,
+                                size,
+                                currentPid,
+                                identityHandle);
+                            return;
+                        }
+                        if (statusCode != STATUS_INFO_LENGTH_MISMATCH)
+                        {
+                            throw new InvalidOperationException(
+                                String.Format(
+                                    "trusted creator process handle census failed: NTSTATUS=0x{0:x8}",
+                                    statusCode));
+                        }
+
+                        long requested = Math.Max(
+                            (long)size * 2,
+                            (long)returned + 64 * 1024);
+                        if (requested > MAX_SYSTEM_HANDLE_SNAPSHOT_BYTES)
+                        {
+                            break;
+                        }
+                        size = checked((int)requested);
+                    }
+                    finally
+                    {
+                        if (buffer != IntPtr.Zero)
+                        {
+                            Marshal.FreeHGlobal(buffer);
+                            buffer = IntPtr.Zero;
+                        }
+                    }
+                }
+                throw new InvalidOperationException(
+                    "trusted creator process handle census exceeded bounded capture size");
+            }
+            finally
+            {
+                CloseHandle(identityHandle);
+            }
+        }
+
+        private static void AuditCreatorHandleSnapshot(
+            IntPtr buffer,
+            int bufferSize,
+            uint currentPid,
+            IntPtr identityHandle)
+        {
+            int headerSize = IntPtr.Size * 2;
+            if (bufferSize < headerSize)
+            {
+                throw new InvalidOperationException(
+                    "trusted creator process handle census header was truncated");
+            }
+
+            ulong count = IntPtr.Size == 8
+                ? unchecked((ulong)Marshal.ReadInt64(buffer))
+                : unchecked((uint)Marshal.ReadInt32(buffer));
+            int entrySize = Marshal.SizeOf(typeof(SystemHandleTableEntryInfoEx));
+            ulong required = unchecked((ulong)headerSize) + count * unchecked((ulong)entrySize);
+            if (required > unchecked((ulong)bufferSize))
+            {
+                throw new InvalidOperationException(
+                    "trusted creator process handle census entries were truncated");
+            }
+
+            ulong identityValue = unchecked((ulong)identityHandle.ToInt64());
+            IntPtr processObject = IntPtr.Zero;
+            int identityMatches = 0;
+            for (ulong index = 0; index < count; index++)
+            {
+                int offset = checked(headerSize + (int)(index * unchecked((ulong)entrySize)));
+                SystemHandleTableEntryInfoEx entry =
+                    (SystemHandleTableEntryInfoEx)Marshal.PtrToStructure(
+                        IntPtr.Add(buffer, offset),
+                        typeof(SystemHandleTableEntryInfoEx));
+                if (entry.UniqueProcessId.ToUInt64() == currentPid &&
+                    entry.HandleValue.ToUInt64() == identityValue)
+                {
+                    identityMatches++;
+                    processObject = entry.Object;
+                }
+            }
+            if (identityMatches != 1 || processObject == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(
+                    "trusted creator process identity handle was not uniquely visible in system handle table");
+            }
+
+            int competing = 0;
+            for (ulong index = 0; index < count; index++)
+            {
+                int offset = checked(headerSize + (int)(index * unchecked((ulong)entrySize)));
+                SystemHandleTableEntryInfoEx entry =
+                    (SystemHandleTableEntryInfoEx)Marshal.PtrToStructure(
+                        IntPtr.Add(buffer, offset),
+                        typeof(SystemHandleTableEntryInfoEx));
+                if (entry.Object == processObject &&
+                    entry.UniqueProcessId.ToUInt64() != currentPid &&
+                    (entry.GrantedAccess & DANGEROUS_PROCESS_ACCESS) != 0)
+                {
+                    competing++;
+                }
+            }
+            if (competing != 0)
+            {
+                throw new InvalidOperationException(
+                    String.Format(
+                        "trusted creator process security fence found {0} pre-existing external dangerous process handle(s)",
+                        competing));
+            }
+        }
 
         private static void RequireSeDebugNotAssigned()
         {
@@ -653,22 +1076,13 @@ namespace Autosport.Release
             }
 
             RequireSeDebugNotAssigned();
+            CreatorProcessFence creatorFence = new CreatorProcessFence();
+            creatorFence.Acquire(currentUserSid, pythonExecutable);
 
             string nonce = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
             string barrierName =
                 "Local\\AutosportBinderLaunch-" + Guid.NewGuid().ToString("N");
-            IntPtr barrier = CreateEventW(
-                IntPtr.Zero,
-                true,
-                false,
-                barrierName);
-            if (barrier == IntPtr.Zero)
-            {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "unable to create protected binder launch barrier");
-            }
-
+            IntPtr barrier = IntPtr.Zero;
             IntPtr processDescriptor = IntPtr.Zero;
             IntPtr threadDescriptor = IntPtr.Zero;
             IntPtr restrictedToken = IntPtr.Zero;
@@ -680,6 +1094,18 @@ namespace Autosport.Release
             string oldNonce = Environment.GetEnvironmentVariable(NonceEnvironment);
             try
             {
+                barrier = CreateEventW(
+                    IntPtr.Zero,
+                    true,
+                    false,
+                    barrierName);
+                if (barrier == IntPtr.Zero)
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "unable to create protected binder launch barrier");
+                }
+
                 processDescriptor = SecurityDescriptor(
                     currentUserSid,
                     DANGEROUS_PROCESS_ACCESS,
@@ -749,6 +1175,11 @@ namespace Autosport.Release
                     "1",
                     StringComparison.Ordinal))
                 {
+                    // Both probes run while the creator still owns the full child
+                    // process/thread handles. The first proves an external sibling
+                    // cannot obtain PROCESS_DUP_HANDLE to this creator and therefore
+                    // cannot clone those live creator-owned child authorities.
+                    RunHostileSiblingProbe(pythonExecutable, GetCurrentProcessId());
                     RunHostileSiblingProbe(pythonExecutable, processInfo.dwProcessId);
                 }
 
@@ -842,7 +1273,11 @@ namespace Autosport.Release
                 {
                     LocalFree(processDescriptor);
                 }
-                CloseHandle(barrier);
+                if (barrier != IntPtr.Zero)
+                {
+                    CloseHandle(barrier);
+                }
+                creatorFence.Dispose();
             }
         }
     }

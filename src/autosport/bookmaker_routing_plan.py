@@ -214,7 +214,7 @@ def plan_equal_split_residual(
     follows the caller's selected-venue order, so identical evidence yields identical
     child proposal identities.
 
-    ``RoutingState.ROUTE`` means the full residual is covered by proposal legs.
+    ``parent_plan_id`` is an opaque reference to parent authority owned by the canonical\n    #353 execution-plan layer. This proposal layer does not claim that the string itself\n    canonically identifies the parent plan content; child identities bind that foreign\n    reference together with this request, exact quote and proposed stake.\n\n    ``RoutingState.ROUTE`` means the full residual is covered by proposal legs.
     ``RoutingState.PARTIAL`` means only a strict subset can be proposed with current
     selected capacity. ``RoutingState.UNEXECUTABLE`` means none can be proposed.
     Neither state is an acknowledgement, receipt or real-execution result.

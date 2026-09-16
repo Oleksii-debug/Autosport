@@ -10,6 +10,7 @@ import pytest
 
 from autosport.gui import AutosportApp
 from autosport.live_observation import observe_workspace_once
+from autosport.localization import text
 from autosport.providers import ProviderBatch, ProviderQuote
 from autosport.session import AutosportSession
 from autosport.windows_gui import WindowsAutosportApp
@@ -185,14 +186,14 @@ def test_corrupt_economic_startup_keeps_shell_and_live_observation_reachable(tmp
     assert app.session is None
     assert app._startup_economic_error == "ValueError: corrupt paper state"
     assert workspace in app._recovery_required_workspaces
-    assert "Read-only live snapshot доступний" in app.status.value
+    assert app.status.value == text("ui.status.startup.recovery_required")
     assert "недоступний до успішного recovery" in app.bank.value
 
     live_result = object()
     provider = object()
     app.replay_worker = SimpleNamespace(busy=False)
     app.live_worker = _ImmediateWorker()
-    app.live_mode_text = _Value("Public preview — без ключа")
+    app.live_mode_text = _Value(text("ui.live_mode.public_preview"))
     app.live_status = _Value()
     app.live_refresh_button = _Button()
     scheduled: list[tuple[int, object]] = []

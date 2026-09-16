@@ -5,12 +5,17 @@ import json
 from dataclasses import dataclass
 
 from .calculation import CalculationEngine, CalculationResult
-from .calculation_input import CalculationInputBoundary, MANUAL_CALCULATION_INPUT
+from .calculation_input import (
+    CalculationInputBoundary,
+    CalculationInputLimits,
+    MANUAL_CALCULATION_INPUT,
+)
 
 
 _SERVICE_VERSION = "manual-calculation-service-v1"
 _CALCULATION_VERSION = 1
 _ENGINE_VERSION = "calculation-engine-v1"
+_CANONICAL_INPUT_LIMITS = CalculationInputLimits()
 _MAX_MARKET_SELECTIONS = 1_000
 _MAX_PARLAY_LEGS = 100
 _MAX_SERIES_ITEMS = 10_000
@@ -93,14 +98,10 @@ class ManualCalculationService:
             and type(input_boundary) is not CalculationInputBoundary
         ):
             raise ValueError("input_boundary must be an exact CalculationInputBoundary")
-        if input_boundary is not None:
-            _validate_input_boundary_limits(input_boundary)
+        boundary = input_boundary if input_boundary is not None else MANUAL_CALCULATION_INPUT
+        _validate_input_boundary_limits(boundary)
         self._engine = engine if engine is not None else CalculationEngine()
-        self._input = (
-            CalculationInputBoundary(input_boundary.limits)
-            if input_boundary is not None
-            else MANUAL_CALCULATION_INPUT
-        )
+        self._input = CalculationInputBoundary(boundary.limits)
 
     def odds_conversion(self, decimal_odds: object) -> ManualCalculationEvidence:
         odds = self._decimal(decimal_odds, "decimal_odds")
@@ -348,10 +349,9 @@ class ManualCalculationService:
 
 
 def _validate_input_boundary_limits(boundary: CalculationInputBoundary) -> None:
-    canonical = MANUAL_CALCULATION_INPUT.limits
     for field in _LIMIT_FIELDS:
         supplied = getattr(boundary.limits, field)
-        maximum = getattr(canonical, field)
+        maximum = getattr(_CANONICAL_INPUT_LIMITS, field)
         if supplied > maximum:
             raise ValueError(
                 f"input_boundary {field} must not be looser than the canonical manual-input limit"

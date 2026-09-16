@@ -182,3 +182,19 @@ def test_manual_service_snapshots_stricter_boundary_against_late_relaxation() ->
     boundary.limits = CalculationInputLimits(numeric_text_chars=129)
     with pytest.raises(ValueError, match="text limit"):
         service.odds_conversion("12")
+
+
+def test_manual_service_snapshots_default_boundary_and_rejects_corrupted_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ManualCalculationService()
+    monkeypatch.setattr(
+        MANUAL_CALCULATION_INPUT,
+        "limits",
+        CalculationInputLimits(numeric_text_chars=129),
+    )
+
+    with pytest.raises(ValueError, match="text limit"):
+        service.odds_conversion("1" * 129)
+    with pytest.raises(ValueError, match="must not be looser"):
+        ManualCalculationService()

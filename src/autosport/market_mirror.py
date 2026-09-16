@@ -281,6 +281,45 @@ class MarketMirror:
         return self.active_view(as_of=as_of, max_age=max_age).events
 
     @classmethod
+    def replay_view_from_store(
+        cls,
+        store: SQLiteMarketStore,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+        source_ids: str | Iterable[str] | None = None,
+        event_ids: str | Iterable[str] | None = None,
+        market_ids: str | Iterable[str] | None = None,
+        selection_ids: str | Iterable[str] | None = None,
+    ) -> MirrorSnapshot:
+        """Reconstruct exactly the decision-visible mirror state at as_of.
+
+        Replay is read-only over canonical append-only history. Events whose local
+        observation instant is after as_of are never applied, even when their
+        provider timestamp is older, so later-received evidence cannot leak into an
+        earlier decision. The reconstructed mirror then applies the same canonical
+        status/freshness/selectors contract as a live active_view.
+        """
+        if not isinstance(store, SQLiteMarketStore):
+            raise TypeError("store must be a SQLiteMarketStore")
+        boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
+        mirror = cls()
+        for event in store.events():
+            observed = cls._utc_timestamp(event.observed_ts)
+            if observed is None:
+                continue
+            if observed <= boundary:
+                mirror.apply(event)
+        return mirror.active_view(
+            as_of=boundary,
+            max_age=age_limit,
+            source_ids=source_ids,
+            event_ids=event_ids,
+            market_ids=market_ids,
+            selection_ids=selection_ids,
+        )
+
+    @classmethod
     def from_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
         """Restore latest source-specific mirror state from authoritative history.
 

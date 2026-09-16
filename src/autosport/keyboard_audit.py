@@ -25,6 +25,7 @@ _FOCUS_BINDINGS = {
 }
 _FOCUSABLE_CONTROLS = (
     "shell_navigation",
+    "shell_open",
     "shell_state",
     "shell_details",
     "strategy",
@@ -61,6 +62,7 @@ def summarize_keyboard_contract(
     bindings: dict[str, bool],
     focus_results: dict[str, bool],
     tab_reachable_controls: list[str],
+    reverse_tab_reachable_controls: list[str] | None = None,
 ) -> dict[str, Any]:
     failures: list[str] = []
     for sequence in (*_ACTION_BINDINGS, *_FOCUS_BINDINGS):
@@ -72,6 +74,14 @@ def summarize_keyboard_contract(
     missing_tab = [name for name in _FOCUSABLE_CONTROLS if name not in tab_reachable_controls]
     if missing_tab:
         failures.append("Tab traversal cannot reach: " + ", ".join(missing_tab))
+    if reverse_tab_reachable_controls is None:
+        failures.append("Shift+Tab traversal evidence missing")
+    else:
+        missing_reverse_tab = [
+            name for name in _FOCUSABLE_CONTROLS if name not in reverse_tab_reachable_controls
+        ]
+        if missing_reverse_tab:
+            failures.append("Shift+Tab traversal cannot reach: " + ", ".join(missing_reverse_tab))
 
     shell_ids = WINDOWS_SHELL_AUTOMATION_IDS
     expected_ids = {
@@ -81,6 +91,7 @@ def summarize_keyboard_contract(
             else shell_ids[
                 {
                     "shell_navigation": "navigation",
+                    "shell_open": "open",
                     "shell_state": "state",
                     "shell_details": "details",
                 }[name]
@@ -103,13 +114,16 @@ def summarize_keyboard_contract(
             for sequence, target in _FOCUS_BINDINGS.items()
         },
         "tab_reachable_controls": list(tab_reachable_controls),
+        "shift_tab_reachable_controls": (
+            [] if reverse_tab_reachable_controls is None else list(reverse_tab_reachable_controls)
+        ),
         "expected_automation_ids": expected_ids,
         "failures": failures,
         "evidence_scope": (
             "in-process packaged Windows GUI keyboard contract: action shortcuts and shell cycling are bound, "
             "F2/F6/F7/F8 focus shortcuts are executed, and critical shell plus V1 controls including the "
-            "read-only bankroll summary are reachable through Tk tab traversal; not physical keyboard or "
-            "NVDA speech proof"
+            "shell Open action and read-only bankroll summary are reachable through forward Tab and reverse "
+            "Shift+Tab traversal; not physical keyboard or NVDA speech proof"
         ),
         "human_tested": False,
         "nvda_verified": False,
@@ -120,6 +134,7 @@ def summarize_keyboard_contract(
 def _critical_widgets(app: WindowsAutosportApp) -> dict[str, Any]:
     return {
         "shell_navigation": app.shell_navigation,
+        "shell_open": app.shell_open_button,
         "shell_state": app.shell_state,
         "shell_details": app.shell_details,
         "strategy": app.strategy,
@@ -138,7 +153,7 @@ def _critical_widgets(app: WindowsAutosportApp) -> dict[str, Any]:
     }
 
 
-def _tab_reachable_controls(app: WindowsAutosportApp) -> list[str]:
+def _tab_reachable_controls(app: WindowsAutosportApp, *, reverse: bool = False) -> list[str]:
     controls = _critical_widgets(app)
     names_by_widget = {widget: name for name, widget in controls.items()}
     start = app.shell_navigation
@@ -152,7 +167,7 @@ def _tab_reachable_controls(app: WindowsAutosportApp) -> list[str]:
         name = names_by_widget.get(current)
         if name is not None:
             reachable.append(name)
-        next_widget = current.tk_focusNext()
+        next_widget = current.tk_focusPrev() if reverse else current.tk_focusNext()
         if next_widget is None:
             break
         current = next_widget
@@ -192,6 +207,7 @@ def run_keyboard_audit(output_path: str | Path) -> int:
             _binding_presence(app),
             _execute_focus_shortcuts(app),
             _tab_reachable_controls(app),
+            _tab_reachable_controls(app, reverse=True),
         )
     except Exception as exc:
         report = {

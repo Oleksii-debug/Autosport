@@ -44,8 +44,8 @@ def test_evaluation_lines_fail_closed_on_excessive_json_nesting(tmp_path: Path) 
 
     lines = evaluation_lines(_result(summary))
 
-    assert "Price truth | ERROR — run summary JSON nesting is too deep." in lines
-    assert lines[-1].startswith("Truth | paper simulation only")
+    assert "Істина ціни | ПОМИЛКА — вкладеність JSON підсумку запуску надто глибока." in lines
+    assert lines[-1].startswith("Істина | лише паперова симуляція")
 
 
 def test_evaluation_lines_fail_closed_on_standard_json_numeric_overflow(tmp_path: Path) -> None:
@@ -65,10 +65,10 @@ def test_evaluation_lines_fail_closed_on_standard_json_numeric_overflow(tmp_path
     lines = evaluation_lines(_result(summary))
 
     assert (
-        "Price truth | ERROR — run summary JSON is ambiguous or non-canonical: "
+        "Істина ціни | ПОМИЛКА — JSON підсумку запуску неоднозначний або неканонічний: "
         "non-finite JSON number: 1e400."
     ) in lines
-    assert lines[-1].startswith("Truth | paper simulation only")
+    assert lines[-1].startswith("Істина | лише паперова симуляція")
 
 
 def test_evaluation_lines_preserve_canonical_price_truth_rendering(tmp_path: Path) -> None:
@@ -90,6 +90,6 @@ def test_evaluation_lines_preserve_canonical_price_truth_rendering(tmp_path: Pat
     lines = evaluation_lines(_result(summary))
 
     assert (
-        "Price truth | canonical_observation_quote; executable quote verified=false; "
-        "paper fill fidelity verified=false."
+        "Істина ціни | canonical_observation_quote; виконувану котировку перевірено=ні; "
+        "відповідність паперового виконання перевірено=ні."
     ) in lines

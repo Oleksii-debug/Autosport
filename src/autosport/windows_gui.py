@@ -131,12 +131,13 @@ class WindowsAutosportApp(AutosportApp):
             else getattr(self, "session", None)
         )
         if source is None:
-            return f"Віртуальний банк: оновлюється після replay; workspace: {self._active_workspace}"
-        return (
-            f"Віртуальний банк: {source.book.balance}; "
-            f"committed: {source.book.committed_stake}; "
-            f"strategy: {source.strategy_id}; "
-            f"workspace: {source.workspace}"
+            return text("ui.status.bank.pending", workspace=self._active_workspace)
+        return text(
+            "ui.status.bank.current",
+            balance=source.book.balance,
+            committed_stake=source.book.committed_stake,
+            strategy_id=source.strategy_id,
+            workspace=source.workspace,
         )
 
     def _refresh_tickets(self) -> None:
@@ -147,37 +148,34 @@ class WindowsAutosportApp(AutosportApp):
             else getattr(self, "session", None)
         )
         if source is None:
-            self.tickets.insert(
-                "end",
-                "Economic state тимчасово недоступний; дочекайтеся terminal replay/recovery boundary.",
-            )
+            self.tickets.insert("end", text("ui.status.windows.economic_unavailable"))
             return
         for line in ticket_lines(source):
             self.tickets.insert("end", line)
 
     def _on_strategy_changed(self, _event=None) -> None:
         if self._recovery_busy:
-            self.status.set("Strategy configuration заблоковано: workspace recovery ще виконується.")
+            self.status.set(text("ui.status.windows.strategy_recovery_busy"))
             return
         self._recovery_view = None
         super()._on_strategy_changed(_event)
 
     def choose_research_plan(self) -> None:
         if self._recovery_busy:
-            self.status.set("Research plan не можна змінювати під час workspace recovery.")
+            self.status.set(text("ui.status.windows.research_plan_recovery_busy"))
             return
         super().choose_research_plan()
 
     def choose_dataset(self) -> None:
         if self._recovery_busy:
-            self.status.set("Dataset не можна змінювати під час workspace recovery.")
+            self.status.set(text("ui.status.windows.dataset_recovery_busy"))
             return
         super().choose_dataset()
 
     def refresh_live_snapshot(self) -> None:
         if self._recovery_busy:
-            self.live_status.set("Live snapshot відкладено: workspace recovery ще виконується.")
-            self.status.set("Read-only live observation не запускається одночасно з workspace recovery.")
+            self.live_status.set(text("ui.status.windows.live_recovery_busy"))
+            self.status.set(text("ui.status.windows.live_recovery_blocked"))
             return
         super().refresh_live_snapshot()
 
@@ -185,23 +183,26 @@ class WindowsAutosportApp(AutosportApp):
         if self._closing:
             return
         if self._dataset_busy:
-            self.status.set("Recovery заблоковано: dataset validation ще виконується.")
+            self.status.set(text("ui.status.recovery.dataset_busy"))
             return
         if self.replay_worker.busy:
-            self.status.set("Recovery заблоковано: economic replay ще виконується.")
+            self.status.set(text("ui.status.recovery.replay_busy"))
             return
         if self.live_worker.busy:
-            self.status.set("Recovery заблоковано: live snapshot ще виконується.")
+            self.status.set(text("ui.status.recovery.live_busy"))
             return
         if self._recovery_busy:
-            self.status.set("Workspace recovery уже виконується; другий recovery не запущено.")
+            self.status.set(text("ui.status.recovery.already_busy"))
             return
         try:
             strategy_id, research_plan = self._selected_replay_configuration()
             replay_workspace = workspace_for_strategy(self.workspace, strategy_id, research_plan)
         except Exception as exc:
-            messagebox.showerror("Автоспорт", f"Recovery configuration відхилено: {exc}")
-            self.status.set("Recovery не запущено: canonical strategy configuration не пройшла fail-closed validation.")
+            messagebox.showerror(
+                text("ui.dialog.title"),
+                text("ui.error.recovery.configuration", detail=exc),
+            )
+            self.status.set(text("ui.status.recovery.configuration_rejected"))
             return
 
         prior_workspace = self.__dict__.get("_active_workspace")
@@ -237,16 +238,13 @@ class WindowsAutosportApp(AutosportApp):
                 self._refresh_tickets()
                 if not isinstance(exc, Exception):
                     raise
-                detail = (
-                    "Workspace recovery відхилено fail-closed: previous economic session teardown failed; "
-                    f"{_safe_exception_detail(exc)}"
+                detail = text(
+                    "ui.error.recovery.teardown",
+                    detail=_safe_exception_detail(exc),
                 )
-                self.status.set(
-                    "Workspace recovery не запущено: previous economic session teardown failed; "
-                    "economic state лишається прихованим, а workspace заблоковано fail-closed."
-                )
+                self.status.set(text("ui.status.recovery.teardown_blocked"))
                 self._append_log(detail)
-                messagebox.showerror("Автоспорт", detail)
+                messagebox.showerror(text("ui.dialog.title"), detail)
                 return
 
         def task():
@@ -259,9 +257,7 @@ class WindowsAutosportApp(AutosportApp):
 
         worker = self.recovery_worker
         if worker is None or not worker.start(task):
-            self.status.set(
-                "Workspace recovery не запущено; session state лишається fail-closed до повторного успішного recovery."
-            )
+            self.status.set(text("ui.status.recovery.start_failed"))
             self.bank.set(self._bank_text())
             self._refresh_tickets()
             return
@@ -275,11 +271,19 @@ class WindowsAutosportApp(AutosportApp):
             else ""
         )
         self.status.set(
-            f"Workspace recovery виконується у background worker; strategy={strategy_id}{plan_identity}. "
-            "Tk/UIA/NVDA thread залишається responsive; replay, live, recovery і configuration controls заблоковано до terminal state."
+            text(
+                "ui.status.recovery.running",
+                strategy_id=strategy_id,
+                plan_identity=plan_identity,
+            )
         )
         self._append_log(
-            f"Workspace recovery запущено у background worker; strategy={strategy_id}{plan_identity}; workspace={replay_workspace}."
+            text(
+                "ui.log.recovery.started",
+                strategy_id=strategy_id,
+                plan_identity=plan_identity,
+                workspace=replay_workspace,
+            )
         )
         self.after(100, self._poll_recovery_worker)
 
@@ -297,12 +301,10 @@ class WindowsAutosportApp(AutosportApp):
             self._recovery_view = None
             self.bank.set(self._bank_text())
             self._refresh_tickets()
-            detail = f"Workspace recovery відхилено fail-closed: {message.error}"
-            self.status.set(
-                "Workspace recovery не завершено; цей economic workspace заблоковано для нового replay до успішного recovery."
-            )
+            detail = text("ui.error.recovery.worker", detail=message.error)
+            self.status.set(text("ui.status.recovery.blocked"))
             self._append_log(detail)
-            messagebox.showerror("Автоспорт", detail)
+            messagebox.showerror(text("ui.dialog.title"), detail)
             return
 
         result = message.result
@@ -310,9 +312,7 @@ class WindowsAutosportApp(AutosportApp):
             self._recovery_view = None
             self.bank.set(self._bank_text())
             self._refresh_tickets()
-            self.status.set(
-                "Workspace recovery worker завершився без terminal result; цей workspace лишається fail-closed."
-            )
+            self.status.set(text("ui.status.recovery.no_result"))
             return
 
         expected_workspace = Path(self._active_workspace)
@@ -333,27 +333,25 @@ class WindowsAutosportApp(AutosportApp):
             self._block_workspace_for_recovery(expected_workspace)
             self.bank.set(self._bank_text())
             self._refresh_tickets()
-            detail = (
-                "Workspace recovery terminal identity mismatch: "
-                f"expected workspace={expected_workspace}, strategy={expected_strategy_id}; "
-                f"received workspace={result.session_view.workspace!r}, "
-                f"strategy={result.session_view.strategy_id!r}."
+            detail = text(
+                "ui.error.recovery.identity_mismatch",
+                expected_workspace=expected_workspace,
+                expected_strategy_id=expected_strategy_id,
+                received_workspace=repr(result.session_view.workspace),
+                received_strategy_id=repr(result.session_view.strategy_id),
             )
-            self.status.set(
-                "Workspace recovery terminal result не відповідає запущеному economic workspace/strategy; "
-                "стан лишається fail-closed і жоден workspace не розблоковано."
-            )
+            self.status.set(text("ui.status.recovery.identity_mismatch"))
             self._append_log(detail)
-            messagebox.showerror("Автоспорт", detail)
+            messagebox.showerror(text("ui.dialog.title"), detail)
             return
 
         report = result.report
-        summary = (
-            "Workspace recovery: "
-            f"reconciled={len(report.reconciled_keys)}; "
-            f"aborted_uncommitted={len(report.aborted_uncommitted_keys)}; "
-            f"unresolved={len(report.unresolved_without_summary)}; "
-            f"workspace={result.session_view.workspace}"
+        summary = text(
+            "ui.recovery.summary",
+            reconciled=len(report.reconciled_keys),
+            aborted_uncommitted=len(report.aborted_uncommitted_keys),
+            unresolved=len(report.unresolved_without_summary),
+            workspace=result.session_view.workspace,
         )
         self._append_log(summary)
         if report.unresolved_without_summary:
@@ -362,14 +360,10 @@ class WindowsAutosportApp(AutosportApp):
             self._block_workspace_for_recovery(expected_workspace)
             self.bank.set(self._bank_text())
             self._refresh_tickets()
-            self.status.set(
-                summary
-                + ". Є unresolved legacy run без достатнього summary proof; economic state лишається прихованим і replay fail-closed для цього workspace."
-            )
+            self.status.set(summary + text("ui.status.recovery.unresolved_suffix"))
             messagebox.showwarning(
-                "Автоспорт",
-                "Recovery завершив перевірку, але залишив unresolved run без достатнього доказу completion. "
-                "Economic state не публікується; не обходьте цей стан через allow-repeat.",
+                text("ui.dialog.title"),
+                text("ui.warning.recovery.unresolved"),
             )
             return
 
@@ -377,8 +371,8 @@ class WindowsAutosportApp(AutosportApp):
         self.bank.set(self._bank_text())
         self._refresh_tickets()
         self._unblock_workspace_after_recovery(result.session_view.workspace)
-        self.status.set(summary + ". Workspace готовий до наступного перевіреного paper replay.")
-        messagebox.showinfo("Автоспорт", "Workspace recovery завершено без unresolved runs.")
+        self.status.set(summary + text("ui.status.recovery.ready_suffix"))
+        messagebox.showinfo(text("ui.dialog.title"), text("ui.info.recovery.complete"))
 
     def _poll_replay_worker(self) -> None:
         """Consume replay terminal state and quarantine uncertain economic state."""
@@ -396,25 +390,15 @@ class WindowsAutosportApp(AutosportApp):
             self.bank.set(self._bank_text())
             self._refresh_tickets()
             if message.error is not None:
-                text = f"Paper replay помилка: {message.error}"
-                self._append_log(text)
-                self._set_evaluation_lines([
-                    "Evaluation недоступна: replay не досяг terminal settlement/evaluation boundary."
-                ])
-                self.status.set(
-                    "Replay завершився помилкою; economic state цього workspace лишається прихованим до recovery. "
-                    "Виконайте «Відновити workspace» або Control+Shift+R перед наступним replay."
-                )
-                messagebox.showerror("Автоспорт", text)
+                replay_error = text("ui.error.recovery.worker", detail=message.error)
+                self._append_log(replay_error)
+                self._set_evaluation_lines([text("ui.evaluation.replay_failed")])
+                self.status.set(text("ui.status.replay.failed_recovery"))
+                messagebox.showerror(text("ui.dialog.title"), replay_error)
                 return
 
-            self._set_evaluation_lines([
-                "Evaluation недоступна: worker не повернув terminal SessionResult."
-            ])
-            self.status.set(
-                "Replay worker завершився без terminal result; economic state цього workspace лишається прихованим до recovery. "
-                "Виконайте «Відновити workspace» перед наступним replay."
-            )
+            self._set_evaluation_lines([text("ui.evaluation.no_terminal_result")])
+            self.status.set(text("ui.status.replay.no_terminal_result"))
             return
 
         try:
@@ -428,21 +412,16 @@ class WindowsAutosportApp(AutosportApp):
             self._block_workspace_for_recovery(self._active_workspace)
             self.bank.set(self._bank_text())
             self._refresh_tickets()
-            self._set_evaluation_lines([
-                "Evaluation недоступна: post-replay workspace reopen не пройшов fail-closed validation."
-            ])
+            self._set_evaluation_lines([text("ui.evaluation.reopen_failed")])
             if not isinstance(exc, Exception):
                 raise
-            detail = (
-                "Post-replay workspace reopen відхилено fail-closed: "
-                f"{_safe_exception_detail(exc)}"
+            detail = text(
+                "ui.error.replay.reopen",
+                detail=_safe_exception_detail(exc),
             )
-            self.status.set(
-                "Replay terminal state не можна безпечно підтвердити; цей economic workspace заблоковано fail-closed. "
-                "Виконайте «Відновити workspace» або Control+Shift+R перед наступним replay у цьому workspace."
-            )
+            self.status.set(text("ui.status.replay.reopen_blocked"))
             self._append_log(detail)
-            messagebox.showerror("Автоспорт", detail)
+            messagebox.showerror(text("ui.dialog.title"), detail)
             return
 
         self.bank.set(self._bank_text())
@@ -456,7 +435,7 @@ class WindowsAutosportApp(AutosportApp):
 
     def run_dataset(self) -> None:
         if self._recovery_busy:
-            self.status.set("Paper replay не запускається: workspace recovery ще виконується.")
+            self.status.set(text("ui.status.replay.recovery_busy"))
             return
         if self._blocked_recovery_workspaces():
             try:
@@ -467,21 +446,16 @@ class WindowsAutosportApp(AutosportApp):
                 # instead of masking it as an unrelated recovery quarantine.
                 return super().run_dataset()
             if self._workspace_requires_recovery(replay_workspace):
-                self.status.set(
-                    "Paper replay заблоковано fail-closed: поточний workspace не має успішного terminal recovery result."
-                )
+                self.status.set(text("ui.status.replay.recovery_required"))
                 return
         self._recovery_view = None
         super().run_dataset()
 
     def close_app(self) -> None:
         if self._recovery_busy:
-            text = (
-                "Workspace recovery ще виконується. Закриття програми заблоковано до terminal recovery state, "
-                "щоб процес не обірвав economic reconciliation у довільній точці."
-            )
-            self.status.set(text)
-            self._append_log(text)
+            close_text = text("ui.status.close.recovery_busy")
+            self.status.set(close_text)
+            self._append_log(close_text)
             self.bell()
             return
         super().close_app()

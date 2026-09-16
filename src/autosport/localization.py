@@ -32,7 +32,7 @@ _UK_UA = MappingProxyType(
         "ui.speed.1000x": "1000×",
         "ui.live_mode.public_preview": "Публічний перегляд — без ключа",
         "ui.live_mode.api_key": "Ключ API із середовища",
-        "ui.strategy.display": "{strategy_id}",
+        "ui.strategy.display": "Стратегія {strategy_id}",
         "ui.strategy.label.baseline-v1": "Базова стратегія тестового сценарію",
         "ui.strategy.label.observe-only-v1": "Лише спостереження",
         "ui.strategy.label.research-replay-v1": "Типізований дослідницький повтор",

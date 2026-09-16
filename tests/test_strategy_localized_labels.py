@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from autosport.gui import AutosportApp
+from autosport.gui import _STRATEGY_CHOICES, AutosportApp
 from autosport.strategies import strategy_spec
 
 
@@ -38,12 +38,18 @@ def test_strategy_status_uses_ukrainian_label_without_changing_identity(
     expected_agents: tuple[str, ...],
 ) -> None:
     spec = strategy_spec(strategy_id)
+    display = next(
+        label for label, semantic_id in _STRATEGY_CHOICES.items()
+        if semantic_id == strategy_id
+    )
     app = SimpleNamespace(
-        strategy_text=SimpleNamespace(get=lambda: strategy_id),
+        strategy_text=SimpleNamespace(get=lambda: display),
     )
 
     rendered = AutosportApp._strategy_status_text(app)
 
+    assert display == f"Стратегія {strategy_id}"
+    assert _STRATEGY_CHOICES[display] == strategy_id
     assert spec.strategy_id == strategy_id
     assert spec.agent_names == expected_agents
     assert spec.label == legacy_english_label

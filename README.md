@@ -1,26 +1,43 @@
 # Автоспорт / Autosport
 
-**Professional agentic Windows sports-betting analysis, paper-proof and controlled execution platform.**
+**Professional agentic Windows sports-betting analysis, live-market intelligence, paper-proof and controlled execution platform.**
 
 Автоспорт — окремий від Nika-Core продукт. Він розробляється, тестується, пакується та запускається незалежно від готовності Nika-Core.
 
 ## Product intent
 
-Autosport **не є permanently paper-only продуктом**. Його зріла продуктова мета — замкнути професійний цикл:
+Autosport **не є permanently paper-only продуктом** і **не є програмою «вгадай переможця»**. Його зріла економічна мета — максимізувати довгострокове зростання банку в межах жорстких risk/execution limits, використовуючи кілька strategy families:
 
-`lawful data -> pre-match/live analysis -> forecast -> multi-agent decision -> bankroll/portfolio risk -> multiple singles/parlays/positions -> paper proof -> bookmaker capability/account read -> supervised real execution -> real execution ledger/reconciliation -> bounded autonomous execution -> causal learning/adaptation`.
+- predictive probability edge;
+- live odds/state movement, lead/lag і stale actionable quotes;
+- cross-provider / cross-market discrepancies;
+- arbitrage і dutching / full-outcome coverage;
+- hedge / rebalance;
+- багато singles/parlays/combinations, керованих як один портфель.
+
+Forecasting є strategy-class dependent, а не глобально обов’язковим. Для чистого arbitrage/dutching/hedging directional forecast може бути відсутнім, якщо рішення спирається на causal executable quote structure та повну terminal-state economics.
+
+Зрілий цикл продукту:
+
+`lawful data -> pre-match/live analysis -> optional forecast / market-state intelligence -> opportunity classification -> bankroll/portfolio/min-P&L risk -> multiple positions -> paper/live-observation proof -> bookmaker capability/account read -> supervised real execution -> real execution ledger/reconciliation -> bounded autonomous execution -> causal learning/adaptation`.
 
 `REAL_MONEY_EXECUTION=false` означає лише, що поточна реалізація ще не має кваліфікованого real-money execution path. Це не постійна заборона продукту.
 
-V1 навмисно використовує replay, Virtual Bank і paper betting, щоб без ризику реальних коштів довести causal correctness, прогнозування, stake sizing, portfolio/risk control, learning/evaluation, restart/recovery та Windows/NVDA usability. Після V1 і професійної paper profitability/safety qualification той самий продукт переходить до окремо керованої bookmaker execution програми в GitHub Issue #353.
+### Outcome-independent profit rule
+
+Autosport може використовувати truth label `OUTCOME_INDEPENDENT_POSITIVE` лише коли доведено повний релевантний terminal outcome space і точний executable position/stake plan має `minimum terminal net P&L > 0` після settlement rules, stake granularity, provider/account limits, quote freshness/slippage, applicable fees/commission/tax, partial acceptance та execution sequencing assumptions.
+
+Якщо доказ неповний або sampled/approximate, потрібен слабший truth label, наприклад `THEORETICAL_ARBITRAGE_ONLY`, `EXECUTION_RISK_PRESENT`, `PARTIAL_COVERAGE`, `HEDGED_BUT_NOT_GUARANTEED` або `RISKED_PORTFOLIO`. Детальний live/outcome-independent contract — GitHub Issue #355; generic strategy-class decision contract — Issue #356.
 
 ## V1 executable path
 
+V1 навмисно є **non-money-moving proof release**. Він використовує replay, Virtual Bank, paper betting і live observation, щоб без ризику реальних коштів довести causal correctness, exact money/portfolio calculations, exact-vs-approximate scenario truth, stake sizing, risk control, learning/evaluation, restart/recovery та Windows/NVDA usability.
+
 Перший vertical slice — настільний теніс, але canonical domain має залишатися sport-generic. V1 — реальний Windows-продукт з агентами, high-speed Market Mirror, sealed historical replay без future leakage, Virtual Bank, singles/parlays, deterministic settlement, incremental Portfolio/Exposure Engine, evaluation/learning loop та keyboard/NVDA-oriented UI.
 
-Швидкий ingestion/storage/portfolio math не залежить від LLM. AI працює над нормалізованими структурами й не замінює deterministic calculations.
+Live observation використовує той самий canonical market path, що й replay. Швидкий ingestion/storage/portfolio math не залежить від LLM. AI працює над нормалізованими структурами й не замінює deterministic calculations.
 
-У V1 реальні ставки **вимкнені**. Реальний bookmaker/account execution активується лише після окремих post-V1 доказів якості, ризик-контролю, прав/умов інтеграції та безпеки. Пріоритет інтеграцій: official API -> sanctioned integration -> permitted browser automation. Майбутній execution layer повинен підтримувати account/balance readback, event/market/selection verification, bet-slip preparation, stake entry, odds/slippage recheck, bookmaker acknowledgement, external bet ID, open/settled position readback, reconciliation і duplicate-bet prevention.
+У V1 реальні ставки **вимкнені**. Реальний bookmaker/account execution активується лише після окремих post-V1 доказів якості, risk control, прав/умов інтеграції та execution safety. Пріоритет інтеграцій: official API -> sanctioned integration -> permitted browser automation. Майбутній execution layer повинен підтримувати account/balance readback, event/market/selection verification, bet-slip preparation, stake-vector entry, odds/slippage recheck, bookmaker acknowledgement, external bet IDs, open/settled position readback, reconciliation, partial multi-leg recovery та duplicate-bet prevention.
 
 ### Run
 
@@ -46,31 +63,37 @@ powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
 
 ## Development model
 
-- `PRODUCT-WIDE` — canonical contracts, sport/market/event model, storage, replay, portfolio math, agents, learning/evaluation, observability, Windows/accessibility, provider interfaces and future bookmaker/execution interfaces.
+- `PRODUCT-WIDE` — canonical contracts, sport/market/event model, storage, replay, portfolio math, agents, learning/evaluation, observability, Windows/accessibility, provider interfaces and future live/bookmaker/execution interfaces.
 - `V1-CRITICAL-PATH` — shortest path to the first runnable Windows proof release without money-moving execution.
-- `POST-V1 EXECUTION` — professional paper qualification -> bookmaker capability/account read -> supervised execution -> real ledger/reconciliation -> bounded autonomy.
+- `POST-V1 LIVE` — professional paper/live-observation qualification -> live price movement -> arbitrage/dutching/hedging -> whole-portfolio min-P&L.
+- `POST-V1 EXECUTION` — bookmaker capability/account read -> supervised execution -> real ledger/reconciliation -> bounded autonomy.
 
 ## Work labels / lane tags
 
-`PRODUCT-FOUNDATION`, `V1-CRITICAL`, `V1-QA`, `DATA`, `REPLAY`, `PORTFOLIO`, `AGENTS`, `LEARNING`, `PROVIDER`, `PERFORMANCE`, `WINDOWS`, `ACCESSIBILITY`, `RELEASE`, `BOOKMAKER`, `EXECUTION`, `DOCS`.
+`PRODUCT-FOUNDATION`, `V1-CRITICAL`, `V1-QA`, `DATA`, `REPLAY`, `PORTFOLIO`, `AGENTS`, `LEARNING`, `PROVIDER`, `LIVE`, `ARBITRAGE`, `PERFORMANCE`, `WINDOWS`, `ACCESSIBILITY`, `RELEASE`, `BOOKMAKER`, `EXECUTION`, `DOCS`.
 
 ## Canonical control
 
 - Repository: `Oleksii-debug/Autosport`
-- Global coordination: GitHub Issue #1
+- Global coordination / product truth: GitHub Issue #1
+- Continuous roadmap: GitHub Issue #198
+- Mathematical intelligence: GitHub Issue #213
+- Live market / arbitrage / dutching / outcome-independent portfolio program: GitHub Issue #355
+- Generic opportunity decision contract: GitHub Issue #356
 - Long-horizon bookmaker execution program: GitHub Issue #353
 - Human-readable master specification: Google Drive folder `Автоспорт`, document `АВТОСПОРТ — MASTER TECHNICAL PROJECT`
 
 ## Product progression
 
-- **V1 — Windows Paper/Replay Proof Release**
+- **V1 — Windows Paper/Replay/Live-Observation Proof Release**
 - **V1.0.x — Reliability / Bug Bash**
-- **Professional Paper Qualification — long-running bankroll/risk/model proof**
+- **Professional Paper + Live Qualification — bankroll/risk/live-opportunity proof**
+- **Live Portfolio Intelligence — arbitrage/dutching/hedging/min-P&L**
 - **Bookmaker Read-Only — capability, account/balance, limits, open/settled positions**
-- **Supervised Execution — prepared bet + human confirmation**
-- **Real Execution Ledger / Reconciliation**
+- **Supervised Execution — prepared single/multi-action plan + human confirmation**
+- **Real Execution Ledger / Reconciliation — including partial multi-leg safety**
 - **Bounded Autonomous Execution — only inside explicit user limits and kill-switch policy**
-- **Mathematical Intelligence / Multi-Sport / Multi-Provider expansion**
+- **Continuous Mathematical Intelligence / Multi-Sport / Multi-Provider expansion**
 
 `HUMAN_TESTED=false`  
 `NVDA_VERIFIED=false`  

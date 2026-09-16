@@ -20,6 +20,14 @@ When either minimum is unproven, the optimizer does not rank the observed minimu
 
 Expected-case change retains the scenario engine's expected-value mode. Sampled independent-group expectation remains sampled/assumption-bound and is not relabeled exact.
 
+## Outcome-independent truth
+
+`OUTCOME_INDEPENDENT_POSITIVE` is a stronger mature-product truth label defined by GitHub Issue #355. It must **not** be inferred from this candidate optimizer's observed or expected metrics alone.
+
+The label is permitted only for an exact executable position/stake vector after the complete relevant terminal outcome space has been proven and every terminal state has `net P&L > 0`, including applicable settlement rules, stake granularity, provider/account limits, quote freshness/slippage, fees/commission/tax, partial acceptance/rejection and execution sequencing assumptions.
+
+If any required state or execution fact is incomplete, sampled, approximate, stale or otherwise unproven, use a weaker label such as `THEORETICAL_ARBITRAGE_ONLY`, `EXECUTION_RISK_PRESENT`, `PARTIAL_COVERAGE`, `HEDGED_BUT_NOT_GUARANTEED` or `RISKED_PORTFOLIO`. Exact-vs-approximate truth must survive candidate generation, portfolio planning and later execution planning without promotion.
+
 ## Scenario and candidate validation
 
 Final portfolio-aware evaluation requires explicit `ScenarioGroup` definitions. It fails closed when an existing ticket or candidate quote is outside the scenario space, a quote appears in multiple scenario groups, one candidate contains two mutually exclusive outcomes from one group, a quote key is not canonical `event|market|selection`, or its declared event id disagrees with the quote key.

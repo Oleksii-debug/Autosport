@@ -2,6 +2,7 @@ import inspect
 
 from autosport.windows_layout import (
     WINDOWS_SHELL_AUTOMATION_IDS,
+    WINDOWS_SHELL_DETAILS_VISIBLE_ROWS,
     compact_surface_heights,
     configure_windows_product_shell_accessibility,
     install_windows_product_shell,
@@ -11,9 +12,13 @@ from autosport.windows_layout import (
 class _Widget:
     def __init__(self):
         self.height = None
+        self.pady = None
 
     def configure(self, **kwargs):
         self.height = kwargs.get("height")
+
+    def pack_configure(self, **kwargs):
+        self.pady = kwargs.get("pady")
 
 
 class _App:
@@ -22,6 +27,9 @@ class _App:
         self.tickets = _Widget()
         self.evaluation = _Widget()
         self.log = _Widget()
+        self.tickets_label = _Widget()
+        self.evaluation_label = _Widget()
+        self.log_label = _Widget()
 
 
 def test_compact_surface_heights_keep_all_critical_scrolling_surfaces_visible():
@@ -33,6 +41,10 @@ def test_compact_surface_heights_keep_all_critical_scrolling_surfaces_visible():
     assert app.tickets.height == 4
     assert app.evaluation.height == 3
     assert app.log.height == 2
+    assert app.tickets_label.pady == (6, 2)
+    assert app.evaluation_label.pady == (6, 2)
+    assert app.log_label.pady == (6, 2)
+    assert WINDOWS_SHELL_DETAILS_VISIBLE_ROWS == 1
 
 
 def test_windows_product_shell_has_stable_uia_ids_and_keyboard_navigation():

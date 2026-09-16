@@ -8,6 +8,7 @@ import tk_uia
 from .gui import AUTOMATION_IDS
 from .integrity import atomic_write_json
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
+from .windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
 
 
 _REQUIRED_PATTERNS = {
@@ -24,6 +25,10 @@ _REQUIRED_PATTERNS = {
     AUTOMATION_IDS["live_quotes"]: set(),
     AUTOMATION_IDS["evaluation"]: set(),
     WINDOWS_BANKROLL_AUTOMATION_ID: {"VALUE"},
+    WINDOWS_SHELL_AUTOMATION_IDS["navigation"]: {"VALUE"},
+    WINDOWS_SHELL_AUTOMATION_IDS["state"]: {"VALUE"},
+    WINDOWS_SHELL_AUTOMATION_IDS["open"]: {"INVOKE"},
+    WINDOWS_SHELL_AUTOMATION_IDS["details"]: set(),
 }
 
 _EXPECTED_ROLES = {
@@ -40,12 +45,17 @@ _EXPECTED_ROLES = {
     AUTOMATION_IDS["live_quotes"]: "LIST",
     AUTOMATION_IDS["evaluation"]: "LIST",
     WINDOWS_BANKROLL_AUTOMATION_ID: "TEXT",
+    WINDOWS_SHELL_AUTOMATION_IDS["navigation"]: "COMBO_BOX",
+    WINDOWS_SHELL_AUTOMATION_IDS["state"]: "TEXT",
+    WINDOWS_SHELL_AUTOMATION_IDS["open"]: "PUSH_BUTTON",
+    WINDOWS_SHELL_AUTOMATION_IDS["details"]: "LIST",
 }
 
 _ROW_CONTROLS = {
     AUTOMATION_IDS["tickets"],
     AUTOMATION_IDS["live_quotes"],
     AUTOMATION_IDS["evaluation"],
+    WINDOWS_SHELL_AUTOMATION_IDS["details"],
 }
 
 _BLOCKING_GAPS = {
@@ -79,22 +89,29 @@ def _enum_name(value: Any) -> str | None:
     return str(getattr(value, "name", value))
 
 
+def _readonly_entry(widget: Any) -> bool:
+    if widget is None:
+        return False
+    return str(widget.cget("state")) == "readonly" and bool(
+        widget.instate(("readonly", "!disabled"))
+    )
+
+
 def _bankroll_summary_is_readonly(app: WindowsAutosportApp) -> bool:
     """Bind packaged accessibility evidence to the actual Tk bankroll widget state."""
+    return _readonly_entry(getattr(app, "bank_summary", None))
 
-    bank_summary = getattr(app, "bank_summary", None)
-    if bank_summary is None:
-        return False
-    return (
-        str(bank_summary.cget("state")) == "readonly"
-        and bool(bank_summary.instate(("readonly", "!disabled")))
-    )
+
+def _shell_state_is_readonly(app: WindowsAutosportApp) -> bool:
+    """Bind shell presentation-state evidence to its actual Tk readonly state."""
+    return _readonly_entry(getattr(app, "shell_state", None))
 
 
 def summarize_description(
     description: Any,
     *,
     bankroll_readonly: bool | None = None,
+    shell_state_readonly: bool | None = None,
 ) -> dict[str, Any]:
     expected_ids = set(_REQUIRED_PATTERNS)
     controls: dict[int, dict[str, Any]] = {}
@@ -148,6 +165,14 @@ def summarize_description(
                 f"automation_id={WINDOWS_BANKROLL_AUTOMATION_ID}: bankroll summary is not runtime readonly"
             )
 
+    shell_state_id = WINDOWS_SHELL_AUTOMATION_IDS["state"]
+    if shell_state_id in controls:
+        controls[shell_state_id]["read_only"] = shell_state_readonly is True
+        if shell_state_readonly is not True:
+            failures.append(
+                f"automation_id={shell_state_id}: shell state is not runtime readonly"
+            )
+
     provider_trouble = [str(item) for item in description.provider_trouble]
     if provider_trouble:
         failures.extend(f"provider trouble: {item}" for item in provider_trouble)
@@ -161,7 +186,8 @@ def summarize_description(
         "providers_stood_down_because": description.providers_stood_down_because,
         "evidence_scope": (
             "in-process tk-uia annotation/provider audit plus runtime Tk readonly-state audit "
-            "of the packaged Windows GUI class; not external UIA client or NVDA speech proof"
+            "of the packaged Windows GUI and canonical product-shell controls; not external UIA "
+            "client or NVDA speech proof"
         ),
         "human_tested": False,
         "nvda_verified": False,
@@ -180,6 +206,7 @@ def run_accessibility_audit(output_path: str | Path) -> int:
         report = summarize_description(
             tk_uia.describe(app),
             bankroll_readonly=_bankroll_summary_is_readonly(app),
+            shell_state_readonly=_shell_state_is_readonly(app),
         )
     except Exception as exc:
         report = {

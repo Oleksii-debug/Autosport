@@ -1090,7 +1090,7 @@ def evaluate_champion_challenger(
                     "primary_metric": protocol.primary_metric,
                     "champion_value": str(champion_value),
                     "challenger_value": str(challenger_value),
-                    "delta": str(delta),
+                    "delta": format(delta, "f"),
                     "guardrails": {
                         rule.metric: {
                             "champion": str(metric(champion, rule.metric)),

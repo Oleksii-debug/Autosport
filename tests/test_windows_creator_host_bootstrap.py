@@ -14,7 +14,9 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 _BOOTSTRAP = _ROOT / "scripts" / "build_windows.ps1"
+_FENCE_BOOTSTRAP = _ROOT / "scripts" / "build_windows_creator_fence.ps1"
 _BODY = _ROOT / "scripts" / "build_windows_body.ps1"
+_REVIEWED_FENCE_BLOB = "45623f3fed4d15af232f4cc0ab210abb16c16bef"
 _REVIEWED_BODY_BLOB = "6116d30fd70aa5c0f7f115b03fdf27170d2d53c4"
 
 
@@ -29,30 +31,60 @@ def _git_blob_sha(data: bytes) -> str:
     ).hexdigest()
 
 
-def test_creator_host_fence_precedes_exact_release_body_and_native_orchestrator() -> None:
+def test_creator_host_privilege_drop_precedes_fence_and_exact_release_body() -> None:
     bootstrap = _BOOTSTRAP.read_text(encoding="utf-8")
+    fence_bootstrap = _FENCE_BOOTSTRAP.read_text(encoding="utf-8")
     body = _BODY.read_text(encoding="utf-8")
 
+    privilege_drop = (
+        "[Autosport.Release.CreatorHostPrivilegeBootstrap]::"
+        "RemoveSeDebugPrivilegeAndVerifyAbsent()"
+    )
+    fence_script_execute = "& $creatorFenceScriptBlock"
     fence = "$creatorFence = [Autosport.Release.CreatorHostFence]::Acquire()"
-    body_lookup = "$bodyEntry = (& $gitExecutable ls-tree $sourceSha -- 'scripts/build_windows_body.ps1').Trim()"
+    body_lookup = (
+        "$bodyEntry = (& $gitExecutable ls-tree $sourceSha -- "
+        "'scripts/build_windows_body.ps1').Trim()"
+    )
     body_execute = "& $creatorBodyTemp"
     native_load = "Add-Type -Path $trustedPyInstallerOrchestratorBoundary"
     native_run = "[Autosport.Release.BirthProtectedPyInstaller]::Run("
 
+    assert _git_blob_sha(_FENCE_BOOTSTRAP.read_bytes()) == _REVIEWED_FENCE_BLOB
     assert _git_blob_sha(_BODY.read_bytes()) == _REVIEWED_BODY_BLOB
-    assert "private const uint DANGEROUS_PROCESS_ACCESS = 0x000C006A;" in bootstrap
-    assert "RequireNoUntrustedPreexistingAuthority();" in bootstrap
-    assert "RequireSeDebugNotAssigned();" in bootstrap
-    assert "NtQuerySystemInformation(" in bootstrap
-    assert "SetSecurityInfo(" in bootstrap
-    assert "AUTOSPORT_CREATOR_FENCE_FRESH_OPEN_DENIAL=PASS" in bootstrap
-    assert bootstrap.index(fence) < bootstrap.index(body_lookup) < bootstrap.index(body_execute)
+
+    # The hosted-runner token must lose SeDebugPrivilege rather than merely have
+    # it disabled. A second assignment attempt must prove it is no longer assigned.
+    assert "private const uint SE_PRIVILEGE_REMOVED = 0x00000004;" in bootstrap
+    assert "private const int ERROR_NOT_ALL_ASSIGNED = 1300;" in bootstrap
+    assert "Attributes = SE_PRIVILEGE_REMOVED" in bootstrap
+    assert bootstrap.count("AdjustTokenPrivileges(") >= 3  # declaration + remove + verify
+    assert "verificationError != ERROR_NOT_ALL_ASSIGNED" in bootstrap
+    assert "SeDebugPrivilege remained assigned after irreversible removal attempt" in bootstrap
+    assert "AUTOSPORT_CREATOR_SEDEBUG_REMOVAL=PASS" in bootstrap
+
+    # The existing creator fence is reused byte-for-byte from one read snapshot;
+    # the privilege drop happens before those bytes are parsed/executed.
+    assert f"$expectedCreatorFenceBlob = '{_REVIEWED_FENCE_BLOB}'" in bootstrap
+    assert "[System.IO.FileShare]::Read" in bootstrap
+    assert "[ScriptBlock]::Create($creatorFenceText)" in bootstrap
+    assert bootstrap.index(privilege_drop) < bootstrap.index(fence_script_execute)
+
+    assert "private const uint DANGEROUS_PROCESS_ACCESS = 0x000C006A;" in fence_bootstrap
+    assert "RequireNoUntrustedPreexistingAuthority();" in fence_bootstrap
+    assert "RequireSeDebugNotAssigned();" in fence_bootstrap
+    assert "NtQuerySystemInformation(" in fence_bootstrap
+    assert "SetSecurityInfo(" in fence_bootstrap
+    assert "AUTOSPORT_CREATOR_FENCE_FRESH_OPEN_DENIAL=PASS" in fence_bootstrap
+    assert fence_bootstrap.index(fence) < fence_bootstrap.index(body_lookup) < fence_bootstrap.index(body_execute)
     assert native_load not in bootstrap
     assert native_run not in bootstrap
+    assert native_load not in fence_bootstrap
+    assert native_run not in fence_bootstrap
     assert native_load in body
     assert body.count(native_run) == 2
-    assert "creator-host build body blob is not the reviewed predecessor body" in bootstrap
-    assert bootstrap.index(body_execute) < bootstrap.index("$creatorFence.Dispose()")
+    assert "creator-host build body blob is not the reviewed predecessor body" in fence_bootstrap
+    assert fence_bootstrap.index(body_execute) < fence_bootstrap.index("$creatorFence.Dispose()")
 
 
 @pytest.mark.skipif(
@@ -160,6 +192,7 @@ def test_used_then_closed_vm_write_authority_cannot_reach_release_body(tmp_path:
 
     stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
     stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+    assert "AUTOSPORT_CREATOR_SEDEBUG_REMOVAL=PASS" in stdout, stderr
     assert "AUTOSPORT_CREATOR_PRE_FENCE_MUTATION_OBSERVED=PASS" in stdout, stderr
     assert "AUTOSPORT_CREATOR_FENCE_FRESH_OPEN_DENIAL=PASS" in stdout, stderr
     assert "AUTOSPORT_CREATOR_RELEASE_BODY_LOADED=false" in stdout, stderr

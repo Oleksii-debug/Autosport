@@ -648,6 +648,11 @@ class ScientificRegistry:
         return envelope
 
     def append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
+        if record.record_type == "PromotionDecision":
+            raise PromotionEvidenceError("promotion decisions must be recorded through record_promotion")
+        return self._append(record, allow_repeat_experiment=allow_repeat_experiment)
+
+    def _append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
         entry = self._entry(record)
         if type(allow_repeat_experiment) is not bool:
             raise ValueError("allow_repeat_experiment must be boolean")
@@ -784,7 +789,7 @@ class ScientificRegistry:
         matching_experiment = matching_experiment_entry["payload"]
         if bundle["payload"].get("dataset_snapshot_id") != matching_experiment.get("dataset_snapshot_id"):
             raise PromotionEvidenceError("evaluation bundle/experiment dataset lineage mismatch")
-        feature = require("FeatureSet", matching_experiment["feature_set_id"])
+        require("FeatureSet", matching_experiment["feature_set_id"])
         if model is not None:
             if model["payload"].get("research_protocol_id") != matching_experiment.get("research_protocol_id"):
                 raise PromotionEvidenceError("candidate model/experiment protocol lineage mismatch")
@@ -797,7 +802,7 @@ class ScientificRegistry:
                 raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
             if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:
                 raise PromotionEvidenceError("PROMOTE requires a positive durable experiment outcome")
-        return self.append(decision)
+        return self._append(decision)
 
     def champion_strategy(self, *, as_of: str) -> str | None:
         decisions = self.causal_records("PromotionDecision", as_of=as_of)

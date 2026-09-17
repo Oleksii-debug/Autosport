@@ -426,6 +426,44 @@ class RealExecutionLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock_path = self.path.with_name(self.path.name + ".writer.lock")
         self._thread_lock = threading.RLock()
+        # False until this instance has proven both the visible file contents and,
+        # on POSIX, the directory entry naming the ledger durable.
+        self._path_durable = False
+
+    def _sync_parent_directory(self) -> None:
+        """Durably publish this ledger pathname on platforms that require it."""
+
+        if os.name == "nt":
+            # Python maps os.fsync() to the Microsoft CRT _commit() on Windows.
+            # The append path always fsyncs the just-created file before reaching
+            # this hook, and Windows has no POSIX directory-fd fsync contract.
+            return
+
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_fd = os.open(self.path.parent, flags)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def _ensure_existing_path_durable(self) -> None:
+        """Re-establish a failed/unknown publish barrier before trusting events."""
+
+        if self._path_durable or not self.path.exists():
+            return
+        try:
+            # Re-fsync the visible file before publishing its directory entry.
+            # Opening in append mode does not change a valid existing ledger.
+            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._sync_parent_directory()
+        except OSError as exc:
+            self._path_durable = False
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger durability barrier failed"
+            ) from exc
+        self._path_durable = True
 
     def _mutate(self, operation: Callable[[], _T]) -> _T:
         with self._thread_lock:
@@ -548,7 +586,10 @@ class RealExecutionLedger:
         return events
 
     def _events(self) -> list[dict[str, Any]]:
-        return self._parse(self.path.read_bytes()) if self.path.exists() else []
+        if not self.path.exists():
+            return []
+        self._ensure_existing_path_durable()
+        return self._parse(self.path.read_bytes())
 
     def _append(
         self,
@@ -570,10 +611,20 @@ class RealExecutionLedger:
         }
         self._validate_event(event)
         envelope = _canonical({"sha256": _digest(event), "event": event})
-        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(envelope + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        path_existed_before = self.path.exists()
+        try:
+            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(envelope + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            if not path_existed_before or not self._path_durable:
+                self._sync_parent_directory()
+        except OSError as exc:
+            self._path_durable = False
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger durability barrier failed"
+            ) from exc
+        self._path_durable = True
 
     @staticmethod
     def _plan_event(

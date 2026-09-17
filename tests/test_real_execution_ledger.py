@@ -1,7 +1,9 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
@@ -63,6 +65,69 @@ def plan(*actions: ExecutionAction, plan_id: str = "p1") -> ExecutionPlan:
 
 
 class RealExecutionLedgerTests(unittest.TestCase):
+    def test_first_create_orders_file_sync_before_path_publication_barrier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            current = plan(action())
+            calls: list[str] = []
+            real_fsync = os.fsync
+
+            def tracked_file_sync(fd: int) -> None:
+                calls.append("file")
+                real_fsync(fd)
+
+            def tracked_directory_sync() -> None:
+                self.assertTrue(path.exists())
+                calls.append("directory")
+
+            with (
+                patch(
+                    "autosport.real_execution_ledger.os.fsync",
+                    side_effect=tracked_file_sync,
+                ),
+                patch.object(
+                    RealExecutionLedger,
+                    "_sync_parent_directory",
+                    side_effect=tracked_directory_sync,
+                ),
+            ):
+                self.assertEqual(
+                    ledger.reserve_plan(current),
+                    current.fingerprint,
+                )
+
+            self.assertEqual(calls, ["file", "directory"])
+
+    def test_failed_first_create_publish_barrier_never_returns_reservation_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            current = plan(action())
+
+            with patch.object(
+                RealExecutionLedger,
+                "_sync_parent_directory",
+                side_effect=(OSError("injected directory fsync failure"), None),
+            ) as sync_parent:
+                with self.assertRaisesRegex(
+                    ExecutionLedgerIntegrityError,
+                    "durability barrier failed",
+                ):
+                    ledger.reserve_plan(current)
+
+                # The first envelope may be visible after a failed durability
+                # barrier, but no reservation authority was returned. A retry
+                # must re-establish the barrier before treating it as durable.
+                self.assertTrue(path.exists())
+                self.assertEqual(
+                    ledger.reserve_plan(current),
+                    current.fingerprint,
+                )
+                self.assertEqual(sync_parent.call_count, 2)
+
+            self.assertEqual(ledger.verify_integrity(), 1)
+
     def test_exact_plan_reservation_idempotent_but_conflict_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")

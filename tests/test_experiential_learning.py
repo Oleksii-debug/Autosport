@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from autosport.experiential_learning import PolicyRetestSpec, run_policy_retest
@@ -58,6 +59,17 @@ class ExperientialLearningFactoryBridgeTests(unittest.TestCase):
         )
         return predecessor, successor, evidence
 
+    @staticmethod
+    def _protocol_entry(policy: BanditPolicyState, *, config_sha256: str | None = None):
+        return SimpleNamespace(
+            payload={
+                "binding": {
+                    "code_config_sha256": config_sha256 or policy.config_sha256,
+                },
+                "environment_sha256": policy.environment_id,
+            }
+        )
+
     def _spec(self):
         return PolicyRetestSpec(
             experiment_id="experiment-experiential-v1",
@@ -104,12 +116,20 @@ class ExperientialLearningFactoryBridgeTests(unittest.TestCase):
             registry = ScientificRegistry.initialize_pristine(root / "scientific_registry.json")
             runner = ExperimentRunner(registry, FactoryArtifactStore(root / "artifacts"))
             rule = PromotionRule("mse", 0.0)
-            with patch.object(
-                ExperimentRunner,
-                "run_baseline_candidate",
-                autospec=True,
-                return_value=expected,
-            ) as delegated:
+            with (
+                patch.object(
+                    ScientificRegistry,
+                    "get",
+                    autospec=True,
+                    return_value=self._protocol_entry(successor),
+                ),
+                patch.object(
+                    ExperimentRunner,
+                    "run_baseline_candidate",
+                    autospec=True,
+                    return_value=expected,
+                ) as delegated,
+            ):
                 result = run_policy_retest(
                     runner,
                     predecessor_policy=predecessor,
@@ -127,6 +147,29 @@ class ExperientialLearningFactoryBridgeTests(unittest.TestCase):
         self.assertEqual(called_spec.research_protocol_id, successor.protocol_id)
         self.assertEqual(called_spec.seed, successor.seed)
         self.assertEqual(delegated.call_args.kwargs["rule"], rule)
+
+    def test_retest_rejects_policy_config_not_frozen_in_protocol(self) -> None:
+        predecessor, successor, evidence = self._lineage()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = ScientificRegistry.initialize_pristine(root / "scientific_registry.json")
+            runner = ExperimentRunner(registry, FactoryArtifactStore(root / "artifacts"))
+            with patch.object(
+                ScientificRegistry,
+                "get",
+                autospec=True,
+                return_value=self._protocol_entry(successor, config_sha256="4" * 64),
+            ):
+                with self.assertRaisesRegex(ValueError, "config does not match frozen"):
+                    run_policy_retest(
+                        runner,
+                        predecessor_policy=predecessor,
+                        challenger_policy=successor,
+                        update_evidence=evidence,
+                        spec=self._spec(),
+                        points=(),
+                        rule=PromotionRule("mse", 0.0),
+                    )
 
     def test_retest_rejects_policy_successor_rebinding_before_factory_call(self) -> None:
         predecessor, successor, evidence = self._lineage()

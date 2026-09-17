@@ -114,6 +114,63 @@ def test_persist_first_buffer_writes_durable_history_before_live_state() -> None
             store.close()
 
 
+def test_persisted_same_sequence_conflict_is_terminal_and_quarantined() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        store = SQLiteMarketStore(Path(directory) / "market.db")
+        mirror = MarketMirror()
+        buffer = MarketMirrorUpdateBuffer(mirror, store=store)
+        first = _event("provider-a", 1, "2.00")
+        conflict = _event("provider-a", 1, "9.99")
+        try:
+            buffer.submit(first)
+            assert len(buffer.drain_provider("provider-a").applied) == 1
+
+            buffer.submit(conflict)
+            drained = buffer.drain_provider("provider-a")
+
+            assert not drained.applied
+            assert len(drained.quarantined) == 1
+            assert drained.quarantined[0].error_type == "ValueError"
+            assert drained.remaining == 0
+            assert store.events() == [first]
+            assert mirror.get("provider-a", "event-1", "winner", "home") == first
+        finally:
+            store.close()
+
+
+def test_tampered_projection_value_error_retains_head_and_rolls_back_history() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        store = SQLiteMarketStore(Path(directory) / "market.db")
+        mirror = MarketMirror()
+        buffer = MarketMirrorUpdateBuffer(mirror, store=store, per_provider_capacity=2)
+        first = _event("provider-a", 1, "2.00")
+        second = _event("provider-a", 2, "2.10")
+        try:
+            buffer.submit(first)
+            assert len(buffer.drain_provider("provider-a").applied) == 1
+            buffer.submit(second)
+
+            store.connection.execute(
+                "UPDATE current_quotes SET sequence=? WHERE source_id=? AND quote_key=?",
+                (999, first.source_id, first.quote_key),
+            )
+            store.connection.commit()
+
+            try:
+                buffer.drain_provider("provider-a")
+            except RuntimeError as exc:
+                assert str(exc) == "durable market append failed before acknowledgement"
+                assert isinstance(exc.__cause__, ValueError)
+            else:
+                raise AssertionError("tampered durable projection did not block acknowledgement")
+
+            assert buffer.queued("provider-a") == 1
+            assert store.events() == [first]
+            assert mirror.get("provider-a", "event-1", "winner", "home") == first
+        finally:
+            store.close()
+
+
 class _FailingProviderStore(SQLiteMarketStore):
     def append(self, event: MarketEvent) -> None:
         if event.source_id == "provider-a":

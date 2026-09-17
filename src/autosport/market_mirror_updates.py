@@ -2,12 +2,21 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from threading import RLock
 
 from .domain import MarketEvent
 from .market_mirror import MarketMirror, MirrorApplyResult
 from .storage import SQLiteMarketStore
+
+
+_SQLITE_INTEGER_MIN = -(2**63)
+_SQLITE_INTEGER_MAX = 2**63 - 1
+
+
+class _DurableStoreFailure(RuntimeError):
+    """A durable append failed without a proven terminal event conflict."""
 
 
 class BufferSubmit(str, Enum):
@@ -52,9 +61,11 @@ class MarketMirrorUpdateBuffer:
     apply/persistence failures retain the queue head and propagate so accepted evidence
     cannot disappear before durable acknowledgement.
 
-    When ``store`` is supplied, draining uses ``MarketMirror.persist_and_apply`` so the
-    canonical ``SQLiteMarketStore`` append completes before live mirror mutation. With
-    no store, the buffer remains an explicitly in-memory composition surface.
+    When ``store`` is supplied, draining appends to the canonical ``SQLiteMarketStore``
+    before live mirror mutation. A store rejection is terminal only when authoritative
+    history proves the incoming source-local identity conflicts with an existing event;
+    otherwise the queue head is retained for retry/repair. With no store, the buffer
+    remains an explicitly in-memory composition surface.
     """
 
     def __init__(
@@ -83,6 +94,41 @@ class MarketMirrorUpdateBuffer:
     def _snapshot(event: MarketEvent) -> MarketEvent:
         return MarketEvent.from_dict(event.to_dict())
 
+    @staticmethod
+    def _source_payload(event: MarketEvent) -> dict[str, object]:
+        payload = event.to_dict()
+        payload.pop("observed_ts", None)
+        payload.pop("ingest_ts", None)
+        return payload
+
+    @staticmethod
+    def _validate_durable_event(event: MarketEvent) -> None:
+        """Fail terminal malformed input before entering the durable append boundary."""
+        if isinstance(event.sequence, bool) or not isinstance(event.sequence, int):
+            raise ValueError("market event sequence must be a non-boolean int")
+        if event.sequence < _SQLITE_INTEGER_MIN or event.sequence > _SQLITE_INTEGER_MAX:
+            raise ValueError("market event sequence must fit signed 64-bit SQLite INTEGER")
+        for field_name, value in (
+            ("observed_ts", event.observed_ts),
+            ("ingest_ts", event.ingest_ts),
+        ):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except (AttributeError, ValueError) as exc:
+                raise ValueError(f"{field_name} must be valid ISO-8601") from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError(f"{field_name} must be timezone-aware ISO-8601")
+
+    def _durable_duplicate_conflict(self, event: MarketEvent) -> bool:
+        """Use authoritative history to distinguish event conflict from store damage."""
+        if self._store is None:
+            return False
+        for existing in self._store.events(event.event_id):
+            if existing.dedupe_key != event.dedupe_key:
+                continue
+            return self._source_payload(existing) != self._source_payload(event)
+        return False
+
     def _provider_drain_lock(self, source_id: str) -> RLock:
         with self._lock:
             return self._provider_drain_locks.setdefault(source_id, RLock())
@@ -90,7 +136,27 @@ class MarketMirrorUpdateBuffer:
     def _apply(self, event: MarketEvent) -> MirrorApplyResult:
         if self._store is None:
             return self._mirror.apply(event)
-        return self._mirror.persist_and_apply(self._store, event)
+
+        self._validate_durable_event(event)
+        try:
+            self._store.append(event)
+        except (TypeError, ValueError) as exc:
+            # Invalid staged input was already rejected above. A remaining store-side
+            # TypeError/ValueError is safe to consume only when canonical history proves
+            # this exact source-local identity is a conflicting duplicate. If history
+            # itself cannot be decoded, that is also a durable integrity failure.
+            try:
+                terminal_conflict = self._durable_duplicate_conflict(event)
+            except (TypeError, ValueError) as integrity_exc:
+                raise _DurableStoreFailure(
+                    "durable market history failed integrity validation"
+                ) from integrity_exc
+            if terminal_conflict:
+                raise
+            raise _DurableStoreFailure(
+                "durable market append failed before acknowledgement"
+            ) from exc
+        return self._mirror.apply(event)
 
     def submit(self, event: MarketEvent) -> BufferSubmitResult:
         if not isinstance(event, MarketEvent):

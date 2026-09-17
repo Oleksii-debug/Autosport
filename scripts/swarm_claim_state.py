@@ -19,6 +19,8 @@ from typing import Any, Mapping, Sequence
 OWNERSHIP_HEADERS = {
     "CLAIM_V1": "claim",
     "CLAIM_RENEW_V1": "renew",
+    "CLAIM_HEARTBEAT_V1": "renew",
+    "LEASE_RENEW_V1": "renew",
     "CLAIM_RELEASE_V1": "release",
 }
 ANY_VERSIONED_HEADER_RE = re.compile(r"^[A-Z][A-Z0-9_ -]*_V\d+$")
@@ -177,6 +179,7 @@ def resolve_comments(
     states: dict[str, dict[str, Any]] = {}
     original_claim_order: list[str] = []
     last_numeric_comment_id: int | None = None
+    server_order_invalid = False
 
     for comment_index, comment in enumerate(comments):
         comment_id = comment.get("id")
@@ -186,6 +189,7 @@ def resolve_comments(
                 last_numeric_comment_id is not None
                 and comment_id < last_numeric_comment_id
             ):
+                server_order_invalid = True
                 malformed.append(
                     _problem(
                         "comment_order",
@@ -338,11 +342,12 @@ def resolve_comments(
                 continue
 
             if event_type == "renew":
+                renewal_header = event["header"]
                 if state is None:
                     malformed.append(
                         _problem(
                             "renew_without_claim",
-                            "CLAIM_RENEW_V1 precedes any CLAIM_V1",
+                            f"{renewal_header} precedes any CLAIM_V1",
                             event=event,
                             run_id=run_id,
                         )
@@ -353,7 +358,7 @@ def resolve_comments(
                     malformed.append(
                         _problem(
                             "renew_after_release",
-                            "CLAIM_RENEW_V1 occurs after CLAIM_RELEASE_V1",
+                            f"{renewal_header} occurs after CLAIM_RELEASE_V1",
                             event=event,
                             run_id=run_id,
                         )
@@ -370,7 +375,7 @@ def resolve_comments(
                     malformed.append(
                         _problem(
                             "missing_lease",
-                            "CLAIM_RENEW_V1 has no LEASE_UNTIL",
+                            f"{renewal_header} has no LEASE_UNTIL",
                             event=event,
                             run_id=run_id,
                         )
@@ -410,7 +415,7 @@ def resolve_comments(
                     malformed.append(
                         _problem(
                             "renew_identity_conflict",
-                            "CLAIM_RENEW_V1 conflicts with immutable claim fields: "
+                            f"{renewal_header} conflicts with immutable claim fields: "
                             + ", ".join(identity_conflicts),
                             event=event,
                             run_id=run_id,
@@ -451,6 +456,15 @@ def resolve_comments(
             state["release_reason"] = fields.get("REASON")
             state["release_evidence"] = fields.get("EVIDENCE")
             state["ambiguous"] = False
+
+    # Numeric GitHub issue-comment ids are monotonic in server order. Once that
+    # invariant is broken, event precedence cannot be trusted. Preserve the
+    # diagnostic evidence but grant no ownership from the affected history.
+    if server_order_invalid:
+        for run_id in original_claim_order:
+            state = states[run_id]
+            state["ambiguous"] = True
+            state["latest_event"] = "ambiguous"
 
     live_runs: list[dict[str, Any]] = []
     released_runs: list[dict[str, Any]] = []
@@ -522,7 +536,7 @@ def _load_comments(path: str) -> Sequence[Mapping[str, Any]]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Fold Autosport CLAIM_V1/CLAIM_RENEW_V1/CLAIM_RELEASE_V1 "
+            "Fold Autosport CLAIM_V1/CLAIM_HEARTBEAT_V1/renew/release "
             "events from server-ordered GitHub issue comments."
         )
     )

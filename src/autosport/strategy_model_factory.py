@@ -109,7 +109,7 @@ class _StagedFactoryArtifactStore:
 class ExperimentRunner(_impl.ExperimentRunner):
     """Factory runner with one fail-closed workspace transaction per candidate.
 
-    The legacy implementation remains the scientific/evaluation authority. This
+    The existing implementation remains the scientific/evaluation authority. This
     facade changes only the durable commit boundary: all candidate registry rows and
     artifacts are first validated against one lock-protected snapshot, staged in an
     isolated workspace, and published only after the complete promotion lineage is
@@ -172,3 +172,19 @@ class ExperimentRunner(_impl.ExperimentRunner):
                     staged_store._rollback(created_artifacts, publish_error)
                     raise
                 return result
+
+
+# The implementation split is internal-only. Preserve the original public module
+# identity for dataclasses/functions so pickle/introspection callers do not observe a
+# compatibility break merely because the durable-commit facade moved the definitions.
+for _public_name, _public_value in vars(_impl).items():
+    if (
+        not _public_name.startswith("_")
+        and _public_name != "ExperimentRunner"
+        and getattr(_public_value, "__module__", None) == _impl.__name__
+    ):
+        try:
+            _public_value.__module__ = __name__
+        except (AttributeError, TypeError):
+            pass
+del _public_name, _public_value

@@ -433,30 +433,84 @@ def test_promotion_rejects_evidence_not_available_at_decision_time(tmp_path):
         registry.record_promotion(early)
 
 
+def test_direct_promotion_append_cannot_bypass_evidence_validation(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    decision = PromotionDecision(
+        "promotion-bypass",
+        PromotionAction.PROMOTE,
+        "strategy-missing",
+        "protocol-missing",
+        SHA_A,
+        "eval-missing",
+        SHA_B,
+        T3,
+    )
+
+    with pytest.raises(PromotionEvidenceError, match="record_promotion"):
+        registry.append(decision)
+
+
 def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    earlier = PromotionDecision(
+    foundation = _foundation(registry)
+    first_experiment = _experiment(outcome=ResearchOutcome.POSITIVE)
+    registry.append(first_experiment)
+
+    first = PromotionDecision(
         "promotion-offset-earlier",
         PromotionAction.PROMOTE,
-        "strategy-offset-1",
-        "protocol-unused",
-        SHA_A,
-        "eval-unused-1",
-        SHA_B,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        SHA_D,
         "2026-01-04T01:30:00+02:00",
+        candidate_model_version_id="model-1",
+    )
+    registry.record_promotion(first)
+
+    strategy2 = StrategyVersion(
+        "strategy-offset-2",
+        "canonical-strategy",
+        SHA_C,
+        SHA_D,
+        SHA_A,
+        T2,
+        model_version_id="model-1",
+        predecessor_strategy_version_id="strategy-1",
+    )
+    bundle2 = EvaluationBundleRef(
+        "eval-offset-2",
+        SHA_A,
+        SHA_C,
+        "dataset-1",
+        foundation["protocol"].protocol_sha256,
+        (SHA_B,),
+        T2,
+    )
+    registry.append(strategy2)
+    registry.append(bundle2)
+    registry.append(
+        replace(
+            first_experiment,
+            experiment_id="experiment-offset-2",
+            strategy_version_id="strategy-offset-2",
+            evaluation_bundle_id="eval-offset-2",
+            config_sha256=SHA_C,
+        )
     )
     later = PromotionDecision(
         "promotion-offset-later",
         PromotionAction.PROMOTE,
         "strategy-offset-2",
-        "protocol-unused",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-offset-2",
         SHA_A,
-        "eval-unused-2",
-        SHA_B,
         "2026-01-04T00:00:00+00:00",
-        predecessor_strategy_version_id="strategy-offset-1",
+        predecessor_strategy_version_id="strategy-1",
+        candidate_model_version_id="model-1",
     )
-    registry.append(earlier)
-    registry.append(later)
+    registry.record_promotion(later)
 
     assert registry.champion_strategy(as_of="2026-01-04T01:00:00+00:00") == "strategy-offset-2"

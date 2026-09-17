@@ -87,7 +87,9 @@ def strategy_state_projection(
     )
     strategy_ids = {entry.record_id for entry in strategies}
     decisions = registry.causal_records("PromotionDecision", as_of=as_of)
-    champion = registry.champion_strategy(as_of=as_of)
+    champion = registry.champion_strategy(
+        as_of=as_of, canonical_strategy_id=canonical_strategy_id
+    )
 
     latest_candidate_decision: dict[str, RegistryEntry] = {}
     promoted: set[str] = set()

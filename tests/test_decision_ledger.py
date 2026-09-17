@@ -109,7 +109,7 @@ class DecisionLedgerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
             goal = self._economic_goal()
-            record = self._economic_record(decision_id="generic-not-economic")
+            record = self._record(decision_id="generic-not-economic")
             JsonlDecisionLedger(path).append(record)
 
             with self.assertRaisesRegex(

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Iterable, Protocol
 
 from .decision_ledger import DecisionRecord, JsonlDecisionLedger
 from .domain import MarketEvent, TicketLeg
+from .market_mirror import MarketMirror
 from .paper import PaperBook
 
 
@@ -38,20 +40,103 @@ def agent_composition_sha256(agent_names: Iterable[object]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-@dataclass(slots=True)
+class _LatestQuotesView(Mapping[object, MarketEvent]):
+    """Detached read compatibility over one provider-isolated MarketMirror snapshot.
+
+    Iteration exposes the canonical provider-aware ``(source_id, quote_key)`` keys.
+    Legacy callers may still look up one plain ``quote_key`` when it identifies exactly
+    one provider in the captured snapshot. Ambiguous cross-provider lookups fail closed
+    instead of silently choosing economic evidence from an arbitrary source.
+    """
+
+    def __init__(self, events: Iterable[MarketEvent]) -> None:
+        self._by_source_quote: dict[tuple[str, str], MarketEvent] = {}
+        self._by_quote: dict[str, MarketEvent] = {}
+        self._ambiguous_quotes: set[str] = set()
+        for event in events:
+            provider_key = (event.source_id, event.quote_key)
+            self._by_source_quote[provider_key] = event
+            previous = self._by_quote.get(event.quote_key)
+            if previous is None:
+                self._by_quote[event.quote_key] = event
+            elif previous.source_id != event.source_id:
+                self._ambiguous_quotes.add(event.quote_key)
+
+    def __getitem__(self, key: object) -> MarketEvent:
+        if isinstance(key, tuple) and len(key) == 2:
+            return self._by_source_quote[key]
+        if isinstance(key, str):
+            if key in self._ambiguous_quotes:
+                raise ValueError(
+                    "latest quote_key is ambiguous across providers; "
+                    "use (source_id, quote_key): " + key
+                )
+            return self._by_quote[key]
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(self._by_source_quote)
+
+    def __len__(self) -> int:
+        return len(self._by_source_quote)
+
+
+@dataclass(slots=True, init=False)
 class AgentContext:
     paper_book: PaperBook
-    latest_quotes: dict[str, MarketEvent] = field(default_factory=dict)
     event_count: int = 0
     replay_run_id: str = "unbound"
     decision_ledger: JsonlDecisionLedger | None = None
     notes: list[str] = field(default_factory=list)
+    market_mirror: MarketMirror = field(default_factory=MarketMirror)
+
+    def __init__(
+        self,
+        paper_book: PaperBook,
+        latest_quotes: Mapping[object, MarketEvent] | None = None,
+        event_count: int = 0,
+        replay_run_id: str = "unbound",
+        decision_ledger: JsonlDecisionLedger | None = None,
+        notes: list[str] | None = None,
+        market_mirror: MarketMirror | None = None,
+    ) -> None:
+        """Build agent state while keeping ``MarketMirror`` the sole mutable quote store.
+
+        ``latest_quotes`` remains an initialization compatibility boundary for existing
+        replay/research callers. Its values are copied into the canonical mirror and the
+        input mapping itself is never retained or mutated.
+        """
+
+        self.paper_book = paper_book
+        self.event_count = event_count
+        self.replay_run_id = replay_run_id
+        self.decision_ledger = decision_ledger
+        self.notes = [] if notes is None else notes
+        if market_mirror is not None and not isinstance(market_mirror, MarketMirror):
+            raise TypeError("market_mirror must be a MarketMirror")
+        self.market_mirror = market_mirror if market_mirror is not None else MarketMirror()
+
+        if latest_quotes is not None:
+            if not isinstance(latest_quotes, Mapping):
+                raise TypeError("latest_quotes must be a mapping")
+            for event in latest_quotes.values():
+                if not isinstance(event, MarketEvent):
+                    raise TypeError("latest_quotes values must be MarketEvent instances")
+                self.market_mirror.apply(event)
+
+    @property
+    def latest_quotes(self) -> Mapping[object, MarketEvent]:
+        """Return a detached compatibility view over the canonical Market Mirror.
+
+        Provider-aware tuple keys are the iterable identity. A unique legacy string
+        quote key is accepted for read lookup so causal research callers survive the
+        migration without restoring a second mutable live-quote dictionary.
+        """
+
+        return _LatestQuotesView(self.market_mirror.snapshot())
 
     def market_context_hash(self) -> str:
-        projection = {
-            key: value.to_dict()
-            for key, value in sorted(self.latest_quotes.items())
-        }
+        projection = [event.to_dict() for event in self.market_mirror.snapshot()]
         canonical = json.dumps(projection, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -66,7 +151,7 @@ class MarketMirrorAgent:
     name = "market-mirror"
 
     def on_market_event(self, event: MarketEvent, context: AgentContext) -> None:
-        context.latest_quotes[event.quote_key] = event
+        context.market_mirror.apply(event)
         context.event_count += 1
 
 

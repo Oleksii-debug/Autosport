@@ -191,7 +191,14 @@ def run_endurance(
     try:
         quotes = _fixture_quotes(cfg)
         clock_point = datetime.fromisoformat(quotes[-1].observed_ts) + timedelta(seconds=1)
-        receive_clock = lambda: clock_point.isoformat()
+        receive_clock_tick = 0
+
+        def receive_clock() -> str:
+            nonlocal receive_clock_tick
+            point = clock_point + timedelta(microseconds=receive_clock_tick)
+            receive_clock_tick += 1
+            return point.isoformat()
+
         policy = IngestionPolicy(
             max_batch_size=cfg.batch_size,
             stale_after_seconds=3_600,

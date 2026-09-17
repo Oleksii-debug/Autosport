@@ -9,10 +9,15 @@ from pathlib import Path
 from autosport.ingestion_health import SourceHealthStore
 
 
-def _record_success(store: SourceHealthStore, *, cursor: str) -> None:
+def _record_success(
+    store: SourceHealthStore,
+    *,
+    cursor: str,
+    now: str = "2026-09-14T00:00:00+00:00",
+) -> None:
     store.record_success(
         "source",
-        now="2026-09-14T00:00:00+00:00",
+        now=now,
         received=1,
         accepted=1,
         rejected=0,
@@ -45,22 +50,34 @@ def _hold_writer_lock_then_crash(path: str, acquired) -> None:
     os._exit(0)
 
 
-def _success_rounds(path: str, barrier, rounds: int) -> None:
+def _success_rounds(path: str, barrier, success_turn, failure_turn, rounds: int) -> None:
     store = SourceHealthStore(Path(path))
     for index in range(rounds):
         barrier.wait(timeout=10)
-        _record_success(store, cursor=f"success-{index}")
+        if not success_turn.wait(timeout=10):
+            raise RuntimeError("timed out waiting for success transition turn")
+        success_turn.clear()
+        _record_success(
+            store,
+            cursor=f"success-{index}",
+            now=f"2026-09-14T00:00:00.{index * 2:06d}+00:00",
+        )
+        failure_turn.set()
 
 
-def _failure_rounds(path: str, barrier, rounds: int) -> None:
+def _failure_rounds(path: str, barrier, success_turn, failure_turn, rounds: int) -> None:
     store = SourceHealthStore(Path(path))
     for index in range(rounds):
         barrier.wait(timeout=10)
+        if not failure_turn.wait(timeout=10):
+            raise RuntimeError("timed out waiting for failure transition turn")
+        failure_turn.clear()
         store.record_failure(
             "source",
-            now="2026-09-14T00:00:00+00:00",
+            now=f"2026-09-14T00:00:00.{index * 2 + 1:06d}+00:00",
             error=RuntimeError(f"failure-{index}"),
         )
+        success_turn.set()
 
 
 class SourceHealthMultiprocessLockTests(unittest.TestCase):
@@ -149,14 +166,17 @@ class SourceHealthMultiprocessLockTests(unittest.TestCase):
             ctx = self._context()
             rounds = 6
             barrier = ctx.Barrier(2)
+            success_turn = ctx.Event()
+            failure_turn = ctx.Event()
+            success_turn.set()
             success = ctx.Process(
                 target=_success_rounds,
-                args=(str(path), barrier, rounds),
+                args=(str(path), barrier, success_turn, failure_turn, rounds),
                 name="source-health-success-process",
             )
             failure = ctx.Process(
                 target=_failure_rounds,
-                args=(str(path), barrier, rounds),
+                args=(str(path), barrier, success_turn, failure_turn, rounds),
                 name="source-health-failure-process",
             )
 

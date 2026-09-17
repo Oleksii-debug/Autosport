@@ -750,6 +750,41 @@ class RealExecutionLedger:
                 "stored plan values are invalid"
             ) from exc
 
+    @staticmethod
+    def _acknowledgement_from_dict(value: object) -> ExternalAcknowledgement:
+        expected_fields = {
+            "attempt_id",
+            "external_receipt_id",
+            "status",
+            "acknowledged_at",
+            "accepted_odds",
+            "accepted_stake",
+            "reconciliation_evidence_id",
+        }
+        if not isinstance(value, dict) or set(value) != expected_fields:
+            raise ExecutionLedgerIntegrityError(
+                "stored acknowledgement schema is invalid"
+            )
+        try:
+            acknowledgement = ExternalAcknowledgement(
+                attempt_id=value["attempt_id"],
+                external_receipt_id=value["external_receipt_id"],
+                status=AcknowledgementStatus(value["status"]),
+                acknowledged_at=value["acknowledged_at"],
+                accepted_odds=value["accepted_odds"],
+                accepted_stake=value["accepted_stake"],
+                reconciliation_evidence_id=value["reconciliation_evidence_id"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                "stored acknowledgement values are invalid"
+            ) from exc
+        if acknowledgement.to_dict() != value:
+            raise ExecutionLedgerIntegrityError(
+                "stored acknowledgement payload is not canonical"
+            )
+        return acknowledgement
+
     @classmethod
     def _validate_semantics(cls, events: list[dict[str, Any]]) -> None:
         plan_ids: set[str] = set()
@@ -870,6 +905,26 @@ class RealExecutionLedger:
                             raise ExecutionLedgerIntegrityError(
                                 "UNKNOWN observation precedes attempt submission"
                             )
+                    elif (
+                        followup["event_type"]
+                        == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
+                    ):
+                        acknowledgement = cls._acknowledgement_from_dict(
+                            followup["payload"]
+                        )
+                        if acknowledgement.attempt_id != attempt_id:
+                            raise ExecutionLedgerIntegrityError(
+                                "stored acknowledgement attempt identity mismatch"
+                            )
+                        if acknowledgement.accepted_stake is not None:
+                            requested_stake = _decimal(
+                                action["requested_stake"], "requested_stake"
+                            )
+                            if acknowledgement.accepted_stake > requested_stake:
+                                raise ExecutionLedgerIntegrityError(
+                                    "stored acknowledgement stake exceeds "
+                                    "requested action stake"
+                                )
                     elif (
                         followup["event_type"]
                         == EventType.RECONCILED_NOT_FOUND.value

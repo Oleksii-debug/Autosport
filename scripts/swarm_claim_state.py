@@ -23,6 +23,20 @@ OWNERSHIP_HEADERS = {
 }
 ANY_VERSIONED_HEADER_RE = re.compile(r"^[A-Z][A-Z0-9_ -]*_V\d+$")
 FIELD_RE = re.compile(r"^([A-Z][A-Z0-9_]*)\s*(?:=|:)\s*(.*)$")
+CLAIM_IDENTITY_FIELDS = (
+    "TASK_ID",
+    "SEMANTIC_KEY",
+    "ACCOUNT_ID",
+    "CLAIM_MODE",
+    "INTENDED_SLICE",
+)
+RENEW_IMMUTABLE_FIELDS = {
+    "TASK_ID": "task_id",
+    "SEMANTIC_KEY": "semantic_key",
+    "ACCOUNT_ID": "account_id",
+    "CLAIM_MODE": "claim_mode",
+    "INTENDED_SLICE": "intended_slice",
+}
 
 
 def parse_instant(value: str) -> datetime:
@@ -117,6 +131,26 @@ def _problem(
     return result
 
 
+def _missing_claim_identity_fields(fields: Mapping[str, Any]) -> list[str]:
+    return [
+        field
+        for field in CLAIM_IDENTITY_FIELDS
+        if not str(fields.get(field, "")).strip()
+    ]
+
+
+def _mark_ambiguous(
+    state: dict[str, Any],
+    *,
+    comment_index: int,
+    comment_id: Any,
+) -> None:
+    state["ambiguous"] = True
+    state["latest_event"] = "ambiguous"
+    state["latest_comment_index"] = comment_index
+    state["latest_comment_id"] = comment_id
+
+
 def resolve_comments(
     comments: Sequence[Mapping[str, Any]],
     *,
@@ -142,7 +176,6 @@ def resolve_comments(
     malformed: list[dict[str, Any]] = []
     states: dict[str, dict[str, Any]] = {}
     original_claim_order: list[str] = []
-
     last_numeric_comment_id: int | None = None
 
     for comment_index, comment in enumerate(comments):
@@ -206,16 +239,30 @@ def resolve_comments(
                             run_id=run_id,
                         )
                     )
-                    state["ambiguous"] = True
-                    state["latest_event"] = "ambiguous"
-                    state["latest_comment_index"] = comment_index
-                    state["latest_comment_id"] = comment_id
+                    _mark_ambiguous(
+                        state,
+                        comment_index=comment_index,
+                        comment_id=comment_id,
+                    )
                     continue
+
+                ambiguous = False
+
+                missing_identity = _missing_claim_identity_fields(fields)
+                if missing_identity:
+                    malformed.append(
+                        _problem(
+                            "missing_claim_fields",
+                            "CLAIM_V1 missing required fields: "
+                            + ", ".join(missing_identity),
+                            event=event,
+                            run_id=run_id,
+                        )
+                    )
+                    ambiguous = True
 
                 lease_text = fields.get("LEASE_UNTIL", "").strip()
                 lease_dt: datetime | None = None
-                ambiguous = False
-
                 if not lease_text:
                     malformed.append(
                         _problem(
@@ -242,7 +289,17 @@ def resolve_comments(
 
                 claimed_at_text = fields.get("CLAIMED_AT", "").strip()
                 claimed_at: datetime | None = None
-                if claimed_at_text:
+                if not claimed_at_text:
+                    malformed.append(
+                        _problem(
+                            "missing_claimed_at",
+                            "CLAIM_V1 has no CLAIMED_AT",
+                            event=event,
+                            run_id=run_id,
+                        )
+                    )
+                    ambiguous = True
+                else:
                     try:
                         claimed_at = parse_instant(claimed_at_text)
                     except ValueError as exc:
@@ -258,11 +315,11 @@ def resolve_comments(
 
                 state = {
                     "run_id": run_id,
-                    "task_id": fields.get("TASK_ID"),
-                    "semantic_key": fields.get("SEMANTIC_KEY"),
-                    "account_id": fields.get("ACCOUNT_ID"),
-                    "claim_mode": fields.get("CLAIM_MODE"),
-                    "intended_slice": fields.get("INTENDED_SLICE"),
+                    "task_id": fields.get("TASK_ID", "").strip() or None,
+                    "semantic_key": fields.get("SEMANTIC_KEY", "").strip() or None,
+                    "account_id": fields.get("ACCOUNT_ID", "").strip() or None,
+                    "claim_mode": fields.get("CLAIM_MODE", "").strip() or None,
+                    "intended_slice": fields.get("INTENDED_SLICE", "").strip() or None,
                     "claim_order": len(original_claim_order),
                     "claim_comment_index": comment_index,
                     "claim_comment_id": comment_id,
@@ -301,10 +358,11 @@ def resolve_comments(
                             run_id=run_id,
                         )
                     )
-                    state["ambiguous"] = True
-                    state["latest_event"] = "ambiguous"
-                    state["latest_comment_index"] = comment_index
-                    state["latest_comment_id"] = comment_id
+                    _mark_ambiguous(
+                        state,
+                        comment_index=comment_index,
+                        comment_id=comment_id,
+                    )
                     continue
 
                 lease_text = fields.get("LEASE_UNTIL", "").strip()
@@ -317,10 +375,11 @@ def resolve_comments(
                             run_id=run_id,
                         )
                     )
-                    state["ambiguous"] = True
-                    state["latest_event"] = "ambiguous"
-                    state["latest_comment_index"] = comment_index
-                    state["latest_comment_id"] = comment_id
+                    _mark_ambiguous(
+                        state,
+                        comment_index=comment_index,
+                        comment_id=comment_id,
+                    )
                     continue
 
                 try:
@@ -334,10 +393,34 @@ def resolve_comments(
                             run_id=run_id,
                         )
                     )
-                    state["ambiguous"] = True
-                    state["latest_event"] = "ambiguous"
-                    state["latest_comment_index"] = comment_index
-                    state["latest_comment_id"] = comment_id
+                    _mark_ambiguous(
+                        state,
+                        comment_index=comment_index,
+                        comment_id=comment_id,
+                    )
+                    continue
+
+                identity_conflicts: list[str] = []
+                for source_key, output_key in RENEW_IMMUTABLE_FIELDS.items():
+                    supplied = fields.get(source_key, "").strip()
+                    if supplied and supplied != (state.get(output_key) or ""):
+                        identity_conflicts.append(source_key)
+
+                if identity_conflicts:
+                    malformed.append(
+                        _problem(
+                            "renew_identity_conflict",
+                            "CLAIM_RENEW_V1 conflicts with immutable claim fields: "
+                            + ", ".join(identity_conflicts),
+                            event=event,
+                            run_id=run_id,
+                        )
+                    )
+                    _mark_ambiguous(
+                        state,
+                        comment_index=comment_index,
+                        comment_id=comment_id,
+                    )
                     continue
 
                 state["_lease_dt"] = lease_dt
@@ -345,17 +428,8 @@ def resolve_comments(
                 state["latest_event"] = "renew"
                 state["latest_comment_index"] = comment_index
                 state["latest_comment_id"] = comment_id
-
-                # Renewals may fill missing metadata, but never rewrite the
-                # immutable identity captured by the original claim.
-                for output_key, source_key in (
-                    ("task_id", "TASK_ID"),
-                    ("semantic_key", "SEMANTIC_KEY"),
-                    ("account_id", "ACCOUNT_ID"),
-                    ("claim_mode", "CLAIM_MODE"),
-                ):
-                    if not state.get(output_key) and fields.get(source_key):
-                        state[output_key] = fields[source_key]
+                # A renewal extends only the lease. It cannot rehabilitate or
+                # rewrite malformed/missing identity from the original claim.
                 continue
 
             # A later release terminates the run immediately. This is true even

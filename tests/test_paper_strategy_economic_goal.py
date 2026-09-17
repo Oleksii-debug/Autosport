@@ -105,6 +105,47 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             self.assertEqual(len(context.paper_book.tickets), 0)
             self.assertFalse(ledger_path.exists())
 
+    def test_economic_ledger_failure_leaves_no_ticket_balance_or_acted_residue(self) -> None:
+        class FailingEconomicLedger(JsonlDecisionLedger):
+            def append_economic(self, record, contract):
+                raise OSError("injected economic-ledger write failure")
+
+        goal = self._goal()
+        event = self._event()
+        agent = self._agent(event, goal)
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "decisions.jsonl"
+            book = PaperBook("100")
+            context = AgentContext(
+                book,
+                latest_quotes={event.quote_key: event},
+                replay_run_id="run-1",
+                decision_ledger=FailingEconomicLedger(ledger_path),
+            )
+
+            with self.assertRaisesRegex(OSError, "injected economic-ledger write failure"):
+                agent.on_market_event(event, context)
+
+            self.assertEqual(book.balance, Decimal("100"))
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.committed_stake, Decimal("0"))
+            self.assertFalse(ledger_path.exists())
+
+            # The same agent/event must remain retryable: a failed ledger write must
+            # not leak into the strategy's duplicate-action suppression state.
+            ledger = JsonlDecisionLedger(ledger_path)
+            context.decision_ledger = ledger
+            agent.on_market_event(event, context)
+
+            self.assertEqual(book.balance, Decimal("99"))
+            self.assertEqual(len(book.tickets), 1)
+            records = ledger.verified_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(
+                records[0].payload["ticket_id"],
+                next(iter(book.tickets)),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -447,10 +447,11 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             ledger_path = Path(tmp) / "research-decisions.jsonl"
             book_path = Path(tmp) / "paper-book.json"
             ledger = JsonlDecisionLedger(ledger_path)
+            restart_forecast = self._forecast(probability="0.60")
             book, _ledger, first = self._decide(
                 tmp,
                 candidate=self._candidate(probability="0.60"),
-                forecast=self._forecast(probability="0.60"),
+                forecast=restart_forecast,
                 pipeline=self._goal_pipeline(goal),
                 stake="NaN",
                 market_quotes=[self._market_event()],
@@ -469,7 +470,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                     tmp,
                     book=restarted_book,
                     candidate=self._candidate(probability="0.60"),
-                    forecast=self._forecast(probability="0.60"),
+                    forecast=restart_forecast,
                     pipeline=self._goal_pipeline(goal),
                     stake="NaN",
                     market_quotes=[self._market_event()],

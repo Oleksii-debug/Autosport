@@ -61,9 +61,10 @@ class ProposedTicketRiskContext:
     any bounded loss window, stake-basis equity preserves open stake at cost until
     settlement, and turnover counts every durable ticket stake. A probabilistic
     risk-of-ruin ceiling requires an explicit canonical upper-bound witness in this
-    context; it is never inferred from PaperBook balances. Concentration ceilings
-    still fail closed until whole-portfolio exposure evidence provides a canonical
-    denominator.
+    context; it is never inferred from PaperBook balances. Event/market concentration
+    is derived exactly from canonical open PaperBook stake plus the proposed stake.
+    Provider/sport concentration remains fail-closed until those historical identities
+    have canonical durable authorities.
     """
 
     legs: tuple[TicketLeg, ...]
@@ -207,8 +208,9 @@ class PaperRiskPolicy:
     Session/day loss, drawdown and turnover are enforced conservatively from the
     canonical PaperBook lifecycle and therefore survive snapshot restart without a
     second state authority. Risk-of-ruin remains evidence-gated because a balance
-    history is not a probability model. Concentration limits still fail closed
-    until canonical whole-portfolio exposure evidence exists.
+    history is not a probability model. Event/market concentration is enforced
+    against the whole open stake set; provider/sport concentration remains
+    fail-closed where canonical historical identity is unavailable.
     """
 
     max_ticket_fraction: Decimal = Decimal("0.02")

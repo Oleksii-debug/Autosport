@@ -10,6 +10,7 @@ from autosport.market_mirror import MarketMirror, MirrorSnapshot
 from autosport.market_mirror_health import (
     HealthGatedMirrorDecisionIndex,
     ProviderDecisionEligibility,
+    ProviderHealthReplayBoundary,
 )
 from autosport.market_mirror_runtime import FocusedMirrorDependencyIndex
 
@@ -95,6 +96,28 @@ class ProviderHealthReplayBoundaryTests(unittest.TestCase):
             )
             self.assertEqual(replay.events, view.events)
             self.assertEqual(replay.health_boundaries, view.health_boundaries)
+
+    def test_explicit_future_replay_boundary_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            gate, store = self._gate(directory)
+            self._record_success(store, now="2026-09-17T12:00:03+00:00")
+            store.record_failure(
+                "provider-a",
+                now="2026-09-17T12:00:08+00:00",
+                error=ConnectionError("future durable transition"),
+            )
+            as_of = datetime(2026, 9, 17, 12, 0, 5, tzinfo=timezone.utc)
+
+            with self.assertRaisesRegex(ValueError, "later than as_of"):
+                gate.provider_health(
+                    "provider-a",
+                    as_of=as_of,
+                    replay_boundary=ProviderHealthReplayBoundary(
+                        source_id="provider-a",
+                        recorded_at="2026-09-17T12:00:08+00:00",
+                        transition_order=2,
+                    ),
+                )
 
     def test_before_first_health_transition_binds_zero_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

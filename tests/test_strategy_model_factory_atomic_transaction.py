@@ -3,13 +3,21 @@ from dataclasses import replace
 from threading import Barrier
 
 from autosport.scientific_registry import ScientificRegistry
-from autosport.strategy_model_factory import ExperimentRunner, FactoryArtifactStore
+from autosport.strategy_model_factory import (
+    ExperimentRunner,
+    FactoryArtifactStore,
+    FactoryCandidateSpec,
+)
 from autosport.workspace_lock import WorkspaceEconomicLockBusyError
 from test_strategy_model_factory import (
     _candidate_points,
     _candidate_spec,
     _factory_foundation,
 )
+
+
+def test_factory_public_type_module_identity_is_stable():
+    assert FactoryCandidateSpec.__module__ == "autosport.strategy_model_factory"
 
 
 def test_concurrent_factory_writers_leave_no_loser_residue(tmp_path):

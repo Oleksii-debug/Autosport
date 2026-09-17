@@ -50,11 +50,9 @@ class ProviderHealthDecision:
 
 
 @dataclass(frozen=True, slots=True)
-class HealthGatedMirrorSnapshot:
-    """Mirror view plus the exact durable health horizons used to filter it."""
+class HealthGatedMirrorSnapshot(MirrorSnapshot):
+    """Backward-compatible mirror view plus exact durable health replay horizons."""
 
-    revision: int
-    events: tuple
     health_boundaries: tuple[ProviderHealthReplayBoundary, ...]
 
 
@@ -273,6 +271,7 @@ class HealthGatedMirrorDecisionIndex:
 
         Pass ``health_boundaries`` from an earlier returned snapshot to reproduce that
         health decision identity after additional equal-time transitions are appended.
+        The returned object remains a ``MirrorSnapshot`` subtype for existing callers.
         """
         boundary = self._as_of(as_of)
         captured: MirrorSnapshot = self._dependencies.decision_view(

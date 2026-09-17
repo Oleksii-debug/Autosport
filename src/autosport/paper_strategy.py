@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from .agents import AgentContext
 from .decision_ledger import DecisionRecord
-from .domain import MarketEvent, TicketLeg
+from .domain import MarketEvent, PaperTicket, TicketLeg
 from .forecasting import ForecastRecord, parse_iso_timestamp
 from .price_truth import paper_quote_rejection_reason
 from .probability import paper_value
@@ -43,6 +43,35 @@ class PaperValueAgent:
         self.risk_policy = risk_policy or PaperRiskPolicy()
         self._acted: set[str] = set()
 
+    @staticmethod
+    def _rollback_uncommitted_ticket(
+        context: AgentContext,
+        ticket: PaperTicket,
+        *,
+        balance_before: Decimal,
+        lifecycle_len_before: int,
+    ) -> None:
+        """Undo exactly one just-opened ticket when durable decision persistence fails.
+
+        The strategy is synchronous, so the rollback is intentionally strict: it only
+        accepts the exact ticket object and the exact final lifecycle witness created
+        by the immediately preceding ``open_ticket`` call.  Any unexpected mutation
+        fails loudly instead of guessing at bankroll state.
+        """
+
+        book = context.paper_book
+        if book.tickets.get(ticket.ticket_id) is not ticket:
+            raise RuntimeError("paper decision rollback cannot prove ticket identity")
+        expected_lifecycle = ("open", ticket.ticket_id, (), ())
+        if (
+            len(book._lifecycle) != lifecycle_len_before + 1
+            or book._lifecycle[-1] != expected_lifecycle
+        ):
+            raise RuntimeError("paper decision rollback cannot prove lifecycle boundary")
+        del book.tickets[ticket.ticket_id]
+        book.balance = balance_before
+        del book._lifecycle[lifecycle_len_before:]
+
     def on_market_event(self, event: MarketEvent, context: AgentContext) -> None:
         if event.quote_key in self._acted or event.status != "open":
             return
@@ -78,46 +107,61 @@ class PaperValueAgent:
         )
         if not risk.allowed:
             return
+
+        balance_before = context.paper_book.balance
+        lifecycle_len_before = len(context.paper_book._lifecycle)
         ticket = context.paper_book.open_ticket(
             [leg],
             self.stake,
             reason=f"paper forecast {forecast.model_id}; EV/unit={estimate.expected_profit_per_unit}",
             placed_at=event.observed_ts,
         )
-        self._acted.add(event.quote_key)
-        if context.decision_ledger:
-            payload = {
-                "ticket_id": ticket.ticket_id,
-                "quote_key": event.quote_key,
-                "forecast_model": forecast.model_id,
-                "probability": str(forecast.probability),
-                "expected_profit_per_unit": str(estimate.expected_profit_per_unit),
-                "stake": str(ticket.stake),
-            }
-            if isinstance(forecast, ForecastRecord):
-                payload.update(
-                    {
-                        "forecast_id": forecast.forecast_id,
-                        "forecast_hash": forecast.canonical_hash,
-                        "model_version": forecast.model_version,
-                        "strategy_version": forecast.strategy_version,
-                        "model_training_cutoff_ts": forecast.model_training_cutoff_ts,
-                        "input_cutoff_ts": forecast.input_cutoff_ts,
-                        "generated_at": forecast.generated_at,
-                        "uncertainty": str(forecast.uncertainty),
-                        "evidence_hashes": list(forecast.evidence_hashes),
-                        "market_snapshot_hash": forecast.market_snapshot_hash,
-                    }
+        try:
+            if context.decision_ledger:
+                payload = {
+                    "ticket_id": ticket.ticket_id,
+                    "quote_key": event.quote_key,
+                    "forecast_model": forecast.model_id,
+                    "probability": str(forecast.probability),
+                    "expected_profit_per_unit": str(estimate.expected_profit_per_unit),
+                    "stake": str(ticket.stake),
+                }
+                if isinstance(forecast, ForecastRecord):
+                    payload.update(
+                        {
+                            "forecast_id": forecast.forecast_id,
+                            "forecast_hash": forecast.canonical_hash,
+                            "model_version": forecast.model_version,
+                            "strategy_version": forecast.strategy_version,
+                            "model_training_cutoff_ts": forecast.model_training_cutoff_ts,
+                            "input_cutoff_ts": forecast.input_cutoff_ts,
+                            "generated_at": forecast.generated_at,
+                            "uncertainty": str(forecast.uncertainty),
+                            "evidence_hashes": list(forecast.evidence_hashes),
+                            "market_snapshot_hash": forecast.market_snapshot_hash,
+                        }
+                    )
+                record = DecisionRecord(
+                    replay_run_id=context.replay_run_id,
+                    agent=self.name,
+                    observed_ts=event.observed_ts,
+                    action="OPEN_PAPER_VALUE_TICKET",
+                    payload=payload,
+                    context_hash=context.market_context_hash(),
                 )
-            record = DecisionRecord(
-                replay_run_id=context.replay_run_id,
-                agent=self.name,
-                observed_ts=event.observed_ts,
-                action="OPEN_PAPER_VALUE_TICKET",
-                payload=payload,
-                context_hash=context.market_context_hash(),
+                if goal is None:
+                    context.decision_ledger.append(record)
+                else:
+                    context.decision_ledger.append_economic(record, goal)
+        except Exception:
+            self._rollback_uncommitted_ticket(
+                context,
+                ticket,
+                balance_before=balance_before,
+                lifecycle_len_before=lifecycle_len_before,
             )
-            if goal is None:
-                context.decision_ledger.append(record)
-            else:
-                context.decision_ledger.append_economic(record, goal)
+            raise
+
+        # Suppress repeat action only after both the paper mutation and its durable
+        # decision evidence have crossed the same successful boundary.
+        self._acted.add(event.quote_key)

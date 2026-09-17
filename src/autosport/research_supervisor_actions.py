@@ -377,9 +377,9 @@ def commit_memory_and_next_question(
             at_least_phase=ResearchPhase.NEXT_QUESTION,
         )
 
-    supervisor.scientific_registry.append(next_question)
     question_bindings = (("next_question_id", next_question.record_id),)
     if snapshot.phase is ResearchPhase.NEXT_QUESTION:
+        supervisor.scientific_registry.append(next_question)
         snapshot = supervisor.advance(
             run_id,
             expected_phase=ResearchPhase.NEXT_QUESTION,
@@ -393,4 +393,9 @@ def commit_memory_and_next_question(
             required=question_bindings,
             at_least_phase=ResearchPhase.COMPLETE,
         )
+        # After the supervisor binding has admitted replay, use the immutable
+        # registry append only as an exact-record verification. A changed record
+        # with the same ID fails without mutation; a changed ID was already rejected
+        # above before any canonical scientific-memory write.
+        supervisor.scientific_registry.append(next_question)
     return snapshot

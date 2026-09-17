@@ -136,7 +136,6 @@ class PaperValueAgent:
         )
 
     def _reconcile_existing_economic_action(
-    def _reconcile_existing_economic_action(
         self,
         event: MarketEvent,
         context: AgentContext,

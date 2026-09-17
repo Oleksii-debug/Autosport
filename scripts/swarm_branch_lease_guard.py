@@ -51,7 +51,10 @@ def _records(value: Any, *, key: str) -> list[Mapping[str, Any]]:
 
 
 def _ambiguous_claim_state(claim_state: Mapping[str, Any]) -> bool:
-    for key in ("ambiguous", "ambiguities", "malformed_events", "collision_candidates"):
+    # Canonical #511 output uses ambiguous_runs. Keep older aliases for
+    # compatibility, but deterministic collision_candidates are *not* ambiguity:
+    # the resolver has already selected admitted_runs by server-order/capacity.
+    for key in ("ambiguous_runs", "ambiguous", "ambiguities", "malformed_events"):
         value = claim_state.get(key)
         if isinstance(value, list) and value:
             return True
@@ -64,11 +67,20 @@ def _admitted_source_owners(
     semantic_key: str,
     now: datetime,
 ) -> list[dict[str, str]]:
-    raw = claim_state.get("admitted")
+    # Canonical #511 output is admitted_runs. ``admitted`` is retained only for
+    # older exported fixtures/control snapshots; live_runs is a final legacy
+    # fallback when no admission set is present at all.
+    raw = claim_state.get("admitted_runs")
+    source_key = "admitted_runs"
+    if raw is None:
+        raw = claim_state.get("admitted")
+        source_key = "admitted"
     if raw is None:
         raw = claim_state.get("live_runs")
+        source_key = "live_runs"
+
     owners = []
-    for item in _records(raw, key="admitted"):
+    for item in _records(raw, key=source_key):
         item_semantic = item.get("semantic_key") or item.get("SEMANTIC_KEY")
         if item_semantic != semantic_key:
             continue
@@ -104,9 +116,10 @@ def evaluate_guard(
 ) -> dict[str, Any]:
     """Evaluate whether branch movement is attributable to the live source owner.
 
-    ``claim_state`` is resolver-compatible JSON. The guard reads ``admitted`` (or
-    historical ``live_runs``) entries and deliberately refuses to derive claim
-    precedence itself. This keeps #510/#511 as the one claim-state authority.
+    ``claim_state`` is resolver-compatible JSON. The guard reads canonical
+    ``admitted_runs`` (with legacy exported aliases only as fallback) and
+    deliberately refuses to derive claim precedence itself. This keeps #510/#511
+    as the one claim-state authority.
 
     ``mutation_state`` must contain ``semantic_key``, ``branch``, ``prior_head``,
     ``current_head`` and optional ordered ``mutations``. Each mutation has
@@ -143,7 +156,7 @@ def evaluate_guard(
         return {
             **base,
             "status": "AMBIGUOUS",
-            "evidence": ["claim-state input contains ambiguity/malformed/collision evidence"],
+            "evidence": ["claim-state input contains ambiguity/malformed evidence"],
         }
 
     try:

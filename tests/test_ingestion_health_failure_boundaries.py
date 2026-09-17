@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -46,6 +47,15 @@ class IngestionHealthFailureBoundaryTests(unittest.TestCase):
         store = SQLiteMarketStore(Path(tmp) / "market.db")
         bus = MarketEventBus(store)
         health = SourceHealthStore(Path(tmp) / "source-health.json")
+        clock_point = datetime.fromisoformat("2026-09-12T12:00:00+00:00")
+        clock_tick = 0
+
+        def clock() -> str:
+            nonlocal clock_tick
+            point = clock_point + timedelta(microseconds=clock_tick)
+            clock_tick += 1
+            return point.isoformat()
+
         engine = IngestionEngine(
             bus,
             policy=IngestionPolicy(
@@ -54,7 +64,7 @@ class IngestionHealthFailureBoundaryTests(unittest.TestCase):
                 max_future_skew_seconds=5,
             ),
             health_store=health,
-            clock=lambda: "2026-09-12T12:00:00+00:00",
+            clock=clock,
         )
         return engine, bus, store, health
 

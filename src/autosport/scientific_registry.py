@@ -752,23 +752,25 @@ class ScientificRegistry:
         return tuple(matches)
 
     @staticmethod
+    def _promotion_order_key(raw: Mapping[str, Any]) -> tuple[datetime, str]:
+        return (
+            _instant(raw["available_at"], "PromotionDecision.available_at"),
+            _text(raw["record_id"], "PromotionDecision.record_id"),
+        )
+
+    @staticmethod
     def _promotion_champion_from_state(
         state: dict[str, Any],
         *,
-        through: datetime,
+        through_key: tuple[datetime, str],
     ) -> str | None:
         decisions = [
             raw
             for raw in state["records"]
             if raw["record_type"] == "PromotionDecision"
-            and _instant(raw["available_at"], "PromotionDecision.available_at") <= through
+            and ScientificRegistry._promotion_order_key(raw) <= through_key
         ]
-        decisions.sort(
-            key=lambda raw: (
-                _instant(raw["available_at"], "PromotionDecision.available_at"),
-                raw["record_id"],
-            )
-        )
+        decisions.sort(key=ScientificRegistry._promotion_order_key)
         champion: str | None = None
         for raw in decisions:
             payload = raw["payload"]
@@ -804,15 +806,16 @@ class ScientificRegistry:
 
             entries = {(raw["record_type"], raw["record_id"]): raw for raw in state["records"]}
             decision_at = _instant(decision.decided_at, "decided_at")
+            decision_key = (decision_at, decision.record_id)
             if any(
                 raw["record_type"] == "PromotionDecision"
-                and _instant(raw["available_at"], "PromotionDecision.available_at") > decision_at
+                and self._promotion_order_key(raw) > decision_key
                 for raw in state["records"]
             ):
                 raise PromotionEvidenceError(
                     "promotion decision cannot be backdated before durable promotion history"
                 )
-            current_champion = self._promotion_champion_from_state(state, through=decision_at)
+            current_champion = self._promotion_champion_from_state(state, through_key=decision_key)
             if decision.action is PromotionAction.PROMOTE:
                 if decision.predecessor_strategy_version_id != current_champion:
                     raise PromotionEvidenceError(

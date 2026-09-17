@@ -12,13 +12,7 @@ from .scientific_registry import (
 
 
 class StrategyLifecycleState(StrEnum):
-    """Deterministic derived state from immutable promotion history.
-
-    `canonical_strategy_id` is intentionally treated as the foundation's opaque
-    strategy-class/context key. The registry does not parse or broaden that key;
-    richer Stage-G context structure can compose above it without creating a
-    second mutable promotion authority.
-    """
+    """Deterministic derived state from immutable promotion history."""
 
     CANDIDATE = "CANDIDATE"
     CHALLENGER = "CHALLENGER"
@@ -50,6 +44,7 @@ class StrategyLineageProjection:
     evaluations: tuple[RegistryEntry, ...]
     promotion_decisions: tuple[RegistryEntry, ...]
     postmortems: tuple[RegistryEntry, ...]
+    predecessor_strategies: tuple[RegistryEntry, ...] = ()
 
 
 def _causal_map(
@@ -64,18 +59,65 @@ def _causal_map(
     }
 
 
+def _predecessor_chain(
+    by_id: dict[str, RegistryEntry],
+    start_id: str,
+    field: str,
+    record_type: str,
+) -> tuple[str, ...]:
+    """Return start + causal predecessor chain, failing closed on gaps/cycles."""
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    current_id: str | None = start_id
+    while current_id is not None:
+        if current_id in seen:
+            raise ScientificRegistryError(
+                f"{record_type} predecessor cycle detected at {current_id}"
+            )
+        entry = by_id.get(current_id)
+        if entry is None:
+            raise ScientificRegistryError(
+                f"lineage references causally missing {record_type}:{current_id}"
+            )
+        ordered.append(current_id)
+        seen.add(current_id)
+        predecessor = entry.payload.get(field)
+        if predecessor is None:
+            current_id = None
+        elif isinstance(predecessor, str) and predecessor:
+            current_id = predecessor
+        else:
+            raise ScientificRegistryError(
+                f"{record_type}:{current_id} has invalid {field}"
+            )
+    return tuple(ordered)
+
+
+def _expand_model_predecessors(
+    models_by_id: dict[str, RegistryEntry],
+    roots: set[str],
+) -> set[str]:
+    expanded: set[str] = set()
+    for model_id in sorted(roots):
+        expanded.update(
+            _predecessor_chain(
+                models_by_id,
+                model_id,
+                "predecessor_model_version_id",
+                "ModelVersion",
+            )
+        )
+    return expanded
+
+
 def strategy_state_projection(
     registry: ScientificRegistry,
     canonical_strategy_id: str,
     *,
     as_of: str,
 ) -> tuple[StrategyStateProjection, ...]:
-    """Project causal champion/challenger lifecycle state for one strategy key.
-
-    This is a read-only projection. Immutable PromotionDecision records remain
-    the sole state authority, so restart/replay cannot drift from a second
-    mutable champion/challenger store.
-    """
+    """Project causal champion/challenger lifecycle state for one strategy key."""
 
     if type(canonical_strategy_id) is not str or not canonical_strategy_id:
         raise ValueError("canonical_strategy_id must be a non-empty string")
@@ -98,7 +140,10 @@ def strategy_state_projection(
         candidate = payload.get("candidate_strategy_version_id")
         if candidate in strategy_ids:
             latest_candidate_decision[candidate] = decision
-        if payload.get("action") == PromotionAction.PROMOTE.value and candidate in strategy_ids:
+        if (
+            payload.get("action") == PromotionAction.PROMOTE.value
+            and candidate in strategy_ids
+        ):
             promoted.add(candidate)
 
     projections: list[StrategyStateProjection] = []
@@ -106,11 +151,8 @@ def strategy_state_projection(
         strategy_id = strategy.record_id
         latest = latest_candidate_decision.get(strategy_id)
         latest_action = (
-            PromotionAction(latest.payload["action"])
-            if latest is not None
-            else None
+            PromotionAction(latest.payload["action"]) if latest is not None else None
         )
-
         if strategy_id == champion:
             state = StrategyLifecycleState.CHAMPION
         elif latest_action is PromotionAction.ROLLBACK:
@@ -146,51 +188,57 @@ def strategy_lineage_projection(
     *,
     as_of: str,
 ) -> StrategyLineageProjection:
-    """Resolve the causal dataset/model/strategy/evaluation lineage for a strategy.
-
-    Missing referenced evidence fails closed rather than silently returning a
-    partial lineage. All reads are bounded by `as_of`, so future records cannot
-    enter a historical projection.
-    """
+    """Resolve complete causal predecessor/evidence lineage for a strategy."""
 
     if type(strategy_version_id) is not str or not strategy_version_id:
         raise ValueError("strategy_version_id must be a non-empty string")
 
-    strategies = _causal_map(registry, "StrategyVersion", as_of=as_of)
-    strategy = strategies.get(strategy_version_id)
+    strategies_all = registry.causal_records("StrategyVersion", as_of=as_of)
+    strategies_by_id = {entry.record_id: entry for entry in strategies_all}
+    strategy = strategies_by_id.get(strategy_version_id)
     if strategy is None:
         raise ScientificRegistryError(
             f"strategy lineage is not causally available: {strategy_version_id}"
         )
 
+    strategy_chain = _predecessor_chain(
+        strategies_by_id,
+        strategy_version_id,
+        "predecessor_strategy_version_id",
+        "StrategyVersion",
+    )
+    strategy_ids = set(strategy_chain)
+    predecessor_strategies = tuple(
+        entry
+        for entry in strategies_all
+        if entry.record_id in strategy_ids and entry.record_id != strategy_version_id
+    )
+
     experiments_all = registry.causal_records("Experiment", as_of=as_of)
     experiments = tuple(
         entry
         for entry in experiments_all
-        if entry.payload.get("strategy_version_id") == strategy_version_id
+        if entry.payload.get("strategy_version_id") in strategy_ids
     )
 
-    model_ids: set[str] = set()
-    strategy_model_id = strategy.payload.get("model_version_id")
-    if isinstance(strategy_model_id, str):
-        model_ids.add(strategy_model_id)
-    for experiment in experiments:
-        model_id = experiment.payload.get("model_version_id")
-        if isinstance(model_id, str):
-            model_ids.add(model_id)
+    model_roots = {
+        entry.payload["model_version_id"]
+        for entry in predecessor_strategies + (strategy,)
+        if isinstance(entry.payload.get("model_version_id"), str)
+    }
+    model_roots.update(
+        entry.payload["model_version_id"]
+        for entry in experiments
+        if isinstance(entry.payload.get("model_version_id"), str)
+    )
 
     models_all = registry.causal_records("ModelVersion", as_of=as_of)
     models_by_id = {entry.record_id: entry for entry in models_all}
-    missing_models = sorted(model_ids - models_by_id.keys())
-    if missing_models:
-        raise ScientificRegistryError(
-            f"strategy lineage references causally missing ModelVersion:{missing_models[0]}"
-        )
+    model_ids = _expand_model_predecessors(models_by_id, model_roots)
     models = tuple(entry for entry in models_all if entry.record_id in model_ids)
 
     evaluation_ids = {
-        experiment.payload["evaluation_bundle_id"]
-        for experiment in experiments
+        entry.payload["evaluation_bundle_id"] for entry in experiments
     }
     evaluations_all = registry.causal_records("EvaluationBundle", as_of=as_of)
     evaluations_by_id = {entry.record_id: entry for entry in evaluations_all}
@@ -205,16 +253,11 @@ def strategy_lineage_projection(
     )
 
     dataset_ids = {
-        experiment.payload["dataset_snapshot_id"]
-        for experiment in experiments
+        entry.payload["dataset_snapshot_id"] for entry in experiments
     }
-    feature_ids = {
-        experiment.payload["feature_set_id"]
-        for experiment in experiments
-    }
+    feature_ids = {entry.payload["feature_set_id"] for entry in experiments}
     protocol_ids = {
-        experiment.payload["research_protocol_id"]
-        for experiment in experiments
+        entry.payload["research_protocol_id"] for entry in experiments
     }
     for model in models:
         dataset_ids.add(model.payload["dataset_snapshot_id"])
@@ -223,13 +266,16 @@ def strategy_lineage_projection(
     for evaluation in evaluations:
         dataset_ids.add(evaluation.payload["dataset_snapshot_id"])
 
-    def resolve_many(record_type: str, ids: set[str]) -> tuple[RegistryEntry, ...]:
+    def resolve_many(
+        record_type: str, ids: set[str]
+    ) -> tuple[RegistryEntry, ...]:
         values = registry.causal_records(record_type, as_of=as_of)
         by_id = {entry.record_id: entry for entry in values}
         missing = sorted(ids - by_id.keys())
         if missing:
             raise ScientificRegistryError(
-                f"strategy lineage references causally missing {record_type}:{missing[0]}"
+                f"strategy lineage references causally missing "
+                f"{record_type}:{missing[0]}"
             )
         return tuple(entry for entry in values if entry.record_id in ids)
 
@@ -240,8 +286,9 @@ def strategy_lineage_projection(
     promotion_decisions = tuple(
         entry
         for entry in registry.causal_records("PromotionDecision", as_of=as_of)
-        if entry.payload.get("candidate_strategy_version_id") == strategy_version_id
-        or entry.payload.get("rollback_to_strategy_version_id") == strategy_version_id
+        if entry.payload.get("candidate_strategy_version_id") in strategy_ids
+        or entry.payload.get("predecessor_strategy_version_id") in strategy_ids
+        or entry.payload.get("rollback_to_strategy_version_id") in strategy_ids
     )
     experiment_ids = {entry.record_id for entry in experiments}
     postmortems = tuple(
@@ -260,4 +307,5 @@ def strategy_lineage_projection(
         evaluations=evaluations,
         promotion_decisions=promotion_decisions,
         postmortems=postmortems,
+        predecessor_strategies=predecessor_strategies,
     )

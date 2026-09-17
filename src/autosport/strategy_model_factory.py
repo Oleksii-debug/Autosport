@@ -615,6 +615,10 @@ class FactoryArtifactStore:
     def _path(self, kind: str, identity: str) -> Path:
         return self.root / self._filename(kind, identity)
 
+    def exists(self, kind: str, identity: str) -> bool:
+        """Return whether an immutable artifact identity is already occupied."""
+        return self._path(kind, identity).exists()
+
     def write(self, kind: str, identity: str, payload: dict[str, object]) -> str:
         path = self._path(kind, identity)
         if path.exists():
@@ -1125,6 +1129,36 @@ class ExperimentRunner:
             raise ValueError(
                 "conflicting immutable experiment identity must fail before factory mutation"
             )
+
+        if existing_experiment is None:
+            registry_identities = [
+                ("ModelVersion", spec.model_version_id),
+                ("StrategyVersion", spec.strategy_version_id),
+                ("EvaluationBundle", spec.evaluation_bundle_id),
+                ("PromotionDecision", spec.promotion_decision_id),
+            ]
+            if outcome is not ResearchOutcome.POSITIVE:
+                registry_identities.append(
+                    ("Postmortem", f"{spec.experiment_id}:postmortem")
+                )
+            for record_type, record_id in registry_identities:
+                if self.registry.get(record_type, record_id) is not None:
+                    raise ValueError(
+                        "candidate immutable identity already exists before factory mutation: "
+                        f"{record_type}:{record_id}"
+                    )
+
+            artifact_identities = (
+                ("model", spec.model_version_id),
+                ("metrics", spec.evaluation_bundle_id),
+                ("evaluation", spec.evaluation_bundle_id),
+            )
+            for kind, identity in artifact_identities:
+                if self.artifact_store.exists(kind, identity):
+                    raise ValueError(
+                        "candidate artifact identity already exists before factory mutation: "
+                        f"{kind}:{identity}"
+                    )
 
         model_payload = final_model.to_payload()
         model_payload.update(

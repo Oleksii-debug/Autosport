@@ -80,9 +80,6 @@ class DecisionRecord:
             raise ValueError("decision payload must not contain future-result fields")
         if self.decision_kind not in {GENERAL_DECISION_KIND, ECONOMIC_DECISION_KIND}:
             raise ValueError("decision_kind must be GENERAL or ECONOMIC")
-        # Legacy economic records predate the explicit decision_kind field. Their
-        # durable, hash-bound provenance is enough to rehydrate the semantic kind
-        # after the original bytes have been verified without rewriting history.
         if (
             self.decision_kind == GENERAL_DECISION_KIND
             and ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY in payload
@@ -101,8 +98,6 @@ class DecisionRecord:
             "decision_id": self.decision_id,
             "recorded_at": self.recorded_at,
         }
-        # Keep GENERAL records byte/schema compatible with the historical ledger.
-        # New ECONOMIC records carry an explicit structural authority marker.
         if self.decision_kind == ECONOMIC_DECISION_KIND:
             record["decision_kind"] = ECONOMIC_DECISION_KIND
         return record
@@ -276,8 +271,6 @@ class JsonlDecisionLedger:
 
     @classmethod
     def _validate_json_value(cls, value: object, *, path: str) -> None:
-        """Reject values whose JSON encoding changes identity or is non-standard."""
-
         if value is None or isinstance(value, (bool, int)):
             return
         if isinstance(value, str):
@@ -330,10 +323,12 @@ class JsonlDecisionLedger:
         line_number: int | None = None,
     ) -> dict[str, Any]:
         location = f" at line {line_number}" if line_number is not None else ""
-        if not isinstance(record, dict) or set(record) not in {
-            cls._LEGACY_RECORD_FIELDS,
-            cls._ECONOMIC_RECORD_FIELDS,
-        }:
+        if not isinstance(record, dict):
+            raise DecisionLedgerIntegrityError(
+                f"Decision Ledger record schema is invalid{location}"
+            )
+        fields = frozenset(record)
+        if fields not in {cls._LEGACY_RECORD_FIELDS, cls._ECONOMIC_RECORD_FIELDS}:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger record schema is invalid{location}"
             )
@@ -405,12 +400,7 @@ class JsonlDecisionLedger:
         return digest
 
     def append(self, record: DecisionRecord) -> str:
-        """Persist a non-economic decision only.
-
-        Material economic records have a separate structural authority path so a
-        caller cannot accidentally bypass EconomicGoal provenance by using this
-        generic append API.
-        """
+        """Persist a non-economic decision only."""
 
         if not isinstance(record, DecisionRecord):
             raise TypeError("Decision Ledger append requires a DecisionRecord")
@@ -434,8 +424,6 @@ class JsonlDecisionLedger:
 
     @classmethod
     def _verify_bytes(cls, raw: bytes) -> int:
-        """Validate one already-captured immutable JSONL byte snapshot."""
-
         if not raw:
             return 0
         if not raw.endswith(b"\n"):
@@ -482,7 +470,7 @@ class JsonlDecisionLedger:
                     f"{exc} at line {line_number}"
                 ) from exc
 
-            if not isinstance(envelope, dict) or set(envelope) != self._ENVELOPE_FIELDS:
+            if not isinstance(envelope, dict) or set(envelope) != cls._ENVELOPE_FIELDS:
                 raise DecisionLedgerIntegrityError(
                     f"Decision Ledger envelope schema is invalid at line {line_number}"
                 )
@@ -516,8 +504,6 @@ class JsonlDecisionLedger:
         return line_count
 
     def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:
-        """Read once, then hash and semantically validate the exact same bytes."""
-
         try:
             raw = self.path.read_bytes()
         except OSError as exc:
@@ -532,8 +518,6 @@ class JsonlDecisionLedger:
         )
 
     def verified_records(self) -> tuple[DecisionRecord, ...]:
-        """Rehydrate records from the exact immutable byte snapshot already verified."""
-
         snapshot = self.verified_snapshot()
         if not snapshot.payload:
             return ()
@@ -549,8 +533,6 @@ class JsonlDecisionLedger:
         decision_id: str,
         contract: EconomicGoalContract,
     ) -> DecisionRecord:
-        """Restart/readback proof for one material economic decision and exact goal."""
-
         if not isinstance(decision_id, str) or not decision_id.strip():
             raise ValueError("decision_id must be a non-empty string")
         for record in self.verified_records():
@@ -562,6 +544,4 @@ class JsonlDecisionLedger:
         )
 
     def verify_integrity(self) -> int:
-        """Validate every durable JSONL envelope and return the number of decisions."""
-
         return self.verified_snapshot().record_count

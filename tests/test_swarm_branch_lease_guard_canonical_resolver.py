@@ -98,3 +98,35 @@ def test_canonical_ambiguous_runs_fails_closed() -> None:
 
     assert result["status"] == "AMBIGUOUS"
     assert "ambiguity" in result["evidence"][0]
+
+
+def test_malformed_canonical_ambiguous_runs_shape_fails_closed() -> None:
+    claims = {
+        "admitted_runs": [_run(OWNER)],
+        "live_runs": [_run(OWNER)],
+        "collision_candidates": [],
+        "ambiguous_runs": {"run_id": "corrupt-shape"},
+        "malformed_events": [],
+    }
+
+    result = guard.evaluate_guard(claims, _mutation(OWNER), now=NOW)
+
+    assert result["status"] == "AMBIGUOUS"
+    assert result["admitted_owner_run_id"] is None
+    assert "malformed evidence" in result["evidence"][0]
+
+
+def test_malformed_events_non_list_shape_fails_closed() -> None:
+    claims = {
+        "admitted_runs": [_run(OWNER)],
+        "live_runs": [_run(OWNER)],
+        "collision_candidates": [],
+        "ambiguous_runs": [],
+        "malformed_events": "corrupt-shape",
+    }
+
+    result = guard.evaluate_guard(claims, _mutation(OWNER), now=NOW)
+
+    assert result["status"] == "AMBIGUOUS"
+    assert result["admitted_owner_run_id"] is None
+    assert "malformed evidence" in result["evidence"][0]

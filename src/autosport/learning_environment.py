@@ -404,6 +404,7 @@ class EnvironmentCheckpoint:
     chain_sha256: str
     last_transition_id: str | None
     committed_action_ids: tuple[str, ...]
+    committed_decision_intents: tuple[tuple[str, str], ...]
 
     def __post_init__(self) -> None:
         _sha256_hex("environment_id", self.environment_id)
@@ -424,8 +425,28 @@ class EnvironmentCheckpoint:
             raise LearningEnvironmentError("committed_action_ids must be sorted")
         if len(self.committed_action_ids) != len(set(self.committed_action_ids)):
             raise LearningEnvironmentError("committed_action_ids must be unique")
+        if type(self.committed_decision_intents) is not tuple:
+            raise LearningEnvironmentError("committed_decision_intents must be a tuple")
+        normalized_intents: list[tuple[str, str]] = []
+        for entry in self.committed_decision_intents:
+            if type(entry) is not tuple or len(entry) != 2:
+                raise LearningEnvironmentError(
+                    "committed_decision_intents entries must be two-item tuples"
+                )
+            intent_id = _sha256_hex("decision intent_id", entry[0])
+            payload_id = _sha256_hex("decision payload_id", entry[1])
+            normalized_intents.append((intent_id, payload_id))
+        if normalized_intents != sorted(normalized_intents):
+            raise LearningEnvironmentError("committed_decision_intents must be sorted")
+        intent_ids = [intent_id for intent_id, _ in normalized_intents]
+        if len(intent_ids) != len(set(intent_ids)):
+            raise LearningEnvironmentError("committed decision intent_ids must be unique")
         if self.step_index == 0:
-            if self.last_transition_id is not None or self.committed_action_ids:
+            if (
+                self.last_transition_id is not None
+                or self.committed_action_ids
+                or self.committed_decision_intents
+            ):
                 raise LearningEnvironmentError("empty checkpoint cannot contain committed actions")
             if self.chain_sha256 != _EMPTY_CHAIN_SHA256:
                 raise LearningEnvironmentError("empty checkpoint chain hash is invalid")
@@ -435,6 +456,10 @@ class EnvironmentCheckpoint:
             if len(self.committed_action_ids) != self.step_index:
                 raise LearningEnvironmentError(
                     "checkpoint committed_action_ids must match step_index"
+                )
+            if len(self.committed_decision_intents) != self.step_index:
+                raise LearningEnvironmentError(
+                    "checkpoint committed_decision_intents must match step_index"
                 )
 
     @property
@@ -448,6 +473,10 @@ class EnvironmentCheckpoint:
                 "chain_sha256": self.chain_sha256,
                 "last_transition_id": self.last_transition_id,
                 "committed_action_ids": list(self.committed_action_ids),
+                "committed_decision_intents": [
+                    [intent_id, payload_id]
+                    for intent_id, payload_id in self.committed_decision_intents
+                ],
             }
         )
 
@@ -456,6 +485,8 @@ class EnvironmentCheckpoint:
 class _PendingAction:
     observation: Observation
     action: Action
+    decision_intent_id: str
+    decision_payload_id: str
 
 
 class CausalLearningEnvironment:
@@ -465,6 +496,10 @@ class CausalLearningEnvironment:
     supplies an externally admissible action set, a policy supplies one member, and
     authoritative outcome/reward evidence can be attached only after its reveal
     boundary.  This keeps financial/risk authority outside the learned policy.
+
+    One exact observation can produce at most one material action inside an episode.
+    That observation-bound decision intent is independent of retry wall-clock time,
+    so restart/retry cannot manufacture a second action by changing ``decision_at``.
     """
 
     def __init__(
@@ -486,7 +521,9 @@ class CausalLearningEnvironment:
             admissible_actions=tuple(sorted(actions)),
         )
         self._pending: dict[str, _PendingAction] = {}
+        self._pending_by_decision_intent: dict[str, str] = {}
         self._committed_action_ids: set[str] = set()
+        self._committed_decision_intents: dict[str, str] = {}
         self._step_index = 0
         self._chain_sha256 = _EMPTY_CHAIN_SHA256
         self._last_transition_id: str | None = None
@@ -518,22 +555,63 @@ class CausalLearningEnvironment:
             raise LearningEnvironmentError("observation exceeds the environment evidence cutoff")
         if available_time > decision_time:
             raise LearningEnvironmentError("future observation evidence is not available at decision time")
+
+        normalized_parameters = _metadata("action parameters", parameters)
+        decision_intent_id = _stable_hash(
+            {
+                "environment_id": self.environment_id,
+                "episode_id": self.episode.episode_id,
+                "observation_id": observation.observation_id,
+            }
+        )
+        decision_payload_id = _stable_hash(
+            {
+                "action_type": action_name,
+                "parameters": _metadata_payload(normalized_parameters),
+            }
+        )
+
+        committed_payload_id = self._committed_decision_intents.get(decision_intent_id)
+        if committed_payload_id is not None:
+            if committed_payload_id != decision_payload_id:
+                raise LearningEnvironmentError(
+                    "decision intent conflicts with the payload committed before restart"
+                )
+            raise LearningEnvironmentError(
+                "decision intent was already committed before restart"
+            )
+
+        pending_action_id = self._pending_by_decision_intent.get(decision_intent_id)
+        if pending_action_id is not None:
+            existing = self._pending[pending_action_id]
+            if existing.decision_payload_id != decision_payload_id:
+                raise LearningEnvironmentError(
+                    "decision intent conflicts with pending action payload"
+                )
+            return existing.action
+
         action = Action(
             environment_id=self.environment_id,
             observation_id=observation.observation_id,
             action_type=action_name,
             decided_at=decision_at,
-            parameters=_metadata("action parameters", parameters),
+            parameters=normalized_parameters,
         )
         if action.action_id in self._committed_action_ids:
             raise LearningEnvironmentError("action identity was already committed before restart")
         existing = self._pending.get(action.action_id)
-        pending = _PendingAction(observation=observation, action=action)
+        pending = _PendingAction(
+            observation=observation,
+            action=action,
+            decision_intent_id=decision_intent_id,
+            decision_payload_id=decision_payload_id,
+        )
         if existing is not None:
             if existing != pending:
                 raise LearningEnvironmentError("action identity conflicts with pending evidence")
             return existing.action
         self._pending[action.action_id] = pending
+        self._pending_by_decision_intent[decision_intent_id] = action.action_id
         return action
 
     def resolve(
@@ -593,7 +671,11 @@ class CausalLearningEnvironment:
         self._chain_sha256 = next_chain
         self._last_transition_id = transition.transition_id
         self._committed_action_ids.add(action.action_id)
+        self._committed_decision_intents[
+            pending.decision_intent_id
+        ] = pending.decision_payload_id
         del self._pending[action.action_id]
+        del self._pending_by_decision_intent[pending.decision_intent_id]
         return transition
 
     def checkpoint(self) -> EnvironmentCheckpoint:
@@ -609,6 +691,9 @@ class CausalLearningEnvironment:
             chain_sha256=self._chain_sha256,
             last_transition_id=self._last_transition_id,
             committed_action_ids=tuple(sorted(self._committed_action_ids)),
+            committed_decision_intents=tuple(
+                sorted(self._committed_decision_intents.items())
+            ),
         )
 
     @classmethod
@@ -639,4 +724,7 @@ class CausalLearningEnvironment:
         environment._chain_sha256 = checkpoint.chain_sha256
         environment._last_transition_id = checkpoint.last_transition_id
         environment._committed_action_ids = set(checkpoint.committed_action_ids)
+        environment._committed_decision_intents = dict(
+            checkpoint.committed_decision_intents
+        )
         return environment

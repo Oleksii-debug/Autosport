@@ -353,6 +353,8 @@ class EvaluationBundleRef:
     protocol_sha256: str
     artifact_hashes: tuple[str, ...]
     created_at: str
+    evaluated_strategy_version_id: str | None = None
+    evaluated_model_version_id: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.evaluation_bundle_id, "evaluation_bundle_id")
@@ -364,6 +366,10 @@ class EvaluationBundleRef:
         if len(self.artifact_hashes) != len(set(value.lower() for value in self.artifact_hashes)):
             raise ValueError("artifact_hashes must not contain duplicates")
         _iso(self.created_at, "created_at")
+        if self.evaluated_strategy_version_id is not None:
+            _text(self.evaluated_strategy_version_id, "evaluated_strategy_version_id")
+        if self.evaluated_model_version_id is not None:
+            _text(self.evaluated_model_version_id, "evaluated_model_version_id")
 
     @property
     def record_type(self) -> str: return "EvaluationBundle"
@@ -378,7 +384,9 @@ class EvaluationBundleRef:
                 "dataset_snapshot_id": self.dataset_snapshot_id,
                 "protocol_sha256": self.protocol_sha256.lower(),
                 "artifact_hashes": [value.lower() for value in self.artifact_hashes],
-                "created_at": self.created_at}
+                "created_at": self.created_at,
+                "evaluated_strategy_version_id": self.evaluated_strategy_version_id,
+                "evaluated_model_version_id": self.evaluated_model_version_id}
 
 
 @dataclass(frozen=True, slots=True)
@@ -845,6 +853,10 @@ class ScientificRegistry:
                 raise PromotionEvidenceError("evaluation bundle is bound to a different protocol")
             if bundle["payload"].get("bundle_sha256") != decision.evaluation_bundle_sha256.lower():
                 raise PromotionEvidenceError("promotion evaluation bundle hash does not match durable bundle")
+            if bundle["payload"].get("evaluated_strategy_version_id") != decision.candidate_strategy_version_id:
+                raise PromotionEvidenceError("evaluation bundle strategy identity does not match candidate")
+            if bundle["payload"].get("evaluated_model_version_id") != decision.candidate_model_version_id:
+                raise PromotionEvidenceError("evaluation bundle model identity does not match candidate")
             dataset = require("DatasetSnapshot", bundle["payload"]["dataset_snapshot_id"])
             if dataset["payload"].get("manifest_sha256") != protocol["payload"].get("dataset_manifest_sha256"):
                 raise PromotionEvidenceError("dataset manifest does not match frozen research protocol")
@@ -860,7 +872,7 @@ class ScientificRegistry:
             if decision.action is PromotionAction.ROLLBACK:
                 require("StrategyVersion", decision.rollback_to_strategy_version_id or "")
 
-            matching_experiment_entry: dict[str, Any] | None = None
+            matching_experiments: list[dict[str, Any]] = []
             for raw in state["records"]:
                 if raw["record_type"] != "Experiment":
                     continue
@@ -871,16 +883,25 @@ class ScientificRegistry:
                     and payload.get("evaluation_bundle_id") == decision.evaluation_bundle_id
                     and payload.get("model_version_id") == decision.candidate_model_version_id
                 ):
-                    matching_experiment_entry = raw
-                    break
-            if matching_experiment_entry is None:
+                    matching_experiments.append(raw)
+            if not matching_experiments:
                 raise PromotionEvidenceError("promotion has no durable matching experiment")
+            if len(matching_experiments) != 1:
+                raise PromotionEvidenceError("promotion evidence is ambiguous across multiple matching experiments")
+            matching_experiment_entry = matching_experiments[0]
             if _instant(matching_experiment_entry["available_at"], "Experiment.available_at") > decision_at:
                 raise PromotionEvidenceError("matching experiment was not complete at decision time")
             matching_experiment = matching_experiment_entry["payload"]
             if bundle["payload"].get("dataset_snapshot_id") != matching_experiment.get("dataset_snapshot_id"):
                 raise PromotionEvidenceError("evaluation bundle/experiment dataset lineage mismatch")
-            require("FeatureSet", matching_experiment["feature_set_id"])
+            feature = require("FeatureSet", matching_experiment["feature_set_id"])
+            if feature["payload"].get("version") != binding.get("feature_set_version"):
+                raise PromotionEvidenceError("feature set version does not match frozen research protocol")
+            frozen_config = _sha256(binding.get("code_config_sha256"), "binding.code_config_sha256")
+            if matching_experiment.get("config_sha256") != frozen_config:
+                raise PromotionEvidenceError("experiment config does not match frozen research protocol")
+            if strategy["payload"].get("config_sha256") != frozen_config:
+                raise PromotionEvidenceError("strategy config does not match frozen research protocol")
             if model is not None:
                 if model["payload"].get("research_protocol_id") != matching_experiment.get("research_protocol_id"):
                     raise PromotionEvidenceError("candidate model/experiment protocol lineage mismatch")
@@ -888,6 +909,10 @@ class ScientificRegistry:
                     raise PromotionEvidenceError("candidate model/experiment dataset lineage mismatch")
                 if model["payload"].get("feature_set_id") != matching_experiment.get("feature_set_id"):
                     raise PromotionEvidenceError("candidate model/experiment feature lineage mismatch")
+                if model["payload"].get("config_sha256") != frozen_config:
+                    raise PromotionEvidenceError("model config does not match frozen research protocol")
+                if model["payload"].get("seed") != matching_experiment.get("seed"):
+                    raise PromotionEvidenceError("candidate model/experiment seed lineage mismatch")
             if decision.action is PromotionAction.PROMOTE:
                 if strategy["payload"].get("predecessor_strategy_version_id") != decision.predecessor_strategy_version_id:
                     raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")

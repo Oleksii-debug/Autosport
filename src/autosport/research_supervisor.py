@@ -1,9 +1,8 @@
-"""Durable, restart-safe orchestration state for the continuous research supervisor.
+"""Durable, restart-safe control state for the continuous research supervisor.
 
-This module is intentionally a bounded control/state seam, not a second workflow
-engine. Scheduling is external trigger input; scientific truth remains owned by
-``ScientificRegistry``/``ExperimentRunner`` and environment truth by the learning
-environment module.
+This module is intentionally a bounded state/trigger/checkpoint seam. Scheduling is
+external input; scientific truth remains owned by ScientificRegistry/ExperimentRunner
+and causal environment truth remains owned by learning_environment.
 """
 
 from __future__ import annotations
@@ -14,25 +13,24 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from .integrity import atomic_write_json
 from .workspace_lock import WorkspaceEconomicLock
-
 
 SCHEMA_VERSION = 1
 
 
 class ResearchSupervisorError(ValueError):
-    """Base error for invalid or conflicting supervisor state."""
+    """Invalid, corrupted, or conflicting supervisor state."""
 
 
 class ConflictingResearchTriggerError(ResearchSupervisorError):
-    """Raised when one trigger identity is reused for different work."""
+    """A trigger id was reused for different immutable work."""
 
 
 class InvalidResearchTransitionError(ResearchSupervisorError):
-    """Raised when a supervisor phase moves outside the frozen lifecycle."""
+    """A state-machine transition violates the frozen research lifecycle."""
 
 
 class ResearchPhase(StrEnum):
@@ -54,13 +52,16 @@ class ResearchPhase(StrEnum):
 
 _PHASE_ORDER = tuple(ResearchPhase)
 _PHASE_INDEX = {phase: index for index, phase in enumerate(_PHASE_ORDER)}
+_REQUIRED_STATE_FIELDS = {
+    "run_id", "trigger_id", "supervisor_id", "question_id", "phase",
+    "protocol_id", "checkpoint_id", "budget_units", "consumed_units", "deadline",
+    "cancelled", "updated_at", "state_sha256",
+}
 
 
 def _text(name: str, value: object) -> str:
-    if type(value) is not str or not value or value != value.strip():
+    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
         raise ResearchSupervisorError(f"{name} must be a non-empty canonical string")
-    if "\x00" in value:
-        raise ResearchSupervisorError(f"{name} must not contain NUL")
     value.encode("utf-8")
     return value
 
@@ -78,7 +79,7 @@ def _timestamp(name: str, value: object) -> str:
 
 def _sha256(name: str, value: object) -> str:
     text = _text(name, value).lower()
-    if len(text) != 64 or any(ch not in "0123456789abcdef" for ch in text):
+    if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
         raise ResearchSupervisorError(f"{name} must be lowercase SHA-256 hex")
     return text
 
@@ -102,8 +103,6 @@ def _digest(payload: dict[str, Any]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ResearchTrigger:
-    """A deterministic external trigger; the scheduler itself is not durable truth."""
-
     trigger_id: str
     trigger_type: str
     question_id: str
@@ -117,19 +116,6 @@ class ResearchTrigger:
         _timestamp("requested_at", self.requested_at)
         _sha256("request_fingerprint", self.request_fingerprint)
 
-    @property
-    def canonical_id(self) -> str:
-        return _digest(
-            {
-                "trigger_id": self.trigger_id,
-                "trigger_type": self.trigger_type,
-                "question_id": self.question_id,
-                "requested_at": _timestamp("requested_at", self.requested_at),
-                "source_id": self.source_id,
-                "request_fingerprint": self.request_fingerprint.lower(),
-            }
-        )
-
     def to_payload(self) -> dict[str, Any]:
         return {
             "trigger_id": self.trigger_id,
@@ -140,11 +126,13 @@ class ResearchTrigger:
             "request_fingerprint": self.request_fingerprint.lower(),
         }
 
+    @property
+    def canonical_id(self) -> str:
+        return _digest(self.to_payload())
+
 
 @dataclass(frozen=True, slots=True)
 class ResearchSupervisorState:
-    """Durable state machine snapshot for one research Run."""
-
     run_id: str
     trigger_id: str
     supervisor_id: str
@@ -168,10 +156,10 @@ class ResearchSupervisorState:
             _text("protocol_id", self.protocol_id)
         if self.checkpoint_id is not None:
             _sha256("checkpoint_id", self.checkpoint_id)
-        if isinstance(self.budget_units, bool) or not isinstance(self.budget_units, int) or self.budget_units < 0:
-            raise ResearchSupervisorError("budget_units must be a non-negative integer")
-        if isinstance(self.consumed_units, bool) or not isinstance(self.consumed_units, int) or self.consumed_units < 0:
-            raise ResearchSupervisorError("consumed_units must be a non-negative integer")
+        for name in ("budget_units", "consumed_units"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ResearchSupervisorError(f"{name} must be a non-negative integer")
         if self.consumed_units > self.budget_units:
             raise ResearchSupervisorError("consumed_units cannot exceed budget_units")
         if self.deadline is not None:
@@ -216,7 +204,7 @@ class ResearchSupervisorState:
         question_id: str,
         budget_units: int,
         deadline: str | None,
-        protocol_id: str | None = None,
+        protocol_id: str | None,
         updated_at: str,
     ) -> "ResearchSupervisorState":
         base = cls(
@@ -237,15 +225,20 @@ class ResearchSupervisorState:
         return replace(base, state_sha256=base.computed_sha256)
 
     def transition(self, next_phase: ResearchPhase, *, updated_at: str) -> "ResearchSupervisorState":
-        if not isinstance(next_phase, ResearchPhase):
-            raise InvalidResearchTransitionError("next_phase must be ResearchPhase")
         if self.cancelled:
             raise InvalidResearchTransitionError("cancelled supervisor cannot advance")
+        if not isinstance(next_phase, ResearchPhase):
+            raise InvalidResearchTransitionError("next_phase must be ResearchPhase")
         if _PHASE_INDEX[next_phase] != _PHASE_INDEX[self.phase] + 1:
             raise InvalidResearchTransitionError(
                 f"invalid phase transition {self.phase.value}->{next_phase.value}"
             )
-        changed = replace(self, phase=next_phase, updated_at=_timestamp("updated_at", updated_at), state_sha256="0" * 64)
+        changed = replace(
+            self,
+            phase=next_phase,
+            updated_at=_timestamp("updated_at", updated_at),
+            state_sha256="0" * 64,
+        )
         return replace(changed, state_sha256=changed.computed_sha256)
 
     def consume_budget(self, units: int, *, updated_at: str) -> "ResearchSupervisorState":
@@ -264,7 +257,12 @@ class ResearchSupervisorState:
     def cancel(self, *, updated_at: str) -> "ResearchSupervisorState":
         if self.cancelled:
             return self
-        changed = replace(self, cancelled=True, updated_at=_timestamp("updated_at", updated_at), state_sha256="0" * 64)
+        changed = replace(
+            self,
+            cancelled=True,
+            updated_at=_timestamp("updated_at", updated_at),
+            state_sha256="0" * 64,
+        )
         return replace(changed, state_sha256=changed.computed_sha256)
 
     def checkpoint(self, *, checkpoint_id: str, updated_at: str) -> "ResearchSupervisorState":
@@ -284,14 +282,7 @@ class ResearchSupervisorState:
 
     @classmethod
     def from_payload(cls, payload: object) -> "ResearchSupervisorState":
-        if type(payload) is not dict:
-            raise ResearchSupervisorError("state payload must be an object")
-        required = {
-            "run_id", "trigger_id", "supervisor_id", "question_id", "phase",
-            "protocol_id", "checkpoint_id", "budget_units", "consumed_units",
-            "deadline", "cancelled", "updated_at", "state_sha256",
-        }
-        if set(payload) != required:
+        if type(payload) is not dict or set(payload) != _REQUIRED_STATE_FIELDS:
             raise ResearchSupervisorError("state payload fields mismatch")
         try:
             state = cls(
@@ -309,19 +300,13 @@ class ResearchSupervisorState:
                 updated_at=payload["updated_at"],
                 state_sha256=payload["state_sha256"],
             )
-        except (KeyError, TypeError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             raise ResearchSupervisorError("invalid state payload") from exc
         return state.verify()
 
 
-class ResearchSupervisorExecutor(Protocol):
-    """Optional application seam; scientific truth stays in canonical executors."""
-
-    def resume(self, state: ResearchSupervisorState) -> ResearchSupervisorState: ...
-
-
 class ResearchSupervisorStore:
-    """Atomic durable trigger/run state store; no scheduler or scientific registry semantics."""
+    """Atomic trigger/run store; contains no scheduler or promotion authority."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -333,34 +318,40 @@ class ResearchSupervisorStore:
         target.parent.mkdir(parents=True, exist_ok=True)
         with WorkspaceEconomicLock(target.parent):
             if not target.exists():
-                atomic_write_json(
-                    target,
-                    {"schema_version": SCHEMA_VERSION, "triggers": {}, "runs": {}},
-                )
+                atomic_write_json(target, {"schema_version": SCHEMA_VERSION, "triggers": {}, "runs": {}})
         return cls(target)
 
     def _read(self) -> dict[str, Any]:
-        raw = self.path.read_text(encoding="utf-8")
         try:
+            raw = self.path.read_text(encoding="utf-8")
             state = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
-        except json.JSONDecodeError as exc:
-            raise ResearchSupervisorError("supervisor store must contain valid JSON") from exc
+        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise ResearchSupervisorError("supervisor store is unreadable") from exc
         if type(state) is not dict or state.get("schema_version") != SCHEMA_VERSION:
             raise ResearchSupervisorError("supervisor store schema_version mismatch")
         if type(state.get("triggers")) is not dict or type(state.get("runs")) is not dict:
             raise ResearchSupervisorError("supervisor store collections must be objects")
         for run_id, payload in state["runs"].items():
-            if type(run_id) is not str or type(payload) is not dict:
-                raise ResearchSupervisorError("invalid supervisor run entry")
+            if type(run_id) is not str:
+                raise ResearchSupervisorError("supervisor run id must be text")
             ResearchSupervisorState.from_payload(payload)
+        for trigger_id, record in state["triggers"].items():
+            if type(trigger_id) is not str or type(record) is not dict:
+                raise ResearchSupervisorError("invalid trigger record")
+            if set(record) != {"canonical_id", "payload", "run_id"}:
+                raise ResearchSupervisorError("trigger record fields mismatch")
+            if _sha256("canonical_id", record["canonical_id"]) != ResearchTrigger(**record["payload"]).canonical_id:
+                raise ResearchSupervisorError("trigger canonical identity mismatch")
+            run_id = record["run_id"]
+            if type(run_id) is not str or run_id not in state["runs"]:
+                raise ResearchSupervisorError("trigger references missing run")
+            if state["runs"][run_id]["trigger_id"] != trigger_id:
+                raise ResearchSupervisorError("trigger/run identity mismatch")
         return state
 
     @staticmethod
-    def _trigger_record(trigger: ResearchTrigger) -> dict[str, Any]:
-        return {
-            "canonical_id": trigger.canonical_id,
-            "payload": trigger.to_payload(),
-        }
+    def _record(trigger: ResearchTrigger, run_id: str) -> dict[str, Any]:
+        return {"canonical_id": trigger.canonical_id, "payload": trigger.to_payload(), "run_id": run_id}
 
     def start_or_resume(
         self,
@@ -373,28 +364,20 @@ class ResearchSupervisorStore:
         updated_at: str,
         protocol_id: str | None = None,
     ) -> ResearchSupervisorState:
-        """Collapse repeated delivery of one trigger into one durable run."""
-
-        _text("run_id", run_id)
         _text("supervisor_id", supervisor_id)
+        _text("run_id", run_id)
         with WorkspaceEconomicLock(self.path.parent):
             state = self._read()
-            existing_trigger = state["triggers"].get(trigger.trigger_id)
-            canonical = self._trigger_record(trigger)
-            if existing_trigger is not None:
-                if existing_trigger != canonical:
+            existing_record = state["triggers"].get(trigger.trigger_id)
+            if existing_record is not None:
+                if existing_record["canonical_id"] != trigger.canonical_id or existing_record["payload"] != trigger.to_payload():
                     raise ConflictingResearchTriggerError(
-                        f"trigger identity {trigger.trigger_id!r} already binds different work"
+                        f"trigger identity {trigger.trigger_id!r} is already bound to different work"
                     )
-                bound_run_id = existing_trigger["run_id"]
-                existing = state["runs"].get(bound_run_id)
-                if existing is None:
-                    raise ResearchSupervisorError("trigger references missing durable run")
-                return ResearchSupervisorState.from_payload(existing)
-
+                existing_run = existing_record["run_id"]
+                return ResearchSupervisorState.from_payload(state["runs"][existing_run])
             if run_id in state["runs"]:
-                raise ResearchSupervisorError("run_id already belongs to a different trigger")
-
+                raise ResearchSupervisorError("run_id already belongs to another trigger")
             run_state = ResearchSupervisorState.create(
                 run_id=run_id,
                 trigger_id=trigger.trigger_id,
@@ -405,9 +388,7 @@ class ResearchSupervisorStore:
                 protocol_id=protocol_id,
                 updated_at=updated_at,
             )
-            trigger_record = dict(canonical)
-            trigger_record["run_id"] = run_id
-            state["triggers"][trigger.trigger_id] = trigger_record
+            state["triggers"][trigger.trigger_id] = self._record(trigger, run_id)
             state["runs"][run_id] = run_state.to_payload()
             atomic_write_json(self.path, state)
             self._read()
@@ -415,20 +396,8 @@ class ResearchSupervisorStore:
 
     def get_run(self, run_id: str) -> ResearchSupervisorState | None:
         _text("run_id", run_id)
-        state = self._read()
-        payload = state["runs"].get(run_id)
+        payload = self._read()["runs"].get(run_id)
         return None if payload is None else ResearchSupervisorState.from_payload(payload)
-
-    def get_trigger_run(self, trigger_id: str) -> ResearchSupervisorState | None:
-        _text("trigger_id", trigger_id)
-        state = self._read()
-        record = state["triggers"].get(trigger_id)
-        if record is None:
-            return None
-        run_id = record.get("run_id")
-        if not isinstance(run_id, str):
-            raise ResearchSupervisorError("trigger run binding is invalid")
-        return self.get_run(run_id)
 
     def persist(self, updated: ResearchSupervisorState) -> ResearchSupervisorState:
         updated.verify()
@@ -438,8 +407,8 @@ class ResearchSupervisorStore:
             if current_payload is None:
                 raise ResearchSupervisorError("cannot persist unknown run")
             current = ResearchSupervisorState.from_payload(current_payload)
-            if current.trigger_id != updated.trigger_id:
-                raise ResearchSupervisorError("run trigger identity cannot change")
+            if current.trigger_id != updated.trigger_id or current.question_id != updated.question_id:
+                raise ResearchSupervisorError("run immutable identity cannot change")
             state["runs"][updated.run_id] = updated.to_payload()
             atomic_write_json(self.path, state)
             self._read()
@@ -449,6 +418,7 @@ class ResearchSupervisorStore:
         state = self.get_run(run_id)
         if state is None:
             raise ResearchSupervisorError("unknown run")
+        next_index = _PHASE_INDEX[state.phase] + 1
         return {
             "run_id": state.run_id,
             "trigger_id": state.trigger_id,
@@ -464,9 +434,5 @@ class ResearchSupervisorStore:
             "cancelled": state.cancelled,
             "updated_at": state.updated_at,
             "state_sha256": state.state_sha256,
-            "next_phase": (
-                _PHASE_ORDER[_PHASE_INDEX[state.phase] + 1].value
-                if _PHASE_INDEX[state.phase] + 1 < len(_PHASE_ORDER)
-                else None
-            ),
+            "next_phase": _PHASE_ORDER[next_index].value if next_index < len(_PHASE_ORDER) else None,
         }

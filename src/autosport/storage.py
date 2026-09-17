@@ -177,6 +177,7 @@ def _validate_persistable_sequence(value: object) -> int:
 def _validate_incoming_event(event: MarketEvent) -> str:
     """Prove an event survives the exact durable JSON/SQLite representation without type drift."""
     _validate_persistable_sequence(event.sequence)
+    _observed_instant(event.observed_ts)
     try:
         raw = event.to_dict()
         payload = _canonical_json(raw)

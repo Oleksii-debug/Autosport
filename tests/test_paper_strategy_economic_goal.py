@@ -4,7 +4,11 @@ from decimal import Decimal
 from pathlib import Path
 
 from autosport.agents import AgentContext
-from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
+from autosport.decision_ledger import (
+    ECONOMIC_DECISION_KIND,
+    DecisionRecord,
+    JsonlDecisionLedger,
+)
 from autosport.domain import MarketEvent
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
@@ -236,6 +240,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
                     context_hash=record.context_hash,
                     decision_id=record.decision_id,
                     recorded_at=record.recorded_at,
+                    decision_kind=ECONOMIC_DECISION_KIND,
                 )
                 super().append_economic(wrong, contract)
                 raise OSError("injected mismatched durable decision")

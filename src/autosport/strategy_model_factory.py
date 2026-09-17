@@ -92,11 +92,13 @@ class TrainingPoint:
     target_available_at: str | None = None
 
     def __post_init__(self) -> None:
-        _instant(self.observed_at, "observed_at")
+        observed = _instant(self.observed_at, "observed_at")
         _finite(self.feature, "feature")
         _finite(self.target, "target")
         if self.target_available_at is not None:
-            _instant(self.target_available_at, "target_available_at")
+            revealed = _instant(self.target_available_at, "target_available_at")
+            if revealed < observed:
+                raise ValueError("target_available_at must not precede observed_at")
 
     @property
     def target_reveal_at(self) -> str:
@@ -145,19 +147,48 @@ def training_points_manifest_sha256(points: Sequence[TrainingPoint]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class WalkForwardEvaluationConfig:
-    """Frozen promotion-grade evaluator degrees of freedom."""
+    """Frozen promotion-grade evaluator degrees of freedom and feature identity."""
 
     minimum_causal_train_size: int = 2
+    feature_set_id: str | None = None
+    feature_definition_sha256: str | None = None
+    feature_source_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.minimum_causal_train_size) is not int or self.minimum_causal_train_size < 1:
             raise ValueError("minimum_causal_train_size must be a positive integer")
+        feature_values = (
+            self.feature_set_id,
+            self.feature_definition_sha256,
+            self.feature_source_sha256,
+        )
+        if any(value is not None for value in feature_values):
+            if not all(value is not None for value in feature_values):
+                raise ValueError("frozen feature identity must be complete")
+            _text(self.feature_set_id, "feature_set_id")
+            _sha256(self.feature_definition_sha256, "feature_definition_sha256")
+            _sha256(self.feature_source_sha256, "feature_source_sha256")
 
     def canonical_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "kind": "autosport-causal-walk-forward-v1",
             "minimum_causal_train_size": self.minimum_causal_train_size,
         }
+        if self.feature_set_id is not None:
+            payload.update(
+                {
+                    "feature_set_id": self.feature_set_id,
+                    "feature_definition_sha256": _sha256(
+                        self.feature_definition_sha256,
+                        "feature_definition_sha256",
+                    ),
+                    "feature_source_sha256": _sha256(
+                        self.feature_source_sha256,
+                        "feature_source_sha256",
+                    ),
+                }
+            )
+        return payload
 
     @property
     def frozen_text(self) -> str:
@@ -180,14 +211,25 @@ class WalkForwardEvaluationConfig:
             payload = json.loads(text)
         except json.JSONDecodeError as exc:
             raise ValueError("factory evaluation_design must be frozen canonical JSON") from exc
-        if type(payload) is not dict or set(payload) != {
-            "kind",
-            "minimum_causal_train_size",
-        }:
+        basic_fields = {"kind", "minimum_causal_train_size"}
+        feature_fields = {
+            "feature_set_id",
+            "feature_definition_sha256",
+            "feature_source_sha256",
+        }
+        if type(payload) is not dict or set(payload) not in (
+            basic_fields,
+            basic_fields | feature_fields,
+        ):
             raise ValueError("factory evaluation_design has unsupported fields")
         if payload.get("kind") != "autosport-causal-walk-forward-v1":
             raise ValueError("factory evaluation_design kind is unsupported")
-        config = cls(payload.get("minimum_causal_train_size"))
+        config = cls(
+            payload.get("minimum_causal_train_size"),
+            payload.get("feature_set_id"),
+            payload.get("feature_definition_sha256"),
+            payload.get("feature_source_sha256"),
+        )
         if text != config.frozen_text:
             raise ValueError("factory evaluation_design must use canonical frozen encoding")
         return config
@@ -754,6 +796,24 @@ class ExperimentRunner:
         evaluation_config = WalkForwardEvaluationConfig.from_frozen_text(
             binding.get("evaluation_design")
         )
+        if evaluation_config.feature_set_id is None:
+            raise ValueError("frozen evaluator config lacks canonical feature identity")
+        if feature.payload.get("feature_set_id") != evaluation_config.feature_set_id:
+            raise ValueError("feature set identity does not match frozen evaluator config")
+        if _sha256(
+            feature.payload.get("definition_sha256"), "feature definition_sha256"
+        ) != _sha256(
+            evaluation_config.feature_definition_sha256,
+            "frozen feature_definition_sha256",
+        ):
+            raise ValueError("feature definition does not match frozen evaluator config")
+        if _sha256(
+            feature.payload.get("source_sha256"), "feature source_sha256"
+        ) != _sha256(
+            evaluation_config.feature_source_sha256,
+            "frozen feature_source_sha256",
+        ):
+            raise ValueError("feature source does not match frozen evaluator config")
         config_sha256 = _sha256(binding.get("code_config_sha256"), "code_config_sha256")
         return (
             binding,
@@ -920,6 +980,16 @@ class ExperimentRunner:
             raise ValueError(
                 "training points do not match frozen DatasetSnapshot manifest"
             )
+        completed = _instant(spec.completed_at, "completed_at")
+        for point in _ordered_training_points(points):
+            if _instant(point.observed_at, "observed_at") > completed:
+                raise ValueError(
+                    "evaluation observation was not available by experiment completion"
+                )
+            if _instant(point.target_reveal_at, "target_available_at") > completed:
+                raise ValueError(
+                    "evaluation target was not revealed by experiment completion"
+                )
 
         current_champion = self.registry.champion_strategy(
             as_of=spec.decided_at,
@@ -947,7 +1017,11 @@ class ExperimentRunner:
         )
         if walk_forward.primary_metric != rule.primary_metric:
             raise ValueError("walk-forward primary metric does not match frozen promotion rule")
-        completed = _instant(spec.completed_at, "completed_at")
+        if any(
+            _instant(fold.evaluation_at, "evaluation_at") > completed
+            for fold in walk_forward.folds
+        ):
+            raise ValueError("evaluation observation was not available by experiment completion")
         if any(
             _instant(fold.target_available_at, "target_available_at") > completed
             for fold in walk_forward.folds

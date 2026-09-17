@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from autosport.experiential_learning import PolicyRetestSpec, run_policy_retest
-from autosport.learning_environment import EvidenceTruth
+from autosport.learning_environment import Action, EvidenceTruth, RewardEvidence, Transition
 from autosport.scientific_registry import ScientificRegistry
 from autosport.strategy_model_factory import (
     ExperimentRunner,
@@ -16,11 +16,7 @@ from autosport.strategy_model_factory import (
     PromotionRule,
     PromotionVerdict,
 )
-from autosport.transparent_bandit_policy import (
-    ActionEstimate,
-    BanditPolicyState,
-    PolicyUpdateEvidence,
-)
+from autosport.transparent_bandit_policy import BanditPolicyState
 
 
 class ExperientialLearningFactoryBridgeTests(unittest.TestCase):
@@ -32,30 +28,35 @@ class ExperientialLearningFactoryBridgeTests(unittest.TestCase):
             seed=17,
             action_types=frozenset({"WAIT"}),
         )
-        successor = BanditPolicyState(
+        action = Action(
             environment_id=predecessor.environment_id,
-            protocol_id=predecessor.protocol_id,
-            config_sha256=predecessor.config_sha256,
-            seed=predecessor.seed,
-            generation=1,
-            estimates=(ActionEstimate("WAIT", 1, Decimal("0")),),
-            applied_action_ids=("a" * 64,),
-            applied_reward_ids=("b" * 64,),
-            predecessor_policy_id=predecessor.policy_id,
+            observation_id="1" * 64,
+            action_type="WAIT",
+            decided_at="2026-09-17T13:00:00+00:00",
         )
-        evidence = PolicyUpdateEvidence(
-            environment_id=successor.environment_id,
-            protocol_id=successor.protocol_id,
-            config_sha256=successor.config_sha256,
-            seed=successor.seed,
-            update_index=1,
-            predecessor_policy_id=predecessor.policy_id,
-            successor_policy_id=successor.policy_id,
-            transition_id="e" * 64,
-            action_id="a" * 64,
-            reward_id="b" * 64,
-            reward_truth=EvidenceTruth.OBSERVED,
-            simulation_model_id=None,
+        reward = RewardEvidence(
+            environment_id=predecessor.environment_id,
+            action_id=action.action_id,
+            outcome_id="2" * 64,
+            reward=Decimal("0"),
+            available_at="2026-09-17T13:00:01+00:00",
+            truth=EvidenceTruth.OBSERVED,
+        )
+        transition = Transition(
+            environment_id=predecessor.environment_id,
+            episode_id="3" * 64,
+            step_index=1,
+            observation_id=action.observation_id,
+            action_id=action.action_id,
+            outcome_id=reward.outcome_id,
+            reward_id=reward.reward_id,
+            decision_at=action.decided_at,
+            resolved_at="2026-09-17T13:00:02+00:00",
+        )
+        successor, evidence = predecessor.update(
+            action=action,
+            reward=reward,
+            transition=transition,
         )
         return predecessor, successor, evidence
 

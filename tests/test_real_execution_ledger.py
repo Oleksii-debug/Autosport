@@ -19,6 +19,11 @@ from autosport.real_execution_ledger import (
 
 
 TS = "2026-09-17T19:28:00+00:00"
+RESERVED_AT = "2026-09-17T19:28:10+00:00"
+UNKNOWN_AT = "2026-09-17T19:28:20+00:00"
+RECONCILED_AT = "2026-09-17T19:28:30+00:00"
+RETRY_RESERVED_AT = "2026-09-17T19:28:40+00:00"
+EXPIRES_AT = "2026-09-17T19:29:00+00:00"
 
 
 def action(
@@ -38,7 +43,7 @@ def action(
         requested_stake="10.00",
         quote_id=f"quote-{action_id}",
         quote_observed_at=TS,
-        expires_at="2026-09-17T19:29:00+00:00",
+        expires_at=EXPIRES_AT,
     )
 
 
@@ -78,7 +83,12 @@ class RealExecutionLedgerTests(unittest.TestCase):
             path = Path(tmp) / "real.jsonl"
             ledger = RealExecutionLedger(path)
             ledger.reserve_plan(plan(action()))
-            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="try-1")
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
             ledger.mark_submitted("try-1")
 
             restarted = RealExecutionLedger(path)
@@ -87,14 +97,22 @@ class RealExecutionLedgerTests(unittest.TestCase):
             self.assertFalse(restarted.can_retry_action(plan_id="p1", action_id="a1"))
             with self.assertRaises(ExecutionStateError):
                 restarted.begin_attempt(
-                    plan_id="p1", action_id="a1", attempt_id="try-2"
+                    plan_id="p1",
+                    action_id="a1",
+                    attempt_id="try-2",
+                    reserved_at=RETRY_RESERVED_AT,
                 )
 
     def test_unknown_ack_requires_external_reconciliation_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
             ledger.reserve_plan(plan(action()))
-            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="try-1")
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
             ledger.mark_unknown("try-1", reason="timeout")
 
             with self.assertRaisesRegex(ExecutionStateError, "reconciliation evidence"):
@@ -126,13 +144,20 @@ class RealExecutionLedgerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
             ledger.reserve_plan(plan(action()))
-            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="try-1")
-            ledger.mark_unknown("try-1", reason="timeout")
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
             ledger.reconcile_not_found(
                 ReconciliationSnapshot(
                     attempt_id="try-1",
                     evidence_id="readback-1",
-                    observed_at=TS,
+                    observed_at=RECONCILED_AT,
                     external_effect_found=False,
                     source="provider-readback",
                 )
@@ -141,7 +166,114 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 ledger.attempt_state("try-1"), AttemptState.RECONCILED_NOT_FOUND
             )
             self.assertTrue(ledger.can_retry_action(plan_id="p1", action_id="a1"))
-            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="try-2")
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-2",
+                reserved_at=RETRY_RESERVED_AT,
+            )
+
+    def test_stale_not_found_evidence_cannot_authorize_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError, "newer than attempt uncertainty boundary"
+            ):
+                ledger.reconcile_not_found(
+                    ReconciliationSnapshot(
+                        attempt_id="try-1",
+                        evidence_id="stale-readback",
+                        observed_at=RESERVED_AT,
+                        external_effect_found=False,
+                        source="provider-readback",
+                    )
+                )
+
+            self.assertEqual(ledger.attempt_state("try-1"), AttemptState.UNKNOWN)
+            self.assertFalse(
+                ledger.can_retry_action(plan_id="p1", action_id="a1")
+            )
+
+    def test_expired_quote_cannot_start_or_retry_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+
+            with self.assertRaisesRegex(
+                ExecutionStateError, "persisted quote expiry"
+            ):
+                ledger.begin_attempt(
+                    plan_id="p1",
+                    action_id="a1",
+                    attempt_id="expired-first",
+                    reserved_at=EXPIRES_AT,
+                )
+
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
+            ledger.reconcile_not_found(
+                ReconciliationSnapshot(
+                    attempt_id="try-1",
+                    evidence_id="fresh-readback",
+                    observed_at=RECONCILED_AT,
+                    external_effect_found=False,
+                    source="provider-readback",
+                )
+            )
+            with self.assertRaisesRegex(
+                ExecutionStateError, "persisted quote expiry"
+            ):
+                ledger.begin_attempt(
+                    plan_id="p1",
+                    action_id="a1",
+                    attempt_id="expired-retry",
+                    reserved_at=EXPIRES_AT,
+                )
+
+    def test_acknowledgement_cannot_exceed_requested_stake(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError, "exceeds requested action stake"
+            ):
+                ledger.acknowledge(
+                    ExternalAcknowledgement(
+                        attempt_id="try-1",
+                        external_receipt_id="oversized",
+                        status=AcknowledgementStatus.ACCEPTED,
+                        acknowledged_at=RECONCILED_AT,
+                        accepted_odds="2.5",
+                        accepted_stake="10.01",
+                    )
+                )
+            self.assertEqual(ledger.attempt_state("try-1"), AttemptState.RESERVED)
+
 
     def test_receipt_identity_is_scoped_by_bookmaker_and_account(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,7 +286,10 @@ class RealExecutionLedgerTests(unittest.TestCase):
             )
             for plan_id, attempt_id in (("p1", "t1"), ("p2", "t2")):
                 ledger.begin_attempt(
-                    plan_id=plan_id, action_id="a1", attempt_id=attempt_id
+                    plan_id=plan_id,
+                    action_id="a1",
+                    attempt_id=attempt_id,
+                    reserved_at=RESERVED_AT,
                 )
                 ledger.acknowledge(
                     ExternalAcknowledgement(
@@ -173,8 +308,18 @@ class RealExecutionLedgerTests(unittest.TestCase):
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
             ledger.reserve_plan(plan(action(), plan_id="p1"))
             ledger.reserve_plan(plan(action(), plan_id="p2"))
-            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="t1")
-            ledger.begin_attempt(plan_id="p2", action_id="a1", attempt_id="t2")
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="t1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.begin_attempt(
+                plan_id="p2",
+                action_id="a1",
+                attempt_id="t2",
+                reserved_at=RESERVED_AT,
+            )
             ledger.acknowledge(
                 ExternalAcknowledgement(
                     attempt_id="t1",
@@ -202,7 +347,12 @@ class RealExecutionLedgerTests(unittest.TestCase):
             path = Path(tmp) / "real.jsonl"
             ledger = RealExecutionLedger(path)
             ledger.reserve_plan(plan(action("a1"), action("a2")))
-            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="t1")
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="t1",
+                reserved_at=RESERVED_AT,
+            )
             ledger.acknowledge(
                 ExternalAcknowledgement(
                     attempt_id="t1",
@@ -219,7 +369,10 @@ class RealExecutionLedgerTests(unittest.TestCase):
             self.assertFalse(restarted.can_retry_action(plan_id="p1", action_id="a2"))
             with self.assertRaisesRegex(ExecutionStateError, "stale"):
                 restarted.begin_attempt(
-                    plan_id="p1", action_id="a2", attempt_id="t2"
+                    plan_id="p1",
+                    action_id="a2",
+                    attempt_id="t2",
+                    reserved_at=RETRY_RESERVED_AT,
                 )
 
     def test_semantic_plan_fingerprint_tamper_detected_even_if_event_hash_recomputed(self):
@@ -260,7 +413,12 @@ class RealExecutionLedgerTests(unittest.TestCase):
             path = Path(tmp) / "real.jsonl"
             ledger = RealExecutionLedger(path)
             ledger.reserve_plan(plan(action()))
-            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="t1")
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="t1",
+                reserved_at=RESERVED_AT,
+            )
             lines = [
                 json.loads(line)
                 for line in path.read_text(encoding="utf-8").splitlines()

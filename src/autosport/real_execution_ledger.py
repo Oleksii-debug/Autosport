@@ -925,6 +925,12 @@ class RealExecutionLedger:
                         raise ExecutionStateError(
                             "action already has unresolved/final attempt"
                         )
+            if _timestamp(reserved_at, "reserved_at") >= _timestamp(
+                action["expires_at"], "expires_at"
+            ):
+                raise ExecutionStateError(
+                    "cannot reserve attempt at or after persisted quote expiry"
+                )
             self._append(
                 EventType.ATTEMPT_RESERVED,
                 plan_id,
@@ -1077,6 +1083,17 @@ class RealExecutionLedger:
                     "UNKNOWN attempt requires external reconciliation evidence"
                 )
             first = attempt_events[0]
+            if acknowledgement.accepted_stake is not None:
+                _, action = self._action_payload(
+                    events, first["plan_id"], first["action_id"]
+                )
+                requested_stake = _decimal(
+                    action["requested_stake"], "requested_stake"
+                )
+                if acknowledgement.accepted_stake > requested_stake:
+                    raise ExecutionStateError(
+                        "acknowledged stake exceeds requested action stake"
+                    )
             probe_event = {
                 "plan_id": first["plan_id"],
                 "action_id": first["action_id"],
@@ -1128,6 +1145,30 @@ class RealExecutionLedger:
             if self._state(attempt_events) != AttemptState.UNKNOWN:
                 raise ExecutionStateError(
                     "retry requires UNKNOWN + external not-found evidence"
+                )
+            uncertainty_boundaries: list[datetime] = []
+            for event in attempt_events:
+                if event["event_type"] == EventType.ATTEMPT_SUBMITTED.value:
+                    uncertainty_boundaries.append(
+                        _timestamp(
+                            event["payload"]["submitted_at"], "submitted_at"
+                        )
+                    )
+                elif event["event_type"] == EventType.ATTEMPT_UNKNOWN.value:
+                    uncertainty_boundaries.append(
+                        _timestamp(
+                            event["payload"]["observed_at"], "observed_at"
+                        )
+                    )
+            if not uncertainty_boundaries:
+                raise ExecutionLedgerIntegrityError(
+                    "UNKNOWN attempt is missing an uncertainty boundary"
+                )
+            if _timestamp(snapshot.observed_at, "observed_at") <= max(
+                uncertainty_boundaries
+            ):
+                raise ExecutionStateError(
+                    "external not-found evidence must be newer than attempt uncertainty boundary"
                 )
             first = attempt_events[0]
             self._append(

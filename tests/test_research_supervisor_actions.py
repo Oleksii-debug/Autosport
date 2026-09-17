@@ -15,7 +15,9 @@ from autosport.research_supervisor import (
     ResearchPhase,
     ResearchSupervisor,
     ResearchSupervisorError,
+    ResearchSupervisorLimitReached,
     ResearchTrigger,
+    SupervisorStatus,
 )
 from autosport.research_supervisor_actions import (
     checkpoint_causal_environment,
@@ -38,7 +40,13 @@ from test_strategy_model_factory import (
 )
 
 
-def _supervisor_for_factory(tmp_path, registry):
+def _supervisor_for_factory(
+    tmp_path,
+    registry,
+    *,
+    budget_units=64,
+    deadline_at="2026-01-10T00:00:00+00:00",
+):
     supervisor = ResearchSupervisor.initialize_pristine(
         tmp_path / "research-supervisor.json", registry
     )
@@ -47,8 +55,8 @@ def _supervisor_for_factory(tmp_path, registry):
             trigger_id="continuous-research-1",
             question_id="question-factory",
             requested_at=T4,
-            budget_units=64,
-            deadline_at="2026-01-10T00:00:00+00:00",
+            budget_units=budget_units,
+            deadline_at=deadline_at,
         )
     )
     return supervisor, started.run_id
@@ -131,6 +139,101 @@ def test_stage_factory_wrong_phase_has_no_scientific_registry_side_effect(tmp_pa
 
     assert registry.path.read_bytes() == before
     assert supervisor.status(run_id).phase is not ResearchPhase.EXPERIMENT
+
+
+def test_stage_factory_paused_run_has_no_scientific_registry_side_effect(tmp_path):
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
+    runner = ExperimentRunner(registry, store)
+    supervisor, run_id = _supervisor_for_factory(tmp_path, registry)
+    _advance_to(supervisor, run_id, ResearchPhase.EXPERIMENT)
+    supervisor.pause(run_id, at=T7)
+    before = registry.path.read_bytes()
+
+    with pytest.raises(ResearchSupervisorError, match="run is not active: PAUSED"):
+        stage_factory_evaluation(
+            supervisor,
+            run_id,
+            runner=runner,
+            spec=_candidate_spec(),
+            points=_candidate_points(),
+            rule=rule,
+            at=T7,
+        )
+
+    assert registry.path.read_bytes() == before
+    assert supervisor.status(run_id).status is SupervisorStatus.PAUSED
+
+
+def test_stage_factory_exhausted_budget_stops_before_scientific_registry_write(tmp_path):
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
+    runner = ExperimentRunner(registry, store)
+    supervisor, run_id = _supervisor_for_factory(tmp_path, registry, budget_units=5)
+    _advance_to(supervisor, run_id, ResearchPhase.EXPERIMENT)
+    before = registry.path.read_bytes()
+
+    with pytest.raises(ResearchSupervisorLimitReached, match="budget exhausted"):
+        stage_factory_evaluation(
+            supervisor,
+            run_id,
+            runner=runner,
+            spec=_candidate_spec(),
+            points=_candidate_points(),
+            rule=rule,
+            at=T7,
+        )
+
+    assert registry.path.read_bytes() == before
+    stopped = supervisor.status(run_id)
+    assert stopped.status is SupervisorStatus.STOPPED
+    assert stopped.phase is ResearchPhase.EXPERIMENT
+    assert stopped.stop_reason == "BUDGET_EXHAUSTED"
+
+
+def test_stage_factory_expired_deadline_stops_before_scientific_registry_write(tmp_path):
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
+    runner = ExperimentRunner(registry, store)
+    supervisor, run_id = _supervisor_for_factory(tmp_path, registry, deadline_at=T6)
+    _advance_to(supervisor, run_id, ResearchPhase.EXPERIMENT, at=T6)
+    before = registry.path.read_bytes()
+
+    with pytest.raises(ResearchSupervisorLimitReached, match="deadline expired"):
+        stage_factory_evaluation(
+            supervisor,
+            run_id,
+            runner=runner,
+            spec=_candidate_spec(),
+            points=_candidate_points(),
+            rule=rule,
+            at=T7,
+        )
+
+    assert registry.path.read_bytes() == before
+    stopped = supervisor.status(run_id)
+    assert stopped.status is SupervisorStatus.STOPPED
+    assert stopped.phase is ResearchPhase.EXPERIMENT
+    assert stopped.stop_reason == "DEADLINE_EXPIRED"
+
+
+def test_stage_factory_backwards_time_has_no_scientific_registry_side_effect(tmp_path):
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
+    runner = ExperimentRunner(registry, store)
+    supervisor, run_id = _supervisor_for_factory(tmp_path, registry)
+    _advance_to(supervisor, run_id, ResearchPhase.EXPERIMENT, at=T7)
+    before = registry.path.read_bytes()
+
+    with pytest.raises(ValueError, match="authority write timestamp cannot move backwards"):
+        stage_factory_evaluation(
+            supervisor,
+            run_id,
+            runner=runner,
+            spec=_candidate_spec(),
+            points=_candidate_points(),
+            rule=rule,
+            at=T6,
+        )
+
+    assert registry.path.read_bytes() == before
+    assert supervisor.status(run_id).phase is ResearchPhase.EXPERIMENT
 
 
 def test_finalize_factory_wrong_phase_has_no_promotion_or_postmortem_side_effect(tmp_path):

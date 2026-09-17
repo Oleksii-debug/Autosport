@@ -9,6 +9,7 @@ after a crash between the authority write and the supervisor checkpoint.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Sequence
 
 from .learning_environment import CausalLearningEnvironment, EnvironmentCheckpoint
@@ -23,6 +24,7 @@ from .research_supervisor import (
     ResearchSupervisor,
     ResearchSupervisorError,
     SupervisorSnapshot,
+    SupervisorStatus,
 )
 from .scientific_registry import PromotionAction, ResearchQuestion
 from .strategy_model_factory import (
@@ -47,6 +49,16 @@ class EnvironmentPhaseEvidence:
 
 def _binding_map(snapshot: SupervisorSnapshot) -> dict[str, str]:
     return dict(snapshot.bindings)
+
+
+def _snapshot_instant(value: str, name: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must include a timezone")
+    return parsed.astimezone(timezone.utc)
 
 
 def _require_replayed_bindings(
@@ -77,17 +89,52 @@ def _require_write_phase_admission(
     *,
     expected_phase: ResearchPhase,
     replay_at_least_phase: ResearchPhase,
+    at: str,
+    budget_cost: int,
 ) -> SupervisorSnapshot:
-    """Reject wrong-phase calls before any external canonical authority can mutate.
+    """Reject inadmissible calls before any external canonical authority can mutate.
 
     The exact expected phase may perform the authority write before the supervisor
-    checkpoint so crash/redelivery remains safe. A snapshot already at or beyond the
-    replay boundary may also replay an immutable/idempotent authority write and then
-    prove its bindings. Any earlier/intermediate phase is rejected before that write.
+    checkpoint so crash/redelivery remains safe, but only while the canonical run is
+    ACTIVE, time-monotonic, within deadline, and has enough remaining budget. When a
+    deadline/budget limit is already crossed, delegate to ``advance`` *before* the
+    authority write so the supervisor records its canonical STOPPED state and raises.
+    A snapshot already at or beyond the replay boundary may replay an immutable/
+    idempotent authority write and then prove its bindings. Earlier/intermediate
+    phases are rejected before that write.
     """
 
     snapshot = supervisor.status(run_id)
     if snapshot.phase is expected_phase:
+        if snapshot.status is not SupervisorStatus.ACTIVE:
+            raise ResearchSupervisorError(
+                f"run is not active: {snapshot.status.value}"
+            )
+        if isinstance(budget_cost, bool) or not isinstance(budget_cost, int):
+            raise ValueError("budget_cost must be an integer")
+        if budget_cost <= 0:
+            raise ValueError("budget_cost must be positive")
+        now = _snapshot_instant(at, "at")
+        if now < _snapshot_instant(snapshot.updated_at, "updated_at"):
+            raise ValueError("authority write timestamp cannot move backwards")
+        deadline_expired = (
+            snapshot.deadline_at is not None
+            and now > _snapshot_instant(snapshot.deadline_at, "deadline_at")
+        )
+        budget_exhausted = (
+            snapshot.consumed_budget_units + budget_cost > snapshot.budget_units
+        )
+        if deadline_expired or budget_exhausted:
+            # Canonical ResearchSupervisor.advance owns limit ordering and STOPPED
+            # persistence. Calling it before the external write preserves that exact
+            # state machine while guaranteeing no scientific authority was published.
+            supervisor.advance(
+                run_id,
+                expected_phase=expected_phase,
+                at=at,
+                budget_cost=budget_cost,
+            )
+            raise AssertionError("limit advance must raise before authority write")
         return snapshot
     if _PHASE_INDEX[snapshot.phase] >= _PHASE_INDEX[replay_at_least_phase]:
         return snapshot
@@ -150,6 +197,8 @@ def stage_factory_evaluation(
         run_id,
         expected_phase=ResearchPhase.EXPERIMENT,
         replay_at_least_phase=ResearchPhase.CAUSAL_EVALUATION,
+        at=at,
+        budget_cost=budget_cost,
     )
     staged = stage_baseline_candidate(
         runner,
@@ -252,6 +301,8 @@ def finalize_factory_decision(
         run_id,
         expected_phase=ResearchPhase.DECISION,
         replay_at_least_phase=ResearchPhase.POSTMORTEM,
+        at=decided_at,
+        budget_cost=budget_cost,
     )
     result = finalize_staged_candidate(
         runner,
@@ -379,6 +430,14 @@ def commit_memory_and_next_question(
 
     question_bindings = (("next_question_id", next_question.record_id),)
     if snapshot.phase is ResearchPhase.NEXT_QUESTION:
+        _require_write_phase_admission(
+            supervisor,
+            run_id,
+            expected_phase=ResearchPhase.NEXT_QUESTION,
+            replay_at_least_phase=ResearchPhase.COMPLETE,
+            at=at,
+            budget_cost=next_question_budget_cost,
+        )
         supervisor.scientific_registry.append(next_question)
         snapshot = supervisor.advance(
             run_id,

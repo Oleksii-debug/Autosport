@@ -18,6 +18,9 @@ _COUNTER_FIELDS = (
     "total_failures",
     "consecutive_failures",
 )
+_SCHEMA_V1 = 1
+_SCHEMA_V2 = 2
+_HISTORY_ENTRY_FIELDS = frozenset({"recorded_at", "state"})
 
 
 def parse_source_timestamp(value: str) -> datetime:
@@ -77,7 +80,11 @@ class IngestionPolicy:
     max_future_skew_seconds: float = 5.0
 
     def __post_init__(self) -> None:
-        if isinstance(self.max_batch_size, bool) or not isinstance(self.max_batch_size, int) or self.max_batch_size <= 0:
+        if (
+            isinstance(self.max_batch_size, bool)
+            or not isinstance(self.max_batch_size, int)
+            or self.max_batch_size <= 0
+        ):
             raise ValueError("max_batch_size must be a positive integer")
         for field_name, value in (
             ("stale_after_seconds", self.stale_after_seconds),
@@ -259,7 +266,13 @@ class _SourceHealthWriterLock:
 
 
 class SourceHealthStore:
-    """Durable operational projection for provider health; never used as market history."""
+    """Durable provider-health projection plus causal append-only state history.
+
+    Schema v2 keeps the latest projection and the decision-relevant transition history
+    in one atomically replaced document. Legacy schema-v1 stores remain readable and are
+    upgraded on the first successful mutation. A legacy projection is never backfilled
+    earlier than the timestamp evidenced by that projection itself.
+    """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -267,26 +280,76 @@ class SourceHealthStore:
         self._lock_path = self.path.with_name(self.path.name + ".lock")
         with self._writer_guard():
             if not self.path.exists():
-                self._write({"schema_version": 1, "sources": {}})
+                self._write({"schema_version": _SCHEMA_V2, "sources": {}, "history": {}})
             else:
-                # Validate existing operational truth while writers are excluded so a
-                # session cannot race initialization against another process mutation.
                 self._read()
+
+    @staticmethod
+    def _state_from_payload(payload: dict, *, normalize_failed_flags: bool = True) -> SourceHealthState:
+        value = dict(payload)
+        value["quality_flags"] = tuple(value["quality_flags"])
+        if normalize_failed_flags and value.get("status") == "failed":
+            # Old schema-v1 stores could retain the preceding successful batch's
+            # quality flags on a later failed poll. Those flags are not current
+            # failed-state evidence, so normalize them at the public boundary.
+            value["quality_flags"] = ()
+        return SourceHealthState(**value)
+
+    @staticmethod
+    def _payload(state: SourceHealthState) -> dict:
+        payload = asdict(state)
+        payload["quality_flags"] = list(state.quality_flags)
+        return payload
+
+    @staticmethod
+    def _transition_at(state: SourceHealthState) -> str | None:
+        if state.status == "failed":
+            return state.last_error_at
+        if state.status in {"healthy", "degraded"}:
+            return state.last_success_at
+        return None
+
+    @staticmethod
+    def _as_of(value: datetime) -> datetime:
+        if not isinstance(value, datetime):
+            raise TypeError("as_of must be a datetime")
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("as_of must be timezone-aware")
+        return value.astimezone(timezone.utc)
 
     def get(self, source_id: str) -> SourceHealthState:
         _validate_source_id(source_id)
         raw = self._read()["sources"].get(source_id)
         if raw is None:
             return SourceHealthState(source_id=source_id)
-        value = dict(raw)
-        value["quality_flags"] = tuple(value["quality_flags"])
-        if value.get("status") == "failed":
-            # Pre-fix stores may legitimately contain the preceding successful
-            # batch's flags on a later failed poll. Preserve that schema-v1 state
-            # as readable input, but never expose stale batch-scoped evidence as
-            # the current failed-state truth.
-            value["quality_flags"] = ()
-        return SourceHealthState(**value)
+        return self._state_from_payload(raw)
+
+    def get_as_of(self, source_id: str, *, as_of: datetime) -> SourceHealthState:
+        """Return health state known at ``as_of`` without consulting future transitions."""
+        _validate_source_id(source_id)
+        boundary = self._as_of(as_of)
+        raw = self._read()
+
+        if raw["schema_version"] == _SCHEMA_V1:
+            payload = raw["sources"].get(source_id)
+            if payload is None:
+                return SourceHealthState(source_id=source_id)
+            state = self._state_from_payload(payload)
+            recorded_at = self._transition_at(state)
+            if recorded_at is None or parse_source_timestamp(recorded_at) > boundary:
+                return SourceHealthState(source_id=source_id)
+            return state
+
+        entries = raw["history"].get(source_id, ())
+        selected: dict | None = None
+        for entry in entries:
+            if parse_source_timestamp(entry["recorded_at"]) <= boundary:
+                selected = entry["state"]
+            else:
+                break
+        if selected is None:
+            return SourceHealthState(source_id=source_id)
+        return self._state_from_payload(selected, normalize_failed_flags=False)
 
     @staticmethod
     def _validate_success_update(
@@ -331,7 +394,7 @@ class SourceHealthStore:
                 state.latest_source_ts = latest_source_ts
         state.quality_flags = tuple(sorted(quality_flags))
         state.status = "degraded" if state.quality_flags else "healthy"
-        self._put(state)
+        self._put(state, recorded_at=now)
         return state
 
     def record_success(
@@ -429,19 +492,57 @@ class SourceHealthStore:
             state.last_error = f"{type(error).__name__}: {error}"
             state.quality_flags = ()
             state.status = "failed"
-            self._put(state)
+            self._put(state, recorded_at=now)
             return state
 
     def _writer_guard(self) -> _SourceHealthWriterLock:
         return _SourceHealthWriterLock(self._lock_path)
 
-    def _put(self, state: SourceHealthState) -> None:
+    def _upgrade_to_v2(self, raw: dict) -> dict:
+        if raw["schema_version"] == _SCHEMA_V2:
+            return raw
+        upgraded = {"schema_version": _SCHEMA_V2, "sources": {}, "history": {}}
+        for source_id, payload in raw["sources"].items():
+            state = self._state_from_payload(payload)
+            normalized = self._payload(state)
+            upgraded["sources"][source_id] = normalized
+            recorded_at = self._transition_at(state)
+            if recorded_at is None:
+                raise ValueError("persisted non-pristine source health requires transition timestamp")
+            upgraded["history"][source_id] = [
+                {"recorded_at": recorded_at, "state": normalized}
+            ]
+        return upgraded
+
+    def _put(self, state: SourceHealthState, *, recorded_at: str) -> None:
         state.validate()
-        raw = self._read()
-        payload = asdict(state)
-        payload["quality_flags"] = list(state.quality_flags)
+        recorded = parse_source_timestamp(recorded_at)
+        transition_at = self._transition_at(state)
+        if transition_at is None or parse_source_timestamp(transition_at) != recorded:
+            raise ValueError("source health transition timestamp mismatch")
+
+        raw = self._upgrade_to_v2(self._read())
+        entries = raw["history"].setdefault(state.source_id, [])
+        if entries and parse_source_timestamp(entries[-1]["recorded_at"]) > recorded:
+            raise ValueError("source health transitions must be recorded in nondecreasing time order")
+
+        payload = self._payload(state)
+        entries.append({"recorded_at": recorded_at, "state": payload})
         raw["sources"][state.source_id] = payload
         self._write(raw)
+
+    @staticmethod
+    def _validate_persisted_state(source_id: str, payload: object) -> None:
+        _validate_source_id(source_id)
+        if not isinstance(payload, dict) or set(payload) != _SOURCE_STATE_FIELDS:
+            raise ValueError("invalid source health state fields")
+        if payload.get("source_id") != source_id:
+            raise ValueError("source health state identity mismatch")
+        if not isinstance(payload.get("quality_flags"), list):
+            raise ValueError("persisted quality_flags must be a JSON array")
+        value = dict(payload)
+        value["quality_flags"] = tuple(value["quality_flags"])
+        SourceHealthState(**value)
 
     def _read(self) -> dict:
         try:
@@ -456,28 +557,55 @@ class SourceHealthStore:
         schema_version = raw.get("schema_version") if isinstance(raw, dict) else None
         if (
             not isinstance(raw, dict)
-            or set(raw) != {"schema_version", "sources"}
             or isinstance(schema_version, bool)
             or not isinstance(schema_version, int)
-            or schema_version != 1
+            or schema_version not in {_SCHEMA_V1, _SCHEMA_V2}
             or not isinstance(raw.get("sources"), dict)
         ):
             raise ValueError("invalid source health store")
 
-        for source_id, payload in raw["sources"].items():
-            try:
-                _validate_source_id(source_id)
-                if not isinstance(payload, dict) or set(payload) != _SOURCE_STATE_FIELDS:
-                    raise ValueError("invalid source health state fields")
-                if payload.get("source_id") != source_id:
-                    raise ValueError("source health state identity mismatch")
-                if not isinstance(payload.get("quality_flags"), list):
-                    raise ValueError("persisted quality_flags must be a JSON array")
-                value = dict(payload)
-                value["quality_flags"] = tuple(value["quality_flags"])
-                SourceHealthState(**value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"invalid source health state for {source_id!r}") from exc
+        expected_fields = (
+            {"schema_version", "sources"}
+            if schema_version == _SCHEMA_V1
+            else {"schema_version", "sources", "history"}
+        )
+        if set(raw) != expected_fields:
+            raise ValueError("invalid source health store")
+        if schema_version == _SCHEMA_V2 and not isinstance(raw.get("history"), dict):
+            raise ValueError("invalid source health store")
+
+        try:
+            for source_id, payload in raw["sources"].items():
+                self._validate_persisted_state(source_id, payload)
+
+            if schema_version == _SCHEMA_V2:
+                if set(raw["history"]) != set(raw["sources"]):
+                    raise ValueError("source health history/projection identity mismatch")
+                for source_id, entries in raw["history"].items():
+                    if not isinstance(entries, list) or not entries:
+                        raise ValueError("source health history must be a non-empty array")
+                    previous: datetime | None = None
+                    for entry in entries:
+                        if not isinstance(entry, dict) or set(entry) != _HISTORY_ENTRY_FIELDS:
+                            raise ValueError("invalid source health history entry")
+                        recorded_at = parse_source_timestamp(entry["recorded_at"])
+                        if previous is not None and recorded_at < previous:
+                            raise ValueError("source health history is out of order")
+                        previous = recorded_at
+                        self._validate_persisted_state(source_id, entry["state"])
+                        state = self._state_from_payload(
+                            entry["state"], normalize_failed_flags=False
+                        )
+                        transition_at = self._transition_at(state)
+                        if (
+                            transition_at is None
+                            or parse_source_timestamp(transition_at) != recorded_at
+                        ):
+                            raise ValueError("source health history timestamp mismatch")
+                    if entries[-1]["state"] != raw["sources"][source_id]:
+                        raise ValueError("source health latest projection/history mismatch")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid source health state/history") from exc
         return raw
 
     def _write(self, raw: dict) -> None:

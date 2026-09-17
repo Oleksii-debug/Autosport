@@ -63,7 +63,16 @@ class StorageSchemaIntegrityTests(unittest.TestCase):
                     'PRAGMA table_xinfo("current_quotes")'
                 ).fetchall()
                 self.assertEqual(market_xinfo[0][1:7], ("dedupe_key", "TEXT", 0, None, 1, 0))
-                self.assertEqual(current_xinfo[0][1:7], ("quote_key", "TEXT", 0, None, 1, 0))
+                self.assertEqual(
+                    tuple(row[1:7] for row in current_xinfo),
+                    (
+                        ("source_id", "TEXT", 1, None, 1, 0),
+                        ("quote_key", "TEXT", 1, None, 2, 0),
+                        ("observed_ts", "TEXT", 1, None, 0, 0),
+                        ("sequence", "INTEGER", 1, None, 0, 0),
+                        ("payload_json", "TEXT", 1, None, 0, 0),
+                    ),
+                )
                 for name, columns in CANONICAL_INDEXES.items():
                     self.assertEqual(self._index_columns(store.connection, name), columns)
             finally:

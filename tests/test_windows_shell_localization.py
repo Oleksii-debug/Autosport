@@ -1,4 +1,5 @@
 import inspect
+import re
 
 import pytest
 
@@ -40,6 +41,33 @@ WINDOWS_SURFACE_CONTENT_FIELDS = {
     "authority_uk": "authority",
     "persistence_uk": "persistence",
 }
+
+_ASCII_PRESENTATION_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
+_ALLOWED_SHORTCUT_OR_PLATFORM_TOKENS = frozenset(
+    {
+        "Alt",
+        "Control",
+        "Ctrl",
+        "F2",
+        "F6",
+        "F7",
+        "F8",
+        "Left",
+        "R",
+        "Right",
+        "Shift",
+        "Tab",
+        "Tk",
+        "UIA",
+        "Windows",
+    }
+)
+
+
+def _assert_no_unexplained_english(value: str) -> None:
+    tokens = set(_ASCII_PRESENTATION_TOKEN.findall(value))
+    unexpected = sorted(tokens - _ALLOWED_SHORTCUT_OR_PLATFORM_TOKENS)
+    assert unexpected == [], f"unexplained English presentation tokens: {unexpected!r} in {value!r}"
 
 
 def test_windows_shell_catalog_extends_one_versioned_ukrainian_boundary():
@@ -113,6 +141,14 @@ def test_windows_surface_detail_labels_are_read_from_catalog():
         assert literal not in source
 
 
+def test_windows_public_shell_copy_does_not_present_v1_as_a_separate_stage():
+    for key in (
+        "ui.windows.shell.state.active",
+        "ui.windows.surface.phase.active",
+    ):
+        assert "V1" not in text(key)
+
+
 def test_windows_surface_content_is_resolved_from_central_catalog():
     public_catalog = catalog()
     expected_keys = set()
@@ -134,6 +170,14 @@ def test_windows_surface_content_is_resolved_from_central_catalog():
             assert "V1" not in surface.blocked_reason_uk
 
     assert expected_keys <= set(public_catalog)
+
+
+def test_windows_surface_content_has_no_unexplained_english_presentation_tokens():
+    for surface in SURFACES:
+        for attribute in WINDOWS_SURFACE_CONTENT_FIELDS:
+            _assert_no_unexplained_english(getattr(surface, attribute))
+        if surface.blocked_reason_uk is not None:
+            _assert_no_unexplained_english(surface.blocked_reason_uk)
 
 
 def test_windows_surface_contract_contains_no_product_owned_presentation_copy():

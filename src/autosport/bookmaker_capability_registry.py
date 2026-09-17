@@ -25,6 +25,7 @@ from .bookmaker_capability import (
     BookmakerCapabilityProfile,
     BookmakerCapabilityState,
 )
+from .json_integrity import strict_json_loads
 
 
 class BookmakerCapabilityRegistryError(ValueError):
@@ -329,8 +330,8 @@ class BookmakerCapabilityRegistry:
             }
         try:
             raw = self.path.read_text(encoding="utf-8")
-            document = json.loads(raw)
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            document = strict_json_loads(raw)
+        except (OSError, UnicodeError, ValueError) as exc:
             raise BookmakerCapabilityRegistryError(
                 "capability registry is unreadable or corrupt"
             ) from exc

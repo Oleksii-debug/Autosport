@@ -6,6 +6,7 @@ from typing import Final, Literal
 
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
+from .localization import text
 
 SurfacePhase = Literal["v1-active", "visible-disabled", "presentation-only"]
 
@@ -248,23 +249,25 @@ def save_surface_selection(workspace: str | Path, surface_key: str) -> bool:
 
 def surface_detail_lines(surface: WindowsSurfaceSpec) -> tuple[str, ...]:
     phase = {
-        "v1-active": "СТАН: V1 — активна поверхня",
-        "visible-disabled": "СТАН: видима, але функція вимкнена до активації capability",
-        "presentation-only": "СТАН: лише інформаційна поверхня",
+        "v1-active": text("ui.windows.surface.phase.active"),
+        "visible-disabled": text("ui.windows.surface.phase.disabled"),
+        "presentation-only": text("ui.windows.surface.phase.presentation"),
     }[surface.phase]
     lines = (
         phase,
-        f"Призначення: {surface.purpose_uk}",
-        f"Основна дія: {surface.primary_task_uk}",
-        f"Контроли: {surface.controls_uk}",
-        f"Вхід фокусу: {surface.focus_entry_uk}",
-        f"Вихід фокусу: {surface.focus_exit_uk}",
-        f"Доступність: {surface.accessibility_uk}",
-        f"Стани: {surface.transient_states_uk}",
-        f"Підтвердження/скасування: {surface.confirmation_uk}",
-        f"Межа істини: {surface.authority_uk}",
-        f"Перезапуск: {surface.persistence_uk}",
+        f"{text('ui.windows.surface.detail.purpose')}: {surface.purpose_uk}",
+        f"{text('ui.windows.surface.detail.primary_task')}: {surface.primary_task_uk}",
+        f"{text('ui.windows.surface.detail.controls')}: {surface.controls_uk}",
+        f"{text('ui.windows.surface.detail.focus_entry')}: {surface.focus_entry_uk}",
+        f"{text('ui.windows.surface.detail.focus_exit')}: {surface.focus_exit_uk}",
+        f"{text('ui.windows.surface.detail.accessibility')}: {surface.accessibility_uk}",
+        f"{text('ui.windows.surface.detail.states')}: {surface.transient_states_uk}",
+        f"{text('ui.windows.surface.detail.confirmation')}: {surface.confirmation_uk}",
+        f"{text('ui.windows.surface.detail.truth_boundary')}: {surface.authority_uk}",
+        f"{text('ui.windows.surface.detail.restart')}: {surface.persistence_uk}",
     )
     if surface.blocked_reason_uk:
-        return lines + (f"Чому вимкнено: {surface.blocked_reason_uk}",)
+        return lines + (
+            f"{text('ui.windows.surface.detail.blocked_reason')}: {surface.blocked_reason_uk}",
+        )
     return lines

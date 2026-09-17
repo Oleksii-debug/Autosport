@@ -195,7 +195,7 @@ class HealthGatedMirrorDecisionIndexTests(unittest.TestCase):
                 max_age=timedelta(minutes=1),
             )
 
-            self.assertEqual(view.revision, mirror.revision)
+            self.assertEqual(view.revision, 2)
             self.assertEqual(len(view.events), 1)
             self.assertEqual(view.events[0].source_id, "provider-b")
 

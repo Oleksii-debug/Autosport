@@ -828,6 +828,8 @@ class PaperRiskPolicy:
                 "does not match",
                 " is invalid",
                 " evidence is invalid",
+                "quote exceeds economic goal maximum age",
+                "quote timestamp is after proposal timestamp",
             )
         )
 
@@ -931,14 +933,14 @@ class PaperRiskPolicy:
                     zero_vector,
                     "candidate set lacks canonical bankroll/currency/quote/time evidence",
                 )
-            if goal.max_risk_of_ruin < Decimal("1") and (
-                context.risk_of_ruin_upper_bound is None
-                or context.risk_of_ruin_upper_bound > goal.max_risk_of_ruin
+            if (
+                goal.max_risk_of_ruin < Decimal("1")
+                and context.risk_of_ruin_upper_bound is None
             ):
                 return StakeVectorDecision(
                     "WAIT",
                     zero_vector,
-                    "candidate set lacks acceptable portfolio risk-of-ruin evidence",
+                    "candidate set lacks portfolio risk-of-ruin evidence",
                 )
 
         shadow = self._shadow_book_for_allocation(book)

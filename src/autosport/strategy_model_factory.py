@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 from typing import Sequence
@@ -7,8 +8,63 @@ from typing import Sequence
 from . import _strategy_model_factory_impl as _impl
 from ._strategy_model_factory_impl import *  # noqa: F401,F403
 from .integrity import atomic_write_json
+from .run_transaction import RunTransaction, RunTransactionError
 from .scientific_registry import ScientificRegistry
 from .workspace_lock import WorkspaceEconomicLock
+
+
+class FactoryArtifactStore(_impl.FactoryArtifactStore):
+    """Immutable factory evidence read from one stable regular filesystem object."""
+
+    def _stable_snapshot(self, kind: str, identity: str):
+        path = self._path(kind, identity)
+        try:
+            return RunTransaction._read_canonical_file_snapshot(
+                path,
+                f"factory artifact {kind}:{identity}",
+            )
+        except RunTransactionError as exc:
+            raise ValueError(
+                f"factory artifact path is not a stable regular object: {kind}:{identity}"
+            ) from exc
+
+    @staticmethod
+    def _decode_snapshot(snapshot, kind: str, identity: str) -> dict[str, object]:
+        try:
+            payload = json.loads(snapshot.payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("factory artifact is invalid JSON") from exc
+        if type(payload) is not dict:
+            raise ValueError("factory artifact root must be an object")
+        return payload
+
+    def write(self, kind: str, identity: str, payload: dict[str, object]) -> str:
+        path = self._path(kind, identity)
+        if path.exists():
+            snapshot = self._stable_snapshot(kind, identity)
+            existing = self._decode_snapshot(snapshot, kind, identity)
+            if existing != payload:
+                raise ValueError(f"conflicting immutable factory artifact: {kind}:{identity}")
+            return snapshot.sha256
+        return super().write(kind, identity, payload)
+
+    def read(
+        self,
+        kind: str,
+        identity: str,
+        *,
+        expected_sha256: str | None = None,
+    ) -> dict[str, object]:
+        snapshot = self._stable_snapshot(kind, identity)
+        if expected_sha256 is not None and snapshot.sha256 != _impl._sha256(
+            expected_sha256,
+            "expected_sha256",
+        ):
+            raise ValueError(f"factory artifact hash mismatch: {kind}:{identity}")
+        return self._decode_snapshot(snapshot, kind, identity)
+
+    def sha256(self, kind: str, identity: str) -> str:
+        return self._stable_snapshot(kind, identity).sha256
 
 
 class _StagedFactoryArtifactStore:
@@ -175,12 +231,11 @@ class ExperimentRunner(_impl.ExperimentRunner):
 
 
 # The implementation split is internal-only. Preserve the original public module
-# identity for dataclasses/functions so pickle/introspection callers do not observe a
-# compatibility break merely because the durable-commit facade moved the definitions.
+# identity for definitions whose public object was not replaced by a facade subclass.
 for _public_name, _public_value in vars(_impl).items():
     if (
         not _public_name.startswith("_")
-        and _public_name != "ExperimentRunner"
+        and _public_name not in {"ExperimentRunner", "FactoryArtifactStore"}
         and getattr(_public_value, "__module__", None) == _impl.__name__
     ):
         try:

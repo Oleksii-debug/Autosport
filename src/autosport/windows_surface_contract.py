@@ -8,7 +8,7 @@ from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .localization import text
 
-SurfacePhase = Literal["v1-active", "visible-disabled", "presentation-only"]
+SurfacePhase = Literal["active", "visible-disabled", "presentation-only"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,18 +63,18 @@ def _localized_surface(
 # The shape remains language-neutral here. All product-owned presentation content
 # for these surfaces is resolved through the central localization API above.
 SURFACES: Final[tuple[WindowsSurfaceSpec, ...]] = (
-    _localized_surface("home_dashboard", "v1-active", "strategy"),
-    _localized_surface("market_mirror", "v1-active", "live_mode"),
-    _localized_surface("research_agents", "v1-active", "strategy"),
+    _localized_surface("home_dashboard", "active", "strategy"),
+    _localized_surface("market_mirror", "active", "live_mode"),
+    _localized_surface("research_agents", "active", "strategy"),
     _localized_surface("opportunities", "visible-disabled", None, blocked=True),
-    _localized_surface("portfolio", "v1-active", "evaluation"),
-    _localized_surface("paper_bank", "v1-active", "bank_summary"),
-    _localized_surface("tickets_positions", "v1-active", "tickets"),
-    _localized_surface("evaluation_learning", "v1-active", "evaluation"),
+    _localized_surface("portfolio", "active", "evaluation"),
+    _localized_surface("paper_bank", "active", "bank_summary"),
+    _localized_surface("tickets_positions", "active", "tickets"),
+    _localized_surface("evaluation_learning", "active", "evaluation"),
     _localized_surface("bookmakers_accounts", "visible-disabled", None, blocked=True),
-    _localized_surface("history_results", "v1-active", "log"),
+    _localized_surface("history_results", "active", "log"),
     _localized_surface("settings", "visible-disabled", None, blocked=True),
-    _localized_surface("diagnostics_recovery", "v1-active", "repair_button"),
+    _localized_surface("diagnostics_recovery", "active", "repair_button"),
     _localized_surface("help_about", "presentation-only", None),
 )
 
@@ -112,7 +112,7 @@ def save_surface_selection(workspace: str | Path, surface_key: str) -> bool:
 
 def surface_detail_lines(surface: WindowsSurfaceSpec) -> tuple[str, ...]:
     phase = {
-        "v1-active": text("ui.windows.surface.phase.active"),
+        "active": text("ui.windows.surface.phase.active"),
         "visible-disabled": text("ui.windows.surface.phase.disabled"),
         "presentation-only": text("ui.windows.surface.phase.presentation"),
     }[surface.phase]

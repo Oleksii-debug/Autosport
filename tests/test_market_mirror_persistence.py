@@ -79,6 +79,31 @@ class MarketMirrorPersistenceTests(unittest.TestCase):
 
             self.assertEqual(mirror.snapshot(), ())
 
+    def test_naive_ingest_timestamp_fails_before_durable_or_live_mutation(self) -> None:
+        event = self.event(observed_ts="2026-09-17T01:00:00+00:00")
+        naive_ingest = MarketEvent(
+            event_id=event.event_id,
+            market_id=event.market_id,
+            selection_id=event.selection_id,
+            decimal_odds=event.decimal_odds,
+            observed_ts=event.observed_ts,
+            ingest_ts="2026-09-17T01:00:01",
+            source_id=event.source_id,
+            sequence=event.sequence,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            mirror = MarketMirror()
+            try:
+                with self.assertRaisesRegex(ValueError, "ingest_ts must be timezone-aware"):
+                    mirror.persist_and_apply(store, naive_ingest)
+                self.assertEqual(store.events(), [])
+                self.assertEqual(store.current(), {})
+                self.assertEqual(mirror.snapshot(), ())
+            finally:
+                store.close()
+
     def test_duplicate_is_durable_idempotent_and_stale_history_does_not_regress_live_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

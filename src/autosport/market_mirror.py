@@ -177,6 +177,27 @@ class MarketMirror:
                 event.sequence,
             )
 
+    def persist_and_apply(
+        self,
+        store: SQLiteMarketStore,
+        event: MarketEvent,
+    ) -> MirrorApplyResult:
+        """Durably record one provider observation before mutating live mirror state.
+
+        The append-only ``SQLiteMarketStore`` remains the durable authority. Its append
+        happens first, so a persistence/validation/conflict failure cannot leave the
+        process exposing an update that cannot be reconstructed after restart. Stale
+        but valid provider observations may still be retained in history for audit;
+        ``apply`` then keeps the live source-local projection monotonic.
+        """
+        if not isinstance(store, SQLiteMarketStore):
+            raise TypeError("store must be a SQLiteMarketStore")
+        if not isinstance(event, MarketEvent):
+            raise TypeError("event must be a MarketEvent")
+
+        store.append(event)
+        return self.apply(event)
+
     def view(
         self,
         *,

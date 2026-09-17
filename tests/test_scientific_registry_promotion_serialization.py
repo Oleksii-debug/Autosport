@@ -247,7 +247,7 @@ def test_second_promotion_must_name_current_durable_champion(tmp_path):
         T3,
         candidate_model_version_id="model-1",
     )
-    with pytest.raises(PromotionEvidenceError, match="current champion"):
+    with pytest.raises(PromotionEvidenceError, match="current context champion"):
         registry.record_promotion(conflicting)
 
     assert registry.champion_strategy(as_of=T3) == "strategy-1"

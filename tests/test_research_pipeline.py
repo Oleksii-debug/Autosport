@@ -14,6 +14,7 @@ from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy
 from autosport.research_pipeline import (
     DeterministicResearchCritic,
+    ResearchDecisionAlreadyCommitted,
     ResearchDecisionPipeline,
     ResearchDecisionPolicy,
     ResearchEvidence,
@@ -25,6 +26,17 @@ A = "match-1|winner|A"
 B = "match-1|winner|B"
 SNAPSHOT = "a" * 64
 EVIDENCE_HASH = "b" * 64
+
+
+class _PreWriteFailingEconomicLedger(JsonlDecisionLedger):
+    def append_economic(self, record, contract):
+        raise RuntimeError("injected pre-write economic ledger failure")
+
+
+class _PostWriteThenRaiseEconomicLedger(JsonlDecisionLedger):
+    def append_economic(self, record, contract):
+        super().append_economic(record, contract)
+        raise RuntimeError("injected post-write economic ledger ambiguity")
 
 
 class ResearchDecisionPipelineTests(unittest.TestCase):
@@ -112,12 +124,16 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
         stake="10",
         decision_ts="2026-09-13T10:00:03+00:00",
         market_quotes=None,
+        decision_ledger=None,
+        material_action_id=None,
     ):
         book = book or self._book()
         candidate = candidate or self._candidate()
         forecast = forecast or self._forecast()
         evidence = [self._evidence()] if evidence is None else evidence
-        ledger = JsonlDecisionLedger(Path(tmp) / "research-decisions.jsonl")
+        ledger = decision_ledger or JsonlDecisionLedger(
+            Path(tmp) / "research-decisions.jsonl"
+        )
         pipeline = pipeline or ResearchDecisionPipeline()
         decision = pipeline.decide_and_open(
             book=book,
@@ -130,6 +146,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             market_quotes=market_quotes,
             decision_ledger=ledger,
             replay_run_id="research-run",
+            material_action_id=material_action_id,
         )
         return book, ledger, decision
 
@@ -354,6 +371,121 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             JsonlDecisionLedger(ledger.path).verified_economic_decision(
                 record.decision_id,
                 goal,
+            )
+
+    def test_economic_ledger_prewrite_failure_rolls_back_exact_paper_state(self):
+        goal = self._economic_goal()
+        with tempfile.TemporaryDirectory() as tmp:
+            book = self._book()
+            before_balance = book.balance
+            before_tickets = dict(book.tickets)
+            before_lifecycle = list(book._lifecycle)
+            ledger = _PreWriteFailingEconomicLedger(
+                Path(tmp) / "research-decisions.jsonl"
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "injected pre-write economic ledger failure",
+            ):
+                self._decide(
+                    tmp,
+                    book=book,
+                    candidate=self._candidate(probability="0.60"),
+                    forecast=self._forecast(probability="0.60"),
+                    pipeline=self._goal_pipeline(goal),
+                    stake="NaN",
+                    market_quotes=[self._market_event()],
+                    decision_ledger=ledger,
+                    material_action_id="research-action-prewrite",
+                )
+
+            self.assertEqual(book.balance, before_balance)
+            self.assertEqual(book.tickets, before_tickets)
+            self.assertEqual(book._lifecycle, before_lifecycle)
+            self.assertFalse(ledger.path.exists())
+
+    def test_economic_ledger_postwrite_ambiguity_keeps_exact_durable_ticket(self):
+        goal = self._economic_goal()
+        with tempfile.TemporaryDirectory() as tmp:
+            book = self._book()
+            before_ticket_ids = set(book.tickets)
+            ledger = _PostWriteThenRaiseEconomicLedger(
+                Path(tmp) / "research-decisions.jsonl"
+            )
+            book, ledger, decision = self._decide(
+                tmp,
+                book=book,
+                candidate=self._candidate(probability="0.60"),
+                forecast=self._forecast(probability="0.60"),
+                pipeline=self._goal_pipeline(goal),
+                stake="NaN",
+                market_quotes=[self._market_event()],
+                decision_ledger=ledger,
+                material_action_id="research-action-postwrite",
+            )
+
+            self.assertTrue(decision.approved)
+            self.assertEqual(len(set(book.tickets) - before_ticket_ids), 1)
+            records = ledger.verified_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(
+                records[0].payload["material_action_id"],
+                "research-action-postwrite",
+            )
+            envelope = json.loads(ledger.path.read_text(encoding="utf-8"))
+            self.assertEqual(decision.audit_sha256, envelope["sha256"])
+            self.assertEqual(
+                envelope["record"]["payload"]["ticket_id"],
+                decision.ticket_id,
+            )
+
+    def test_economic_material_action_restart_is_idempotent(self):
+        goal = self._economic_goal()
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "research-decisions.jsonl"
+            book_path = Path(tmp) / "paper-book.json"
+            ledger = JsonlDecisionLedger(ledger_path)
+            book, _ledger, first = self._decide(
+                tmp,
+                candidate=self._candidate(probability="0.60"),
+                forecast=self._forecast(probability="0.60"),
+                pipeline=self._goal_pipeline(goal),
+                stake="NaN",
+                market_quotes=[self._market_event()],
+                decision_ledger=ledger,
+                material_action_id="research-action-restart",
+            )
+            self.assertTrue(first.approved)
+            book.save(book_path)
+            restarted_book = PaperBook.load(book_path)
+            before_balance = restarted_book.balance
+            before_ticket_ids = set(restarted_book.tickets)
+            before_lifecycle = list(restarted_book._lifecycle)
+
+            with self.assertRaises(ResearchDecisionAlreadyCommitted) as caught:
+                self._decide(
+                    tmp,
+                    book=restarted_book,
+                    candidate=self._candidate(probability="0.60"),
+                    forecast=self._forecast(probability="0.60"),
+                    pipeline=self._goal_pipeline(goal),
+                    stake="NaN",
+                    market_quotes=[self._market_event()],
+                    decision_ledger=JsonlDecisionLedger(ledger_path),
+                    material_action_id="research-action-restart",
+                )
+
+            self.assertEqual(
+                caught.exception.material_action_id,
+                "research-action-restart",
+            )
+            self.assertEqual(restarted_book.balance, before_balance)
+            self.assertEqual(set(restarted_book.tickets), before_ticket_ids)
+            self.assertEqual(restarted_book._lifecycle, before_lifecycle)
+            self.assertEqual(
+                JsonlDecisionLedger(ledger_path).verify_integrity(),
+                1,
             )
 
     def test_risk_policy_can_reject_otherwise_valid_research(self):

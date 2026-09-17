@@ -74,6 +74,7 @@ def _factory_foundation(tmp_path):
     rule = _factory_rule()
     registry_path = tmp_path / "scientific_registry.json"
     registry = ScientificRegistry.initialize_pristine(registry_path)
+    store = FactoryArtifactStore(tmp_path / "factory-artifacts")
     question = ResearchQuestion(
         "question-factory",
         "Does the challenger lower frozen holdout MSE without guardrail regression?",
@@ -148,13 +149,22 @@ def _factory_foundation(tmp_path):
         T2,
         model_version_id=champion_model.model_version_id,
     )
+    champion_metrics_payload = {
+        "schema_version": 1,
+        "kind": "autosport-factory-metrics-v1",
+        "evaluation_bundle_id": "eval-v1",
+        "strategy_version_id": champion_strategy.strategy_version_id,
+        "model_version_id": champion_model.model_version_id,
+        "metrics": {"max_drawdown": 0.10, "mse": 0.80},
+    }
+    champion_metrics_sha256 = store.write("metrics", "eval-v1", champion_metrics_payload)
     champion_bundle = EvaluationBundleRef(
         "eval-v1",
         SHA_D,
         SHA_C,
         dataset.dataset_snapshot_id,
         protocol.protocol_sha256,
-        (SHA_A,),
+        (SHA_A, champion_metrics_sha256),
         T3,
         evaluated_strategy_version_id=champion_strategy.strategy_version_id,
         evaluated_model_version_id=champion_model.model_version_id,
@@ -191,7 +201,7 @@ def _factory_foundation(tmp_path):
             reason="fixture baseline champion",
         )
     )
-    return registry, registry_path, rule
+    return registry, registry_path, rule, store
 
 
 def _candidate_spec() -> FactoryCandidateSpec:
@@ -223,6 +233,25 @@ def _candidate_points():
         TrainingPoint(T1, 2.0, 1.0, T1),
         TrainingPoint(T4, 3.0, 1.0, T4),
         TrainingPoint(T5, 4.0, 0.0, T5),
+    )
+
+
+def _bad_candidate_points():
+    return (
+        TrainingPoint(T0, 1.0, 0.0, T0),
+        TrainingPoint(T1, 2.0, 1.0, T1),
+        TrainingPoint(T4, 3.0, 10.0, T4),
+        TrainingPoint(T5, 4.0, 10.0, T5),
+    )
+
+
+def _run_candidate(runner, points, rule, *, protective=0.10):
+    return runner.run_baseline_candidate(
+        _candidate_spec(),
+        points,
+        rule=rule,
+        champion_evaluation_bundle_id="eval-v1",
+        protective_metrics={"max_drawdown": protective},
     )
 
 
@@ -266,6 +295,7 @@ def test_walk_forward_is_expanding_window_and_deterministic():
         "2026-01-03T00:00:00+00:00",
     ]
     assert all(fold.training_cutoff < fold.evaluation_at for fold in first.folds)
+    assert all(fold.target_available_at for fold in first.folds)
     assert first.primary_metric == "mse"
 
 
@@ -325,38 +355,36 @@ def test_factory_rejects_nonfinite_metrics():
 def test_drift_monitor_only_emits_research_recommendations():
     recommendations = DriftMonitor.recommendations(
         (
-            DriftEvidence("mse", 0.20, 0.21, 0.05, "2026-01-05T00:00:00+00:00"),
-            DriftEvidence("calibration", 0.02, 0.20, 0.05, "2026-01-05T00:00:00+00:00"),
+            DriftEvidence("mse", 0.20, 0.21, 0.05, T4),
+            DriftEvidence("calibration", 0.02, 0.20, 0.05, T4),
         )
     )
-    assert recommendations == (
-        "RESEARCH_CHALLENGER:calibration:2026-01-05T00:00:00+00:00",
-    )
+    assert recommendations == (f"RESEARCH_CHALLENGER:calibration:{T4}",)
     assert all("PROMOTE" not in item for item in recommendations)
 
 
 def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path):
-    registry, registry_path, rule = _factory_foundation(tmp_path)
-    store = FactoryArtifactStore(tmp_path / "factory-artifacts")
+    registry, registry_path, rule, store = _factory_foundation(tmp_path)
     runner = ExperimentRunner(registry, store)
 
-    result = runner.run_baseline_candidate(
-        _candidate_spec(),
-        _candidate_points(),
-        rule=rule,
-        champion_metrics={"mse": 0.80, "max_drawdown": 0.10},
-        protective_metrics={"max_drawdown": 0.10},
-    )
+    result = _run_candidate(runner, _candidate_points(), rule)
 
     assert result.verdict is PromotionVerdict.PROMOTE
     assert registry.get("ModelVersion", "model-v2") is not None
     assert registry.get("StrategyVersion", "strategy-v2") is not None
-    assert registry.get("EvaluationBundle", "eval-v2") is not None
+    bundle = registry.get("EvaluationBundle", "eval-v2")
+    assert bundle is not None
+    metrics_sha = store.sha256("metrics", "eval-v2")
+    assert metrics_sha in bundle.payload["artifact_hashes"]
     assert registry.get("Experiment", "experiment-v2").payload["outcome"] == "POSITIVE"
     assert registry.get("PromotionDecision", "promotion-v2") is not None
     assert registry.champion_strategy(
         as_of=T7, canonical_strategy_id="canonical-factory-strategy"
     ) == "strategy-v2"
+
+    evaluation = store.read("evaluation", "eval-v2")
+    assert evaluation["walk_forward"]["folds"][0]["target_available_at"] == T4
+    assert evaluation["champion_metrics"] == {"max_drawdown": 0.1, "mse": 0.8}
 
     restarted = ExperimentRunner.verify_restart(
         registry_path,
@@ -370,34 +398,31 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
 
 
 def test_factory_fails_closed_on_frozen_promotion_rule_tampering(tmp_path):
-    registry, _, rule = _factory_foundation(tmp_path)
-    runner = ExperimentRunner(
-        registry, FactoryArtifactStore(tmp_path / "factory-artifacts")
-    )
+    registry, _, rule, store = _factory_foundation(tmp_path)
+    runner = ExperimentRunner(registry, store)
     tampered = replace(rule, minimum_improvement=0.01)
     with pytest.raises(ValueError, match="does not match frozen"):
-        runner.run_baseline_candidate(
-            _candidate_spec(),
-            _candidate_points(),
-            rule=tampered,
-            champion_metrics={"mse": 0.80, "max_drawdown": 0.10},
-            protective_metrics={"max_drawdown": 0.10},
-        )
+        _run_candidate(runner, _candidate_points(), tampered)
     assert registry.get("ModelVersion", "model-v2") is None
 
 
+def test_factory_fails_closed_when_champion_metrics_are_not_durably_bound(tmp_path):
+    registry, _, rule, store = _factory_foundation(tmp_path)
+    target = store.path_for_testing("metrics", "eval-v1")
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["metrics"]["mse"] = 99.0
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not hash-bound"):
+        _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
+    assert registry.get("ModelVersion", "model-v2") is None
+    assert registry.get("PromotionDecision", "promotion-v2") is None
+
+
 def test_factory_rejection_is_durable_negative_memory_with_postmortem(tmp_path):
-    registry, registry_path, rule = _factory_foundation(tmp_path)
-    runner = ExperimentRunner(
-        registry, FactoryArtifactStore(tmp_path / "factory-artifacts")
-    )
-    result = runner.run_baseline_candidate(
-        _candidate_spec(),
-        _candidate_points(),
-        rule=rule,
-        champion_metrics={"mse": 0.20, "max_drawdown": 0.10},
-        protective_metrics={"max_drawdown": 0.10},
-    )
+    registry, registry_path, rule, store = _factory_foundation(tmp_path)
+    runner = ExperimentRunner(registry, store)
+    result = _run_candidate(runner, _bad_candidate_points(), rule)
     assert result.verdict is PromotionVerdict.REJECT
     reopened = ScientificRegistry(registry_path)
     experiment = reopened.get("Experiment", "experiment-v2")
@@ -409,16 +434,21 @@ def test_factory_rejection_is_durable_negative_memory_with_postmortem(tmp_path):
     ) == "strategy-v1"
 
 
-def test_restart_detects_tampered_evaluation_artifact(tmp_path):
-    registry, registry_path, rule = _factory_foundation(tmp_path)
-    store = FactoryArtifactStore(tmp_path / "factory-artifacts")
-    ExperimentRunner(registry, store).run_baseline_candidate(
-        _candidate_spec(),
-        _candidate_points(),
-        rule=rule,
-        champion_metrics={"mse": 0.80, "max_drawdown": 0.10},
-        protective_metrics={"max_drawdown": 0.10},
+def test_protective_metric_degradation_is_durably_rejected(tmp_path):
+    registry, _, rule, store = _factory_foundation(tmp_path)
+    result = _run_candidate(
+        ExperimentRunner(registry, store), _candidate_points(), rule, protective=0.25
     )
+    assert result.verdict is PromotionVerdict.REJECT
+    decision = registry.get("PromotionDecision", "promotion-v2")
+    assert decision is not None
+    assert decision.payload["action"] == "REJECT"
+    assert "protective metric degraded" in decision.payload["reason"]
+
+
+def test_restart_detects_tampered_evaluation_artifact(tmp_path):
+    registry, registry_path, rule, store = _factory_foundation(tmp_path)
+    _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
     target = store.path_for_testing("evaluation", "eval-v2")
     payload = json.loads(target.read_text(encoding="utf-8"))
     payload["candidate_metrics"]["mse"] = 999.0
@@ -432,16 +462,25 @@ def test_restart_detects_tampered_evaluation_artifact(tmp_path):
         )
 
 
+def test_restart_detects_tampered_candidate_metrics_artifact(tmp_path):
+    registry, registry_path, rule, store = _factory_foundation(tmp_path)
+    _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
+    target = store.path_for_testing("metrics", "eval-v2")
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["metrics"]["mse"] = 999.0
+    target.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="artifact hash mismatch"):
+        ExperimentRunner.verify_restart(
+            registry_path,
+            tmp_path / "factory-artifacts",
+            "experiment-v2",
+            as_of=T7,
+        )
+
+
 def test_drift_evidence_is_causal_durable_and_has_no_promotion_authority(tmp_path):
-    registry, _, rule = _factory_foundation(tmp_path)
-    store = FactoryArtifactStore(tmp_path / "factory-artifacts")
-    ExperimentRunner(registry, store).run_baseline_candidate(
-        _candidate_spec(),
-        _candidate_points(),
-        rule=rule,
-        champion_metrics={"mse": 0.80, "max_drawdown": 0.10},
-        protective_metrics={"max_drawdown": 0.10},
-    )
+    registry, _, rule, store = _factory_foundation(tmp_path)
+    _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
     before = registry.champion_strategy(
         as_of=T7, canonical_strategy_id="canonical-factory-strategy"
     )
@@ -474,6 +513,14 @@ def test_drift_evidence_is_causal_durable_and_has_no_promotion_authority(tmp_pat
             dataset_snapshot_id="dataset-factory",
             research_protocol_id="protocol-factory",
             evaluator_source_sha256=SHA_C,
-            evidence=(DriftEvidence("mse", 0.30, 0.60, 0.10, "2026-01-09T00:00:00+00:00"),),
+            evidence=(
+                DriftEvidence(
+                    "mse",
+                    0.30,
+                    0.60,
+                    0.10,
+                    "2026-01-09T00:00:00+00:00",
+                ),
+            ),
             recorded_at=T7,
         )

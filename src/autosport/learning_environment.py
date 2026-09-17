@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Final
@@ -57,6 +57,13 @@ def _timestamp(name: str, value: object) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise LearningEnvironmentError(f"{name} must be timezone-aware ISO-8601")
     return parsed
+
+
+def _timestamp_identity(name: str, value: object) -> str:
+    """Return one stable UTC spelling for an already valid causal instant."""
+
+    parsed = _timestamp(name, value).astimezone(timezone.utc)
+    return parsed.isoformat().replace("+00:00", "Z")
 
 
 def _sha256_hex(name: str, value: object) -> str:
@@ -153,7 +160,7 @@ class EnvironmentIdentity:
                 "config_id": self.config_id,
                 "data_id": self.data_id,
                 "protocol_id": self.protocol_id,
-                "cutoff_ts": self.cutoff_ts,
+                "cutoff_ts": _timestamp_identity("cutoff_ts", self.cutoff_ts),
                 "seed": self.seed,
             }
         )
@@ -181,8 +188,8 @@ class Observation:
         return _stable_hash(
             {
                 "environment_id": self.environment_id,
-                "observed_at": self.observed_at,
-                "available_at": self.available_at,
+                "observed_at": _timestamp_identity("observed_at", self.observed_at),
+                "available_at": _timestamp_identity("available_at", self.available_at),
                 "evidence": _metadata_payload(self.evidence),
             }
         )
@@ -212,7 +219,7 @@ class Action:
                 "environment_id": self.environment_id,
                 "observation_id": self.observation_id,
                 "action_type": self.action_type,
-                "decided_at": self.decided_at,
+                "decided_at": _timestamp_identity("decided_at", self.decided_at),
                 "parameters": _metadata_payload(self.parameters),
             }
         )
@@ -249,7 +256,7 @@ class Outcome:
             {
                 "environment_id": self.environment_id,
                 "action_id": self.action_id,
-                "revealed_at": self.revealed_at,
+                "revealed_at": _timestamp_identity("revealed_at", self.revealed_at),
                 "truth": self.truth.value,
                 "evidence": _metadata_payload(self.evidence),
                 "simulation_model_id": self.simulation_model_id,
@@ -294,7 +301,7 @@ class RewardEvidence:
                 "action_id": self.action_id,
                 "outcome_id": self.outcome_id,
                 "reward": str(self.reward),
-                "available_at": self.available_at,
+                "available_at": _timestamp_identity("reward available_at", self.available_at),
                 "truth": self.truth.value,
                 "evidence": _metadata_payload(self.evidence),
                 "simulation_model_id": self.simulation_model_id,
@@ -346,8 +353,8 @@ class Transition:
                 "action_id": self.action_id,
                 "outcome_id": self.outcome_id,
                 "reward_id": self.reward_id,
-                "decision_at": self.decision_at,
-                "resolved_at": self.resolved_at,
+                "decision_at": _timestamp_identity("decision_at", self.decision_at),
+                "resolved_at": _timestamp_identity("resolved_at", self.resolved_at),
             }
         )
 
@@ -504,7 +511,11 @@ class CausalLearningEnvironment:
         if action_name not in self.episode.admissible_actions:
             raise LearningEnvironmentError("action is outside the externally admissible set")
         decision_time = _timestamp("decision_at", decision_at)
+        observed_time = _timestamp("observation observed_at", observation.observed_at)
         available_time = _timestamp("observation available_at", observation.available_at)
+        cutoff_time = _timestamp("environment cutoff_ts", self.identity.cutoff_ts)
+        if observed_time > cutoff_time or available_time > cutoff_time:
+            raise LearningEnvironmentError("observation exceeds the environment evidence cutoff")
         if available_time > decision_time:
             raise LearningEnvironmentError("future observation evidence is not available at decision time")
         action = Action(

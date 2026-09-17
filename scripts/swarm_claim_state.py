@@ -76,6 +76,7 @@ def _extract_events(
                 "type": OWNERSHIP_HEADERS[line],
                 "header": line,
                 "fields": {},
+                "duplicate_fields": {},
                 "comment_index": comment_index,
                 "comment_id": comment_id,
                 "line_index": line_index,
@@ -95,7 +96,13 @@ def _extract_events(
         match = FIELD_RE.match(line)
         if match:
             key, value = match.groups()
-            current["fields"][key] = value.strip()
+            value = value.strip()
+            fields = current["fields"]
+            if key in fields:
+                duplicate_fields = current["duplicate_fields"]
+                duplicate_fields.setdefault(key, [fields[key]]).append(value)
+            else:
+                fields[key] = value
 
     return events
 
@@ -218,6 +225,43 @@ def resolve_comments(
             comment_id=comment_id,
         ):
             fields = event["fields"]
+            duplicate_fields = event.get("duplicate_fields", {})
+            if duplicate_fields:
+                duplicate_keys = list(duplicate_fields)
+                if "RUN_ID" in duplicate_fields:
+                    run_candidates = [
+                        value.strip()
+                        for value in duplicate_fields["RUN_ID"]
+                        if value.strip()
+                    ]
+                else:
+                    candidate = fields.get("RUN_ID", "").strip()
+                    run_candidates = [candidate] if candidate else []
+
+                unique_run_candidates = list(dict.fromkeys(run_candidates))
+                malformed.append(
+                    _problem(
+                        "duplicate_field",
+                        f"{event['header']} repeats protocol fields: "
+                        + ", ".join(duplicate_keys),
+                        event=event,
+                        run_id=(
+                            unique_run_candidates[0]
+                            if len(unique_run_candidates) == 1
+                            else None
+                        ),
+                    )
+                )
+                for candidate_run_id in unique_run_candidates:
+                    candidate_state = states.get(candidate_run_id)
+                    if candidate_state is not None:
+                        _mark_ambiguous(
+                            candidate_state,
+                            comment_index=comment_index,
+                            comment_id=comment_id,
+                        )
+                continue
+
             run_id = fields.get("RUN_ID", "").strip()
 
             if not run_id:

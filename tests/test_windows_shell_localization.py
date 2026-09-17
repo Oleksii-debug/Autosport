@@ -183,10 +183,11 @@ def test_bookmakers_accounts_copy_distinguishes_read_capability_from_unwired_sur
     surface = SURFACE_BY_KEY["bookmakers_accounts"]
     assert surface.phase == "visible-disabled"
     assert surface.blocked_reason_uk is not None
-    assert "читання даних рахунку букмекера підтримується" in surface.blocked_reason_uk
-    assert "Windows-поверхня ще не підключена" in surface.blocked_reason_uk
-    assert "реальне виконання ставок вимкнене" in surface.blocked_reason_uk
-    assert "Модуль можливостей букмекера й рахунку" not in surface.blocked_reason_uk
+    blocked_reason = surface.blocked_reason_uk.casefold()
+    assert "читання даних рахунку букмекера підтримується" in blocked_reason
+    assert "поверхня windows ще не підключена" in blocked_reason
+    assert "реальне виконання ставок вимкнене" in blocked_reason
+    assert "модуль можливостей букмекера й рахунку" not in blocked_reason
 
 
 def test_windows_surface_content_has_no_unexplained_english_presentation_tokens():

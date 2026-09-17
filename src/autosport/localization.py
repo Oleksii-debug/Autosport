@@ -19,7 +19,7 @@ _WINDOWS_SHELL_UK_UA = MappingProxyType(
         "ui.windows.shell.frame.title": "Навігація продукту",
         "ui.windows.shell.screen.label": "Екран:",
         "ui.windows.shell.button.open": "Перейти до робочої поверхні",
-        "ui.windows.shell.state.active": "Активна V1-поверхня",
+        "ui.windows.shell.state.active": "Активна робоча поверхня",
         "ui.windows.shell.state.disabled": "Вимкнено: {reason}",
         "ui.windows.shell.state.presentation": "Лише інформація — без доменної дії",
         "ui.windows.shell.accessibility.navigation.name": "Навігація екранами Автоспорт",
@@ -41,14 +41,14 @@ _WINDOWS_SHELL_UK_UA = MappingProxyType(
             "Опис лише для читання: задача, клавіатура, стани, збереження та межі "
             "доменної істини вибраного екрана."
         ),
-        "ui.windows.surface.phase.active": "СТАН: V1 — активна поверхня",
+        "ui.windows.surface.phase.active": "СТАН: активна робоча поверхня",
         "ui.windows.surface.phase.disabled": (
-            "СТАН: видима, але функція вимкнена до активації capability"
+            "СТАН: видима, але функція вимкнена до активації можливості"
         ),
         "ui.windows.surface.phase.presentation": "СТАН: лише інформаційна поверхня",
         "ui.windows.surface.detail.purpose": "Призначення",
         "ui.windows.surface.detail.primary_task": "Основна дія",
-        "ui.windows.surface.detail.controls": "Контроли",
+        "ui.windows.surface.detail.controls": "Елементи керування",
         "ui.windows.surface.detail.focus_entry": "Вхід фокусу",
         "ui.windows.surface.detail.focus_exit": "Вихід фокусу",
         "ui.windows.surface.detail.accessibility": "Доступність",

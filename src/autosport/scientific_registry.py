@@ -863,6 +863,10 @@ class ScientificRegistry:
             dataset = require("DatasetSnapshot", bundle["payload"]["dataset_snapshot_id"])
             if dataset["payload"].get("manifest_sha256") != protocol["payload"].get("dataset_manifest_sha256"):
                 raise PromotionEvidenceError("dataset manifest does not match frozen research protocol")
+            if _instant(dataset["payload"].get("causal_cutoff"), "DatasetSnapshot.causal_cutoff") != _instant(
+                binding.get("causal_cutoff"), "binding.causal_cutoff"
+            ):
+                raise PromotionEvidenceError("dataset causal cutoff does not match frozen research protocol")
 
             strategy_model_id = strategy["payload"].get("model_version_id")
             if strategy_model_id != decision.candidate_model_version_id:
@@ -873,7 +877,26 @@ class ScientificRegistry:
             if decision.predecessor_strategy_version_id is not None:
                 require("StrategyVersion", decision.predecessor_strategy_version_id)
             if decision.action is PromotionAction.ROLLBACK:
-                require("StrategyVersion", decision.rollback_to_strategy_version_id or "")
+                rollback_target = decision.rollback_to_strategy_version_id or ""
+                require("StrategyVersion", rollback_target)
+                prior_champions: set[str] = set()
+                for raw in sorted(
+                    (
+                        raw
+                        for raw in state["records"]
+                        if raw["record_type"] == "PromotionDecision"
+                        and self._promotion_order_key(raw) < decision_key
+                    ),
+                    key=self._promotion_order_key,
+                ):
+                    payload = raw["payload"]
+                    action = PromotionAction(payload["action"])
+                    if action is PromotionAction.PROMOTE:
+                        prior_champions.add(payload["candidate_strategy_version_id"])
+                    elif action is PromotionAction.ROLLBACK:
+                        prior_champions.add(payload["rollback_to_strategy_version_id"])
+                if rollback_target == decision.candidate_strategy_version_id or rollback_target not in prior_champions:
+                    raise PromotionEvidenceError("rollback target must be a distinct prior durable champion")
 
             matching_experiments: list[dict[str, Any]] = []
             for raw in state["records"]:

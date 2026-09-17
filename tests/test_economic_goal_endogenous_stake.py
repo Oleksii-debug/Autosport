@@ -9,7 +9,7 @@ from autosport.domain import MarketEvent, TicketLeg, TicketStatus
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
 from autosport.paper_strategy import Forecast, PaperValueAgent
-from autosport.risk import PaperRiskPolicy
+from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 
 
 class EconomicGoalEndogenousStakeTests(unittest.TestCase):
@@ -82,6 +82,29 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             ticket
             for ticket in book.tickets.values()
             if ticket.status is TicketStatus.OPEN
+        )
+
+    @staticmethod
+    def _risk_context(
+        event: MarketEvent,
+        goal: EconomicGoalContract,
+        *,
+        risk_of_ruin_upper_bound: Decimal | None = None,
+        include_quote: bool = True,
+    ) -> ProposedTicketRiskContext:
+        leg = TicketLeg(
+            event.event_id,
+            event.market_id,
+            event.selection_id,
+            event.decimal_odds,
+        )
+        return ProposedTicketRiskContext(
+            legs=(leg,),
+            quotes=((event,) if include_quote else ()),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+            proposal_ts=event.observed_ts,
+            risk_of_ruin_upper_bound=risk_of_ruin_upper_bound,
         )
 
     def test_active_economic_goal_removes_fixed_caller_stake_authority(self) -> None:
@@ -182,6 +205,102 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             self.assertEqual(self._open_tickets(book), (existing,))
             self.assertEqual(book.committed_stake, Decimal("20"))
             self.assertFalse((Path(tmp) / "decisions.jsonl").exists())
+
+    def test_multi_candidate_vector_prioritizes_signal_and_reserves_aggregate_cap(self) -> None:
+        weak = self._event(event_id="event-weak", market_id="market-weak", sequence=11)
+        strong = self._event(
+            event_id="event-strong",
+            market_id="market-strong",
+            selection_id="selection-strong",
+            sequence=12,
+        )
+        goal = self._goal(
+            max_stake_fraction=Decimal("0.20"),
+            max_capital_at_risk_fraction=Decimal("0.30"),
+            max_concurrent_positions=3,
+        )
+        policy = self._policy(goal)
+        book = PaperBook("100")
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("0.50"), Decimal("1")),
+            contexts=(
+                self._risk_context(weak, goal),
+                self._risk_context(strong, goal),
+            ),
+        )
+
+        self.assertEqual(decision.action, "STAKE_VECTOR")
+        self.assertEqual(decision.stakes, (Decimal("10.00"), Decimal("20.00")))
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+        self.assertEqual(book.committed_stake, Decimal("0"))
+
+    def test_multi_candidate_vector_waits_on_incomplete_candidate_evidence(self) -> None:
+        event = self._event(event_id="event-wait", market_id="market-wait", sequence=13)
+        goal = self._goal()
+        policy = self._policy(goal)
+        book = PaperBook("100")
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("1"),),
+            contexts=(
+                self._risk_context(event, goal, include_quote=False),
+            ),
+        )
+
+        self.assertEqual(decision.action, "WAIT")
+        self.assertEqual(decision.stakes, (Decimal("0"),))
+        self.assertEqual(book.tickets, {})
+
+    def test_multi_candidate_vector_zero_for_no_positive_signal(self) -> None:
+        first = self._event(event_id="event-zero-1", market_id="market-zero-1", sequence=14)
+        second = self._event(
+            event_id="event-zero-2",
+            market_id="market-zero-2",
+            selection_id="selection-zero-2",
+            sequence=15,
+        )
+        goal = self._goal()
+        policy = self._policy(goal)
+        book = PaperBook("100")
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("0"), Decimal("-0.1")),
+            contexts=(
+                self._risk_context(first, goal),
+                self._risk_context(second, goal),
+            ),
+        )
+
+        self.assertEqual(decision.action, "ZERO")
+        self.assertEqual(decision.stakes, (Decimal("0"), Decimal("0")))
+        self.assertEqual(book.tickets, {})
+
+    def test_multi_candidate_vector_accepts_explicit_ruin_witness(self) -> None:
+        event = self._event(event_id="event-ruin", market_id="market-ruin", sequence=16)
+        goal = self._goal(max_risk_of_ruin=Decimal("0.10"))
+        policy = self._policy(goal)
+        book = PaperBook("100")
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("1"),),
+            contexts=(
+                self._risk_context(
+                    event,
+                    goal,
+                    risk_of_ruin_upper_bound=Decimal("0.05"),
+                ),
+            ),
+        )
+
+        self.assertEqual(decision.action, "STAKE_VECTOR")
+        self.assertEqual(decision.stakes, (Decimal("2.00"),))
+        self.assertEqual(book.tickets, {})
 
 
 if __name__ == "__main__":

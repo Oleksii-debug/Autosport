@@ -23,14 +23,26 @@ def comment(comment_id: int, body: str) -> dict[str, object]:
     return {"id": comment_id, "body": body}
 
 
-def claim(run_id: str, lease_until: str, *, syntax: str = "=") -> str:
+def claim(
+    run_id: str,
+    lease_until: str,
+    *,
+    syntax: str = "=",
+    omit: frozenset[str] = frozenset(),
+) -> str:
+    values = (
+        ("TASK_ID", "task-a"),
+        ("SEMANTIC_KEY", "control.test-v1"),
+        ("RUN_ID", run_id),
+        ("ACCOUNT_ID", "A"),
+        ("CLAIM_MODE", "SOURCE_MUTATION"),
+        ("CLAIMED_AT", "2026-09-17T17:00:00Z"),
+        ("LEASE_UNTIL", lease_until),
+        ("INTENDED_SLICE", "isolated test slice"),
+    )
     return "\n".join(
-        (
-            "CLAIM_V1",
-            f"RUN_ID{syntax}{run_id}",
-            f"CLAIMED_AT{syntax}2026-09-17T17:00:00Z",
-            f"LEASE_UNTIL{syntax}{lease_until}",
-        )
+        ["CLAIM_V1"]
+        + [f"{key}{syntax}{value}" for key, value in values if key not in omit]
     )
 
 
@@ -79,9 +91,14 @@ def test_multiple_ownership_events_in_one_comment_are_folded_in_line_order() -> 
                 "\n".join(
                     (
                         "CLAIM_V1",
+                        "TASK_ID: task-a",
+                        "SEMANTIC_KEY: control.test-v1",
                         "RUN_ID: owner-a",
+                        "ACCOUNT_ID: A",
+                        "CLAIM_MODE: SOURCE_MUTATION",
                         "CLAIMED_AT: 2026-09-17T17:00:00Z",
                         "LEASE_UNTIL: 2026-09-17T18:00:00Z",
+                        "INTENDED_SLICE: isolated test slice",
                         "TASK_RESULT_V1",
                         "RUN_ID=owner-a",
                         "RESULT=COMPLETE",
@@ -189,7 +206,16 @@ def test_capacity_uses_original_claim_order_after_dead_runs_are_removed() -> Non
 
 def test_missing_lease_is_reported_and_fails_closed() -> None:
     result = resolve_comments(
-        [comment(800, "CLAIM_V1\nRUN_ID=owner-a\nCLAIMED_AT=2026-09-17T17:00:00Z")],
+        [
+            comment(
+                800,
+                claim(
+                    "owner-a",
+                    "2026-09-17T18:00:00Z",
+                    omit=frozenset({"LEASE_UNTIL"}),
+                ),
+            )
+        ],
         now=NOW,
         capacity=1,
     )
@@ -211,3 +237,120 @@ def test_decreasing_comment_ids_are_reported_without_reordering_history() -> Non
     assert result["live_runs"] == []
     assert result["released_runs"][0]["run_id"] == "owner-a"
     assert result["malformed_events"][0]["kind"] == "comment_order"
+
+
+def test_claim_requires_complete_protocol_identity() -> None:
+    for index, field in enumerate(
+        (
+            "TASK_ID",
+            "SEMANTIC_KEY",
+            "ACCOUNT_ID",
+            "CLAIM_MODE",
+            "INTENDED_SLICE",
+        ),
+        start=1000,
+    ):
+        run_id = f"owner-{field.lower()}"
+        result = resolve_comments(
+            [
+                comment(
+                    index,
+                    claim(
+                        run_id,
+                        "2026-09-17T18:00:00Z",
+                        omit=frozenset({field}),
+                    ),
+                )
+            ],
+            now=NOW,
+            capacity=1,
+        )
+
+        assert result["live_runs"] == []
+        assert result["admitted_runs"] == []
+        assert [run["run_id"] for run in result["ambiguous_runs"]] == [run_id]
+        assert result["malformed_events"][0]["kind"] == "missing_claim_fields"
+        assert field in result["malformed_events"][0]["message"]
+
+
+def test_claim_requires_claimed_at() -> None:
+    result = resolve_comments(
+        [
+            comment(
+                1100,
+                claim(
+                    "owner-a",
+                    "2026-09-17T18:00:00Z",
+                    omit=frozenset({"CLAIMED_AT"}),
+                ),
+            )
+        ],
+        now=NOW,
+        capacity=1,
+    )
+
+    assert result["live_runs"] == []
+    assert result["admitted_runs"] == []
+    assert [run["run_id"] for run in result["ambiguous_runs"]] == ["owner-a"]
+    assert result["malformed_events"][0]["kind"] == "missing_claimed_at"
+
+
+def test_renew_cannot_rehabilitate_incomplete_claim_identity() -> None:
+    result = resolve_comments(
+        [
+            comment(
+                1200,
+                claim(
+                    "owner-a",
+                    "2026-09-17T17:50:00Z",
+                    omit=frozenset({"ACCOUNT_ID"}),
+                ),
+            ),
+            comment(
+                1210,
+                "\n".join(
+                    (
+                        "CLAIM_RENEW_V1",
+                        "RUN_ID=owner-a",
+                        "ACCOUNT_ID=A",
+                        "LEASE_UNTIL=2026-09-17T18:20:00Z",
+                    )
+                ),
+            ),
+        ],
+        now=NOW,
+        capacity=1,
+    )
+
+    assert result["live_runs"] == []
+    assert result["admitted_runs"] == []
+    assert [run["run_id"] for run in result["ambiguous_runs"]] == ["owner-a"]
+    assert result["ambiguous_runs"][0]["account_id"] is None
+    assert result["malformed_events"][0]["kind"] == "missing_claim_fields"
+
+
+def test_renew_cannot_rewrite_immutable_claim_identity() -> None:
+    result = resolve_comments(
+        [
+            comment(1300, claim("owner-a", "2026-09-17T17:50:00Z")),
+            comment(
+                1310,
+                "\n".join(
+                    (
+                        "CLAIM_RENEW_V1",
+                        "RUN_ID=owner-a",
+                        "ACCOUNT_ID=B",
+                        "LEASE_UNTIL=2026-09-17T18:20:00Z",
+                    )
+                ),
+            ),
+        ],
+        now=NOW,
+        capacity=1,
+    )
+
+    assert result["live_runs"] == []
+    assert result["admitted_runs"] == []
+    assert [run["run_id"] for run in result["ambiguous_runs"]] == ["owner-a"]
+    assert result["ambiguous_runs"][0]["account_id"] == "A"
+    assert result["malformed_events"][0]["kind"] == "renew_identity_conflict"

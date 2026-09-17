@@ -33,19 +33,16 @@ class ProviderHealthDecision:
 
 
 class HealthGatedMirrorDecisionIndex:
-    """Join canonical Market Mirror truth with durable provider-health eligibility.
+    """Join canonical Market Mirror truth with causal durable provider health.
 
     ``MarketMirror`` remains the only live quote authority and ``SourceHealthStore``
-    remains the operational provider-health authority. This gate owns no duplicate
-    mutable market/provider state: every decision read starts from one coherent focused
-    mirror revision, then fails closed for provider sources whose durable health is not
-    proven healthy and recent enough at the requested decision timestamp.
+    remains the provider-health authority. Every decision read starts from one coherent
+    focused mirror revision, then reads the provider state that was durably known at the
+    requested decision timestamp. Later health transitions therefore cannot rewrite an
+    earlier replay boundary.
 
-    This prevents a still-fresh quote from remaining decision-eligible after a provider
-    poll fails, becomes degraded/quarantined, silently stops reporting, or publishes a
-    health success timestamp from the future. Historical market reconstruction remains
-    the responsibility of the mirror/store causal replay path; current source-health
-    projection is deliberately not rewritten into historical evidence.
+    The gate fails closed for unknown, degraded, failed, stale, or otherwise invalid
+    provider health. It owns no duplicate mutable market/provider state.
     """
 
     def __init__(
@@ -87,10 +84,10 @@ class HealthGatedMirrorDecisionIndex:
         *,
         as_of: datetime,
     ) -> ProviderHealthDecision:
-        """Return the exact fail-closed eligibility reason for one provider source."""
+        """Return exact fail-closed eligibility using only health known by ``as_of``."""
         normalized_source = self._source_id(source_id)
         boundary = self._as_of(as_of)
-        state = self._health_store.get(normalized_source)
+        state = self._health_store.get_as_of(normalized_source, as_of=boundary)
 
         if state.status == "unknown":
             eligibility = ProviderDecisionEligibility.UNKNOWN
@@ -99,14 +96,14 @@ class HealthGatedMirrorDecisionIndex:
         elif state.status == "failed":
             eligibility = ProviderDecisionEligibility.FAILED
         elif state.status != "healthy":
-            # SourceHealthState validation currently restricts statuses, but keep the
-            # decision boundary fail closed if the durable schema expands later.
             eligibility = ProviderDecisionEligibility.UNKNOWN
         elif state.last_success_at is None:
             eligibility = ProviderDecisionEligibility.UNKNOWN
         else:
             last_success = parse_source_timestamp(state.last_success_at)
             if last_success > boundary:
+                # Defensive invariant fence. get_as_of() should make this unreachable,
+                # but retain an explicit fail-closed reason if storage semantics change.
                 eligibility = ProviderDecisionEligibility.FUTURE_HEALTH
             elif boundary - last_success > self._max_health_age:
                 eligibility = ProviderDecisionEligibility.STALE_HEALTH
@@ -127,7 +124,7 @@ class HealthGatedMirrorDecisionIndex:
         as_of: datetime,
         max_age: timedelta,
     ) -> MirrorSnapshot:
-        """Return a focused live decision view with provider-health fencing applied."""
+        """Return a focused decision view with causal provider-health fencing applied."""
         boundary = self._as_of(as_of)
         captured = self._dependencies.decision_view(
             input_id,
@@ -154,14 +151,7 @@ class HealthGatedMirrorDecisionIndex:
         as_of: datetime,
         max_age: timedelta,
     ) -> tuple[str, ...]:
-        """Route a provider-health transition only to live inputs currently using it.
-
-        Health transitions are not quote mutations, so they do not appear in the
-        quote-key invalidation buffer. This method derives their affected subgraph from
-        the canonical focused views without caching a second dependency or quote map.
-        Consumers can call it when SourceHealthStore changes and then recompute only the
-        returned decision inputs through :meth:`decision_view`.
-        """
+        """Route a provider-health transition only to inputs that use that provider."""
         normalized_source = self._source_id(source_id)
         boundary = self._as_of(as_of)
         affected: list[str] = []

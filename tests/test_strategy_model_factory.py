@@ -7,6 +7,7 @@ import pytest
 
 from autosport.scientific_registry import (
     DatasetSnapshot,
+    DuplicateExperimentFingerprintError,
     EvaluationBundleRef,
     ExperimentRecord,
     FeatureSet,
@@ -507,6 +508,32 @@ def test_factory_rejection_is_durable_negative_memory_with_postmortem(tmp_path):
     assert reopened.champion_strategy(
         as_of=T7, canonical_strategy_id="canonical-factory-strategy"
     ) == "strategy-v1"
+
+
+def test_factory_duplicate_fingerprint_fails_before_new_durable_state(tmp_path):
+    registry, _, rule, store = _factory_foundation(tmp_path)
+    runner = ExperimentRunner(registry, store)
+    first = _run_candidate(runner, _bad_candidate_points(), rule)
+    assert first.verdict is PromotionVerdict.REJECT
+
+    duplicate = replace(
+        _candidate_spec(),
+        experiment_id="experiment-v2-duplicate",
+        evaluation_bundle_id="eval-v2-duplicate",
+        promotion_decision_id="promotion-v2-duplicate",
+    )
+    with pytest.raises(DuplicateExperimentFingerprintError):
+        runner.run_baseline_candidate(
+            duplicate,
+            _bad_candidate_points(),
+            rule=rule,
+        )
+
+    assert registry.get("Experiment", "experiment-v2-duplicate") is None
+    assert registry.get("EvaluationBundle", "eval-v2-duplicate") is None
+    assert registry.get("PromotionDecision", "promotion-v2-duplicate") is None
+    assert not store.path_for_testing("metrics", "eval-v2-duplicate").exists()
+    assert not store.path_for_testing("evaluation", "eval-v2-duplicate").exists()
 
 
 def test_protective_metric_degradation_is_durably_rejected(tmp_path):

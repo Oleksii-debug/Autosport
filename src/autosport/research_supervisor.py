@@ -367,10 +367,10 @@ class ResearchSupervisor:
         }
         if set(run) != required:
             raise ValueError("research supervisor run fields mismatch")
-        _sha256(run["run_id"], "run_id")
-        _text(run["trigger_id"], "trigger_id")
-        _sha256(run["trigger_sha256"], "trigger_sha256")
-        _text(run["question_id"], "question_id")
+        run_id = _sha256(run["run_id"], "run_id")
+        trigger_id = _text(run["trigger_id"], "trigger_id")
+        trigger_sha256 = _sha256(run["trigger_sha256"], "trigger_sha256")
+        question_id = _text(run["question_id"], "question_id")
         phase = ResearchPhase(run["phase"])
         status = SupervisorStatus(run["status"])
         created = _instant(run["created_at"], "created_at")
@@ -389,6 +389,31 @@ class ResearchSupervisor:
             raise ValueError("budget_units must be positive")
         if not 0 <= run["consumed_budget_units"] <= run["budget_units"]:
             raise ValueError("consumed_budget_units is outside budget")
+        canonical_deadline = (
+            None
+            if run["deadline_at"] is None
+            else _timestamp_identity(run["deadline_at"], "deadline_at")
+        )
+        expected_trigger_sha256 = _digest(
+            {
+                "trigger_id": trigger_id,
+                "question_id": question_id,
+                "requested_at": _timestamp_identity(run["created_at"], "created_at"),
+                "budget_units": run["budget_units"],
+                "deadline_at": canonical_deadline,
+            }
+        )
+        if trigger_sha256 != expected_trigger_sha256:
+            raise ValueError("research supervisor trigger digest mismatch")
+        expected_run_id = _digest(
+            {
+                "schema": SUPERVISOR_SCHEMA,
+                "schema_version": SUPERVISOR_SCHEMA_VERSION,
+                "trigger_sha256": trigger_sha256,
+            }
+        )
+        if run_id != expected_run_id:
+            raise ValueError("research supervisor run identity mismatch")
         if run["checkpoint_index"] < 0:
             raise ValueError("checkpoint_index must be non-negative")
         if type(run["bindings"]) is not dict:
@@ -455,6 +480,7 @@ class ResearchSupervisor:
     ) -> tuple[tuple[str, str], ...]:
         values = _binding_pairs(bindings)
         cutoff = _instant(as_of, "binding as_of")
+        normalized: list[tuple[str, str]] = []
         for key, value in values:
             record_type = _SCIENTIFIC_BINDINGS.get(key)
             if record_type is not None:
@@ -474,11 +500,12 @@ class ResearchSupervisor:
                     raise ResearchSupervisorError(
                         f"binding references unrevealed {record_type}:{value}"
                     )
+                normalized.append((key, value))
             elif key in _SHA_BINDINGS:
-                _sha256(value, key)
+                normalized.append((key, _sha256(value, key)))
             else:
                 raise ResearchSupervisorError(f"unsupported supervisor binding: {key}")
-        return values
+        return tuple(normalized)
 
     def accept_trigger(self, trigger: ResearchTrigger) -> SupervisorSnapshot:
         if not isinstance(trigger, ResearchTrigger):
@@ -668,21 +695,26 @@ class ResearchSupervisor:
                 )
             if now_instant < _instant(run["updated_at"], "updated_at"):
                 raise ValueError("status timestamp cannot move backwards")
+            limit_error: str | None = None
             if target is SupervisorStatus.ACTIVE:
                 deadline = run["deadline_at"]
                 if deadline is not None and now_instant > _instant(deadline, "deadline_at"):
-                    raise ResearchSupervisorLimitReached(
-                        "cannot resume after research run deadline"
-                    )
-                if run["consumed_budget_units"] >= run["budget_units"]:
-                    raise ResearchSupervisorLimitReached(
-                        "cannot resume exhausted research run budget"
-                    )
-            run["status"] = target.value
+                    run["status"] = SupervisorStatus.STOPPED.value
+                    run["stop_reason"] = "DEADLINE_EXPIRED"
+                    limit_error = "cannot resume after research run deadline"
+                elif run["consumed_budget_units"] >= run["budget_units"]:
+                    run["status"] = SupervisorStatus.STOPPED.value
+                    run["stop_reason"] = "BUDGET_EXHAUSTED"
+                    limit_error = "cannot resume exhausted research run budget"
+            if limit_error is None:
+                run["status"] = target.value
             run["checkpoint_index"] += 1
             run["updated_at"] = now
             sealed = self._seal_run(run)
             run.clear()
             run.update(sealed)
             self._write_state(self.path, self._state_without_digest(state))
-            return self._snapshot(run)
+            snapshot = self._snapshot(run)
+        if limit_error is not None:
+            raise ResearchSupervisorLimitReached(limit_error)
+        return snapshot

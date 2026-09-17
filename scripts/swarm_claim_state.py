@@ -1,635 +1,146 @@
 #!/usr/bin/env python3
-"""Deterministically fold Autosport swarm ownership events.
+"""Deterministic swarm claim-state resolver with protocol-domain validation.
 
-The resolver is deliberately network-free. Feed it a JSON export of GitHub issue
-comments in server order. It never grants ownership from malformed or ambiguous
-records.
+The historical fold implementation lives in ``swarm_claim_state_impl.py`` unchanged.
+This facade adds the #368 CLAIM_MODE domain fence at the ownership boundary and then
+re-exports the established resolver/CLI surface. Unknown claim modes are fail-closed:
+they can never appear as live, admitted, collision, released, or expired ownership.
 """
 
 from __future__ import annotations
 
-import argparse
-from datetime import datetime, timezone
-import json
+import importlib.util
 from pathlib import Path
-import re
 from typing import Any, Mapping, Sequence
 
 
-OWNERSHIP_HEADERS = {
-    "CLAIM_V1": "claim",
-    "CLAIM_RENEW_V1": "renew",
-    "CLAIM_HEARTBEAT_V1": "renew",
-    "LEASE_RENEW_V1": "renew",
-    "CLAIM_RELEASE_V1": "release",
-}
-ANY_VERSIONED_HEADER_RE = re.compile(r"^[A-Z][A-Z0-9_ -]*_V\d+$")
-FIELD_RE = re.compile(r"^([A-Z][A-Z0-9_]*)\s*(?:=|:)\s*(.*)$")
-CLAIM_IDENTITY_FIELDS = (
-    "TASK_ID",
-    "SEMANTIC_KEY",
-    "ACCOUNT_ID",
-    "CLAIM_MODE",
-    "INTENDED_SLICE",
+_IMPL_PATH = Path(__file__).with_name("swarm_claim_state_impl.py")
+_SPEC = importlib.util.spec_from_file_location(
+    "_autosport_swarm_claim_state_impl",
+    _IMPL_PATH,
 )
-RENEW_IMMUTABLE_FIELDS = {
-    "TASK_ID": "task_id",
-    "SEMANTIC_KEY": "semantic_key",
-    "ACCOUNT_ID": "account_id",
-    "CLAIM_MODE": "claim_mode",
-    "CLAIMED_AT": "claimed_at",
-    "INTENDED_SLICE": "intended_slice",
-}
+if _SPEC is None or _SPEC.loader is None:  # pragma: no cover - import machinery guard
+    raise ImportError(f"cannot load claim-state implementation from {_IMPL_PATH}")
+_impl = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_impl)
+
+# #368 is the canonical protocol authority for the claim-mode domain.
+ALLOWED_CLAIM_MODES = frozenset(
+    {
+        "SOURCE_MUTATION",
+        "INTEGRATION",
+        "READ_ONLY_AUDIT",
+        "RESEARCH",
+        "CI_TRIAGE",
+    }
+)
+
+# Preserve the established public/helper surface for current callers and tests.
+for _name in dir(_impl):
+    if _name.startswith("__") or _name in {"resolve_comments", "main"}:
+        continue
+    globals()[_name] = getattr(_impl, _name)
+
+_BASE_RESOLVE_COMMENTS = _impl.resolve_comments
+_STATE_BUCKETS = (
+    "live_runs",
+    "source_live_runs",
+    "non_source_live_runs",
+    "admitted_runs",
+    "collision_candidates",
+    "released_runs",
+    "expired_runs",
+    "ambiguous_runs",
+)
+_NON_AMBIGUOUS_BUCKETS = tuple(
+    bucket for bucket in _STATE_BUCKETS if bucket != "ambiguous_runs"
+)
 
 
-def parse_instant(value: str) -> datetime:
-    """Parse an offset-aware ISO-8601 instant and normalize it to UTC."""
-
-    text = value.strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    instant = datetime.fromisoformat(text)
-    if instant.tzinfo is None:
-        raise ValueError("timestamp must include a timezone offset")
-    return instant.astimezone(timezone.utc)
-
-
-def _format_instant(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _extract_events(
-    body: str,
-    *,
-    comment_index: int,
-    comment_id: Any,
-) -> list[dict[str, Any]]:
-    """Extract ownership blocks while ignoring unrelated versioned blocks."""
-
-    events: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
-
-    for line_index, raw_line in enumerate(body.splitlines()):
-        line = raw_line.strip()
-
-        if line in OWNERSHIP_HEADERS:
-            current = {
-                "type": OWNERSHIP_HEADERS[line],
-                "header": line,
-                "fields": {},
-                "duplicate_fields": {},
-                "comment_index": comment_index,
-                "comment_id": comment_id,
-                "line_index": line_index,
-            }
-            events.append(current)
-            continue
-
-        # TASK_RESULT_V1, AUDITOR_*_V1, etc. end the preceding ownership
-        # block. A later ownership header in the same comment starts a new one.
-        if ANY_VERSIONED_HEADER_RE.match(line):
-            current = None
-            continue
-
-        if current is None:
-            continue
-
-        match = FIELD_RE.match(line)
-        if match:
-            key, value = match.groups()
-            value = value.strip()
-            fields = current["fields"]
-            if key in fields:
-                duplicate_fields = current["duplicate_fields"]
-                duplicate_fields.setdefault(key, [fields[key]]).append(value)
-            else:
-                fields[key] = value
-
-    return events
+def _claim_mode_problem(run: Mapping[str, Any]) -> dict[str, Any]:
+    problem: dict[str, Any] = {
+        "kind": "invalid_claim_mode",
+        "message": (
+            "CLAIM_V1 has invalid CLAIM_MODE: "
+            f"{run.get('claim_mode')!s}; expected one of "
+            + ", ".join(sorted(ALLOWED_CLAIM_MODES))
+        ),
+        "run_id": run.get("run_id"),
+        "header": "CLAIM_V1",
+    }
+    if run.get("claim_comment_index") is not None:
+        problem["comment_index"] = run["claim_comment_index"]
+    if run.get("claim_comment_id") is not None:
+        problem["comment_id"] = run["claim_comment_id"]
+    return problem
 
 
-def _public_state(state: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in state.items() if not key.startswith("_")}
+def _fail_closed_invalid_claim_modes(result: dict[str, Any]) -> dict[str, Any]:
+    """Move every nonempty unknown CLAIM_MODE into ambiguous ownership evidence."""
 
+    invalid: dict[str, dict[str, Any]] = {}
+    for bucket in _STATE_BUCKETS:
+        for run in result.get(bucket, ()):
+            mode = run.get("claim_mode")
+            run_id = run.get("run_id")
+            if (
+                isinstance(mode, str)
+                and mode
+                and mode not in ALLOWED_CLAIM_MODES
+                and isinstance(run_id, str)
+                and run_id
+            ):
+                invalid.setdefault(run_id, run)
 
-def _problem(
-    kind: str,
-    message: str,
-    *,
-    event: Mapping[str, Any] | None = None,
-    run_id: str | None = None,
-    comment_index: int | None = None,
-    comment_id: Any = None,
-) -> dict[str, Any]:
-    result: dict[str, Any] = {"kind": kind, "message": message}
-    if run_id:
-        result["run_id"] = run_id
-    if event is not None:
-        result.update(
-            {
-                "header": event["header"],
-                "comment_index": event["comment_index"],
-                "comment_id": event["comment_id"],
-                "line_index": event["line_index"],
-            }
-        )
-    else:
-        if comment_index is not None:
-            result["comment_index"] = comment_index
-        if comment_id is not None:
-            result["comment_id"] = comment_id
+    if not invalid:
+        return result
+
+    invalid_ids = frozenset(invalid)
+    for bucket in _NON_AMBIGUOUS_BUCKETS:
+        result[bucket] = [
+            run for run in result.get(bucket, ()) if run.get("run_id") not in invalid_ids
+        ]
+
+    ambiguous = {
+        run.get("run_id"): run
+        for run in result.get("ambiguous_runs", ())
+        if isinstance(run.get("run_id"), str)
+    }
+    ambiguous.update(invalid)
+    result["ambiguous_runs"] = sorted(
+        ambiguous.values(), key=lambda run: run.get("claim_order", -1)
+    )
+
+    malformed = list(result.get("malformed_events", ()))
+    existing = {
+        event.get("run_id")
+        for event in malformed
+        if event.get("kind") == "invalid_claim_mode"
+    }
+    for run_id, run in invalid.items():
+        if run_id not in existing:
+            malformed.append(_claim_mode_problem(run))
+    result["malformed_events"] = malformed
     return result
-
-
-def _missing_claim_identity_fields(fields: Mapping[str, Any]) -> list[str]:
-    return [
-        field
-        for field in CLAIM_IDENTITY_FIELDS
-        if not str(fields.get(field, "")).strip()
-    ]
-
-
-def _mark_ambiguous(
-    state: dict[str, Any],
-    *,
-    comment_index: int,
-    comment_id: Any,
-) -> None:
-    state["ambiguous"] = True
-    state["latest_event"] = "ambiguous"
-    state["latest_comment_index"] = comment_index
-    state["latest_comment_id"] = comment_id
 
 
 def resolve_comments(
     comments: Sequence[Mapping[str, Any]],
     *,
-    now: datetime | str,
+    now: Any,
     capacity: int | None = None,
 ) -> dict[str, Any]:
-    """Fold server-ordered comments into deterministic ownership state.
+    """Fold ownership comments and fail closed on unknown #368 claim modes."""
 
-    ``comments`` must be the complete relevant issue-comment history in GitHub
-    server order. Runs with malformed ownership history are never admitted.
-    """
-
-    if isinstance(now, str):
-        resolved_now = parse_instant(now)
-    else:
-        if now.tzinfo is None:
-            raise ValueError("now must be timezone-aware")
-        resolved_now = now.astimezone(timezone.utc)
-
-    if capacity is not None and capacity < 1:
-        raise ValueError("capacity must be >= 1")
-
-    malformed: list[dict[str, Any]] = []
-    states: dict[str, dict[str, Any]] = {}
-    original_claim_order: list[str] = []
-    last_numeric_comment_id: int | None = None
-    server_order_invalid = False
-
-    for comment_index, comment in enumerate(comments):
-        comment_id = comment.get("id")
-
-        if isinstance(comment_id, int):
-            if (
-                last_numeric_comment_id is not None
-                and comment_id < last_numeric_comment_id
-            ):
-                server_order_invalid = True
-                malformed.append(
-                    _problem(
-                        "comment_order",
-                        "comment ids decreased; input is not in GitHub server order",
-                        comment_index=comment_index,
-                        comment_id=comment_id,
-                    )
-                )
-            last_numeric_comment_id = comment_id
-
-        body = comment.get("body")
-        if not isinstance(body, str):
-            malformed.append(
-                _problem(
-                    "comment_body",
-                    "comment body must be a string",
-                    comment_index=comment_index,
-                    comment_id=comment_id,
-                )
-            )
-            continue
-
-        for event in _extract_events(
-            body,
-            comment_index=comment_index,
-            comment_id=comment_id,
-        ):
-            fields = event["fields"]
-            duplicate_fields = event.get("duplicate_fields", {})
-            if duplicate_fields:
-                duplicate_keys = list(duplicate_fields)
-                if "RUN_ID" in duplicate_fields:
-                    run_candidates = [
-                        value.strip()
-                        for value in duplicate_fields["RUN_ID"]
-                        if value.strip()
-                    ]
-                else:
-                    candidate = fields.get("RUN_ID", "").strip()
-                    run_candidates = [candidate] if candidate else []
-
-                unique_run_candidates = list(dict.fromkeys(run_candidates))
-                malformed.append(
-                    _problem(
-                        "duplicate_field",
-                        f"{event['header']} repeats protocol fields: "
-                        + ", ".join(duplicate_keys),
-                        event=event,
-                        run_id=(
-                            unique_run_candidates[0]
-                            if len(unique_run_candidates) == 1
-                            else None
-                        ),
-                    )
-                )
-                for candidate_run_id in unique_run_candidates:
-                    candidate_state = states.get(candidate_run_id)
-                    if candidate_state is not None:
-                        _mark_ambiguous(
-                            candidate_state,
-                            comment_index=comment_index,
-                            comment_id=comment_id,
-                        )
-                continue
-
-            run_id = fields.get("RUN_ID", "").strip()
-
-            if not run_id:
-                malformed.append(
-                    _problem(
-                        "missing_run_id",
-                        "ownership event has no RUN_ID",
-                        event=event,
-                    )
-                )
-                continue
-
-            state = states.get(run_id)
-            event_type = event["type"]
-
-            if event_type == "claim":
-                if state is not None:
-                    malformed.append(
-                        _problem(
-                            "duplicate_claim",
-                            "RUN_ID has more than one CLAIM_V1",
-                            event=event,
-                            run_id=run_id,
-                        )
-                    )
-                    _mark_ambiguous(
-                        state,
-                        comment_index=comment_index,
-                        comment_id=comment_id,
-                    )
-                    continue
-
-                ambiguous = False
-
-                missing_identity = _missing_claim_identity_fields(fields)
-                if missing_identity:
-                    malformed.append(
-                        _problem(
-                            "missing_claim_fields",
-                            "CLAIM_V1 missing required fields: "
-                            + ", ".join(missing_identity),
-                            event=event,
-                            run_id=run_id,
-                        )
-                    )
-                    ambiguous = True
-
-                lease_text = fields.get("LEASE_UNTIL", "").strip()
-                lease_dt: datetime | None = None
-                if not lease_text:
-                    malformed.append(
-                        _problem(
-                            "missing_lease",
-                            "CLAIM_V1 has no LEASE_UNTIL",
-                            event=event,
-                            run_id=run_id,
-                        )
-                    )
-                    ambiguous = True
-                else:
-                    try:
-                        lease_dt = parse_instant(lease_text)
-                    except ValueError as exc:
-                        malformed.append(
-                            _problem(
-                                "invalid_lease",
-                                str(exc),
-                                event=event,
-                                run_id=run_id,
-                            )
-                        )
-                        ambiguous = True
-
-                claimed_at_text = fields.get("CLAIMED_AT", "").strip()
-                claimed_at: datetime | None = None
-                if not claimed_at_text:
-                    malformed.append(
-                        _problem(
-                            "missing_claimed_at",
-                            "CLAIM_V1 has no CLAIMED_AT",
-                            event=event,
-                            run_id=run_id,
-                        )
-                    )
-                    ambiguous = True
-                else:
-                    try:
-                        claimed_at = parse_instant(claimed_at_text)
-                    except ValueError as exc:
-                        malformed.append(
-                            _problem(
-                                "invalid_claimed_at",
-                                str(exc),
-                                event=event,
-                                run_id=run_id,
-                            )
-                        )
-                        ambiguous = True
-
-                state = {
-                    "run_id": run_id,
-                    "task_id": fields.get("TASK_ID", "").strip() or None,
-                    "semantic_key": fields.get("SEMANTIC_KEY", "").strip() or None,
-                    "account_id": fields.get("ACCOUNT_ID", "").strip() or None,
-                    "claim_mode": fields.get("CLAIM_MODE", "").strip() or None,
-                    "intended_slice": fields.get("INTENDED_SLICE", "").strip() or None,
-                    "claim_order": len(original_claim_order),
-                    "claim_comment_index": comment_index,
-                    "claim_comment_id": comment_id,
-                    "claimed_at": (
-                        _format_instant(claimed_at) if claimed_at else None
-                    ),
-                    "lease_until": _format_instant(lease_dt) if lease_dt else None,
-                    "_lease_dt": lease_dt,
-                    "latest_event": "claim",
-                    "latest_comment_index": comment_index,
-                    "latest_comment_id": comment_id,
-                    "ambiguous": ambiguous,
-                }
-                states[run_id] = state
-                original_claim_order.append(run_id)
-                continue
-
-            if event_type == "renew":
-                renewal_header = event["header"]
-                if state is None:
-                    malformed.append(
-                        _problem(
-                            "renew_without_claim",
-                            f"{renewal_header} precedes any CLAIM_V1",
-                            event=event,
-                            run_id=run_id,
-                        )
-                    )
-                    continue
-
-                if state["latest_event"] == "release":
-                    malformed.append(
-                        _problem(
-                            "renew_after_release",
-                            f"{renewal_header} occurs after CLAIM_RELEASE_V1",
-                            event=event,
-                            run_id=run_id,
-                        )
-                    )
-                    _mark_ambiguous(
-                        state,
-                        comment_index=comment_index,
-                        comment_id=comment_id,
-                    )
-                    continue
-
-                lease_text = fields.get("LEASE_UNTIL", "").strip()
-                if not lease_text:
-                    malformed.append(
-                        _problem(
-                            "missing_lease",
-                            f"{renewal_header} has no LEASE_UNTIL",
-                            event=event,
-                            run_id=run_id,
-                        )
-                    )
-                    _mark_ambiguous(
-                        state,
-                        comment_index=comment_index,
-                        comment_id=comment_id,
-                    )
-                    continue
-
-                try:
-                    lease_dt = parse_instant(lease_text)
-                except ValueError as exc:
-                    malformed.append(
-                        _problem(
-                            "invalid_lease",
-                            str(exc),
-                            event=event,
-                            run_id=run_id,
-                        )
-                    )
-                    _mark_ambiguous(
-                        state,
-                        comment_index=comment_index,
-                        comment_id=comment_id,
-                    )
-                    continue
-
-                identity_conflicts: list[str] = []
-                for source_key, output_key in RENEW_IMMUTABLE_FIELDS.items():
-                    supplied = fields.get(source_key, "").strip()
-                    if supplied and supplied != (state.get(output_key) or ""):
-                        identity_conflicts.append(source_key)
-
-                if identity_conflicts:
-                    malformed.append(
-                        _problem(
-                            "renew_identity_conflict",
-                            f"{renewal_header} conflicts with immutable claim fields: "
-                            + ", ".join(identity_conflicts),
-                            event=event,
-                            run_id=run_id,
-                        )
-                    )
-                    _mark_ambiguous(
-                        state,
-                        comment_index=comment_index,
-                        comment_id=comment_id,
-                    )
-                    continue
-
-                state["_lease_dt"] = lease_dt
-                state["lease_until"] = _format_instant(lease_dt)
-                state["latest_event"] = "renew"
-                state["latest_comment_index"] = comment_index
-                state["latest_comment_id"] = comment_id
-                # A renewal extends only the lease. It cannot rehabilitate or
-                # rewrite malformed/missing identity from the original claim.
-                continue
-
-            # A later release terminates the run immediately. This is true even
-            # if an earlier event was malformed; release cannot grant authority.
-            if state is None:
-                malformed.append(
-                    _problem(
-                        "release_without_claim",
-                        "CLAIM_RELEASE_V1 precedes any CLAIM_V1",
-                        event=event,
-                        run_id=run_id,
-                    )
-                )
-                continue
-
-            state["latest_event"] = "release"
-            state["latest_comment_index"] = comment_index
-            state["latest_comment_id"] = comment_id
-            state["release_reason"] = fields.get("REASON")
-            state["release_evidence"] = fields.get("EVIDENCE")
-
-    # Numeric GitHub issue-comment ids are monotonic in server order. Once that
-    # invariant is broken, event precedence cannot be trusted. Preserve the
-    # diagnostic evidence but grant no ownership from the affected history.
-    if server_order_invalid:
-        for run_id in original_claim_order:
-            state = states[run_id]
-            state["ambiguous"] = True
-            state["latest_event"] = "ambiguous"
-
-    live_runs: list[dict[str, Any]] = []
-    released_runs: list[dict[str, Any]] = []
-    expired_runs: list[dict[str, Any]] = []
-    ambiguous_runs: list[dict[str, Any]] = []
-
-    for run_id in original_claim_order:
-        state = states[run_id]
-
-        if (
-            state.get("ambiguous")
-            or state["latest_event"] == "ambiguous"
-            or state.get("_lease_dt") is None
-        ):
-            ambiguous_runs.append(_public_state(state))
-            continue
-
-        if state["latest_event"] == "release":
-            released_runs.append(_public_state(state))
-            continue
-
-        if state["_lease_dt"] <= resolved_now:
-            expired_runs.append(_public_state(state))
-            continue
-
-        live_runs.append(_public_state(state))
-
-    live_runs.sort(key=lambda item: item["claim_order"])
-    source_live_runs = [
-        run for run in live_runs if run.get("claim_mode") == "SOURCE_MUTATION"
-    ]
-    non_source_live_runs = [
-        run for run in live_runs if run.get("claim_mode") != "SOURCE_MUTATION"
-    ]
-
-    if capacity is None:
-        admitted_runs = list(source_live_runs)
-        collision_candidates: list[dict[str, Any]] = []
-    else:
-        admitted_runs = source_live_runs[:capacity]
-        collision_candidates = source_live_runs[capacity:]
-
-    return {
-        "now": _format_instant(resolved_now),
-        "capacity": capacity,
-        "live_runs": live_runs,
-        "source_live_runs": source_live_runs,
-        "non_source_live_runs": non_source_live_runs,
-        "admitted_runs": admitted_runs,
-        "collision_candidates": collision_candidates,
-        "released_runs": released_runs,
-        "expired_runs": expired_runs,
-        "ambiguous_runs": ambiguous_runs,
-        "malformed_events": malformed,
-    }
+    result = _BASE_RESOLVE_COMMENTS(comments, now=now, capacity=capacity)
+    return _fail_closed_invalid_claim_modes(result)
 
 
-def _load_comments(path: str) -> Sequence[Mapping[str, Any]]:
-    if path == "-":
-        payload = json.load(__import__("sys").stdin)
-    else:
-        with Path(path).open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-
-    if isinstance(payload, dict) and isinstance(payload.get("comments"), list):
-        payload = payload["comments"]
-
-    if not isinstance(payload, list):
-        raise ValueError("input JSON must be a comment list or {'comments': [...]}")
-
-    if not all(isinstance(item, dict) for item in payload):
-        raise ValueError("every comment entry must be a JSON object")
-
-    return payload
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Fold Autosport CLAIM_V1/CLAIM_HEARTBEAT_V1/renew/release "
-            "events from server-ordered GitHub issue comments."
-        )
-    )
-    parser.add_argument(
-        "--input",
-        required=True,
-        help="Path to issue-comment JSON, or '-' for stdin.",
-    )
-    parser.add_argument(
-        "--now",
-        required=True,
-        help="Deterministic offset-aware ISO-8601 instant used for lease expiry.",
-    )
-    parser.add_argument(
-        "--capacity",
-        type=int,
-        default=None,
-        help=(
-            "Optional SOURCE_MUTATION task capacity; admitted_runs/collision_candidates "
-            "exclude live read-only/non-source claims."
-        ),
-    )
-    return parser
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    try:
-        comments = _load_comments(args.input)
-        result = resolve_comments(
-            comments,
-            now=args.now,
-            capacity=args.capacity,
-        )
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        parser.error(str(exc))
-
-    print(json.dumps(result, indent=2, sort_keys=True))
-    return 0
+# The established CLI resolves ``resolve_comments`` through the implementation module's
+# globals at call time. Patch only that callable so CLI and Python callers share the same
+# validated semantics while retaining the existing parser/error behavior.
+_impl.resolve_comments = resolve_comments
+main = _impl.main
 
 
 if __name__ == "__main__":

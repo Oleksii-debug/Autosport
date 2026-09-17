@@ -7,6 +7,8 @@ permission and never performs bookmaker network/write actions.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -15,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from threading import RLock
 
 from .bookmaker_capability import (
     BookmakerCapability,
@@ -34,6 +37,54 @@ class GovernancePermissionState(str, Enum):
     UNKNOWN = "unknown"
     PERMITTED = "permitted"
     PROHIBITED = "prohibited"
+
+
+_LOCAL_WRITE_LOCK = RLock()
+
+
+@contextmanager
+def _registry_write_lock(registry_path: Path) -> Iterator[None]:
+    """Serialize the complete registry read-modify-publish transaction.
+
+    Atomic replacement keeps readers from seeing a partial document, but it cannot by
+    itself prevent two writers from reading the same predecessor and then replacing one
+    another. A process-local lock protects threads while an OS advisory lock protects
+    separate Autosport processes that share the same registry path.
+    """
+
+    lock_path = registry_path.with_name(f".{registry_path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _LOCAL_WRITE_LOCK:
+        try:
+            with lock_path.open("a+b") as handle:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                handle.seek(0)
+
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                    try:
+                        yield
+                    finally:
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                    try:
+                        yield
+                    finally:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError as exc:
+            raise BookmakerCapabilityRegistryError(
+                "unable to acquire or release capability registry write lock"
+            ) from exc
 
 
 def _text(value: str, field: str) -> str:
@@ -130,27 +181,28 @@ class BookmakerCapabilityRegistry:
             raise BookmakerCapabilityRegistryError(
                 "profile must be a BookmakerCapabilityProfile"
             )
-        document = self._load_document()
-        profiles = self._profiles_from_document(document)
-        profile_id = profile.profile_id
-        if any(existing.profile_id == profile_id for existing in profiles):
-            return False
+        with _registry_write_lock(self.path):
+            document = self._load_document()
+            profiles = self._profiles_from_document(document)
+            profile_id = profile.profile_id
+            if any(existing.profile_id == profile_id for existing in profiles):
+                return False
 
-        key = self._profile_key(profile)
-        for existing in profiles:
-            if self._profile_key(existing) == key:
-                raise BookmakerCapabilityRegistryError(
-                    "conflicting immutable profile identity for "
-                    f"{profile.venue_id}/{profile.account_id}/"
-                    f"{profile.adapter_id}/v{profile.profile_version}"
-                )
+            key = self._profile_key(profile)
+            for existing in profiles:
+                if self._profile_key(existing) == key:
+                    raise BookmakerCapabilityRegistryError(
+                        "conflicting immutable profile identity for "
+                        f"{profile.venue_id}/{profile.account_id}/"
+                        f"{profile.adapter_id}/v{profile.profile_version}"
+                    )
 
-        profiles.append(profile)
-        self._write_document(
-            profiles,
-            self._governance_from_document(document),
-        )
-        return True
+            profiles.append(profile)
+            self._write_document(
+                profiles,
+                self._governance_from_document(document),
+            )
+            return True
 
     def profile_history(
         self,
@@ -198,27 +250,28 @@ class BookmakerCapabilityRegistry:
             raise BookmakerCapabilityRegistryError(
                 "evidence must be BookmakerGovernanceEvidence"
             )
-        document = self._load_document()
-        governance = self._governance_from_document(document)
-        evidence_id = evidence.evidence_id
-        if any(existing.evidence_id == evidence_id for existing in governance):
-            return False
+        with _registry_write_lock(self.path):
+            document = self._load_document()
+            governance = self._governance_from_document(document)
+            evidence_id = evidence.evidence_id
+            if any(existing.evidence_id == evidence_id for existing in governance):
+                return False
 
-        key = self._governance_key(evidence)
-        for existing in governance:
-            if self._governance_key(existing) == key:
-                raise BookmakerCapabilityRegistryError(
-                    "conflicting immutable governance evidence for "
-                    f"{evidence.venue_id}/{evidence.account_id}/"
-                    f"{evidence.jurisdiction}/{evidence.terms_version}"
-                )
+            key = self._governance_key(evidence)
+            for existing in governance:
+                if self._governance_key(existing) == key:
+                    raise BookmakerCapabilityRegistryError(
+                        "conflicting immutable governance evidence for "
+                        f"{evidence.venue_id}/{evidence.account_id}/"
+                        f"{evidence.jurisdiction}/{evidence.terms_version}"
+                    )
 
-        governance.append(evidence)
-        self._write_document(
-            self._profiles_from_document(document),
-            governance,
-        )
-        return True
+            governance.append(evidence)
+            self._write_document(
+                self._profiles_from_document(document),
+                governance,
+            )
+            return True
 
     def governance_history(
         self,

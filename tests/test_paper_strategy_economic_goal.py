@@ -105,6 +105,43 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             self.assertEqual(len(context.paper_book.tickets), 0)
             self.assertFalse(ledger_path.exists())
 
+    def test_active_goal_without_decision_ledger_fails_closed_and_remains_retryable(self) -> None:
+        goal = self._goal()
+        event = self._event()
+        agent = self._agent(event, goal)
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "decisions.jsonl"
+            book = PaperBook("100")
+            context = AgentContext(
+                book,
+                latest_quotes={event.quote_key: event},
+                replay_run_id="run-1",
+                decision_ledger=None,
+            )
+
+            agent.on_market_event(event, context)
+
+            self.assertEqual(book.balance, Decimal("100"))
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.committed_stake, Decimal("0"))
+            self.assertFalse(ledger_path.exists())
+
+            ledger = JsonlDecisionLedger(ledger_path)
+            context.decision_ledger = ledger
+            agent.on_market_event(event, context)
+
+            self.assertEqual(book.balance, Decimal("99"))
+            self.assertEqual(len(book.tickets), 1)
+            records = ledger.verified_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(
+                records[0].payload["ticket_id"],
+                next(iter(book.tickets)),
+            )
+            restarted = JsonlDecisionLedger(ledger_path)
+            rebound = restarted.verified_economic_decision(records[0].decision_id, goal)
+            self.assertEqual(rebound, records[0])
+
     def test_economic_ledger_failure_leaves_no_ticket_balance_or_acted_residue(self) -> None:
         class FailingEconomicLedger(JsonlDecisionLedger):
             def append_economic(self, record, contract):

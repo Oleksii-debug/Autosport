@@ -94,7 +94,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0].payload["stake"], "20.00")
 
-    def test_existing_open_exposure_tightens_next_goal_derived_stake(self) -> None:
+    def test_existing_open_exposure_tightens_next_goal_derived_stake_and_restart_is_idempotent(self) -> None:
         event = self._event(event_id="event-2", market_id="market-2", sequence=2)
         goal = self._goal(
             max_stake_fraction=Decimal("0.20"),
@@ -106,7 +106,10 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             Decimal("20"),
         )
         with tempfile.TemporaryDirectory() as tmp:
-            ledger = JsonlDecisionLedger(Path(tmp) / "decisions.jsonl")
+            root = Path(tmp)
+            ledger_path = root / "decisions.jsonl"
+            book_path = root / "paper.json"
+            ledger = JsonlDecisionLedger(ledger_path)
             context = AgentContext(
                 book,
                 latest_quotes={event.quote_key: event},
@@ -124,6 +127,20 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             )
             self.assertEqual(new_ticket.stake, Decimal("5.00"))
             self.assertEqual(book.committed_stake, Decimal("25.00"))
+            book.save(book_path)
+
+            restarted_book = PaperBook.load(book_path)
+            restarted_context = AgentContext(
+                restarted_book,
+                latest_quotes={event.quote_key: event},
+                replay_run_id="run-exposure-aware-stake",
+                decision_ledger=JsonlDecisionLedger(ledger_path),
+            )
+            self._agent(event, self._policy(goal)).on_market_event(event, restarted_context)
+
+            self.assertEqual(len(restarted_book.open_tickets), 2)
+            self.assertEqual(restarted_book.committed_stake, Decimal("25.00"))
+            self.assertEqual(len(restarted_context.decision_ledger.verified_records()), 1)
 
     def test_exhausted_goal_exposure_returns_zero_by_opening_nothing(self) -> None:
         event = self._event(event_id="event-3", market_id="market-3", sequence=3)

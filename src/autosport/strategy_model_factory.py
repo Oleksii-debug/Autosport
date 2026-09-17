@@ -67,6 +67,18 @@ def _instant(value: object, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _metric_map(value: object, name: str) -> dict[str, float]:
+    if type(value) is not dict or not value:
+        raise ValueError(f"{name} must be a non-empty metric object")
+    result: dict[str, float] = {}
+    for key, metric in value.items():
+        key = _text(key, f"{name} metric name")
+        if key in result:
+            raise ValueError(f"{name} metric names must be unique")
+        result[key] = _finite(metric, f"{name}.{key}")
+    return dict(sorted(result.items()))
+
+
 @dataclass(frozen=True, slots=True)
 class TrainingPoint:
     observed_at: str
@@ -197,7 +209,9 @@ class WalkForwardRunner:
     def run(points: Sequence[TrainingPoint], *, minimum_train_size: int = 2) -> WalkForwardResult:
         if type(minimum_train_size) is not int or minimum_train_size < 1:
             raise ValueError("minimum_train_size must be a positive integer")
-        ordered = tuple(sorted(points, key=lambda point: _instant(point.observed_at, "observed_at")))
+        ordered = tuple(
+            sorted(points, key=lambda point: _instant(point.observed_at, "observed_at"))
+        )
         if len(ordered) <= minimum_train_size:
             raise ValueError("not enough observations for walk-forward evaluation")
         instants = tuple(_instant(point.observed_at, "observed_at") for point in ordered)
@@ -296,7 +310,7 @@ class PromotionEvaluation:
 
 
 class PromotionController:
-    """Deterministic fail-closed comparison; it records a verdict but owns no execution authority."""
+    """Deterministic fail-closed comparison; it owns no execution authority."""
 
     @staticmethod
     def evaluate(
@@ -346,7 +360,10 @@ class PromotionController:
                 reasons.append(f"protective metric degraded: {name}")
         if reasons:
             return PromotionEvaluation(
-                PromotionVerdict.REJECT, PromotionAction.REJECT, improvement, tuple(reasons)
+                PromotionVerdict.REJECT,
+                PromotionAction.REJECT,
+                improvement,
+                tuple(reasons),
             )
         return PromotionEvaluation(
             PromotionVerdict.PROMOTE,
@@ -357,7 +374,7 @@ class PromotionController:
 
 
 class CandidateStudyAdapter(Protocol):
-    """Optional HPO seam. Autosport owns identities/evidence; a future Optuna adapter may implement it."""
+    """Optional HPO seam; a future approved Optuna adapter may implement it."""
 
     def candidate_configs(
         self, *, study_id: str, frozen_config_sha256: str
@@ -365,7 +382,7 @@ class CandidateStudyAdapter(Protocol):
 
 
 class FactoryArtifactStore:
-    """Immutable deterministic artifact sidecar referenced by ScientificRegistry hashes."""
+    """Immutable deterministic artifacts referenced by canonical ScientificRegistry hashes."""
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
@@ -411,6 +428,12 @@ class FactoryArtifactStore:
         if type(payload) is not dict:
             raise ValueError("factory artifact root must be an object")
         return payload
+
+    def sha256(self, kind: str, identity: str) -> str:
+        path = self._path(kind, identity)
+        if not path.is_file():
+            raise ValueError(f"factory artifact is missing: {kind}:{identity}")
+        return sha256_file(path)
 
     def path_for_testing(self, kind: str, identity: str) -> Path:
         return self._path(kind, identity)
@@ -546,13 +569,52 @@ class ExperimentRunner:
         config_sha256 = _sha256(binding.get("code_config_sha256"), "code_config_sha256")
         return binding, config_sha256, protocol.payload["protocol_sha256"]
 
+    def _durable_champion_metrics(
+        self,
+        *,
+        champion_strategy_version_id: str,
+        champion_evaluation_bundle_id: str,
+    ) -> dict[str, float]:
+        strategy = self.registry.get("StrategyVersion", champion_strategy_version_id)
+        bundle = self.registry.get("EvaluationBundle", champion_evaluation_bundle_id)
+        if strategy is None or bundle is None:
+            raise ValueError("durable champion evaluation provenance is missing")
+        champion_model_version_id = strategy.payload.get("model_version_id")
+        if type(champion_model_version_id) is not str:
+            raise ValueError("durable champion model identity is missing")
+        if bundle.payload.get("evaluated_strategy_version_id") != champion_strategy_version_id:
+            raise ValueError("champion evaluation does not reference durable champion strategy")
+        if bundle.payload.get("evaluated_model_version_id") != champion_model_version_id:
+            raise ValueError("champion evaluation does not reference durable champion model")
+
+        metrics_artifact_sha256 = self.artifact_store.sha256(
+            "metrics", champion_evaluation_bundle_id
+        )
+        artifact_hashes = bundle.payload.get("artifact_hashes")
+        if type(artifact_hashes) is not list or metrics_artifact_sha256 not in artifact_hashes:
+            raise ValueError("champion metrics artifact is not hash-bound to EvaluationBundle")
+        payload = self.artifact_store.read(
+            "metrics",
+            champion_evaluation_bundle_id,
+            expected_sha256=metrics_artifact_sha256,
+        )
+        if payload.get("kind") != "autosport-factory-metrics-v1":
+            raise ValueError("champion metrics artifact kind mismatch")
+        if payload.get("evaluation_bundle_id") != champion_evaluation_bundle_id:
+            raise ValueError("champion metrics evaluation identity mismatch")
+        if payload.get("strategy_version_id") != champion_strategy_version_id:
+            raise ValueError("champion metrics strategy identity mismatch")
+        if payload.get("model_version_id") != champion_model_version_id:
+            raise ValueError("champion metrics model identity mismatch")
+        return _metric_map(payload.get("metrics"), "champion metrics")
+
     def run_baseline_candidate(
         self,
         spec: FactoryCandidateSpec,
         points: Sequence[TrainingPoint],
         *,
         rule: PromotionRule,
-        champion_metrics: Mapping[str, float],
+        champion_evaluation_bundle_id: str,
         protective_metrics: Mapping[str, float],
         minimum_train_size: int = 2,
     ) -> FactoryRunResult:
@@ -565,6 +627,10 @@ class ExperimentRunner:
             raise ValueError("candidate predecessor does not match durable context champion")
         if current_champion is None:
             raise ValueError("factory challenger promotion requires a durable rollback champion")
+        champion_metrics = self._durable_champion_metrics(
+            champion_strategy_version_id=current_champion,
+            champion_evaluation_bundle_id=champion_evaluation_bundle_id,
+        )
 
         walk_forward = WalkForwardRunner.run(points, minimum_train_size=minimum_train_size)
         if walk_forward.primary_metric != rule.primary_metric:
@@ -587,6 +653,7 @@ class ExperimentRunner:
             if name in candidate_metrics:
                 raise ValueError("protective metrics must not overwrite primary metric")
             candidate_metrics[name] = _finite(value, f"protective metric {name}")
+        candidate_metrics = dict(sorted(candidate_metrics.items()))
         promotion = PromotionController.evaluate(
             rule,
             champion_metrics=champion_metrics,
@@ -609,33 +676,47 @@ class ExperimentRunner:
         model_artifact_sha256 = self.artifact_store.write(
             "model", spec.model_version_id, model_payload
         )
-        model = ModelVersion(
-            spec.model_version_id,
-            "mean-baseline-v1",
-            model_artifact_sha256,
-            spec.source_sha256,
-            spec.environment_sha256,
-            spec.dataset_snapshot_id,
-            spec.feature_set_id,
-            spec.research_protocol_id,
-            spec.seed,
-            config_sha256,
-            spec.created_at,
-            predecessor_model_version_id=spec.predecessor_model_version_id,
+        self.registry.append(
+            ModelVersion(
+                spec.model_version_id,
+                "mean-baseline-v1",
+                model_artifact_sha256,
+                spec.source_sha256,
+                spec.environment_sha256,
+                spec.dataset_snapshot_id,
+                spec.feature_set_id,
+                spec.research_protocol_id,
+                spec.seed,
+                config_sha256,
+                spec.created_at,
+                predecessor_model_version_id=spec.predecessor_model_version_id,
+            )
         )
-        self.registry.append(model)
 
-        strategy = StrategyVersion(
-            spec.strategy_version_id,
-            spec.canonical_strategy_id,
-            spec.source_sha256,
-            spec.environment_sha256,
-            config_sha256,
-            spec.created_at,
-            model_version_id=spec.model_version_id,
-            predecessor_strategy_version_id=spec.predecessor_strategy_version_id,
+        self.registry.append(
+            StrategyVersion(
+                spec.strategy_version_id,
+                spec.canonical_strategy_id,
+                spec.source_sha256,
+                spec.environment_sha256,
+                config_sha256,
+                spec.created_at,
+                model_version_id=spec.model_version_id,
+                predecessor_strategy_version_id=spec.predecessor_strategy_version_id,
+            )
         )
-        self.registry.append(strategy)
+
+        metrics_payload: dict[str, object] = {
+            "schema_version": 1,
+            "kind": "autosport-factory-metrics-v1",
+            "evaluation_bundle_id": spec.evaluation_bundle_id,
+            "strategy_version_id": spec.strategy_version_id,
+            "model_version_id": spec.model_version_id,
+            "metrics": candidate_metrics,
+        }
+        candidate_metrics_artifact_sha256 = self.artifact_store.write(
+            "metrics", spec.evaluation_bundle_id, metrics_payload
+        )
 
         evaluation_payload: dict[str, object] = {
             "schema_version": 1,
@@ -652,11 +733,10 @@ class ExperimentRunner:
             "seed": spec.seed,
             "config_sha256": config_sha256,
             "walk_forward": walk_forward.to_payload(),
-            "candidate_metrics": dict(sorted(candidate_metrics.items())),
-            "champion_metrics": {
-                name: _finite(value, f"champion metric {name}")
-                for name, value in sorted(champion_metrics.items())
-            },
+            "candidate_metrics": candidate_metrics,
+            "candidate_metrics_artifact_sha256": candidate_metrics_artifact_sha256,
+            "champion_evaluation_bundle_id": champion_evaluation_bundle_id,
+            "champion_metrics": champion_metrics,
             "promotion_verdict": promotion.verdict.value,
             "promotion_reasons": list(promotion.reasons),
             "completed_at": spec.completed_at,
@@ -670,18 +750,19 @@ class ExperimentRunner:
         evaluation_bundle_sha256 = self.artifact_store.write(
             "evaluation", spec.evaluation_bundle_id, evaluation_payload
         )
-        bundle = EvaluationBundleRef(
-            spec.evaluation_bundle_id,
-            evaluation_bundle_sha256,
-            spec.evaluator_source_sha256,
-            spec.dataset_snapshot_id,
-            protocol_sha256,
-            (model_artifact_sha256,),
-            spec.completed_at,
-            evaluated_strategy_version_id=spec.strategy_version_id,
-            evaluated_model_version_id=spec.model_version_id,
+        self.registry.append(
+            EvaluationBundleRef(
+                spec.evaluation_bundle_id,
+                evaluation_bundle_sha256,
+                spec.evaluator_source_sha256,
+                spec.dataset_snapshot_id,
+                protocol_sha256,
+                (model_artifact_sha256, candidate_metrics_artifact_sha256),
+                spec.completed_at,
+                evaluated_strategy_version_id=spec.strategy_version_id,
+                evaluated_model_version_id=spec.model_version_id,
+            )
         )
-        self.registry.append(bundle)
 
         outcome = (
             ResearchOutcome.POSITIVE
@@ -705,20 +786,21 @@ class ExperimentRunner:
         )
         self.registry.append(experiment)
 
-        decision = PromotionDecision(
-            spec.promotion_decision_id,
-            promotion.registry_action,
-            spec.strategy_version_id,
-            spec.research_protocol_id,
-            protocol_sha256,
-            spec.evaluation_bundle_id,
-            evaluation_bundle_sha256,
-            spec.decided_at,
-            predecessor_strategy_version_id=spec.predecessor_strategy_version_id,
-            candidate_model_version_id=spec.model_version_id,
-            reason="; ".join(promotion.reasons),
+        self.registry.record_promotion(
+            PromotionDecision(
+                spec.promotion_decision_id,
+                promotion.registry_action,
+                spec.strategy_version_id,
+                spec.research_protocol_id,
+                protocol_sha256,
+                spec.evaluation_bundle_id,
+                evaluation_bundle_sha256,
+                spec.decided_at,
+                predecessor_strategy_version_id=spec.predecessor_strategy_version_id,
+                candidate_model_version_id=spec.model_version_id,
+                reason="; ".join(promotion.reasons),
+            )
         )
-        self.registry.record_promotion(decision)
 
         if outcome is not ResearchOutcome.POSITIVE:
             self.registry.append(
@@ -726,7 +808,8 @@ class ExperimentRunner:
                     f"{spec.experiment_id}:postmortem",
                     spec.experiment_id,
                     outcome,
-                    "; ".join(promotion.reasons) or "frozen promotion rule rejected candidate",
+                    "; ".join(promotion.reasons)
+                    or "frozen promotion rule rejected candidate",
                     ("new protocol version or explicitly authorized retest",),
                     spec.decided_at,
                 )
@@ -782,6 +865,18 @@ class ExperimentRunner:
             model_version_id,
             expected_sha256=model.payload["artifact_sha256"],
         )
+        metrics_sha256 = evaluation_payload.get("candidate_metrics_artifact_sha256")
+        if type(metrics_sha256) is not str:
+            raise ValueError("evaluation artifact lacks metrics provenance")
+        if metrics_sha256 not in bundle.payload.get("artifact_hashes", []):
+            raise ValueError("metrics artifact is not hash-bound to EvaluationBundle")
+        metrics_payload = store.read(
+            "metrics", evaluation_bundle_id, expected_sha256=metrics_sha256
+        )
+        if metrics_payload.get("strategy_version_id") != strategy_version_id:
+            raise ValueError("metrics artifact strategy identity mismatch")
+        if metrics_payload.get("model_version_id") != model_version_id:
+            raise ValueError("metrics artifact model identity mismatch")
         if evaluation_payload.get("experiment_id") != experiment_id:
             raise ValueError("evaluation artifact experiment identity mismatch")
         if evaluation_payload.get("model_version_id") != model_version_id:

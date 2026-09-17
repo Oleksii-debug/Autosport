@@ -30,6 +30,33 @@ def test_baseline_cutoff_compares_mixed_offsets_as_instants():
     assert model.mean_target == 0.0
 
 
+def test_target_reveal_cutoff_compares_mixed_offsets_as_instants():
+    points = (
+        TrainingPoint(
+            "2025-12-31T22:00:00+00:00",
+            1.0,
+            0.0,
+            "2025-12-31T22:00:00+00:00",
+        ),
+        # Observed at 23:30Z; this label is revealed at 00:30Z, after the cutoff.
+        TrainingPoint(
+            "2025-12-31T22:30:00-01:00",
+            2.0,
+            1.0,
+            "2025-12-31T23:30:00-01:00",
+        ),
+    )
+
+    model = MeanBaselineModel.fit(
+        "mixed-offset-target-reveal",
+        points,
+        training_cutoff="2026-01-01T00:00:00+00:00",
+    )
+
+    assert model.training_count == 1
+    assert model.mean_target == 0.0
+
+
 def test_prediction_future_guard_compares_mixed_offsets_as_instants():
     model = MeanBaselineModel.fit(
         "mixed-offset-predict",

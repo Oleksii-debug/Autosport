@@ -12,6 +12,7 @@ from .bookmaker_routing import (
     RoutingState,
     VenueObservation,
     VenueQuote,
+    _dedupe_external_receipts,
     route_residual,
 )
 
@@ -251,7 +252,7 @@ def plan_equal_split_residual(
     """
 
     venues = tuple(selected_venues)
-    obs = tuple(observations)
+    obs = _dedupe_external_receipts(tuple(observations))
     parent_id = _text(parent_plan_id, "parent_plan_id")
     request_id = _text(routing_request_id, "routing_request_id")
     quantum = _positive_decimal(stake_quantum, "stake_quantum")

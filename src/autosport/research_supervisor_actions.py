@@ -267,9 +267,9 @@ def finalize_factory_decision(
     bindings = (
         ("evaluation_bundle_id", staged.evaluation_bundle_id),
         ("experiment_id", staged.experiment_id),
+        ("model_version_id", staged.model_version_id),
         ("promotion_decision_id", result.promotion_decision_id),
         ("strategy_version_id", staged.strategy_version_id),
-        ("model_version_id", staged.model_version_id),
     )
     snapshot = _advance_once_or_replay(
         supervisor,
@@ -359,8 +359,8 @@ def commit_memory_and_next_question(
     )
 
     memory_bindings = (
-        ("promotion_decision_id", decision.promotion_decision_id),
         ("experiment_id", staged.experiment_id),
+        ("promotion_decision_id", decision.promotion_decision_id),
     )
     if snapshot.phase is ResearchPhase.MEMORY:
         snapshot = supervisor.advance(

@@ -73,14 +73,18 @@ _SQLITE_INTEGER_MIN = -(2**63)
 _SQLITE_INTEGER_MAX = 2**63 - 1
 
 
-def _observed_instant(value: str) -> datetime:
+def _timezone_aware_instant(value: str, field_name: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError("observed_ts must be valid ISO-8601") from exc
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be valid ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("observed_ts must be timezone-aware ISO-8601")
+        raise ValueError(f"{field_name} must be timezone-aware ISO-8601")
     return parsed
+
+
+def _observed_instant(value: str) -> datetime:
+    return _timezone_aware_instant(value, "observed_ts")
 
 
 def _event_order_key(event: MarketEvent) -> tuple[datetime, int, str]:
@@ -178,6 +182,7 @@ def _validate_incoming_event(event: MarketEvent) -> str:
     """Prove an event survives the exact durable JSON/SQLite representation without type drift."""
     _validate_persistable_sequence(event.sequence)
     _observed_instant(event.observed_ts)
+    _timezone_aware_instant(event.ingest_ts, "ingest_ts")
     try:
         raw = event.to_dict()
         payload = _canonical_json(raw)

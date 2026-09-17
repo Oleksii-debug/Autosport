@@ -35,16 +35,31 @@ def _venue(source: str, account: str) -> VenueQuote:
     return VenueQuote(source, account, _quote(source), Decimal("100.00"))
 
 
-def test_public_plan_rejects_second_external_receipt_for_same_child() -> None:
-    a = _venue("book-a", "acct-a")
-    b = _venue("book-b", "acct-b")
-    initial = plan_equal_split_residual(
+def _initial(a: VenueQuote, b: VenueQuote):
+    return plan_equal_split_residual(
         Decimal("100.00"),
         (a, b),
         routing_request_id=_REQUEST_ID,
         parent_plan_id=_PLAN_ID,
         stake_quantum=Decimal("0.01"),
     )
+
+
+def _plan(a: VenueQuote, b: VenueQuote, observations):
+    return plan_equal_split_residual(
+        Decimal("100.00"),
+        (a, b),
+        observations,
+        routing_request_id=_REQUEST_ID,
+        parent_plan_id=_PLAN_ID,
+        stake_quantum=Decimal("0.01"),
+    )
+
+
+def test_public_plan_rejects_second_external_receipt_for_same_child() -> None:
+    a = _venue("book-a", "acct-a")
+    b = _venue("book-b", "acct-b")
+    initial = _initial(a, b)
     first = bind_leg_receipt(
         initial.legs[0],
         effect=ExternalEffect.ACCEPTED,
@@ -59,11 +74,21 @@ def test_public_plan_rejects_second_external_receipt_for_same_child() -> None:
     )
 
     with pytest.raises(RoutingContractError, match="multiple external receipts"):
-        plan_equal_split_residual(
-            Decimal("100.00"),
-            (a, b),
-            (first, second),
-            routing_request_id=_REQUEST_ID,
-            parent_plan_id=_PLAN_ID,
-            stake_quantum=Decimal("0.01"),
-        )
+        _plan(a, b, (first, second))
+
+
+def test_public_plan_exact_receipt_replay_is_allocation_idempotent() -> None:
+    a = _venue("book-a", "acct-a")
+    b = _venue("book-b", "acct-b")
+    initial = _initial(a, b)
+    receipt = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="receipt-a-1",
+        confirmed_accepted=Decimal("50.00"),
+    )
+
+    single = _plan(a, b, (receipt,))
+    replayed = _plan(a, b, (receipt, receipt))
+
+    assert replayed == single

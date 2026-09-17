@@ -117,7 +117,12 @@ def _factory_rule() -> PromotionRule:
 
 def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
     governed_points = _candidate_points() if points is None else tuple(points)
-    evaluator_config = WalkForwardEvaluationConfig(minimum_train_size)
+    evaluator_config = WalkForwardEvaluationConfig(
+        minimum_train_size,
+        feature_set_id="features-factory",
+        feature_definition_sha256=SHA_B,
+        feature_source_sha256=SHA_C,
+    )
     dataset_manifest_sha256 = training_points_manifest_sha256(governed_points)
     rule = _factory_rule()
     registry_path = tmp_path / "scientific_registry.json"
@@ -416,6 +421,11 @@ def test_baseline_rejects_missing_target_availability_provenance():
         )
 
 
+def test_training_point_rejects_target_reveal_before_observation():
+    with pytest.raises(ValueError, match="must not precede observed_at"):
+        TrainingPoint(T2, 1.0, 0.0, T1)
+
+
 def test_training_points_manifest_is_order_invariant_and_content_sensitive():
     points = _candidate_points()
     assert training_points_manifest_sha256(points) == training_points_manifest_sha256(
@@ -559,6 +569,18 @@ def test_factory_fails_closed_on_runtime_evaluator_config_mutation(tmp_path):
             _candidate_points(),
             rule,
             minimum_train_size=1,
+        )
+    assert registry.get("ModelVersion", "model-v2") is None
+    assert registry.get("PromotionDecision", "promotion-v2") is None
+
+
+def test_factory_fails_closed_on_same_version_different_feature_identity(tmp_path):
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
+    registry.append(FeatureSet("features-rogue", "v1", SHA_A, SHA_D, T0))
+    rogue_spec = replace(_candidate_spec(), feature_set_id="features-rogue")
+    with pytest.raises(ValueError, match="feature set identity does not match frozen"):
+        ExperimentRunner(registry, store).run_baseline_candidate(
+            rogue_spec, _candidate_points(), rule=rule
         )
     assert registry.get("ModelVersion", "model-v2") is None
     assert registry.get("PromotionDecision", "promotion-v2") is None

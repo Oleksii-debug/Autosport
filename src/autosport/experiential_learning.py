@@ -114,6 +114,30 @@ def _validate_exact_policy_successor(
         raise ValueError("challenger policy must advance exactly one action estimate")
 
 
+def _validate_causal_policy_successor(
+    predecessor_policy: BanditPolicyState,
+    challenger_policy: BanditPolicyState,
+    update_evidence: PolicyUpdateEvidence,
+) -> None:
+    """Recompute the exact update from its immutable causal witnesses."""
+
+    action = update_evidence.action
+    reward = update_evidence.reward
+    transition = update_evidence.transition
+    if action is None or reward is None or transition is None:
+        raise ValueError("policy update evidence lacks complete canonical causal witnesses")
+
+    expected_challenger, expected_evidence = predecessor_policy.update(
+        action=action,
+        reward=reward,
+        transition=transition,
+    )
+    if expected_challenger != challenger_policy:
+        raise ValueError("challenger policy is not the exact causal policy successor")
+    if expected_evidence != update_evidence:
+        raise ValueError("policy update evidence does not match the exact causal policy update")
+
+
 def run_policy_retest(
     runner: ExperimentRunner,
     *,
@@ -150,6 +174,7 @@ def run_policy_retest(
         if getattr(update_evidence, name) != getattr(challenger_policy, name):
             raise ValueError(f"policy update evidence {name} mismatch")
     _validate_exact_policy_successor(predecessor_policy, challenger_policy, update_evidence)
+    _validate_causal_policy_successor(predecessor_policy, challenger_policy, update_evidence)
 
     protocol = runner.registry.get("ResearchProtocol", challenger_policy.protocol_id)
     if protocol is None:

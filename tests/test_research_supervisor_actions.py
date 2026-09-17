@@ -112,6 +112,66 @@ def _resolved_environment():
     return environment
 
 
+def test_stage_factory_wrong_phase_has_no_scientific_registry_side_effect(tmp_path):
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
+    runner = ExperimentRunner(registry, store)
+    supervisor, run_id = _supervisor_for_factory(tmp_path, registry)
+    before = registry.path.read_bytes()
+
+    with pytest.raises(ResearchSupervisorError, match="not admitted for authority write"):
+        stage_factory_evaluation(
+            supervisor,
+            run_id,
+            runner=runner,
+            spec=_candidate_spec(),
+            points=_candidate_points(),
+            rule=rule,
+            at=T7,
+        )
+
+    assert registry.path.read_bytes() == before
+    assert supervisor.status(run_id).phase is not ResearchPhase.EXPERIMENT
+
+
+def test_finalize_factory_wrong_phase_has_no_promotion_or_postmortem_side_effect(tmp_path):
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
+    runner = ExperimentRunner(registry, store)
+    supervisor, run_id = _supervisor_for_factory(tmp_path, registry)
+    spec = _candidate_spec()
+
+    _advance_to(supervisor, run_id, ResearchPhase.EXPERIMENT)
+    _, staged = stage_factory_evaluation(
+        supervisor,
+        run_id,
+        runner=runner,
+        spec=spec,
+        points=_candidate_points(),
+        rule=rule,
+        at=T7,
+    )
+    _advance_to(supervisor, run_id, ResearchPhase.FORWARD_PAPER_SHADOW)
+    before = registry.path.read_bytes()
+    assert registry.get("PromotionDecision", staged.promotion_decision_id) is None
+
+    with pytest.raises(ResearchSupervisorError, match="not admitted for authority write"):
+        finalize_factory_decision(
+            supervisor,
+            run_id,
+            runner=runner,
+            spec=spec,
+            staged=staged,
+            final_action=staged.proposed_action,
+            decided_at=T7,
+            robustness_evidence_sha256=SHA_A,
+            forward_evidence_sha256=SHA_B,
+            reason="wrong-phase call must not publish durable science",
+        )
+
+    assert registry.path.read_bytes() == before
+    assert registry.get("PromotionDecision", staged.promotion_decision_id) is None
+    assert supervisor.status(run_id).phase is ResearchPhase.FORWARD_PAPER_SHADOW
+
+
 def test_continuous_supervisor_consumes_real_factory_environment_memory_and_restart(tmp_path):
     registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
     runner = ExperimentRunner(registry, store)

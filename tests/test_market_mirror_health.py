@@ -120,6 +120,34 @@ class HealthGatedMirrorDecisionIndexTests(unittest.TestCase):
                 ("decision",),
             )
 
+    def test_later_failure_does_not_rewrite_historical_health_or_decision_view(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mirror, _, health_store, gate = self.build_gate(directory)
+            mirror.apply(self.event("provider-a"))
+            self.record_healthy(
+                health_store,
+                "provider-a",
+                now="2026-09-17T12:00:03+00:00",
+            )
+            health_store.record_failure(
+                "provider-a",
+                now="2026-09-17T12:00:08+00:00",
+                error=ConnectionError("future relative to replay"),
+            )
+
+            historical = datetime(2026, 9, 17, 12, 0, 5, tzinfo=timezone.utc)
+            health = gate.provider_health("provider-a", as_of=historical)
+            view = gate.decision_view(
+                "decision",
+                as_of=historical,
+                max_age=timedelta(minutes=1),
+            )
+
+            self.assertEqual(health.eligibility, ProviderDecisionEligibility.ELIGIBLE)
+            self.assertEqual(health.source_status, "healthy")
+            self.assertEqual(len(view.events), 1)
+            self.assertEqual(view.events[0].source_id, "provider-a")
+
     def test_degraded_provider_quality_is_quarantined_from_decision_view(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             mirror, _, health_store, gate = self.build_gate(directory)
@@ -146,7 +174,7 @@ class HealthGatedMirrorDecisionIndexTests(unittest.TestCase):
             self.assertEqual(health.eligibility, ProviderDecisionEligibility.DEGRADED)
             self.assertEqual(view.events, ())
 
-    def test_stale_or_future_provider_health_fails_closed(self) -> None:
+    def test_stale_or_pre_first_transition_provider_health_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             mirror, _, health_store, gate = self.build_gate(directory)
             mirror.apply(self.event("provider-a"))
@@ -160,13 +188,13 @@ class HealthGatedMirrorDecisionIndexTests(unittest.TestCase):
                 "provider-a",
                 as_of=datetime(2026, 9, 17, 12, 1, 0, tzinfo=timezone.utc),
             )
-            future = gate.provider_health(
+            before_first = gate.provider_health(
                 "provider-a",
                 as_of=datetime(2026, 9, 17, 12, 0, 4, tzinfo=timezone.utc),
             )
 
             self.assertEqual(stale.eligibility, ProviderDecisionEligibility.STALE_HEALTH)
-            self.assertEqual(future.eligibility, ProviderDecisionEligibility.FUTURE_HEALTH)
+            self.assertEqual(before_first.eligibility, ProviderDecisionEligibility.UNKNOWN)
 
     def test_one_failed_provider_does_not_remove_other_healthy_provider(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

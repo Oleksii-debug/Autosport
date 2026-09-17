@@ -1,10 +1,8 @@
-"""Fail-closed read-only bookmaker capability and account observation contracts.
+"""Fail-closed bookmaker capability and account observation contracts.
 
-This module is deliberately policy/data only.  It defines what an adapter says it can
-read and the immutable observations returned from those reads.  It does not contain
-credentials, network access, bet placement/cancellation, or canonical execution-ledger
-truth.  Product-level execution and settlement authority remain owned by the supervised
-execution program (#353).
+This module is deliberately data/policy only. It models technical capability evidence and
+read-only account observations. It never performs network access, credentials handling,
+bet placement/cancellation/cashout, bankroll mutation, or canonical execution settlement.
 """
 
 from __future__ import annotations
@@ -13,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+from hashlib import sha256
+import json
 from typing import Protocol, runtime_checkable
 
 
@@ -20,16 +20,39 @@ class BookmakerCapabilityError(ValueError):
     """Raised when bookmaker capability/account evidence violates the contract."""
 
 
+class UnknownBookmakerCapability(BookmakerCapabilityError):
+    """Raised when requested capability has no conclusive technical evidence."""
+
+
 class UnsupportedBookmakerCapability(BookmakerCapabilityError):
-    """Raised when a read is not explicitly supported by the current profile."""
+    """Raised when requested capability is conclusively unsupported."""
 
 
 class BookmakerCapability(str, Enum):
-    """Read-only capabilities that an adapter may explicitly advertise."""
+    """Technical capability vocabulary.
 
+    Write-like values are reserved as evidence vocabulary only. This module does not expose
+    methods that perform those actions.
+    """
+
+    ACCOUNT_IDENTITY_READ = "account_identity_read"
     BALANCE_READ = "balance_read"
+    LIMITS_READ = "limits_read"
+    PREMATCH_QUOTES_READ = "prematch_quotes_read"
+    LIVE_QUOTES_READ = "live_quotes_read"
+    BETSLIP_READ = "betslip_read"
     OPEN_POSITIONS_READ = "open_positions_read"
     SETTLED_POSITIONS_READ = "settled_positions_read"
+    PLACE_BET = "place_bet"
+    BET_READBACK = "bet_readback"
+    CASHOUT = "cashout"
+    CANCEL_BET = "cancel_bet"
+
+
+class BookmakerCapabilityState(str, Enum):
+    UNKNOWN = "unknown"
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
 
 
 class BookmakerPositionState(str, Enum):
@@ -86,45 +109,110 @@ def _currency(value: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class BookmakerCapabilityFact:
+    capability: BookmakerCapability
+    state: BookmakerCapabilityState
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.capability, BookmakerCapability):
+            raise BookmakerCapabilityError(
+                "capability must be a BookmakerCapability value"
+            )
+        if not isinstance(self.state, BookmakerCapabilityState):
+            raise BookmakerCapabilityError(
+                "state must be a BookmakerCapabilityState value"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class BookmakerCapabilityProfile:
-    """Immutable statement of what one adapter can read for one bookmaker account."""
+    """Versioned technical capability evidence for one venue/account/adapter scope."""
 
     venue_id: str
     account_id: str
     adapter_id: str
     adapter_version: str
-    capabilities: frozenset[BookmakerCapability]
+    profile_version: int
+    facts: tuple[BookmakerCapabilityFact, ...]
     observed_at: str
+    source_ref: str
+    source_payload_sha256: str
 
     def __post_init__(self) -> None:
         _text(self.venue_id, "venue_id")
         _text(self.account_id, "account_id")
         _text(self.adapter_id, "adapter_id")
         _text(self.adapter_version, "adapter_version")
+        if (
+            not isinstance(self.profile_version, int)
+            or isinstance(self.profile_version, bool)
+            or self.profile_version < 1
+        ):
+            raise BookmakerCapabilityError("profile_version must be a positive integer")
+        if not isinstance(self.facts, tuple):
+            raise BookmakerCapabilityError("facts must be a tuple")
+        seen: set[BookmakerCapability] = set()
+        for fact in self.facts:
+            if not isinstance(fact, BookmakerCapabilityFact):
+                raise BookmakerCapabilityError(
+                    "facts must contain only BookmakerCapabilityFact values"
+                )
+            if fact.capability in seen:
+                raise BookmakerCapabilityError(
+                    f"duplicate capability fact: {fact.capability.value}"
+                )
+            seen.add(fact.capability)
         _timestamp(self.observed_at, "observed_at")
-        if not isinstance(self.capabilities, frozenset):
-            raise BookmakerCapabilityError("capabilities must be a frozenset")
-        invalid = [
-            item
-            for item in self.capabilities
-            if not isinstance(item, BookmakerCapability)
-        ]
-        if invalid:
-            raise BookmakerCapabilityError(
-                "capabilities must contain only BookmakerCapability values"
-            )
+        _text(self.source_ref, "source_ref")
+        _sha256(self.source_payload_sha256, "source_payload_sha256")
 
-    def supports(self, capability: BookmakerCapability) -> bool:
+    @property
+    def profile_id(self) -> str:
+        payload = self.to_canonical_dict()
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+        return sha256(encoded).hexdigest()
+
+    def to_canonical_dict(self) -> dict[str, object]:
+        return {
+            "account_id": self.account_id,
+            "adapter_id": self.adapter_id,
+            "adapter_version": self.adapter_version,
+            "facts": [
+                {"capability": fact.capability.value, "state": fact.state.value}
+                for fact in sorted(self.facts, key=lambda item: item.capability.value)
+            ],
+            "observed_at": self.observed_at,
+            "profile_version": self.profile_version,
+            "source_payload_sha256": self.source_payload_sha256,
+            "source_ref": self.source_ref,
+            "venue_id": self.venue_id,
+        }
+
+    def state_of(self, capability: BookmakerCapability) -> BookmakerCapabilityState:
         if not isinstance(capability, BookmakerCapability):
             raise BookmakerCapabilityError(
                 "capability must be a BookmakerCapability value"
             )
-        return capability in self.capabilities
+        for fact in self.facts:
+            if fact.capability is capability:
+                return fact.state
+        return BookmakerCapabilityState.UNKNOWN
+
+    def supports(self, capability: BookmakerCapability) -> bool:
+        return self.state_of(capability) is BookmakerCapabilityState.SUPPORTED
 
     def require(self, capability: BookmakerCapability) -> None:
-        if not self.supports(capability):
+        state = self.state_of(capability)
+        if state is BookmakerCapabilityState.UNKNOWN:
+            raise UnknownBookmakerCapability(
+                f"{self.venue_id}/{self.account_id} capability "
+                f"{capability.value} is unknown"
+            )
+        if state is BookmakerCapabilityState.UNSUPPORTED:
             raise UnsupportedBookmakerCapability(
-                f"{self.venue_id}/{self.account_id} does not advertise "
+                f"{self.venue_id}/{self.account_id} does not support "
                 f"{capability.value}"
             )
 
@@ -161,11 +249,7 @@ class BookmakerBalanceObservation:
 
 @dataclass(frozen=True, slots=True)
 class BookmakerPositionObservation:
-    """Provider-native open/settled position evidence.
-
-    Monetary fields are observations from the provider and intentionally do not
-    establish canonical settlement, profit, or bankroll truth.
-    """
+    """Provider-native position evidence, not canonical settlement/P&L truth."""
 
     venue_id: str
     account_id: str
@@ -320,11 +404,11 @@ class ReadOnlyBookmakerAdapter(Protocol):
     """Side-effect-free adapter boundary for Stage-K account observations."""
 
     def capability_profile(self) -> BookmakerCapabilityProfile:
-        """Return the current explicit capability statement."""
+        """Return current technical capability evidence."""
 
     def read_account_snapshot(
         self,
         requested_capabilities: frozenset[BookmakerCapability],
         /,
     ) -> BookmakerAccountSnapshot:
-        """Read requested supported capabilities without creating external effects."""
+        """Read supported capabilities without creating external effects."""

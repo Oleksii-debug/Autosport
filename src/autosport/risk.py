@@ -56,8 +56,10 @@ class ProposedTicketRiskContext:
     market deny-list, and provider deny-list enforcement. Canonical sport identity
     is deliberately absent until the upstream #339 identity authority exists, so
     any non-empty owner sport deny-list must fail closed instead of being guessed.
-    Session/day and portfolio concentration ceilings require additional durable
-    measurement evidence and remain follow-on policy work.
+    Session/day ceilings and concentration ceilings require additional durable
+    measurement semantics. Until the whole-portfolio allocation seam provides a
+    canonical concentration denominator, non-default concentration ceilings fail
+    closed rather than being inferred from proposal-local identity alone.
     """
 
     legs: tuple[TicketLeg, ...]
@@ -174,7 +176,9 @@ class PaperRiskPolicy:
     typed, non-persistent evidence seam for these proposal-local checks; an active
     economic goal therefore fails closed when that evidence seam is absent.
     Concentration and session/day enforcement remain explicit follow-on policy
-    work until their durable measurement evidence exists.
+    work until canonical durable measurement semantics exist; configured
+    concentration ceilings fail closed in the meantime instead of guessing a
+    denominator.
     """
 
     max_ticket_fraction: Decimal = Decimal("0.02")
@@ -307,6 +311,20 @@ class PaperRiskPolicy:
                 False,
                 "owner sport deny-list cannot be proven without canonical sport identity",
             )
+
+        concentration_limits = (
+            ("event", goal.max_event_concentration_fraction),
+            ("market", goal.max_market_concentration_fraction),
+            ("provider", goal.max_provider_concentration_fraction),
+            ("sport", goal.max_sport_concentration_fraction),
+        )
+        for dimension, limit in concentration_limits:
+            if limit < Decimal("1"):
+                return RiskDecision(
+                    False,
+                    f"owner {dimension} concentration limit cannot be proven without "
+                    "canonical whole-portfolio exposure evidence",
+                )
         return None
 
     @staticmethod

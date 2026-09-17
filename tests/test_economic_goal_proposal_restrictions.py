@@ -136,6 +136,27 @@ class EconomicGoalProposalRestrictionTests(unittest.TestCase):
             "owner sport deny-list cannot be proven without canonical sport identity",
         )
 
+    def test_nondefault_concentration_limits_fail_closed_without_canonical_exposure(self) -> None:
+        dimensions = (
+            ("max_event_concentration_fraction", "event"),
+            ("max_market_concentration_fraction", "market"),
+            ("max_provider_concentration_fraction", "provider"),
+            ("max_sport_concentration_fraction", "sport"),
+        )
+
+        for field_name, dimension in dimensions:
+            with self.subTest(field_name=field_name):
+                decision = self._policy(
+                    self._goal(**{field_name: Decimal("0.99")})
+                ).evaluate(PaperBook("100"), Decimal("1"), context=self._context())
+
+                self.assertFalse(decision.allowed)
+                self.assertEqual(
+                    decision.reason,
+                    f"owner {dimension} concentration limit cannot be proven without "
+                    "canonical whole-portfolio exposure evidence",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

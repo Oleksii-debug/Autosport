@@ -272,6 +272,29 @@ def test_promotion_decision_cannot_be_backdated_before_durable_history(tmp_path)
         registry.record_promotion(backdated)
 
 
+def test_equal_instant_promotion_cannot_reorder_before_durable_history(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    protocol, eval1, eval2, _ = _seed_promotion_evidence(registry)
+    registry.record_promotion(_first_promotion(protocol, eval1))
+
+    earlier_total_order = PromotionDecision(
+        "promotion-0",
+        PromotionAction.PROMOTE,
+        "strategy-2",
+        "protocol-1",
+        protocol.protocol_sha256,
+        "eval-2",
+        eval2.bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+        predecessor_strategy_version_id="strategy-1",
+    )
+    with pytest.raises(PromotionEvidenceError, match="backdated"):
+        registry.record_promotion(earlier_total_order)
+
+    assert registry.champion_strategy(as_of=T3) == "strategy-1"
+
+
 def test_promotion_rejects_feature_version_outside_frozen_protocol(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     protocol, eval1, _, _ = _seed_promotion_evidence(

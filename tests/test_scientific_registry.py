@@ -411,3 +411,23 @@ def test_promotion_rejects_cross_dataset_model_experiment_lineage(tmp_path):
 
     with pytest.raises(PromotionEvidenceError, match="dataset lineage mismatch"):
         registry.record_promotion(decision)
+
+
+def test_promotion_rejects_evidence_not_available_at_decision_time(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    foundation = _foundation(registry)
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
+    early = PromotionDecision(
+        "promotion-too-early",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        SHA_D,
+        T1,
+        candidate_model_version_id="model-1",
+    )
+
+    with pytest.raises(PromotionEvidenceError, match="not available at decision time"):
+        registry.record_promotion(early)

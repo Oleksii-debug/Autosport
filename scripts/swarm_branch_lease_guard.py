@@ -51,12 +51,6 @@ def _records(value: Any, *, key: str) -> list[Mapping[str, Any]]:
 
 
 def _ambiguous_claim_state(claim_state: Mapping[str, Any]) -> bool:
-    # Canonical #511 output uses ambiguous_runs. Keep older aliases for
-    # compatibility, but deterministic collision_candidates are *not* ambiguity:
-    # the resolver has already selected admitted_runs by server-order/capacity.
-    # If an ambiguity/malformed-evidence key is present, its shape is part of the
-    # trust boundary. A non-list value is itself malformed evidence and therefore
-    # must fail closed rather than being silently ignored.
     for key in ("ambiguous_runs", "ambiguous", "ambiguities", "malformed_events"):
         if key not in claim_state:
             continue
@@ -74,9 +68,6 @@ def _admitted_source_owners(
     semantic_key: str,
     now: datetime,
 ) -> list[dict[str, str]]:
-    # Canonical #511 output is admitted_runs. ``admitted`` is retained only for
-    # older exported fixtures/control snapshots; live_runs is a final legacy
-    # fallback when no admission set is present at all.
     raw = claim_state.get("admitted_runs")
     source_key = "admitted_runs"
     if raw is None:
@@ -91,26 +82,18 @@ def _admitted_source_owners(
         item_semantic = item.get("semantic_key") or item.get("SEMANTIC_KEY")
         if item_semantic != semantic_key:
             continue
-
         mode = item.get("claim_mode") or item.get("CLAIM_MODE")
         if mode != "SOURCE_MUTATION":
             continue
-
         run_id = item.get("run_id") or item.get("RUN_ID")
         lease_until = item.get("lease_until") or item.get("LEASE_UNTIL")
         if not isinstance(run_id, str) or not run_id.strip():
             raise ValueError("admitted source owner is missing run_id")
         if not isinstance(lease_until, str) or not lease_until.strip():
             raise ValueError("admitted source owner is missing lease_until")
-
         if _parse_instant(lease_until) <= now:
             continue
-        owners.append(
-            {
-                "run_id": run_id.strip(),
-                "lease_until": lease_until.strip(),
-            }
-        )
+        owners.append({"run_id": run_id.strip(), "lease_until": lease_until.strip()})
     return owners
 
 
@@ -121,18 +104,11 @@ def evaluate_guard(
     now: str,
     semantic_key: str | None = None,
 ) -> dict[str, Any]:
-    """Evaluate whether branch movement is attributable to the live source owner.
+    """Evaluate whether complete branch movement belongs to the live source owner.
 
-    ``claim_state`` is resolver-compatible JSON. The guard reads canonical
-    ``admitted_runs`` (with legacy exported aliases only as fallback) and
-    deliberately refuses to derive claim precedence itself. This keeps #510/#511
-    as the one claim-state authority.
-
-    ``mutation_state`` must contain ``semantic_key``, ``branch``, ``prior_head``,
-    ``current_head`` and optional ordered ``mutations``. Each mutation has
-    ``head`` and ``run_id``. If a branch moved while a live owner exists but the
-    writer identity is absent or cannot be bound to the current head, the result
-    is AMBIGUOUS rather than granting write authority.
+    Mutation events are exported Git commit evidence. Each event must include the
+    commit ``head``, its writer ``run_id``, and Git ``parent_heads``. Parent
+    continuity proves that no intermediate source-branch commit was omitted.
     """
     if not isinstance(claim_state, Mapping):
         raise ValueError("claim_state must be an object")
@@ -167,11 +143,7 @@ def evaluate_guard(
         }
 
     try:
-        owners = _admitted_source_owners(
-            claim_state,
-            semantic_key=semantic,
-            now=now_dt,
-        )
+        owners = _admitted_source_owners(claim_state, semantic_key=semantic, now=now_dt)
     except ValueError as exc:
         return {
             **base,
@@ -185,7 +157,6 @@ def evaluate_guard(
             "status": "AMBIGUOUS",
             "evidence": ["multiple unexpired admitted SOURCE_MUTATION owners"],
         }
-
     if not owners:
         return {
             **base,
@@ -212,7 +183,6 @@ def evaluate_guard(
             "status": "AMBIGUOUS",
             "evidence": [f"invalid mutation evidence: {exc}"],
         }
-
     if not mutations:
         return {
             **base,
@@ -224,33 +194,86 @@ def evaluate_guard(
 
     writers: list[str] = []
     seen_heads: set[str] = set()
+    expected_parent = prior_head
     for index, mutation in enumerate(mutations):
         head = mutation.get("head")
         run_id = mutation.get("run_id")
+        parent_heads = mutation.get("parent_heads")
+
         if not isinstance(head, str) or not head.strip():
             return {
                 **base,
                 "status": "AMBIGUOUS",
+                "mutation_writer_run_ids": writers,
                 "evidence": [f"mutations[{index}] is missing head"],
             }
+        head = head.strip()
         if head in seen_heads:
             return {
                 **base,
                 "status": "AMBIGUOUS",
+                "mutation_writer_run_ids": writers,
                 "evidence": [f"duplicate mutation head {head}"],
             }
         seen_heads.add(head)
+
+        if not isinstance(parent_heads, list) or not parent_heads:
+            return {
+                **base,
+                "status": "AMBIGUOUS",
+                "mutation_writer_run_ids": writers,
+                "evidence": [f"mutations[{index}] is missing parent_heads"],
+            }
+        normalized_parents: list[str] = []
+        for parent_index, parent in enumerate(parent_heads):
+            if not isinstance(parent, str) or not parent.strip():
+                return {
+                    **base,
+                    "status": "AMBIGUOUS",
+                    "mutation_writer_run_ids": writers,
+                    "evidence": [
+                        f"mutations[{index}].parent_heads[{parent_index}] is invalid"
+                    ],
+                }
+            normalized_parents.append(parent.strip())
+        if len(set(normalized_parents)) != len(normalized_parents):
+            return {
+                **base,
+                "status": "AMBIGUOUS",
+                "mutation_writer_run_ids": writers,
+                "evidence": [f"mutations[{index}] has duplicate parent_heads"],
+            }
+        if head in normalized_parents:
+            return {
+                **base,
+                "status": "AMBIGUOUS",
+                "mutation_writer_run_ids": writers,
+                "evidence": [f"mutations[{index}] self-parents {head}"],
+            }
+        if expected_parent not in normalized_parents:
+            return {
+                **base,
+                "status": "AMBIGUOUS",
+                "mutation_writer_run_ids": writers,
+                "evidence": [
+                    f"mutation evidence is non-contiguous at index {index}: "
+                    f"expected direct parent {expected_parent}"
+                ],
+            }
+
         if not isinstance(run_id, str) or not run_id.strip():
             return {
                 **base,
                 "status": "AMBIGUOUS",
+                "mutation_writer_run_ids": writers,
                 "evidence": [
                     f"branch moved under a live owner but mutations[{index}] lacks run_id"
                 ],
             }
         writers.append(run_id.strip())
+        expected_parent = head
 
-    if mutations[-1]["head"].strip() != current_head:
+    if expected_parent != current_head:
         return {
             **base,
             "status": "AMBIGUOUS",
@@ -274,7 +297,7 @@ def evaluate_guard(
         **base,
         "status": "OK",
         "evidence": [
-            f"all observed branch movement is attributed to live owner {owner['run_id']}"
+            f"complete observed branch movement is attributed to live owner {owner['run_id']}"
         ],
     }
 
@@ -316,8 +339,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
 
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    # Only proven live-owner attribution authorizes branch mutation. Every other
-    # diagnostic status is fail-closed for shell/workflow callers.
     return 0 if result["status"] == "OK" else 2
 
 

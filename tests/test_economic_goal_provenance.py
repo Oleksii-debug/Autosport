@@ -87,10 +87,13 @@ def test_provenance_rejects_identity_rebinding() -> None:
     evidence = provenance_for(goal)
 
     with pytest.raises(EconomicGoalProvenanceError, match="goal_id mismatch"):
-        verify_provenance(replace(goal, goal_id="other-goal", revision=2), evidence)
+        verify_provenance(replace(goal, goal_id="other-goal"), evidence)
+
+    with pytest.raises(EconomicGoalProvenanceError, match="revision mismatch"):
+        verify_provenance(replace(goal, revision=2), evidence)
 
     with pytest.raises(EconomicGoalProvenanceError, match="bankroll_id mismatch"):
-        verify_provenance(replace(goal, bankroll_id="other-bankroll", revision=2), evidence)
+        verify_provenance(replace(goal, bankroll_id="other-bankroll"), evidence)
 
 
 def test_provenance_schema_validation_is_fail_closed() -> None:

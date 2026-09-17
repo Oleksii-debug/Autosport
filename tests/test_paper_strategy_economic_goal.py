@@ -146,6 +146,47 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
                 next(iter(book.tickets)),
             )
 
+    def test_economic_ledger_post_write_error_keeps_verified_ticket_commit(self) -> None:
+        class RaiseAfterCommitLedger(JsonlDecisionLedger):
+            def append_economic(self, record, contract):
+                super().append_economic(record, contract)
+                raise OSError("injected post-write fsync uncertainty")
+
+        goal = self._goal()
+        event = self._event()
+        agent = self._agent(event, goal)
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "decisions.jsonl"
+            ledger = RaiseAfterCommitLedger(ledger_path)
+            book = PaperBook("100")
+            context = AgentContext(
+                book,
+                latest_quotes={event.quote_key: event},
+                replay_run_id="run-1",
+                decision_ledger=ledger,
+            )
+
+            # The append reports an uncertain error only after durable bytes exist.
+            # Verified readback resolves the transaction as committed, so the paper
+            # ticket remains and the synthetic transport error is not surfaced.
+            agent.on_market_event(event, context)
+
+            self.assertEqual(book.balance, Decimal("99"))
+            self.assertEqual(len(book.tickets), 1)
+            records = ledger.verified_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(
+                records[0].payload["ticket_id"],
+                next(iter(book.tickets)),
+            )
+
+            # _acted must agree with the proven durable commit and prevent a duplicate
+            # position if the same event is delivered again in the same process.
+            agent.on_market_event(event, context)
+            self.assertEqual(book.balance, Decimal("99"))
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(len(ledger.verified_records()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

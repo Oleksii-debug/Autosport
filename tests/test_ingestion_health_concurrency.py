@@ -8,10 +8,15 @@ from autosport.ingestion_health import SourceHealthStore
 
 class SourceHealthStoreConcurrencyTests(unittest.TestCase):
     @staticmethod
-    def _record_success(store: SourceHealthStore, *, cursor: str) -> None:
+    def _record_success(
+        store: SourceHealthStore,
+        *,
+        cursor: str,
+        now: str = "2026-09-14T00:00:00+00:00",
+    ) -> None:
         store.record_success(
             "source",
-            now="2026-09-14T00:00:00+00:00",
+            now=now,
             received=1,
             accepted=1,
             rejected=0,
@@ -56,6 +61,9 @@ class SourceHealthStoreConcurrencyTests(unittest.TestCase):
             success_store = SourceHealthStore(path)
             failure_store = SourceHealthStore(path)
             barrier = threading.Barrier(2)
+            success_done = threading.Event()
+            failure_done = threading.Event()
+            failure_done.set()
             errors: list[BaseException] = []
             rounds = 6
 
@@ -63,7 +71,15 @@ class SourceHealthStoreConcurrencyTests(unittest.TestCase):
                 try:
                     for index in range(rounds):
                         barrier.wait(timeout=5)
-                        self._record_success(success_store, cursor=f"success-{index}")
+                        if not failure_done.wait(timeout=5):
+                            raise RuntimeError("timed out waiting for prior failure transition")
+                        failure_done.clear()
+                        self._record_success(
+                            success_store,
+                            cursor=f"success-{index}",
+                            now=f"2026-09-14T00:00:00.{index * 2:06d}+00:00",
+                        )
+                        success_done.set()
                 except BaseException as exc:  # pragma: no cover - surfaced by assertion below
                     errors.append(exc)
 
@@ -71,11 +87,15 @@ class SourceHealthStoreConcurrencyTests(unittest.TestCase):
                 try:
                     for index in range(rounds):
                         barrier.wait(timeout=5)
+                        if not success_done.wait(timeout=5):
+                            raise RuntimeError("timed out waiting for success transition")
+                        success_done.clear()
                         failure_store.record_failure(
                             "source",
-                            now="2026-09-14T00:00:00+00:00",
+                            now=f"2026-09-14T00:00:00.{index * 2 + 1:06d}+00:00",
                             error=RuntimeError(f"failure-{index}"),
                         )
+                        failure_done.set()
                 except BaseException as exc:  # pragma: no cover - surfaced by assertion below
                     errors.append(exc)
 

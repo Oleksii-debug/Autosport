@@ -12,6 +12,7 @@ from autosport.real_execution_ledger import (
     ExecutionLedgerIntegrityError,
     ExecutionPlan,
     ExecutionStateError,
+    EventType,
     ExternalAcknowledgement,
     RealExecutionLedger,
     ReconciliationSnapshot,
@@ -20,6 +21,7 @@ from autosport.real_execution_ledger import (
 
 TS = "2026-09-17T19:28:00+00:00"
 RESERVED_AT = "2026-09-17T19:28:10+00:00"
+SUBMITTED_AT = "2026-09-17T19:28:15+00:00"
 UNKNOWN_AT = "2026-09-17T19:28:20+00:00"
 RECONCILED_AT = "2026-09-17T19:28:30+00:00"
 RETRY_RESERVED_AT = "2026-09-17T19:28:40+00:00"
@@ -89,7 +91,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 attempt_id="try-1",
                 reserved_at=RESERVED_AT,
             )
-            ledger.mark_submitted("try-1")
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
 
             restarted = RealExecutionLedger(path)
             self.assertEqual(restarted.recover_uncertain(), ("try-1",))
@@ -247,6 +249,124 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     attempt_id="expired-retry",
                     reserved_at=EXPIRES_AT,
                 )
+
+    def test_submit_cannot_precede_reservation_or_reach_quote_expiry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError, "precede attempt reservation"
+            ):
+                ledger.mark_submitted("try-1", submitted_at=TS)
+            self.assertEqual(
+                ledger.attempt_state("try-1"), AttemptState.RESERVED
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError, "persisted quote expiry"
+            ):
+                ledger.mark_submitted("try-1", submitted_at=EXPIRES_AT)
+            self.assertEqual(
+                ledger.attempt_state("try-1"), AttemptState.RESERVED
+            )
+
+    def test_unknown_timestamp_cannot_precede_reservation_or_submission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError, "precede attempt reservation"
+            ):
+                ledger.mark_unknown(
+                    "try-1", reason="timeout", observed_at=TS
+                )
+            self.assertEqual(
+                ledger.attempt_state("try-1"), AttemptState.RESERVED
+            )
+
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            with self.assertRaisesRegex(
+                ExecutionStateError, "precede attempt submission"
+            ):
+                ledger.mark_unknown(
+                    "try-1", reason="timeout", observed_at=RESERVED_AT
+                )
+            self.assertEqual(
+                ledger.attempt_state("try-1"), AttemptState.SUBMITTED
+            )
+
+    def test_not_found_before_reservation_cannot_authorize_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError, "newer than attempt uncertainty boundary"
+            ):
+                ledger.reconcile_not_found(
+                    ReconciliationSnapshot(
+                        attempt_id="try-1",
+                        evidence_id="pre-reservation-readback",
+                        observed_at=TS,
+                        external_effect_found=False,
+                        source="provider-readback",
+                    )
+                )
+            self.assertEqual(
+                ledger.attempt_state("try-1"), AttemptState.UNKNOWN
+            )
+            self.assertFalse(
+                ledger.can_retry_action(plan_id="p1", action_id="a1")
+            )
+
+    def test_restart_rejects_hash_valid_backdated_unknown_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger._append(
+                EventType.ATTEMPT_UNKNOWN,
+                "p1",
+                "a1",
+                "try-1",
+                {"reason": "legacy", "observed_at": TS},
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "UNKNOWN observation precedes attempt reservation",
+            ):
+                restarted.verify_integrity()
 
     def test_acknowledgement_cannot_exceed_requested_stake(self):
         with tempfile.TemporaryDirectory() as tmp:

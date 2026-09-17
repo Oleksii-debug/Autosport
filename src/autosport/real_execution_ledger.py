@@ -792,7 +792,9 @@ class RealExecutionLedger:
                     "ATTEMPT_RESERVED payload schema is invalid"
                 )
             try:
-                _timestamp(first["payload"]["reserved_at"], "reserved_at")
+                reserved_time = _timestamp(
+                    first["payload"]["reserved_at"], "reserved_at"
+                )
             except (KeyError, ValueError) as exc:
                 raise ExecutionLedgerIntegrityError(
                     "attempt reservation timestamp is invalid"
@@ -800,6 +802,16 @@ class RealExecutionLedger:
             plan_event, action = cls._action_payload(
                 events, first["plan_id"], first["action_id"]
             )
+            try:
+                expires_time = _timestamp(action["expires_at"], "expires_at")
+            except (KeyError, ValueError) as exc:
+                raise ExecutionLedgerIntegrityError(
+                    "stored action expiry timestamp is invalid"
+                ) from exc
+            if reserved_time >= expires_time:
+                raise ExecutionLedgerIntegrityError(
+                    "attempt reservation is at/after persisted quote expiry"
+                )
             expected = _digest(
                 {
                     "plan_fingerprint": plan_event["payload"][
@@ -812,6 +824,8 @@ class RealExecutionLedger:
                 raise ExecutionLedgerIntegrityError(
                     "stored effect fingerprint mismatch"
                 )
+            submitted_time: datetime | None = None
+            unknown_time: datetime | None = None
             for followup in attempt_events[1:]:
                 if (
                     followup["plan_id"] != first["plan_id"]
@@ -820,6 +834,64 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "attempt identity changes across history"
                     )
+                try:
+                    if (
+                        followup["event_type"]
+                        == EventType.ATTEMPT_SUBMITTED.value
+                    ):
+                        submitted_time = _timestamp(
+                            followup["payload"]["submitted_at"],
+                            "submitted_at",
+                        )
+                        if submitted_time < reserved_time:
+                            raise ExecutionLedgerIntegrityError(
+                                "attempt submission precedes reservation"
+                            )
+                        if submitted_time >= expires_time:
+                            raise ExecutionLedgerIntegrityError(
+                                "attempt submission is at/after persisted quote expiry"
+                            )
+                    elif (
+                        followup["event_type"]
+                        == EventType.ATTEMPT_UNKNOWN.value
+                    ):
+                        unknown_time = _timestamp(
+                            followup["payload"]["observed_at"],
+                            "observed_at",
+                        )
+                        if unknown_time < reserved_time:
+                            raise ExecutionLedgerIntegrityError(
+                                "UNKNOWN observation precedes attempt reservation"
+                            )
+                        if (
+                            submitted_time is not None
+                            and unknown_time < submitted_time
+                        ):
+                            raise ExecutionLedgerIntegrityError(
+                                "UNKNOWN observation precedes attempt submission"
+                            )
+                    elif (
+                        followup["event_type"]
+                        == EventType.RECONCILED_NOT_FOUND.value
+                    ):
+                        reconciled_time = _timestamp(
+                            followup["payload"]["observed_at"],
+                            "observed_at",
+                        )
+                        causal_boundaries = [reserved_time]
+                        if submitted_time is not None:
+                            causal_boundaries.append(submitted_time)
+                        if unknown_time is not None:
+                            causal_boundaries.append(unknown_time)
+                        if reconciled_time <= max(causal_boundaries):
+                            raise ExecutionLedgerIntegrityError(
+                                "not-found reconciliation is not newer than "
+                                "attempt causal boundary"
+                            )
+                except (KeyError, ValueError) as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        "attempt chronology timestamp is invalid"
+                    ) from exc
             cls._state(attempt_events)
 
         for event in events:
@@ -950,8 +1022,8 @@ class RealExecutionLedger:
     def mark_submitted(
         self, attempt_id: str, submitted_at: str | None = None
     ) -> None:
-        if submitted_at is not None:
-            _timestamp(submitted_at, "submitted_at")
+        actual_submitted_at = submitted_at or _now()
+        submitted_time = _timestamp(actual_submitted_at, "submitted_at")
 
         def operation() -> None:
             events = self._events()
@@ -964,12 +1036,28 @@ class RealExecutionLedger:
                     "only reserved attempt can be submitted"
                 )
             first = attempt_events[0]
+            reserved_time = _timestamp(
+                first["payload"]["reserved_at"], "reserved_at"
+            )
+            if submitted_time < reserved_time:
+                raise ExecutionStateError(
+                    "submitted_at cannot precede attempt reservation"
+                )
+            _, action = self._action_payload(
+                events, first["plan_id"], first["action_id"]
+            )
+            if submitted_time >= _timestamp(
+                action["expires_at"], "expires_at"
+            ):
+                raise ExecutionStateError(
+                    "cannot submit attempt at or after persisted quote expiry"
+                )
             self._append(
                 EventType.ATTEMPT_SUBMITTED,
                 first["plan_id"],
                 first["action_id"],
                 attempt_id,
-                {"submitted_at": submitted_at or _now()},
+                {"submitted_at": actual_submitted_at},
             )
 
         self._mutate(operation)
@@ -982,8 +1070,8 @@ class RealExecutionLedger:
         observed_at: str | None = None,
     ) -> None:
         _text(reason, "reason")
-        if observed_at is not None:
-            _timestamp(observed_at, "observed_at")
+        actual_observed_at = observed_at or _now()
+        observed_time = _timestamp(actual_observed_at, "observed_at")
 
         def operation() -> None:
             events = self._events()
@@ -999,6 +1087,28 @@ class RealExecutionLedger:
                     "only unresolved attempt can become UNKNOWN"
                 )
             first = attempt_events[0]
+            reserved_time = _timestamp(
+                first["payload"]["reserved_at"], "reserved_at"
+            )
+            if observed_time < reserved_time:
+                raise ExecutionStateError(
+                    "UNKNOWN observed_at cannot precede attempt reservation"
+                )
+            submitted_events = [
+                event
+                for event in attempt_events
+                if event["event_type"]
+                == EventType.ATTEMPT_SUBMITTED.value
+            ]
+            if submitted_events:
+                submitted_time = _timestamp(
+                    submitted_events[-1]["payload"]["submitted_at"],
+                    "submitted_at",
+                )
+                if observed_time < submitted_time:
+                    raise ExecutionStateError(
+                        "UNKNOWN observed_at cannot precede attempt submission"
+                    )
             self._append(
                 EventType.ATTEMPT_UNKNOWN,
                 first["plan_id"],
@@ -1006,7 +1116,7 @@ class RealExecutionLedger:
                 attempt_id,
                 {
                     "reason": reason,
-                    "observed_at": observed_at or _now(),
+                    "observed_at": actual_observed_at,
                 },
             )
 
@@ -1146,7 +1256,11 @@ class RealExecutionLedger:
                 raise ExecutionStateError(
                     "retry requires UNKNOWN + external not-found evidence"
                 )
-            uncertainty_boundaries: list[datetime] = []
+            uncertainty_boundaries: list[datetime] = [
+                _timestamp(
+                    attempt_events[0]["payload"]["reserved_at"], "reserved_at"
+                )
+            ]
             for event in attempt_events:
                 if event["event_type"] == EventType.ATTEMPT_SUBMITTED.value:
                     uncertainty_boundaries.append(

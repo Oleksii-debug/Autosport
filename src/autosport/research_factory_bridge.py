@@ -1,9 +1,9 @@
 """Research-supervisor bridge to the canonical Strategy/Model Factory.
 
 This module does not implement a second evaluator, model factory, artifact store, or
-promotion authority.  It reuses the canonical factory's existing isolated staging
+promotion authority. It reuses the canonical factory's existing isolated staging
 transaction, but deliberately publishes the scientific candidate/evaluation before
-publishing a PromotionDecision.  The supervisor can therefore perform robustness
+publishing a PromotionDecision. The supervisor can therefore perform robustness
 and forward paper/shadow phases before the canonical registry is asked to change
 champion history.
 """
@@ -98,7 +98,7 @@ def _publish_staged_state(
     final_state: dict[str, object],
     staged_store: _factory._StagedFactoryArtifactStore,
 ) -> None:
-    """Publish one already-validated registry/artifact snapshot atomically enough for recovery."""
+    """Publish one already-validated registry/artifact snapshot with crash recovery."""
     transaction_path = _factory._publish_transaction_path(real_registry)
     transaction = {
         "schema_version": 1,
@@ -174,8 +174,8 @@ def stage_baseline_candidate(
     """Publish canonical candidate/evaluation evidence without publishing a decision.
 
     The canonical implementation still performs the complete causal evaluation in an
-    isolated staged workspace.  Before publication this bridge removes only the
-    candidate's staged PromotionDecision and negative-result Postmortem.  Model,
+    isolated staged workspace. Before publication this bridge removes only the
+    candidate's staged PromotionDecision and negative-result Postmortem. Model,
     strategy, evaluation bundle, and Experiment remain canonical immutable evidence.
     Re-delivery before finalization is idempotent because the canonical factory
     re-validates those immutable identities against the staged copy.
@@ -250,15 +250,10 @@ def stage_baseline_candidate(
                 raise ResearchFactoryBridgeError(
                     "canonical staged factory did not produce exactly one decision candidate"
                 )
-            expected_postmortems = (
-                0 if result.proposed_action is PromotionAction.PROMOTE else 1
-                if hasattr(result, "proposed_action")
-                else None
-            )
-            # FactoryRunResult exposes `registry_action`, not final authority.  A
-            # negative candidate currently creates one staged postmortem; positive
-            # candidates create none.  Validate either shape without weakening the
-            # canonical implementation's own checks.
+            # FactoryRunResult exposes `registry_action`, which here is only the
+            # frozen factory proposal. A negative candidate creates one staged
+            # postmortem; a positive candidate creates none. Neither may be published
+            # before robustness and forward paper/shadow complete.
             if result.registry_action is PromotionAction.PROMOTE:
                 if removed_postmortems != 0:
                     raise ResearchFactoryBridgeError(
@@ -336,7 +331,10 @@ def finalize_staged_candidate(
         raise ResearchFactoryBridgeError("staged evaluation identity mismatch")
     if staged.promotion_decision_id != spec.promotion_decision_id:
         raise ResearchFactoryBridgeError("staged promotion identity mismatch")
-    if final_action is PromotionAction.PROMOTE and staged.proposed_action is not PromotionAction.PROMOTE:
+    if (
+        final_action is PromotionAction.PROMOTE
+        and staged.proposed_action is not PromotionAction.PROMOTE
+    ):
         raise ResearchFactoryBridgeError(
             "later evidence cannot upgrade a factory-rejected candidate to PROMOTE"
         )
@@ -367,10 +365,16 @@ def finalize_staged_candidate(
             bundle = staged_registry.get("EvaluationBundle", spec.evaluation_bundle_id)
             strategy = staged_registry.get("StrategyVersion", spec.strategy_version_id)
             model = staged_registry.get("ModelVersion", spec.model_version_id)
-            if None in (experiment, protocol, bundle, strategy, model):
+            if any(
+                value is None
+                for value in (experiment, protocol, bundle, strategy, model)
+            ):
                 raise ResearchFactoryBridgeError(
                     "staged factory lineage is incomplete before final decision"
                 )
+            assert experiment is not None
+            assert protocol is not None
+            assert bundle is not None
             if bundle.payload.get("bundle_sha256") != staged.evaluation_bundle_sha256:
                 raise ResearchFactoryBridgeError(
                     "staged evaluation bundle changed before final decision"

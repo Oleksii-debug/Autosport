@@ -30,6 +30,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             currency="USD",
             max_stake_fraction=Decimal("0.10"),
             max_capital_at_risk_fraction=Decimal("0.50"),
+            max_risk_of_ruin=Decimal("1"),
             max_concurrent_positions=2,
             max_quote_age_seconds=Decimal("5"),
             minimum_data_quality=Decimal("0"),

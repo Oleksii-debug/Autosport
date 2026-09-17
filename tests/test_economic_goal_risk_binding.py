@@ -52,7 +52,12 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             "bankroll_id": "paper-bankroll",
             "currency": "USD",
             "max_stake_fraction": Decimal("1"),
+            "max_session_loss_fraction": Decimal("1"),
+            "max_day_loss_fraction": Decimal("1"),
+            "max_drawdown_fraction": Decimal("1"),
             "max_capital_at_risk_fraction": Decimal("1"),
+            "max_turnover_fraction": Decimal("1000"),
+            "max_risk_of_ruin": Decimal("1"),
             "max_concurrent_positions": 10,
         }
         values.update(overrides)
@@ -137,6 +142,114 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "aggregate committed stake limit exceeded")
+
+
+    def test_session_loss_limit_uses_conservative_realized_loss_plus_proposed_worst_case(self) -> None:
+        book = PaperBook("100")
+        lost = book.open_ticket([self._leg()], Decimal("4"))
+        book.settle(lost.ticket_id, set())
+        policy = self._policy(
+            self._goal(max_session_loss_fraction=Decimal("0.05"))
+        )
+
+        self.assertTrue(self._evaluate(policy, book, Decimal("1")).allowed)
+        blocked = self._evaluate(policy, book, Decimal("1.01"))
+
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(
+            blocked.reason,
+            "economic goal conservative session loss limit exceeded",
+        )
+
+    def test_day_loss_limit_uses_same_safe_all_history_upper_bound(self) -> None:
+        book = PaperBook("100")
+        lost = book.open_ticket([self._leg()], Decimal("4"))
+        book.settle(lost.ticket_id, set())
+        policy = self._policy(
+            self._goal(max_day_loss_fraction=Decimal("0.05"))
+        )
+
+        self.assertTrue(self._evaluate(policy, book, Decimal("1")).allowed)
+        blocked = self._evaluate(policy, book, Decimal("1.01"))
+
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(
+            blocked.reason,
+            "economic goal conservative day loss limit exceeded",
+        )
+
+    def test_drawdown_limit_uses_stake_basis_equity_high_watermark(self) -> None:
+        book = PaperBook("100")
+        winner = book.open_ticket([self._leg()], Decimal("10"))
+        book.settle(winner.ticket_id, {winner.legs[0].quote_key})
+        loser = book.open_ticket(
+            [TicketLeg("event-2", "market-2", "selection-2", Decimal("2"))],
+            Decimal("10"),
+        )
+        book.settle(loser.ticket_id, set())
+        policy = self._policy(
+            self._goal(max_drawdown_fraction=Decimal("0.10"))
+        )
+
+        self.assertTrue(self._evaluate(policy, book, Decimal("1")).allowed)
+        blocked = self._evaluate(policy, book, Decimal("1.01"))
+
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(blocked.reason, "economic goal drawdown limit exceeded")
+
+    def test_turnover_limit_counts_every_durable_ticket_stake_including_settled(self) -> None:
+        book = PaperBook("100")
+        prior = book.open_ticket([self._leg()], Decimal("50"))
+        book.settle(
+            prior.ticket_id,
+            set(),
+            {prior.legs[0].quote_key},
+        )
+        policy = self._policy(
+            self._goal(max_turnover_fraction=Decimal("0.51"))
+        )
+
+        self.assertTrue(self._evaluate(policy, book, Decimal("1")).allowed)
+        blocked = self._evaluate(policy, book, Decimal("1.01"))
+
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(blocked.reason, "economic goal turnover limit exceeded")
+
+    def test_nontrivial_risk_of_ruin_requires_explicit_canonical_upper_bound(self) -> None:
+        goal = self._goal(max_risk_of_ruin=Decimal("0.01"))
+        policy = self._policy(goal)
+        book = PaperBook("100")
+
+        missing = self._evaluate(policy, book, Decimal("1"))
+        self.assertFalse(missing.allowed)
+        self.assertEqual(
+            missing.reason,
+            "portfolio risk-of-ruin evidence is required by economic goal",
+        )
+
+        at_boundary = policy.evaluate(
+            book,
+            Decimal("1"),
+            context=replace(
+                self._context(),
+                risk_of_ruin_upper_bound=Decimal("0.01"),
+            ),
+        )
+        self.assertTrue(at_boundary.allowed)
+
+        exceeded = policy.evaluate(
+            book,
+            Decimal("1"),
+            context=replace(
+                self._context(),
+                risk_of_ruin_upper_bound=Decimal("0.0100001"),
+            ),
+        )
+        self.assertFalse(exceeded.allowed)
+        self.assertEqual(
+            exceeded.reason,
+            "portfolio risk-of-ruin upper bound exceeds economic goal limit",
+        )
 
     def test_owner_concurrent_position_limit_counts_only_canonical_open_tickets(self) -> None:
         book = PaperBook("100")

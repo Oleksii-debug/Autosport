@@ -41,7 +41,12 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             "bankroll_id": "paper-bankroll",
             "currency": "USD",
             "max_stake_fraction": Decimal("0.02"),
+            "max_session_loss_fraction": Decimal("1"),
+            "max_day_loss_fraction": Decimal("1"),
+            "max_drawdown_fraction": Decimal("1"),
             "max_capital_at_risk_fraction": Decimal("0.20"),
+            "max_turnover_fraction": Decimal("1000"),
+            "max_risk_of_ruin": Decimal("1"),
             "max_concurrent_positions": 10,
         }
         values.update(overrides)

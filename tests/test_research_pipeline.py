@@ -302,6 +302,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             "currency": "USD",
             "max_stake_fraction": Decimal("0.02"),
             "max_capital_at_risk_fraction": Decimal("0.20"),
+            "max_risk_of_ruin": Decimal("1"),
             "max_concurrent_positions": 5,
             "max_quote_age_seconds": Decimal("5"),
         }

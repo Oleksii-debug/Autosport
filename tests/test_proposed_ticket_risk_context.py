@@ -46,6 +46,7 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
             "currency": "USD",
             "max_stake_fraction": Decimal("1"),
             "max_capital_at_risk_fraction": Decimal("1"),
+            "max_risk_of_ruin": Decimal("1"),
             "max_concurrent_positions": 10,
             "max_execution_slippage_fraction": Decimal("1"),
             "max_quote_age_seconds": Decimal("3600"),
@@ -186,6 +187,21 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
                 legs=(leg,),
                 measurement_window_start="2026-09-16T16:00:00+00:00",
                 measurement_window_end="2026-09-16T15:00:00+00:00",
+            )
+        with self.assertRaisesRegex(ValueError, "exact Decimal between 0 and 1"):
+            ProposedTicketRiskContext(
+                legs=(leg,),
+                risk_of_ruin_upper_bound="0.01",  # type: ignore[arg-type]
+            )
+        with self.assertRaisesRegex(ValueError, "exact Decimal between 0 and 1"):
+            ProposedTicketRiskContext(
+                legs=(leg,),
+                risk_of_ruin_upper_bound=Decimal("NaN"),
+            )
+        with self.assertRaisesRegex(ValueError, "exact Decimal between 0 and 1"):
+            ProposedTicketRiskContext(
+                legs=(leg,),
+                risk_of_ruin_upper_bound=Decimal("1.0001"),
             )
 
     def test_policy_rejects_untyped_context_and_goal_identity_mismatch(self) -> None:

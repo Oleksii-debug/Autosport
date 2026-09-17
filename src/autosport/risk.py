@@ -56,10 +56,14 @@ class ProposedTicketRiskContext:
     market deny-list, and provider deny-list enforcement. Canonical sport identity
     is deliberately absent until the upstream #339 identity authority exists, so
     any non-empty owner sport deny-list must fail closed instead of being guessed.
-    Session/day ceilings and concentration ceilings require additional durable
-    measurement semantics. Until the whole-portfolio allocation seam provides a
-    canonical concentration denominator, non-default concentration ceilings fail
-    closed rather than being inferred from proposal-local identity alone.
+    Session/day loss, drawdown and turnover are conservatively bounded from the
+    validated PaperBook lifecycle: all-history gross realized loss upper-bounds
+    any bounded loss window, stake-basis equity preserves open stake at cost until
+    settlement, and turnover counts every durable ticket stake. A probabilistic
+    risk-of-ruin ceiling requires an explicit canonical upper-bound witness in this
+    context; it is never inferred from PaperBook balances. Concentration ceilings
+    still fail closed until whole-portfolio exposure evidence provides a canonical
+    denominator.
     """
 
     legs: tuple[TicketLeg, ...]
@@ -69,6 +73,7 @@ class ProposedTicketRiskContext:
     measurement_window_start: str | None = None
     measurement_window_end: str | None = None
     proposal_ts: str | None = None
+    risk_of_ruin_upper_bound: Decimal | None = None
 
     def __post_init__(self) -> None:
         if type(self.legs) is not tuple or not self.legs:
@@ -141,6 +146,18 @@ class ProposedTicketRiskContext:
             if start > end:
                 raise ValueError("measurement window start must not be after end")
 
+        if self.risk_of_ruin_upper_bound is not None:
+            bound = self.risk_of_ruin_upper_bound
+            if (
+                not isinstance(bound, Decimal)
+                or not bound.is_finite()
+                or bound < Decimal("0")
+                or bound > Decimal("1")
+            ):
+                raise ValueError(
+                    "risk_of_ruin_upper_bound must be an exact Decimal between 0 and 1"
+                )
+
     @property
     def parlay_leg_count(self) -> int:
         return len(self.legs)
@@ -165,6 +182,17 @@ class RiskDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class _HistoricalRiskMetrics:
+    """Derived, non-persistent risk facts from one validated PaperBook lifecycle."""
+
+    initial_bankroll: Decimal
+    current_equity: Decimal
+    peak_equity: Decimal
+    realized_gross_loss: Decimal
+    turnover: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class PaperRiskPolicy:
     """Paper-lab guardrails. Limits are explicit and deterministic, never inferred by an LLM.
 
@@ -175,10 +203,11 @@ class PaperRiskPolicy:
     available data-quality proof boundary. ``ProposedTicketRiskContext`` is the
     typed, non-persistent evidence seam for these proposal-local checks; an active
     economic goal therefore fails closed when that evidence seam is absent.
-    Concentration and session/day enforcement remain explicit follow-on policy
-    work until canonical durable measurement semantics exist; configured
-    concentration ceilings fail closed in the meantime instead of guessing a
-    denominator.
+    Session/day loss, drawdown and turnover are enforced conservatively from the
+    canonical PaperBook lifecycle and therefore survive snapshot restart without a
+    second state authority. Risk-of-ruin remains evidence-gated because a balance
+    history is not a probability model. Concentration limits still fail closed
+    until canonical whole-portfolio exposure evidence exists.
     """
 
     max_ticket_fraction: Decimal = Decimal("0.02")
@@ -293,6 +322,145 @@ class PaperRiskPolicy:
         if initial_bankroll <= 0 or balance < 0 or committed_stake < 0:
             return None
         return initial_bankroll, balance, committed_stake, open_position_count
+
+    @classmethod
+    def _historical_risk_metrics(
+        cls, book: PaperBook
+    ) -> _HistoricalRiskMetrics | None:
+        """Derive conservative durable risk facts from canonical PaperBook history.
+
+        Gross realized loss deliberately ignores wins, so it upper-bounds the loss
+        accumulated in any unknown session/day sub-window. Stake-basis equity is
+        cash plus open stake at cost: opening a ticket cannot manufacture drawdown,
+        while settlement changes equity by exactly payout minus stake. This is a
+        derived view only; PaperBook remains the sole bankroll/lifecycle authority.
+        """
+
+        try:
+            PaperBook._validate_loaded_state(book)
+            replay_balance = book.initial_bankroll
+            replay_committed = Decimal("0")
+            peak_equity = book.initial_bankroll
+            realized_gross_loss = Decimal("0")
+            turnover = Decimal("0")
+
+            for raw_entry in book._lifecycle:
+                action, ticket_id, winners_raw, voids_raw = (
+                    PaperBook._validate_lifecycle_entry(raw_entry)
+                )
+                ticket = book.tickets.get(ticket_id)
+                if ticket is None:
+                    return None
+
+                if action == "open":
+                    replay_balance = PaperBook._debit_balance(
+                        replay_balance, ticket.stake
+                    )
+                    replay_committed = cls._exact_positive_sum(
+                        (replay_committed, ticket.stake)
+                    )
+                    turnover = cls._exact_positive_sum((turnover, ticket.stake))
+                else:
+                    _, payout, replay_balance = PaperBook._settlement_result(
+                        ticket,
+                        replay_balance,
+                        set(winners_raw),
+                        set(voids_raw),
+                    )
+                    with localcontext(cls._decimal_context()):
+                        replay_committed = replay_committed - ticket.stake
+                        loss = (
+                            ticket.stake - payout
+                            if payout < ticket.stake
+                            else Decimal("0")
+                        )
+                    if replay_committed < 0:
+                        return None
+                    if loss > 0:
+                        realized_gross_loss = cls._exact_positive_sum(
+                            (realized_gross_loss, loss)
+                        )
+
+                equity = cls._exact_positive_sum(
+                    (replay_balance, replay_committed)
+                )
+                if equity > peak_equity:
+                    peak_equity = equity
+
+            current_committed = cls._exact_positive_sum(
+                tuple(
+                    ticket.stake
+                    for ticket in book.tickets.values()
+                    if ticket.status is TicketStatus.OPEN
+                )
+            )
+            current_equity = cls._exact_positive_sum(
+                (book.balance, current_committed)
+            )
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
+            return None
+
+        if replay_balance != book.balance or replay_committed != current_committed:
+            return None
+        values = (
+            book.initial_bankroll,
+            current_equity,
+            peak_equity,
+            realized_gross_loss,
+            turnover,
+        )
+        if any(
+            not isinstance(value, Decimal)
+            or not value.is_finite()
+            or value < Decimal("0")
+            for value in values
+        ):
+            return None
+        if peak_equity <= 0 or current_equity > peak_equity:
+            return None
+        return _HistoricalRiskMetrics(
+            initial_bankroll=book.initial_bankroll,
+            current_equity=current_equity,
+            peak_equity=peak_equity,
+            realized_gross_loss=realized_gross_loss,
+            turnover=turnover,
+        )
+
+    @classmethod
+    def _goal_history_rooms(
+        cls,
+        book: PaperBook,
+        goal: EconomicGoalContract,
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal] | None:
+        """Return maximum additional losing stake allowed by durable history."""
+
+        metrics = cls._historical_risk_metrics(book)
+        if metrics is None:
+            return None
+        try:
+            with localcontext(cls._decimal_context()):
+                session_limit = (
+                    metrics.initial_bankroll * goal.max_session_loss_fraction
+                )
+                day_limit = metrics.initial_bankroll * goal.max_day_loss_fraction
+                drawdown_limit = (
+                    metrics.peak_equity * goal.max_drawdown_fraction
+                )
+                turnover_limit = (
+                    metrics.initial_bankroll * goal.max_turnover_fraction
+                )
+                session_room = session_limit - metrics.realized_gross_loss
+                day_room = day_limit - metrics.realized_gross_loss
+                drawdown_floor = metrics.peak_equity - drawdown_limit
+                drawdown_room = metrics.current_equity - drawdown_floor
+                turnover_room = turnover_limit - metrics.turnover
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+
+        rooms = (session_room, day_room, drawdown_room, turnover_room)
+        if any(not value.is_finite() for value in rooms):
+            return None
+        return rooms
 
     @staticmethod
     def _proposal_restriction_decision(
@@ -427,6 +595,10 @@ class PaperRiskPolicy:
         if goal.emergency_stop or open_position_count >= goal.max_concurrent_positions:
             return None
 
+        history_rooms = self._goal_history_rooms(book, goal)
+        if history_rooms is None:
+            return None
+
         try:
             ticket_fraction, committed_fraction = self._effective_fraction_limits()
             signal_fraction = min(signal, Decimal("1"))
@@ -443,6 +615,7 @@ class PaperRiskPolicy:
                 committed_room,
                 reserve_room,
                 balance,
+                *history_rooms,
             ]
             if goal.max_stake_amount is not None:
                 caps.append(goal.max_stake_amount)
@@ -544,6 +717,38 @@ class PaperRiskPolicy:
                 return RiskDecision(False, "ticket exceeds economic goal absolute stake limit")
             if open_position_count >= goal.max_concurrent_positions:
                 return RiskDecision(False, "economic goal concurrent position limit exceeded")
+
+            history_rooms = self._goal_history_rooms(book, goal)
+            if history_rooms is None:
+                return RiskDecision(False, "virtual bankroll risk history is invalid")
+            session_room, day_room, drawdown_room, turnover_room = history_rooms
+            history_limits = (
+                (
+                    session_room,
+                    "economic goal conservative session loss limit exceeded",
+                ),
+                (
+                    day_room,
+                    "economic goal conservative day loss limit exceeded",
+                ),
+                (drawdown_room, "economic goal drawdown limit exceeded"),
+                (turnover_room, "economic goal turnover limit exceeded"),
+            )
+            for room, reason in history_limits:
+                if amount > room:
+                    return RiskDecision(False, reason)
+
+            if goal.max_risk_of_ruin < Decimal("1"):
+                if context.risk_of_ruin_upper_bound is None:
+                    return RiskDecision(
+                        False,
+                        "portfolio risk-of-ruin evidence is required by economic goal",
+                    )
+                if context.risk_of_ruin_upper_bound > goal.max_risk_of_ruin:
+                    return RiskDecision(
+                        False,
+                        "portfolio risk-of-ruin upper bound exceeds economic goal limit",
+                    )
 
         derived = self._derived_risk_values(initial_bankroll, balance, committed_stake, amount)
         if derived is None:

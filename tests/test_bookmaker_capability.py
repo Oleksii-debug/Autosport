@@ -7,10 +7,13 @@ from autosport.bookmaker_capability import (
     BookmakerBalanceObservation,
     BookmakerCapability,
     BookmakerCapabilityError,
+    BookmakerCapabilityFact,
     BookmakerCapabilityProfile,
+    BookmakerCapabilityState,
     BookmakerPositionObservation,
     BookmakerPositionState,
     ReadOnlyBookmakerAdapter,
+    UnknownBookmakerCapability,
     UnsupportedBookmakerCapability,
 )
 
@@ -19,14 +22,36 @@ _TS = "2026-09-17T16:00:00+00:00"
 _HASH = "a" * 64
 
 
-def _profile(*capabilities: BookmakerCapability) -> BookmakerCapabilityProfile:
+def _profile(
+    *supported: BookmakerCapability,
+    unsupported: tuple[BookmakerCapability, ...] = (),
+    facts: tuple[BookmakerCapabilityFact, ...] | None = None,
+    version: int = 1,
+) -> BookmakerCapabilityProfile:
+    if facts is None:
+        facts = tuple(
+            BookmakerCapabilityFact(
+                capability=capability,
+                state=BookmakerCapabilityState.SUPPORTED,
+            )
+            for capability in supported
+        ) + tuple(
+            BookmakerCapabilityFact(
+                capability=capability,
+                state=BookmakerCapabilityState.UNSUPPORTED,
+            )
+            for capability in unsupported
+        )
     return BookmakerCapabilityProfile(
         venue_id="book-a",
         account_id="acct-a",
         adapter_id="adapter-a",
         adapter_version="1.0",
-        capabilities=frozenset(capabilities),
+        profile_version=version,
+        facts=facts,
         observed_at=_TS,
+        source_ref="provider-capability-probe",
+        source_payload_sha256=_HASH,
     )
 
 
@@ -67,14 +92,79 @@ def _position(
     return BookmakerPositionObservation(**values)
 
 
-def test_profile_fails_closed_for_unadvertised_capability() -> None:
-    profile = _profile(BookmakerCapability.BALANCE_READ)
-    assert profile.supports(BookmakerCapability.BALANCE_READ)
-    with pytest.raises(
-        UnsupportedBookmakerCapability,
-        match="open_positions_read",
-    ):
-        profile.require(BookmakerCapability.OPEN_POSITIONS_READ)
+def test_profile_distinguishes_unknown_from_unsupported() -> None:
+    profile = _profile(
+        BookmakerCapability.BALANCE_READ,
+        unsupported=(BookmakerCapability.CANCEL_BET,),
+    )
+
+    assert (
+        profile.state_of(BookmakerCapability.BALANCE_READ)
+        is BookmakerCapabilityState.SUPPORTED
+    )
+    assert (
+        profile.state_of(BookmakerCapability.LIVE_QUOTES_READ)
+        is BookmakerCapabilityState.UNKNOWN
+    )
+    assert (
+        profile.state_of(BookmakerCapability.CANCEL_BET)
+        is BookmakerCapabilityState.UNSUPPORTED
+    )
+
+    with pytest.raises(UnknownBookmakerCapability, match="is unknown"):
+        profile.require(BookmakerCapability.LIVE_QUOTES_READ)
+    with pytest.raises(UnsupportedBookmakerCapability, match="does not support"):
+        profile.require(BookmakerCapability.CANCEL_BET)
+
+
+def test_profile_identity_is_deterministic_across_fact_order() -> None:
+    one = BookmakerCapabilityFact(
+        BookmakerCapability.BALANCE_READ,
+        BookmakerCapabilityState.SUPPORTED,
+    )
+    two = BookmakerCapabilityFact(
+        BookmakerCapability.LIMITS_READ,
+        BookmakerCapabilityState.UNSUPPORTED,
+    )
+    assert _profile(facts=(one, two)).profile_id == _profile(
+        facts=(two, one)
+    ).profile_id
+
+
+def test_profile_rejects_duplicate_capability_facts() -> None:
+    fact = BookmakerCapabilityFact(
+        BookmakerCapability.BALANCE_READ,
+        BookmakerCapabilityState.SUPPORTED,
+    )
+    with pytest.raises(BookmakerCapabilityError, match="duplicate capability fact"):
+        _profile(facts=(fact, fact))
+
+
+def test_profile_requires_provenance_and_positive_version() -> None:
+    with pytest.raises(BookmakerCapabilityError, match="positive integer"):
+        BookmakerCapabilityProfile(
+            venue_id="book-a",
+            account_id="acct-a",
+            adapter_id="adapter-a",
+            adapter_version="1",
+            profile_version=0,
+            facts=(),
+            observed_at=_TS,
+            source_ref="probe",
+            source_payload_sha256=_HASH,
+        )
+    with pytest.raises(BookmakerCapabilityError, match="source_ref"):
+        BookmakerCapabilityProfile(
+            venue_id="book-a",
+            account_id="acct-a",
+            adapter_id="adapter-a",
+            adapter_version="1",
+            profile_version=1,
+            facts=(),
+            observed_at=_TS,
+            source_ref="",
+            source_payload_sha256=_HASH,
+        )
 
 
 def test_balance_observation_rejects_impossible_or_non_finite_money() -> None:
@@ -123,17 +213,16 @@ def test_snapshot_requires_balance_exactly_when_balance_was_observed() -> None:
         )
 
 
-def test_empty_open_position_result_is_valid_when_capability_was_observed() -> None:
-    profile = _profile(BookmakerCapability.OPEN_POSITIONS_READ)
-    snapshot = BookmakerAccountSnapshot(
-        profile=profile,
-        observed_capabilities=frozenset(
-            {BookmakerCapability.OPEN_POSITIONS_READ}
-        ),
-        observed_at=_TS,
-        open_positions=(),
-    )
-    assert snapshot.open_positions == ()
+def test_snapshot_fails_closed_when_observed_capability_is_unknown() -> None:
+    profile = _profile()
+    with pytest.raises(UnknownBookmakerCapability, match="open_positions_read"):
+        BookmakerAccountSnapshot(
+            profile=profile,
+            observed_capabilities=frozenset(
+                {BookmakerCapability.OPEN_POSITIONS_READ}
+            ),
+            observed_at=_TS,
+        )
 
 
 def test_position_records_require_matching_state_and_observed_capability() -> None:
@@ -185,22 +274,7 @@ def test_duplicate_position_evidence_identity_is_rejected() -> None:
         )
 
 
-def test_observed_capability_must_be_advertised_by_profile() -> None:
-    profile = _profile()
-    with pytest.raises(
-        UnsupportedBookmakerCapability,
-        match="settled_positions_read",
-    ):
-        BookmakerAccountSnapshot(
-            profile=profile,
-            observed_capabilities=frozenset(
-                {BookmakerCapability.SETTLED_POSITIONS_READ}
-            ),
-            observed_at=_TS,
-        )
-
-
-def test_adapter_protocol_is_read_only_and_structural() -> None:
+def test_adapter_protocol_remains_read_only_and_structural() -> None:
     class Adapter:
         def capability_profile(self) -> BookmakerCapabilityProfile:
             return _profile(BookmakerCapability.BALANCE_READ)
@@ -226,3 +300,4 @@ def test_adapter_protocol_is_read_only_and_structural() -> None:
     assert isinstance(Adapter(), ReadOnlyBookmakerAdapter)
     assert "place" not in ReadOnlyBookmakerAdapter.__dict__
     assert "cancel" not in ReadOnlyBookmakerAdapter.__dict__
+    assert "cashout" not in ReadOnlyBookmakerAdapter.__dict__

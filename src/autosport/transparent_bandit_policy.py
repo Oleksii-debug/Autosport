@@ -11,6 +11,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from decimal import Decimal
+from fractions import Fraction
 from typing import Final
 
 from .learning_environment import (
@@ -82,6 +83,12 @@ class ActionEstimate:
         if self.observations == 0:
             return Decimal("0")
         return self.reward_sum / Decimal(self.observations)
+
+    @property
+    def exact_mean_reward(self) -> Fraction:
+        if self.observations == 0:
+            return Fraction(0)
+        return Fraction(self.reward_sum) / self.observations
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -201,7 +208,7 @@ class BanditPolicyState:
             )
         ranked = sorted(
             admitted,
-            key=lambda action_type: (-estimates[action_type].mean_reward, action_type),
+            key=lambda action_type: (-estimates[action_type].exact_mean_reward, action_type),
         )
         return ranked[0]
 

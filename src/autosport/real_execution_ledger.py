@@ -605,6 +605,7 @@ class RealExecutionLedger:
     def _state(cls, events: list[dict[str, Any]]) -> AttemptState | None:
         state = None
         found_reconciliations: dict[str, dict[str, Any]] = {}
+        found_receipt_id: str | None = None
         for event in events:
             kind = event["event_type"]
             if kind == EventType.ATTEMPT_RESERVED.value:
@@ -640,6 +641,22 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "conflicting found reconciliation evidence"
                     )
+                external_receipt_id = event["payload"].get("external_receipt_id")
+                if (
+                    not isinstance(external_receipt_id, str)
+                    or not external_receipt_id.strip()
+                ):
+                    raise ExecutionLedgerIntegrityError(
+                        "found reconciliation lacks receipt identity"
+                    )
+                if (
+                    found_receipt_id is not None
+                    and found_receipt_id != external_receipt_id
+                ):
+                    raise ExecutionLedgerIntegrityError(
+                        "conflicting found reconciliation receipt identity"
+                    )
+                found_receipt_id = external_receipt_id
                 found_reconciliations[evidence_id] = event["payload"]
             elif kind == EventType.EXTERNAL_ACKNOWLEDGEMENT.value:
                 if state not in {
@@ -954,6 +971,7 @@ class RealExecutionLedger:
             submitted_time: datetime | None = None
             unknown_time: datetime | None = None
             found_reconciliations: dict[str, ExternalEffectReconciliation] = {}
+            found_receipt_id: str | None = None
             for followup in attempt_events[1:]:
                 if (
                     followup["plan_id"] != first["plan_id"]
@@ -1031,6 +1049,15 @@ class RealExecutionLedger:
                             raise ExecutionLedgerIntegrityError(
                                 "conflicting found reconciliation evidence"
                             )
+                        if (
+                            found_receipt_id is not None
+                            and found_receipt_id
+                            != reconciliation.external_receipt_id
+                        ):
+                            raise ExecutionLedgerIntegrityError(
+                                "conflicting found reconciliation receipt identity"
+                            )
+                        found_receipt_id = reconciliation.external_receipt_id
                         found_reconciliations[
                             reconciliation.evidence_id
                         ] = reconciliation
@@ -1537,6 +1564,19 @@ class RealExecutionLedger:
                 raise ExecutionIdentityConflict(
                     "different positive reconciliation evidence already exists"
                 )
+            for event in attempt_events:
+                if event["event_type"] != EventType.RECONCILED_FOUND.value:
+                    continue
+                existing_reconciliation = self._found_reconciliation_from_dict(
+                    event["payload"]
+                )
+                if (
+                    existing_reconciliation.external_receipt_id
+                    != reconciliation.external_receipt_id
+                ):
+                    raise ExecutionIdentityConflict(
+                        "conflicting positive reconciliation receipt identity"
+                    )
             causal_boundaries: list[datetime] = [
                 _timestamp(
                     attempt_events[0]["payload"]["reserved_at"], "reserved_at"

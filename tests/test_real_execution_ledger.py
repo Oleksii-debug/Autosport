@@ -25,6 +25,7 @@ RESERVED_AT = "2026-09-17T19:28:10+00:00"
 SUBMITTED_AT = "2026-09-17T19:28:15+00:00"
 UNKNOWN_AT = "2026-09-17T19:28:20+00:00"
 RECONCILED_AT = "2026-09-17T19:28:30+00:00"
+SECOND_RECONCILED_AT = "2026-09-17T19:28:35+00:00"
 RETRY_RESERVED_AT = "2026-09-17T19:28:40+00:00"
 EXPIRES_AT = "2026-09-17T19:29:00+00:00"
 
@@ -222,6 +223,54 @@ class RealExecutionLedgerTests(unittest.TestCase):
                         reconciliation_evidence_id="readback-1",
                     )
                 )
+
+    def test_positive_reconciliation_requires_one_receipt_identity_per_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
+            ledger.reconcile_found(
+                ExternalEffectReconciliation(
+                    attempt_id="try-1",
+                    evidence_id="readback-1",
+                    external_receipt_id="r1",
+                    observed_at=RECONCILED_AT,
+                    source="provider-readback",
+                )
+            )
+            ledger.reconcile_found(
+                ExternalEffectReconciliation(
+                    attempt_id="try-1",
+                    evidence_id="readback-2",
+                    external_receipt_id="r1",
+                    observed_at=SECOND_RECONCILED_AT,
+                    source="provider-readback-second-observation",
+                )
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionIdentityConflict, "receipt identity"
+            ):
+                ledger.reconcile_found(
+                    ExternalEffectReconciliation(
+                        attempt_id="try-1",
+                        evidence_id="readback-3",
+                        external_receipt_id="r2",
+                        observed_at=RETRY_RESERVED_AT,
+                        source="provider-readback-conflict",
+                    )
+                )
+            self.assertEqual(
+                ledger.attempt_state("try-1"), AttemptState.UNKNOWN
+            )
 
     def test_positive_reconciliation_blocks_not_found_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -488,6 +537,50 @@ class RealExecutionLedgerTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ExecutionLedgerIntegrityError,
                 "UNKNOWN observation precedes attempt reservation",
+            ):
+                restarted.verify_integrity()
+
+    def test_restart_rejects_hash_valid_conflicting_found_receipt_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
+            ledger.reconcile_found(
+                ExternalEffectReconciliation(
+                    attempt_id="try-1",
+                    evidence_id="readback-1",
+                    external_receipt_id="r1",
+                    observed_at=RECONCILED_AT,
+                    source="provider-readback",
+                )
+            )
+            ledger._append(
+                EventType.RECONCILED_FOUND,
+                "p1",
+                "a1",
+                "try-1",
+                ExternalEffectReconciliation(
+                    attempt_id="try-1",
+                    evidence_id="readback-2",
+                    external_receipt_id="r2",
+                    observed_at=SECOND_RECONCILED_AT,
+                    source="provider-readback-tamper",
+                ).to_dict(),
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "receipt identity",
             ):
                 restarted.verify_integrity()
 

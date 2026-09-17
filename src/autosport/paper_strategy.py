@@ -55,7 +55,7 @@ class PaperValueAgent:
 
         The strategy is synchronous, so the rollback is intentionally strict: it only
         accepts the exact ticket object and the exact final lifecycle witness created
-        by the immediately preceding ``open_ticket`` call.  Any unexpected mutation
+        by the immediately preceding ``open_ticket`` call. Any unexpected mutation
         fails loudly instead of guessing at bankroll state.
         """
 
@@ -72,10 +72,34 @@ class PaperValueAgent:
         book.balance = balance_before
         del book._lifecycle[lifecycle_len_before:]
 
+    @staticmethod
+    def _decision_is_durable(
+        context: AgentContext,
+        record: DecisionRecord,
+        goal,
+    ) -> bool:
+        """Resolve an uncertain append outcome from verified durable bytes only."""
+
+        ledger = context.decision_ledger
+        if ledger is None:
+            return False
+        try:
+            if goal is None:
+                return any(
+                    persisted.decision_id == record.decision_id
+                    for persisted in ledger.verified_records()
+                )
+            persisted = ledger.verified_economic_decision(record.decision_id, goal)
+            return persisted.decision_id == record.decision_id
+        except Exception:
+            # Missing, unreadable or structurally invalid evidence is never treated as
+            # a successful economic commit. The caller will roll back the paper side.
+            return False
+
     def on_market_event(self, event: MarketEvent, context: AgentContext) -> None:
         if event.quote_key in self._acted or event.status != "open":
             return
-        # Provider truth is binding.  Observational prices, positive-delay exchange
+        # Provider truth is binding. Observational prices, positive-delay exchange
         # quotes, incomplete ladder caches, or quotes whose observed capacity is below
         # the configured paper stake must fail closed before virtual economics.
         if paper_quote_rejection_reason(event, self.stake) is not None:
@@ -116,6 +140,7 @@ class PaperValueAgent:
             reason=f"paper forecast {forecast.model_id}; EV/unit={estimate.expected_profit_per_unit}",
             placed_at=event.observed_ts,
         )
+        record: DecisionRecord | None = None
         try:
             if context.decision_ledger:
                 payload = {
@@ -154,6 +179,13 @@ class PaperValueAgent:
                 else:
                     context.decision_ledger.append_economic(record, goal)
         except Exception:
+            # An append can fail after bytes were actually written (for example an
+            # uncertain fsync outcome). Resolve that uncertainty from the ledger's own
+            # integrity/readback contract before deciding whether the paper mutation
+            # belongs to the committed side or must be rolled back.
+            if record is not None and self._decision_is_durable(context, record, goal):
+                self._acted.add(event.quote_key)
+                return
             self._rollback_uncommitted_ticket(
                 context,
                 ticket,

@@ -227,3 +227,42 @@ def test_partial_acceptance_then_refusal_routes_residual_to_other_venue() -> Non
     assert reconciled.proposed_total == Decimal("60.00")
     assert [leg.venue for leg in reconciled.legs] == [b]
     assert [leg.proposed_stake for leg in reconciled.legs] == [Decimal("60.00")]
+
+
+def test_receipt_bound_partial_refusal_then_residual_acceptance_completes_parent() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    accepted_a = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-partial",
+        confirmed_accepted=Decimal("40.00"),
+    )
+    refused_a = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.MARKET_REFUSED,
+        observation_id="refusal-a-after-partial",
+    )
+
+    after_a = _reconcile((a, b), (accepted_a, refused_a))
+    assert after_a.state is RoutingState.ROUTE
+    assert after_a.parent_plan_id == _PLAN_ID
+    assert after_a.confirmed_total == Decimal("40.00")
+    assert after_a.residual_before == Decimal("60.00")
+    assert len(after_a.legs) == 1
+    assert after_a.legs[0].venue == b
+    assert after_a.legs[0].proposed_stake == Decimal("60.00")
+
+    accepted_b = bind_leg_receipt(
+        after_a.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-b-residual",
+        confirmed_accepted=Decimal("60.00"),
+    )
+    final = _reconcile((a, b), (accepted_a, refused_a, accepted_b))
+    assert final.state is RoutingState.COMPLETE
+    assert final.parent_plan_id == _PLAN_ID
+    assert final.confirmed_total == Decimal("100.00")
+    assert final.residual_before == Decimal("0")
+    assert final.proposed_total == Decimal("0")
+    assert final.legs == ()

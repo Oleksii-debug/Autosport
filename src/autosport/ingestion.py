@@ -233,9 +233,9 @@ class IngestionEngine:
             )
         started = perf_counter()
 
-        # Bind provider identity exactly once before acquisition. Health transition
-        # evidence is sampled only after acquisition succeeds/fails; a slow provider
-        # must not carry its pre-I/O start timestamp into durable health history.
+        # Bind provider identity exactly once before acquisition. If acquisition or
+        # provider-owned validation fails, failure-health evidence is sampled after the
+        # failed I/O rather than carrying a stale pre-I/O timestamp.
         provider_source_id: str | None = None
         try:
             provider_source_id = provider.source_id
@@ -260,9 +260,10 @@ class IngestionEngine:
                     raise exc from health_error
             raise
 
-        # This observation timestamp is for quote-age/clock-skew truth only. Durable
-        # health publication gets a fresh timestamp after market persistence below.
-        observed_at = self.clock()
+        # One post-acquisition evidence instant governs both quote-age truth and this
+        # poll's health transition. Equal instants remain distinct via durable
+        # transition_order; genuinely older direct evidence still fails closed.
+        now = self.clock()
 
         health_before = None
         previous_source_ts = None
@@ -276,7 +277,7 @@ class IngestionEngine:
         normalized = []
         rejected = 0
         latest_source: datetime | None = None
-        observed_point = parse_source_timestamp(observed_at)
+        now_point = parse_source_timestamp(now)
         for quote in batch.quotes:
             source_point: datetime | None = None
             if quote.source_ts is not None:
@@ -286,7 +287,7 @@ class IngestionEngine:
                     flags.add("INVALID_SOURCE_TIMESTAMP")
                     rejected += 1
                     continue
-                age_seconds = (observed_point - source_point).total_seconds()
+                age_seconds = (now_point - source_point).total_seconds()
                 if age_seconds > self.policy.stale_after_seconds:
                     flags.add("STALE_SOURCE")
                 if age_seconds < -self.policy.max_future_skew_seconds:
@@ -316,12 +317,11 @@ class IngestionEngine:
             accepted = self.bus.publish_many(normalized)
         except MarketEventDeliveryError as delivery_error:
             # MarketEventDeliveryError can only be raised after transactional
-            # persistence succeeds. Sample health publication time after that commit so
-            # concurrent slow polls do not replay by their acquisition-start order.
-            health_now = self.clock()
+            # persistence succeeds. Preserve the exact storage-derived outcome in
+            # provider progress before re-raising the consumer delivery failure.
             outcome = CommittedIngestionOutcome(
                 source_id=batch.source_id,
-                now=health_now,
+                now=now,
                 received=len(batch.quotes),
                 accepted=delivery_error.accepted_count,
                 rejected=rejected,
@@ -341,13 +341,9 @@ class IngestionEngine:
                     ) from health_error
             raise
 
-        # Health history is a publication log, not an acquisition-start log. Keeping
-        # this timestamp adjacent to the durable health write makes its evidence
-        # boundary truthful; equal instants are ordered by SourceHealthStore.
-        health_now = self.clock()
         outcome = CommittedIngestionOutcome(
             source_id=batch.source_id,
-            now=health_now,
+            now=now,
             received=len(batch.quotes),
             accepted=accepted,
             rejected=rejected,

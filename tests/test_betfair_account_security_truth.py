@@ -31,7 +31,7 @@ class FakeTransport:
         return self.responses.pop(0)
 
 
-def rpc(result: object, request_id: int) -> bytes:
+def rpc(result: object, request_id: object) -> bytes:
     return json.dumps(
         {"jsonrpc": "2.0", "result": result, "id": request_id},
         separators=(",", ":"),
@@ -60,6 +60,36 @@ def account_details(request_id: int = 1) -> bytes:
     )
 
 
+def current_order(bet_id: str, *, size_matched: float = 1.0) -> dict[str, object]:
+    return {
+        "betId": bet_id,
+        "marketId": "1.100",
+        "selectionId": 1,
+        "side": "BACK",
+        "status": "EXECUTABLE",
+        "placedDate": "2026-09-17T18:00:00+00:00",
+        "priceSize": {"price": 2.0, "size": size_matched},
+        "averagePriceMatched": 2.0 if size_matched else 0,
+        "sizeMatched": size_matched,
+        "sizeRemaining": 0,
+    }
+
+
+def cleared_order(bet_id: str) -> dict[str, object]:
+    return {
+        "betId": bet_id,
+        "marketId": "1.100",
+        "selectionId": 1,
+        "side": "BACK",
+        "placedDate": "2026-09-16T18:00:00+00:00",
+        "settledDate": "2026-09-17T18:00:00+00:00",
+        "priceRequested": 2.0,
+        "priceMatched": 2.0,
+        "sizeSettled": 1.0,
+        "profit": 1.0,
+    }
+
+
 def test_provider_controlled_error_message_redacts_both_known_credentials() -> None:
     raw = json.dumps(
         {
@@ -82,6 +112,25 @@ def test_provider_controlled_error_message_redacts_both_known_credentials() -> N
     assert message.count("<redacted>") == 2
 
 
+@pytest.mark.parametrize("response_id", [True, 1.0, "1", None])
+def test_response_id_requires_an_actual_integer(response_id: object) -> None:
+    client = client_for(rpc({}, response_id))
+
+    with pytest.raises(BetfairReadOnlyError, match="response id does not match request id"):
+        client.read_account_funds()
+
+
+def test_duplicate_key_diagnostic_does_not_echo_provider_controlled_key() -> None:
+    payload = b'{"jsonrpc":"2.0","result":{"app-secret":1,"app-secret":2},"id":1}'
+
+    with pytest.raises(BetfairReadOnlyError) as captured:
+        _decode_json(payload)
+
+    message = str(captured.value)
+    assert "duplicate object key" in message
+    assert "app-secret" not in message
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -100,6 +149,46 @@ def test_all_nonstandard_numeric_constants_fail_closed(constant: bytes) -> None:
     payload = b'{"jsonrpc":"2.0","result":{"value":' + constant + b'},"id":1}'
     with pytest.raises(BetfairReadOnlyError, match="non-standard numeric constant"):
         _decode_json(payload)
+
+
+def test_duplicate_bet_id_diagnostic_does_not_echo_provider_controlled_id() -> None:
+    secret_order = current_order("session-secret")
+    client = client_for(
+        rpc(
+            {"currentOrders": [secret_order, dict(secret_order)], "moreAvailable": False},
+            1,
+        )
+    )
+
+    with pytest.raises(BetfairReadOnlyError) as captured:
+        client.read_current_orders_page()
+
+    message = str(captured.value)
+    assert "duplicate bet_id" in message
+    assert "session-secret" not in message
+
+
+def test_cross_state_overlap_diagnostic_does_not_echo_provider_controlled_id() -> None:
+    secret_id = "app-secret"
+    client = client_for(
+        account_details(),
+        rpc({"currentOrders": [current_order(secret_id)], "moreAvailable": False}, 2),
+        rpc({"clearedOrders": [cleared_order(secret_id)], "moreAvailable": False}, 3),
+    )
+
+    with pytest.raises(BetfairReadOnlyError) as captured:
+        client.read_account_snapshot(
+            frozenset(
+                {
+                    BookmakerCapability.OPEN_POSITIONS_READ,
+                    BookmakerCapability.SETTLED_POSITIONS_READ,
+                }
+            )
+        )
+
+    message = str(captured.value)
+    assert "both OPEN and SETTLED" in message
+    assert secret_id not in message
 
 
 def test_snapshot_excludes_unmatched_order_from_open_positions_and_preserves_lay_side() -> None:

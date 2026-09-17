@@ -58,7 +58,7 @@ require_keys(WINDOWS_SHELL_LOCALIZATION_KEYS)
 
 
 def compact_surface_heights(app: Any) -> None:
-    """Apply the Windows V1 vertical budget without weakening UIA gates."""
+    """Apply the Windows product vertical budget without weakening UIA gates."""
     for name, height in _SURFACE_HEIGHTS.items():
         getattr(app, name).configure(height=height)
     for name in ("tickets_label", "evaluation_label", "log_label"):
@@ -95,7 +95,7 @@ def _render_shell_surface(app: Any, surface_key: str, *, persist: bool) -> None:
     app.shell_surface_display.set(surface.title_uk)
     app.shell_surface_state.set(
         {
-            "v1-active": text("ui.windows.shell.state.active"),
+            "active": text("ui.windows.shell.state.active"),
             "visible-disabled": text(
                 "ui.windows.shell.state.disabled", reason=surface.blocked_reason_uk or ""
             ),

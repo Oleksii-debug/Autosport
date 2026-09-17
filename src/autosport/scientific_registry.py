@@ -56,6 +56,10 @@ def _iso(value: object, name: str) -> str:
     return text
 
 
+def _instant(value: object, name: str) -> datetime:
+    return datetime.fromisoformat(_iso(value, name).replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
 def _text_tuple(value: object, name: str, *, allow_empty: bool = False) -> tuple[str, ...]:
     if not isinstance(value, tuple):
         raise ValueError(f"{name} must be a tuple")
@@ -404,9 +408,12 @@ class ExperimentRecord:
         _sha256(self.config_sha256, "config_sha256")
         if not isinstance(self.outcome, ResearchOutcome):
             raise ValueError("outcome must be a ResearchOutcome")
-        _iso(self.created_at, "created_at")
-        if self.completed_at is not None:
-            _iso(self.completed_at, "completed_at")
+        created = _instant(self.created_at, "created_at")
+        if self.completed_at is None:
+            raise ValueError("completed_at is required for a final experiment outcome")
+        completed = _instant(self.completed_at, "completed_at")
+        if completed < created:
+            raise ValueError("completed_at must not precede created_at")
         if type(self.notes) is not str:
             raise ValueError("notes must be a string")
 
@@ -739,13 +746,13 @@ class ScientificRegistry:
         if bundle["payload"].get("bundle_sha256") != decision.evaluation_bundle_sha256.lower():
             raise PromotionEvidenceError("promotion evaluation bundle hash does not match durable bundle")
         require("DatasetSnapshot", bundle["payload"]["dataset_snapshot_id"])
+
+        strategy_model_id = strategy["payload"].get("model_version_id")
+        if strategy_model_id != decision.candidate_model_version_id:
+            raise PromotionEvidenceError("candidate strategy/model lineage mismatch")
+        model: dict[str, Any] | None = None
         if decision.candidate_model_version_id is not None:
-            require("ModelVersion", decision.candidate_model_version_id)
-            if strategy["payload"].get("model_version_id") not in {
-                None,
-                decision.candidate_model_version_id,
-            }:
-                raise PromotionEvidenceError("candidate strategy/model lineage mismatch")
+            model = require("ModelVersion", decision.candidate_model_version_id)
         if decision.predecessor_strategy_version_id is not None:
             require("StrategyVersion", decision.predecessor_strategy_version_id)
         if decision.action is PromotionAction.ROLLBACK:
@@ -760,18 +767,27 @@ class ScientificRegistry:
                 payload.get("research_protocol_id") == decision.research_protocol_id
                 and payload.get("strategy_version_id") == decision.candidate_strategy_version_id
                 and payload.get("evaluation_bundle_id") == decision.evaluation_bundle_id
-                and (
-                    decision.candidate_model_version_id is None
-                    or payload.get("model_version_id") == decision.candidate_model_version_id
-                )
+                and payload.get("model_version_id") == decision.candidate_model_version_id
             ):
                 matching_experiment = payload
                 break
         if matching_experiment is None:
             raise PromotionEvidenceError("promotion has no durable matching experiment")
+        if bundle["payload"].get("dataset_snapshot_id") != matching_experiment.get("dataset_snapshot_id"):
+            raise PromotionEvidenceError("evaluation bundle/experiment dataset lineage mismatch")
         require("FeatureSet", matching_experiment["feature_set_id"])
-        if decision.action is PromotionAction.PROMOTE and matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:
-            raise PromotionEvidenceError("PROMOTE requires a positive durable experiment outcome")
+        if model is not None:
+            if model["payload"].get("research_protocol_id") != matching_experiment.get("research_protocol_id"):
+                raise PromotionEvidenceError("candidate model/experiment protocol lineage mismatch")
+            if model["payload"].get("dataset_snapshot_id") != matching_experiment.get("dataset_snapshot_id"):
+                raise PromotionEvidenceError("candidate model/experiment dataset lineage mismatch")
+            if model["payload"].get("feature_set_id") != matching_experiment.get("feature_set_id"):
+                raise PromotionEvidenceError("candidate model/experiment feature lineage mismatch")
+        if decision.action is PromotionAction.PROMOTE:
+            if strategy["payload"].get("predecessor_strategy_version_id") != decision.predecessor_strategy_version_id:
+                raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
+            if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:
+                raise PromotionEvidenceError("PROMOTE requires a positive durable experiment outcome")
         return self.append(decision)
 
     def champion_strategy(self, *, as_of: str) -> str | None:
@@ -786,6 +802,8 @@ class ScientificRegistry:
                     raise PromotionEvidenceError("promotion predecessor does not match current champion")
                 champion = payload["candidate_strategy_version_id"]
             elif action is PromotionAction.ROLLBACK:
+                if champion != payload["candidate_strategy_version_id"]:
+                    raise PromotionEvidenceError("rollback candidate does not match current champion")
                 champion = payload["rollback_to_strategy_version_id"]
         return champion
 

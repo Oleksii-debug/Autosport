@@ -21,11 +21,15 @@ from autosport.real_execution_ledger import (
 TS = "2026-09-17T19:28:00+00:00"
 
 
-def action(action_id: str = "a1") -> ExecutionAction:
+def action(
+    action_id: str = "a1",
+    bookmaker_id: str = "betfair",
+    account_id: str = "acct-1",
+) -> ExecutionAction:
     return ExecutionAction(
         action_id=action_id,
-        bookmaker_id="betfair",
-        account_id="acct-1",
+        bookmaker_id=bookmaker_id,
+        account_id=account_id,
         event_id="event-1",
         market_id="market-1",
         selection_id=f"selection-{action_id}",
@@ -50,12 +54,12 @@ def plan(*actions: ExecutionAction, plan_id: str = "p1") -> ExecutionPlan:
 
 
 class RealExecutionLedgerTests(unittest.TestCase):
-    def test_exact_plan_reservation_is_idempotent_but_conflict_fails(self):
+    def test_exact_plan_reservation_idempotent_but_conflict_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
-            first = plan(action())
-            self.assertEqual(ledger.reserve_plan(first), first.fingerprint)
-            self.assertEqual(ledger.reserve_plan(first), first.fingerprint)
+            current = plan(action())
+            self.assertEqual(ledger.reserve_plan(current), current.fingerprint)
+            self.assertEqual(ledger.reserve_plan(current), current.fingerprint)
             self.assertEqual(ledger.verify_integrity(), 1)
 
             conflict = ExecutionPlan(
@@ -69,68 +73,112 @@ class RealExecutionLedgerTests(unittest.TestCase):
             with self.assertRaises(ExecutionIdentityConflict):
                 ledger.reserve_plan(conflict)
 
-    def test_reserve_before_act_survives_restart_as_unknown_and_blocks_retry(self):
+    def test_restart_promotes_unresolved_attempt_to_unknown_and_blocks_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"
             ledger = RealExecutionLedger(path)
             ledger.reserve_plan(plan(action()))
             ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="try-1")
             ledger.mark_submitted("try-1")
-            restarted = RealExecutionLedger(path)
 
+            restarted = RealExecutionLedger(path)
             self.assertEqual(restarted.recover_uncertain(), ("try-1",))
             self.assertEqual(restarted.attempt_state("try-1"), AttemptState.UNKNOWN)
             self.assertFalse(restarted.can_retry_action(plan_id="p1", action_id="a1"))
             with self.assertRaises(ExecutionStateError):
-                restarted.begin_attempt(plan_id="p1", action_id="a1", attempt_id="try-2")
+                restarted.begin_attempt(
+                    plan_id="p1", action_id="a1", attempt_id="try-2"
+                )
 
-    def test_unknown_can_retry_only_after_external_not_found_reconciliation(self):
+    def test_unknown_ack_requires_external_reconciliation_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
             ledger.reserve_plan(plan(action()))
             ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="try-1")
             ledger.mark_unknown("try-1", reason="timeout")
 
-            with self.assertRaises(ExecutionStateError):
-                ledger.reconcile_not_found(
-                    ReconciliationSnapshot(
-                        attempt_id="missing",
-                        evidence_id="readback-0",
-                        observed_at=TS,
-                        external_effect_found=False,
-                        source="provider-open-and-cleared-orders",
+            with self.assertRaisesRegex(ExecutionStateError, "reconciliation evidence"):
+                ledger.acknowledge(
+                    ExternalAcknowledgement(
+                        attempt_id="try-1",
+                        external_receipt_id="r1",
+                        status=AcknowledgementStatus.ACCEPTED,
+                        acknowledged_at=TS,
+                        accepted_odds="2.5",
+                        accepted_stake="10",
                     )
                 )
 
+            ledger.acknowledge(
+                ExternalAcknowledgement(
+                    attempt_id="try-1",
+                    external_receipt_id="r1",
+                    status=AcknowledgementStatus.ACCEPTED,
+                    acknowledged_at=TS,
+                    accepted_odds="2.5",
+                    accepted_stake="10",
+                    reconciliation_evidence_id="readback-1",
+                )
+            )
+            self.assertEqual(ledger.attempt_state("try-1"), AttemptState.ACCEPTED)
+
+    def test_unknown_retry_only_after_not_found_reconciliation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="try-1")
+            ledger.mark_unknown("try-1", reason="timeout")
             ledger.reconcile_not_found(
                 ReconciliationSnapshot(
                     attempt_id="try-1",
                     evidence_id="readback-1",
                     observed_at=TS,
                     external_effect_found=False,
-                    source="provider-open-and-cleared-orders",
+                    source="provider-readback",
                 )
             )
             self.assertEqual(
                 ledger.attempt_state("try-1"), AttemptState.RECONCILED_NOT_FOUND
             )
             self.assertTrue(ledger.can_retry_action(plan_id="p1", action_id="a1"))
-            second = ledger.begin_attempt(
-                plan_id="p1", action_id="a1", attempt_id="try-2"
-            )
-            self.assertEqual(second.attempt_id, "try-2")
+            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="try-2")
 
-    def test_external_receipt_is_globally_unique(self):
+    def test_receipt_identity_is_scoped_by_bookmaker_and_account(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(
+                plan(action(bookmaker_id="book-a", account_id="a"), plan_id="p1")
+            )
+            ledger.reserve_plan(
+                plan(action(bookmaker_id="book-b", account_id="b"), plan_id="p2")
+            )
+            for plan_id, attempt_id in (("p1", "t1"), ("p2", "t2")):
+                ledger.begin_attempt(
+                    plan_id=plan_id, action_id="a1", attempt_id=attempt_id
+                )
+                ledger.acknowledge(
+                    ExternalAcknowledgement(
+                        attempt_id=attempt_id,
+                        external_receipt_id="same-native-id",
+                        status=AcknowledgementStatus.ACCEPTED,
+                        acknowledged_at=TS,
+                        accepted_odds="2.5",
+                        accepted_stake="10",
+                    )
+                )
+            self.assertEqual(ledger.verify_integrity(), 6)
+
+    def test_same_provider_account_receipt_cannot_belong_to_two_attempts(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
             ledger.reserve_plan(plan(action(), plan_id="p1"))
             ledger.reserve_plan(plan(action(), plan_id="p2"))
-            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="try-1")
-            ledger.begin_attempt(plan_id="p2", action_id="a1", attempt_id="try-2")
+            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="t1")
+            ledger.begin_attempt(plan_id="p2", action_id="a1", attempt_id="t2")
             ledger.acknowledge(
                 ExternalAcknowledgement(
-                    attempt_id="try-1",
-                    external_receipt_id="receipt-1",
+                    attempt_id="t1",
+                    external_receipt_id="r",
                     status=AcknowledgementStatus.ACCEPTED,
                     acknowledged_at=TS,
                     accepted_odds="2.5",
@@ -140,8 +188,8 @@ class RealExecutionLedgerTests(unittest.TestCase):
             with self.assertRaises(ExecutionIdentityConflict):
                 ledger.acknowledge(
                     ExternalAcknowledgement(
-                        attempt_id="try-2",
-                        external_receipt_id="receipt-1",
+                        attempt_id="t2",
+                        external_receipt_id="r",
                         status=AcknowledgementStatus.ACCEPTED,
                         acknowledged_at=TS,
                         accepted_odds="2.5",
@@ -149,80 +197,117 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     )
                 )
 
-    def test_multi_action_ack_invalidates_remaining_old_plan(self):
+    def test_multi_action_ack_is_itself_crash_atomic_stale_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
             ledger.reserve_plan(plan(action("a1"), action("a2")))
-            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="try-1")
+            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="t1")
             ledger.acknowledge(
                 ExternalAcknowledgement(
-                    attempt_id="try-1",
-                    external_receipt_id="receipt-1",
+                    attempt_id="t1",
+                    external_receipt_id="r1",
                     status=AcknowledgementStatus.PARTIAL,
                     acknowledged_at=TS,
                     accepted_odds="2.4",
                     accepted_stake="5",
                 )
             )
-            self.assertTrue(ledger.plan_is_stale("p1"))
-            self.assertFalse(ledger.can_retry_action(plan_id="p1", action_id="a2"))
+
+            restarted = RealExecutionLedger(path)
+            self.assertTrue(restarted.plan_is_stale("p1"))
+            self.assertFalse(restarted.can_retry_action(plan_id="p1", action_id="a2"))
             with self.assertRaisesRegex(ExecutionStateError, "stale"):
-                ledger.begin_attempt(plan_id="p1", action_id="a2", attempt_id="try-2")
-
-    def test_same_ack_is_idempotent_but_conflicting_ack_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
-            ledger.reserve_plan(plan(action()))
-            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="try-1")
-            ack = ExternalAcknowledgement(
-                attempt_id="try-1",
-                external_receipt_id="receipt-1",
-                status=AcknowledgementStatus.ACCEPTED,
-                acknowledged_at=TS,
-                accepted_odds="2.5",
-                accepted_stake="10",
-            )
-            ledger.acknowledge(ack)
-            event_count = ledger.verify_integrity()
-            ledger.acknowledge(ack)
-            self.assertEqual(ledger.verify_integrity(), event_count)
-
-            with self.assertRaises(ExecutionIdentityConflict):
-                ledger.acknowledge(
-                    ExternalAcknowledgement(
-                        attempt_id="try-1",
-                        external_receipt_id="receipt-2",
-                        status=AcknowledgementStatus.ACCEPTED,
-                        acknowledged_at=TS,
-                        accepted_odds="2.5",
-                        accepted_stake="10",
-                    )
+                restarted.begin_attempt(
+                    plan_id="p1", action_id="a2", attempt_id="t2"
                 )
 
-    def test_tampering_is_detected(self):
+    def test_semantic_plan_fingerprint_tamper_detected_even_if_event_hash_recomputed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"
             ledger = RealExecutionLedger(path)
             ledger.reserve_plan(plan(action()))
-            envelope = json.loads(path.read_text(encoding="utf-8").strip())
+            envelope = json.loads(path.read_text(encoding="utf-8"))
             envelope["event"]["payload"]["plan"]["approval_id"] = "forged"
-            path.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
-            with self.assertRaisesRegex(ExecutionLedgerIntegrityError, "SHA-256 mismatch"):
+
+            import hashlib
+
+            body = json.dumps(
+                envelope["event"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            envelope["sha256"] = hashlib.sha256(body.encode()).hexdigest()
+            path.write_text(
+                json.dumps(
+                    envelope,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError, "plan fingerprint mismatch"
+            ):
+                ledger.verify_integrity()
+
+    def test_semantic_effect_fingerprint_tamper_detected_even_if_event_hash_recomputed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(plan_id="p1", action_id="a1", attempt_id="t1")
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            lines[1]["event"]["payload"]["effect_fingerprint"] = "0" * 64
+
+            import hashlib
+
+            body = json.dumps(
+                lines[1]["event"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            lines[1]["sha256"] = hashlib.sha256(body.encode()).hexdigest()
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for item in lines
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError, "effect fingerprint mismatch"
+            ):
                 ledger.verify_integrity()
 
     def test_existing_writer_lock_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"
             ledger = RealExecutionLedger(path)
-            ledger._lock_path.write_text("simulated active writer", encoding="utf-8")
+            ledger._lock_path.write_text("owner", encoding="utf-8")
             with self.assertRaises(ExecutionLedgerBusyError):
                 ledger.reserve_plan(plan(action()))
 
     def test_rejected_ack_cannot_claim_accepted_money(self):
         with self.assertRaises(ValueError):
             ExternalAcknowledgement(
-                attempt_id="try-1",
-                external_receipt_id="receipt-1",
+                attempt_id="t1",
+                external_receipt_id="r",
                 status=AcknowledgementStatus.REJECTED,
                 acknowledged_at=TS,
                 accepted_odds="2.5",

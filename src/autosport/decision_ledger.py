@@ -13,6 +13,13 @@ from typing import Any
 
 from .causal_integrity import contains_forbidden_future_key
 from .domain import utc_now_iso
+from .economic_goal import EconomicGoalContract
+from .economic_goal_provenance import (
+    EconomicGoalProvenance,
+    EconomicGoalProvenanceError,
+    provenance_for,
+    verify_provenance,
+)
 
 
 class DecisionLedgerIntegrityError(RuntimeError):
@@ -78,6 +85,121 @@ class DecisionRecord:
             "decision_id": self.decision_id,
             "recorded_at": self.recorded_at,
         }
+
+
+ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY = "economic_goal_provenance"
+_ECONOMIC_GOAL_PROVENANCE_FIELDS = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "goal_id",
+        "revision",
+        "bankroll_id",
+        "contract_sha256",
+    }
+)
+
+
+def _economic_goal_provenance_payload(
+    provenance: EconomicGoalProvenance,
+) -> dict[str, object]:
+    return {
+        "schema": provenance.schema,
+        "schema_version": provenance.schema_version,
+        "goal_id": provenance.goal_id,
+        "revision": provenance.revision,
+        "bankroll_id": provenance.bankroll_id,
+        "contract_sha256": provenance.contract_sha256,
+    }
+
+
+def _economic_goal_provenance_from_payload(
+    payload: object,
+) -> EconomicGoalProvenance:
+    if not isinstance(payload, Mapping) or set(payload) != _ECONOMIC_GOAL_PROVENANCE_FIELDS:
+        raise DecisionLedgerIntegrityError(
+            "Decision Ledger economic-goal provenance schema is invalid"
+        )
+    try:
+        return EconomicGoalProvenance(
+            schema=payload["schema"],  # type: ignore[arg-type]
+            schema_version=payload["schema_version"],  # type: ignore[arg-type]
+            goal_id=payload["goal_id"],  # type: ignore[arg-type]
+            revision=payload["revision"],  # type: ignore[arg-type]
+            bankroll_id=payload["bankroll_id"],  # type: ignore[arg-type]
+            contract_sha256=payload["contract_sha256"],  # type: ignore[arg-type]
+        )
+    except (EconomicGoalProvenanceError, KeyError, TypeError) as exc:
+        raise DecisionLedgerIntegrityError(
+            "Decision Ledger economic-goal provenance is invalid"
+        ) from exc
+
+
+def bind_economic_goal(
+    record: DecisionRecord,
+    contract: EconomicGoalContract,
+) -> DecisionRecord:
+    """Return the same decision identity with immutable EconomicGoal evidence bound.
+
+    This is the canonical material-economic binding seam.  It does not persist or
+    mutate the EconomicGoalContract; EconomicGoalStore remains the sole durable
+    goal authority.  A caller-supplied provenance object is rejected so persisted
+    evidence can only be derived from the exact supplied canonical contract.
+    """
+
+    if not isinstance(record, DecisionRecord):
+        raise TypeError("economic decision binding requires a DecisionRecord")
+    if not isinstance(contract, EconomicGoalContract):
+        raise TypeError("economic decision binding requires an EconomicGoalContract")
+
+    payload = _detached_decision_payload(record.payload)
+    if not isinstance(payload, dict):
+        raise DecisionLedgerIntegrityError("Decision Ledger record payload is invalid")
+    if ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY in payload:
+        raise DecisionLedgerIntegrityError(
+            "Decision Ledger economic-goal provenance must be derived, not caller supplied"
+        )
+
+    provenance = provenance_for(contract)
+    payload[ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY] = _economic_goal_provenance_payload(
+        provenance
+    )
+    return DecisionRecord(
+        replay_run_id=record.replay_run_id,
+        agent=record.agent,
+        observed_ts=record.observed_ts,
+        action=record.action,
+        payload=payload,
+        context_hash=record.context_hash,
+        decision_id=record.decision_id,
+        recorded_at=record.recorded_at,
+    )
+
+
+def verify_economic_goal_binding(
+    record: DecisionRecord,
+    contract: EconomicGoalContract,
+) -> EconomicGoalProvenance:
+    """Fail closed unless one durable decision is bound to ``contract`` exactly."""
+
+    if not isinstance(record, DecisionRecord):
+        raise TypeError("economic decision verification requires a DecisionRecord")
+    if not isinstance(contract, EconomicGoalContract):
+        raise TypeError("economic decision verification requires an EconomicGoalContract")
+
+    evidence = record.payload.get(ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY)
+    if evidence is None:
+        raise DecisionLedgerIntegrityError(
+            "Decision Ledger economic decision is missing EconomicGoal provenance"
+        )
+    provenance = _economic_goal_provenance_from_payload(evidence)
+    try:
+        verify_provenance(contract, provenance)
+    except EconomicGoalProvenanceError as exc:
+        raise DecisionLedgerIntegrityError(
+            f"Decision Ledger economic-goal provenance mismatch: {exc}"
+        ) from exc
+    return provenance
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +366,15 @@ class JsonlDecisionLedger:
             os.fsync(handle.fileno())
         return digest
 
+    def append_economic(
+        self,
+        record: DecisionRecord,
+        contract: EconomicGoalContract,
+    ) -> str:
+        """Persist a material economic decision with derived goal provenance bound."""
+
+        return self.append(bind_economic_goal(record, contract))
+
     @classmethod
     def _verify_bytes(cls, raw: bytes) -> int:
         """Validate one already-captured immutable JSONL byte snapshot."""
@@ -341,6 +472,36 @@ class JsonlDecisionLedger:
             payload=raw,
             sha256=hashlib.sha256(raw).hexdigest(),
             record_count=record_count,
+        )
+
+    def verified_records(self) -> tuple[DecisionRecord, ...]:
+        """Rehydrate records from the exact immutable byte snapshot already verified."""
+
+        snapshot = self.verified_snapshot()
+        if not snapshot.payload:
+            return ()
+        records: list[DecisionRecord] = []
+        for line in snapshot.payload.decode("utf-8").splitlines():
+            envelope = json.loads(line)
+            record = self._validate_record(envelope["record"])
+            records.append(DecisionRecord(**record))
+        return tuple(records)
+
+    def verified_economic_decision(
+        self,
+        decision_id: str,
+        contract: EconomicGoalContract,
+    ) -> DecisionRecord:
+        """Restart/readback proof for one material economic decision and exact goal."""
+
+        if not isinstance(decision_id, str) or not decision_id.strip():
+            raise ValueError("decision_id must be a non-empty string")
+        for record in self.verified_records():
+            if record.decision_id == decision_id:
+                verify_economic_goal_binding(record, contract)
+                return record
+        raise DecisionLedgerIntegrityError(
+            "Decision Ledger economic decision_id was not found"
         )
 
     def verify_integrity(self) -> int:

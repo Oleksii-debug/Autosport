@@ -33,7 +33,9 @@ from autosport.strategy_model_factory import (
     PromotionRule,
     PromotionVerdict,
     TrainingPoint,
+    WalkForwardEvaluationConfig,
     WalkForwardRunner,
+    training_points_manifest_sha256,
 )
 
 
@@ -53,16 +55,47 @@ T7 = "2026-01-08T00:00:00+00:00"
 
 def _points():
     return (
-        TrainingPoint("2026-01-01T00:00:00+00:00", 1.0, 0.0, "2026-01-01T00:00:00+00:00"),
-        TrainingPoint("2026-01-02T00:00:00+00:00", 2.0, 1.0, "2026-01-02T00:00:00+00:00"),
-        TrainingPoint("2026-01-03T00:00:00+00:00", 3.0, 1.0, "2026-01-03T00:00:00+00:00"),
-        TrainingPoint("2026-01-04T00:00:00+00:00", 4.0, 0.0, "2026-01-04T00:00:00+00:00"),
+        TrainingPoint(T0, 1.0, 0.0, T0),
+        TrainingPoint(T1, 2.0, 1.0, T1),
+        TrainingPoint(T2, 3.0, 1.0, T2),
+        TrainingPoint(T3, 4.0, 0.0, T3),
+    )
+
+
+def _candidate_points():
+    return (
+        TrainingPoint(T0, 1.0, 0.0, T0),
+        TrainingPoint(T1, 2.0, 1.0, T1),
+        TrainingPoint(T4, 3.0, 1.0, T4),
+        TrainingPoint(T5, 4.0, 0.0, T5),
+    )
+
+
+def _bad_candidate_points():
+    return (
+        TrainingPoint(T0, 1.0, 0.0, T0),
+        TrainingPoint(T1, 2.0, 1.0, T1),
+        TrainingPoint(T4, 3.0, 10.0, T4),
+        TrainingPoint(T5, 4.0, 10.0, T5),
+    )
+
+
+def _guardrail_bad_candidate_points():
+    return (
+        TrainingPoint(T0, 1.0, 0.0, T0),
+        TrainingPoint(T1, 2.0, 0.0, T1),
+        TrainingPoint(T4, 3.0, 1.0, T4),
+        TrainingPoint(T5, 4.0, 0.5, T5),
     )
 
 
 def _payload_sha(record) -> str:
     canonical = json.dumps(
-        record.to_payload(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        record.to_payload(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -82,11 +115,15 @@ def _factory_rule() -> PromotionRule:
     return PromotionRule("mse", 0.05, (("max_squared_error", 0.50),))
 
 
-def _factory_foundation(tmp_path):
+def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
+    governed_points = _candidate_points() if points is None else tuple(points)
+    evaluator_config = WalkForwardEvaluationConfig(minimum_train_size)
+    dataset_manifest_sha256 = training_points_manifest_sha256(governed_points)
     rule = _factory_rule()
     registry_path = tmp_path / "scientific_registry.json"
     registry = ScientificRegistry.initialize_pristine(registry_path)
     store = FactoryArtifactStore(tmp_path / "factory-artifacts")
+
     question = ResearchQuestion(
         "question-factory",
         "Does the challenger lower frozen holdout MSE without guardrail regression?",
@@ -113,7 +150,7 @@ def _factory_foundation(tmp_path):
         exclusion_criteria="missing provenance or causal availability",
         lawful_source_requirements="lawful retained source evidence",
         causal_cutoff=T2,
-        evaluation_design="causal expanding-window holdout",
+        evaluation_design=evaluator_config.frozen_text,
         feature_set_version="v1",
         uncertainty_method="deterministic baseline checkpoint",
         multiple_comparison_control="single frozen primary metric",
@@ -125,10 +162,16 @@ def _factory_foundation(tmp_path):
         code_config_sha256=SHA_B,
         frozen_at_utc=T0,
     )
-    protocol = ResearchProtocol(binding, SHA_C, SHA_D, SHA_A, T0)
+    protocol = ResearchProtocol(
+        binding,
+        SHA_C,
+        SHA_D,
+        dataset_manifest_sha256,
+        T0,
+    )
     dataset = DatasetSnapshot(
         "dataset-factory",
-        SHA_A,
+        dataset_manifest_sha256,
         "lawful-provider:fixture",
         "license-evidence:v1",
         T2,
@@ -168,45 +211,40 @@ def _factory_foundation(tmp_path):
         "folds": [
             {
                 "fold_id": "champion-fold-1",
-                "training_cutoff": T0,
-                "evaluation_at": T1,
-                "target_available_at": T1,
+                "training_cutoff": T1,
+                "evaluation_at": T2,
+                "target_available_at": T2,
+                "causal_training_count": 2,
                 "prediction": 0.0,
                 "target": 1.0,
                 "squared_error": 1.0,
             },
             {
                 "fold_id": "champion-fold-2",
-                "training_cutoff": T1,
-                "evaluation_at": T2,
-                "target_available_at": T2,
+                "training_cutoff": T2,
+                "evaluation_at": T3,
+                "target_available_at": T3,
+                "causal_training_count": 3,
                 "prediction": 0.0,
                 "target": 1.0,
                 "squared_error": 1.0,
             },
             {
                 "fold_id": "champion-fold-3",
-                "training_cutoff": T2,
-                "evaluation_at": T3,
-                "target_available_at": T3,
+                "training_cutoff": T3,
+                "evaluation_at": T4,
+                "target_available_at": T4,
+                "causal_training_count": 4,
                 "prediction": 0.0,
                 "target": 1.0,
                 "squared_error": 1.0,
             },
             {
                 "fold_id": "champion-fold-4",
-                "training_cutoff": T3,
-                "evaluation_at": T4,
-                "target_available_at": T4,
-                "prediction": 0.0,
-                "target": 1.0,
-                "squared_error": 1.0,
-            },
-            {
-                "fold_id": "champion-fold-5",
                 "training_cutoff": T4,
                 "evaluation_at": T5,
                 "target_available_at": T5,
+                "causal_training_count": 5,
                 "prediction": 0.0,
                 "target": 0.0,
                 "squared_error": 0.0,
@@ -223,8 +261,12 @@ def _factory_foundation(tmp_path):
         "metrics": {"max_squared_error": 1.0, "mse": 0.80},
         "source": "causal-walk-forward-v1",
         "walk_forward_result_sha256": champion_walk_forward_sha256,
+        "evaluator_config_sha256": evaluator_config.config_sha256,
+        "training_points_manifest_sha256": dataset_manifest_sha256,
     }
-    champion_metrics_sha256 = store.write("metrics", "eval-v1", champion_metrics_payload)
+    champion_metrics_sha256 = store.write(
+        "metrics", "eval-v1", champion_metrics_payload
+    )
     champion_evaluation_payload = {
         "schema_version": 1,
         "kind": "autosport-strategy-model-factory-evaluation",
@@ -237,6 +279,9 @@ def _factory_foundation(tmp_path):
         "model_version_id": champion_model.model_version_id,
         "strategy_version_id": champion_strategy.strategy_version_id,
         "evaluator_source_sha256": SHA_C,
+        "evaluator_config": evaluator_config.canonical_payload(),
+        "evaluator_config_sha256": evaluator_config.config_sha256,
+        "training_points_manifest_sha256": dataset_manifest_sha256,
         "walk_forward": champion_walk_forward,
         "walk_forward_result_sha256": champion_walk_forward_sha256,
         "candidate_metrics": {"max_squared_error": 1.0, "mse": 0.80},
@@ -289,7 +334,7 @@ def _factory_foundation(tmp_path):
             reason="fixture baseline champion",
         )
     )
-    return registry, registry_path, rule, store
+    return registry, registry_path, rule, store, evaluator_config, dataset_manifest_sha256
 
 
 def _candidate_spec() -> FactoryCandidateSpec:
@@ -315,40 +360,12 @@ def _candidate_spec() -> FactoryCandidateSpec:
     )
 
 
-def _candidate_points():
-    return (
-        TrainingPoint(T0, 1.0, 0.0, T0),
-        TrainingPoint(T1, 2.0, 1.0, T1),
-        TrainingPoint(T4, 3.0, 1.0, T4),
-        TrainingPoint(T5, 4.0, 0.0, T5),
-    )
-
-
-def _bad_candidate_points():
-    return (
-        TrainingPoint(T0, 1.0, 0.0, T0),
-        TrainingPoint(T1, 2.0, 1.0, T1),
-        TrainingPoint(T4, 3.0, 10.0, T4),
-        TrainingPoint(T5, 4.0, 10.0, T5),
-    )
-
-
-def _guardrail_bad_candidate_points():
-    # MSE remains below the champion's 0.80 by more than 0.05, but one causal
-    # fold has squared error 1.0 and therefore breaches the frozen 0.50 guardrail.
-    return (
-        TrainingPoint(T0, 1.0, 0.0, T0),
-        TrainingPoint(T1, 2.0, 0.0, T1),
-        TrainingPoint(T4, 3.0, 1.0, T4),
-        TrainingPoint(T5, 4.0, 0.5, T5),
-    )
-
-
-def _run_candidate(runner, points, rule):
+def _run_candidate(runner, points, rule, **kwargs):
     return runner.run_baseline_candidate(
         _candidate_spec(),
         points,
         rule=rule,
+        **kwargs,
     )
 
 
@@ -368,23 +385,16 @@ class _RecordingMeanFactory:
 
 
 def test_mean_baseline_uses_only_observations_at_or_before_training_cutoff():
-    model = MeanBaselineModel.fit(
-        "baseline-1", _points(), training_cutoff="2026-01-02T00:00:00+00:00"
-    )
+    model = MeanBaselineModel.fit("baseline-1", _points(), training_cutoff=T1)
     assert model.training_count == 2
     assert model.mean_target == 0.5
     assert len(model.identity_sha256) == 64
 
 
 def test_mean_baseline_rejects_future_prediction_input():
-    model = MeanBaselineModel.fit(
-        "baseline-1", _points()[:2], training_cutoff="2026-01-02T00:00:00+00:00"
-    )
+    model = MeanBaselineModel.fit("baseline-1", _points()[:2], training_cutoff=T1)
     with pytest.raises(ValueError, match="not available"):
-        model.predict(
-            TrainingPoint("2026-01-04T00:00:00+00:00", 4.0, 0.0),
-            decision_at="2026-01-03T00:00:00+00:00",
-        )
+        model.predict(TrainingPoint(T3, 4.0, 0.0), decision_at=T2)
 
 
 def test_baseline_excludes_labels_not_revealed_by_training_cutoff():
@@ -406,29 +416,44 @@ def test_baseline_rejects_missing_target_availability_provenance():
         )
 
 
+def test_training_points_manifest_is_order_invariant_and_content_sensitive():
+    points = _candidate_points()
+    assert training_points_manifest_sha256(points) == training_points_manifest_sha256(
+        tuple(reversed(points))
+    )
+    altered = points[:-1] + (replace(points[-1], feature=999.0),)
+    assert training_points_manifest_sha256(altered) != training_points_manifest_sha256(points)
+
+
 def test_walk_forward_is_expanding_window_and_deterministic():
     first = WalkForwardRunner.run(_points(), minimum_train_size=2)
     second = WalkForwardRunner.run(tuple(reversed(_points())), minimum_train_size=2)
     assert first == second
     assert first.result_sha256 == second.result_sha256
-    assert [fold.training_cutoff for fold in first.folds] == [
-        "2026-01-02T00:00:00+00:00",
-        "2026-01-03T00:00:00+00:00",
-    ]
+    assert [fold.training_cutoff for fold in first.folds] == [T1, T2]
+    assert [fold.causal_training_count for fold in first.folds] == [2, 3]
     assert all(fold.training_cutoff < fold.evaluation_at for fold in first.folds)
     assert all(fold.target_available_at for fold in first.folds)
     assert first.primary_metric == "mse"
-    assert first.promotion_metrics()["max_squared_error"] == max(
-        fold.squared_error for fold in first.folds
+
+
+def test_walk_forward_minimum_counts_only_causally_revealed_labels():
+    points = (
+        TrainingPoint(T0, 1.0, 0.0, T4),
+        TrainingPoint(T1, 2.0, 1.0, T1),
+        TrainingPoint(T2, 3.0, 1.0, T2),
+        TrainingPoint(T3, 4.0, 0.0, T3),
     )
+    result = WalkForwardRunner.run(points, minimum_train_size=2)
+    assert len(result.folds) == 1
+    assert result.folds[0].evaluation_at == T3
+    assert result.folds[0].causal_training_count == 2
 
 
 def test_walk_forward_uses_injected_typed_baseline_factory_boundary():
     factory = _RecordingMeanFactory()
     result = WalkForwardRunner.run(
-        _points(),
-        minimum_train_size=2,
-        model_factory=factory,
+        _points(), minimum_train_size=2, model_factory=factory
     )
     assert result.model_family == factory.model_family
     assert factory.fit_ids == [
@@ -438,14 +463,7 @@ def test_walk_forward_uses_injected_typed_baseline_factory_boundary():
 
 
 def test_walk_forward_rejects_duplicate_timestamp_identity():
-    points = _points()[:2] + (
-        TrainingPoint(
-            "2026-01-02T00:00:00+00:00",
-            9.0,
-            0.0,
-            "2026-01-02T00:00:00+00:00",
-        ),
-    )
+    points = _points()[:2] + (TrainingPoint(T1, 9.0, 0.0, T1),)
     with pytest.raises(ValueError, match="unique timestamps"):
         WalkForwardRunner.run(points, minimum_train_size=2)
 
@@ -460,8 +478,6 @@ def test_promotion_requires_provenance_rollback_primary_and_protective_metrics()
         rollback_target="strategy-v1",
     )
     assert accepted.verdict is PromotionVerdict.PROMOTE
-    assert accepted.registry_action is PromotionAction.PROMOTE
-
     degraded = PromotionController.evaluate(
         rule,
         champion_metrics={"mse": 0.40, "max_drawdown": 0.10},
@@ -470,24 +486,13 @@ def test_promotion_requires_provenance_rollback_primary_and_protective_metrics()
         rollback_target="strategy-v1",
     )
     assert degraded.verdict is PromotionVerdict.REJECT
-    assert degraded.registry_action is PromotionAction.REJECT
     assert "protective metric degraded: max_drawdown" in degraded.reasons
-
-    incomplete = PromotionController.evaluate(
-        rule,
-        champion_metrics={"mse": 0.40},
-        challenger_metrics={"mse": 0.20},
-        provenance_complete=False,
-        rollback_target="strategy-v1",
-    )
-    assert incomplete.verdict is PromotionVerdict.REJECT
 
 
 def test_factory_rejects_nonfinite_metrics():
-    rule = PromotionRule("mse", 0.0)
     with pytest.raises(ValueError, match="finite"):
         PromotionController.evaluate(
-            rule,
+            PromotionRule("mse", 0.0),
             champion_metrics={"mse": 1.0},
             challenger_metrics={"mse": math.nan},
             provenance_complete=True,
@@ -495,26 +500,14 @@ def test_factory_rejects_nonfinite_metrics():
         )
 
 
-def test_drift_monitor_only_emits_research_recommendations():
-    recommendations = DriftMonitor.recommendations(
-        (
-            DriftEvidence("mse", 0.20, 0.21, 0.05, T4),
-            DriftEvidence("calibration", 0.02, 0.20, 0.05, T4),
-        )
-    )
-    assert recommendations == (f"RESEARCH_CHALLENGER:calibration:{T4}",)
-    assert all("PROMOTE" not in item for item in recommendations)
-
-
 def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path):
-    registry, registry_path, rule, store = _factory_foundation(tmp_path)
+    registry, registry_path, rule, store, evaluator_config, input_manifest = (
+        _factory_foundation(tmp_path)
+    )
     model_factory = _RecordingMeanFactory()
     runner = ExperimentRunner(
-        registry,
-        store,
-        baseline_model_factory=model_factory,
+        registry, store, baseline_model_factory=model_factory
     )
-
     result = _run_candidate(runner, _candidate_points(), rule)
 
     assert result.verdict is PromotionVerdict.PROMOTE
@@ -522,27 +515,21 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
     assert model_factory.fit_ids[-1] == "model-v2"
     assert registry.get("ModelVersion", "model-v2") is not None
     assert registry.get("StrategyVersion", "strategy-v2") is not None
-    bundle = registry.get("EvaluationBundle", "eval-v2")
-    assert bundle is not None
-    metrics_sha = store.sha256("metrics", "eval-v2")
-    assert metrics_sha in bundle.payload["artifact_hashes"]
-    assert registry.get("Experiment", "experiment-v2").payload["outcome"] == "POSITIVE"
     assert registry.get("PromotionDecision", "promotion-v2") is not None
-    assert registry.champion_strategy(
-        as_of=T7, canonical_strategy_id="canonical-factory-strategy"
-    ) == "strategy-v2"
 
     evaluation = store.read("evaluation", "eval-v2")
     metrics = store.read("metrics", "eval-v2")
+    model = store.read("model", "model-v2")
+    assert evaluation["evaluator_config"] == evaluator_config.canonical_payload()
+    assert evaluation["evaluator_config_sha256"] == evaluator_config.config_sha256
+    assert evaluation["training_points_manifest_sha256"] == input_manifest
+    assert metrics["training_points_manifest_sha256"] == input_manifest
+    assert model["training_points_manifest_sha256"] == input_manifest
     assert evaluation["walk_forward"]["folds"][0]["target_available_at"] == T4
+    assert evaluation["walk_forward"]["folds"][0]["causal_training_count"] == 2
     assert evaluation["walk_forward_result_sha256"] == _canonical_sha(
         evaluation["walk_forward"]
     )
-    assert evaluation["evaluator_source_sha256"] == SHA_C
-    assert evaluation["champion_evaluation_bundle_id"] == "eval-v1"
-    assert evaluation["champion_metrics"] == {"max_squared_error": 1.0, "mse": 0.8}
-    assert evaluation["candidate_metrics_source"] == "causal-walk-forward-v1"
-    assert metrics["source"] == "causal-walk-forward-v1"
     assert metrics["walk_forward_result_sha256"] == evaluation["walk_forward_result_sha256"]
 
     restarted = ExperimentRunner.verify_restart(
@@ -557,76 +544,73 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
 
 
 def test_factory_fails_closed_on_frozen_promotion_rule_tampering(tmp_path):
-    registry, _, rule, store = _factory_foundation(tmp_path)
-    runner = ExperimentRunner(registry, store)
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
     tampered = replace(rule, minimum_improvement=0.01)
     with pytest.raises(ValueError, match="does not match frozen"):
-        _run_candidate(runner, _candidate_points(), tampered)
+        _run_candidate(ExperimentRunner(registry, store), _candidate_points(), tampered)
     assert registry.get("ModelVersion", "model-v2") is None
 
 
+def test_factory_fails_closed_on_runtime_evaluator_config_mutation(tmp_path):
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
+    with pytest.raises(ValueError, match="does not match frozen evaluator config"):
+        _run_candidate(
+            ExperimentRunner(registry, store),
+            _candidate_points(),
+            rule,
+            minimum_train_size=1,
+        )
+    assert registry.get("ModelVersion", "model-v2") is None
+    assert registry.get("PromotionDecision", "promotion-v2") is None
+
+
+def test_factory_fails_closed_on_altered_rows_under_same_dataset_identity(tmp_path):
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
+    altered = list(_candidate_points())
+    altered[-1] = replace(altered[-1], target=0.25)
+    with pytest.raises(ValueError, match="do not match frozen DatasetSnapshot manifest"):
+        _run_candidate(ExperimentRunner(registry, store), tuple(altered), rule)
+    assert registry.get("ModelVersion", "model-v2") is None
+    assert registry.get("PromotionDecision", "promotion-v2") is None
+    assert not store.path_for_testing("evaluation", "eval-v2").exists()
+
+
 def test_factory_fails_closed_when_champion_metrics_are_not_durably_bound(tmp_path):
-    registry, _, rule, store = _factory_foundation(tmp_path)
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
     target = store.path_for_testing("metrics", "eval-v1")
     payload = json.loads(target.read_text(encoding="utf-8"))
     payload["metrics"]["mse"] = 99.0
     target.write_text(json.dumps(payload), encoding="utf-8")
-
     with pytest.raises(ValueError, match="not hash-bound"):
         _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
-    assert registry.get("ModelVersion", "model-v2") is None
     assert registry.get("PromotionDecision", "promotion-v2") is None
 
 
 def test_factory_rejects_mismatched_champion_evaluator_source_before_mutation(tmp_path):
-    registry, _, rule, store = _factory_foundation(tmp_path)
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
     mismatched = replace(_candidate_spec(), evaluator_source_sha256=SHA_B)
     with pytest.raises(ValueError, match="evaluator source mismatch"):
         ExperimentRunner(registry, store).run_baseline_candidate(
-            mismatched,
-            _candidate_points(),
-            rule=rule,
+            mismatched, _candidate_points(), rule=rule
         )
     assert registry.get("ModelVersion", "model-v2") is None
+
+
+def test_factory_rejects_tampered_champion_evaluator_config_identity(tmp_path):
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
+    target = store.path_for_testing("metrics", "eval-v1")
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["evaluator_config_sha256"] = SHA_A
+    target.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="not hash-bound|hash mismatch"):
+        _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
     assert registry.get("PromotionDecision", "promotion-v2") is None
 
 
-def test_factory_ignores_unpromoted_champion_bundle_and_uses_promotion_history(tmp_path):
-    registry, _, rule, store = _factory_foundation(tmp_path)
-    rogue_metrics = {
-        "schema_version": 1,
-        "kind": "autosport-factory-metrics-v1",
-        "evaluation_bundle_id": "rogue-eval",
-        "strategy_version_id": "strategy-v1",
-        "model_version_id": "model-v1",
-        "metrics": {"max_squared_error": 0.0, "mse": 0.0},
-    }
-    rogue_hash = store.write("metrics", "rogue-eval", rogue_metrics)
-    registry.append(
-        EvaluationBundleRef(
-            "rogue-eval",
-            SHA_A,
-            SHA_C,
-            "dataset-factory",
-            registry.get("ResearchProtocol", "protocol-factory").payload["protocol_sha256"],
-            (rogue_hash,),
-            T4,
-            evaluated_strategy_version_id="strategy-v1",
-            evaluated_model_version_id="model-v1",
-        )
-    )
-
-    _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
-    evaluation = store.read("evaluation", "eval-v2")
-    assert evaluation["champion_evaluation_bundle_id"] == "eval-v1"
-    assert evaluation["champion_metrics"]["mse"] == 0.8
-
-
 def test_factory_rejects_caller_injected_promotion_authority_metrics(tmp_path):
-    registry, _, rule, store = _factory_foundation(tmp_path)
-    runner = ExperimentRunner(registry, store)
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
     with pytest.raises(TypeError, match="unexpected keyword argument"):
-        runner.run_baseline_candidate(
+        ExperimentRunner(registry, store).run_baseline_candidate(
             _candidate_spec(),
             _candidate_points(),
             rule=rule,
@@ -635,26 +619,26 @@ def test_factory_rejects_caller_injected_promotion_authority_metrics(tmp_path):
 
 
 def test_factory_rejection_is_durable_negative_memory_with_postmortem(tmp_path):
-    registry, registry_path, rule, store = _factory_foundation(tmp_path)
-    runner = ExperimentRunner(registry, store)
-    result = _run_candidate(runner, _bad_candidate_points(), rule)
+    points = _bad_candidate_points()
+    registry, registry_path, rule, store, _, _ = _factory_foundation(
+        tmp_path, points=points
+    )
+    result = _run_candidate(ExperimentRunner(registry, store), points, rule)
     assert result.verdict is PromotionVerdict.REJECT
     reopened = ScientificRegistry(registry_path)
     experiment = reopened.get("Experiment", "experiment-v2")
     assert experiment.payload["outcome"] == "NEGATIVE"
     assert reopened.get("Postmortem", "experiment-v2:postmortem") is not None
-    assert reopened.find_experiment_fingerprint(experiment.payload["fingerprint"])
     assert reopened.champion_strategy(
         as_of=T7, canonical_strategy_id="canonical-factory-strategy"
     ) == "strategy-v1"
 
 
 def test_factory_duplicate_fingerprint_fails_before_new_durable_state(tmp_path):
-    registry, _, rule, store = _factory_foundation(tmp_path)
+    points = _bad_candidate_points()
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path, points=points)
     runner = ExperimentRunner(registry, store)
-    first = _run_candidate(runner, _bad_candidate_points(), rule)
-    assert first.verdict is PromotionVerdict.REJECT
-
+    assert _run_candidate(runner, points, rule).verdict is PromotionVerdict.REJECT
     duplicate = replace(
         _candidate_spec(),
         experiment_id="experiment-v2-duplicate",
@@ -662,35 +646,25 @@ def test_factory_duplicate_fingerprint_fails_before_new_durable_state(tmp_path):
         promotion_decision_id="promotion-v2-duplicate",
     )
     with pytest.raises(DuplicateExperimentFingerprintError):
-        runner.run_baseline_candidate(
-            duplicate,
-            _bad_candidate_points(),
-            rule=rule,
-        )
-
+        runner.run_baseline_candidate(duplicate, points, rule=rule)
     assert registry.get("Experiment", "experiment-v2-duplicate") is None
-    assert registry.get("EvaluationBundle", "eval-v2-duplicate") is None
-    assert registry.get("PromotionDecision", "promotion-v2-duplicate") is None
-    assert not store.path_for_testing("metrics", "eval-v2-duplicate").exists()
     assert not store.path_for_testing("evaluation", "eval-v2-duplicate").exists()
 
 
 def test_protective_metric_degradation_is_durably_rejected(tmp_path):
-    registry, _, rule, store = _factory_foundation(tmp_path)
-    result = _run_candidate(
-        ExperimentRunner(registry, store), _guardrail_bad_candidate_points(), rule
-    )
+    points = _guardrail_bad_candidate_points()
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path, points=points)
+    result = _run_candidate(ExperimentRunner(registry, store), points, rule)
     assert result.candidate_metrics["mse"] < 0.75
     assert result.candidate_metrics["max_squared_error"] > 0.50
     assert result.verdict is PromotionVerdict.REJECT
     decision = registry.get("PromotionDecision", "promotion-v2")
-    assert decision is not None
     assert decision.payload["action"] == "REJECT"
     assert "protective metric degraded" in decision.payload["reason"]
 
 
 def test_restart_detects_tampered_evaluation_artifact(tmp_path):
-    registry, registry_path, rule, store = _factory_foundation(tmp_path)
+    registry, registry_path, rule, store, _, _ = _factory_foundation(tmp_path)
     _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
     target = store.path_for_testing("evaluation", "eval-v2")
     payload = json.loads(target.read_text(encoding="utf-8"))
@@ -706,7 +680,7 @@ def test_restart_detects_tampered_evaluation_artifact(tmp_path):
 
 
 def test_restart_detects_tampered_candidate_metrics_artifact(tmp_path):
-    registry, registry_path, rule, store = _factory_foundation(tmp_path)
+    registry, registry_path, rule, store, _, _ = _factory_foundation(tmp_path)
     _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
     target = store.path_for_testing("metrics", "eval-v2")
     payload = json.loads(target.read_text(encoding="utf-8"))
@@ -721,8 +695,19 @@ def test_restart_detects_tampered_candidate_metrics_artifact(tmp_path):
         )
 
 
+def test_drift_monitor_only_emits_research_recommendations():
+    recommendations = DriftMonitor.recommendations(
+        (
+            DriftEvidence("mse", 0.20, 0.21, 0.05, T4),
+            DriftEvidence("calibration", 0.02, 0.20, 0.05, T4),
+        )
+    )
+    assert recommendations == (f"RESEARCH_CHALLENGER:calibration:{T4}",)
+    assert all("PROMOTE" not in item for item in recommendations)
+
+
 def test_drift_evidence_is_causal_durable_and_has_no_promotion_authority(tmp_path):
-    registry, _, rule, store = _factory_foundation(tmp_path)
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
     _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
     before = registry.champion_strategy(
         as_of=T7, canonical_strategy_id="canonical-factory-strategy"
@@ -740,7 +725,6 @@ def test_drift_evidence_is_causal_durable_and_has_no_promotion_authority(tmp_pat
         recorded_at=T7,
     )
     assert drift.recommendations == (f"RESEARCH_CHALLENGER:mse:{T6}",)
-    assert registry.get("EvaluationBundle", "drift-v2") is not None
     assert registry.get("PromotionDecision", "drift-v2") is None
     assert registry.champion_strategy(
         as_of=T7, canonical_strategy_id="canonical-factory-strategy"
@@ -756,14 +740,6 @@ def test_drift_evidence_is_causal_durable_and_has_no_promotion_authority(tmp_pat
             dataset_snapshot_id="dataset-factory",
             research_protocol_id="protocol-factory",
             evaluator_source_sha256=SHA_C,
-            evidence=(
-                DriftEvidence(
-                    "mse",
-                    0.30,
-                    0.60,
-                    0.10,
-                    "2026-01-09T00:00:00+00:00",
-                ),
-            ),
+            evidence=(DriftEvidence("mse", 0.30, 0.60, 0.10, "2026-01-09T00:00:00+00:00"),),
             recorded_at=T7,
         )

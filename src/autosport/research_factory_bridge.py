@@ -37,6 +37,18 @@ class ResearchFactoryAlreadyFinalized(ResearchFactoryBridgeError):
     """The candidate already has a durable canonical promotion decision."""
 
 
+class BlindResearchRerunBlocked(ResearchFactoryBridgeError):
+    """Known failed/null/harmful work must not be rediscovered blindly."""
+
+    def __init__(self, prior_experiment_ids: tuple[str, ...]) -> None:
+        self.prior_experiment_ids = prior_experiment_ids
+        joined = ", ".join(prior_experiment_ids)
+        super().__init__(
+            "known non-positive research memory blocks blind rerun under the same "
+            f"frozen protocol; reuse the conclusion or create a justified new protocol: {joined}"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class StagedFactoryEvaluation:
     experiment_id: str
@@ -163,6 +175,157 @@ def _strip_predecision_records(
     return stripped, removed_decisions, removed_postmortems
 
 
+def _existing_staged_evaluation(
+    registry: ScientificRegistry,
+    store: _factory.FactoryArtifactStore,
+    spec: _impl.FactoryCandidateSpec,
+) -> StagedFactoryEvaluation | None:
+    """Reconstruct an already-published predecision stage after restart/redelivery."""
+    experiment = registry.get("Experiment", spec.experiment_id)
+    if experiment is None:
+        return None
+    if registry.get("PromotionDecision", spec.promotion_decision_id) is not None:
+        raise ResearchFactoryAlreadyFinalized(
+            f"candidate already finalized: {spec.promotion_decision_id}"
+        )
+    if registry.get("Postmortem", f"{spec.experiment_id}:postmortem") is not None:
+        raise ResearchFactoryBridgeError(
+            "candidate has a postmortem without its canonical final decision"
+        )
+
+    model = registry.get("ModelVersion", spec.model_version_id)
+    strategy = registry.get("StrategyVersion", spec.strategy_version_id)
+    bundle = registry.get("EvaluationBundle", spec.evaluation_bundle_id)
+    if any(value is None for value in (model, strategy, bundle)):
+        raise ResearchFactoryBridgeError(
+            "existing staged experiment has incomplete factory lineage"
+        )
+    assert model is not None
+    assert strategy is not None
+    assert bundle is not None
+
+    expected_experiment = {
+        "research_protocol_id": spec.research_protocol_id,
+        "dataset_snapshot_id": spec.dataset_snapshot_id,
+        "feature_set_id": spec.feature_set_id,
+        "model_version_id": spec.model_version_id,
+        "strategy_version_id": spec.strategy_version_id,
+        "evaluation_bundle_id": spec.evaluation_bundle_id,
+        "seed": spec.seed,
+    }
+    for key, expected in expected_experiment.items():
+        if experiment.payload.get(key) != expected:
+            raise ResearchFactoryBridgeError(
+                f"existing staged experiment identity mismatch: {key}"
+            )
+    if strategy.payload.get("canonical_strategy_id") != spec.canonical_strategy_id:
+        raise ResearchFactoryBridgeError("existing staged canonical strategy mismatch")
+    if strategy.payload.get("source_sha256") != spec.source_sha256.lower():
+        raise ResearchFactoryBridgeError("existing staged strategy source mismatch")
+    if strategy.payload.get("environment_sha256") != spec.environment_sha256.lower():
+        raise ResearchFactoryBridgeError("existing staged strategy environment mismatch")
+    if model.payload.get("research_protocol_id") != spec.research_protocol_id:
+        raise ResearchFactoryBridgeError("existing staged model protocol mismatch")
+    if model.payload.get("dataset_snapshot_id") != spec.dataset_snapshot_id:
+        raise ResearchFactoryBridgeError("existing staged model dataset mismatch")
+    if model.payload.get("feature_set_id") != spec.feature_set_id:
+        raise ResearchFactoryBridgeError("existing staged model feature mismatch")
+
+    evaluation = store.read(
+        "evaluation",
+        spec.evaluation_bundle_id,
+        expected_sha256=bundle.payload.get("bundle_sha256"),
+    )
+    if evaluation.get("experiment_id") != spec.experiment_id:
+        raise ResearchFactoryBridgeError("existing staged evaluation experiment mismatch")
+    if evaluation.get("model_version_id") != spec.model_version_id:
+        raise ResearchFactoryBridgeError("existing staged evaluation model mismatch")
+    if evaluation.get("strategy_version_id") != spec.strategy_version_id:
+        raise ResearchFactoryBridgeError("existing staged evaluation strategy mismatch")
+    verdict_raw = evaluation.get("promotion_verdict")
+    try:
+        verdict = _impl.PromotionVerdict(verdict_raw)
+    except (TypeError, ValueError) as exc:
+        raise ResearchFactoryBridgeError(
+            "existing staged evaluation lacks canonical promotion verdict"
+        ) from exc
+    candidate_metrics = _impl._metric_map(
+        evaluation.get("candidate_metrics"),
+        "existing staged candidate metrics",
+    )
+    reproducibility = registry.reproducibility_bundle(spec.experiment_id)
+    return StagedFactoryEvaluation(
+        experiment_id=spec.experiment_id,
+        model_version_id=spec.model_version_id,
+        strategy_version_id=spec.strategy_version_id,
+        evaluation_bundle_id=spec.evaluation_bundle_id,
+        promotion_decision_id=spec.promotion_decision_id,
+        evaluation_bundle_sha256=bundle.payload["bundle_sha256"],
+        reproducibility_bundle_sha256=reproducibility["bundle_sha256"],
+        proposed_verdict=verdict,
+        proposed_action=(
+            PromotionAction.PROMOTE
+            if verdict is _impl.PromotionVerdict.PROMOTE
+            else PromotionAction.REJECT
+        ),
+        candidate_metrics=tuple(sorted(candidate_metrics.items())),
+    )
+
+
+def _known_nonpositive_equivalents(
+    registry: ScientificRegistry,
+    spec: _impl.FactoryCandidateSpec,
+    *,
+    config_sha256: str,
+) -> tuple[str, ...]:
+    """Find semantically equivalent negative memory even when version IDs differ."""
+    experiments = registry.causal_records("Experiment", as_of=spec.created_at)
+    postmortems = {
+        entry.payload.get("experiment_id"): entry
+        for entry in registry.causal_records("Postmortem", as_of=spec.created_at)
+        if isinstance(entry.payload.get("experiment_id"), str)
+    }
+    decisions = registry.causal_records("PromotionDecision", as_of=spec.created_at)
+    blocked: list[str] = []
+    for experiment in experiments:
+        payload = experiment.payload
+        if payload.get("research_protocol_id") != spec.research_protocol_id:
+            continue
+        if payload.get("dataset_snapshot_id") != spec.dataset_snapshot_id:
+            continue
+        if payload.get("feature_set_id") != spec.feature_set_id:
+            continue
+        if payload.get("seed") != spec.seed:
+            continue
+        if payload.get("config_sha256") != config_sha256:
+            continue
+        strategy_id = payload.get("strategy_version_id")
+        if type(strategy_id) is not str:
+            continue
+        strategy = registry.get("StrategyVersion", strategy_id)
+        if strategy is None:
+            raise ResearchFactoryBridgeError(
+                f"historical experiment references missing StrategyVersion:{strategy_id}"
+            )
+        if strategy.payload.get("canonical_strategy_id") != spec.canonical_strategy_id:
+            continue
+        if strategy.payload.get("source_sha256") != spec.source_sha256.lower():
+            continue
+        if strategy.payload.get("environment_sha256") != spec.environment_sha256.lower():
+            continue
+
+        outcome = ResearchOutcome(payload["outcome"])
+        has_postmortem = experiment.record_id in postmortems
+        has_rejecting_decision = any(
+            decision.payload.get("candidate_strategy_version_id") == strategy_id
+            and decision.payload.get("action") != PromotionAction.PROMOTE.value
+            for decision in decisions
+        )
+        if outcome is not ResearchOutcome.POSITIVE or has_postmortem or has_rejecting_decision:
+            blocked.append(experiment.record_id)
+    return tuple(sorted(set(blocked)))
+
+
 def stage_baseline_candidate(
     runner: _factory.ExperimentRunner,
     spec: _impl.FactoryCandidateSpec,
@@ -173,12 +336,10 @@ def stage_baseline_candidate(
 ) -> StagedFactoryEvaluation:
     """Publish canonical candidate/evaluation evidence without publishing a decision.
 
-    The canonical implementation still performs the complete causal evaluation in an
-    isolated staged workspace. Before publication this bridge removes only the
-    candidate's staged PromotionDecision and negative-result Postmortem. Model,
-    strategy, evaluation bundle, and Experiment remain canonical immutable evidence.
-    Re-delivery before finalization is idempotent because the canonical factory
-    re-validates those immutable identities against the staged copy.
+    Exact redelivery of an already-published predecision stage is reconstructed
+    idempotently. New semantically equivalent work is checked against causal durable
+    negative/null/harmful memory before the canonical factory is allowed to evaluate
+    anything. A justified retest therefore needs a new frozen protocol version.
     """
     if not isinstance(runner, _factory.ExperimentRunner):
         raise TypeError("runner must be the canonical strategy_model_factory.ExperimentRunner")
@@ -191,6 +352,9 @@ def stage_baseline_candidate(
 
     with WorkspaceEconomicLock(real_registry.path.parent):
         _factory._recover_interrupted_factory_publish(real_registry, real_store)
+        existing = _existing_staged_evaluation(real_registry, real_store, spec)
+        if existing is not None:
+            return existing
         if real_registry.get("PromotionDecision", spec.promotion_decision_id) is not None:
             raise ResearchFactoryAlreadyFinalized(
                 f"candidate already finalized: {spec.promotion_decision_id}"
@@ -209,6 +373,17 @@ def stage_baseline_candidate(
             raise ResearchFactoryBridgeError(
                 "factory research protocol lacks frozen binding"
             )
+        config_sha256 = _impl._sha256(
+            binding.get("code_config_sha256"), "code_config_sha256"
+        )
+        blocked = _known_nonpositive_equivalents(
+            real_registry,
+            spec,
+            config_sha256=config_sha256,
+        )
+        if blocked:
+            raise BlindResearchRerunBlocked(blocked)
+
         evaluation_config = _impl.WalkForwardEvaluationConfig.from_frozen_text(
             binding.get("evaluation_design")
         )
@@ -250,10 +425,6 @@ def stage_baseline_candidate(
                 raise ResearchFactoryBridgeError(
                     "canonical staged factory did not produce exactly one decision candidate"
                 )
-            # FactoryRunResult exposes `registry_action`, which here is only the
-            # frozen factory proposal. A negative candidate creates one staged
-            # postmortem; a positive candidate creates none. Neither may be published
-            # before robustness and forward paper/shadow complete.
             if result.registry_action is PromotionAction.PROMOTE:
                 if removed_postmortems != 0:
                     raise ResearchFactoryBridgeError(
@@ -273,29 +444,12 @@ def stage_baseline_candidate(
             )
 
     reopened = ScientificRegistry(real_registry.path)
-    experiment = reopened.get("Experiment", spec.experiment_id)
-    bundle = reopened.get("EvaluationBundle", spec.evaluation_bundle_id)
-    if experiment is None or bundle is None:
+    existing = _existing_staged_evaluation(reopened, real_store, spec)
+    if existing is None:
         raise ResearchFactoryBridgeError(
             "staged candidate/evaluation evidence is missing after publication"
         )
-    if reopened.get("PromotionDecision", spec.promotion_decision_id) is not None:
-        raise ResearchFactoryBridgeError(
-            "predecision stage unexpectedly published a PromotionDecision"
-        )
-    reproducibility = reopened.reproducibility_bundle(spec.experiment_id)
-    return StagedFactoryEvaluation(
-        experiment_id=spec.experiment_id,
-        model_version_id=spec.model_version_id,
-        strategy_version_id=spec.strategy_version_id,
-        evaluation_bundle_id=spec.evaluation_bundle_id,
-        promotion_decision_id=spec.promotion_decision_id,
-        evaluation_bundle_sha256=bundle.payload["bundle_sha256"],
-        reproducibility_bundle_sha256=reproducibility["bundle_sha256"],
-        proposed_verdict=result.verdict,
-        proposed_action=result.registry_action,
-        candidate_metrics=tuple(sorted(result.candidate_metrics.items())),
-    )
+    return existing
 
 
 def finalize_staged_candidate(
@@ -405,13 +559,18 @@ def finalize_staged_candidate(
 
             postmortem_id: str | None = None
             experiment_outcome = ResearchOutcome(experiment.payload["outcome"])
-            if experiment_outcome is not ResearchOutcome.POSITIVE:
+            if final_action is PromotionAction.REJECT:
                 postmortem_id = f"{spec.experiment_id}:postmortem"
+                memory_classification = (
+                    experiment_outcome
+                    if experiment_outcome is not ResearchOutcome.POSITIVE
+                    else ResearchOutcome.NEGATIVE
+                )
                 staged_registry.append(
                     Postmortem(
                         postmortem_id,
                         spec.experiment_id,
-                        experiment_outcome,
+                        memory_classification,
                         canonical_reason,
                         retest_conditions,
                         decided_at,

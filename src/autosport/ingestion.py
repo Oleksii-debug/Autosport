@@ -232,11 +232,10 @@ class IngestionEngine:
                 f"requested batch {max_items} exceeds backpressure limit {self.policy.max_batch_size}"
             )
         started = perf_counter()
-        now = self.clock()
 
         # Bind provider identity exactly once before acquisition. If acquisition or
-        # provider-owned validation fails, failure-health evidence must use that
-        # original identity rather than re-reading a mutable/raising accessor.
+        # provider-owned validation fails, failure-health evidence is sampled after the
+        # failed I/O rather than carrying a stale pre-I/O timestamp.
         provider_source_id: str | None = None
         try:
             provider_source_id = provider.source_id
@@ -251,7 +250,7 @@ class IngestionEngine:
             if self.health_store is not None and provider_source_id is not None:
                 try:
                     self.health_store.record_failure(
-                        provider_source_id, now=now, error=exc
+                        provider_source_id, now=self.clock(), error=exc
                     )
                 except Exception as health_error:
                     exc.add_note(
@@ -260,6 +259,11 @@ class IngestionEngine:
                     )
                     raise exc from health_error
             raise
+
+        # One post-acquisition evidence instant governs both quote-age truth and this
+        # poll's health transition. Equal instants remain distinct via durable
+        # transition_order; genuinely older direct evidence still fails closed.
+        now = self.clock()
 
         health_before = None
         previous_source_ts = None

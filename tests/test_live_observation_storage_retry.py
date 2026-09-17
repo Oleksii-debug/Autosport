@@ -41,6 +41,14 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
     def test_transient_storage_failure_replays_same_chunk_before_tail_progress(self):
         transport_calls: list[str] = []
         payload = [self._event("event-1", ["A", "B", "C", "D", "E"])]
+        observation_clock_values = iter(
+            [
+                "2026-09-14T08:00:11+00:00",
+                "2026-09-14T08:00:12+00:00",
+                "2026-09-14T08:00:13+00:00",
+                "2026-09-14T08:00:14+00:00",
+            ]
+        )
 
         def transport(url, headers, timeout):
             transport_calls.append(url)
@@ -78,7 +86,7 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
                     tmp,
                     provider,
                     max_items=2,
-                    clock=lambda: "2026-09-14T08:00:10+00:00",
+                    clock=lambda: next(observation_clock_values),
                 )
 
         self.assertEqual(len(transport_calls), 1)
@@ -104,6 +112,15 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
     def test_exhausted_storage_failures_refetch_before_tail_progress(self):
         transport_calls: list[str] = []
         payload = [self._event("event-1", ["A", "B", "C", "D", "E"])]
+        observation_clock_values = iter(
+            [
+                "2026-09-14T08:00:11+00:00",
+                "2026-09-14T08:00:12+00:00",
+                "2026-09-14T08:00:13+00:00",
+                "2026-09-14T08:00:14+00:00",
+                "2026-09-14T08:00:15+00:00",
+            ]
+        )
 
         def transport(url, headers, timeout):
             transport_calls.append(url)
@@ -138,13 +155,13 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
                         tmp,
                         provider,
                         max_items=2,
-                        clock=lambda: "2026-09-14T08:00:10+00:00",
+                        clock=lambda: next(observation_clock_values),
                     )
                 recovered = observe_workspace_once(
                     tmp,
                     provider,
                     max_items=2,
-                    clock=lambda: "2026-09-14T08:00:10+00:00",
+                    clock=lambda: next(observation_clock_values),
                 )
 
             store = SQLiteMarketStore(market_path)

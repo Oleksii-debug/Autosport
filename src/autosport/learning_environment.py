@@ -546,10 +546,10 @@ class CausalLearningEnvironment:
             raise LearningEnvironmentError("resolution evidence does not bind the action identity")
         if reward.outcome_id != outcome.outcome_id:
             raise LearningEnvironmentError("reward does not bind the exact outcome identity")
-        if reward.truth is not outcome.truth:
-            raise LearningEnvironmentError("reward truth label conflicts with outcome truth")
-        if reward.simulation_model_id != outcome.simulation_model_id:
-            raise LearningEnvironmentError("reward simulation identity conflicts with outcome")
+        if outcome.truth is EvidenceTruth.SIMULATED and reward.truth is not EvidenceTruth.SIMULATED:
+            raise LearningEnvironmentError(
+                "reward truth label conflicts: observed reward cannot derive from simulated outcome"
+            )
 
         decision_time = _timestamp("action decided_at", action.decided_at)
         reveal_time = _timestamp("outcome revealed_at", outcome.revealed_at)

@@ -326,7 +326,12 @@ class BookmakerAccountSnapshot:
             raise BookmakerCapabilityError(
                 "profile must be a BookmakerCapabilityProfile"
             )
-        _timestamp(self.observed_at, "observed_at")
+        snapshot_at = _timestamp(self.observed_at, "observed_at")
+        self._validate_not_after_snapshot(
+            self.profile.observed_at,
+            snapshot_at,
+            "profile",
+        )
         if not isinstance(self.observed_capabilities, frozenset):
             raise BookmakerCapabilityError(
                 "observed_capabilities must be a frozenset"
@@ -338,21 +343,23 @@ class BookmakerAccountSnapshot:
                 )
             self.profile.require(capability)
 
-        self._validate_balance()
+        self._validate_balance(snapshot_at)
         self._validate_positions(
             self.open_positions,
             BookmakerPositionState.OPEN,
             BookmakerCapability.OPEN_POSITIONS_READ,
             "open_positions",
+            snapshot_at,
         )
         self._validate_positions(
             self.settled_positions,
             BookmakerPositionState.SETTLED,
             BookmakerCapability.SETTLED_POSITIONS_READ,
             "settled_positions",
+            snapshot_at,
         )
 
-    def _validate_balance(self) -> None:
+    def _validate_balance(self, snapshot_at: datetime) -> None:
         observed = BookmakerCapability.BALANCE_READ in self.observed_capabilities
         if observed != (self.balance is not None):
             raise BookmakerCapabilityError(
@@ -365,6 +372,11 @@ class BookmakerAccountSnapshot:
                 self.balance.adapter_id,
                 "balance",
             )
+            self._validate_not_after_snapshot(
+                self.balance.observed_at,
+                snapshot_at,
+                "balance",
+            )
 
     def _validate_positions(
         self,
@@ -372,6 +384,7 @@ class BookmakerAccountSnapshot:
         state: BookmakerPositionState,
         capability: BookmakerCapability,
         field: str,
+        snapshot_at: datetime,
     ) -> None:
         if not isinstance(positions, tuple):
             raise BookmakerCapabilityError(f"{field} must be a tuple")
@@ -380,7 +393,8 @@ class BookmakerAccountSnapshot:
                 f"{field} cannot contain observations unless {capability.value} "
                 "was observed"
             )
-        seen: set[str] = set()
+        seen_observation_ids: set[str] = set()
+        seen_external_position_ids: set[str] = set()
         for position in positions:
             if not isinstance(position, BookmakerPositionObservation):
                 raise BookmakerCapabilityError(
@@ -396,12 +410,34 @@ class BookmakerAccountSnapshot:
                 raise BookmakerCapabilityError(
                     f"{field} contains a {position.state.value} observation"
                 )
-            if position.observation_id in seen:
+            self._validate_not_after_snapshot(
+                position.observed_at,
+                snapshot_at,
+                field,
+            )
+            if position.observation_id in seen_observation_ids:
                 raise BookmakerCapabilityError(
                     f"{field} contains duplicate observation_id "
                     f"{position.observation_id}"
                 )
-            seen.add(position.observation_id)
+            seen_observation_ids.add(position.observation_id)
+            if position.external_position_id in seen_external_position_ids:
+                raise BookmakerCapabilityError(
+                    f"{field} contains duplicate external_position_id "
+                    f"{position.external_position_id}"
+                )
+            seen_external_position_ids.add(position.external_position_id)
+
+    @staticmethod
+    def _validate_not_after_snapshot(
+        observed_at: str,
+        snapshot_at: datetime,
+        field: str,
+    ) -> None:
+        if _timestamp(observed_at, f"{field}.observed_at") > snapshot_at:
+            raise BookmakerCapabilityError(
+                f"{field} observed_at cannot be later than snapshot observed_at"
+            )
 
     def _validate_identity(
         self,

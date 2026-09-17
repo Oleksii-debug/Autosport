@@ -27,6 +27,7 @@ def _profile(
     unsupported: tuple[BookmakerCapability, ...] = (),
     facts: tuple[BookmakerCapabilityFact, ...] | None = None,
     version: int = 1,
+    observed_at: str = _TS,
 ) -> BookmakerCapabilityProfile:
     if facts is None:
         facts = tuple(
@@ -49,7 +50,7 @@ def _profile(
         adapter_version="1.0",
         profile_version=version,
         facts=facts,
-        observed_at=_TS,
+        observed_at=observed_at,
         source_ref="provider-capability-probe",
         source_payload_sha256=_HASH,
     )
@@ -308,6 +309,123 @@ def test_duplicate_position_evidence_identity_is_rejected() -> None:
             ),
             observed_at=_TS,
             open_positions=(position, position),
+        )
+
+
+def test_snapshot_rejects_future_capability_profile_evidence() -> None:
+    profile = _profile(observed_at="2026-09-17T16:00:01+00:00")
+
+    with pytest.raises(BookmakerCapabilityError, match="profile observed_at"):
+        BookmakerAccountSnapshot(
+            profile=profile,
+            observed_capabilities=frozenset(),
+            observed_at=_TS,
+        )
+
+
+def test_snapshot_rejects_future_balance_evidence() -> None:
+    profile = _profile(BookmakerCapability.BALANCE_READ)
+
+    with pytest.raises(BookmakerCapabilityError, match="balance observed_at"):
+        BookmakerAccountSnapshot(
+            profile=profile,
+            observed_capabilities=frozenset(
+                {BookmakerCapability.BALANCE_READ}
+            ),
+            observed_at=_TS,
+            balance=_balance(observed_at="2026-09-17T16:00:01+00:00"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("capability", "state", "field"),
+    [
+        (
+            BookmakerCapability.OPEN_POSITIONS_READ,
+            BookmakerPositionState.OPEN,
+            "open_positions",
+        ),
+        (
+            BookmakerCapability.SETTLED_POSITIONS_READ,
+            BookmakerPositionState.SETTLED,
+            "settled_positions",
+        ),
+    ],
+)
+def test_snapshot_rejects_future_position_evidence(
+    capability: BookmakerCapability,
+    state: BookmakerPositionState,
+    field: str,
+) -> None:
+    profile = _profile(capability)
+    position = _position(
+        state,
+        observed_at="2026-09-17T16:00:01+00:00",
+    )
+    kwargs = {field: (position,)}
+
+    with pytest.raises(BookmakerCapabilityError, match=f"{field} observed_at"):
+        BookmakerAccountSnapshot(
+            profile=profile,
+            observed_capabilities=frozenset({capability}),
+            observed_at=_TS,
+            **kwargs,
+        )
+
+
+def test_snapshot_compares_observed_times_as_instants_not_strings() -> None:
+    equivalent = "2026-09-17T18:00:00+02:00"
+    profile = _profile(
+        BookmakerCapability.BALANCE_READ,
+        BookmakerCapability.OPEN_POSITIONS_READ,
+        observed_at=equivalent,
+    )
+
+    snapshot = BookmakerAccountSnapshot(
+        profile=profile,
+        observed_capabilities=frozenset(
+            {
+                BookmakerCapability.BALANCE_READ,
+                BookmakerCapability.OPEN_POSITIONS_READ,
+            }
+        ),
+        observed_at=_TS,
+        balance=_balance(observed_at=equivalent),
+        open_positions=(
+            _position(
+                BookmakerPositionState.OPEN,
+                observed_at=equivalent,
+            ),
+        ),
+    )
+
+    assert snapshot.observed_at == _TS
+
+
+def test_duplicate_external_position_id_is_rejected_with_distinct_wrappers() -> None:
+    profile = _profile(BookmakerCapability.OPEN_POSITIONS_READ)
+    first = _position(
+        BookmakerPositionState.OPEN,
+        observation_id="position-open-1",
+        external_position_id="provider-position-1",
+    )
+    second = _position(
+        BookmakerPositionState.OPEN,
+        observation_id="position-open-2",
+        external_position_id="provider-position-1",
+    )
+
+    with pytest.raises(
+        BookmakerCapabilityError,
+        match="duplicate external_position_id",
+    ):
+        BookmakerAccountSnapshot(
+            profile=profile,
+            observed_capabilities=frozenset(
+                {BookmakerCapability.OPEN_POSITIONS_READ}
+            ),
+            observed_at=_TS,
+            open_positions=(first, second),
         )
 
 

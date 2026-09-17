@@ -116,6 +116,33 @@ class CausalLearningEnvironmentTests(unittest.TestCase):
                 decision_at="2026-09-17T13:00:02+00:00",
             )
 
+    def test_pending_retry_collapses_by_decision_intent_and_conflict_fails_closed(self) -> None:
+        environment = self._environment()
+        observation = self._observation(environment.environment_id)
+        first = environment.act(
+            observation,
+            action_type="PAPER_PROPOSAL",
+            decision_at="2026-09-17T13:00:02+00:00",
+            parameters=(("candidate_id", "paper-candidate-1"),),
+        )
+
+        retry = environment.act(
+            observation,
+            action_type="PAPER_PROPOSAL",
+            decision_at="2026-09-17T13:00:03+00:00",
+            parameters=(("candidate_id", "paper-candidate-1"),),
+        )
+        self.assertEqual(retry.action_id, first.action_id)
+        self.assertEqual(retry.decided_at, first.decided_at)
+
+        with self.assertRaisesRegex(LearningEnvironmentError, "decision intent conflicts"):
+            environment.act(
+                observation,
+                action_type="PAPER_PROPOSAL",
+                decision_at="2026-09-17T13:00:04+00:00",
+                parameters=(("candidate_id", "paper-candidate-2"),),
+            )
+
     def test_observed_transition_checkpoint_resume_and_duplicate_action_fail_closed(self) -> None:
         environment = self._environment()
         observation = self._observation(environment.environment_id)
@@ -145,13 +172,21 @@ class CausalLearningEnvironmentTests(unittest.TestCase):
         self.assertEqual(checkpoint.step_index, 1)
         self.assertEqual(checkpoint.last_transition_id, transition.transition_id)
         self.assertIn(action.action_id, checkpoint.committed_action_ids)
+        self.assertEqual(len(checkpoint.committed_decision_intents), 1)
         self.assertEqual(resumed.checkpoint(), checkpoint)
         with self.assertRaisesRegex(LearningEnvironmentError, "already committed"):
             resumed.act(
                 observation,
                 action_type="PAPER_PROPOSAL",
-                decision_at="2026-09-17T13:00:02+00:00",
+                decision_at="2026-09-17T13:00:03+00:00",
                 parameters=(("candidate_id", "paper-candidate-1"),),
+            )
+        with self.assertRaisesRegex(LearningEnvironmentError, "decision intent conflicts"):
+            resumed.act(
+                observation,
+                action_type="PAPER_PROPOSAL",
+                decision_at="2026-09-17T13:00:03+00:00",
+                parameters=(("candidate_id", "paper-candidate-2"),),
             )
 
     def test_checkpoint_refuses_to_erase_unresolved_action(self) -> None:

@@ -1,0 +1,208 @@
+from dataclasses import replace
+from decimal import Decimal
+
+import pytest
+
+from autosport.bookmaker_routing import (
+    ExternalEffect,
+    RoutingContractError,
+    RoutingState,
+    VenueQuote,
+)
+from autosport.bookmaker_receipt_reconciliation import (
+    bind_leg_receipt,
+    reconcile_equal_split_residual,
+)
+from autosport.bookmaker_routing_plan import plan_equal_split_residual
+from autosport.opportunity import QuoteRef
+
+
+_REQUEST_ID = "route-request-receipts-1"
+_PLAN_ID = "parent-plan-receipts-1"
+
+
+def _quote(source: str) -> QuoteRef:
+    return QuoteRef(
+        event_id="event-1",
+        market_id="winner",
+        selection_id="home",
+        source_id=source,
+        sequence=1,
+        decimal_odds=Decimal("2.00"),
+        observed_ts="2026-09-17T01:40:00+00:00",
+        source_ts=None,
+        ingest_ts="2026-09-17T01:40:00+00:00",
+        market_event_hash="a" * 64,
+    )
+
+
+def _venue(source: str, account: str, ceiling: str = "100.00") -> VenueQuote:
+    return VenueQuote(source, account, _quote(source), Decimal(ceiling))
+
+
+def _initial(venues: tuple[VenueQuote, ...]):
+    return plan_equal_split_residual(
+        Decimal("100.00"),
+        venues,
+        routing_request_id=_REQUEST_ID,
+        parent_plan_id=_PLAN_ID,
+        stake_quantum=Decimal("0.01"),
+    )
+
+
+def _reconcile(
+    venues: tuple[VenueQuote, ...],
+    receipts,
+):
+    return reconcile_equal_split_residual(
+        Decimal("100.00"),
+        venues,
+        receipts,
+        routing_request_id=_REQUEST_ID,
+        parent_plan_id=_PLAN_ID,
+        stake_quantum=Decimal("0.01"),
+    )
+
+
+def test_independent_child_receipts_complete_one_parent_without_duplicate_ledger() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    assert [leg.proposed_stake for leg in initial.legs] == [
+        Decimal("50.00"),
+        Decimal("50.00"),
+    ]
+
+    receipts = (
+        bind_leg_receipt(
+            initial.legs[0],
+            effect=ExternalEffect.ACCEPTED,
+            external_receipt_id="external-a-1",
+            confirmed_accepted=Decimal("50.00"),
+        ),
+        bind_leg_receipt(
+            initial.legs[1],
+            effect=ExternalEffect.ACCEPTED,
+            external_receipt_id="external-b-1",
+            confirmed_accepted=Decimal("50.00"),
+        ),
+    )
+
+    reconciled = _reconcile((a, b), receipts)
+    assert reconciled.state is RoutingState.COMPLETE
+    assert reconciled.confirmed_total == Decimal("100.00")
+    assert reconciled.residual_before == Decimal("0")
+    assert reconciled.proposed_total == Decimal("0")
+    assert reconciled.legs == ()
+
+
+def test_exact_external_receipt_replay_is_idempotent() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    receipt = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-1",
+        confirmed_accepted=Decimal("50.00"),
+    )
+
+    reconciled = _reconcile((a, b), (receipt, receipt))
+    assert reconciled.confirmed_total == Decimal("50.00")
+    assert reconciled.residual_before == Decimal("50.00")
+    assert reconciled.state is RoutingState.ROUTE
+
+
+def test_conflicting_reuse_of_provider_receipt_identity_fails_closed() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    receipt = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-1",
+        confirmed_accepted=Decimal("40.00"),
+    )
+    conflict = replace(receipt, confirmed_accepted=Decimal("50.00"))
+
+    with pytest.raises(RoutingContractError, match="conflicting external receipt"):
+        _reconcile((a, b), (receipt, conflict))
+
+
+def test_receipt_parent_and_canonical_child_identity_are_verified() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    receipt = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-1",
+        confirmed_accepted=Decimal("40.00"),
+    )
+
+    with pytest.raises(RoutingContractError, match="parent_plan_id"):
+        _reconcile(
+            (a, b),
+            (replace(receipt, parent_plan_id="different-parent"),),
+        )
+
+    with pytest.raises(RoutingContractError, match="canonical child identity"):
+        _reconcile(
+            (a, b),
+            (replace(receipt, proposal_leg_id="b" * 64),),
+        )
+
+
+def test_multiple_receipts_cannot_confirm_more_than_bound_child_proposal() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    first = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-1",
+        confirmed_accepted=Decimal("30.00"),
+    )
+    second = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-2",
+        confirmed_accepted=Decimal("30.00"),
+    )
+
+    with pytest.raises(RoutingContractError, match="exceed bound child"):
+        _reconcile((a, b), (first, second))
+
+
+def test_unknown_child_receipt_blocks_blind_reroute() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    unknown = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.UNKNOWN,
+        external_receipt_id="external-a-unknown",
+    )
+
+    reconciled = _reconcile((a, b), (unknown,))
+    assert reconciled.state is RoutingState.BLOCKED_UNKNOWN
+    assert reconciled.proposed_total == Decimal("0")
+    assert reconciled.legs == ()
+
+
+def test_partial_acceptance_then_child_refusal_routes_only_residual_to_other_venue() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    accepted = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-accepted",
+        confirmed_accepted=Decimal("40.00"),
+    )
+    refused = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.MARKET_REFUSED,
+        external_receipt_id="external-a-refused",
+    )
+
+    reconciled = _reconcile((a, b), (accepted, refused))
+    assert reconciled.confirmed_total == Decimal("40.00")
+    assert reconciled.residual_before == Decimal("60.00")
+    assert reconciled.state is RoutingState.ROUTE
+    assert reconciled.proposed_total == Decimal("60.00")
+    assert [leg.venue for leg in reconciled.legs] == [b]
+    assert [leg.proposed_stake for leg in reconciled.legs] == [Decimal("60.00")]

@@ -52,10 +52,10 @@ T7 = "2026-01-08T00:00:00+00:00"
 
 def _points():
     return (
-        TrainingPoint("2026-01-01T00:00:00+00:00", 1.0, 0.0),
-        TrainingPoint("2026-01-02T00:00:00+00:00", 2.0, 1.0),
-        TrainingPoint("2026-01-03T00:00:00+00:00", 3.0, 1.0),
-        TrainingPoint("2026-01-04T00:00:00+00:00", 4.0, 0.0),
+        TrainingPoint("2026-01-01T00:00:00+00:00", 1.0, 0.0, "2026-01-01T00:00:00+00:00"),
+        TrainingPoint("2026-01-02T00:00:00+00:00", 2.0, 1.0, "2026-01-02T00:00:00+00:00"),
+        TrainingPoint("2026-01-03T00:00:00+00:00", 3.0, 1.0, "2026-01-03T00:00:00+00:00"),
+        TrainingPoint("2026-01-04T00:00:00+00:00", 4.0, 0.0, "2026-01-04T00:00:00+00:00"),
     )
 
 
@@ -283,6 +283,15 @@ def test_baseline_excludes_labels_not_revealed_by_training_cutoff():
     model = MeanBaselineModel.fit("baseline-delayed", points, training_cutoff=T2)
     assert model.training_count == 1
     assert model.mean_target == 1.0
+
+
+def test_baseline_rejects_missing_target_availability_provenance():
+    with pytest.raises(ValueError, match="target_available_at is required"):
+        MeanBaselineModel.fit(
+            "baseline-unproven-label",
+            (TrainingPoint(T0, 1.0, 0.0),),
+            training_cutoff=T0,
+        )
 
 
 def test_walk_forward_is_expanding_window_and_deterministic():

@@ -24,7 +24,7 @@ class StoragePhysicalTimeTests(unittest.TestCase):
             }
         )
 
-    def test_mixed_offsets_order_by_physical_instant_and_drive_current_projection(self):
+    def test_mixed_offsets_order_history_by_physical_instant_but_current_by_source_sequence(self):
         earlier = self._event(
             odds="1.8",
             observed_ts="2026-01-01T01:00:00+01:00",
@@ -41,10 +41,10 @@ class StoragePhysicalTimeTests(unittest.TestCase):
             store = SQLiteMarketStore(Path(tmp) / "market.db")
             self.assertEqual(store.append_many([earlier, later]), 2)
             self.assertEqual([event.decimal_odds for event in store.events()], [Decimal("1.8"), Decimal("2.0")])
-            self.assertEqual(store.current()[earlier.quote_key].decimal_odds, Decimal("2.0"))
+            self.assertEqual(store.current()[earlier.quote_key].decimal_odds, Decimal("1.8"))
             store.close()
 
-    def test_reopen_repairs_legacy_lexical_current_projection(self):
+    def test_reopen_repairs_sequence_stale_current_projection(self):
         earlier = self._event(
             odds="1.8",
             observed_ts="2026-01-01T01:00:00+01:00",
@@ -60,19 +60,25 @@ class StoragePhysicalTimeTests(unittest.TestCase):
             path = Path(tmp) / "market.db"
             store = SQLiteMarketStore(path)
             store.append_many([earlier, later])
-            legacy_payload = json.dumps(
-                earlier.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            stale_payload = json.dumps(
+                later.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
             )
             store.connection.execute(
-                "UPDATE current_quotes SET observed_ts=?, sequence=?, payload_json=? WHERE quote_key=?",
-                (earlier.observed_ts, earlier.sequence, legacy_payload, earlier.quote_key),
+                "UPDATE current_quotes SET observed_ts=?, sequence=?, payload_json=? WHERE source_id=? AND quote_key=?",
+                (
+                    later.observed_ts,
+                    later.sequence,
+                    stale_payload,
+                    later.source_id,
+                    later.quote_key,
+                ),
             )
             store.connection.commit()
-            self.assertEqual(store.current()[earlier.quote_key].decimal_odds, Decimal("1.8"))
+            self.assertEqual(store.current()[earlier.quote_key].decimal_odds, Decimal("2.0"))
             store.close()
 
             reopened = SQLiteMarketStore(path)
-            self.assertEqual(reopened.current()[earlier.quote_key].decimal_odds, Decimal("2.0"))
+            self.assertEqual(reopened.current()[earlier.quote_key].decimal_odds, Decimal("1.8"))
             reopened.close()
 
     def test_rebuild_takes_write_transaction_before_history_snapshot(self):

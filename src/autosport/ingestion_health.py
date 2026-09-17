@@ -20,7 +20,9 @@ _COUNTER_FIELDS = (
 )
 _SCHEMA_V1 = 1
 _SCHEMA_V2 = 2
-_HISTORY_ENTRY_FIELDS = frozenset({"recorded_at", "state"})
+_SCHEMA_V3 = 3
+_HISTORY_ENTRY_V2_FIELDS = frozenset({"recorded_at", "state"})
+_HISTORY_ENTRY_V3_FIELDS = frozenset({"recorded_at", "transition_order", "state"})
 
 
 def parse_source_timestamp(value: str) -> datetime:
@@ -268,10 +270,11 @@ class _SourceHealthWriterLock:
 class SourceHealthStore:
     """Durable provider-health projection plus causal append-only state history.
 
-    Schema v2 keeps the latest projection and the decision-relevant transition history
-    in one atomically replaced document. Legacy schema-v1 stores remain readable and are
-    upgraded on the first successful mutation. A legacy projection is never backfilled
-    earlier than the timestamp evidenced by that projection itself.
+    Schema v3 keeps exact transition evidence time plus a durable per-source order key,
+    so equal-time transitions remain totally ordered without inventing timestamps.
+    Legacy schema-v1/v2 stores remain readable and are upgraded on the first successful
+    mutation. A legacy projection is never backfilled earlier than the timestamp
+    evidenced by that projection itself.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -280,7 +283,7 @@ class SourceHealthStore:
         self._lock_path = self.path.with_name(self.path.name + ".lock")
         with self._writer_guard():
             if not self.path.exists():
-                self._write({"schema_version": _SCHEMA_V2, "sources": {}, "history": {}})
+                self._write({"schema_version": _SCHEMA_V3, "sources": {}, "history": {}})
             else:
                 self._read()
 
@@ -498,19 +501,38 @@ class SourceHealthStore:
     def _writer_guard(self) -> _SourceHealthWriterLock:
         return _SourceHealthWriterLock(self._lock_path)
 
-    def _upgrade_to_v2(self, raw: dict) -> dict:
-        if raw["schema_version"] == _SCHEMA_V2:
+    def _upgrade_to_v3(self, raw: dict) -> dict:
+        if raw["schema_version"] == _SCHEMA_V3:
             return raw
-        upgraded = {"schema_version": _SCHEMA_V2, "sources": {}, "history": {}}
+        upgraded = {"schema_version": _SCHEMA_V3, "sources": {}, "history": {}}
+        if raw["schema_version"] == _SCHEMA_V1:
+            for source_id, payload in raw["sources"].items():
+                state = self._state_from_payload(payload)
+                normalized = self._payload(state)
+                upgraded["sources"][source_id] = normalized
+                recorded_at = self._transition_at(state)
+                if recorded_at is None:
+                    raise ValueError(
+                        "persisted non-pristine source health requires transition timestamp"
+                    )
+                upgraded["history"][source_id] = [
+                    {
+                        "recorded_at": recorded_at,
+                        "transition_order": 1,
+                        "state": normalized,
+                    }
+                ]
+            return upgraded
+
         for source_id, payload in raw["sources"].items():
-            state = self._state_from_payload(payload)
-            normalized = self._payload(state)
-            upgraded["sources"][source_id] = normalized
-            recorded_at = self._transition_at(state)
-            if recorded_at is None:
-                raise ValueError("persisted non-pristine source health requires transition timestamp")
+            upgraded["sources"][source_id] = payload
             upgraded["history"][source_id] = [
-                {"recorded_at": recorded_at, "state": normalized}
+                {
+                    "recorded_at": entry["recorded_at"],
+                    "transition_order": index,
+                    "state": entry["state"],
+                }
+                for index, entry in enumerate(raw["history"][source_id], start=1)
             ]
         return upgraded
 
@@ -521,13 +543,20 @@ class SourceHealthStore:
         if transition_at is None or parse_source_timestamp(transition_at) != recorded:
             raise ValueError("source health transition timestamp mismatch")
 
-        raw = self._upgrade_to_v2(self._read())
+        raw = self._upgrade_to_v3(self._read())
         entries = raw["history"].setdefault(state.source_id, [])
-        if entries and parse_source_timestamp(entries[-1]["recorded_at"]) >= recorded:
-            raise ValueError("source health transitions must be recorded in strictly increasing time order")
+        if entries and parse_source_timestamp(entries[-1]["recorded_at"]) > recorded:
+            raise ValueError("source health transitions cannot move backwards in evidence time")
 
         payload = self._payload(state)
-        entries.append({"recorded_at": recorded_at, "state": payload})
+        transition_order = entries[-1]["transition_order"] + 1 if entries else 1
+        entries.append(
+            {
+                "recorded_at": recorded_at,
+                "transition_order": transition_order,
+                "state": payload,
+            }
+        )
         raw["sources"][state.source_id] = payload
         self._write(raw)
 
@@ -559,7 +588,7 @@ class SourceHealthStore:
             not isinstance(raw, dict)
             or isinstance(schema_version, bool)
             or not isinstance(schema_version, int)
-            or schema_version not in {_SCHEMA_V1, _SCHEMA_V2}
+            or schema_version not in {_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3}
             or not isinstance(raw.get("sources"), dict)
         ):
             raise ValueError("invalid source health store")
@@ -571,27 +600,47 @@ class SourceHealthStore:
         )
         if set(raw) != expected_fields:
             raise ValueError("invalid source health store")
-        if schema_version == _SCHEMA_V2 and not isinstance(raw.get("history"), dict):
+        if schema_version in {_SCHEMA_V2, _SCHEMA_V3} and not isinstance(
+            raw.get("history"), dict
+        ):
             raise ValueError("invalid source health store")
 
         try:
             for source_id, payload in raw["sources"].items():
                 self._validate_persisted_state(source_id, payload)
 
-            if schema_version == _SCHEMA_V2:
+            if schema_version in {_SCHEMA_V2, _SCHEMA_V3}:
                 if set(raw["history"]) != set(raw["sources"]):
                     raise ValueError("source health history/projection identity mismatch")
                 for source_id, entries in raw["history"].items():
                     if not isinstance(entries, list) or not entries:
                         raise ValueError("source health history must be a non-empty array")
-                    previous: datetime | None = None
+                    previous_recorded: datetime | None = None
+                    previous_order = 0
                     for entry in entries:
-                        if not isinstance(entry, dict) or set(entry) != _HISTORY_ENTRY_FIELDS:
+                        expected_entry_fields = (
+                            _HISTORY_ENTRY_V2_FIELDS
+                            if schema_version == _SCHEMA_V2
+                            else _HISTORY_ENTRY_V3_FIELDS
+                        )
+                        if not isinstance(entry, dict) or set(entry) != expected_entry_fields:
                             raise ValueError("invalid source health history entry")
                         recorded_at = parse_source_timestamp(entry["recorded_at"])
-                        if previous is not None and recorded_at <= previous:
-                            raise ValueError("source health history is not strictly increasing")
-                        previous = recorded_at
+                        if schema_version == _SCHEMA_V2:
+                            if previous_recorded is not None and recorded_at <= previous_recorded:
+                                raise ValueError("source health history is not strictly increasing")
+                        else:
+                            order = entry["transition_order"]
+                            if (
+                                isinstance(order, bool)
+                                or not isinstance(order, int)
+                                or order != previous_order + 1
+                            ):
+                                raise ValueError("source health transition order is not contiguous")
+                            if previous_recorded is not None and recorded_at < previous_recorded:
+                                raise ValueError("source health history evidence time moved backwards")
+                            previous_order = order
+                        previous_recorded = recorded_at
                         self._validate_persisted_state(source_id, entry["state"])
                         state = self._state_from_payload(
                             entry["state"], normalize_failed_flags=False

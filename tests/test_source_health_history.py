@@ -83,8 +83,12 @@ class SourceHealthHistoryTests(unittest.TestCase):
                 error=ConnectionError("down"),
             )
             persisted = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(persisted["schema_version"], 2)
+            self.assertEqual(persisted["schema_version"], 3)
             self.assertEqual(len(persisted["history"]["provider-a"]), 2)
+            self.assertEqual(
+                [entry["transition_order"] for entry in persisted["history"]["provider-a"]],
+                [1, 2],
+            )
             self.assertEqual(store.get_as_of("provider-a", as_of=self.at(5)).status, "healthy")
             self.assertEqual(store.get_as_of("provider-a", as_of=self.at(9)).status, "failed")
 
@@ -95,7 +99,7 @@ class SourceHealthHistoryTests(unittest.TestCase):
             self.success(store, "2026-09-17T12:00:08+00:00")
             baseline = path.read_bytes()
 
-            with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            with self.assertRaisesRegex(ValueError, "cannot move backwards"):
                 store.record_failure(
                     "provider-a",
                     now="2026-09-17T12:00:07+00:00",
@@ -105,25 +109,28 @@ class SourceHealthHistoryTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), baseline)
             self.assertEqual(store.get("provider-a").status, "healthy")
 
-    def test_equal_timestamp_transition_is_rejected_without_rewriting_replay_boundary(self) -> None:
+    def test_equal_timestamp_transition_uses_durable_order_without_timestamp_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "health.json"
             store = SourceHealthStore(path)
-            self.success(store, "2026-09-17T12:00:08+00:00")
-            baseline = path.read_bytes()
+            same_time = "2026-09-17T12:00:08+00:00"
+            self.success(store, same_time)
             boundary = self.at(8)
             self.assertEqual(store.get_as_of("provider-a", as_of=boundary).status, "healthy")
 
-            with self.assertRaisesRegex(ValueError, "strictly increasing"):
-                store.record_failure(
-                    "provider-a",
-                    now="2026-09-17T12:00:08+00:00",
-                    error=RuntimeError("same-time late transition"),
-                )
+            store.record_failure(
+                "provider-a",
+                now=same_time,
+                error=RuntimeError("same-time concurrent transition"),
+            )
 
-            self.assertEqual(path.read_bytes(), baseline)
-            self.assertEqual(store.get_as_of("provider-a", as_of=boundary).status, "healthy")
-            self.assertEqual(store.get("provider-a").status, "healthy")
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            entries = persisted["history"]["provider-a"]
+            self.assertEqual([entry["transition_order"] for entry in entries], [1, 2])
+            self.assertEqual([entry["recorded_at"] for entry in entries], [same_time, same_time])
+            self.assertEqual(store.get_as_of("provider-a", as_of=self.at(7)).status, "unknown")
+            self.assertEqual(store.get_as_of("provider-a", as_of=boundary).status, "failed")
+            self.assertEqual(store.get("provider-a").status, "failed")
 
     def test_naive_as_of_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

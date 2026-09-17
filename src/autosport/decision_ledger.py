@@ -57,6 +57,11 @@ def _detached_decision_payload(value: Any) -> Any:
     return value
 
 
+GENERAL_DECISION_KIND = "GENERAL"
+ECONOMIC_DECISION_KIND = "ECONOMIC"
+ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY = "economic_goal_provenance"
+
+
 @dataclass(frozen=True, slots=True)
 class DecisionRecord:
     replay_run_id: str
@@ -67,15 +72,26 @@ class DecisionRecord:
     context_hash: str
     decision_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     recorded_at: str = field(default_factory=utc_now_iso)
+    decision_kind: str = GENERAL_DECISION_KIND
 
     def __post_init__(self) -> None:
         payload = _freeze_decision_payload(self.payload)
         if contains_forbidden_future_key(payload):
             raise ValueError("decision payload must not contain future-result fields")
+        if self.decision_kind not in {GENERAL_DECISION_KIND, ECONOMIC_DECISION_KIND}:
+            raise ValueError("decision_kind must be GENERAL or ECONOMIC")
+        # Legacy economic records predate the explicit decision_kind field. Their
+        # durable, hash-bound provenance is enough to rehydrate the semantic kind
+        # after the original bytes have been verified without rewriting history.
+        if (
+            self.decision_kind == GENERAL_DECISION_KIND
+            and ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY in payload
+        ):
+            object.__setattr__(self, "decision_kind", ECONOMIC_DECISION_KIND)
         object.__setattr__(self, "payload", payload)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        record = {
             "replay_run_id": self.replay_run_id,
             "agent": self.agent,
             "observed_ts": self.observed_ts,
@@ -85,9 +101,13 @@ class DecisionRecord:
             "decision_id": self.decision_id,
             "recorded_at": self.recorded_at,
         }
+        # Keep GENERAL records byte/schema compatible with the historical ledger.
+        # New ECONOMIC records carry an explicit structural authority marker.
+        if self.decision_kind == ECONOMIC_DECISION_KIND:
+            record["decision_kind"] = ECONOMIC_DECISION_KIND
+        return record
 
 
-ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY = "economic_goal_provenance"
 _ECONOMIC_GOAL_PROVENANCE_FIELDS = frozenset(
     {
         "schema",
@@ -139,18 +159,16 @@ def bind_economic_goal(
     record: DecisionRecord,
     contract: EconomicGoalContract,
 ) -> DecisionRecord:
-    """Return the same decision identity with immutable EconomicGoal evidence bound.
-
-    This is the canonical material-economic binding seam.  It does not persist or
-    mutate the EconomicGoalContract; EconomicGoalStore remains the sole durable
-    goal authority.  A caller-supplied provenance object is rejected so persisted
-    evidence can only be derived from the exact supplied canonical contract.
-    """
+    """Return the same economic decision identity with canonical goal evidence bound."""
 
     if not isinstance(record, DecisionRecord):
         raise TypeError("economic decision binding requires a DecisionRecord")
     if not isinstance(contract, EconomicGoalContract):
         raise TypeError("economic decision binding requires an EconomicGoalContract")
+    if record.decision_kind != ECONOMIC_DECISION_KIND:
+        raise DecisionLedgerIntegrityError(
+            "Decision Ledger material economic decision must declare ECONOMIC decision_kind"
+        )
 
     payload = _detached_decision_payload(record.payload)
     if not isinstance(payload, dict):
@@ -173,6 +191,7 @@ def bind_economic_goal(
         context_hash=record.context_hash,
         decision_id=record.decision_id,
         recorded_at=record.recorded_at,
+        decision_kind=ECONOMIC_DECISION_KIND,
     )
 
 
@@ -180,12 +199,16 @@ def verify_economic_goal_binding(
     record: DecisionRecord,
     contract: EconomicGoalContract,
 ) -> EconomicGoalProvenance:
-    """Fail closed unless one durable decision is bound to ``contract`` exactly."""
+    """Fail closed unless one durable economic decision is bound to ``contract`` exactly."""
 
     if not isinstance(record, DecisionRecord):
         raise TypeError("economic decision verification requires a DecisionRecord")
     if not isinstance(contract, EconomicGoalContract):
         raise TypeError("economic decision verification requires an EconomicGoalContract")
+    if record.decision_kind != ECONOMIC_DECISION_KIND:
+        raise DecisionLedgerIntegrityError(
+            "Decision Ledger record is not classified as a material economic decision"
+        )
 
     evidence = record.payload.get(ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY)
     if evidence is None:
@@ -215,7 +238,7 @@ class JsonlDecisionLedger:
     """Append-only causal decision ledger. Result/outcome fields do not belong here."""
 
     _ENVELOPE_FIELDS = frozenset({"sha256", "record"})
-    _RECORD_FIELDS = frozenset(
+    _LEGACY_RECORD_FIELDS = frozenset(
         {
             "replay_run_id",
             "agent",
@@ -227,6 +250,7 @@ class JsonlDecisionLedger:
             "recorded_at",
         }
     )
+    _ECONOMIC_RECORD_FIELDS = _LEGACY_RECORD_FIELDS | {"decision_kind"}
     _STRING_FIELDS = (
         "replay_run_id",
         "agent",
@@ -306,7 +330,10 @@ class JsonlDecisionLedger:
         line_number: int | None = None,
     ) -> dict[str, Any]:
         location = f" at line {line_number}" if line_number is not None else ""
-        if not isinstance(record, dict) or set(record) != cls._RECORD_FIELDS:
+        if not isinstance(record, dict) or set(record) not in {
+            cls._LEGACY_RECORD_FIELDS,
+            cls._ECONOMIC_RECORD_FIELDS,
+        }:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger record schema is invalid{location}"
             )
@@ -322,6 +349,10 @@ class JsonlDecisionLedger:
                 raise DecisionLedgerIntegrityError(
                     f"Decision Ledger record field {field_name!r} is invalid{location}"
                 )
+        if "decision_kind" in record and record["decision_kind"] != ECONOMIC_DECISION_KIND:
+            raise DecisionLedgerIntegrityError(
+                f"Decision Ledger decision_kind is invalid{location}"
+            )
         payload = record.get("payload")
         if not isinstance(payload, dict):
             raise DecisionLedgerIntegrityError(
@@ -330,6 +361,13 @@ class JsonlDecisionLedger:
         if contains_forbidden_future_key(payload):
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger payload contains future-result fields{location}"
+            )
+        if (
+            "decision_kind" in record
+            and ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY not in payload
+        ):
+            raise DecisionLedgerIntegrityError(
+                f"Decision Ledger ECONOMIC record is missing EconomicGoal provenance{location}"
             )
         return record
 
@@ -350,7 +388,7 @@ class JsonlDecisionLedger:
             f"Decision Ledger JSON contains non-finite numeric value {value!r}"
         )
 
-    def append(self, record: DecisionRecord) -> str:
+    def _append_validated(self, record: DecisionRecord) -> str:
         payload = self._validate_record(record.to_dict())
         canonical = self._canonical_record(payload)
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -366,6 +404,25 @@ class JsonlDecisionLedger:
             os.fsync(handle.fileno())
         return digest
 
+    def append(self, record: DecisionRecord) -> str:
+        """Persist a non-economic decision only.
+
+        Material economic records have a separate structural authority path so a
+        caller cannot accidentally bypass EconomicGoal provenance by using this
+        generic append API.
+        """
+
+        if not isinstance(record, DecisionRecord):
+            raise TypeError("Decision Ledger append requires a DecisionRecord")
+        if (
+            record.decision_kind == ECONOMIC_DECISION_KIND
+            or ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY in record.payload
+        ):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger material economic decision must use append_economic"
+            )
+        return self._append_validated(record)
+
     def append_economic(
         self,
         record: DecisionRecord,
@@ -373,7 +430,7 @@ class JsonlDecisionLedger:
     ) -> str:
         """Persist a material economic decision with derived goal provenance bound."""
 
-        return self.append(bind_economic_goal(record, contract))
+        return self._append_validated(bind_economic_goal(record, contract))
 
     @classmethod
     def _verify_bytes(cls, raw: bytes) -> int:
@@ -425,7 +482,7 @@ class JsonlDecisionLedger:
                     f"{exc} at line {line_number}"
                 ) from exc
 
-            if not isinstance(envelope, dict) or set(envelope) != cls._ENVELOPE_FIELDS:
+            if not isinstance(envelope, dict) or set(envelope) != self._ENVELOPE_FIELDS:
                 raise DecisionLedgerIntegrityError(
                     f"Decision Ledger envelope schema is invalid at line {line_number}"
                 )

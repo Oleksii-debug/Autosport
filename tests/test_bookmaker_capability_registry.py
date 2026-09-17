@@ -1,4 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
 import json
+from threading import Event
 
 import pytest
 
@@ -171,6 +173,58 @@ def test_registry_rejects_duplicate_persisted_profile_entries(tmp_path) -> None:
         BookmakerCapabilityRegistry(path).profile_history(
             "book-a", "acct-a", "adapter-a"
         )
+
+
+def test_registry_serializes_concurrent_profile_and_governance_writers(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "registry.json"
+    first = BookmakerCapabilityRegistry(path)
+    second = BookmakerCapabilityRegistry(path)
+
+    first_write_entered = Event()
+    allow_first_write = Event()
+    second_load_entered = Event()
+
+    original_first_write = first._write_document
+    original_second_load = second._load_document
+
+    def blocked_first_write(profiles, governance) -> None:
+        first_write_entered.set()
+        assert allow_first_write.wait(5)
+        original_first_write(profiles, governance)
+
+    def observed_second_load():
+        second_load_entered.set()
+        return original_second_load()
+
+    monkeypatch.setattr(first, "_write_document", blocked_first_write)
+    monkeypatch.setattr(second, "_load_document", observed_second_load)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(first.register_profile, _profile())
+        assert first_write_entered.wait(5)
+
+        second_future = pool.submit(
+            second.register_governance,
+            _governance(GovernancePermissionState.PERMITTED),
+        )
+        assert not second_load_entered.wait(0.2)
+
+        allow_first_write.set()
+        assert first_future.result(timeout=5)
+        assert second_future.result(timeout=5)
+
+    assert second_load_entered.is_set()
+    reopened = BookmakerCapabilityRegistry(path)
+    assert [
+        item.profile_version
+        for item in reopened.profile_history("book-a", "acct-a", "adapter-a")
+    ] == [1]
+    assert reopened.governance_history("book-a", "acct-a") == (
+        _governance(GovernancePermissionState.PERMITTED),
+    )
 
 
 def test_registry_file_is_deterministic_json_with_schema_version(tmp_path) -> None:

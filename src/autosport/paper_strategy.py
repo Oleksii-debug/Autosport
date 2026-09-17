@@ -113,6 +113,11 @@ class PaperValueAgent:
 
         leg = TicketLeg(event.event_id, event.market_id, event.selection_id, event.decimal_odds)
         goal = self.risk_policy.economic_goal
+        # A material EconomicGoal-bound decision is not allowed to exist only in
+        # mutable PaperBook state. Without the canonical Decision Ledger there is no
+        # restart-verifiable goal/policy evidence, so fail closed before mutation.
+        if goal is not None and context.decision_ledger is None:
+            return
         proposal_context = None
         if goal is not None:
             proposal_context = ProposedTicketRiskContext(

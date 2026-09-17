@@ -45,12 +45,23 @@ def mutation_state(
     current: str = "3c9a161",
     mutations: list[dict] | None = None,
 ) -> dict:
+    # Tests default to truthful exported Git ancestry. Individual regressions can
+    # provide explicit parent_heads to exercise malformed/incomplete evidence.
+    normalized: list[dict] = []
+    previous = prior
+    for mutation in [] if mutations is None else mutations:
+        item = dict(mutation)
+        item.setdefault("parent_heads", [previous])
+        normalized.append(item)
+        head = item.get("head")
+        if isinstance(head, str) and head.strip():
+            previous = head.strip()
     return {
         "semantic_key": SEMANTIC,
         "branch": "swarm/a-483-economic-goal-risk-20260917",
         "prior_head": prior,
         "current_head": current,
-        "mutations": [] if mutations is None else mutations,
+        "mutations": normalized,
     }
 
 
@@ -212,16 +223,59 @@ def test_semantic_key_mismatch_is_rejected() -> None:
         raise AssertionError("semantic key mismatch must fail")
 
 
+def test_omitted_intermediate_commit_fails_closed() -> None:
+    # Actual direct parent of current is the omitted foreign commit 526ad252.
+    # The prior baseline therefore cannot be proven as the parent of the only
+    # supplied owner-tagged event.
+    result = guard.evaluate_guard(
+        claim_state(),
+        mutation_state(
+            mutations=[
+                {
+                    "head": "3c9a161",
+                    "run_id": A,
+                    "parent_heads": ["526ad252"],
+                }
+            ]
+        ),
+        now=NOW,
+    )
+    assert result["status"] == "AMBIGUOUS"
+    assert "non-contiguous" in result["evidence"][0]
+
+
+def test_valid_merge_commit_accepts_previous_source_head_as_any_parent() -> None:
+    result = guard.evaluate_guard(
+        claim_state(),
+        mutation_state(
+            current="merge-head",
+            mutations=[
+                {
+                    "head": "merge-head",
+                    "run_id": A,
+                    "parent_heads": ["ec35e21", "new-main-head"],
+                }
+            ],
+        ),
+        now=NOW,
+    )
+    assert result["status"] == "OK"
+
+
+def test_missing_parent_evidence_fails_closed() -> None:
+    state = mutation_state(mutations=[{"head": "3c9a161", "run_id": A}])
+    state["mutations"][0].pop("parent_heads")
+    result = guard.evaluate_guard(claim_state(), state, now=NOW)
+    assert result["status"] == "AMBIGUOUS"
+    assert "parent_heads" in result["evidence"][0]
+
+
 def test_cli_returns_nonzero_for_collision(tmp_path, capsys) -> None:
     claims_path = tmp_path / "claims.json"
     mutation_path = tmp_path / "mutation.json"
     claims_path.write_text(json.dumps(claim_state()), encoding="utf-8")
     mutation_path.write_text(
-        json.dumps(
-            mutation_state(
-                mutations=[{"head": "3c9a161", "run_id": B}]
-            )
-        ),
+        json.dumps(mutation_state(mutations=[{"head": "3c9a161", "run_id": B}])),
         encoding="utf-8",
     )
 
@@ -248,11 +302,7 @@ def test_cli_returns_nonzero_without_live_source_owner(tmp_path, capsys) -> None
         encoding="utf-8",
     )
     mutation_path.write_text(
-        json.dumps(
-            mutation_state(
-                mutations=[{"head": "3c9a161", "run_id": B}]
-            )
-        ),
+        json.dumps(mutation_state(mutations=[{"head": "3c9a161", "run_id": B}])),
         encoding="utf-8",
     )
 

@@ -247,6 +247,7 @@ def route_residual(
         tuple[str, str],
         tuple[str, str, str, QuoteRef, Decimal],
     ] = {}
+    accepted_receipt_by_child: dict[tuple[str, str], str] = {}
     for item, identity in zip(obs, observation_identities, strict=True):
         if identity not in by_identity:
             raise RoutingContractError(
@@ -291,6 +292,20 @@ def route_residual(
                     "proposal leg identity has conflicting bound evidence"
                 )
             child_leg_bindings[child_key] = child_binding
+            if item.effect is ExternalEffect.ACCEPTED:
+                if item.external_receipt_id is None:
+                    raise RoutingContractError(
+                        "child-bound ACCEPTED evidence requires external_receipt_id"
+                    )
+                previous_receipt = accepted_receipt_by_child.get(child_key)
+                if (
+                    previous_receipt is not None
+                    and previous_receipt != item.external_receipt_id
+                ):
+                    raise RoutingContractError(
+                        "multiple external receipts for one child are ambiguous"
+                    )
+                accepted_receipt_by_child[child_key] = item.external_receipt_id
 
     refused: set[tuple[str, str]] = set()
     accepted_by_identity: dict[tuple[str, str], Decimal] = {}

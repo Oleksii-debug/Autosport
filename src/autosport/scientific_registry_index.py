@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from .scientific_registry import PromotionAction, RegistryEntry, ScientificRegistry
+from .scientific_registry import (
+    PromotionAction,
+    RegistryEntry,
+    ScientificRegistry,
+    ScientificRegistryError,
+)
 
 
 class StrategyLifecycleState(StrEnum):
@@ -17,14 +22,6 @@ class StrategyLifecycleState(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class StrategyStateProjection:
-    """Causal promotion-state projection for one canonical strategy key.
-
-    The existing ``canonical_strategy_id`` is the stable class/context key for this
-    foundation. The projection is derived on demand and never persists a second
-    mutable promotion authority. ``champion_strategy_version_id`` is the champion
-    derived only from promotion history for this same strategy key.
-    """
-
     canonical_strategy_id: str
     as_of: str
     champion_strategy_version_id: str | None
@@ -47,8 +44,6 @@ class StrategyStateProjection:
 
 @dataclass(frozen=True, slots=True)
 class ScientificLineageProjection:
-    """Deterministic causal read model over the append-only scientific registry."""
-
     query_type: str
     query_id: str
     as_of: str
@@ -64,12 +59,7 @@ class ScientificLineageProjection:
 
 
 class ScientificRegistryIndex:
-    """Read-only factory-facing indexes derived from canonical registry history.
-
-    No index state is persisted. Every result is recomputed from causal records at
-    ``as_of`` so restart/replay behavior stays deterministic and future decisions
-    cannot leak into historical queries.
-    """
+    """Read-only factory-facing indexes derived from canonical registry history."""
 
     def __init__(self, registry: ScientificRegistry) -> None:
         if not isinstance(registry, ScientificRegistry):
@@ -90,6 +80,42 @@ class ScientificRegistryIndex:
     @staticmethod
     def _ids(values: tuple[RegistryEntry, ...]) -> set[str]:
         return {entry.record_id for entry in values}
+
+    @staticmethod
+    def _expand_predecessors(
+        values: tuple[RegistryEntry, ...],
+        roots: set[str],
+        *,
+        field: str,
+        record_type: str,
+    ) -> set[str]:
+        by_id = {entry.record_id: entry for entry in values}
+        expanded: set[str] = set()
+        for root in sorted(roots):
+            current: str | None = root
+            local_seen: set[str] = set()
+            while current is not None:
+                if current in local_seen:
+                    raise ScientificRegistryError(
+                        f"{record_type} predecessor cycle detected at {current}"
+                    )
+                entry = by_id.get(current)
+                if entry is None:
+                    raise ScientificRegistryError(
+                        f"lineage references causally missing {record_type}:{current}"
+                    )
+                expanded.add(current)
+                local_seen.add(current)
+                predecessor = entry.payload.get(field)
+                if predecessor is None:
+                    current = None
+                elif isinstance(predecessor, str) and predecessor:
+                    current = predecessor
+                else:
+                    raise ScientificRegistryError(
+                        f"{record_type}:{current} has invalid {field}"
+                    )
+        return expanded
 
     def strategy_state(self, canonical_strategy_id: str, *, as_of: str) -> StrategyStateProjection:
         versions = self._only(
@@ -214,24 +240,34 @@ class ScientificRegistryIndex:
         )
 
     def by_model(self, model_version_id: str, *, as_of: str) -> ScientificLineageProjection:
-        models = tuple(
+        models_all = self._records("ModelVersion", as_of)
+        root_models = tuple(entry for entry in models_all if entry.record_id == model_version_id)
+        if root_models:
+            model_ids = self._expand_predecessors(
+                models_all,
+                {model_version_id},
+                field="predecessor_model_version_id",
+                record_type="ModelVersion",
+            )
+        else:
+            model_ids = set()
+        models = tuple(entry for entry in models_all if entry.record_id in model_ids)
+
+        strategies = tuple(
             entry
-            for entry in self._records("ModelVersion", as_of)
-            if entry.record_id == model_version_id
+            for entry in self._records("StrategyVersion", as_of)
+            if entry.payload.get("model_version_id") in model_ids
         )
-        strategies = self._only(
-            self._records("StrategyVersion", as_of),
-            model_version_id=model_version_id,
-        )
-        experiments = self._only(
-            self._records("Experiment", as_of),
-            model_version_id=model_version_id,
+        experiments = tuple(
+            entry
+            for entry in self._records("Experiment", as_of)
+            if entry.payload.get("model_version_id") in model_ids
         )
         experiment_evaluation_ids = {entry.payload["evaluation_bundle_id"] for entry in experiments}
         evaluations = tuple(
             entry
             for entry in self._records("EvaluationBundle", as_of)
-            if entry.payload.get("evaluated_model_version_id") == model_version_id
+            if entry.payload.get("evaluated_model_version_id") in model_ids
             or entry.record_id in experiment_evaluation_ids
         )
         dataset_ids = {entry.payload["dataset_snapshot_id"] for entry in models}
@@ -254,7 +290,7 @@ class ScientificRegistryIndex:
         promotions = tuple(
             entry
             for entry in self._records("PromotionDecision", as_of)
-            if entry.payload.get("candidate_model_version_id") == model_version_id
+            if entry.payload.get("candidate_model_version_id") in model_ids
             or entry.payload.get("candidate_strategy_version_id") in strategy_ids
         )
         experiment_ids = self._ids(experiments)
@@ -279,40 +315,62 @@ class ScientificRegistryIndex:
         )
 
     def by_strategy(self, strategy_version_id: str, *, as_of: str) -> ScientificLineageProjection:
-        strategies = tuple(
-            entry
-            for entry in self._records("StrategyVersion", as_of)
-            if entry.record_id == strategy_version_id
+        strategies_all = self._records("StrategyVersion", as_of)
+        root_strategies = tuple(
+            entry for entry in strategies_all if entry.record_id == strategy_version_id
         )
-        experiments = self._only(
-            self._records("Experiment", as_of),
-            strategy_version_id=strategy_version_id,
+        if root_strategies:
+            strategy_ids = self._expand_predecessors(
+                strategies_all,
+                {strategy_version_id},
+                field="predecessor_strategy_version_id",
+                record_type="StrategyVersion",
+            )
+        else:
+            strategy_ids = set()
+        strategies = tuple(entry for entry in strategies_all if entry.record_id in strategy_ids)
+
+        experiments = tuple(
+            entry
+            for entry in self._records("Experiment", as_of)
+            if entry.payload.get("strategy_version_id") in strategy_ids
         )
         experiment_evaluation_ids = {entry.payload["evaluation_bundle_id"] for entry in experiments}
         evaluations = tuple(
             entry
             for entry in self._records("EvaluationBundle", as_of)
-            if entry.payload.get("evaluated_strategy_version_id") == strategy_version_id
+            if entry.payload.get("evaluated_strategy_version_id") in strategy_ids
             or entry.record_id in experiment_evaluation_ids
         )
-        model_ids = {
+
+        model_roots = {
             entry.payload["model_version_id"]
             for entry in strategies
             if entry.payload.get("model_version_id") is not None
         }
-        model_ids.update(
+        model_roots.update(
             entry.payload["model_version_id"]
             for entry in experiments
             if entry.payload.get("model_version_id") is not None
         )
-        model_ids.update(
+        model_roots.update(
             entry.payload["evaluated_model_version_id"]
             for entry in evaluations
             if entry.payload.get("evaluated_model_version_id") is not None
         )
-        models = tuple(
-            entry for entry in self._records("ModelVersion", as_of) if entry.record_id in model_ids
+        models_all = self._records("ModelVersion", as_of)
+        model_ids = (
+            self._expand_predecessors(
+                models_all,
+                model_roots,
+                field="predecessor_model_version_id",
+                record_type="ModelVersion",
+            )
+            if model_roots
+            else set()
         )
+        models = tuple(entry for entry in models_all if entry.record_id in model_ids)
+
         dataset_ids = {entry.payload["dataset_snapshot_id"] for entry in models}
         dataset_ids.update(entry.payload["dataset_snapshot_id"] for entry in experiments)
         dataset_ids.update(entry.payload["dataset_snapshot_id"] for entry in evaluations)
@@ -332,9 +390,9 @@ class ScientificRegistryIndex:
         promotions = tuple(
             entry
             for entry in self._records("PromotionDecision", as_of)
-            if entry.payload.get("candidate_strategy_version_id") == strategy_version_id
-            or entry.payload.get("predecessor_strategy_version_id") == strategy_version_id
-            or entry.payload.get("rollback_to_strategy_version_id") == strategy_version_id
+            if entry.payload.get("candidate_strategy_version_id") in strategy_ids
+            or entry.payload.get("predecessor_strategy_version_id") in strategy_ids
+            or entry.payload.get("rollback_to_strategy_version_id") in strategy_ids
         )
         experiment_ids = self._ids(experiments)
         postmortems = tuple(

@@ -161,14 +161,16 @@ class ScientificRegistryIndex:
             dataset_snapshot_id=dataset_snapshot_id,
         )
         model_ids = self._ids(models)
-        strategy_ids_from_experiments = {
-            entry.payload["strategy_version_id"] for entry in experiments
-        }
+        strategy_ids = {entry.payload["strategy_version_id"] for entry in experiments}
+        strategy_ids.update(
+            entry.payload["evaluated_strategy_version_id"]
+            for entry in evaluations
+            if entry.payload.get("evaluated_strategy_version_id") is not None
+        )
         strategies = tuple(
             entry
             for entry in self._records("StrategyVersion", as_of)
-            if entry.payload.get("model_version_id") in model_ids
-            or entry.record_id in strategy_ids_from_experiments
+            if entry.payload.get("model_version_id") in model_ids or entry.record_id in strategy_ids
         )
         strategy_ids = self._ids(strategies)
         evaluation_ids = self._ids(evaluations)
@@ -223,13 +225,20 @@ class ScientificRegistryIndex:
             self._records("Experiment", as_of),
             model_version_id=model_version_id,
         )
+        experiment_evaluation_ids = {entry.payload["evaluation_bundle_id"] for entry in experiments}
+        evaluations = tuple(
+            entry
+            for entry in self._records("EvaluationBundle", as_of)
+            if entry.payload.get("evaluated_model_version_id") == model_version_id
+            or entry.record_id in experiment_evaluation_ids
+        )
         dataset_ids = {entry.payload["dataset_snapshot_id"] for entry in models}
         dataset_ids.update(entry.payload["dataset_snapshot_id"] for entry in experiments)
+        dataset_ids.update(entry.payload["dataset_snapshot_id"] for entry in evaluations)
         feature_ids = {entry.payload["feature_set_id"] for entry in models}
         feature_ids.update(entry.payload["feature_set_id"] for entry in experiments)
         protocol_ids = {entry.payload["research_protocol_id"] for entry in models}
         protocol_ids.update(entry.payload["research_protocol_id"] for entry in experiments)
-        evaluation_ids = {entry.payload["evaluation_bundle_id"] for entry in experiments}
         datasets = tuple(
             entry for entry in self._records("DatasetSnapshot", as_of) if entry.record_id in dataset_ids
         )
@@ -238,9 +247,6 @@ class ScientificRegistryIndex:
         )
         protocols = tuple(
             entry for entry in self._records("ResearchProtocol", as_of) if entry.record_id in protocol_ids
-        )
-        evaluations = tuple(
-            entry for entry in self._records("EvaluationBundle", as_of) if entry.record_id in evaluation_ids
         )
         strategy_ids = self._ids(strategies)
         promotions = tuple(
@@ -280,6 +286,13 @@ class ScientificRegistryIndex:
             self._records("Experiment", as_of),
             strategy_version_id=strategy_version_id,
         )
+        experiment_evaluation_ids = {entry.payload["evaluation_bundle_id"] for entry in experiments}
+        evaluations = tuple(
+            entry
+            for entry in self._records("EvaluationBundle", as_of)
+            if entry.payload.get("evaluated_strategy_version_id") == strategy_version_id
+            or entry.record_id in experiment_evaluation_ids
+        )
         model_ids = {
             entry.payload["model_version_id"]
             for entry in strategies
@@ -290,16 +303,21 @@ class ScientificRegistryIndex:
             for entry in experiments
             if entry.payload.get("model_version_id") is not None
         )
+        model_ids.update(
+            entry.payload["evaluated_model_version_id"]
+            for entry in evaluations
+            if entry.payload.get("evaluated_model_version_id") is not None
+        )
         models = tuple(
             entry for entry in self._records("ModelVersion", as_of) if entry.record_id in model_ids
         )
         dataset_ids = {entry.payload["dataset_snapshot_id"] for entry in models}
         dataset_ids.update(entry.payload["dataset_snapshot_id"] for entry in experiments)
+        dataset_ids.update(entry.payload["dataset_snapshot_id"] for entry in evaluations)
         feature_ids = {entry.payload["feature_set_id"] for entry in models}
         feature_ids.update(entry.payload["feature_set_id"] for entry in experiments)
         protocol_ids = {entry.payload["research_protocol_id"] for entry in models}
         protocol_ids.update(entry.payload["research_protocol_id"] for entry in experiments)
-        evaluation_ids = {entry.payload["evaluation_bundle_id"] for entry in experiments}
         datasets = tuple(
             entry for entry in self._records("DatasetSnapshot", as_of) if entry.record_id in dataset_ids
         )
@@ -308,9 +326,6 @@ class ScientificRegistryIndex:
         )
         protocols = tuple(
             entry for entry in self._records("ResearchProtocol", as_of) if entry.record_id in protocol_ids
-        )
-        evaluations = tuple(
-            entry for entry in self._records("EvaluationBundle", as_of) if entry.record_id in evaluation_ids
         )
         promotions = tuple(
             entry

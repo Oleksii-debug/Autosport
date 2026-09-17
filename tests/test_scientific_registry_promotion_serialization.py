@@ -46,6 +46,7 @@ def _seed_promotion_evidence(
     *,
     frozen_feature_version: str = "v1",
     frozen_config_sha256: str = SHA_B,
+    dataset_causal_cutoff: str = T1,
     eval1_strategy_id: str = "strategy-1",
     eval1_model_id: str | None = "model-1",
 ) -> tuple[ResearchProtocol, EvaluationBundleRef, EvaluationBundleRef, ExperimentRecord]:
@@ -88,7 +89,7 @@ def _seed_promotion_evidence(
         SHA_A,
         "lawful-provider:fixture",
         "license-evidence:v1",
-        T1,
+        dataset_causal_cutoff,
         T0,
         outcome_reveal_after=T1,
     )
@@ -291,6 +292,40 @@ def test_equal_instant_promotion_cannot_reorder_before_durable_history(tmp_path)
     )
     with pytest.raises(PromotionEvidenceError, match="backdated"):
         registry.record_promotion(earlier_total_order)
+
+    assert registry.champion_strategy(as_of=T3) == "strategy-1"
+
+
+def test_promotion_rejects_dataset_causal_cutoff_outside_frozen_protocol(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    protocol, eval1, _, _ = _seed_promotion_evidence(
+        registry,
+        dataset_causal_cutoff=T2,
+    )
+
+    with pytest.raises(PromotionEvidenceError, match="causal cutoff"):
+        registry.record_promotion(_first_promotion(protocol, eval1))
+
+
+def test_rollback_rejects_existing_strategy_that_was_never_champion(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    protocol, eval1, _, _ = _seed_promotion_evidence(registry)
+    registry.record_promotion(_first_promotion(protocol, eval1))
+
+    unrelated = PromotionDecision(
+        "rollback-unrelated",
+        PromotionAction.ROLLBACK,
+        "strategy-1",
+        "protocol-1",
+        protocol.protocol_sha256,
+        "eval-1",
+        eval1.bundle_sha256,
+        T3,
+        rollback_to_strategy_version_id="strategy-2",
+        candidate_model_version_id="model-1",
+    )
+    with pytest.raises(PromotionEvidenceError, match="rollback target"):
+        registry.record_promotion(unrelated)
 
     assert registry.champion_strategy(as_of=T3) == "strategy-1"
 

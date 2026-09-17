@@ -894,6 +894,33 @@ class RealExecutionLedger:
             )
         return reconciliation
 
+    @staticmethod
+    def _reconciliation_snapshot_from_dict(
+        value: object,
+    ) -> ReconciliationSnapshot:
+        expected_fields = {
+            "attempt_id",
+            "evidence_id",
+            "observed_at",
+            "external_effect_found",
+            "source",
+        }
+        if not isinstance(value, dict) or set(value) != expected_fields:
+            raise ExecutionLedgerIntegrityError(
+                "stored not-found reconciliation schema is invalid"
+            )
+        try:
+            snapshot = ReconciliationSnapshot(**value)
+        except (TypeError, ValueError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                "stored not-found reconciliation values are invalid"
+            ) from exc
+        if snapshot.to_dict() != value:
+            raise ExecutionLedgerIntegrityError(
+                "stored not-found reconciliation payload is not canonical"
+            )
+        return snapshot
+
     @classmethod
     def _validate_semantics(cls, events: list[dict[str, Any]]) -> None:
         plan_ids: set[str] = set()
@@ -1130,8 +1157,19 @@ class RealExecutionLedger:
                         followup["event_type"]
                         == EventType.RECONCILED_NOT_FOUND.value
                     ):
+                        snapshot = cls._reconciliation_snapshot_from_dict(
+                            followup["payload"]
+                        )
+                        if snapshot.attempt_id != attempt_id:
+                            raise ExecutionLedgerIntegrityError(
+                                "not-found reconciliation attempt identity mismatch"
+                            )
+                        if snapshot.external_effect_found:
+                            raise ExecutionLedgerIntegrityError(
+                                "stored not-found reconciliation cannot claim external effect"
+                            )
                         reconciled_time = _timestamp(
-                            followup["payload"]["observed_at"],
+                            snapshot.observed_at,
                             "observed_at",
                         )
                         causal_boundaries = [reserved_time]

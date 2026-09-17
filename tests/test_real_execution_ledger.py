@@ -1154,5 +1154,141 @@ class RealExecutionLedgerTests(unittest.TestCase):
             )
 
 
+    def test_restart_rejects_hash_valid_not_found_claiming_found_external_effect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
+            ledger.reconcile_not_found(
+                ReconciliationSnapshot(
+                    attempt_id="try-1",
+                    evidence_id="readback-1",
+                    observed_at=RECONCILED_AT,
+                    external_effect_found=False,
+                    source="provider-readback",
+                )
+            )
+
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            not_found = next(
+                envelope
+                for envelope in lines
+                if envelope["event"]["event_type"]
+                == EventType.RECONCILED_NOT_FOUND.value
+            )
+            not_found["event"]["payload"]["external_effect_found"] = True
+
+            import hashlib
+
+            body = json.dumps(
+                not_found["event"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            not_found["sha256"] = hashlib.sha256(body.encode()).hexdigest()
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        envelope,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for envelope in lines
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "not-found reconciliation cannot claim external effect",
+            ):
+                restarted.verify_integrity()
+
+    def test_restart_rejects_hash_valid_not_found_attempt_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
+            ledger.reconcile_not_found(
+                ReconciliationSnapshot(
+                    attempt_id="try-1",
+                    evidence_id="readback-1",
+                    observed_at=RECONCILED_AT,
+                    external_effect_found=False,
+                    source="provider-readback",
+                )
+            )
+
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            not_found = next(
+                envelope
+                for envelope in lines
+                if envelope["event"]["event_type"]
+                == EventType.RECONCILED_NOT_FOUND.value
+            )
+            not_found["event"]["payload"]["attempt_id"] = "other-attempt"
+
+            import hashlib
+
+            body = json.dumps(
+                not_found["event"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            not_found["sha256"] = hashlib.sha256(body.encode()).hexdigest()
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        envelope,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for envelope in lines
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "not-found reconciliation attempt identity mismatch",
+            ):
+                restarted.verify_integrity()
+
+
+
 if __name__ == "__main__":
     unittest.main()

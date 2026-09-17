@@ -238,3 +238,34 @@ def test_cli_returns_nonzero_for_collision(tmp_path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 2
     assert payload["status"] == "COLLISION"
+
+
+def test_cli_returns_nonzero_without_live_source_owner(tmp_path, capsys) -> None:
+    claims_path = tmp_path / "claims.json"
+    mutation_path = tmp_path / "mutation.json"
+    claims_path.write_text(
+        json.dumps(claim_state(lease_until="2026-09-17T18:46:00Z")),
+        encoding="utf-8",
+    )
+    mutation_path.write_text(
+        json.dumps(
+            mutation_state(
+                mutations=[{"head": "3c9a161", "run_id": B}]
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = guard.main(
+        [
+            "--claim-state",
+            str(claims_path),
+            "--mutation-state",
+            str(mutation_path),
+            "--now",
+            NOW,
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["status"] == "NO_LIVE_OWNER"

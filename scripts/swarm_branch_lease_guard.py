@@ -316,7 +316,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
 
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    return 0 if result["status"] in {"OK", "NO_LIVE_OWNER"} else 2
+    # Only proven live-owner attribution authorizes branch mutation. Every other
+    # diagnostic status is fail-closed for shell/workflow callers.
+    return 0 if result["status"] == "OK" else 2
 
 
 if __name__ == "__main__":

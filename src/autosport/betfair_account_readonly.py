@@ -342,7 +342,11 @@ class BetfairReadOnlyClient:
         balance = None
         if funds is not None:
             balance = BookmakerBalanceObservation(self._venue_id, self._account_id, ADAPTER_ID, f"funds:{funds.evidence.source_payload_sha256}", details.currency_code, funds.available_to_bet_balance, funds.evidence.observed_at, funds.evidence.source_payload_sha256, total_balance=None, exposure=funds.exposure, retained_commission=funds.retained_commission, exposure_limit=funds.exposure_limit)
-        open_positions = tuple(self._to_position(o, BookmakerPositionState.OPEN, details.currency_code) for o in current)
+        open_positions = tuple(
+            self._to_position(o, BookmakerPositionState.OPEN, details.currency_code)
+            for o in current
+            if o.size_matched > 0
+        )
         settled_positions = tuple(self._to_position(o, BookmakerPositionState.SETTLED, details.currency_code) for o in cleared)
         overlap = {p.external_position_id for p in open_positions} & {p.external_position_id for p in settled_positions}
         if overlap:
@@ -353,7 +357,7 @@ class BetfairReadOnlyClient:
         from .bookmaker_capability import BookmakerPositionObservation
         if isinstance(order, BetfairCurrentOrderObservation):
             amount = order.size_matched
-            odds = order.average_price_matched if order.average_price_matched > 0 else order.price
+            odds = order.average_price_matched if order.average_price_matched > 0 else None
             semantics = "betfair_size_matched"
         else:
             amount = order.size_settled
@@ -388,11 +392,18 @@ class BetfairReadOnlyClient:
             if isinstance(code, (str, int)) and not isinstance(code, bool):
                 detail += f" code={code}"
             if isinstance(message, str) and message.strip():
-                detail += f" message={message.strip()[:160]}"
+                detail += f" message={self._redact_provider_message(message)[:160]}"
             raise BetfairReadOnlyError(detail)
         if "result" not in envelope:
             raise BetfairReadOnlyError("Betfair response is missing result")
         return _RpcResult(envelope["result"], evidence)
+
+    def _redact_provider_message(self, message: str) -> str:
+        text = message.strip()
+        secrets = {self._credentials.application_key, self._credentials.session_token}
+        for secret in sorted(secrets, key=len, reverse=True):
+            text = text.replace(secret, "<redacted>")
+        return text
 
     def _next_request_id(self) -> int:
         with self._request_lock:

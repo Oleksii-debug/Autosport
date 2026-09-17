@@ -104,8 +104,14 @@ class PaperValueAgent:
         return matches[0] if matches else None
 
     @staticmethod
-    def _ticket_matches_event(ticket: PaperTicket, event: MarketEvent, stake: Decimal) -> bool:
-        if ticket.stake != stake or ticket.placed_at != event.observed_ts or len(ticket.legs) != 1:
+    def _ticket_matches_event(ticket: PaperTicket, event: MarketEvent) -> bool:
+        if (
+            not isinstance(ticket.stake, Decimal)
+            or not ticket.stake.is_finite()
+            or ticket.stake <= 0
+            or ticket.placed_at != event.observed_ts
+            or len(ticket.legs) != 1
+        ):
             return False
         leg = ticket.legs[0]
         return (
@@ -123,8 +129,8 @@ class PaperValueAgent:
         """Derive one fail-closed paper stake without granting caller stake authority.
 
         The signal is deliberately simple and deterministic: positive EV supplies
-        an edge-proportional target fraction.  Existing policy/goal ceilings and
-        current open PaperBook exposure only tighten that target.  This helper is
+        an edge-proportional target fraction. Existing policy/goal ceilings and
+        current open PaperBook exposure only tighten that target. This helper is
         not a second risk authority; ``PaperRiskPolicy.evaluate`` still decides
         whether the resulting proposal is executable.
         """
@@ -147,18 +153,13 @@ class PaperValueAgent:
             return None
 
         try:
-            ticket_fraction, committed_fraction = (
-                self.risk_policy._effective_fraction_limits()
-            )
+            ticket_fraction, committed_fraction = self.risk_policy._effective_fraction_limits()
             signal_fraction = min(expected_profit_per_unit, Decimal("1"))
             with localcontext(self.risk_policy._decimal_context()):
                 signal_limit = initial_bankroll * signal_fraction
                 ticket_limit = initial_bankroll * ticket_fraction
                 committed_limit = initial_bankroll * committed_fraction
-                reserve_limit = (
-                    initial_bankroll
-                    * self.risk_policy.minimum_cash_reserve_fraction
-                )
+                reserve_limit = initial_bankroll * self.risk_policy.minimum_cash_reserve_fraction
                 committed_room = committed_limit - committed_stake
                 reserve_room = balance - reserve_limit
             caps = [
@@ -184,7 +185,6 @@ class PaperValueAgent:
         context: AgentContext,
         goal,
         material_action_id: str,
-        expected_stake: Decimal,
     ) -> bool:
         """Resolve a restarted material action without creating a second authority record."""
 
@@ -221,7 +221,7 @@ class PaperValueAgent:
             or payload.get("quote_key") != event.quote_key
             or payload.get("ticket_id") != ticket.ticket_id
             or payload.get("stake") != str(ticket.stake)
-            or not self._ticket_matches_event(ticket, event, expected_stake)
+            or not self._ticket_matches_event(ticket, event)
         ):
             raise PaperDecisionReconciliationRequired(
                 "PaperBook and Decision Ledger material-action evidence do not match exactly"
@@ -289,6 +289,20 @@ class PaperValueAgent:
         if goal is not None and context.decision_ledger is None:
             return
 
+        material_action_id: str | None = None
+        if goal is not None:
+            material_action_id = self._material_action_id(context, event)
+            # Reconcile before deriving a fresh stake. The durable ticket itself
+            # changes current exposure, so re-sizing first could turn a valid
+            # redelivery into ZERO or a different amount.
+            if self._reconcile_existing_economic_action(
+                event,
+                context,
+                goal,
+                material_action_id,
+            ):
+                return
+
         chosen_stake = (
             self.stake
             if goal is None
@@ -311,18 +325,6 @@ class PaperValueAgent:
                 currency=goal.currency,
                 proposal_ts=event.observed_ts,
             )
-
-        material_action_id: str | None = None
-        if goal is not None:
-            material_action_id = self._material_action_id(context, event)
-            if self._reconcile_existing_economic_action(
-                event,
-                context,
-                goal,
-                material_action_id,
-                chosen_stake,
-            ):
-                return
 
         risk = self.risk_policy.evaluate(
             context.paper_book,

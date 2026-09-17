@@ -100,6 +100,17 @@ def run_policy_retest(
         if getattr(update_evidence, name) != getattr(challenger_policy, name):
             raise ValueError(f"policy update evidence {name} mismatch")
 
+    protocol = runner.registry.get("ResearchProtocol", challenger_policy.protocol_id)
+    if protocol is None:
+        raise ValueError("challenger policy research protocol is missing from ScientificRegistry")
+    binding = protocol.payload.get("binding")
+    if type(binding) is not dict:
+        raise ValueError("challenger policy research protocol lacks frozen binding")
+    if binding.get("code_config_sha256") != challenger_policy.config_sha256:
+        raise ValueError("challenger policy config does not match frozen research protocol")
+    if protocol.payload.get("environment_sha256") != challenger_policy.environment_id:
+        raise ValueError("challenger policy environment does not match frozen research protocol")
+
     factory_spec = spec.factory_spec(challenger_policy)
     if factory_spec.strategy_version_id != challenger_policy.policy_id:
         raise ValueError("factory candidate must use exact challenger policy identity")

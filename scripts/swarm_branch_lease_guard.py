@@ -54,9 +54,16 @@ def _ambiguous_claim_state(claim_state: Mapping[str, Any]) -> bool:
     # Canonical #511 output uses ambiguous_runs. Keep older aliases for
     # compatibility, but deterministic collision_candidates are *not* ambiguity:
     # the resolver has already selected admitted_runs by server-order/capacity.
+    # If an ambiguity/malformed-evidence key is present, its shape is part of the
+    # trust boundary. A non-list value is itself malformed evidence and therefore
+    # must fail closed rather than being silently ignored.
     for key in ("ambiguous_runs", "ambiguous", "ambiguities", "malformed_events"):
+        if key not in claim_state:
+            continue
         value = claim_state.get(key)
-        if isinstance(value, list) and value:
+        if not isinstance(value, list):
+            return True
+        if value:
             return True
     return False
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 from .agents import AgentContext
 from .decision_ledger import (
@@ -53,6 +53,10 @@ class PaperValueAgent:
         risk_policy: PaperRiskPolicy | None = None,
     ) -> None:
         self.forecasts = forecasts
+        # ``stake`` remains a compatibility input for legacy/no-goal paper runs.
+        # Once an EconomicGoalContract is active it has no financial authority:
+        # the strategy derives a bounded proposal from edge + current PaperBook
+        # exposure, then PaperRiskPolicy remains the final executable gate.
         self.stake = Decimal(str(stake))
         self.minimum_edge = Decimal(str(minimum_expected_profit_per_unit))
         self.risk_policy = risk_policy or PaperRiskPolicy()
@@ -111,12 +115,76 @@ class PaperValueAgent:
             and leg.locked_odds == event.decimal_odds
         )
 
+    def _derive_goal_stake(
+        self,
+        context: AgentContext,
+        expected_profit_per_unit: Decimal,
+    ) -> Decimal | None:
+        """Derive one fail-closed paper stake without granting caller stake authority.
+
+        The signal is deliberately simple and deterministic: positive EV supplies
+        an edge-proportional target fraction.  Existing policy/goal ceilings and
+        current open PaperBook exposure only tighten that target.  This helper is
+        not a second risk authority; ``PaperRiskPolicy.evaluate`` still decides
+        whether the resulting proposal is executable.
+        """
+
+        goal = self.risk_policy.economic_goal
+        if goal is None:
+            return self.stake
+        if (
+            not isinstance(expected_profit_per_unit, Decimal)
+            or not expected_profit_per_unit.is_finite()
+            or expected_profit_per_unit <= 0
+        ):
+            return None
+
+        state = self.risk_policy._book_state(context.paper_book)
+        if state is None:
+            return None
+        initial_bankroll, balance, committed_stake, open_position_count = state
+        if goal.emergency_stop or open_position_count >= goal.max_concurrent_positions:
+            return None
+
+        try:
+            ticket_fraction, committed_fraction = (
+                self.risk_policy._effective_fraction_limits()
+            )
+            signal_fraction = min(expected_profit_per_unit, Decimal("1"))
+            with localcontext(self.risk_policy._decimal_context()):
+                signal_limit = initial_bankroll * signal_fraction
+                ticket_limit = initial_bankroll * ticket_fraction
+                committed_limit = initial_bankroll * committed_fraction
+                reserve_limit = (
+                    initial_bankroll
+                    * self.risk_policy.minimum_cash_reserve_fraction
+                )
+                committed_room = committed_limit - committed_stake
+                reserve_room = balance - reserve_limit
+            caps = [
+                signal_limit,
+                ticket_limit,
+                committed_room,
+                reserve_room,
+                balance,
+            ]
+            if goal.max_stake_amount is not None:
+                caps.append(goal.max_stake_amount)
+            amount = min(caps)
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+
+        if not isinstance(amount, Decimal) or not amount.is_finite() or amount <= 0:
+            return None
+        return amount
+
     def _reconcile_existing_economic_action(
         self,
         event: MarketEvent,
         context: AgentContext,
         goal,
         material_action_id: str,
+        expected_stake: Decimal,
     ) -> bool:
         """Resolve a restarted material action without creating a second authority record."""
 
@@ -153,7 +221,7 @@ class PaperValueAgent:
             or payload.get("quote_key") != event.quote_key
             or payload.get("ticket_id") != ticket.ticket_id
             or payload.get("stake") != str(ticket.stake)
-            or not self._ticket_matches_event(ticket, event, self.stake)
+            or not self._ticket_matches_event(ticket, event, expected_stake)
         ):
             raise PaperDecisionReconciliationRequired(
                 "PaperBook and Decision Ledger material-action evidence do not match exactly"
@@ -207,8 +275,6 @@ class PaperValueAgent:
     def on_market_event(self, event: MarketEvent, context: AgentContext) -> None:
         if event.quote_key in self._acted or event.status != "open":
             return
-        if paper_quote_rejection_reason(event, self.stake) is not None:
-            return
         forecast = self.forecasts.get(event.quote_key)
         if forecast is None:
             return
@@ -223,16 +289,18 @@ class PaperValueAgent:
         if goal is not None and context.decision_ledger is None:
             return
 
-        material_action_id: str | None = None
-        if goal is not None:
-            material_action_id = self._material_action_id(context, event)
-            if self._reconcile_existing_economic_action(
-                event,
+        chosen_stake = (
+            self.stake
+            if goal is None
+            else self._derive_goal_stake(
                 context,
-                goal,
-                material_action_id,
-            ):
-                return
+                estimate.expected_profit_per_unit,
+            )
+        )
+        if chosen_stake is None:
+            return
+        if paper_quote_rejection_reason(event, chosen_stake) is not None:
+            return
 
         proposal_context = None
         if goal is not None:
@@ -243,9 +311,22 @@ class PaperValueAgent:
                 currency=goal.currency,
                 proposal_ts=event.observed_ts,
             )
+
+        material_action_id: str | None = None
+        if goal is not None:
+            material_action_id = self._material_action_id(context, event)
+            if self._reconcile_existing_economic_action(
+                event,
+                context,
+                goal,
+                material_action_id,
+                chosen_stake,
+            ):
+                return
+
         risk = self.risk_policy.evaluate(
             context.paper_book,
-            self.stake,
+            chosen_stake,
             context=proposal_context,
         )
         if not risk.allowed:
@@ -264,7 +345,7 @@ class PaperValueAgent:
         lifecycle_len_before = len(context.paper_book._lifecycle)
         ticket = context.paper_book.open_ticket(
             [leg],
-            self.stake,
+            chosen_stake,
             reason=reason,
             placed_at=event.observed_ts,
         )

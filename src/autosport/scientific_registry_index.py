@@ -20,8 +20,9 @@ class StrategyStateProjection:
     """Causal promotion-state projection for one canonical strategy key.
 
     The existing ``canonical_strategy_id`` is the stable class/context key for this
-    foundation.  The projection is derived on demand and is never persisted as a
-    second mutable authority.
+    foundation. The projection is derived on demand and never persists a second
+    mutable promotion authority. ``champion_strategy_version_id`` is populated only
+    when the registry's canonical global champion belongs to this strategy key.
     """
 
     canonical_strategy_id: str
@@ -107,7 +108,6 @@ class ScientificRegistryIndex:
                 retired=(),
             )
 
-        champion: str | None = None
         ever_promoted: set[str] = set()
         latest_action: dict[str, PromotionAction] = {}
         for entry in self._records("PromotionDecision", as_of):
@@ -118,15 +118,12 @@ class ScientificRegistryIndex:
             if candidate in version_ids:
                 latest_action[candidate] = action
             if action is PromotionAction.PROMOTE and candidate in version_ids:
-                champion = candidate
                 ever_promoted.add(candidate)
-            elif action is PromotionAction.ROLLBACK:
-                if candidate in version_ids and champion == candidate:
-                    champion = None
-                if rollback_target in version_ids:
-                    champion = rollback_target
-                    ever_promoted.add(rollback_target)
+            elif action is PromotionAction.ROLLBACK and rollback_target in version_ids:
+                ever_promoted.add(rollback_target)
 
+        global_champion = self.registry.champion_strategy(as_of=as_of)
+        champion = global_champion if global_champion in version_ids else None
         rejected = {
             version_id
             for version_id, action in latest_action.items()

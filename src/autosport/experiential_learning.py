@@ -64,6 +64,56 @@ class PolicyRetestSpec:
         )
 
 
+def _validate_exact_policy_successor(
+    predecessor_policy: BanditPolicyState,
+    challenger_policy: BanditPolicyState,
+    update_evidence: PolicyUpdateEvidence,
+) -> None:
+    """Fail closed unless the challenger is exactly one durable policy update later."""
+
+    if challenger_policy.generation != predecessor_policy.generation + 1:
+        raise ValueError("challenger policy must be exactly one generation after predecessor")
+    if update_evidence.update_index != challenger_policy.generation:
+        raise ValueError("policy update evidence index does not match challenger generation")
+
+    predecessor_actions = set(predecessor_policy.applied_action_ids)
+    challenger_actions = set(challenger_policy.applied_action_ids)
+    if not predecessor_actions.issubset(challenger_actions):
+        raise ValueError("challenger policy discarded predecessor action history")
+    if challenger_actions - predecessor_actions != {update_evidence.action_id}:
+        raise ValueError("policy update evidence action does not match challenger history delta")
+
+    predecessor_rewards = set(predecessor_policy.applied_reward_ids)
+    challenger_rewards = set(challenger_policy.applied_reward_ids)
+    if not predecessor_rewards.issubset(challenger_rewards):
+        raise ValueError("challenger policy discarded predecessor reward history")
+    if challenger_rewards - predecessor_rewards != {update_evidence.reward_id}:
+        raise ValueError("policy update evidence reward does not match challenger history delta")
+
+    predecessor_estimates = {
+        estimate.action_type: estimate for estimate in predecessor_policy.estimates
+    }
+    challenger_estimates = {
+        estimate.action_type: estimate for estimate in challenger_policy.estimates
+    }
+    if predecessor_estimates.keys() != challenger_estimates.keys():
+        raise ValueError("challenger policy action universe differs from predecessor")
+
+    advanced_estimates = 0
+    for action_type, predecessor_estimate in predecessor_estimates.items():
+        challenger_estimate = challenger_estimates[action_type]
+        observation_delta = challenger_estimate.observations - predecessor_estimate.observations
+        if observation_delta == 0:
+            if challenger_estimate.reward_sum != predecessor_estimate.reward_sum:
+                raise ValueError("challenger policy changed reward state without an observation")
+            continue
+        if observation_delta != 1:
+            raise ValueError("challenger policy estimate advanced by more than one observation")
+        advanced_estimates += 1
+    if advanced_estimates != 1:
+        raise ValueError("challenger policy must advance exactly one action estimate")
+
+
 def run_policy_retest(
     runner: ExperimentRunner,
     *,
@@ -99,6 +149,7 @@ def run_policy_retest(
             raise ValueError(f"policy update illegally rebound immutable {name}")
         if getattr(update_evidence, name) != getattr(challenger_policy, name):
             raise ValueError(f"policy update evidence {name} mismatch")
+    _validate_exact_policy_successor(predecessor_policy, challenger_policy, update_evidence)
 
     protocol = runner.registry.get("ResearchProtocol", challenger_policy.protocol_id)
     if protocol is None:

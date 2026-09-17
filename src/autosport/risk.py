@@ -455,23 +455,27 @@ class PaperRiskPolicy:
 
         goal = self.economic_goal
         if goal is not None:
-            if context is not None and context.bankroll_id is not None:
-                if context.bankroll_id != goal.bankroll_id:
-                    return RiskDecision(
-                        False,
-                        "proposed ticket bankroll identity does not match economic goal",
-                    )
-                if context.currency != goal.currency:
-                    return RiskDecision(
-                        False,
-                        "proposed ticket currency does not match economic goal",
-                    )
             if goal.emergency_stop:
                 return RiskDecision(False, "economic goal emergency stop is active")
             if context is None:
                 return RiskDecision(
                     False,
                     "proposed ticket risk context is required for economic goal quote checks",
+                )
+            if context.bankroll_id is None or context.currency is None:
+                return RiskDecision(
+                    False,
+                    "proposed ticket bankroll and currency identity are required for economic goal",
+                )
+            if context.bankroll_id != goal.bankroll_id:
+                return RiskDecision(
+                    False,
+                    "proposed ticket bankroll identity does not match economic goal",
+                )
+            if context.currency != goal.currency:
+                return RiskDecision(
+                    False,
+                    "proposed ticket currency does not match economic goal",
                 )
             restriction_decision = self._proposal_restriction_decision(goal, context)
             if restriction_decision is not None:

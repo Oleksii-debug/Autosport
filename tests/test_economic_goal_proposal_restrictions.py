@@ -28,6 +28,8 @@ class EconomicGoalProposalRestrictionTests(unittest.TestCase):
         *,
         market_ids: tuple[str, ...] = ("market-1",),
         source_ids: tuple[str, ...] = ("provider-1",),
+        bankroll_id: str | None = "paper-bankroll",
+        currency: str | None = "USD",
     ) -> ProposedTicketRiskContext:
         if len(market_ids) != len(source_ids):
             raise ValueError("test market/source fixtures must have equal length")
@@ -59,6 +61,8 @@ class EconomicGoalProposalRestrictionTests(unittest.TestCase):
         return ProposedTicketRiskContext(
             legs=tuple(legs),
             quotes=tuple(quotes),
+            bankroll_id=bankroll_id,
+            currency=currency,
             proposal_ts="2026-09-17T14:00:02+00:00",
         )
 
@@ -70,6 +74,70 @@ class EconomicGoalProposalRestrictionTests(unittest.TestCase):
             minimum_cash_reserve_fraction=Decimal("0"),
             economic_goal=goal,
         )
+
+    def test_active_goal_requires_bankroll_and_currency_identity(self) -> None:
+        decision = self._policy(self._goal()).evaluate(
+            PaperBook("100"),
+            Decimal("1"),
+            context=self._context(bankroll_id=None, currency=None),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "proposed ticket bankroll and currency identity are required for economic goal",
+        )
+
+    def test_active_goal_rejects_mismatched_bankroll_identity(self) -> None:
+        decision = self._policy(self._goal()).evaluate(
+            PaperBook("100"),
+            Decimal("1"),
+            context=self._context(bankroll_id="other-bankroll"),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "proposed ticket bankroll identity does not match economic goal",
+        )
+
+    def test_active_goal_rejects_mismatched_currency_identity(self) -> None:
+        decision = self._policy(self._goal()).evaluate(
+            PaperBook("100"),
+            Decimal("1"),
+            context=self._context(currency="EUR"),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "proposed ticket currency does not match economic goal",
+        )
+
+    def test_active_goal_accepts_matching_bankroll_and_currency_identity(self) -> None:
+        decision = self._policy(self._goal()).evaluate(
+            PaperBook("100"),
+            Decimal("1"),
+            context=self._context(),
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed")
+
+    def test_no_goal_preserves_optional_bankroll_and_currency_identity(self) -> None:
+        policy = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("1"),
+            max_committed_fraction=Decimal("1"),
+            minimum_cash_reserve_fraction=Decimal("0"),
+        )
+        decision = policy.evaluate(
+            PaperBook("100"),
+            Decimal("1"),
+            context=self._context(bankroll_id=None, currency=None),
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed")
 
     def test_owner_parlay_limit_is_inclusive_and_blocks_excess_legs(self) -> None:
         policy = self._policy(self._goal(max_parlay_legs=1))

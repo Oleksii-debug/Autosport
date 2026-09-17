@@ -147,6 +147,89 @@ class RealExecutionLedgerTests(unittest.TestCase):
             with self.assertRaises(ExecutionIdentityConflict):
                 ledger.reserve_plan(conflict)
 
+    def test_reserved_attempt_cannot_be_acknowledged_without_submission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError, "durable submission"
+            ):
+                ledger.acknowledge(
+                    ExternalAcknowledgement(
+                        attempt_id="try-1",
+                        external_receipt_id="r1",
+                        status=AcknowledgementStatus.ACCEPTED,
+                        acknowledged_at=RECONCILED_AT,
+                        accepted_odds="2.5",
+                        accepted_stake="5",
+                    )
+                )
+            self.assertEqual(
+                ledger.attempt_state("try-1"),
+                AttemptState.RESERVED,
+            )
+
+    def test_restart_rejects_hash_valid_reserved_to_ack_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            ledger.acknowledge(
+                ExternalAcknowledgement(
+                    attempt_id="try-1",
+                    external_receipt_id="r1",
+                    status=AcknowledgementStatus.ACCEPTED,
+                    acknowledged_at=RECONCILED_AT,
+                    accepted_odds="2.5",
+                    accepted_stake="5",
+                )
+            )
+
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            lines = [
+                envelope
+                for envelope in lines
+                if envelope["event"]["event_type"]
+                != EventType.ATTEMPT_SUBMITTED.value
+            ]
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        envelope,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for envelope in lines
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "acknowledgement from invalid state",
+            ):
+                restarted.verify_integrity()
+
     def test_restart_promotes_unresolved_attempt_to_unknown_and_blocks_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"
@@ -785,6 +868,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 attempt_id="try-1",
                 reserved_at=RESERVED_AT,
             )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
 
             with self.assertRaisesRegex(
                 ExecutionStateError, "exceeds requested action stake"
@@ -799,7 +883,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                         accepted_stake="10.01",
                     )
                 )
-            self.assertEqual(ledger.attempt_state("try-1"), AttemptState.RESERVED)
+            self.assertEqual(ledger.attempt_state("try-1"), AttemptState.SUBMITTED)
 
 
     def test_restart_rejects_hash_valid_unknown_ack_evidence_tamper(self):
@@ -895,6 +979,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 attempt_id="try-1",
                 reserved_at=RESERVED_AT,
             )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
             ledger.acknowledge(
                 ExternalAcknowledgement(
                     attempt_id="try-1",
@@ -962,6 +1047,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 attempt_id="try-1",
                 reserved_at=RESERVED_AT,
             )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
             ledger.acknowledge(
                 ExternalAcknowledgement(
                     attempt_id="try-1",
@@ -1037,6 +1123,10 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     attempt_id=attempt_id,
                     reserved_at=RESERVED_AT,
                 )
+                ledger.mark_submitted(
+                    attempt_id,
+                    submitted_at=SUBMITTED_AT,
+                )
                 ledger.acknowledge(
                     ExternalAcknowledgement(
                         attempt_id=attempt_id,
@@ -1047,7 +1137,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                         accepted_stake="10",
                     )
                 )
-            self.assertEqual(ledger.verify_integrity(), 6)
+            self.assertEqual(ledger.verify_integrity(), 8)
 
     def test_same_provider_account_receipt_cannot_belong_to_two_attempts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1066,6 +1156,8 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 attempt_id="t2",
                 reserved_at=RESERVED_AT,
             )
+            ledger.mark_submitted("t1", submitted_at=SUBMITTED_AT)
+            ledger.mark_submitted("t2", submitted_at=SUBMITTED_AT)
             ledger.acknowledge(
                 ExternalAcknowledgement(
                     attempt_id="t1",
@@ -1099,6 +1191,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 attempt_id="t1",
                 reserved_at=RESERVED_AT,
             )
+            ledger.mark_submitted("t1", submitted_at=SUBMITTED_AT)
             ledger.acknowledge(
                 ExternalAcknowledgement(
                     attempt_id="t1",

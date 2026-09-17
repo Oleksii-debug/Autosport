@@ -302,6 +302,9 @@ class BanditPolicyState:
             reward_id=reward.reward_id,
             reward_truth=reward.truth,
             simulation_model_id=reward.simulation_model_id,
+            action=action,
+            reward=reward,
+            transition=transition,
         )
         return successor, evidence
 
@@ -322,6 +325,9 @@ class PolicyUpdateEvidence:
     reward_id: str
     reward_truth: EvidenceTruth
     simulation_model_id: str | None
+    action: Action | None = None
+    reward: RewardEvidence | None = None
+    transition: Transition | None = None
 
     def __post_init__(self) -> None:
         _sha256("environment_id", self.environment_id)
@@ -347,6 +353,33 @@ class PolicyUpdateEvidence:
             _text("simulation_model_id", self.simulation_model_id)
         elif self.simulation_model_id is not None:
             raise LearningEnvironmentError("observed policy update cannot carry simulation_model_id")
+
+        witnesses = (self.action, self.reward, self.transition)
+        if any(item is not None for item in witnesses):
+            if not all(item is not None for item in witnesses):
+                raise LearningEnvironmentError("policy update causal witnesses must be complete")
+            if not isinstance(self.action, Action):
+                raise LearningEnvironmentError("policy update action witness must be Action")
+            if not isinstance(self.reward, RewardEvidence):
+                raise LearningEnvironmentError("policy update reward witness must be RewardEvidence")
+            if not isinstance(self.transition, Transition):
+                raise LearningEnvironmentError("policy update transition witness must be Transition")
+            if self.action.environment_id != self.environment_id:
+                raise LearningEnvironmentError("policy update action witness environment mismatch")
+            if self.reward.environment_id != self.environment_id:
+                raise LearningEnvironmentError("policy update reward witness environment mismatch")
+            if self.transition.environment_id != self.environment_id:
+                raise LearningEnvironmentError("policy update transition witness environment mismatch")
+            if self.action.action_id != self.action_id:
+                raise LearningEnvironmentError("policy update action witness identity mismatch")
+            if self.reward.reward_id != self.reward_id:
+                raise LearningEnvironmentError("policy update reward witness identity mismatch")
+            if self.transition.transition_id != self.transition_id:
+                raise LearningEnvironmentError("policy update transition witness identity mismatch")
+            if self.reward.truth is not self.reward_truth:
+                raise LearningEnvironmentError("policy update reward truth witness mismatch")
+            if self.reward.simulation_model_id != self.simulation_model_id:
+                raise LearningEnvironmentError("policy update simulation model witness mismatch")
 
     @property
     def update_id(self) -> str:

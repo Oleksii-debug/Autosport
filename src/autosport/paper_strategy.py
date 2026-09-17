@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from decimal import Decimal, localcontext
+from decimal import Decimal
 
 from .agents import AgentContext
 from .decision_ledger import (
@@ -126,59 +126,16 @@ class PaperValueAgent:
         context: AgentContext,
         expected_profit_per_unit: Decimal,
     ) -> Decimal | None:
-        """Derive one fail-closed paper stake without granting caller stake authority.
+        """Use the canonical risk authority for goal-active sizing."""
 
-        The signal is deliberately simple and deterministic: positive EV supplies
-        an edge-proportional target fraction. Existing policy/goal ceilings and
-        current open PaperBook exposure only tighten that target. This helper is
-        not a second risk authority; ``PaperRiskPolicy.evaluate`` still decides
-        whether the resulting proposal is executable.
-        """
-
-        goal = self.risk_policy.economic_goal
-        if goal is None:
+        if self.risk_policy.economic_goal is None:
             return self.stake
-        if (
-            not isinstance(expected_profit_per_unit, Decimal)
-            or not expected_profit_per_unit.is_finite()
-            or expected_profit_per_unit <= 0
-        ):
-            return None
+        return self.risk_policy.derive_goal_stake(
+            context.paper_book,
+            expected_profit_per_unit,
+        )
 
-        state = self.risk_policy._book_state(context.paper_book)
-        if state is None:
-            return None
-        initial_bankroll, balance, committed_stake, open_position_count = state
-        if goal.emergency_stop or open_position_count >= goal.max_concurrent_positions:
-            return None
-
-        try:
-            ticket_fraction, committed_fraction = self.risk_policy._effective_fraction_limits()
-            signal_fraction = min(expected_profit_per_unit, Decimal("1"))
-            with localcontext(self.risk_policy._decimal_context()):
-                signal_limit = initial_bankroll * signal_fraction
-                ticket_limit = initial_bankroll * ticket_fraction
-                committed_limit = initial_bankroll * committed_fraction
-                reserve_limit = initial_bankroll * self.risk_policy.minimum_cash_reserve_fraction
-                committed_room = committed_limit - committed_stake
-                reserve_room = balance - reserve_limit
-            caps = [
-                signal_limit,
-                ticket_limit,
-                committed_room,
-                reserve_room,
-                balance,
-            ]
-            if goal.max_stake_amount is not None:
-                caps.append(goal.max_stake_amount)
-            amount = min(caps)
-        except (ArithmeticError, TypeError, ValueError):
-            return None
-
-        if not isinstance(amount, Decimal) or not amount.is_finite() or amount <= 0:
-            return None
-        return amount
-
+    def _reconcile_existing_economic_action(
     def _reconcile_existing_economic_action(
         self,
         event: MarketEvent,

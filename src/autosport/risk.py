@@ -397,6 +397,63 @@ class PaperRiskPolicy:
             min(self.max_committed_fraction, goal.max_capital_at_risk_fraction),
         )
 
+    def derive_goal_stake(
+        self,
+        book: PaperBook,
+        signal_strength: Decimal | str,
+    ) -> Decimal | None:
+        """Derive one bounded paper stake when an EconomicGoalContract is active.
+
+        The signal may tighten the executable proposal, but it can never enlarge
+        the owner goal or local PaperRiskPolicy envelope. Invalid state, exhausted
+        capacity, emergency STOP, non-positive signal, or Decimal uncertainty
+        returns ZERO semantics as None rather than inventing a stake.
+        """
+
+        goal = self.economic_goal
+        if goal is None:
+            return None
+        try:
+            signal = Decimal(str(signal_strength))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if not signal.is_finite() or signal <= 0:
+            return None
+
+        state = self._book_state(book)
+        if state is None:
+            return None
+        initial_bankroll, balance, committed_stake, open_position_count = state
+        if goal.emergency_stop or open_position_count >= goal.max_concurrent_positions:
+            return None
+
+        try:
+            ticket_fraction, committed_fraction = self._effective_fraction_limits()
+            signal_fraction = min(signal, Decimal("1"))
+            with localcontext(self._decimal_context()):
+                signal_limit = initial_bankroll * signal_fraction
+                ticket_limit = initial_bankroll * ticket_fraction
+                committed_limit = initial_bankroll * committed_fraction
+                reserve_limit = initial_bankroll * self.minimum_cash_reserve_fraction
+                committed_room = committed_limit - committed_stake
+                reserve_room = balance - reserve_limit
+            caps = [
+                signal_limit,
+                ticket_limit,
+                committed_room,
+                reserve_room,
+                balance,
+            ]
+            if goal.max_stake_amount is not None:
+                caps.append(goal.max_stake_amount)
+            amount = min(caps)
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+
+        if not isinstance(amount, Decimal) or not amount.is_finite() or amount <= 0:
+            return None
+        return amount
+
     def _derived_risk_values(
         self,
         initial_bankroll: Decimal,

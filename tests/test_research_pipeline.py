@@ -6,10 +6,12 @@ from pathlib import Path
 
 from autosport.candidate_optimizer import PortfolioAwareCandidateOptimizer
 from autosport.candidate_search import CandidateLeg, ParlayCandidate
-from autosport.decision_ledger import JsonlDecisionLedger
-from autosport.domain import TicketLeg
+from autosport.decision_ledger import ECONOMIC_DECISION_KIND, JsonlDecisionLedger
+from autosport.domain import MarketEvent, TicketLeg
+from autosport.economic_goal import EconomicGoalContract
 from autosport.forecasting import ForecastRecord
 from autosport.paper import PaperBook
+from autosport.risk import PaperRiskPolicy
 from autosport.research_pipeline import (
     DeterministicResearchCritic,
     ResearchDecisionPipeline,
@@ -109,6 +111,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
         pipeline=None,
         stake="10",
         decision_ts="2026-09-13T10:00:03+00:00",
+        market_quotes=None,
     ):
         book = book or self._book()
         candidate = candidate or self._candidate()
@@ -124,6 +127,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             evidence=evidence,
             stake=stake,
             decision_ts=decision_ts,
+            market_quotes=market_quotes,
             decision_ledger=ledger,
             replay_run_id="research-run",
         )
@@ -257,6 +261,99 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             self.assertFalse(decision.portfolio_impact.worst_case_change_proven)
             self.assertTrue(
                 any("not proven exact" in reason for reason in decision.reasons)
+            )
+
+    def _market_event(self) -> MarketEvent:
+        return MarketEvent(
+            event_id="match-1",
+            market_id="winner",
+            selection_id="B",
+            decimal_odds=Decimal("2.00"),
+            observed_ts="2026-09-13T10:00:00+00:00",
+            source_id="provider",
+            sequence=1,
+            source_ts="2026-09-13T10:00:00+00:00",
+            ingest_ts="2026-09-13T10:00:00+00:00",
+        )
+
+    def _economic_goal(self, **overrides) -> EconomicGoalContract:
+        values = {
+            "goal_id": "goal-research-pipeline",
+            "revision": 1,
+            "bankroll_id": "paper-bankroll",
+            "currency": "USD",
+            "max_stake_fraction": Decimal("0.02"),
+            "max_capital_at_risk_fraction": Decimal("0.20"),
+            "max_concurrent_positions": 5,
+            "max_quote_age_seconds": Decimal("5"),
+        }
+        values.update(overrides)
+        return EconomicGoalContract(**values)
+
+    def _goal_pipeline(self, goal: EconomicGoalContract) -> ResearchDecisionPipeline:
+        return ResearchDecisionPipeline(
+            risk_policy=PaperRiskPolicy(
+                max_ticket_fraction=Decimal("1"),
+                max_committed_fraction=Decimal("1"),
+                minimum_cash_reserve_fraction=Decimal("0"),
+                economic_goal=goal,
+            )
+        )
+
+    def test_active_economic_goal_ignores_caller_stake_and_persists_provenance(self):
+        goal = self._economic_goal()
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, decision = self._decide(
+                tmp,
+                candidate=self._candidate(probability="0.60"),
+                forecast=self._forecast(probability="0.60"),
+                pipeline=self._goal_pipeline(goal),
+                stake="NaN",
+                market_quotes=[self._market_event()],
+            )
+
+            self.assertTrue(decision.approved)
+            self.assertIsNotNone(decision.portfolio_impact)
+            self.assertEqual(decision.portfolio_impact.stake, Decimal("20.00"))
+            ticket = book.tickets[decision.ticket_id]
+            self.assertEqual(ticket.stake, Decimal("20.00"))
+            records = ledger.verified_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].decision_kind, ECONOMIC_DECISION_KIND)
+            self.assertEqual(records[0].payload["stake"], "20.00")
+            self.assertEqual(records[0].payload["stake_source"], "economic-goal-derived")
+            rebound = JsonlDecisionLedger(ledger.path).verified_economic_decision(
+                records[0].decision_id,
+                goal,
+            )
+            self.assertEqual(rebound, records[0])
+
+    def test_active_economic_goal_exhaustion_records_zero_without_ticket(self):
+        goal = self._economic_goal(max_stake_fraction=Decimal("0"))
+        book = self._book()
+        before = set(book.tickets)
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, decision = self._decide(
+                tmp,
+                book=book,
+                candidate=self._candidate(probability="0.60"),
+                forecast=self._forecast(probability="0.60"),
+                pipeline=self._goal_pipeline(goal),
+                stake="999999999999999999999",
+                market_quotes=[self._market_event()],
+            )
+
+            self.assertFalse(decision.approved)
+            self.assertIsNone(decision.portfolio_impact)
+            self.assertEqual(set(book.tickets), before)
+            self.assertTrue(any("ZERO stake" in reason for reason in decision.reasons))
+            record = ledger.verified_records()[0]
+            self.assertEqual(record.decision_kind, ECONOMIC_DECISION_KIND)
+            self.assertEqual(record.payload["stake"], "0")
+            self.assertEqual(record.payload["stake_source"], "economic-goal-derived")
+            JsonlDecisionLedger(ledger.path).verified_economic_decision(
+                record.decision_id,
+                goal,
             )
 
     def test_risk_policy_can_reject_otherwise_valid_research(self):

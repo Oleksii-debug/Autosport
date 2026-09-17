@@ -8,11 +8,17 @@ from typing import Iterable
 
 from .candidate_optimizer import CandidatePortfolioImpact, PortfolioAwareCandidateOptimizer
 from .candidate_search import ParlayCandidate
-from .decision_ledger import DecisionRecord, JsonlDecisionLedger
-from .domain import PaperTicket, TicketLeg
+from .decision_ledger import (
+    ECONOMIC_DECISION_KIND,
+    GENERAL_DECISION_KIND,
+    DecisionRecord,
+    JsonlDecisionLedger,
+)
+from .domain import MarketEvent, PaperTicket, TicketLeg
 from .forecasting import ForecastRecord, parse_iso_timestamp
 from .paper import PaperBook
-from .risk import PaperRiskPolicy, RiskDecision
+from .price_truth import paper_quote_rejection_reason
+from .risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskDecision
 from .scenario_search import ScenarioGroup
 
 
@@ -216,7 +222,7 @@ class ResearchDecision:
     reasons: tuple[str, ...]
     decision_ts: str
     critic: CriticVerdict
-    portfolio_impact: CandidatePortfolioImpact
+    portfolio_impact: CandidatePortfolioImpact | None
     risk: RiskDecision
     ticket_id: str | None
     audit_sha256: str
@@ -361,19 +367,33 @@ class ResearchDecisionPipeline:
         groups: list[ScenarioGroup],
         forecasts: dict[str, ForecastRecord],
         evidence: Iterable[ResearchEvidence],
-        stake: Decimal | str,
+        stake: Decimal | str | None,
         decision_ts: str,
+        market_quotes: Iterable[MarketEvent] | None = None,
         decision_ledger: JsonlDecisionLedger,
         replay_run_id: str,
     ) -> ResearchDecision:
         _validate_canonical_string(replay_run_id, "replay_run_id")
         _validate_canonical_string(decision_ts, "decision_ts")
         parse_iso_timestamp(decision_ts)
-        amount = _finite_decimal(stake, "stake")
-        if amount <= 0:
-            raise ValueError("stake must be positive")
+        goal = self.risk_policy.economic_goal
+        if goal is None:
+            amount = _finite_decimal(stake, "stake")
+            if amount <= 0:
+                raise ValueError("stake must be positive")
+            stake_source = "legacy-caller-fixed"
+        else:
+            # Research-plan stake is compatibility metadata only under an active
+            # owner EconomicGoalContract; it has no monetary authority.
+            derived = self.risk_policy.derive_goal_stake(
+                book,
+                candidate.expected_profit_per_unit,
+            )
+            amount = derived if derived is not None else Decimal("0")
+            stake_source = "economic-goal-derived"
 
         evidence_items = tuple(evidence)
+        quote_items = tuple(market_quotes or ())
         context_hash = _research_context_hash(
             book=book,
             candidate=candidate,
@@ -383,28 +403,69 @@ class ResearchDecisionPipeline:
             decision_ts=decision_ts,
         )
 
-        impact = self.optimizer.evaluate_candidates(
-            list(book.tickets.values()),
-            [candidate],
-            groups,
-            stake=amount,
-        )[0]
+        impact = (
+            self.optimizer.evaluate_candidates(
+                list(book.tickets.values()),
+                [candidate],
+                groups,
+                stake=amount,
+            )[0]
+            if amount > 0
+            else None
+        )
         critic_verdict = self.critic.review(
             candidate,
             forecasts,
             evidence_items,
             decision_ts=decision_ts,
         )
-        risk = self.risk_policy.evaluate(book, amount)
+
+        if amount <= 0:
+            risk = RiskDecision(
+                False,
+                "economic goal produced ZERO stake under the current authority envelope",
+            )
+        else:
+            quote_rejection: str | None = None
+            candidate_quote_keys = {leg.quote_key for leg in candidate.legs}
+            for quote in quote_items:
+                if quote.quote_key not in candidate_quote_keys:
+                    continue
+                rejection = paper_quote_rejection_reason(quote, amount)
+                if rejection is not None:
+                    quote_rejection = f"{quote.quote_key}: {rejection}"
+                    break
+
+            if quote_rejection is not None:
+                risk = RiskDecision(False, "paper quote: " + quote_rejection)
+            else:
+                proposal_context = None
+                if goal is not None:
+                    proposal_context = ProposedTicketRiskContext(
+                        legs=tuple(_ticket_legs(candidate)),
+                        quotes=quote_items,
+                        bankroll_id=goal.bankroll_id,
+                        currency=goal.currency,
+                        proposal_ts=decision_ts,
+                    )
+                risk = self.risk_policy.evaluate(
+                    book,
+                    amount,
+                    context=proposal_context,
+                )
 
         reasons: list[str] = list(critic_verdict.reasons)
         policy = self.critic.policy
         if not risk.allowed:
             reasons.append("risk policy: " + risk.reason)
-        if policy.require_worst_case_proof and not impact.worst_case_change_proven:
+        if (
+            policy.require_worst_case_proof
+            and (impact is None or not impact.worst_case_change_proven)
+        ):
             reasons.append("portfolio worst-case change is not proven exact")
         if (
-            policy.minimum_ranking_risk_change is not None
+            impact is not None
+            and policy.minimum_ranking_risk_change is not None
             and impact.ranking_risk_change < policy.minimum_ranking_risk_change
         ):
             reasons.append("portfolio ranking risk change is below policy minimum")
@@ -416,9 +477,10 @@ class ResearchDecisionPipeline:
             reasons.append("standalone expected profit per unit is below policy minimum")
 
         reasons = list(dict.fromkeys(reasons))
-        approved = not reasons
+        approved = not reasons and impact is not None
         ticket: PaperTicket | None = None
         if approved:
+            assert impact is not None
             ticket = book.open_ticket(
                 _ticket_legs(candidate),
                 amount,
@@ -438,6 +500,7 @@ class ResearchDecisionPipeline:
         payload = _audit_payload(
             candidate=candidate,
             amount=amount,
+            stake_source=stake_source,
             critic=critic_verdict,
             impact=impact,
             risk=risk,
@@ -447,16 +510,23 @@ class ResearchDecisionPipeline:
             forecasts=forecasts,
             evidence=evidence_items,
         )
-        audit_sha = decision_ledger.append(
-            DecisionRecord(
-                replay_run_id=replay_run_id,
-                agent="research-decision-pipeline",
-                observed_ts=decision_ts,
-                action=action,
-                payload=payload,
-                context_hash=context_hash,
-            )
+        record = DecisionRecord(
+            replay_run_id=replay_run_id,
+            agent="research-decision-pipeline",
+            observed_ts=decision_ts,
+            action=action,
+            payload=payload,
+            context_hash=context_hash,
+            decision_kind=(
+                ECONOMIC_DECISION_KIND
+                if goal is not None
+                else GENERAL_DECISION_KIND
+            ),
         )
+        if goal is None:
+            audit_sha = decision_ledger.append(record)
+        else:
+            audit_sha = decision_ledger.append_economic(record, goal)
         return ResearchDecision(
             approved=approved,
             reasons=tuple(reasons),
@@ -491,8 +561,9 @@ def _audit_payload(
     *,
     candidate: ParlayCandidate,
     amount: Decimal,
+    stake_source: str,
     critic: CriticVerdict,
-    impact: CandidatePortfolioImpact,
+    impact: CandidatePortfolioImpact | None,
     risk: RiskDecision,
     approved: bool,
     reasons: tuple[str, ...],
@@ -510,6 +581,7 @@ def _audit_payload(
         "reasons": list(reasons),
         "ticket_id": ticket_id,
         "stake": str(amount),
+        "stake_source": stake_source,
         "candidate_quote_keys": [leg.quote_key for leg in candidate.legs],
         "candidate_ticket_identities": [
             _candidate_identity_payload(leg) for leg in candidate.legs
@@ -533,23 +605,27 @@ def _audit_payload(
                 for review in critic.leg_reviews
             ],
         },
-        "portfolio": {
-            "ranking_risk_change": str(impact.ranking_risk_change),
-            "ranking_risk_truth": impact.ranking_risk_truth,
-            "observed_worst_case_change": str(impact.observed_worst_case_change),
-            "conservative_floor_change": str(impact.conservative_floor_change),
-            "worst_case_change_proven": impact.worst_case_change_proven,
-            "observed_best_case_change": str(impact.observed_best_case_change),
-            "conservative_ceiling_change": str(impact.conservative_ceiling_change),
-            "best_case_change_proven": impact.best_case_change_proven,
-            "expected_case_change": (
-                str(impact.expected_case_change)
-                if impact.expected_case_change is not None
-                else None
-            ),
-            "expected_change_mode": impact.expected_change_mode,
-            "dependent_existing_ticket_ids": list(impact.dependent_existing_ticket_ids),
-        },
+        "portfolio": (
+            None
+            if impact is None
+            else {
+                "ranking_risk_change": str(impact.ranking_risk_change),
+                "ranking_risk_truth": impact.ranking_risk_truth,
+                "observed_worst_case_change": str(impact.observed_worst_case_change),
+                "conservative_floor_change": str(impact.conservative_floor_change),
+                "worst_case_change_proven": impact.worst_case_change_proven,
+                "observed_best_case_change": str(impact.observed_best_case_change),
+                "conservative_ceiling_change": str(impact.conservative_ceiling_change),
+                "best_case_change_proven": impact.best_case_change_proven,
+                "expected_case_change": (
+                    str(impact.expected_case_change)
+                    if impact.expected_case_change is not None
+                    else None
+                ),
+                "expected_change_mode": impact.expected_change_mode,
+                "dependent_existing_ticket_ids": list(impact.dependent_existing_ticket_ids),
+            }
+        ),
         "risk": {"allowed": risk.allowed, "reason": risk.reason},
         "forecasts": [
             {

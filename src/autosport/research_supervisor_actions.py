@@ -71,6 +71,32 @@ def _require_replayed_bindings(
     return snapshot
 
 
+def _require_write_phase_admission(
+    supervisor: ResearchSupervisor,
+    run_id: str,
+    *,
+    expected_phase: ResearchPhase,
+    replay_at_least_phase: ResearchPhase,
+) -> SupervisorSnapshot:
+    """Reject wrong-phase calls before any external canonical authority can mutate.
+
+    The exact expected phase may perform the authority write before the supervisor
+    checkpoint so crash/redelivery remains safe. A snapshot already at or beyond the
+    replay boundary may also replay an immutable/idempotent authority write and then
+    prove its bindings. Any earlier/intermediate phase is rejected before that write.
+    """
+
+    snapshot = supervisor.status(run_id)
+    if snapshot.phase is expected_phase:
+        return snapshot
+    if _PHASE_INDEX[snapshot.phase] >= _PHASE_INDEX[replay_at_least_phase]:
+        return snapshot
+    raise ResearchSupervisorError(
+        f"supervisor phase {snapshot.phase.value} is not admitted for authority write; "
+        f"expected {expected_phase.value} or replay at/after {replay_at_least_phase.value}"
+    )
+
+
 def _advance_once_or_replay(
     supervisor: ResearchSupervisor,
     run_id: str,
@@ -119,6 +145,12 @@ def stage_factory_evaluation(
 
     if not isinstance(supervisor, ResearchSupervisor):
         raise TypeError("supervisor must be ResearchSupervisor")
+    _require_write_phase_admission(
+        supervisor,
+        run_id,
+        expected_phase=ResearchPhase.EXPERIMENT,
+        replay_at_least_phase=ResearchPhase.CAUSAL_EVALUATION,
+    )
     staged = stage_baseline_candidate(
         runner,
         spec,
@@ -215,6 +247,12 @@ def finalize_factory_decision(
 
     if not isinstance(supervisor, ResearchSupervisor):
         raise TypeError("supervisor must be ResearchSupervisor")
+    _require_write_phase_admission(
+        supervisor,
+        run_id,
+        expected_phase=ResearchPhase.DECISION,
+        replay_at_least_phase=ResearchPhase.POSTMORTEM,
+    )
     result = finalize_staged_candidate(
         runner,
         spec=spec,

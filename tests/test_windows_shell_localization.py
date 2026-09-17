@@ -149,6 +149,13 @@ def test_windows_public_shell_copy_does_not_present_v1_as_a_separate_stage():
         assert "V1" not in text(key)
 
 
+def test_windows_surface_phase_contract_is_stage_neutral():
+    phases = {surface.phase for surface in SURFACES}
+    assert phases <= {"active", "visible-disabled", "presentation-only"}
+    assert "v1-active" not in inspect.getsource(windows_surface_contract)
+    assert "Windows V1" not in inspect.getsource(windows_layout)
+
+
 def test_windows_surface_content_is_resolved_from_central_catalog():
     public_catalog = catalog()
     expected_keys = set()

@@ -346,5 +346,95 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         )
 
 
+    def test_event_concentration_uses_exact_whole_open_portfolio_boundary(self) -> None:
+        goal = self._goal(
+            max_session_loss_fraction=Decimal("1"),
+            max_day_loss_fraction=Decimal("1"),
+            max_drawdown_fraction=Decimal("1"),
+            max_turnover_fraction=Decimal("1000"),
+            max_event_concentration_fraction=Decimal("0.20"),
+        )
+        policy = self._permissive_policy(goal)
+
+        at_boundary = PaperBook("100")
+        at_boundary.open_ticket(
+            (self._leg("event-other", "market-other", "selection-other"),),
+            Decimal("80"),
+        )
+        allowed = policy.evaluate(
+            at_boundary,
+            Decimal("20"),
+            context=self._context(),
+        )
+        self.assertTrue(allowed.allowed)
+
+        over_limit = PaperBook("100")
+        over_limit.open_ticket(
+            (self._leg("event-other", "market-other", "selection-other"),),
+            Decimal("79"),
+        )
+        over_limit.open_ticket(
+            (self._leg("event-1", "market-other-2", "selection-existing"),),
+            Decimal("1"),
+        )
+        blocked = policy.evaluate(
+            over_limit,
+            Decimal("20"),
+            context=self._context(),
+        )
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(
+            blocked.reason,
+            "owner event concentration limit exceeded",
+        )
+
+    def test_market_concentration_counts_existing_open_stake_across_events(self) -> None:
+        goal = self._goal(
+            max_session_loss_fraction=Decimal("1"),
+            max_day_loss_fraction=Decimal("1"),
+            max_drawdown_fraction=Decimal("1"),
+            max_turnover_fraction=Decimal("1000"),
+            max_market_concentration_fraction=Decimal("0.20"),
+        )
+        book = PaperBook("100")
+        book.open_ticket(
+            (self._leg("event-other", "market-1", "selection-other"),),
+            Decimal("80"),
+        )
+
+        decision = self._permissive_policy(goal).evaluate(
+            book,
+            Decimal("20"),
+            context=self._context(),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "owner market concentration limit exceeded",
+        )
+
+    def test_unpersisted_provider_and_sport_concentration_remain_fail_closed(self) -> None:
+        provider = self._permissive_policy(
+            self._goal(max_provider_concentration_fraction=Decimal("0.99"))
+        ).evaluate(PaperBook("100"), Decimal("1"), context=self._context())
+        self.assertFalse(provider.allowed)
+        self.assertEqual(
+            provider.reason,
+            "owner provider concentration limit cannot be proven without "
+            "canonical whole-portfolio exposure evidence",
+        )
+
+        sport = self._permissive_policy(
+            self._goal(max_sport_concentration_fraction=Decimal("0.99"))
+        ).evaluate(PaperBook("100"), Decimal("1"), context=self._context())
+        self.assertFalse(sport.allowed)
+        self.assertEqual(
+            sport.reason,
+            "owner sport concentration limit cannot be proven without "
+            "canonical whole-portfolio exposure evidence",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

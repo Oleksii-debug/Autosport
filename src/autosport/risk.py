@@ -481,11 +481,105 @@ class PaperRiskPolicy:
         return rooms
 
     @staticmethod
+    def _fraction_exceeds(
+        numerator: Decimal,
+        denominator: Decimal,
+        limit: Decimal,
+    ) -> bool:
+        """Compare one exact Decimal ratio to a limit without rounding."""
+        values = (numerator, denominator, limit)
+        if any(
+            not isinstance(value, Decimal) or not value.is_finite()
+            for value in values
+        ):
+            raise ValueError("concentration ratio requires finite Decimal values")
+        if numerator < 0 or denominator <= 0 or limit < 0 or limit > 1:
+            raise ValueError("concentration ratio values are out of range")
+
+        numerator_num, numerator_den = numerator.as_integer_ratio()
+        denominator_num, denominator_den = denominator.as_integer_ratio()
+        limit_num, limit_den = limit.as_integer_ratio()
+        return (
+            numerator_num * denominator_den * limit_den
+            > limit_num * numerator_den * denominator_num
+        )
+
+    @classmethod
+    def _identity_concentration_decision(
+        cls,
+        book: PaperBook,
+        amount: Decimal,
+        context: ProposedTicketRiskContext,
+        *,
+        dimension: str,
+        limit: Decimal,
+    ) -> RiskDecision | None:
+        """Enforce exact whole-open-portfolio event/market stake concentration."""
+        if limit >= Decimal("1"):
+            return None
+        if dimension == "event":
+            proposed_identities = context.event_ids
+            identity_attribute = "event_id"
+        elif dimension == "market":
+            proposed_identities = context.market_ids
+            identity_attribute = "market_id"
+        else:
+            raise ValueError("unsupported concentration dimension")
+
+        state = cls._book_state(book)
+        if state is None:
+            return RiskDecision(False, "virtual bankroll state is invalid")
+        _, _, committed_stake, _ = state
+
+        try:
+            total_exposure = cls._exact_positive_sum((committed_stake, amount))
+            exposure_by_identity: dict[str, Decimal] = {}
+            for ticket in book.tickets.values():
+                if ticket.status is not TicketStatus.OPEN:
+                    continue
+                identities = frozenset(
+                    getattr(leg, identity_attribute) for leg in ticket.legs
+                )
+                for identity in identities:
+                    exposure_by_identity[identity] = cls._exact_positive_sum(
+                        (
+                            exposure_by_identity.get(identity, Decimal("0")),
+                            ticket.stake,
+                        )
+                    )
+
+            for identity in proposed_identities:
+                proposed_exposure = cls._exact_positive_sum(
+                    (
+                        exposure_by_identity.get(identity, Decimal("0")),
+                        amount,
+                    )
+                )
+                if cls._fraction_exceeds(
+                    proposed_exposure,
+                    total_exposure,
+                    limit,
+                ):
+                    return RiskDecision(
+                        False,
+                        f"owner {dimension} concentration limit exceeded",
+                    )
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
+            return RiskDecision(
+                False,
+                f"owner {dimension} concentration evidence is invalid",
+            )
+        return None
+
+    @classmethod
     def _proposal_restriction_decision(
+        cls,
+        book: PaperBook,
+        amount: Decimal,
         goal: EconomicGoalContract,
         context: ProposedTicketRiskContext,
     ) -> RiskDecision | None:
-        """Enforce owner restrictions supported by canonical proposal-local identity."""
+        """Enforce owner restrictions supported by canonical proposal/open-book identity."""
         if context.parlay_leg_count > goal.max_parlay_legs:
             return RiskDecision(False, "economic goal parlay leg limit exceeded")
         if context.market_ids & goal.blocked_markets:
@@ -498,13 +592,28 @@ class PaperRiskPolicy:
                 "owner sport deny-list cannot be proven without canonical sport identity",
             )
 
-        concentration_limits = (
+        for dimension, limit in (
             ("event", goal.max_event_concentration_fraction),
             ("market", goal.max_market_concentration_fraction),
+        ):
+            decision = cls._identity_concentration_decision(
+                book,
+                amount,
+                context,
+                dimension=dimension,
+                limit=limit,
+            )
+            if decision is not None:
+                return decision
+
+        # PaperTicket deliberately persists event/market/selection identity but not
+        # provider or sport identity. Never invent those historical dimensions from
+        # current quote evidence. Restrictive provider/sport concentration therefore
+        # remains fail-closed until their canonical durable identity authorities exist.
+        for dimension, limit in (
             ("provider", goal.max_provider_concentration_fraction),
             ("sport", goal.max_sport_concentration_fraction),
-        )
-        for dimension, limit in concentration_limits:
+        ):
             if limit < Decimal("1"):
                 return RiskDecision(
                     False,
@@ -731,7 +840,12 @@ class PaperRiskPolicy:
                     False,
                     "proposed ticket currency does not match economic goal",
                 )
-            restriction_decision = self._proposal_restriction_decision(goal, context)
+            restriction_decision = self._proposal_restriction_decision(
+                book,
+                amount,
+                goal,
+                context,
+            )
             if restriction_decision is not None:
                 return restriction_decision
             quote_decision = self._quote_risk_decision(goal, context)

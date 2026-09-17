@@ -21,8 +21,8 @@ class StrategyStateProjection:
 
     The existing ``canonical_strategy_id`` is the stable class/context key for this
     foundation. The projection is derived on demand and never persists a second
-    mutable promotion authority. ``champion_strategy_version_id`` is populated only
-    when the registry's canonical global champion belongs to this strategy key.
+    mutable promotion authority. ``champion_strategy_version_id`` is the champion
+    derived only from promotion history for this same strategy key.
     """
 
     canonical_strategy_id: str
@@ -122,8 +122,10 @@ class ScientificRegistryIndex:
             elif action is PromotionAction.ROLLBACK and rollback_target in version_ids:
                 ever_promoted.add(rollback_target)
 
-        global_champion = self.registry.champion_strategy(as_of=as_of)
-        champion = global_champion if global_champion in version_ids else None
+        champion = self.registry.champion_strategy(
+            as_of=as_of,
+            canonical_strategy_id=canonical_strategy_id,
+        )
         rejected = {
             version_id
             for version_id, action in latest_action.items()

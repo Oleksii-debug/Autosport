@@ -658,28 +658,51 @@ class ScientificRegistry:
             raise ValueError("allow_repeat_experiment must be boolean")
         with WorkspaceEconomicLock(self.path.parent):
             state = self._read()
+            return self._append_entry_locked(
+                state,
+                entry,
+                allow_repeat_experiment=allow_repeat_experiment,
+            )
+
+    def _append_entry_locked(
+        self,
+        state: dict[str, Any],
+        entry: dict[str, Any],
+        *,
+        allow_repeat_experiment: bool = False,
+    ) -> str:
+        for existing in state["records"]:
+            if (existing["record_type"], existing["record_id"]) == (
+                entry["record_type"], entry["record_id"]
+            ):
+                if existing["record_sha256"] == entry["record_sha256"]:
+                    return entry["record_sha256"]
+                raise ConflictingScientificRecordError(
+                    f"conflicting immutable scientific record: {entry['record_type']}:{entry['record_id']}"
+                )
+        if entry["record_type"] == "Experiment":
+            fingerprint = entry["payload"]["fingerprint"]
+            evaluation_bundle_id = entry["payload"]["evaluation_bundle_id"]
             for existing in state["records"]:
-                if (existing["record_type"], existing["record_id"]) == (
-                    entry["record_type"], entry["record_id"]
-                ):
-                    if existing["record_sha256"] == entry["record_sha256"]:
-                        return entry["record_sha256"]
-                    raise ConflictingScientificRecordError(
-                        f"conflicting immutable scientific record: {entry['record_type']}:{entry['record_id']}"
-                    )
-            if entry["record_type"] == "Experiment" and not allow_repeat_experiment:
-                fingerprint = entry["payload"]["fingerprint"]
-                if any(
+                if (
                     existing["record_type"] == "Experiment"
-                    and existing["payload"].get("fingerprint") == fingerprint
-                    for existing in state["records"]
+                    and existing["payload"].get("evaluation_bundle_id") == evaluation_bundle_id
+                    and existing["payload"].get("fingerprint") != fingerprint
                 ):
-                    raise DuplicateExperimentFingerprintError(
-                        "experiment fingerprint already has durable history; inspect negative/null results before repeating"
+                    raise ConflictingScientificRecordError(
+                        "evaluation bundle is already bound to a different experiment fingerprint"
                     )
-            state["records"].append(entry)
-            atomic_write_json(self.path, state)
-            self._read()
+            if not allow_repeat_experiment and any(
+                existing["record_type"] == "Experiment"
+                and existing["payload"].get("fingerprint") == fingerprint
+                for existing in state["records"]
+            ):
+                raise DuplicateExperimentFingerprintError(
+                    "experiment fingerprint already has durable history; inspect negative/null results before repeating"
+                )
+        state["records"].append(entry)
+        atomic_write_json(self.path, state)
+        self._read()
         return entry["record_sha256"]
 
     def get(self, record_type: str, record_id: str) -> RegistryEntry | None:
@@ -720,89 +743,157 @@ class ScientificRegistry:
         matches.sort(key=lambda item: (_instant(item.available_at, "available_at"), item.record_id))
         return tuple(matches)
 
-    def record_promotion(self, decision: PromotionDecision) -> str:
-        state = self._read()
-        entries = {(raw["record_type"], raw["record_id"]): raw for raw in state["records"]}
-        decision_at = _instant(decision.decided_at, "decided_at")
-
-        def require(kind: str, identity: str) -> dict[str, Any]:
-            value = entries.get((kind, identity))
-            if value is None:
-                raise PromotionEvidenceError(f"promotion evidence missing {kind}:{identity}")
-            if _instant(value["available_at"], f"{kind}.available_at") > decision_at:
-                raise PromotionEvidenceError(f"promotion evidence {kind}:{identity} was not available at decision time")
-            reveal = value["payload"].get("outcome_reveal_after")
-            if isinstance(reveal, str) and _instant(reveal, f"{kind}.outcome_reveal_after") > decision_at:
-                raise PromotionEvidenceError(f"promotion evidence {kind}:{identity} was not causally revealed at decision time")
-            return value
-
-        strategy = require("StrategyVersion", decision.candidate_strategy_version_id)
-        protocol = require("ResearchProtocol", decision.research_protocol_id)
-        bundle = require("EvaluationBundle", decision.evaluation_bundle_id)
-        binding = protocol["payload"].get("binding")
-        if type(binding) is not dict:
-            raise PromotionEvidenceError("durable protocol lacks scientific binding")
-        question = require("ResearchQuestion", binding.get("research_question_id", ""))
-        hypothesis = require("Hypothesis", binding.get("hypothesis_id", ""))
-        if _digest(question["payload"]) != binding.get("research_question_sha256"):
-            raise PromotionEvidenceError("research question hash does not match frozen protocol binding")
-        if _digest(hypothesis["payload"]) != binding.get("hypothesis_sha256"):
-            raise PromotionEvidenceError("hypothesis hash does not match frozen protocol binding")
-        if protocol["payload"].get("protocol_sha256") != decision.protocol_sha256.lower():
-            raise PromotionEvidenceError("promotion protocol hash does not match durable protocol")
-        if bundle["payload"].get("protocol_sha256") != decision.protocol_sha256.lower():
-            raise PromotionEvidenceError("evaluation bundle is bound to a different protocol")
-        if bundle["payload"].get("bundle_sha256") != decision.evaluation_bundle_sha256.lower():
-            raise PromotionEvidenceError("promotion evaluation bundle hash does not match durable bundle")
-        dataset = require("DatasetSnapshot", bundle["payload"]["dataset_snapshot_id"])
-        if dataset["payload"].get("manifest_sha256") != protocol["payload"].get("dataset_manifest_sha256"):
-            raise PromotionEvidenceError("dataset manifest does not match frozen research protocol")
-
-        strategy_model_id = strategy["payload"].get("model_version_id")
-        if strategy_model_id != decision.candidate_model_version_id:
-            raise PromotionEvidenceError("candidate strategy/model lineage mismatch")
-        model: dict[str, Any] | None = None
-        if decision.candidate_model_version_id is not None:
-            model = require("ModelVersion", decision.candidate_model_version_id)
-        if decision.predecessor_strategy_version_id is not None:
-            require("StrategyVersion", decision.predecessor_strategy_version_id)
-        if decision.action is PromotionAction.ROLLBACK:
-            require("StrategyVersion", decision.rollback_to_strategy_version_id or "")
-
-        matching_experiment_entry: dict[str, Any] | None = None
-        for raw in state["records"]:
-            if raw["record_type"] != "Experiment":
-                continue
+    @staticmethod
+    def _promotion_champion_from_state(
+        state: dict[str, Any],
+        *,
+        through: datetime,
+    ) -> str | None:
+        decisions = [
+            raw
+            for raw in state["records"]
+            if raw["record_type"] == "PromotionDecision"
+            and _instant(raw["available_at"], "PromotionDecision.available_at") <= through
+        ]
+        decisions.sort(
+            key=lambda raw: (
+                _instant(raw["available_at"], "PromotionDecision.available_at"),
+                raw["record_id"],
+            )
+        )
+        champion: str | None = None
+        for raw in decisions:
             payload = raw["payload"]
-            if (
-                payload.get("research_protocol_id") == decision.research_protocol_id
-                and payload.get("strategy_version_id") == decision.candidate_strategy_version_id
-                and payload.get("evaluation_bundle_id") == decision.evaluation_bundle_id
-                and payload.get("model_version_id") == decision.candidate_model_version_id
+            action = PromotionAction(payload["action"])
+            predecessor = payload.get("predecessor_strategy_version_id")
+            if action is PromotionAction.PROMOTE:
+                if predecessor != champion:
+                    raise PromotionEvidenceError(
+                        "durable promotion history predecessor does not match current champion"
+                    )
+                champion = payload["candidate_strategy_version_id"]
+            elif action is PromotionAction.ROLLBACK:
+                if champion != payload["candidate_strategy_version_id"]:
+                    raise PromotionEvidenceError(
+                        "durable rollback candidate does not match current champion"
+                    )
+                champion = payload["rollback_to_strategy_version_id"]
+        return champion
+
+    def record_promotion(self, decision: PromotionDecision) -> str:
+        entry = self._entry(decision)
+        with WorkspaceEconomicLock(self.path.parent):
+            state = self._read()
+            for existing in state["records"]:
+                if (existing["record_type"], existing["record_id"]) == (
+                    entry["record_type"], entry["record_id"]
+                ):
+                    if existing["record_sha256"] == entry["record_sha256"]:
+                        return entry["record_sha256"]
+                    raise ConflictingScientificRecordError(
+                        f"conflicting immutable scientific record: {entry['record_type']}:{entry['record_id']}"
+                    )
+
+            entries = {(raw["record_type"], raw["record_id"]): raw for raw in state["records"]}
+            decision_at = _instant(decision.decided_at, "decided_at")
+            if any(
+                raw["record_type"] == "PromotionDecision"
+                and _instant(raw["available_at"], "PromotionDecision.available_at") > decision_at
+                for raw in state["records"]
             ):
-                matching_experiment_entry = raw
-                break
-        if matching_experiment_entry is None:
-            raise PromotionEvidenceError("promotion has no durable matching experiment")
-        if _instant(matching_experiment_entry["available_at"], "Experiment.available_at") > decision_at:
-            raise PromotionEvidenceError("matching experiment was not complete at decision time")
-        matching_experiment = matching_experiment_entry["payload"]
-        if bundle["payload"].get("dataset_snapshot_id") != matching_experiment.get("dataset_snapshot_id"):
-            raise PromotionEvidenceError("evaluation bundle/experiment dataset lineage mismatch")
-        require("FeatureSet", matching_experiment["feature_set_id"])
-        if model is not None:
-            if model["payload"].get("research_protocol_id") != matching_experiment.get("research_protocol_id"):
-                raise PromotionEvidenceError("candidate model/experiment protocol lineage mismatch")
-            if model["payload"].get("dataset_snapshot_id") != matching_experiment.get("dataset_snapshot_id"):
-                raise PromotionEvidenceError("candidate model/experiment dataset lineage mismatch")
-            if model["payload"].get("feature_set_id") != matching_experiment.get("feature_set_id"):
-                raise PromotionEvidenceError("candidate model/experiment feature lineage mismatch")
-        if decision.action is PromotionAction.PROMOTE:
-            if strategy["payload"].get("predecessor_strategy_version_id") != decision.predecessor_strategy_version_id:
-                raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
-            if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:
-                raise PromotionEvidenceError("PROMOTE requires a positive durable experiment outcome")
-        return self._append(decision)
+                raise PromotionEvidenceError(
+                    "promotion decision cannot be backdated before durable promotion history"
+                )
+            current_champion = self._promotion_champion_from_state(state, through=decision_at)
+            if decision.action is PromotionAction.PROMOTE:
+                if decision.predecessor_strategy_version_id != current_champion:
+                    raise PromotionEvidenceError(
+                        "promotion predecessor does not match current champion"
+                    )
+            elif decision.action is PromotionAction.ROLLBACK:
+                if decision.candidate_strategy_version_id != current_champion:
+                    raise PromotionEvidenceError(
+                        "rollback candidate does not match current champion"
+                    )
+
+            def require(kind: str, identity: str) -> dict[str, Any]:
+                value = entries.get((kind, identity))
+                if value is None:
+                    raise PromotionEvidenceError(f"promotion evidence missing {kind}:{identity}")
+                if _instant(value["available_at"], f"{kind}.available_at") > decision_at:
+                    raise PromotionEvidenceError(f"promotion evidence {kind}:{identity} was not available at decision time")
+                reveal = value["payload"].get("outcome_reveal_after")
+                if isinstance(reveal, str) and _instant(reveal, f"{kind}.outcome_reveal_after") > decision_at:
+                    raise PromotionEvidenceError(f"promotion evidence {kind}:{identity} was not causally revealed at decision time")
+                return value
+
+            strategy = require("StrategyVersion", decision.candidate_strategy_version_id)
+            protocol = require("ResearchProtocol", decision.research_protocol_id)
+            bundle = require("EvaluationBundle", decision.evaluation_bundle_id)
+            binding = protocol["payload"].get("binding")
+            if type(binding) is not dict:
+                raise PromotionEvidenceError("durable protocol lacks scientific binding")
+            question = require("ResearchQuestion", binding.get("research_question_id", ""))
+            hypothesis = require("Hypothesis", binding.get("hypothesis_id", ""))
+            if _digest(question["payload"]) != binding.get("research_question_sha256"):
+                raise PromotionEvidenceError("research question hash does not match frozen protocol binding")
+            if _digest(hypothesis["payload"]) != binding.get("hypothesis_sha256"):
+                raise PromotionEvidenceError("hypothesis hash does not match frozen protocol binding")
+            if protocol["payload"].get("protocol_sha256") != decision.protocol_sha256.lower():
+                raise PromotionEvidenceError("promotion protocol hash does not match durable protocol")
+            if bundle["payload"].get("protocol_sha256") != decision.protocol_sha256.lower():
+                raise PromotionEvidenceError("evaluation bundle is bound to a different protocol")
+            if bundle["payload"].get("bundle_sha256") != decision.evaluation_bundle_sha256.lower():
+                raise PromotionEvidenceError("promotion evaluation bundle hash does not match durable bundle")
+            dataset = require("DatasetSnapshot", bundle["payload"]["dataset_snapshot_id"])
+            if dataset["payload"].get("manifest_sha256") != protocol["payload"].get("dataset_manifest_sha256"):
+                raise PromotionEvidenceError("dataset manifest does not match frozen research protocol")
+
+            strategy_model_id = strategy["payload"].get("model_version_id")
+            if strategy_model_id != decision.candidate_model_version_id:
+                raise PromotionEvidenceError("candidate strategy/model lineage mismatch")
+            model: dict[str, Any] | None = None
+            if decision.candidate_model_version_id is not None:
+                model = require("ModelVersion", decision.candidate_model_version_id)
+            if decision.predecessor_strategy_version_id is not None:
+                require("StrategyVersion", decision.predecessor_strategy_version_id)
+            if decision.action is PromotionAction.ROLLBACK:
+                require("StrategyVersion", decision.rollback_to_strategy_version_id or "")
+
+            matching_experiment_entry: dict[str, Any] | None = None
+            for raw in state["records"]:
+                if raw["record_type"] != "Experiment":
+                    continue
+                payload = raw["payload"]
+                if (
+                    payload.get("research_protocol_id") == decision.research_protocol_id
+                    and payload.get("strategy_version_id") == decision.candidate_strategy_version_id
+                    and payload.get("evaluation_bundle_id") == decision.evaluation_bundle_id
+                    and payload.get("model_version_id") == decision.candidate_model_version_id
+                ):
+                    matching_experiment_entry = raw
+                    break
+            if matching_experiment_entry is None:
+                raise PromotionEvidenceError("promotion has no durable matching experiment")
+            if _instant(matching_experiment_entry["available_at"], "Experiment.available_at") > decision_at:
+                raise PromotionEvidenceError("matching experiment was not complete at decision time")
+            matching_experiment = matching_experiment_entry["payload"]
+            if bundle["payload"].get("dataset_snapshot_id") != matching_experiment.get("dataset_snapshot_id"):
+                raise PromotionEvidenceError("evaluation bundle/experiment dataset lineage mismatch")
+            require("FeatureSet", matching_experiment["feature_set_id"])
+            if model is not None:
+                if model["payload"].get("research_protocol_id") != matching_experiment.get("research_protocol_id"):
+                    raise PromotionEvidenceError("candidate model/experiment protocol lineage mismatch")
+                if model["payload"].get("dataset_snapshot_id") != matching_experiment.get("dataset_snapshot_id"):
+                    raise PromotionEvidenceError("candidate model/experiment dataset lineage mismatch")
+                if model["payload"].get("feature_set_id") != matching_experiment.get("feature_set_id"):
+                    raise PromotionEvidenceError("candidate model/experiment feature lineage mismatch")
+            if decision.action is PromotionAction.PROMOTE:
+                if strategy["payload"].get("predecessor_strategy_version_id") != decision.predecessor_strategy_version_id:
+                    raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
+                if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:
+                    raise PromotionEvidenceError("PROMOTE requires a positive durable experiment outcome")
+            return self._append_entry_locked(state, entry)
 
     def champion_strategy(self, *, as_of: str) -> str | None:
         decisions = self.causal_records("PromotionDecision", as_of=as_of)

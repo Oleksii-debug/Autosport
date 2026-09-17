@@ -47,6 +47,33 @@ def _exact_decimal(name: str, value: object) -> Decimal:
     return value
 
 
+def _exact_decimal_add(left: Decimal, right: Decimal) -> Decimal:
+    """Add two finite Decimals exactly without consulting ambient Decimal context."""
+
+    left = _exact_decimal("left reward value", left)
+    right = _exact_decimal("right reward value", right)
+
+    def coefficient_and_exponent(value: Decimal) -> tuple[int, int]:
+        parts = value.as_tuple()
+        coefficient = 0
+        for digit in parts.digits:
+            coefficient = coefficient * 10 + digit
+        if parts.sign:
+            coefficient = -coefficient
+        return coefficient, int(parts.exponent)
+
+    left_coefficient, left_exponent = coefficient_and_exponent(left)
+    right_coefficient, right_exponent = coefficient_and_exponent(right)
+    exponent = min(left_exponent, right_exponent)
+    coefficient = (
+        left_coefficient * (10 ** (left_exponent - exponent))
+        + right_coefficient * (10 ** (right_exponent - exponent))
+    )
+    sign = 1 if coefficient < 0 else 0
+    digits = tuple(int(character) for character in str(abs(coefficient))) if coefficient else (0,)
+    return Decimal((sign, digits, exponent))
+
+
 def _stable_hash(payload: object) -> str:
     try:
         encoded = json.dumps(
@@ -249,7 +276,7 @@ class BanditPolicyState:
         estimates[action.action_type] = ActionEstimate(
             action.action_type,
             current.observations + 1,
-            current.reward_sum + reward.reward,
+            _exact_decimal_add(current.reward_sum, reward.reward),
         )
         successor = BanditPolicyState(
             environment_id=self.environment_id,

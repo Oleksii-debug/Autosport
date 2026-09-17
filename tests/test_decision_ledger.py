@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from autosport.decision_ledger import (
+    ECONOMIC_DECISION_KIND,
     ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY,
     DecisionLedgerIntegrityError,
     DecisionRecord,
@@ -26,6 +27,20 @@ class DecisionLedgerTests(unittest.TestCase):
             "OBSERVE",
             {"x": 1},
             "ctx",
+            **kwargs,
+        )
+
+    @staticmethod
+    def _economic_record(*, decision_id: str | None = None) -> DecisionRecord:
+        kwargs = {} if decision_id is None else {"decision_id": decision_id}
+        return DecisionRecord(
+            "run-1",
+            "agent",
+            "2026-01-01T00:00:00+00:00",
+            "PROPOSE_STAKE",
+            {"x": 1},
+            "ctx",
+            decision_kind=ECONOMIC_DECISION_KIND,
             **kwargs,
         )
 
@@ -75,7 +90,7 @@ class DecisionLedgerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
             goal = self._economic_goal()
-            record = self._record(decision_id="economic-decision-1")
+            record = self._economic_record(decision_id="economic-decision-1")
 
             ledger = JsonlDecisionLedger(path)
             ledger.append_economic(record, goal)
@@ -94,7 +109,7 @@ class DecisionLedgerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
             goal = self._economic_goal()
-            record = self._record(decision_id="generic-not-economic")
+            record = self._economic_record(decision_id="generic-not-economic")
             JsonlDecisionLedger(path).append(record)
 
             with self.assertRaisesRegex(
@@ -110,7 +125,7 @@ class DecisionLedgerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
             goal = self._economic_goal()
-            record = self._record(decision_id="economic-revision-bound")
+            record = self._economic_record(decision_id="economic-revision-bound")
             JsonlDecisionLedger(path).append_economic(record, goal)
 
             changed = replace(goal, revision=2)
@@ -138,6 +153,7 @@ class DecisionLedgerTests(unittest.TestCase):
                 },
                 "ctx",
                 decision_id="caller-spoof",
+                decision_kind=ECONOMIC_DECISION_KIND,
             )
 
             with self.assertRaisesRegex(

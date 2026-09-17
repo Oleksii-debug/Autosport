@@ -144,6 +144,41 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         self.assertEqual(decision.reason, "aggregate committed stake limit exceeded")
 
 
+    def test_existing_open_exposure_consumes_session_day_and_drawdown_loss_rooms(self) -> None:
+        limits = (
+            (
+                "max_session_loss_fraction",
+                "economic goal conservative session loss limit exceeded",
+            ),
+            (
+                "max_day_loss_fraction",
+                "economic goal conservative day loss limit exceeded",
+            ),
+            ("max_drawdown_fraction", "economic goal drawdown limit exceeded"),
+        )
+        for field_name, reason in limits:
+            with self.subTest(field_name=field_name):
+                book = PaperBook("100")
+                book.open_ticket([self._leg()], Decimal("4"))
+                policy = self._policy(
+                    self._goal(**{field_name: Decimal("0.05")})
+                )
+
+                self.assertTrue(self._evaluate(policy, book, Decimal("1")).allowed)
+                blocked = self._evaluate(policy, book, Decimal("1.01"))
+
+                self.assertFalse(blocked.allowed)
+                self.assertEqual(blocked.reason, reason)
+
+    def test_goal_stake_derivation_fails_closed_without_required_ruin_evidence(self) -> None:
+        policy = self._policy(
+            self._goal(max_risk_of_ruin=Decimal("0.01"))
+        )
+
+        self.assertIsNone(
+            policy.derive_goal_stake(PaperBook("100"), Decimal("1"))
+        )
+
     def test_session_loss_limit_uses_conservative_realized_loss_plus_proposed_worst_case(self) -> None:
         book = PaperBook("100")
         lost = book.open_ticket([self._leg()], Decimal("4"))

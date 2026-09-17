@@ -188,6 +188,7 @@ class _HistoricalRiskMetrics:
     initial_bankroll: Decimal
     current_equity: Decimal
     peak_equity: Decimal
+    committed_stake: Decimal
     realized_gross_loss: Decimal
     turnover: Decimal
 
@@ -406,6 +407,7 @@ class PaperRiskPolicy:
             book.initial_bankroll,
             current_equity,
             peak_equity,
+            current_committed,
             realized_gross_loss,
             turnover,
         )
@@ -422,6 +424,7 @@ class PaperRiskPolicy:
             initial_bankroll=book.initial_bankroll,
             current_equity=current_equity,
             peak_equity=peak_equity,
+            committed_stake=current_committed,
             realized_gross_loss=realized_gross_loss,
             turnover=turnover,
         )
@@ -449,10 +452,25 @@ class PaperRiskPolicy:
                 turnover_limit = (
                     metrics.initial_bankroll * goal.max_turnover_fraction
                 )
-                session_room = session_limit - metrics.realized_gross_loss
-                day_room = day_limit - metrics.realized_gross_loss
+                # Existing open stake is part of the whole-portfolio worst-case
+                # loss envelope. A new proposal may consume only the room left
+                # after every current open ticket is treated as a full loss.
+                session_room = (
+                    session_limit
+                    - metrics.realized_gross_loss
+                    - metrics.committed_stake
+                )
+                day_room = (
+                    day_limit
+                    - metrics.realized_gross_loss
+                    - metrics.committed_stake
+                )
                 drawdown_floor = metrics.peak_equity - drawdown_limit
-                drawdown_room = metrics.current_equity - drawdown_floor
+                drawdown_room = (
+                    metrics.current_equity
+                    - drawdown_floor
+                    - metrics.committed_stake
+                )
                 turnover_room = turnover_limit - metrics.turnover
         except (ArithmeticError, TypeError, ValueError):
             return None
@@ -593,6 +611,12 @@ class PaperRiskPolicy:
             return None
         initial_bankroll, balance, committed_stake, open_position_count = state
         if goal.emergency_stop or open_position_count >= goal.max_concurrent_positions:
+            return None
+        # This proposal-only sizing API has no canonical probabilistic ruin
+        # witness input. A nontrivial owner ruin ceiling therefore means the
+        # method must return ZERO rather than emit a stake that has not passed
+        # every required economic-risk evidence boundary.
+        if goal.max_risk_of_ruin < Decimal("1"):
             return None
 
         history_rooms = self._goal_history_rooms(book, goal)

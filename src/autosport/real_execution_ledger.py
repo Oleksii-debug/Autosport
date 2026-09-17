@@ -711,7 +711,6 @@ class RealExecutionLedger:
                 found_reconciliations[evidence_id] = event["payload"]
             elif kind == EventType.EXTERNAL_ACKNOWLEDGEMENT.value:
                 if state not in {
-                    AttemptState.RESERVED,
                     AttemptState.SUBMITTED,
                     AttemptState.UNKNOWN,
                 }:
@@ -1523,12 +1522,12 @@ class RealExecutionLedger:
                 )
             state = self._state(attempt_events)
             if state not in {
-                AttemptState.RESERVED,
                 AttemptState.SUBMITTED,
                 AttemptState.UNKNOWN,
             }:
                 raise ExecutionStateError(
-                    "acknowledgement requires unresolved attempt"
+                    "acknowledgement requires durable submission or "
+                    "UNKNOWN reconciliation"
                 )
             first = attempt_events[0]
             causal_boundaries: list[datetime] = [

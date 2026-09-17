@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 
-from .ingestion_health import SourceHealthStore, parse_source_timestamp
+from .ingestion_health import SourceHealthState, SourceHealthStore, parse_source_timestamp
 from .market_mirror import MirrorSnapshot
 from .market_mirror_runtime import FocusedMirrorDependencyIndex
 
@@ -21,15 +22,40 @@ class ProviderDecisionEligibility(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderHealthReplayBoundary:
+    """Durable provider-health log horizon bound into one decision identity.
+
+    ``transition_order`` is the source-local append order already persisted by
+    ``SourceHealthStore`` schema v3. ``recorded_at`` is retained alongside it so a
+    replay cannot accidentally reuse the same integer against a different/corrupt
+    history. Order zero represents a store with no durable transition for the source.
+    """
+
+    source_id: str
+    recorded_at: str | None
+    transition_order: int
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderHealthDecision:
     source_id: str
     eligibility: ProviderDecisionEligibility
     source_status: str
     last_success_at: str | None
+    replay_boundary: ProviderHealthReplayBoundary
 
     @property
     def eligible(self) -> bool:
         return self.eligibility is ProviderDecisionEligibility.ELIGIBLE
+
+
+@dataclass(frozen=True, slots=True)
+class HealthGatedMirrorSnapshot:
+    """Mirror view plus the exact durable health horizons used to filter it."""
+
+    revision: int
+    events: tuple
+    health_boundaries: tuple[ProviderHealthReplayBoundary, ...]
 
 
 class HealthGatedMirrorDecisionIndex:
@@ -37,9 +63,10 @@ class HealthGatedMirrorDecisionIndex:
 
     ``MarketMirror`` remains the only live quote authority and ``SourceHealthStore``
     remains the provider-health authority. Every decision read starts from one coherent
-    focused mirror revision, then reads the provider state that was durably known at the
-    requested decision timestamp. Later health transitions therefore cannot rewrite an
-    earlier replay boundary.
+    focused mirror revision, then reads provider state through an explicit durable
+    health-log horizon. A fresh read binds the current horizon; a replay can pass those
+    exact horizons back, so a later equal-evidence-time health transition cannot rewrite
+    an already-bound historical decision identity.
 
     The gate fails closed for unknown, degraded, failed, stale, or otherwise invalid
     provider health. It owns no duplicate mutable market/provider state.
@@ -78,16 +105,131 @@ class HealthGatedMirrorDecisionIndex:
             raise ValueError("source_id must be a non-empty trimmed string")
         return value
 
+    @staticmethod
+    def _boundary_order(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("health replay transition_order must be a non-negative integer")
+        return value
+
+    def _health_at_boundary(
+        self,
+        source_id: str,
+        *,
+        as_of: datetime,
+        replay_boundary: ProviderHealthReplayBoundary | None,
+    ) -> tuple[SourceHealthState, ProviderHealthReplayBoundary]:
+        """Read one source at a durable log horizon without inventing evidence time.
+
+        ``SourceHealthStore.get_as_of`` intentionally returns the freshest state for a
+        datetime and therefore cannot distinguish two transitions sharing that datetime.
+        This decision-layer reader binds the store's already-durable source-local order
+        as the missing replay identity. It performs no mutation and delegates persisted
+        state decoding/validation to ``SourceHealthStore``.
+        """
+        raw = self._health_store._read()
+        schema_version = raw["schema_version"]
+        entries = raw.get("history", {}).get(source_id, ())
+
+        if schema_version == 1:
+            payload = raw["sources"].get(source_id)
+            if payload is None:
+                available_order = 0
+                available_recorded_at = None
+            else:
+                state = self._health_store._state_from_payload(payload)
+                available_recorded_at = self._health_store._transition_at(state)
+                available_order = 1
+        elif entries:
+            available_order = (
+                entries[-1]["transition_order"]
+                if schema_version == 3
+                else len(entries)
+            )
+            available_recorded_at = entries[-1]["recorded_at"]
+        else:
+            available_order = 0
+            available_recorded_at = None
+
+        if replay_boundary is None:
+            horizon_order = available_order
+            horizon_recorded_at = available_recorded_at
+        else:
+            if not isinstance(replay_boundary, ProviderHealthReplayBoundary):
+                raise TypeError("replay_boundary must be a ProviderHealthReplayBoundary")
+            if replay_boundary.source_id != source_id:
+                raise ValueError("health replay boundary source_id mismatch")
+            horizon_order = self._boundary_order(replay_boundary.transition_order)
+            horizon_recorded_at = replay_boundary.recorded_at
+            if horizon_order > available_order:
+                raise ValueError("health replay boundary is newer than durable source history")
+            if horizon_order == 0:
+                if horizon_recorded_at is not None:
+                    raise ValueError("zero health replay boundary cannot carry recorded_at")
+            else:
+                if schema_version == 1:
+                    expected_recorded_at = available_recorded_at
+                else:
+                    expected = entries[horizon_order - 1]
+                    expected_order = (
+                        expected["transition_order"]
+                        if schema_version == 3
+                        else horizon_order
+                    )
+                    if expected_order != horizon_order:
+                        raise ValueError("health replay boundary order is unavailable")
+                    expected_recorded_at = expected["recorded_at"]
+                if horizon_recorded_at != expected_recorded_at:
+                    raise ValueError("health replay boundary does not match durable evidence")
+
+        bound = ProviderHealthReplayBoundary(
+            source_id=source_id,
+            recorded_at=horizon_recorded_at,
+            transition_order=horizon_order,
+        )
+        if horizon_order == 0:
+            return SourceHealthState(source_id=source_id), bound
+
+        if schema_version == 1:
+            payload = raw["sources"].get(source_id)
+            if payload is None:
+                return SourceHealthState(source_id=source_id), bound
+            state = self._health_store._state_from_payload(payload)
+            recorded_at = self._health_store._transition_at(state)
+            if recorded_at is None or parse_source_timestamp(recorded_at) > as_of:
+                return SourceHealthState(source_id=source_id), bound
+            return state, bound
+
+        selected: dict | None = None
+        for index, entry in enumerate(entries, start=1):
+            order = entry["transition_order"] if schema_version == 3 else index
+            if order > horizon_order:
+                break
+            if parse_source_timestamp(entry["recorded_at"]) <= as_of:
+                selected = entry["state"]
+            else:
+                break
+        if selected is None:
+            return SourceHealthState(source_id=source_id), bound
+        return self._health_store._state_from_payload(
+            selected,
+            normalize_failed_flags=False,
+        ), bound
+
     def provider_health(
         self,
         source_id: str,
         *,
         as_of: datetime,
+        replay_boundary: ProviderHealthReplayBoundary | None = None,
     ) -> ProviderHealthDecision:
-        """Return exact fail-closed eligibility using only health known by ``as_of``."""
+        """Return fail-closed eligibility bound to an explicit durable health horizon."""
         normalized_source = self._source_id(source_id)
         boundary = self._as_of(as_of)
-        state = self._health_store.get_as_of(normalized_source, as_of=boundary)
+        state, bound = self._health_at_boundary(
+            normalized_source,
+            as_of=boundary,
+            replay_boundary=replay_boundary,
+        )
 
         if state.status == "unknown":
             eligibility = ProviderDecisionEligibility.UNKNOWN
@@ -102,8 +244,9 @@ class HealthGatedMirrorDecisionIndex:
         else:
             last_success = parse_source_timestamp(state.last_success_at)
             if last_success > boundary:
-                # Defensive invariant fence. get_as_of() should make this unreachable,
-                # but retain an explicit fail-closed reason if storage semantics change.
+                # Defensive invariant fence. The causal reader should make this
+                # unreachable, but retain an explicit fail-closed reason if storage
+                # semantics change.
                 eligibility = ProviderDecisionEligibility.FUTURE_HEALTH
             elif boundary - last_success > self._max_health_age:
                 eligibility = ProviderDecisionEligibility.STALE_HEALTH
@@ -115,6 +258,7 @@ class HealthGatedMirrorDecisionIndex:
             eligibility=eligibility,
             source_status=state.status,
             last_success_at=state.last_success_at,
+            replay_boundary=bound,
         )
 
     def decision_view(
@@ -123,24 +267,47 @@ class HealthGatedMirrorDecisionIndex:
         *,
         as_of: datetime,
         max_age: timedelta,
-    ) -> MirrorSnapshot:
-        """Return a focused decision view with causal provider-health fencing applied."""
+        health_boundaries: Mapping[str, ProviderHealthReplayBoundary] | None = None,
+    ) -> HealthGatedMirrorSnapshot:
+        """Return a focused view and the durable health horizons used to filter it.
+
+        Pass ``health_boundaries`` from an earlier returned snapshot to reproduce that
+        health decision identity after additional equal-time transitions are appended.
+        """
         boundary = self._as_of(as_of)
-        captured = self._dependencies.decision_view(
+        captured: MirrorSnapshot = self._dependencies.decision_view(
             input_id,
             as_of=boundary,
             max_age=max_age,
         )
-        health_by_source = {
-            source_id: self.provider_health(source_id, as_of=boundary)
-            for source_id in {event.source_id for event in captured.events}
+        source_ids = tuple(sorted({event.source_id for event in captured.events}))
+        supplied: Mapping[str, ProviderHealthReplayBoundary]
+        if health_boundaries is None:
+            supplied = {}
+        else:
+            if not isinstance(health_boundaries, Mapping):
+                raise TypeError("health_boundaries must be a mapping or null")
+            if set(health_boundaries) != set(source_ids):
+                raise ValueError("health replay boundaries must match decision-view sources")
+            supplied = health_boundaries
+
+        decisions = {
+            source_id: self.provider_health(
+                source_id,
+                as_of=boundary,
+                replay_boundary=(supplied[source_id] if health_boundaries is not None else None),
+            )
+            for source_id in source_ids
         }
-        return MirrorSnapshot(
+        return HealthGatedMirrorSnapshot(
             revision=captured.revision,
             events=tuple(
                 event
                 for event in captured.events
-                if health_by_source[event.source_id].eligible
+                if decisions[event.source_id].eligible
+            ),
+            health_boundaries=tuple(
+                decisions[source_id].replay_boundary for source_id in source_ids
             ),
         )
 

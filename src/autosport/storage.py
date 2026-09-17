@@ -5,6 +5,7 @@ import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from threading import RLock
 from typing import Iterable
 
 from .domain import MarketEvent
@@ -519,11 +520,17 @@ def _ensure_canonical_secondary_indexes(connection: sqlite3.Connection) -> None:
 
 
 class SQLiteMarketStore:
-    """Crash-safe append-only normalized market history plus current quote projection."""
+    """Crash-safe append-only normalized market history plus current quote projection.
+
+    One connection remains the canonical durable authority. Cross-thread use is
+    explicitly permitted only because every public store operation is serialized by
+    ``_connection_lock``; callers must not bypass that boundary for concurrent I/O.
+    """
 
     def __init__(self, path: str | Path = "autosport.db") -> None:
         self.path = Path(path)
-        self.connection = sqlite3.connect(self.path)
+        self._connection_lock = RLock()
+        self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:
             self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.execute("PRAGMA synchronous=FULL")
@@ -736,43 +743,47 @@ class SQLiteMarketStore:
         return True
 
     def append(self, event: MarketEvent) -> bool:
-        with self.connection:
-            return self._insert_one(event)
+        with self._connection_lock:
+            with self.connection:
+                return self._insert_one(event)
 
     def append_batch_accepted(self, events: Iterable[MarketEvent]) -> list[MarketEvent]:
         """Insert one normalized batch in one transaction and return newly accepted events."""
         accepted: list[MarketEvent] = []
-        with self.connection:
-            for event in events:
-                if self._insert_one(event):
-                    accepted.append(event)
+        with self._connection_lock:
+            with self.connection:
+                for event in events:
+                    if self._insert_one(event):
+                        accepted.append(event)
         return accepted
 
     def append_many(self, events: Iterable[MarketEvent]) -> int:
         return len(self.append_batch_accepted(events))
 
     def events(self, event_id: str | None = None) -> list[MarketEvent]:
-        if event_id is None:
-            rows = self.connection.execute(
-                f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
-            ).fetchall()
-        else:
-            rows = self.connection.execute(
-                f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE event_id=?",
-                (event_id,),
-            ).fetchall()
-        events = [_event_from_history_row(row) for row in rows]
+        with self._connection_lock:
+            if event_id is None:
+                rows = self.connection.execute(
+                    f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
+                ).fetchall()
+            else:
+                rows = self.connection.execute(
+                    f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE event_id=?",
+                    (event_id,),
+                ).fetchall()
+            events = [_event_from_history_row(row) for row in rows]
         return sorted(events, key=_event_order_key)
 
     def current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
-        rows = self.connection.execute(
-            f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
-        ).fetchall()
-        current: dict[tuple[str, str], MarketEvent] = {}
-        for row in rows:
-            event = _event_from_current_row(row)
-            current[(event.source_id, event.quote_key)] = event
-        return current
+        with self._connection_lock:
+            rows = self.connection.execute(
+                f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
+            ).fetchall()
+            current: dict[tuple[str, str], MarketEvent] = {}
+            for row in rows:
+                event = _event_from_current_row(row)
+                current[(event.source_id, event.quote_key)] = event
+            return current
 
     def current(self) -> dict[str, MarketEvent]:
         current: dict[str, MarketEvent] = {}
@@ -786,4 +797,5 @@ class SQLiteMarketStore:
         return current
 
     def close(self) -> None:
-        self.connection.close()
+        with self._connection_lock:
+            self.connection.close()

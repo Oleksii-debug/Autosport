@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -14,6 +16,15 @@ from .forecasting import ForecastRecord, parse_iso_timestamp
 from .price_truth import paper_quote_rejection_reason
 from .probability import paper_value
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext
+
+
+_MATERIAL_ACTION_SCHEMA = "autosport.paper-value.open-ticket.v1"
+_MATERIAL_ACTION_MARKER = "material_action_id="
+_MATERIAL_ACTION_NAME = "OPEN_PAPER_VALUE_TICKET"
+
+
+class PaperDecisionReconciliationRequired(RuntimeError):
+    """Raised when PaperBook and Decision Ledger disagree about one material action."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +57,110 @@ class PaperValueAgent:
         self.minimum_edge = Decimal(str(minimum_expected_profit_per_unit))
         self.risk_policy = risk_policy or PaperRiskPolicy()
         self._acted: set[str] = set()
+
+    @classmethod
+    def _material_action_id(cls, context: AgentContext, event: MarketEvent) -> str:
+        """Stable logical commit identity mirroring the agent's quote-level duplicate guard."""
+
+        identity = {
+            "schema": _MATERIAL_ACTION_SCHEMA,
+            "replay_run_id": context.replay_run_id,
+            "agent": cls.name,
+            "action": _MATERIAL_ACTION_NAME,
+            "quote_key": event.quote_key,
+        }
+        canonical = json.dumps(
+            identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _strategy_reason(forecast: ForecastLike, expected_profit: Decimal, material_action_id: str) -> str:
+        return (
+            f"paper forecast {forecast.model_id}; EV/unit={expected_profit}; "
+            f"{_MATERIAL_ACTION_MARKER}{material_action_id}"
+        )
+
+    @staticmethod
+    def _material_action_ticket(context: AgentContext, material_action_id: str) -> PaperTicket | None:
+        marker = f"{_MATERIAL_ACTION_MARKER}{material_action_id}"
+        matches = [
+            ticket
+            for ticket in context.paper_book.tickets.values()
+            if ticket.strategy_reason.endswith(f"; {marker}")
+        ]
+        if len(matches) > 1:
+            raise PaperDecisionReconciliationRequired(
+                "PaperBook contains duplicate tickets for one material_action_id"
+            )
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _ticket_matches_event(ticket: PaperTicket, event: MarketEvent, stake: Decimal) -> bool:
+        if ticket.stake != stake or ticket.placed_at != event.observed_ts or len(ticket.legs) != 1:
+            return False
+        leg = ticket.legs[0]
+        return (
+            leg.event_id == event.event_id
+            and leg.market_id == event.market_id
+            and leg.selection_id == event.selection_id
+            and leg.locked_odds == event.decimal_odds
+        )
+
+    def _reconcile_existing_economic_action(
+        self,
+        event: MarketEvent,
+        context: AgentContext,
+        goal,
+        material_action_id: str,
+    ) -> bool:
+        """Resolve a restarted material action without creating a second authority record."""
+
+        ledger = context.decision_ledger
+        if ledger is None:
+            return False
+        if getattr(ledger, "path", None) is not None and not ledger.path.exists():
+            persisted = None
+        else:
+            persisted = ledger.verified_economic_decision_for_material_action(
+                material_action_id,
+                goal,
+            )
+        ticket = self._material_action_ticket(context, material_action_id)
+
+        if persisted is None and ticket is None:
+            return False
+        if persisted is None:
+            raise PaperDecisionReconciliationRequired(
+                "PaperBook material action exists without a durable Decision Ledger record"
+            )
+        if ticket is None:
+            raise PaperDecisionReconciliationRequired(
+                "Decision Ledger material action exists without a durable PaperBook ticket"
+            )
+
+        payload = persisted.payload
+        if (
+            persisted.replay_run_id != context.replay_run_id
+            or persisted.agent != self.name
+            or persisted.action != _MATERIAL_ACTION_NAME
+            or persisted.observed_ts != event.observed_ts
+            or payload.get("material_action_id") != material_action_id
+            or payload.get("quote_key") != event.quote_key
+            or payload.get("ticket_id") != ticket.ticket_id
+            or payload.get("stake") != str(ticket.stake)
+            or not self._ticket_matches_event(ticket, event, self.stake)
+        ):
+            raise PaperDecisionReconciliationRequired(
+                "PaperBook and Decision Ledger material-action evidence do not match exactly"
+            )
+
+        self._acted.add(event.quote_key)
+        return True
 
     @staticmethod
     def _rollback_uncommitted_ticket(
@@ -107,6 +222,18 @@ class PaperValueAgent:
         goal = self.risk_policy.economic_goal
         if goal is not None and context.decision_ledger is None:
             return
+
+        material_action_id: str | None = None
+        if goal is not None:
+            material_action_id = self._material_action_id(context, event)
+            if self._reconcile_existing_economic_action(
+                event,
+                context,
+                goal,
+                material_action_id,
+            ):
+                return
+
         proposal_context = None
         if goal is not None:
             proposal_context = ProposedTicketRiskContext(
@@ -124,12 +251,21 @@ class PaperValueAgent:
         if not risk.allowed:
             return
 
+        reason = (
+            self._strategy_reason(
+                forecast,
+                estimate.expected_profit_per_unit,
+                material_action_id,
+            )
+            if material_action_id is not None
+            else f"paper forecast {forecast.model_id}; EV/unit={estimate.expected_profit_per_unit}"
+        )
         balance_before = context.paper_book.balance
         lifecycle_len_before = len(context.paper_book._lifecycle)
         ticket = context.paper_book.open_ticket(
             [leg],
             self.stake,
-            reason=f"paper forecast {forecast.model_id}; EV/unit={estimate.expected_profit_per_unit}",
+            reason=reason,
             placed_at=event.observed_ts,
         )
         record: DecisionRecord | None = None
@@ -143,6 +279,8 @@ class PaperValueAgent:
                     "expected_profit_per_unit": str(estimate.expected_profit_per_unit),
                     "stake": str(ticket.stake),
                 }
+                if material_action_id is not None:
+                    payload["material_action_id"] = material_action_id
                 if isinstance(forecast, ForecastRecord):
                     payload.update(
                         {
@@ -162,7 +300,7 @@ class PaperValueAgent:
                     replay_run_id=context.replay_run_id,
                     agent=self.name,
                     observed_ts=event.observed_ts,
-                    action="OPEN_PAPER_VALUE_TICKET",
+                    action=_MATERIAL_ACTION_NAME,
                     payload=payload,
                     context_hash=context.market_context_hash(),
                     decision_kind=(ECONOMIC_DECISION_KIND if goal is not None else "GENERAL"),

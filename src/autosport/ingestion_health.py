@@ -523,8 +523,8 @@ class SourceHealthStore:
 
         raw = self._upgrade_to_v2(self._read())
         entries = raw["history"].setdefault(state.source_id, [])
-        if entries and parse_source_timestamp(entries[-1]["recorded_at"]) > recorded:
-            raise ValueError("source health transitions must be recorded in nondecreasing time order")
+        if entries and parse_source_timestamp(entries[-1]["recorded_at"]) >= recorded:
+            raise ValueError("source health transitions must be recorded in strictly increasing time order")
 
         payload = self._payload(state)
         entries.append({"recorded_at": recorded_at, "state": payload})
@@ -589,8 +589,8 @@ class SourceHealthStore:
                         if not isinstance(entry, dict) or set(entry) != _HISTORY_ENTRY_FIELDS:
                             raise ValueError("invalid source health history entry")
                         recorded_at = parse_source_timestamp(entry["recorded_at"])
-                        if previous is not None and recorded_at < previous:
-                            raise ValueError("source health history is out of order")
+                        if previous is not None and recorded_at <= previous:
+                            raise ValueError("source health history is not strictly increasing")
                         previous = recorded_at
                         self._validate_persisted_state(source_id, entry["state"])
                         state = self._state_from_payload(

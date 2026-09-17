@@ -12,7 +12,11 @@ from autosport.decision_ledger import (
 from autosport.domain import MarketEvent
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
-from autosport.paper_strategy import Forecast, PaperValueAgent
+from autosport.paper_strategy import (
+    Forecast,
+    PaperDecisionReconciliationRequired,
+    PaperValueAgent,
+)
 from autosport.risk import PaperRiskPolicy
 
 
@@ -78,6 +82,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             records = ledger.verified_records()
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0].action, "OPEN_PAPER_VALUE_TICKET")
+            self.assertRegex(records[0].payload["material_action_id"], r"^[0-9a-f]{64}$")
 
             restarted = JsonlDecisionLedger(ledger_path)
             rebound = restarted.verified_economic_decision(records[0].decision_id, goal)
@@ -90,6 +95,123 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
                 rebound.payload["economic_goal_provenance"]["revision"],
                 goal.revision,
             )
+
+    def test_restart_redelivery_is_idempotent_when_book_and_ledger_are_both_durable(self) -> None:
+        goal = self._goal()
+        event = self._event()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ledger_path = root / "decisions.jsonl"
+            book_path = root / "paper.json"
+            book = PaperBook("100")
+            context = AgentContext(
+                book,
+                latest_quotes={event.quote_key: event},
+                replay_run_id="run-1",
+                decision_ledger=JsonlDecisionLedger(ledger_path),
+            )
+            self._agent(event, goal).on_market_event(event, context)
+            book.save(book_path)
+
+            first_ticket_id = next(iter(book.tickets))
+            first_action_id = context.decision_ledger.verified_records()[0].payload[
+                "material_action_id"
+            ]
+            restarted_book = PaperBook.load(book_path)
+            restarted_ledger = JsonlDecisionLedger(ledger_path)
+            restarted_context = AgentContext(
+                restarted_book,
+                latest_quotes={event.quote_key: event},
+                replay_run_id="run-1",
+                decision_ledger=restarted_ledger,
+            )
+
+            self._agent(event, goal).on_market_event(event, restarted_context)
+
+            self.assertEqual(restarted_book.balance, Decimal("99"))
+            self.assertEqual(tuple(restarted_book.tickets), (first_ticket_id,))
+            records = restarted_ledger.verified_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].payload["material_action_id"], first_action_id)
+
+    def test_restart_ledger_only_commit_fails_closed_without_second_material_action(self) -> None:
+        goal = self._goal()
+        event = self._event()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ledger_path = root / "decisions.jsonl"
+            pristine_book_path = root / "paper-before-action.json"
+            pristine = PaperBook("100")
+            pristine.save(pristine_book_path)
+            live_context = AgentContext(
+                pristine,
+                latest_quotes={event.quote_key: event},
+                replay_run_id="run-1",
+                decision_ledger=JsonlDecisionLedger(ledger_path),
+            )
+            self._agent(event, goal).on_market_event(event, live_context)
+            self.assertEqual(len(live_context.decision_ledger.verified_records()), 1)
+
+            # Simulate a process crash after Decision Ledger fsync but before the
+            # mutated PaperBook crossed its own atomic snapshot boundary.
+            restarted_book = PaperBook.load(pristine_book_path)
+            restarted_ledger = JsonlDecisionLedger(ledger_path)
+            restarted_context = AgentContext(
+                restarted_book,
+                latest_quotes={event.quote_key: event},
+                replay_run_id="run-1",
+                decision_ledger=restarted_ledger,
+            )
+
+            with self.assertRaisesRegex(
+                PaperDecisionReconciliationRequired,
+                "Decision Ledger material action exists without a durable PaperBook ticket",
+            ):
+                self._agent(event, goal).on_market_event(event, restarted_context)
+
+            self.assertEqual(restarted_book.balance, Decimal("100"))
+            self.assertEqual(restarted_book.tickets, {})
+            self.assertEqual(len(restarted_ledger.verified_records()), 1)
+
+    def test_restart_paper_only_commit_fails_closed_without_second_material_action(self) -> None:
+        goal = self._goal()
+        event = self._event()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ledger_path = root / "decisions.jsonl"
+            book_path = root / "paper-after-action.json"
+            book = PaperBook("100")
+            context = AgentContext(
+                book,
+                latest_quotes={event.quote_key: event},
+                replay_run_id="run-1",
+                decision_ledger=JsonlDecisionLedger(ledger_path),
+            )
+            self._agent(event, goal).on_market_event(event, context)
+            book.save(book_path)
+            ledger_path.unlink()
+
+            # Simulate the converse split boundary: the ticket snapshot survived,
+            # but the ledger append did not. A fresh process must not open another
+            # ticket merely because its in-memory _acted set is empty.
+            restarted_book = PaperBook.load(book_path)
+            restarted_ledger = JsonlDecisionLedger(ledger_path)
+            restarted_context = AgentContext(
+                restarted_book,
+                latest_quotes={event.quote_key: event},
+                replay_run_id="run-1",
+                decision_ledger=restarted_ledger,
+            )
+
+            with self.assertRaisesRegex(
+                PaperDecisionReconciliationRequired,
+                "PaperBook material action exists without a durable Decision Ledger record",
+            ):
+                self._agent(event, goal).on_market_event(event, restarted_context)
+
+            self.assertEqual(restarted_book.balance, Decimal("99"))
+            self.assertEqual(len(restarted_book.tickets), 1)
+            self.assertFalse(ledger_path.exists())
 
     def test_active_goal_fails_closed_on_stale_quote_before_ticket_or_decision(self) -> None:
         goal = self._goal()

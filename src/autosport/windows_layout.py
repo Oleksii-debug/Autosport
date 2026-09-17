@@ -1,30 +1,233 @@
 from __future__ import annotations
 
+import tkinter as tk
 from typing import Any
 
+from tkinter import ttk
+
+import tk_uia
+
+from .localization import require_keys, text
+from .windows_surface_contract import (
+    SURFACE_BY_KEY,
+    SURFACES,
+    load_surface_selection,
+    save_surface_selection,
+    surface_detail_lines,
+)
+
 # Keep every critical surface mapped inside the canonical 1080x860 Windows
-# window. Listboxes remain scrollable, so reducing visible rows does not remove
-# content or keyboard access.
+# window. Scrolling surfaces retain their full content, while the Windows-only
+# wrapper removes excess vertical chrome so the final execution log remains
+# mapped after the product shell is inserted.
 _SURFACE_HEIGHTS = {
-    "live_quotes": 4,
-    "tickets": 5,
-    "evaluation": 4,
-    "log": 5,
+    "live_quotes": 3,
+    "tickets": 4,
+    "evaluation": 3,
+    "log": 2,
 }
+_SECTION_LABEL_PADY = (6, 2)
+WINDOWS_SHELL_DETAILS_VISIBLE_ROWS = 1
+
+WINDOWS_SHELL_AUTOMATION_IDS = {
+    "navigation": 301,
+    "state": 302,
+    "open": 303,
+    "details": 304,
+}
+
+WINDOWS_SHELL_LOCALIZATION_KEYS = frozenset(
+    {
+        "ui.windows.shell.frame.title",
+        "ui.windows.shell.screen.label",
+        "ui.windows.shell.button.open",
+        "ui.windows.shell.state.active",
+        "ui.windows.shell.state.disabled",
+        "ui.windows.shell.state.presentation",
+        "ui.windows.shell.accessibility.navigation.name",
+        "ui.windows.shell.accessibility.navigation.description",
+        "ui.windows.shell.accessibility.state.name",
+        "ui.windows.shell.accessibility.state.description",
+        "ui.windows.shell.accessibility.open.name",
+        "ui.windows.shell.accessibility.open.description",
+        "ui.windows.shell.accessibility.details.name",
+        "ui.windows.shell.accessibility.details.description",
+    }
+)
+require_keys(WINDOWS_SHELL_LOCALIZATION_KEYS)
 
 
 def compact_surface_heights(app: Any) -> None:
     """Apply the Windows V1 vertical budget without weakening UIA gates."""
     for name, height in _SURFACE_HEIGHTS.items():
         getattr(app, name).configure(height=height)
+    for name in ("tickets_label", "evaluation_label", "log_label"):
+        getattr(app, name).pack_configure(pady=_SECTION_LABEL_PADY)
+
+
+def _surface_target_widget(app: Any, surface_key: str) -> Any | None:
+    """Return only a target that the current product shell actually exposes."""
+    target_name = SURFACE_BY_KEY[surface_key].target_widget
+    if target_name is None:
+        return None
+    return getattr(app, target_name, None)
+
+
+def refresh_windows_shell_open_availability(app: Any) -> None:
+    """Refresh Open authority after late-bound Windows controls are installed."""
+    surface_key = app.shell_surface_key.get()
+    app.shell_open_button.configure(
+        state=("normal" if _surface_target_widget(app, surface_key) is not None else "disabled")
+    )
+
+
+def _focus_surface_target(app: Any, surface_key: str) -> None:
+    target = _surface_target_widget(app, surface_key)
+    if target is None:
+        app.shell_details.focus_set()
+        return
+    target.focus_set()
+
+
+def _render_shell_surface(app: Any, surface_key: str, *, persist: bool) -> None:
+    surface = SURFACE_BY_KEY[surface_key]
+    app.shell_surface_key.set(surface.key)
+    app.shell_surface_display.set(surface.title_uk)
+    app.shell_surface_state.set(
+        {
+            "v1-active": text("ui.windows.shell.state.active"),
+            "visible-disabled": text(
+                "ui.windows.shell.state.disabled", reason=surface.blocked_reason_uk or ""
+            ),
+            "presentation-only": text("ui.windows.shell.state.presentation"),
+        }[surface.phase]
+    )
+    app.shell_details.delete(0, "end")
+    for line in surface_detail_lines(surface):
+        app.shell_details.insert("end", line)
+    # A declared target is not enough: the packaged app must expose that
+    # widget before the generic Open action can truthfully promise reachability.
+    # This keeps presentation-only/future surfaces fail-closed instead of
+    # silently focusing an unrelated control.
+    refresh_windows_shell_open_availability(app)
+    if persist:
+        save_surface_selection(app.workspace, surface.key)
+
+
+def _on_shell_selected(app: Any, _event: object | None = None) -> None:
+    title = app.shell_surface_display.get()
+    surface = next((item for item in SURFACES if item.title_uk == title), SURFACES[0])
+    _render_shell_surface(app, surface.key, persist=True)
+
+
+def _cycle_shell_surface(app: Any, delta: int) -> None:
+    current = app.shell_surface_key.get()
+    keys = [surface.key for surface in SURFACES]
+    try:
+        index = keys.index(current)
+    except ValueError:
+        index = 0
+    surface = SURFACE_BY_KEY[keys[(index + delta) % len(keys)]]
+    _render_shell_surface(app, surface.key, persist=True)
+    app.shell_navigation.focus_set()
+
+
+def install_windows_product_shell(app: Any) -> None:
+    """Install the truthful keyboard-first product navigator in the existing Tk shell."""
+    children = app.winfo_children()
+    frame = children[0] if children else None
+    if frame is None:
+        raise RuntimeError("Autosport root frame is missing")
+
+    shell = ttk.LabelFrame(frame, text=text("ui.windows.shell.frame.title"), padding=(8, 4))
+    first = frame.winfo_children()[0] if frame.winfo_children() else None
+    if first is None:
+        shell.pack(fill="x", pady=(0, 4))
+    else:
+        shell.pack(fill="x", pady=(0, 4), before=first)
+
+    app.shell_surface_key = tk.StringVar()
+    app.shell_surface_display = tk.StringVar()
+    app.shell_surface_state = tk.StringVar()
+
+    nav_row = ttk.Frame(shell)
+    nav_row.pack(fill="x")
+    ttk.Label(nav_row, text=text("ui.windows.shell.screen.label")).pack(side="left", padx=(0, 4))
+    app.shell_navigation = ttk.Combobox(
+        nav_row,
+        textvariable=app.shell_surface_display,
+        values=[surface.title_uk for surface in SURFACES],
+        state="readonly",
+        width=38,
+        takefocus=True,
+    )
+    app.shell_navigation.pack(side="left", fill="x", expand=True, padx=(0, 8))
+    app.shell_navigation.bind("<<ComboboxSelected>>", lambda event: _on_shell_selected(app, event))
+
+    app.shell_open_button = ttk.Button(
+        nav_row,
+        text=text("ui.windows.shell.button.open"),
+        command=lambda: _focus_surface_target(app, app.shell_surface_key.get()),
+        takefocus=True,
+    )
+    app.shell_open_button.pack(side="left")
+
+    app.shell_state = ttk.Entry(
+        shell,
+        textvariable=app.shell_surface_state,
+        state="readonly",
+        takefocus=True,
+    )
+    app.shell_state.pack(fill="x", pady=(4, 2))
+
+    app.shell_details = tk.Listbox(
+        shell,
+        height=WINDOWS_SHELL_DETAILS_VISIBLE_ROWS,
+        takefocus=True,
+    )
+    app.shell_details.pack(fill="x")
+
+    app.bind("<F2>", lambda _event: app.shell_navigation.focus_set())
+    app.bind("<Control-Alt-Left>", lambda _event: _cycle_shell_surface(app, -1))
+    app.bind("<Control-Alt-Right>", lambda _event: _cycle_shell_surface(app, 1))
+
+    _render_shell_surface(app, load_surface_selection(app.workspace), persist=False)
+
+
+def configure_windows_product_shell_accessibility(app: Any) -> None:
+    """Attach stable Windows UIA metadata after the canonical Tk/UIA bridge is enabled."""
+    tk_uia.set_acc_name(app.shell_navigation, text("ui.windows.shell.accessibility.navigation.name"))
+    tk_uia.set_acc_description(
+        app.shell_navigation,
+        text("ui.windows.shell.accessibility.navigation.description"),
+    )
+    tk_uia.set_automation_id(app.shell_navigation, WINDOWS_SHELL_AUTOMATION_IDS["navigation"])
+    tk_uia.set_acc_name(app.shell_state, text("ui.windows.shell.accessibility.state.name"))
+    tk_uia.set_acc_description(
+        app.shell_state,
+        text("ui.windows.shell.accessibility.state.description"),
+    )
+    tk_uia.set_automation_id(app.shell_state, WINDOWS_SHELL_AUTOMATION_IDS["state"])
+    tk_uia.set_acc_name(app.shell_open_button, text("ui.windows.shell.accessibility.open.name"))
+    tk_uia.set_acc_description(
+        app.shell_open_button,
+        text("ui.windows.shell.accessibility.open.description"),
+    )
+    tk_uia.set_automation_id(app.shell_open_button, WINDOWS_SHELL_AUTOMATION_IDS["open"])
+    tk_uia.set_acc_name(app.shell_details, text("ui.windows.shell.accessibility.details.name"))
+    tk_uia.set_acc_description(
+        app.shell_details,
+        text("ui.windows.shell.accessibility.details.description"),
+    )
+    tk_uia.set_automation_id(app.shell_details, WINDOWS_SHELL_AUTOMATION_IDS["details"])
 
 
 def install_compact_windows_layout() -> None:
-    """Install the compact build wrapper before any packaged AutosportApp exists.
+    """Install the Windows build wrapper before any packaged AutosportApp exists.
 
     The packaged entrypoint calls this before normal GUI startup and before the
     accessibility/keyboard audit entrypoints. The same layout is therefore
-    audited that Windows users actually receive; this is not an audit-only
+    audited that Windows users actually receive rather than an audit-only
     resize.
     """
     from .gui import AutosportApp
@@ -33,10 +236,22 @@ def install_compact_windows_layout() -> None:
         return
 
     original_build = AutosportApp._build
+    original_configure_accessibility = AutosportApp._configure_accessibility
 
     def build_with_windows_budget(self) -> None:
         original_build(self)
         compact_surface_heights(self)
+        install_windows_product_shell(self)
+
+    def configure_with_windows_shell(self) -> None:
+        original_configure_accessibility(self)
+        configure_windows_product_shell_accessibility(self)
+        # WindowsAutosportApp creates its read-only bank_summary only after the
+        # patched base _build() has installed and restored the shell selection.
+        # Re-check Open authority here, after the full subclass build returned
+        # and before user interaction begins, without re-persisting selection.
+        refresh_windows_shell_open_availability(self)
 
     AutosportApp._build = build_with_windows_budget
+    AutosportApp._configure_accessibility = configure_with_windows_shell
     AutosportApp._compact_windows_layout_installed = True

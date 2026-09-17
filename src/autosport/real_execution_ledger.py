@@ -687,7 +687,6 @@ class RealExecutionLedger:
         return state
 
     @classmethod
-    def _action_payload(    @classmethod
     def _action_payload(
         cls,
         events: list[dict[str, Any]],

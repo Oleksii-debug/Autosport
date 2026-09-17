@@ -123,8 +123,9 @@ class HealthGatedMirrorDecisionIndex:
         This decision-layer reader binds the store's already-durable source-local order
         as the missing replay identity. A fresh read binds only transitions whose
         evidence time is visible at ``as_of``; future durable writes are not exposed in
-        historical decision evidence. The reader performs no mutation and delegates
-        persisted state decoding/validation to ``SourceHealthStore``.
+        historical decision evidence. Explicit replay boundaries are also rejected when
+        their durable evidence timestamp is later than ``as_of``. The reader performs no
+        mutation and delegates persisted state decoding/validation to ``SourceHealthStore``.
         """
         raw = self._health_store._read()
         schema_version = raw["schema_version"]
@@ -198,6 +199,8 @@ class HealthGatedMirrorDecisionIndex:
                     expected_recorded_at = expected["recorded_at"]
                 if horizon_recorded_at != expected_recorded_at:
                     raise ValueError("health replay boundary does not match durable evidence")
+                if parse_source_timestamp(horizon_recorded_at) > as_of:
+                    raise ValueError("health replay boundary is later than as_of")
 
         bound = ProviderHealthReplayBoundary(
             source_id=source_id,
@@ -262,9 +265,6 @@ class HealthGatedMirrorDecisionIndex:
         else:
             last_success = parse_source_timestamp(state.last_success_at)
             if last_success > boundary:
-                # Defensive invariant fence. The causal reader should make this
-                # unreachable, but retain an explicit fail-closed reason if storage
-                # semantics change.
                 eligibility = ProviderDecisionEligibility.FUTURE_HEALTH
             elif boundary - last_success > self._max_health_age:
                 eligibility = ProviderDecisionEligibility.STALE_HEALTH

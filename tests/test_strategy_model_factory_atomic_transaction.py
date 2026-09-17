@@ -1,6 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 from threading import Barrier
+
+import pytest
 
 from autosport.scientific_registry import ScientificRegistry
 from autosport.strategy_model_factory import (
@@ -18,6 +21,44 @@ from test_strategy_model_factory import (
 
 def test_factory_public_type_module_identity_is_stable():
     assert FactoryCandidateSpec.__module__ == "autosport.strategy_model_factory"
+    assert FactoryArtifactStore.__module__ == "autosport.strategy_model_factory"
+
+
+@pytest.mark.parametrize("operation", ("read", "sha256", "write"))
+def test_factory_artifact_evidence_rejects_redirected_verification_open(
+    tmp_path,
+    monkeypatch,
+    operation,
+):
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    payload = {"metric": 1}
+    expected_sha256 = store.write("metrics", "stable-object", payload)
+    source = store.path_for_testing("metrics", "stable-object")
+    replacement = tmp_path / "replacement.json"
+    source_bytes = source.read_bytes()
+    replacement.write_bytes(source_bytes.replace(b"1", b"2", 1))
+    assert replacement.stat().st_size == source.stat().st_size
+
+    real_open = Path.open
+    source_open_count = 0
+
+    def redirected_open(self: Path, *args, **kwargs):
+        nonlocal source_open_count
+        if self == source:
+            source_open_count += 1
+            if source_open_count >= 2:
+                return real_open(replacement, *args, **kwargs)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", redirected_open)
+
+    with pytest.raises(ValueError, match="stable regular object"):
+        if operation == "read":
+            store.read("metrics", "stable-object", expected_sha256=expected_sha256)
+        elif operation == "sha256":
+            store.sha256("metrics", "stable-object")
+        else:
+            store.write("metrics", "stable-object", payload)
 
 
 def test_concurrent_factory_writers_leave_no_loser_residue(tmp_path):

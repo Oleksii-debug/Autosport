@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -35,11 +36,20 @@ class IngestionHealthTests(unittest.TestCase):
         store = SQLiteMarketStore(Path(tmp) / "market.db")
         bus = MarketEventBus(store)
         health = SourceHealthStore(Path(tmp) / "source-health.json")
+        clock_point = datetime.fromisoformat(now)
+        clock_tick = 0
+
+        def clock() -> str:
+            nonlocal clock_tick
+            point = clock_point + timedelta(microseconds=clock_tick)
+            clock_tick += 1
+            return point.isoformat()
+
         engine = IngestionEngine(
             bus,
             policy=policy or IngestionPolicy(max_batch_size=100, stale_after_seconds=60, max_future_skew_seconds=5),
             health_store=health,
-            clock=lambda: now,
+            clock=clock,
         )
         return engine, store, health
 

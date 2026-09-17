@@ -82,8 +82,10 @@ class HealthGatedMirrorDecisionIndexTests(unittest.TestCase):
 
             self.assertEqual(health.eligibility, ProviderDecisionEligibility.ELIGIBLE)
             self.assertTrue(health.eligible)
+            self.assertEqual(health.replay_boundary.transition_order, 1)
             self.assertEqual(len(view.events), 1)
             self.assertEqual(view.events[0].source_id, "provider-a")
+            self.assertEqual(view.health_boundaries, (health.replay_boundary,))
 
     def test_failed_provider_is_removed_even_while_quote_is_still_fresh(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -147,6 +149,65 @@ class HealthGatedMirrorDecisionIndexTests(unittest.TestCase):
             self.assertEqual(health.source_status, "healthy")
             self.assertEqual(len(view.events), 1)
             self.assertEqual(view.events[0].source_id, "provider-a")
+
+    def test_equal_time_transition_cannot_rewrite_bound_health_decision_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mirror, dependencies, health_store, gate = self.build_gate(directory)
+            mirror.apply(self.event("provider-a"))
+            same_time = "2026-09-17T12:00:08+00:00"
+            as_of = datetime(2026, 9, 17, 12, 0, 8, tzinfo=timezone.utc)
+            self.record_healthy(health_store, "provider-a", now=same_time)
+
+            original = gate.decision_view(
+                "decision",
+                as_of=as_of,
+                max_age=timedelta(minutes=1),
+            )
+            self.assertEqual(len(original.events), 1)
+            self.assertEqual(len(original.health_boundaries), 1)
+            original_boundary = original.health_boundaries[0]
+            self.assertEqual(original_boundary.source_id, "provider-a")
+            self.assertEqual(original_boundary.recorded_at, same_time)
+            self.assertEqual(original_boundary.transition_order, 1)
+
+            health_store.record_failure(
+                "provider-a",
+                now=same_time,
+                error=ConnectionError("same evidence time, later durable transition"),
+            )
+
+            fresh = gate.decision_view(
+                "decision",
+                as_of=as_of,
+                max_age=timedelta(minutes=1),
+            )
+            self.assertEqual(fresh.events, ())
+            self.assertEqual(fresh.health_boundaries[0].transition_order, 2)
+
+            reopened_store = SourceHealthStore(Path(directory) / "source_health.json")
+            reopened_gate = HealthGatedMirrorDecisionIndex(
+                dependencies,
+                reopened_store,
+                max_health_age=timedelta(seconds=30),
+            )
+            replay = reopened_gate.decision_view(
+                "decision",
+                as_of=as_of,
+                max_age=timedelta(minutes=1),
+                health_boundaries={
+                    boundary.source_id: boundary for boundary in original.health_boundaries
+                },
+            )
+
+            self.assertEqual(replay.events, original.events)
+            self.assertEqual(replay.health_boundaries, original.health_boundaries)
+            replay_health = reopened_gate.provider_health(
+                "provider-a",
+                as_of=as_of,
+                replay_boundary=original_boundary,
+            )
+            self.assertEqual(replay_health.eligibility, ProviderDecisionEligibility.ELIGIBLE)
+            self.assertEqual(replay_health.source_status, "healthy")
 
     def test_degraded_provider_quality_is_quarantined_from_decision_view(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

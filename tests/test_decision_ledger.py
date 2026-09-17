@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import tempfile
@@ -109,8 +110,25 @@ class DecisionLedgerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
             goal = self._economic_goal()
-            record = self._record(decision_id="generic-not-economic")
-            JsonlDecisionLedger(path).append(record)
+            record = self._economic_record(decision_id="economic-missing-binding")
+            persisted = record.to_dict()
+            canonical = json.dumps(
+                persisted,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            envelope = json.dumps(
+                {
+                    "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                    "record": persisted,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            path.write_text(envelope + "\n", encoding="utf-8")
 
             with self.assertRaisesRegex(
                 DecisionLedgerIntegrityError,

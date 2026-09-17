@@ -67,6 +67,17 @@ def _payload_sha(record) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _canonical_sha(payload) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _factory_rule() -> PromotionRule:
     return PromotionRule("mse", 0.05, (("max_squared_error", 0.50),))
 
@@ -150,18 +161,94 @@ def _factory_foundation(tmp_path):
         T2,
         model_version_id=champion_model.model_version_id,
     )
+    champion_walk_forward = {
+        "model_family": "mean-baseline-v1",
+        "primary_metric": "mse",
+        "primary_value": 0.80,
+        "folds": [
+            {
+                "fold_id": "champion-fold-1",
+                "training_cutoff": T0,
+                "evaluation_at": T1,
+                "target_available_at": T1,
+                "prediction": 0.0,
+                "target": 1.0,
+                "squared_error": 1.0,
+            },
+            {
+                "fold_id": "champion-fold-2",
+                "training_cutoff": T1,
+                "evaluation_at": T2,
+                "target_available_at": T2,
+                "prediction": 0.0,
+                "target": 1.0,
+                "squared_error": 1.0,
+            },
+            {
+                "fold_id": "champion-fold-3",
+                "training_cutoff": T2,
+                "evaluation_at": T3,
+                "target_available_at": T3,
+                "prediction": 0.0,
+                "target": 1.0,
+                "squared_error": 1.0,
+            },
+            {
+                "fold_id": "champion-fold-4",
+                "training_cutoff": T3,
+                "evaluation_at": T4,
+                "target_available_at": T4,
+                "prediction": 0.0,
+                "target": 1.0,
+                "squared_error": 1.0,
+            },
+            {
+                "fold_id": "champion-fold-5",
+                "training_cutoff": T4,
+                "evaluation_at": T5,
+                "target_available_at": T5,
+                "prediction": 0.0,
+                "target": 0.0,
+                "squared_error": 0.0,
+            },
+        ],
+    }
+    champion_walk_forward_sha256 = _canonical_sha(champion_walk_forward)
     champion_metrics_payload = {
         "schema_version": 1,
         "kind": "autosport-factory-metrics-v1",
         "evaluation_bundle_id": "eval-v1",
         "strategy_version_id": champion_strategy.strategy_version_id,
         "model_version_id": champion_model.model_version_id,
-        "metrics": {"max_squared_error": 0.40, "mse": 0.80},
+        "metrics": {"max_squared_error": 1.0, "mse": 0.80},
+        "source": "causal-walk-forward-v1",
+        "walk_forward_result_sha256": champion_walk_forward_sha256,
     }
     champion_metrics_sha256 = store.write("metrics", "eval-v1", champion_metrics_payload)
+    champion_evaluation_payload = {
+        "schema_version": 1,
+        "kind": "autosport-strategy-model-factory-evaluation",
+        "evaluation_bundle_id": "eval-v1",
+        "experiment_id": "experiment-v1",
+        "research_protocol_id": binding.research_protocol_id,
+        "protocol_sha256": protocol.protocol_sha256,
+        "dataset_snapshot_id": dataset.dataset_snapshot_id,
+        "feature_set_id": features.feature_set_id,
+        "model_version_id": champion_model.model_version_id,
+        "strategy_version_id": champion_strategy.strategy_version_id,
+        "evaluator_source_sha256": SHA_C,
+        "walk_forward": champion_walk_forward,
+        "walk_forward_result_sha256": champion_walk_forward_sha256,
+        "candidate_metrics": {"max_squared_error": 1.0, "mse": 0.80},
+        "candidate_metrics_artifact_sha256": champion_metrics_sha256,
+        "candidate_metrics_source": "causal-walk-forward-v1",
+    }
+    champion_evaluation_sha256 = store.write(
+        "evaluation", "eval-v1", champion_evaluation_payload
+    )
     champion_bundle = EvaluationBundleRef(
         "eval-v1",
-        SHA_D,
+        champion_evaluation_sha256,
         SHA_C,
         dataset.dataset_snapshot_id,
         protocol.protocol_sha256,
@@ -196,7 +283,7 @@ def _factory_foundation(tmp_path):
             binding.research_protocol_id,
             protocol.protocol_sha256,
             champion_bundle.evaluation_bundle_id,
-            SHA_D,
+            champion_evaluation_sha256,
             T3,
             candidate_model_version_id=champion_model.model_version_id,
             reason="fixture baseline champion",
@@ -265,6 +352,21 @@ def _run_candidate(runner, points, rule):
     )
 
 
+class _RecordingMeanFactory:
+    model_family = "mean-baseline-v1"
+
+    def __init__(self):
+        self.fit_ids = []
+
+    def fit(self, model_id, points, *, training_cutoff):
+        self.fit_ids.append(model_id)
+        return MeanBaselineModel.fit(
+            model_id,
+            points,
+            training_cutoff=training_cutoff,
+        )
+
+
 def test_mean_baseline_uses_only_observations_at_or_before_training_cutoff():
     model = MeanBaselineModel.fit(
         "baseline-1", _points(), training_cutoff="2026-01-02T00:00:00+00:00"
@@ -319,6 +421,20 @@ def test_walk_forward_is_expanding_window_and_deterministic():
     assert first.promotion_metrics()["max_squared_error"] == max(
         fold.squared_error for fold in first.folds
     )
+
+
+def test_walk_forward_uses_injected_typed_baseline_factory_boundary():
+    factory = _RecordingMeanFactory()
+    result = WalkForwardRunner.run(
+        _points(),
+        minimum_train_size=2,
+        model_factory=factory,
+    )
+    assert result.model_family == factory.model_family
+    assert factory.fit_ids == [
+        "mean-baseline-v1-fold-2",
+        "mean-baseline-v1-fold-3",
+    ]
 
 
 def test_walk_forward_rejects_duplicate_timestamp_identity():
@@ -392,12 +508,18 @@ def test_drift_monitor_only_emits_research_recommendations():
 
 def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path):
     registry, registry_path, rule, store = _factory_foundation(tmp_path)
-    runner = ExperimentRunner(registry, store)
+    model_factory = _RecordingMeanFactory()
+    runner = ExperimentRunner(
+        registry,
+        store,
+        baseline_model_factory=model_factory,
+    )
 
     result = _run_candidate(runner, _candidate_points(), rule)
 
     assert result.verdict is PromotionVerdict.PROMOTE
     assert result.candidate_metrics["max_squared_error"] <= 0.50
+    assert model_factory.fit_ids[-1] == "model-v2"
     assert registry.get("ModelVersion", "model-v2") is not None
     assert registry.get("StrategyVersion", "strategy-v2") is not None
     bundle = registry.get("EvaluationBundle", "eval-v2")
@@ -413,11 +535,15 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
     evaluation = store.read("evaluation", "eval-v2")
     metrics = store.read("metrics", "eval-v2")
     assert evaluation["walk_forward"]["folds"][0]["target_available_at"] == T4
+    assert evaluation["walk_forward_result_sha256"] == _canonical_sha(
+        evaluation["walk_forward"]
+    )
+    assert evaluation["evaluator_source_sha256"] == SHA_C
     assert evaluation["champion_evaluation_bundle_id"] == "eval-v1"
-    assert evaluation["champion_metrics"] == {"max_squared_error": 0.4, "mse": 0.8}
+    assert evaluation["champion_metrics"] == {"max_squared_error": 1.0, "mse": 0.8}
     assert evaluation["candidate_metrics_source"] == "causal-walk-forward-v1"
     assert metrics["source"] == "causal-walk-forward-v1"
-    assert metrics["walk_forward_result_sha256"] == evaluation["walk_forward"]["result_sha256"] if "result_sha256" in evaluation["walk_forward"] else result.candidate_metrics is not None
+    assert metrics["walk_forward_result_sha256"] == evaluation["walk_forward_result_sha256"]
 
     restarted = ExperimentRunner.verify_restart(
         registry_path,
@@ -448,6 +574,19 @@ def test_factory_fails_closed_when_champion_metrics_are_not_durably_bound(tmp_pa
 
     with pytest.raises(ValueError, match="not hash-bound"):
         _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
+    assert registry.get("ModelVersion", "model-v2") is None
+    assert registry.get("PromotionDecision", "promotion-v2") is None
+
+
+def test_factory_rejects_mismatched_champion_evaluator_source_before_mutation(tmp_path):
+    registry, _, rule, store = _factory_foundation(tmp_path)
+    mismatched = replace(_candidate_spec(), evaluator_source_sha256=SHA_B)
+    with pytest.raises(ValueError, match="evaluator source mismatch"):
+        ExperimentRunner(registry, store).run_baseline_candidate(
+            mismatched,
+            _candidate_points(),
+            rule=rule,
+        )
     assert registry.get("ModelVersion", "model-v2") is None
     assert registry.get("PromotionDecision", "promotion-v2") is None
 

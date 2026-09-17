@@ -103,6 +103,34 @@ class TrainingPoint:
         return self.target_available_at
 
 
+class BaselineModel(Protocol):
+    """Typed prediction/evidence contract for transparent baseline implementations."""
+
+    model_id: str
+    training_cutoff: str
+
+    @property
+    def identity_sha256(self) -> str: ...
+
+    def predict(self, point: TrainingPoint, *, decision_at: str) -> float: ...
+
+    def to_payload(self) -> dict[str, object]: ...
+
+
+class BaselineModelFactory(Protocol):
+    """Typed construction seam used by both walk-forward and final-model training."""
+
+    model_family: str
+
+    def fit(
+        self,
+        model_id: str,
+        points: Sequence[TrainingPoint],
+        *,
+        training_cutoff: str,
+    ) -> BaselineModel: ...
+
+
 @dataclass(frozen=True, slots=True)
 class MeanBaselineModel:
     """Transparent deterministic baseline used before more complex model adapters."""
@@ -166,6 +194,24 @@ class MeanBaselineModel:
 
 
 @dataclass(frozen=True, slots=True)
+class MeanBaselineModelFactory:
+    model_family: str = "mean-baseline-v1"
+
+    def fit(
+        self,
+        model_id: str,
+        points: Sequence[TrainingPoint],
+        *,
+        training_cutoff: str,
+    ) -> MeanBaselineModel:
+        return MeanBaselineModel.fit(
+            model_id,
+            points,
+            training_cutoff=training_cutoff,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class WalkForwardFold:
     fold_id: str
     training_cutoff: str
@@ -225,9 +271,16 @@ class WalkForwardRunner:
     """Causal expanding-window evaluator; evaluation labels never enter their own training set."""
 
     @staticmethod
-    def run(points: Sequence[TrainingPoint], *, minimum_train_size: int = 2) -> WalkForwardResult:
+    def run(
+        points: Sequence[TrainingPoint],
+        *,
+        minimum_train_size: int = 2,
+        model_factory: BaselineModelFactory | None = None,
+    ) -> WalkForwardResult:
         if type(minimum_train_size) is not int or minimum_train_size < 1:
             raise ValueError("minimum_train_size must be a positive integer")
+        factory = model_factory or MeanBaselineModelFactory()
+        _text(factory.model_family, "model_family")
         ordered = tuple(
             sorted(points, key=lambda point: _instant(point.observed_at, "observed_at"))
         )
@@ -246,8 +299,10 @@ class WalkForwardRunner:
                 evaluation.observed_at, "evaluation_at"
             ):
                 raise ValueError("walk-forward cutoff must precede evaluation")
-            model = MeanBaselineModel.fit(
-                f"mean-baseline-fold-{index}", train, training_cutoff=cutoff
+            model = factory.fit(
+                f"{factory.model_family}-fold-{index}",
+                train,
+                training_cutoff=cutoff,
             )
             prediction = model.predict(evaluation, decision_at=evaluation.observed_at)
             target = _finite(evaluation.target, "target")
@@ -264,7 +319,7 @@ class WalkForwardRunner:
                 )
             )
         mse = sum(fold.squared_error for fold in folds) / len(folds)
-        return WalkForwardResult("mean-baseline-v1", tuple(folds), "mse", mse)
+        return WalkForwardResult(factory.model_family, tuple(folds), "mse", mse)
 
 
 class PromotionVerdict(StrEnum):
@@ -538,12 +593,18 @@ class ExperimentRunner:
     """Executable factory vertical backed by the canonical ScientificRegistry."""
 
     def __init__(
-        self, registry: ScientificRegistry, artifact_store: FactoryArtifactStore
+        self,
+        registry: ScientificRegistry,
+        artifact_store: FactoryArtifactStore,
+        *,
+        baseline_model_factory: BaselineModelFactory | None = None,
     ) -> None:
         if not isinstance(registry, ScientificRegistry):
             raise ValueError("registry must be ScientificRegistry")
         self.registry = registry
         self.artifact_store = artifact_store
+        self.baseline_model_factory = baseline_model_factory or MeanBaselineModelFactory()
+        _text(self.baseline_model_factory.model_family, "model_family")
 
     def _foundation(
         self, spec: FactoryCandidateSpec, rule: PromotionRule
@@ -596,6 +657,7 @@ class ExperimentRunner:
         research_protocol_id: str,
         protocol_sha256: str,
         dataset_snapshot_id: str,
+        evaluator_source_sha256: str,
     ) -> tuple[str, dict[str, float]]:
         strategy = self.registry.get("StrategyVersion", champion_strategy_version_id)
         if strategy is None:
@@ -631,6 +693,11 @@ class ExperimentRunner:
             raise ValueError("canonical champion promotion/evaluation hash mismatch")
         if bundle.payload.get("dataset_snapshot_id") != dataset_snapshot_id:
             raise ValueError("champion comparison uses a different dataset snapshot")
+        if _sha256(
+            bundle.payload.get("evaluator_source_sha256"),
+            "champion evaluator_source_sha256",
+        ) != _sha256(evaluator_source_sha256, "candidate evaluator_source_sha256"):
+            raise ValueError("champion comparison evaluator source mismatch")
         if bundle.payload.get("evaluated_strategy_version_id") != champion_strategy_version_id:
             raise ValueError("champion evaluation does not reference durable champion strategy")
         if bundle.payload.get("evaluated_model_version_id") != champion_model_version_id:
@@ -642,22 +709,49 @@ class ExperimentRunner:
         artifact_hashes = bundle.payload.get("artifact_hashes")
         if type(artifact_hashes) is not list or metrics_artifact_sha256 not in artifact_hashes:
             raise ValueError("champion metrics artifact is not hash-bound to EvaluationBundle")
-        payload = self.artifact_store.read(
+        metrics_payload = self.artifact_store.read(
             "metrics",
             champion_evaluation_bundle_id,
             expected_sha256=metrics_artifact_sha256,
         )
-        if payload.get("kind") != "autosport-factory-metrics-v1":
+        if metrics_payload.get("kind") != "autosport-factory-metrics-v1":
             raise ValueError("champion metrics artifact kind mismatch")
-        if payload.get("evaluation_bundle_id") != champion_evaluation_bundle_id:
+        if metrics_payload.get("evaluation_bundle_id") != champion_evaluation_bundle_id:
             raise ValueError("champion metrics evaluation identity mismatch")
-        if payload.get("strategy_version_id") != champion_strategy_version_id:
+        if metrics_payload.get("strategy_version_id") != champion_strategy_version_id:
             raise ValueError("champion metrics strategy identity mismatch")
-        if payload.get("model_version_id") != champion_model_version_id:
+        if metrics_payload.get("model_version_id") != champion_model_version_id:
             raise ValueError("champion metrics model identity mismatch")
-        return champion_evaluation_bundle_id, _metric_map(
-            payload.get("metrics"), "champion metrics"
+        if metrics_payload.get("source") != "causal-walk-forward-v1":
+            raise ValueError("champion metrics lack causal evaluator provenance")
+        walk_forward_result_sha256 = _sha256(
+            metrics_payload.get("walk_forward_result_sha256"),
+            "champion walk_forward_result_sha256",
         )
+
+        evaluation_payload = self.artifact_store.read(
+            "evaluation",
+            champion_evaluation_bundle_id,
+            expected_sha256=bundle.payload.get("bundle_sha256"),
+        )
+        if evaluation_payload.get("candidate_metrics_artifact_sha256") != metrics_artifact_sha256:
+            raise ValueError("champion evaluation/metrics artifact identity mismatch")
+        if evaluation_payload.get("candidate_metrics_source") != "causal-walk-forward-v1":
+            raise ValueError("champion evaluation lacks causal metric source")
+        walk_forward_payload = evaluation_payload.get("walk_forward")
+        if type(walk_forward_payload) is not dict:
+            raise ValueError("champion evaluation lacks walk-forward evidence")
+        if _canonical_digest(walk_forward_payload) != walk_forward_result_sha256:
+            raise ValueError("champion walk-forward evidence hash mismatch")
+        if evaluation_payload.get("walk_forward_result_sha256") != walk_forward_result_sha256:
+            raise ValueError("champion evaluation walk-forward identity mismatch")
+        metrics = _metric_map(metrics_payload.get("metrics"), "champion metrics")
+        if _metric_map(
+            evaluation_payload.get("candidate_metrics"),
+            "champion evaluation metrics",
+        ) != metrics:
+            raise ValueError("champion evaluation/metrics values mismatch")
+        return champion_evaluation_bundle_id, metrics
 
     def run_baseline_candidate(
         self,
@@ -682,9 +776,14 @@ class ExperimentRunner:
             research_protocol_id=spec.research_protocol_id,
             protocol_sha256=protocol_sha256,
             dataset_snapshot_id=spec.dataset_snapshot_id,
+            evaluator_source_sha256=spec.evaluator_source_sha256,
         )
 
-        walk_forward = WalkForwardRunner.run(points, minimum_train_size=minimum_train_size)
+        walk_forward = WalkForwardRunner.run(
+            points,
+            minimum_train_size=minimum_train_size,
+            model_factory=self.baseline_model_factory,
+        )
         if walk_forward.primary_metric != rule.primary_metric:
             raise ValueError("walk-forward primary metric does not match frozen promotion rule")
         completed = _instant(spec.completed_at, "completed_at")
@@ -694,7 +793,7 @@ class ExperimentRunner:
         ):
             raise ValueError("evaluation target was not revealed by experiment completion")
 
-        final_model = MeanBaselineModel.fit(
+        final_model = self.baseline_model_factory.fit(
             spec.model_version_id,
             points,
             training_cutoff=binding["causal_cutoff"],
@@ -776,7 +875,7 @@ class ExperimentRunner:
         self.registry.append(
             ModelVersion(
                 spec.model_version_id,
-                "mean-baseline-v1",
+                self.baseline_model_factory.model_family,
                 model_artifact_sha256,
                 spec.source_sha256,
                 spec.environment_sha256,
@@ -829,9 +928,14 @@ class ExperimentRunner:
             "feature_set_id": spec.feature_set_id,
             "model_version_id": spec.model_version_id,
             "strategy_version_id": spec.strategy_version_id,
+            "evaluator_source_sha256": _sha256(
+                spec.evaluator_source_sha256,
+                "evaluator_source_sha256",
+            ),
             "seed": spec.seed,
             "config_sha256": config_sha256,
             "walk_forward": walk_forward.to_payload(),
+            "walk_forward_result_sha256": walk_forward.result_sha256,
             "candidate_metrics": candidate_metrics,
             "candidate_metrics_artifact_sha256": candidate_metrics_artifact_sha256,
             "candidate_metrics_source": "causal-walk-forward-v1",
@@ -940,6 +1044,10 @@ class ExperimentRunner:
             evaluation_bundle_id,
             expected_sha256=bundle.payload["bundle_sha256"],
         )
+        if evaluation_payload.get("evaluator_source_sha256") != bundle.payload.get(
+            "evaluator_source_sha256"
+        ):
+            raise ValueError("evaluation artifact evaluator identity mismatch")
         store.read(
             "model",
             model_version_id,
@@ -959,10 +1067,20 @@ class ExperimentRunner:
             raise ValueError("metrics artifact model identity mismatch")
         if metrics_payload.get("source") != "causal-walk-forward-v1":
             raise ValueError("metrics artifact lacks causal evaluator provenance")
-        if metrics_payload.get("walk_forward_result_sha256") != _canonical_digest(
+        walk_forward_result_sha256 = _canonical_digest(
             evaluation_payload.get("walk_forward", {})
-        ):
+        )
+        if metrics_payload.get("walk_forward_result_sha256") != walk_forward_result_sha256:
             raise ValueError("metrics artifact walk-forward hash mismatch")
+        if evaluation_payload.get("walk_forward_result_sha256") != walk_forward_result_sha256:
+            raise ValueError("evaluation artifact walk-forward identity mismatch")
+        if evaluation_payload.get("candidate_metrics_source") != "causal-walk-forward-v1":
+            raise ValueError("evaluation artifact lacks causal metric source")
+        if _metric_map(
+            evaluation_payload.get("candidate_metrics"),
+            "evaluation candidate metrics",
+        ) != _metric_map(metrics_payload.get("metrics"), "metrics artifact metrics"):
+            raise ValueError("evaluation/metrics artifact values mismatch")
         if evaluation_payload.get("experiment_id") != experiment_id:
             raise ValueError("evaluation artifact experiment identity mismatch")
         if evaluation_payload.get("model_version_id") != model_version_id:

@@ -302,6 +302,48 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         self.assertEqual(decision.stakes, (Decimal("2.00"),))
         self.assertEqual(book.tickets, {})
 
+    def test_multi_candidate_vector_waits_on_stale_quote_evidence(self) -> None:
+        event = self._event(event_id="event-stale", market_id="market-stale", sequence=17)
+        goal = self._goal(max_quote_age_seconds=Decimal("0.5"))
+        policy = self._policy(goal)
+        book = PaperBook("100")
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("1"),),
+            contexts=(self._risk_context(event, goal),),
+        )
+
+        self.assertEqual(decision.action, "WAIT")
+        self.assertEqual(decision.stakes, (Decimal("0"),))
+        self.assertEqual(book.tickets, {})
+
+    def test_multi_candidate_vector_zero_when_ruin_evidence_exceeds_limit(self) -> None:
+        event = self._event(
+            event_id="event-ruin-high",
+            market_id="market-ruin-high",
+            sequence=18,
+        )
+        goal = self._goal(max_risk_of_ruin=Decimal("0.10"))
+        policy = self._policy(goal)
+        book = PaperBook("100")
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("1"),),
+            contexts=(
+                self._risk_context(
+                    event,
+                    goal,
+                    risk_of_ruin_upper_bound=Decimal("0.20"),
+                ),
+            ),
+        )
+
+        self.assertEqual(decision.action, "ZERO")
+        self.assertEqual(decision.stakes, (Decimal("0"),))
+        self.assertEqual(book.tickets, {})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,10 +8,15 @@ from autosport.ingestion_health import SourceHealthStore
 
 class SourceHealthStoreConcurrencyTests(unittest.TestCase):
     @staticmethod
-    def _record_success(store: SourceHealthStore, *, cursor: str) -> None:
+    def _record_success(
+        store: SourceHealthStore,
+        *,
+        cursor: str,
+        now: str = "2026-09-14T00:00:00+00:00",
+    ) -> None:
         store.record_success(
             "source",
-            now="2026-09-14T00:00:00+00:00",
+            now=now,
             received=1,
             accepted=1,
             rejected=0,
@@ -50,7 +55,7 @@ class SourceHealthStoreConcurrencyTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertEqual(first.get("source").poll_count, 1)
 
-    def test_concurrent_success_and_failure_updates_do_not_lose_counters(self):
+    def test_concurrent_equal_time_success_and_failure_updates_do_not_lose_counters(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "source_health.json"
             success_store = SourceHealthStore(path)
@@ -58,12 +63,17 @@ class SourceHealthStoreConcurrencyTests(unittest.TestCase):
             barrier = threading.Barrier(2)
             errors: list[BaseException] = []
             rounds = 6
+            same_now = "2026-09-14T00:00:00+00:00"
 
             def success_writer() -> None:
                 try:
                     for index in range(rounds):
                         barrier.wait(timeout=5)
-                        self._record_success(success_store, cursor=f"success-{index}")
+                        self._record_success(
+                            success_store,
+                            cursor=f"success-{index}",
+                            now=same_now,
+                        )
                 except BaseException as exc:  # pragma: no cover - surfaced by assertion below
                     errors.append(exc)
 
@@ -73,7 +83,7 @@ class SourceHealthStoreConcurrencyTests(unittest.TestCase):
                         barrier.wait(timeout=5)
                         failure_store.record_failure(
                             "source",
-                            now="2026-09-14T00:00:00+00:00",
+                            now=same_now,
                             error=RuntimeError(f"failure-{index}"),
                         )
                 except BaseException as exc:  # pragma: no cover - surfaced by assertion below
@@ -90,13 +100,23 @@ class SourceHealthStoreConcurrencyTests(unittest.TestCase):
 
             self.assertTrue(all(not thread.is_alive() for thread in threads))
             self.assertEqual(errors, [])
-            state = SourceHealthStore(path).get("source")
+            reopened = SourceHealthStore(path)
+            state = reopened.get("source")
             self.assertEqual(state.poll_count, rounds * 2)
             self.assertEqual(state.total_received, rounds)
             self.assertEqual(state.total_accepted, rounds)
             self.assertEqual(state.total_rejected, 0)
             self.assertEqual(state.total_failures, rounds)
             self.assertEqual(state.latest_source_ts, "2026-09-13T23:59:59+00:00")
+
+            # Every writer used the same evidence time, but durable transition order
+            # must still preserve all twelve causal states without timestamp invention.
+            import json
+
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            entries = persisted["history"]["source"]
+            self.assertEqual([entry["transition_order"] for entry in entries], list(range(1, 13)))
+            self.assertEqual({entry["recorded_at"] for entry in entries}, {same_now})
 
 
 if __name__ == "__main__":

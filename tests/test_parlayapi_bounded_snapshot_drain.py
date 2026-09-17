@@ -196,12 +196,15 @@ class ParlayApiBoundedSnapshotDrainTests(unittest.TestCase):
                 )
 
         provider = ChunkedProvider()
+        clock_values = iter(
+            f"2026-09-14T08:00:10.{tick:06d}+00:00" for tick in range(10)
+        )
         with tempfile.TemporaryDirectory() as tmp:
             result = observe_workspace_once(
                 tmp,
                 provider,
                 max_items=1,
-                clock=lambda: "2026-09-14T08:00:10+00:00",
+                clock=lambda: next(clock_values),
             )
 
         self.assertEqual(provider.calls, 2)

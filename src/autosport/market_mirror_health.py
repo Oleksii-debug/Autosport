@@ -62,9 +62,9 @@ class HealthGatedMirrorDecisionIndex:
     ``MarketMirror`` remains the only live quote authority and ``SourceHealthStore``
     remains the provider-health authority. Every decision read starts from one coherent
     focused mirror revision, then reads provider state through an explicit durable
-    health-log horizon. A fresh read binds the current horizon; a replay can pass those
-    exact horizons back, so a later equal-evidence-time health transition cannot rewrite
-    an already-bound historical decision identity.
+    health-log horizon. A fresh read binds the latest horizon visible at ``as_of``; a
+    replay can pass those exact horizons back, so neither a later equal-evidence-time
+    transition nor a future transition can rewrite already-bound historical identity.
 
     The gate fails closed for unknown, degraded, failed, stale, or otherwise invalid
     provider health. It owns no duplicate mutable market/provider state.
@@ -121,8 +121,10 @@ class HealthGatedMirrorDecisionIndex:
         ``SourceHealthStore.get_as_of`` intentionally returns the freshest state for a
         datetime and therefore cannot distinguish two transitions sharing that datetime.
         This decision-layer reader binds the store's already-durable source-local order
-        as the missing replay identity. It performs no mutation and delegates persisted
-        state decoding/validation to ``SourceHealthStore``.
+        as the missing replay identity. A fresh read binds only transitions whose
+        evidence time is visible at ``as_of``; future durable writes are not exposed in
+        historical decision evidence. The reader performs no mutation and delegates
+        persisted state decoding/validation to ``SourceHealthStore``.
         """
         raw = self._health_store._read()
         schema_version = raw["schema_version"]
@@ -149,8 +151,26 @@ class HealthGatedMirrorDecisionIndex:
             available_recorded_at = None
 
         if replay_boundary is None:
-            horizon_order = available_order
-            horizon_recorded_at = available_recorded_at
+            horizon_order = 0
+            horizon_recorded_at = None
+            if schema_version == 1:
+                if (
+                    available_order == 1
+                    and available_recorded_at is not None
+                    and parse_source_timestamp(available_recorded_at) <= as_of
+                ):
+                    horizon_order = 1
+                    horizon_recorded_at = available_recorded_at
+            else:
+                for index, entry in enumerate(entries, start=1):
+                    if parse_source_timestamp(entry["recorded_at"]) > as_of:
+                        break
+                    horizon_order = (
+                        entry["transition_order"]
+                        if schema_version == 3
+                        else index
+                    )
+                    horizon_recorded_at = entry["recorded_at"]
         else:
             if not isinstance(replay_boundary, ProviderHealthReplayBoundary):
                 raise TypeError("replay_boundary must be a ProviderHealthReplayBoundary")

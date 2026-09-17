@@ -759,16 +759,30 @@ class ScientificRegistry:
         )
 
     @staticmethod
+    def _strategy_key_from_state(state: Mapping[str, Any], strategy_version_id: str) -> str:
+        for raw in state["records"]:
+            if raw["record_type"] == "StrategyVersion" and raw["record_id"] == strategy_version_id:
+                return _text(raw["payload"].get("canonical_strategy_id"), "canonical_strategy_id")
+        raise PromotionEvidenceError(
+            f"promotion history references missing StrategyVersion:{strategy_version_id}"
+        )
+
+    @staticmethod
     def _promotion_champion_from_state(
         state: dict[str, Any],
         *,
         through_key: tuple[datetime, str],
+        canonical_strategy_id: str,
     ) -> str | None:
+        wanted_key = _text(canonical_strategy_id, "canonical_strategy_id")
         decisions = [
             raw
             for raw in state["records"]
             if raw["record_type"] == "PromotionDecision"
             and ScientificRegistry._promotion_order_key(raw) <= through_key
+            and ScientificRegistry._strategy_key_from_state(
+                state, raw["payload"]["candidate_strategy_version_id"]
+            ) == wanted_key
         ]
         decisions.sort(key=ScientificRegistry._promotion_order_key)
         champion: str | None = None
@@ -779,15 +793,18 @@ class ScientificRegistry:
             if action is PromotionAction.PROMOTE:
                 if predecessor != champion:
                     raise PromotionEvidenceError(
-                        "durable promotion history predecessor does not match current champion"
+                        "durable promotion history predecessor does not match current context champion"
                     )
                 champion = payload["candidate_strategy_version_id"]
             elif action is PromotionAction.ROLLBACK:
                 if champion != payload["candidate_strategy_version_id"]:
                     raise PromotionEvidenceError(
-                        "durable rollback candidate does not match current champion"
+                        "durable rollback candidate does not match current context champion"
                     )
-                champion = payload["rollback_to_strategy_version_id"]
+                rollback_target = payload["rollback_to_strategy_version_id"]
+                if ScientificRegistry._strategy_key_from_state(state, rollback_target) != wanted_key:
+                    raise PromotionEvidenceError("durable rollback target crosses strategy context")
+                champion = rollback_target
         return champion
 
     def record_promotion(self, decision: PromotionDecision) -> str:
@@ -807,25 +824,6 @@ class ScientificRegistry:
             entries = {(raw["record_type"], raw["record_id"]): raw for raw in state["records"]}
             decision_at = _instant(decision.decided_at, "decided_at")
             decision_key = (decision_at, decision.record_id)
-            if any(
-                raw["record_type"] == "PromotionDecision"
-                and self._promotion_order_key(raw) > decision_key
-                for raw in state["records"]
-            ):
-                raise PromotionEvidenceError(
-                    "promotion decision cannot be backdated before durable promotion history"
-                )
-            current_champion = self._promotion_champion_from_state(state, through_key=decision_key)
-            if decision.action is PromotionAction.PROMOTE:
-                if decision.predecessor_strategy_version_id != current_champion:
-                    raise PromotionEvidenceError(
-                        "promotion predecessor does not match current champion"
-                    )
-            elif decision.action is PromotionAction.ROLLBACK:
-                if decision.candidate_strategy_version_id != current_champion:
-                    raise PromotionEvidenceError(
-                        "rollback candidate does not match current champion"
-                    )
 
             def require(kind: str, identity: str) -> dict[str, Any]:
                 value = entries.get((kind, identity))
@@ -839,6 +837,36 @@ class ScientificRegistry:
                 return value
 
             strategy = require("StrategyVersion", decision.candidate_strategy_version_id)
+            canonical_strategy_id = _text(
+                strategy["payload"].get("canonical_strategy_id"), "canonical_strategy_id"
+            )
+            if any(
+                raw["record_type"] == "PromotionDecision"
+                and self._strategy_key_from_state(
+                    state, raw["payload"]["candidate_strategy_version_id"]
+                ) == canonical_strategy_id
+                and self._promotion_order_key(raw) > decision_key
+                for raw in state["records"]
+            ):
+                raise PromotionEvidenceError(
+                    "promotion decision cannot be backdated before durable promotion history in its strategy context"
+                )
+            current_champion = self._promotion_champion_from_state(
+                state,
+                through_key=decision_key,
+                canonical_strategy_id=canonical_strategy_id,
+            )
+            if decision.action is PromotionAction.PROMOTE:
+                if decision.predecessor_strategy_version_id != current_champion:
+                    raise PromotionEvidenceError(
+                        "promotion predecessor does not match current context champion"
+                    )
+            elif decision.action is PromotionAction.ROLLBACK:
+                if decision.candidate_strategy_version_id != current_champion:
+                    raise PromotionEvidenceError(
+                        "rollback candidate does not match current context champion"
+                    )
+
             protocol = require("ResearchProtocol", decision.research_protocol_id)
             bundle = require("EvaluationBundle", decision.evaluation_bundle_id)
             binding = protocol["payload"].get("binding")
@@ -875,16 +903,23 @@ class ScientificRegistry:
             if decision.candidate_model_version_id is not None:
                 model = require("ModelVersion", decision.candidate_model_version_id)
             if decision.predecessor_strategy_version_id is not None:
-                require("StrategyVersion", decision.predecessor_strategy_version_id)
+                predecessor = require("StrategyVersion", decision.predecessor_strategy_version_id)
+                if predecessor["payload"].get("canonical_strategy_id") != canonical_strategy_id:
+                    raise PromotionEvidenceError("promotion predecessor crosses strategy context")
             if decision.action is PromotionAction.ROLLBACK:
                 rollback_target = decision.rollback_to_strategy_version_id or ""
-                require("StrategyVersion", rollback_target)
+                rollback_strategy = require("StrategyVersion", rollback_target)
+                if rollback_strategy["payload"].get("canonical_strategy_id") != canonical_strategy_id:
+                    raise PromotionEvidenceError("rollback target crosses strategy context")
                 prior_champions: set[str] = set()
                 for raw in sorted(
                     (
                         raw
                         for raw in state["records"]
                         if raw["record_type"] == "PromotionDecision"
+                        and self._strategy_key_from_state(
+                            state, raw["payload"]["candidate_strategy_version_id"]
+                        ) == canonical_strategy_id
                         and self._promotion_order_key(raw) < decision_key
                     ),
                     key=self._promotion_order_key,
@@ -946,21 +981,51 @@ class ScientificRegistry:
                     raise PromotionEvidenceError("PROMOTE requires a positive durable experiment outcome")
             return self._append_entry_locked(state, entry)
 
-    def champion_strategy(self, *, as_of: str) -> str | None:
+    def champion_strategy(
+        self,
+        *,
+        as_of: str,
+        canonical_strategy_id: str | None = None,
+    ) -> str | None:
         decisions = self.causal_records("PromotionDecision", as_of=as_of)
+        state = self._read()
+        if canonical_strategy_id is None:
+            keys = {
+                self._strategy_key_from_state(state, entry.payload["candidate_strategy_version_id"])
+                for entry in decisions
+            }
+            if not keys:
+                return None
+            if len(keys) != 1:
+                raise PromotionEvidenceError(
+                    "canonical_strategy_id is required when multiple strategy contexts have promotion history"
+                )
+            canonical_strategy_id = next(iter(keys))
+        wanted_key = _text(canonical_strategy_id, "canonical_strategy_id")
         champion: str | None = None
         for entry in decisions:
             payload = entry.payload
+            if self._strategy_key_from_state(
+                state, payload["candidate_strategy_version_id"]
+            ) != wanted_key:
+                continue
             action = PromotionAction(payload["action"])
             predecessor = payload.get("predecessor_strategy_version_id")
             if action is PromotionAction.PROMOTE:
-                if champion is not None and predecessor != champion:
-                    raise PromotionEvidenceError("promotion predecessor does not match current champion")
+                if predecessor != champion:
+                    raise PromotionEvidenceError(
+                        "promotion predecessor does not match current context champion"
+                    )
                 champion = payload["candidate_strategy_version_id"]
             elif action is PromotionAction.ROLLBACK:
                 if champion != payload["candidate_strategy_version_id"]:
-                    raise PromotionEvidenceError("rollback candidate does not match current champion")
-                champion = payload["rollback_to_strategy_version_id"]
+                    raise PromotionEvidenceError(
+                        "rollback candidate does not match current context champion"
+                    )
+                rollback_target = payload["rollback_to_strategy_version_id"]
+                if self._strategy_key_from_state(state, rollback_target) != wanted_key:
+                    raise PromotionEvidenceError("rollback target crosses strategy context")
+                champion = rollback_target
         return champion
 
     def reproducibility_bundle(self, experiment_id: str) -> dict[str, Any]:

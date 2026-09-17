@@ -60,6 +60,7 @@ def _detached_decision_payload(value: Any) -> Any:
 GENERAL_DECISION_KIND = "GENERAL"
 ECONOMIC_DECISION_KIND = "ECONOMIC"
 ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY = "economic_goal_provenance"
+MATERIAL_ACTION_ID_PAYLOAD_KEY = "material_action_id"
 
 
 @dataclass(frozen=True, slots=True)
@@ -542,6 +543,44 @@ class JsonlDecisionLedger:
         raise DecisionLedgerIntegrityError(
             "Decision Ledger economic decision_id was not found"
         )
+
+    def verified_economic_decision_for_material_action(
+        self,
+        material_action_id: str,
+        contract: EconomicGoalContract,
+    ) -> DecisionRecord | None:
+        """Return one exact durable economic action identity, or ``None`` if absent.
+
+        The material action id is a caller-owned idempotence key.  It does not
+        replace ``decision_id``; instead it lets a restarted caller prove that a
+        logical money-affecting paper action already crossed the ledger durability
+        boundary before creating another material position.
+        """
+
+        if not isinstance(material_action_id, str) or not material_action_id.strip():
+            raise ValueError("material_action_id must be a non-empty string")
+        matched: list[DecisionRecord] = []
+        for record in self.verified_records():
+            value = record.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger material_action_id is invalid"
+                )
+            if value != material_action_id:
+                continue
+            if record.decision_kind != ECONOMIC_DECISION_KIND:
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger material_action_id is attached to a non-economic decision"
+                )
+            verify_economic_goal_binding(record, contract)
+            matched.append(record)
+        if len(matched) > 1:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger contains duplicate material_action_id"
+            )
+        return matched[0] if matched else None
 
     def verify_integrity(self) -> int:
         return self.verified_snapshot().record_count

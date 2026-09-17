@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -40,7 +41,14 @@ def _payload_sha(record) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _seed_promotion_evidence(registry: ScientificRegistry) -> tuple[ResearchProtocol, EvaluationBundleRef, EvaluationBundleRef]:
+def _seed_promotion_evidence(
+    registry: ScientificRegistry,
+    *,
+    frozen_feature_version: str = "v1",
+    frozen_config_sha256: str = SHA_B,
+    eval1_strategy_id: str = "strategy-1",
+    eval1_model_id: str | None = "model-1",
+) -> tuple[ResearchProtocol, EvaluationBundleRef, EvaluationBundleRef, ExperimentRecord]:
     question = ResearchQuestion("question-1", "Does the candidate improve the frozen metric?", SHA_A, T0)
     hypothesis = Hypothesis(
         "hypothesis-1",
@@ -63,7 +71,7 @@ def _seed_promotion_evidence(registry: ScientificRegistry) -> tuple[ResearchProt
         lawful_source_requirements="retained lawful source evidence",
         causal_cutoff=T1,
         evaluation_design="sealed walk-forward holdout",
-        feature_set_version="features-v1",
+        feature_set_version=frozen_feature_version,
         uncertainty_method="bootstrap intervals",
         multiple_comparison_control="single frozen metric",
         robustness_checks=("time split",),
@@ -71,7 +79,7 @@ def _seed_promotion_evidence(registry: ScientificRegistry) -> tuple[ResearchProt
         stopping_rule="one final evaluation",
         promotion_rule="promote only on positive frozen outcome",
         expected_artifacts=("evaluation bundle", "decision"),
-        code_config_sha256=SHA_C,
+        code_config_sha256=frozen_config_sha256,
         frozen_at_utc=T0,
     )
     protocol = ResearchProtocol(binding, SHA_C, SHA_D, SHA_A, T0)
@@ -102,13 +110,29 @@ def _seed_promotion_evidence(registry: ScientificRegistry) -> tuple[ResearchProt
         "strategy-1", "canonical-strategy", SHA_C, SHA_D, SHA_B, T1, model_version_id="model-1"
     )
     strategy2 = StrategyVersion(
-        "strategy-2", "canonical-strategy", SHA_C, SHA_D, SHA_A, T1, model_version_id="model-1"
+        "strategy-2", "canonical-strategy", SHA_C, SHA_D, SHA_B, T1, model_version_id="model-1"
     )
     eval1 = EvaluationBundleRef(
-        "eval-1", SHA_D, SHA_C, "dataset-1", protocol.protocol_sha256, (SHA_A,), T2
+        "eval-1",
+        SHA_D,
+        SHA_C,
+        "dataset-1",
+        protocol.protocol_sha256,
+        (SHA_A,),
+        T2,
+        evaluated_strategy_version_id=eval1_strategy_id,
+        evaluated_model_version_id=eval1_model_id,
     )
     eval2 = EvaluationBundleRef(
-        "eval-2", SHA_A, SHA_C, "dataset-1", protocol.protocol_sha256, (SHA_B,), T2
+        "eval-2",
+        SHA_A,
+        SHA_C,
+        "dataset-1",
+        protocol.protocol_sha256,
+        (SHA_B,),
+        T2,
+        evaluated_strategy_version_id="strategy-2",
+        evaluated_model_version_id="model-1",
     )
     exp1 = ExperimentRecord(
         "experiment-1",
@@ -132,7 +156,7 @@ def _seed_promotion_evidence(registry: ScientificRegistry) -> tuple[ResearchProt
         "strategy-2",
         "eval-2",
         7,
-        SHA_C,
+        SHA_B,
         ResearchOutcome.POSITIVE,
         T1,
         model_version_id="model-1",
@@ -153,7 +177,21 @@ def _seed_promotion_evidence(registry: ScientificRegistry) -> tuple[ResearchProt
         exp2,
     ):
         registry.append(record)
-    return protocol, eval1, eval2
+    return protocol, eval1, eval2, exp1
+
+
+def _first_promotion(protocol: ResearchProtocol, bundle: EvaluationBundleRef) -> PromotionDecision:
+    return PromotionDecision(
+        "promotion-1",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        protocol.protocol_sha256,
+        "eval-1",
+        bundle.bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+    )
 
 
 def test_evaluation_bundle_cannot_be_rebound_to_different_experiment_lineage(tmp_path):
@@ -194,20 +232,8 @@ def test_evaluation_bundle_cannot_be_rebound_to_different_experiment_lineage(tmp
 
 def test_second_promotion_must_name_current_durable_champion(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, eval2 = _seed_promotion_evidence(registry)
-
-    first = PromotionDecision(
-        "promotion-1",
-        PromotionAction.PROMOTE,
-        "strategy-1",
-        "protocol-1",
-        protocol.protocol_sha256,
-        "eval-1",
-        eval1.bundle_sha256,
-        T3,
-        candidate_model_version_id="model-1",
-    )
-    registry.record_promotion(first)
+    protocol, eval1, eval2, _ = _seed_promotion_evidence(registry)
+    registry.record_promotion(_first_promotion(protocol, eval1))
 
     conflicting = PromotionDecision(
         "promotion-2",
@@ -228,19 +254,8 @@ def test_second_promotion_must_name_current_durable_champion(tmp_path):
 
 def test_promotion_decision_cannot_be_backdated_before_durable_history(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, _ = _seed_promotion_evidence(registry)
-    first = PromotionDecision(
-        "promotion-1",
-        PromotionAction.PROMOTE,
-        "strategy-1",
-        "protocol-1",
-        protocol.protocol_sha256,
-        "eval-1",
-        eval1.bundle_sha256,
-        T3,
-        candidate_model_version_id="model-1",
-    )
-    registry.record_promotion(first)
+    protocol, eval1, _, _ = _seed_promotion_evidence(registry)
+    registry.record_promotion(_first_promotion(protocol, eval1))
 
     backdated = PromotionDecision(
         "promotion-backdated",
@@ -255,3 +270,48 @@ def test_promotion_decision_cannot_be_backdated_before_durable_history(tmp_path)
     )
     with pytest.raises(PromotionEvidenceError, match="backdated"):
         registry.record_promotion(backdated)
+
+
+def test_promotion_rejects_feature_version_outside_frozen_protocol(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    protocol, eval1, _, _ = _seed_promotion_evidence(
+        registry,
+        frozen_feature_version="v2",
+    )
+
+    with pytest.raises(PromotionEvidenceError, match="feature set version"):
+        registry.record_promotion(_first_promotion(protocol, eval1))
+
+
+def test_promotion_rejects_config_outside_frozen_protocol(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    protocol, eval1, _, _ = _seed_promotion_evidence(
+        registry,
+        frozen_config_sha256=SHA_C,
+    )
+
+    with pytest.raises(PromotionEvidenceError, match="config does not match frozen"):
+        registry.record_promotion(_first_promotion(protocol, eval1))
+
+
+def test_promotion_rejects_bundle_candidate_identity_mismatch(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    protocol, eval1, _, _ = _seed_promotion_evidence(
+        registry,
+        eval1_strategy_id="strategy-2",
+    )
+
+    with pytest.raises(PromotionEvidenceError, match="bundle strategy identity"):
+        registry.record_promotion(_first_promotion(protocol, eval1))
+
+
+def test_promotion_rejects_ambiguous_duplicate_matching_experiment(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    protocol, eval1, _, exp1 = _seed_promotion_evidence(registry)
+    registry.append(
+        replace(exp1, experiment_id="experiment-repeat"),
+        allow_repeat_experiment=True,
+    )
+
+    with pytest.raises(PromotionEvidenceError, match="ambiguous"):
+        registry.record_promotion(_first_promotion(protocol, eval1))

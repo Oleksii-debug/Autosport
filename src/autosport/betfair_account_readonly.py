@@ -350,7 +350,7 @@ class BetfairReadOnlyClient:
         settled_positions = tuple(self._to_position(o, BookmakerPositionState.SETTLED, details.currency_code) for o in cleared)
         overlap = {p.external_position_id for p in open_positions} & {p.external_position_id for p in settled_positions}
         if overlap:
-            raise BetfairReadOnlyError(f"provider returned positions in both OPEN and SETTLED states: {sorted(overlap)!r}")
+            raise BetfairReadOnlyError("provider returned positions in both OPEN and SETTLED states")
         return BookmakerAccountSnapshot(profile, common_caps, self._observed_at(), balance, open_positions, settled_positions)
 
     def _to_position(self, order: object, state: object, currency: str) -> object:
@@ -380,7 +380,8 @@ class BetfairReadOnlyClient:
         envelope = _mapping(decoded, "JSON-RPC response")
         if envelope.get("jsonrpc") != "2.0":
             raise BetfairReadOnlyError("Betfair response has invalid jsonrpc version")
-        if envelope.get("id") != request_id:
+        response_id = envelope.get("id")
+        if not isinstance(response_id, int) or isinstance(response_id, bool) or response_id != request_id:
             raise BetfairReadOnlyError("Betfair response id does not match request id")
         if "error" in envelope and envelope["error"] is not None:
             if "result" in envelope:
@@ -424,11 +425,11 @@ def _decode_json(payload: bytes) -> object:
         result: dict[str, object] = {}
         for key, value in pairs:
             if key in result:
-                raise BetfairReadOnlyError(f"Betfair JSON contains duplicate object key {key!r}")
+                raise BetfairReadOnlyError("Betfair JSON contains duplicate object key")
             result[key] = value
         return result
     def reject_constant(value: str) -> object:
-        raise BetfairReadOnlyError(f"Betfair JSON contains non-standard numeric constant {value}")
+        raise BetfairReadOnlyError("Betfair JSON contains non-standard numeric constant")
     try:
         return json.loads(payload.decode("utf-8"), parse_float=Decimal, object_pairs_hook=reject_duplicate_pairs, parse_constant=reject_constant)
     except BetfairReadOnlyError:
@@ -586,7 +587,7 @@ def _unique_bet_ids(orders: Sequence[object], field: str) -> None:
         if not isinstance(bet_id, str):
             raise BetfairReadOnlyError(f"{field} order lacks bet_id")
         if bet_id in seen:
-            raise BetfairReadOnlyError(f"{field} contains duplicate bet_id {bet_id}")
+            raise BetfairReadOnlyError(f"{field} contains duplicate bet_id")
         seen.add(bet_id)
 
 
@@ -596,6 +597,6 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
         if not isinstance(bet_id, str):
             raise BetfairReadOnlyError(f"{field} order lacks canonical bet_id")
         if bet_id in seen:
-            raise BetfairReadOnlyError(f"{field} pagination returned duplicate bet_id {bet_id}")
+            raise BetfairReadOnlyError(f"{field} pagination returned duplicate bet_id")
         seen.add(bet_id)
         target.append(order)

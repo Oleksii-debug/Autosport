@@ -431,3 +431,32 @@ def test_promotion_rejects_evidence_not_available_at_decision_time(tmp_path):
 
     with pytest.raises(PromotionEvidenceError, match="not available at decision time"):
         registry.record_promotion(early)
+
+
+def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    earlier = PromotionDecision(
+        "promotion-offset-earlier",
+        PromotionAction.PROMOTE,
+        "strategy-offset-1",
+        "protocol-unused",
+        SHA_A,
+        "eval-unused-1",
+        SHA_B,
+        "2026-01-04T01:30:00+02:00",
+    )
+    later = PromotionDecision(
+        "promotion-offset-later",
+        PromotionAction.PROMOTE,
+        "strategy-offset-2",
+        "protocol-unused",
+        SHA_A,
+        "eval-unused-2",
+        SHA_B,
+        "2026-01-04T00:00:00+00:00",
+        predecessor_strategy_version_id="strategy-offset-1",
+    )
+    registry.append(earlier)
+    registry.append(later)
+
+    assert registry.champion_strategy(as_of="2026-01-04T01:00:00+00:00") == "strategy-offset-2"

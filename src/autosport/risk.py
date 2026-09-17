@@ -52,9 +52,12 @@ class ProposedTicketRiskContext:
     instant. Optional bankroll/currency and measurement-window identities are
     carried unchanged and never inferred.
 
-    This seam intentionally does not implement concentration, deny-list, parlay,
-    or session/day ceilings. Canonical sport identity is deliberately absent until
-    the upstream #339 identity authority exists.
+    This seam carries the canonical proposal-local identities needed for parlay,
+    market deny-list, and provider deny-list enforcement. Canonical sport identity
+    is deliberately absent until the upstream #339 identity authority exists, so
+    any non-empty owner sport deny-list must fail closed instead of being guessed.
+    Session/day and portfolio concentration ceilings require additional durable
+    measurement evidence and remain follow-on policy work.
     """
 
     legs: tuple[TicketLeg, ...]
@@ -165,12 +168,13 @@ class PaperRiskPolicy:
 
     ``economic_goal`` can only tighten the locally proven executable limits in
     this policy. It binds per-ticket stake, aggregate committed capital,
-    concurrent open paper positions, owner emergency stop, quote freshness,
-    execution slippage, and the available data-quality proof boundary.
-    ``ProposedTicketRiskContext`` is the typed, non-persistent evidence seam for
-    proposal-local quote checks; an active economic goal therefore fails closed
-    when that evidence seam is absent. Concentration, deny-list, parlay, and
-    session/day enforcement remain explicit follow-on policy work.
+    concurrent open paper positions, owner emergency stop, proposal-local parlay
+    and deny-list restrictions, quote freshness, execution slippage, and the
+    available data-quality proof boundary. ``ProposedTicketRiskContext`` is the
+    typed, non-persistent evidence seam for these proposal-local checks; an active
+    economic goal therefore fails closed when that evidence seam is absent.
+    Concentration and session/day enforcement remain explicit follow-on policy
+    work until their durable measurement evidence exists.
     """
 
     max_ticket_fraction: Decimal = Decimal("0.02")
@@ -285,6 +289,25 @@ class PaperRiskPolicy:
         if initial_bankroll <= 0 or balance < 0 or committed_stake < 0:
             return None
         return initial_bankroll, balance, committed_stake, open_position_count
+
+    @staticmethod
+    def _proposal_restriction_decision(
+        goal: EconomicGoalContract,
+        context: ProposedTicketRiskContext,
+    ) -> RiskDecision | None:
+        """Enforce owner restrictions supported by canonical proposal-local identity."""
+        if context.parlay_leg_count > goal.max_parlay_legs:
+            return RiskDecision(False, "economic goal parlay leg limit exceeded")
+        if context.market_ids & goal.blocked_markets:
+            return RiskDecision(False, "proposed ticket contains an owner-blocked market")
+        if context.source_ids & goal.blocked_providers:
+            return RiskDecision(False, "proposed ticket uses an owner-blocked provider")
+        if goal.blocked_sports:
+            return RiskDecision(
+                False,
+                "owner sport deny-list cannot be proven without canonical sport identity",
+            )
+        return None
 
     @staticmethod
     def _quote_risk_decision(
@@ -432,6 +455,9 @@ class PaperRiskPolicy:
                     False,
                     "proposed ticket risk context is required for economic goal quote checks",
                 )
+            restriction_decision = self._proposal_restriction_decision(goal, context)
+            if restriction_decision is not None:
+                return restriction_decision
             quote_decision = self._quote_risk_decision(goal, context)
             if quote_decision is not None:
                 return quote_decision

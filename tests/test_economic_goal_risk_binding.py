@@ -30,6 +30,8 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         return ProposedTicketRiskContext(
             legs=(leg,),
             quotes=(quote,),
+            bankroll_id="paper-bankroll",
+            currency="USD",
             proposal_ts="2026-09-16T15:00:02+00:00",
         )
 

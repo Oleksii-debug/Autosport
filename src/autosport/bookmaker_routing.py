@@ -67,7 +67,14 @@ class VenueQuote:
 
 @dataclass(frozen=True, slots=True)
 class VenueObservation:
-    """Externally reconciled effect bound to one routing request and exact quote."""
+    """Externally reconciled effect bound to one routing request and exact quote.
+
+    The optional child identity fields bind evidence to one deterministic
+    non-money-moving proposal leg. An external receipt is separate evidence:
+    child-bound ACCEPTED effects require it, while UNKNOWN/refusal may truthfully
+    have no provider receipt yet. This does not create a durable execution ledger;
+    that future authority remains owned by canonical #353.
+    """
 
     venue_id: str
     account_id: str
@@ -76,6 +83,10 @@ class VenueObservation:
     quote: QuoteRef
     confirmed_accepted: Decimal = Decimal("0")
     observation_id: str | None = None
+    parent_plan_id: str | None = None
+    proposal_leg_id: str | None = None
+    proposed_stake: Decimal | None = None
+    external_receipt_id: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.venue_id, "observation venue_id")
@@ -101,6 +112,45 @@ class VenueObservation:
         if self.observation_id is not None:
             _text(self.observation_id, "observation_id")
 
+        child_fields = (
+            self.parent_plan_id,
+            self.proposal_leg_id,
+            self.proposed_stake,
+        )
+        child_bound = any(value is not None for value in child_fields)
+        if child_bound:
+            if any(value is None for value in child_fields):
+                raise RoutingContractError(
+                    "child identity requires parent_plan_id, proposal_leg_id and "
+                    "proposed_stake together"
+                )
+            _text(self.parent_plan_id, "parent_plan_id")
+            _text(self.proposal_leg_id, "proposal_leg_id")
+            bound_stake = _amount(
+                self.proposed_stake,
+                "proposed_stake",
+                positive=True,
+            )
+            if accepted > bound_stake:
+                raise RoutingContractError(
+                    "confirmed accepted stake exceeds bound proposal stake"
+                )
+        elif self.external_receipt_id is not None:
+            raise RoutingContractError(
+                "external_receipt_id requires deterministic child identity"
+            )
+
+        if self.external_receipt_id is not None:
+            _text(self.external_receipt_id, "external_receipt_id")
+        if (
+            child_bound
+            and self.effect is ExternalEffect.ACCEPTED
+            and self.external_receipt_id is None
+        ):
+            raise RoutingContractError(
+                "child-bound ACCEPTED evidence requires external_receipt_id"
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class RoutingDecision:
@@ -109,6 +159,36 @@ class RoutingDecision:
     next_venue: VenueQuote | None
     confirmed_total: Decimal
     proposed_stake: Decimal = Decimal("0")
+
+
+def _dedupe_external_receipts(
+    observations: Iterable[VenueObservation],
+) -> tuple[VenueObservation, ...]:
+    """Deduplicate exact receipt replays and fail closed on conflicting reuse.
+
+    External receipt identifiers are provider/account scoped because independent
+    bookmakers may legitimately issue the same textual identifier. Re-observing
+    the exact same immutable receipt is idempotent; changing any bound evidence for
+    the same receipt identity is ambiguous and therefore rejected.
+    """
+
+    normalized: list[VenueObservation] = []
+    receipts: dict[tuple[str, str, str], VenueObservation] = {}
+    for item in observations:
+        if item.external_receipt_id is None:
+            normalized.append(item)
+            continue
+        key = (item.venue_id, item.account_id, item.external_receipt_id)
+        previous = receipts.get(key)
+        if previous is None:
+            receipts[key] = item
+            normalized.append(item)
+            continue
+        if previous != item:
+            raise RoutingContractError(
+                "conflicting external receipt identity is ambiguous"
+            )
+    return tuple(normalized)
 
 
 def route_residual(
@@ -151,17 +231,23 @@ def route_residual(
         )
 
     by_identity = {(v.venue_id, v.account_id): v for v in venues}
-    obs = tuple(observations)
-    if any(not isinstance(item, VenueObservation) for item in obs):
+    raw_obs = tuple(observations)
+    if any(not isinstance(item, VenueObservation) for item in raw_obs):
         raise RoutingContractError(
             "observations must contain VenueObservation values"
         )
+    obs = _dedupe_external_receipts(raw_obs)
 
     observation_identities = [
         (item.venue_id, item.account_id) for item in obs
     ]
     counts = Counter(observation_identities)
     observation_ids: set[str] = set()
+    child_leg_bindings: dict[
+        tuple[str, str],
+        tuple[str, str, str, QuoteRef, Decimal],
+    ] = {}
+    accepted_receipt_by_child: dict[tuple[str, str], str] = {}
     for item, identity in zip(obs, observation_identities, strict=True):
         if identity not in by_identity:
             raise RoutingContractError(
@@ -176,9 +262,14 @@ def route_residual(
             raise RoutingContractError(
                 "observation quote does not exactly match selected venue quote"
             )
-        if counts[identity] > 1 and item.observation_id is None:
+        if (
+            counts[identity] > 1
+            and item.observation_id is None
+            and item.external_receipt_id is None
+        ):
             raise RoutingContractError(
-                "repeated venue/account observations require unique observation_id"
+                "repeated venue/account observations require unique observation_id "
+                "or external_receipt_id"
             )
         if item.observation_id is not None:
             if item.observation_id in observation_ids:
@@ -186,6 +277,48 @@ def route_residual(
                     "duplicate observation_id is ambiguous"
                 )
             observation_ids.add(item.observation_id)
+        if item.proposal_leg_id is not None:
+            if item.parent_plan_id is None or item.proposed_stake is None:
+                raise RoutingContractError("child identity is incomplete")
+            # Reuse the canonical proposal validator rather than trusting a caller-supplied
+            # digest or duplicating the child-hash algorithm in this lower-level path.
+            from .bookmaker_routing_plan import VenueLegProposal
+
+            VenueLegProposal(
+                parent_plan_id=item.parent_plan_id,
+                routing_request_id=item.routing_request_id,
+                leg_id=item.proposal_leg_id,
+                venue=by_identity[identity],
+                proposed_stake=item.proposed_stake,
+            )
+            child_key = (item.parent_plan_id, item.proposal_leg_id)
+            child_binding = (
+                item.routing_request_id,
+                item.venue_id,
+                item.account_id,
+                item.quote,
+                item.proposed_stake,
+            )
+            previous = child_leg_bindings.get(child_key)
+            if previous is not None and previous != child_binding:
+                raise RoutingContractError(
+                    "proposal leg identity has conflicting bound evidence"
+                )
+            child_leg_bindings[child_key] = child_binding
+            if item.effect is ExternalEffect.ACCEPTED:
+                if item.external_receipt_id is None:
+                    raise RoutingContractError(
+                        "child-bound ACCEPTED evidence requires external_receipt_id"
+                    )
+                previous_receipt = accepted_receipt_by_child.get(child_key)
+                if (
+                    previous_receipt is not None
+                    and previous_receipt != item.external_receipt_id
+                ):
+                    raise RoutingContractError(
+                        "multiple external receipts for one child are ambiguous"
+                    )
+                accepted_receipt_by_child[child_key] = item.external_receipt_id
 
     refused: set[tuple[str, str]] = set()
     accepted_by_identity: dict[tuple[str, str], Decimal] = {}

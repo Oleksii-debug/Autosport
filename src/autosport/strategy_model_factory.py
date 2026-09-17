@@ -205,6 +205,20 @@ class WalkForwardResult:
     def result_sha256(self) -> str:
         return _canonical_digest(self.to_payload())
 
+    def promotion_metrics(self) -> dict[str, float]:
+        """Metrics derived only from this causal walk-forward result.
+
+        Promotion-capable guardrails must come from governed evaluation arithmetic,
+        never from caller-supplied values. New protective metrics must be added here
+        (or via another hash-bound evaluator) before a frozen rule can use them.
+        """
+        if not self.folds:
+            raise ValueError("walk-forward result has no folds")
+        return {
+            self.primary_metric: self.primary_value,
+            "max_squared_error": max(fold.squared_error for fold in self.folds),
+        }
+
 
 class WalkForwardRunner:
     """Causal expanding-window evaluator; evaluation labels never enter their own training set."""
@@ -577,15 +591,45 @@ class ExperimentRunner:
         self,
         *,
         champion_strategy_version_id: str,
-        champion_evaluation_bundle_id: str,
-    ) -> dict[str, float]:
+        as_of: str,
+        research_protocol_id: str,
+        protocol_sha256: str,
+        dataset_snapshot_id: str,
+    ) -> tuple[str, dict[str, float]]:
         strategy = self.registry.get("StrategyVersion", champion_strategy_version_id)
-        bundle = self.registry.get("EvaluationBundle", champion_evaluation_bundle_id)
-        if strategy is None or bundle is None:
-            raise ValueError("durable champion evaluation provenance is missing")
+        if strategy is None:
+            raise ValueError("durable champion strategy is missing")
         champion_model_version_id = strategy.payload.get("model_version_id")
         if type(champion_model_version_id) is not str:
             raise ValueError("durable champion model identity is missing")
+
+        decisions = tuple(
+            decision
+            for decision in self.registry.causal_records("PromotionDecision", as_of=as_of)
+            if decision.payload.get("action") == PromotionAction.PROMOTE.value
+            and decision.payload.get("candidate_strategy_version_id")
+            == champion_strategy_version_id
+        )
+        if not decisions:
+            raise ValueError("durable champion has no canonical promotion evidence")
+        decision = decisions[-1]
+        if decision.payload.get("research_protocol_id") != research_protocol_id:
+            raise ValueError("champion comparison uses a different frozen research protocol")
+        if decision.payload.get("protocol_sha256") != protocol_sha256:
+            raise ValueError("champion comparison protocol hash mismatch")
+        champion_evaluation_bundle_id = decision.payload.get("evaluation_bundle_id")
+        if type(champion_evaluation_bundle_id) is not str:
+            raise ValueError("canonical champion promotion lacks evaluation bundle identity")
+
+        bundle = self.registry.get("EvaluationBundle", champion_evaluation_bundle_id)
+        if bundle is None:
+            raise ValueError("durable champion evaluation provenance is missing")
+        if bundle.payload.get("bundle_sha256") != decision.payload.get(
+            "evaluation_bundle_sha256"
+        ):
+            raise ValueError("canonical champion promotion/evaluation hash mismatch")
+        if bundle.payload.get("dataset_snapshot_id") != dataset_snapshot_id:
+            raise ValueError("champion comparison uses a different dataset snapshot")
         if bundle.payload.get("evaluated_strategy_version_id") != champion_strategy_version_id:
             raise ValueError("champion evaluation does not reference durable champion strategy")
         if bundle.payload.get("evaluated_model_version_id") != champion_model_version_id:
@@ -610,7 +654,9 @@ class ExperimentRunner:
             raise ValueError("champion metrics strategy identity mismatch")
         if payload.get("model_version_id") != champion_model_version_id:
             raise ValueError("champion metrics model identity mismatch")
-        return _metric_map(payload.get("metrics"), "champion metrics")
+        return champion_evaluation_bundle_id, _metric_map(
+            payload.get("metrics"), "champion metrics"
+        )
 
     def run_baseline_candidate(
         self,
@@ -618,8 +664,6 @@ class ExperimentRunner:
         points: Sequence[TrainingPoint],
         *,
         rule: PromotionRule,
-        champion_evaluation_bundle_id: str,
-        protective_metrics: Mapping[str, float],
         minimum_train_size: int = 2,
     ) -> FactoryRunResult:
         binding, config_sha256, protocol_sha256 = self._foundation(spec, rule)
@@ -631,9 +675,12 @@ class ExperimentRunner:
             raise ValueError("candidate predecessor does not match durable context champion")
         if current_champion is None:
             raise ValueError("factory challenger promotion requires a durable rollback champion")
-        champion_metrics = self._durable_champion_metrics(
+        champion_evaluation_bundle_id, champion_metrics = self._durable_champion_metrics(
             champion_strategy_version_id=current_champion,
-            champion_evaluation_bundle_id=champion_evaluation_bundle_id,
+            as_of=spec.decided_at,
+            research_protocol_id=spec.research_protocol_id,
+            protocol_sha256=protocol_sha256,
+            dataset_snapshot_id=spec.dataset_snapshot_id,
         )
 
         walk_forward = WalkForwardRunner.run(points, minimum_train_size=minimum_train_size)
@@ -651,13 +698,28 @@ class ExperimentRunner:
             points,
             training_cutoff=binding["causal_cutoff"],
         )
-        candidate_metrics = {rule.primary_metric: walk_forward.primary_value}
-        for name, value in protective_metrics.items():
-            _text(name, "protective metric name")
-            if name in candidate_metrics:
-                raise ValueError("protective metrics must not overwrite primary metric")
-            candidate_metrics[name] = _finite(value, f"protective metric {name}")
-        candidate_metrics = dict(sorted(candidate_metrics.items()))
+        candidate_metrics = walk_forward.promotion_metrics()
+        required_metrics = {rule.primary_metric} | {
+            name for name, _ in rule.protective_metric_maxima
+        }
+        missing_metrics = sorted(required_metrics - set(candidate_metrics))
+        if missing_metrics:
+            raise ValueError(
+                "frozen promotion rule requires unsupported causal metrics: "
+                + ", ".join(missing_metrics)
+            )
+        champion_missing = sorted(required_metrics - set(champion_metrics))
+        if champion_missing:
+            raise ValueError(
+                "durable champion evidence lacks comparable metrics: "
+                + ", ".join(champion_missing)
+            )
+        candidate_metrics = {
+            name: candidate_metrics[name] for name in sorted(required_metrics)
+        }
+        champion_metrics = {
+            name: champion_metrics[name] for name in sorted(required_metrics)
+        }
         promotion = PromotionController.evaluate(
             rule,
             champion_metrics=champion_metrics,
@@ -717,6 +779,8 @@ class ExperimentRunner:
             "strategy_version_id": spec.strategy_version_id,
             "model_version_id": spec.model_version_id,
             "metrics": candidate_metrics,
+            "source": "causal-walk-forward-v1",
+            "walk_forward_result_sha256": walk_forward.result_sha256,
         }
         candidate_metrics_artifact_sha256 = self.artifact_store.write(
             "metrics", spec.evaluation_bundle_id, metrics_payload
@@ -739,6 +803,7 @@ class ExperimentRunner:
             "walk_forward": walk_forward.to_payload(),
             "candidate_metrics": candidate_metrics,
             "candidate_metrics_artifact_sha256": candidate_metrics_artifact_sha256,
+            "candidate_metrics_source": "causal-walk-forward-v1",
             "champion_evaluation_bundle_id": champion_evaluation_bundle_id,
             "champion_metrics": champion_metrics,
             "promotion_verdict": promotion.verdict.value,
@@ -881,6 +946,12 @@ class ExperimentRunner:
             raise ValueError("metrics artifact strategy identity mismatch")
         if metrics_payload.get("model_version_id") != model_version_id:
             raise ValueError("metrics artifact model identity mismatch")
+        if metrics_payload.get("source") != "causal-walk-forward-v1":
+            raise ValueError("metrics artifact lacks causal evaluator provenance")
+        if metrics_payload.get("walk_forward_result_sha256") != _canonical_digest(
+            evaluation_payload.get("walk_forward", {})
+        ):
+            raise ValueError("metrics artifact walk-forward hash mismatch")
         if evaluation_payload.get("experiment_id") != experiment_id:
             raise ValueError("evaluation artifact experiment identity mismatch")
         if evaluation_payload.get("model_version_id") != model_version_id:

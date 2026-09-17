@@ -67,7 +67,7 @@ def _payload_sha(record) -> str:
 
 
 def _factory_rule() -> PromotionRule:
-    return PromotionRule("mse", 0.05, (("max_drawdown", 0.20),))
+    return PromotionRule("mse", 0.05, (("max_squared_error", 0.50),))
 
 
 def _factory_foundation(tmp_path):
@@ -84,11 +84,11 @@ def _factory_foundation(tmp_path):
     hypothesis = Hypothesis(
         "hypothesis-factory",
         "question-factory",
-        "Challenger lowers MSE while max drawdown remains bounded.",
+        "Challenger lowers MSE while maximum fold squared error remains bounded.",
         "mse improves by the frozen threshold",
-        "mse misses threshold or max_drawdown exceeds guardrail",
+        "mse misses threshold or max_squared_error exceeds guardrail",
         "mse",
-        ("max_drawdown",),
+        ("max_squared_error",),
         T0,
     )
     binding = ScientificProtocolBinding(
@@ -155,7 +155,7 @@ def _factory_foundation(tmp_path):
         "evaluation_bundle_id": "eval-v1",
         "strategy_version_id": champion_strategy.strategy_version_id,
         "model_version_id": champion_model.model_version_id,
-        "metrics": {"max_drawdown": 0.10, "mse": 0.80},
+        "metrics": {"max_squared_error": 0.40, "mse": 0.80},
     }
     champion_metrics_sha256 = store.write("metrics", "eval-v1", champion_metrics_payload)
     champion_bundle = EvaluationBundleRef(
@@ -245,13 +245,22 @@ def _bad_candidate_points():
     )
 
 
-def _run_candidate(runner, points, rule, *, protective=0.10):
+def _guardrail_bad_candidate_points():
+    # MSE remains below the champion's 0.80 by more than 0.05, but one causal
+    # fold has squared error 1.0 and therefore breaches the frozen 0.50 guardrail.
+    return (
+        TrainingPoint(T0, 1.0, 0.0, T0),
+        TrainingPoint(T1, 2.0, 0.0, T1),
+        TrainingPoint(T4, 3.0, 1.0, T4),
+        TrainingPoint(T5, 4.0, 0.5, T5),
+    )
+
+
+def _run_candidate(runner, points, rule):
     return runner.run_baseline_candidate(
         _candidate_spec(),
         points,
         rule=rule,
-        champion_evaluation_bundle_id="eval-v1",
-        protective_metrics={"max_drawdown": protective},
     )
 
 
@@ -306,11 +315,19 @@ def test_walk_forward_is_expanding_window_and_deterministic():
     assert all(fold.training_cutoff < fold.evaluation_at for fold in first.folds)
     assert all(fold.target_available_at for fold in first.folds)
     assert first.primary_metric == "mse"
+    assert first.promotion_metrics()["max_squared_error"] == max(
+        fold.squared_error for fold in first.folds
+    )
 
 
 def test_walk_forward_rejects_duplicate_timestamp_identity():
     points = _points()[:2] + (
-        TrainingPoint("2026-01-02T00:00:00+00:00", 9.0, 0.0),
+        TrainingPoint(
+            "2026-01-02T00:00:00+00:00",
+            9.0,
+            0.0,
+            "2026-01-02T00:00:00+00:00",
+        ),
     )
     with pytest.raises(ValueError, match="unique timestamps"):
         WalkForwardRunner.run(points, minimum_train_size=2)
@@ -379,6 +396,7 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
     result = _run_candidate(runner, _candidate_points(), rule)
 
     assert result.verdict is PromotionVerdict.PROMOTE
+    assert result.candidate_metrics["max_squared_error"] <= 0.50
     assert registry.get("ModelVersion", "model-v2") is not None
     assert registry.get("StrategyVersion", "strategy-v2") is not None
     bundle = registry.get("EvaluationBundle", "eval-v2")
@@ -392,8 +410,13 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
     ) == "strategy-v2"
 
     evaluation = store.read("evaluation", "eval-v2")
+    metrics = store.read("metrics", "eval-v2")
     assert evaluation["walk_forward"]["folds"][0]["target_available_at"] == T4
-    assert evaluation["champion_metrics"] == {"max_drawdown": 0.1, "mse": 0.8}
+    assert evaluation["champion_evaluation_bundle_id"] == "eval-v1"
+    assert evaluation["champion_metrics"] == {"max_squared_error": 0.4, "mse": 0.8}
+    assert evaluation["candidate_metrics_source"] == "causal-walk-forward-v1"
+    assert metrics["source"] == "causal-walk-forward-v1"
+    assert metrics["walk_forward_result_sha256"] == evaluation["walk_forward"]["result_sha256"] if "result_sha256" in evaluation["walk_forward"] else result.candidate_metrics is not None
 
     restarted = ExperimentRunner.verify_restart(
         registry_path,
@@ -428,6 +451,49 @@ def test_factory_fails_closed_when_champion_metrics_are_not_durably_bound(tmp_pa
     assert registry.get("PromotionDecision", "promotion-v2") is None
 
 
+def test_factory_ignores_unpromoted_champion_bundle_and_uses_promotion_history(tmp_path):
+    registry, _, rule, store = _factory_foundation(tmp_path)
+    rogue_metrics = {
+        "schema_version": 1,
+        "kind": "autosport-factory-metrics-v1",
+        "evaluation_bundle_id": "rogue-eval",
+        "strategy_version_id": "strategy-v1",
+        "model_version_id": "model-v1",
+        "metrics": {"max_squared_error": 0.0, "mse": 0.0},
+    }
+    rogue_hash = store.write("metrics", "rogue-eval", rogue_metrics)
+    registry.append(
+        EvaluationBundleRef(
+            "rogue-eval",
+            SHA_A,
+            SHA_C,
+            "dataset-factory",
+            registry.get("ResearchProtocol", "protocol-factory").payload["protocol_sha256"],
+            (rogue_hash,),
+            T4,
+            evaluated_strategy_version_id="strategy-v1",
+            evaluated_model_version_id="model-v1",
+        )
+    )
+
+    _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
+    evaluation = store.read("evaluation", "eval-v2")
+    assert evaluation["champion_evaluation_bundle_id"] == "eval-v1"
+    assert evaluation["champion_metrics"]["mse"] == 0.8
+
+
+def test_factory_rejects_caller_injected_promotion_authority_metrics(tmp_path):
+    registry, _, rule, store = _factory_foundation(tmp_path)
+    runner = ExperimentRunner(registry, store)
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        runner.run_baseline_candidate(
+            _candidate_spec(),
+            _candidate_points(),
+            rule=rule,
+            protective_metrics={"max_squared_error": 0.0},
+        )
+
+
 def test_factory_rejection_is_durable_negative_memory_with_postmortem(tmp_path):
     registry, registry_path, rule, store = _factory_foundation(tmp_path)
     runner = ExperimentRunner(registry, store)
@@ -446,8 +512,10 @@ def test_factory_rejection_is_durable_negative_memory_with_postmortem(tmp_path):
 def test_protective_metric_degradation_is_durably_rejected(tmp_path):
     registry, _, rule, store = _factory_foundation(tmp_path)
     result = _run_candidate(
-        ExperimentRunner(registry, store), _candidate_points(), rule, protective=0.25
+        ExperimentRunner(registry, store), _guardrail_bad_candidate_points(), rule
     )
+    assert result.candidate_metrics["mse"] < 0.75
+    assert result.candidate_metrics["max_squared_error"] > 0.50
     assert result.verdict is PromotionVerdict.REJECT
     decision = registry.get("PromotionDecision", "promotion-v2")
     assert decision is not None

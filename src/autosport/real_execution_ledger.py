@@ -11,10 +11,11 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 
 SCHEMA_VERSION = 1
+_T = TypeVar("_T")
 
 
 class ExecutionLedgerError(RuntimeError):
@@ -60,7 +61,6 @@ class EventType(str, Enum):
     ATTEMPT_UNKNOWN = "ATTEMPT_UNKNOWN"
     EXTERNAL_ACKNOWLEDGEMENT = "EXTERNAL_ACKNOWLEDGEMENT"
     RECONCILED_NOT_FOUND = "RECONCILED_NOT_FOUND"
-    PLAN_STALE = "PLAN_STALE"
 
 
 def _now() -> str:
@@ -70,8 +70,22 @@ def _now() -> str:
 def _text(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be non-empty text")
-    value.encode("utf-8")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
     return value
+
+
+def _timestamp(value: str, name: str) -> datetime:
+    _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
+    return parsed
 
 
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
@@ -98,7 +112,7 @@ def _canonical(value: Any) -> str:
             separators=(",", ":"),
             allow_nan=False,
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
         raise ExecutionLedgerIntegrityError("value is not canonical JSON") from exc
 
 
@@ -120,9 +134,13 @@ def _nonfinite(value: str) -> None:
 
 
 def _validate_json(value: Any, path: str = "event") -> None:
-    if value is None or isinstance(value, (bool, int, str)):
-        if isinstance(value, str):
+    if value is None or isinstance(value, (bool, int)):
+        return
+    if isinstance(value, str):
+        try:
             value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ExecutionLedgerIntegrityError(f"invalid UTF-8 text at {path}") from exc
         return
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -136,6 +154,7 @@ def _validate_json(value: Any, path: str = "event") -> None:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ExecutionLedgerIntegrityError(f"non-text JSON key at {path}")
+            _validate_json(key, f"{path} object key")
             _validate_json(item, f"{path}.{key}")
         return
     raise ExecutionLedgerIntegrityError(
@@ -160,12 +179,26 @@ class ExecutionAction:
 
     def __post_init__(self) -> None:
         for name in (
-            "action_id", "bookmaker_id", "account_id", "event_id", "market_id",
-            "selection_id", "side", "quote_id", "quote_observed_at", "expires_at",
+            "action_id",
+            "bookmaker_id",
+            "account_id",
+            "event_id",
+            "market_id",
+            "selection_id",
+            "side",
+            "quote_id",
         ):
             _text(getattr(self, name), name)
-        object.__setattr__(self, "requested_odds", _decimal(self.requested_odds, "requested_odds"))
-        object.__setattr__(self, "requested_stake", _decimal(self.requested_stake, "requested_stake"))
+        observed = _timestamp(self.quote_observed_at, "quote_observed_at")
+        expires = _timestamp(self.expires_at, "expires_at")
+        if expires <= observed:
+            raise ValueError("expires_at must be after quote_observed_at")
+        object.__setattr__(
+            self, "requested_odds", _decimal(self.requested_odds, "requested_odds")
+        )
+        object.__setattr__(
+            self, "requested_stake", _decimal(self.requested_stake, "requested_stake")
+        )
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -195,13 +228,21 @@ class ExecutionPlan:
     schema_version: int = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        for name in ("plan_id", "bookmaker_profile_version", "decision_id", "approval_id", "created_at"):
+        for name in (
+            "plan_id",
+            "bookmaker_profile_version",
+            "decision_id",
+            "approval_id",
+        ):
             _text(getattr(self, name), name)
+        _timestamp(self.created_at, "created_at")
         if self.schema_version != SCHEMA_VERSION:
             raise ValueError("unsupported execution plan schema")
         actions = tuple(self.actions)
-        if not actions or len({a.action_id for a in actions}) != len(actions):
-            raise ValueError("execution plan needs unique non-empty actions")
+        if not actions or not all(isinstance(item, ExecutionAction) for item in actions):
+            raise ValueError("execution plan requires ExecutionAction items")
+        if len({action.action_id for action in actions}) != len(actions):
+            raise ValueError("execution plan needs unique action_id values")
         object.__setattr__(self, "actions", actions)
 
     def to_dict(self) -> dict[str, Any]:
@@ -230,6 +271,13 @@ class ExecutionAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalReceiptIdentity:
+    bookmaker_id: str
+    account_id: str
+    external_receipt_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class ExternalAcknowledgement:
     attempt_id: str
     external_receipt_id: str
@@ -242,16 +290,29 @@ class ExternalAcknowledgement:
     def __post_init__(self) -> None:
         _text(self.attempt_id, "attempt_id")
         _text(self.external_receipt_id, "external_receipt_id")
-        _text(self.acknowledged_at, "acknowledged_at")
+        _timestamp(self.acknowledged_at, "acknowledged_at")
+        if not isinstance(self.status, AcknowledgementStatus):
+            raise ValueError("status must be AcknowledgementStatus")
         if self.reconciliation_evidence_id is not None:
             _text(self.reconciliation_evidence_id, "reconciliation_evidence_id")
-        if self.status in {AcknowledgementStatus.ACCEPTED, AcknowledgementStatus.PARTIAL}:
+        if self.status in {
+            AcknowledgementStatus.ACCEPTED,
+            AcknowledgementStatus.PARTIAL,
+        }:
             if self.accepted_odds is None or self.accepted_stake is None:
-                raise ValueError("accepted/partial acknowledgement requires odds and stake")
-            object.__setattr__(self, "accepted_odds", _decimal(self.accepted_odds, "accepted_odds"))
-            object.__setattr__(self, "accepted_stake", _decimal(self.accepted_stake, "accepted_stake"))
+                raise ValueError(
+                    "accepted/partial acknowledgement requires odds and stake"
+                )
+            object.__setattr__(
+                self, "accepted_odds", _decimal(self.accepted_odds, "accepted_odds")
+            )
+            object.__setattr__(
+                self, "accepted_stake", _decimal(self.accepted_stake, "accepted_stake")
+            )
         elif self.accepted_odds is not None or self.accepted_stake is not None:
-            raise ValueError("rejected acknowledgement cannot claim accepted odds/stake")
+            raise ValueError(
+                "rejected acknowledgement cannot claim accepted odds/stake"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -259,8 +320,16 @@ class ExternalAcknowledgement:
             "external_receipt_id": self.external_receipt_id,
             "status": self.status.value,
             "acknowledged_at": self.acknowledged_at,
-            "accepted_odds": _decimal_text(self.accepted_odds) if self.accepted_odds is not None else None,
-            "accepted_stake": _decimal_text(self.accepted_stake) if self.accepted_stake is not None else None,
+            "accepted_odds": (
+                _decimal_text(self.accepted_odds)
+                if self.accepted_odds is not None
+                else None
+            ),
+            "accepted_stake": (
+                _decimal_text(self.accepted_stake)
+                if self.accepted_stake is not None
+                else None
+            ),
             "reconciliation_evidence_id": self.reconciliation_evidence_id,
         }
 
@@ -274,8 +343,11 @@ class ReconciliationSnapshot:
     source: str
 
     def __post_init__(self) -> None:
-        for name in ("attempt_id", "evidence_id", "observed_at", "source"):
+        for name in ("attempt_id", "evidence_id", "source"):
             _text(getattr(self, name), name)
+        _timestamp(self.observed_at, "observed_at")
+        if type(self.external_effect_found) is not bool:
+            raise ValueError("external_effect_found must be bool")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -294,7 +366,7 @@ class ExecutionSaga:
     stale: bool
     attempts: dict[str, AttemptState]
     attempt_action_ids: dict[str, str]
-    receipts: dict[str, str]
+    receipts: dict[ExternalReceiptIdentity, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,8 +380,16 @@ class RealExecutionLedger:
     """Durable execution facts only; deliberately contains no provider write capability."""
 
     _FIELDS = frozenset(
-        {"schema_version", "event_id", "event_type", "recorded_at", "plan_id",
-         "action_id", "attempt_id", "payload"}
+        {
+            "schema_version",
+            "event_id",
+            "event_type",
+            "recorded_at",
+            "plan_id",
+            "action_id",
+            "attempt_id",
+            "payload",
+        }
     )
 
     def __init__(self, path: str | Path) -> None:
@@ -318,10 +398,12 @@ class RealExecutionLedger:
         self._lock_path = self.path.with_name(self.path.name + ".writer.lock")
         self._thread_lock = threading.RLock()
 
-    def _mutate(self, operation):
+    def _mutate(self, operation: Callable[[], _T]) -> _T:
         with self._thread_lock:
             try:
-                fd = os.open(self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                fd = os.open(
+                    self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+                )
             except FileExistsError as exc:
                 raise ExecutionLedgerBusyError(
                     "writer lock exists; fail closed until writer/crash ownership is resolved"
@@ -336,24 +418,41 @@ class RealExecutionLedger:
                     pass
 
     @classmethod
-    def _validate_event(cls, event: object, line: int | None = None) -> dict[str, Any]:
+    def _validate_event(
+        cls, event: object, line: int | None = None
+    ) -> dict[str, Any]:
         where = f" at line {line}" if line else ""
         if not isinstance(event, dict) or set(event) != cls._FIELDS:
-            raise ExecutionLedgerIntegrityError(f"execution event schema invalid{where}")
-        if event["schema_version"] != SCHEMA_VERSION:
+            raise ExecutionLedgerIntegrityError(
+                f"execution event schema invalid{where}"
+            )
+        if type(event["schema_version"]) is not int or event["schema_version"] != SCHEMA_VERSION:
             raise ExecutionLedgerIntegrityError(f"unsupported event schema{where}")
         for name in ("event_id", "event_type", "recorded_at", "plan_id"):
             if not isinstance(event[name], str) or not event[name].strip():
                 raise ExecutionLedgerIntegrityError(f"invalid {name}{where}")
+        try:
+            _timestamp(event["recorded_at"], "recorded_at")
+        except ValueError as exc:
+            raise ExecutionLedgerIntegrityError(
+                f"invalid recorded_at{where}"
+            ) from exc
         if event["event_type"] not in {item.value for item in EventType}:
             raise ExecutionLedgerIntegrityError(f"unknown event type{where}")
         for name in ("action_id", "attempt_id"):
             value = event[name]
-            if value is not None and (not isinstance(value, str) or not value.strip()):
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
                 raise ExecutionLedgerIntegrityError(f"invalid {name}{where}")
         if not isinstance(event["payload"], dict):
             raise ExecutionLedgerIntegrityError(f"invalid payload{where}")
-        _validate_json(event)
+        try:
+            _validate_json(event)
+        except (UnicodeEncodeError, RecursionError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                f"invalid execution event value{where}"
+            ) from exc
         return event
 
     @classmethod
@@ -361,36 +460,75 @@ class RealExecutionLedger:
         if not raw:
             return []
         if not raw.endswith(b"\n"):
-            raise ExecutionLedgerIntegrityError("execution ledger has unterminated final event")
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger has unterminated final event"
+            )
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise ExecutionLedgerIntegrityError("execution ledger is not valid UTF-8") from exc
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger is not valid UTF-8"
+            ) from exc
         events: list[dict[str, Any]] = []
         ids: set[str] = set()
         for line_no, line in enumerate(text.splitlines(), 1):
             if not line:
                 raise ExecutionLedgerIntegrityError(f"blank event at line {line_no}")
             try:
-                envelope = json.loads(line, object_pairs_hook=_pairs, parse_constant=_nonfinite)
+                envelope = json.loads(
+                    line,
+                    object_pairs_hook=_pairs,
+                    parse_constant=_nonfinite,
+                )
             except json.JSONDecodeError as exc:
-                raise ExecutionLedgerIntegrityError(f"invalid JSON at line {line_no}") from exc
-            if not isinstance(envelope, dict) or set(envelope) != {"sha256", "event"}:
-                raise ExecutionLedgerIntegrityError(f"invalid envelope at line {line_no}")
+                raise ExecutionLedgerIntegrityError(
+                    f"invalid JSON at line {line_no}"
+                ) from exc
+            except RecursionError as exc:
+                raise ExecutionLedgerIntegrityError(
+                    f"JSON nesting is too deep at line {line_no}"
+                ) from exc
+            if (
+                not isinstance(envelope, dict)
+                or set(envelope) != {"sha256", "event"}
+            ):
+                raise ExecutionLedgerIntegrityError(
+                    f"invalid envelope at line {line_no}"
+                )
+            digest = envelope["sha256"]
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)
+            ):
+                raise ExecutionLedgerIntegrityError(
+                    f"invalid SHA-256 at line {line_no}"
+                )
             event = cls._validate_event(envelope["event"], line_no)
-            if envelope["sha256"] != _digest(event):
-                raise ExecutionLedgerIntegrityError(f"execution ledger SHA-256 mismatch at line {line_no}")
+            if digest != _digest(event):
+                raise ExecutionLedgerIntegrityError(
+                    f"execution ledger SHA-256 mismatch at line {line_no}"
+                )
             if event["event_id"] in ids:
-                raise ExecutionLedgerIntegrityError(f"duplicate event_id at line {line_no}")
+                raise ExecutionLedgerIntegrityError(
+                    f"duplicate event_id at line {line_no}"
+                )
             ids.add(event["event_id"])
             events.append(event)
+        cls._validate_semantics(events)
         return events
 
     def _events(self) -> list[dict[str, Any]]:
         return self._parse(self.path.read_bytes()) if self.path.exists() else []
 
-    def _append(self, kind: EventType, plan_id: str, action_id: str | None,
-                attempt_id: str | None, payload: dict[str, Any]) -> None:
+    def _append(
+        self,
+        kind: EventType,
+        plan_id: str,
+        action_id: str | None,
+        attempt_id: str | None,
+        payload: dict[str, Any],
+    ) -> None:
         event = {
             "schema_version": SCHEMA_VERSION,
             "event_id": str(uuid.uuid4()),
@@ -409,15 +547,30 @@ class RealExecutionLedger:
             os.fsync(handle.fileno())
 
     @staticmethod
-    def _plan_event(events: list[dict[str, Any]], plan_id: str) -> dict[str, Any] | None:
-        matches = [e for e in events if e["plan_id"] == plan_id and e["event_type"] == EventType.PLAN_RESERVED.value]
-        if len(matches) > 1 and len({e["payload"]["plan_fingerprint"] for e in matches}) != 1:
-            raise ExecutionLedgerIntegrityError(f"conflicting plan records for {plan_id}")
+    def _plan_event(
+        events: list[dict[str, Any]], plan_id: str
+    ) -> dict[str, Any] | None:
+        matches = [
+            event
+            for event in events
+            if event["plan_id"] == plan_id
+            and event["event_type"] == EventType.PLAN_RESERVED.value
+        ]
+        if len(matches) > 1:
+            fingerprints = {
+                event["payload"].get("plan_fingerprint") for event in matches
+            }
+            if len(fingerprints) != 1:
+                raise ExecutionLedgerIntegrityError(
+                    f"conflicting plan records for {plan_id}"
+                )
         return matches[0] if matches else None
 
     @staticmethod
-    def _attempt_events(events: list[dict[str, Any]], attempt_id: str) -> list[dict[str, Any]]:
-        return [e for e in events if e["attempt_id"] == attempt_id]
+    def _attempt_events(
+        events: list[dict[str, Any]], attempt_id: str
+    ) -> list[dict[str, Any]]:
+        return [event for event in events if event["attempt_id"] == attempt_id]
 
     @classmethod
     def _state(cls, events: list[dict[str, Any]]) -> AttemptState | None:
@@ -426,94 +579,374 @@ class RealExecutionLedger:
             kind = event["event_type"]
             if kind == EventType.ATTEMPT_RESERVED.value:
                 if state is not None:
-                    raise ExecutionLedgerIntegrityError("attempt reserved more than once")
+                    raise ExecutionLedgerIntegrityError(
+                        "attempt reserved more than once"
+                    )
                 state = AttemptState.RESERVED
             elif kind == EventType.ATTEMPT_SUBMITTED.value:
                 if state != AttemptState.RESERVED:
-                    raise ExecutionLedgerIntegrityError("submission without reservation")
+                    raise ExecutionLedgerIntegrityError(
+                        "submission without reservation"
+                    )
                 state = AttemptState.SUBMITTED
             elif kind == EventType.ATTEMPT_UNKNOWN.value:
                 if state not in {AttemptState.RESERVED, AttemptState.SUBMITTED}:
-                    raise ExecutionLedgerIntegrityError("UNKNOWN from invalid state")
+                    raise ExecutionLedgerIntegrityError(
+                        "UNKNOWN from invalid state"
+                    )
                 state = AttemptState.UNKNOWN
             elif kind == EventType.EXTERNAL_ACKNOWLEDGEMENT.value:
-                if state not in {AttemptState.RESERVED, AttemptState.SUBMITTED, AttemptState.UNKNOWN}:
-                    raise ExecutionLedgerIntegrityError("acknowledgement from invalid state")
-                state = AttemptState(event["payload"]["status"])
+                if state not in {
+                    AttemptState.RESERVED,
+                    AttemptState.SUBMITTED,
+                    AttemptState.UNKNOWN,
+                }:
+                    raise ExecutionLedgerIntegrityError(
+                        "acknowledgement from invalid state"
+                    )
+                if (
+                    state == AttemptState.UNKNOWN
+                    and not event["payload"].get("reconciliation_evidence_id")
+                ):
+                    raise ExecutionLedgerIntegrityError(
+                        "UNKNOWN acknowledgement lacks reconciliation evidence"
+                    )
+                try:
+                    state = AttemptState(event["payload"]["status"])
+                except (KeyError, ValueError) as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        "acknowledgement has invalid status"
+                    ) from exc
             elif kind == EventType.RECONCILED_NOT_FOUND.value:
                 if state != AttemptState.UNKNOWN:
-                    raise ExecutionLedgerIntegrityError("not-found reconciliation requires UNKNOWN")
+                    raise ExecutionLedgerIntegrityError(
+                        "not-found reconciliation requires UNKNOWN"
+                    )
                 state = AttemptState.RECONCILED_NOT_FOUND
         return state
 
-    @staticmethod
-    def _stale(events: list[dict[str, Any]], plan_id: str) -> bool:
-        return any(e["plan_id"] == plan_id and e["event_type"] == EventType.PLAN_STALE.value for e in events)
-
     @classmethod
-    def _receipt_owners(cls, events: list[dict[str, Any]]) -> dict[str, str]:
-        owners: dict[str, str] = {}
-        for event in events:
-            if event["event_type"] != EventType.EXTERNAL_ACKNOWLEDGEMENT.value:
-                continue
-            receipt, attempt = event["payload"]["external_receipt_id"], event["attempt_id"]
-            if receipt in owners and owners[receipt] != attempt:
-                raise ExecutionLedgerIntegrityError("external receipt belongs to multiple attempts")
-            owners[receipt] = attempt
-        return owners
-
-    def _action(self, events: list[dict[str, Any]], plan_id: str, action_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        plan_event = self._plan_event(events, plan_id)
+    def _action_payload(
+        cls,
+        events: list[dict[str, Any]],
+        plan_id: str,
+        action_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        plan_event = cls._plan_event(events, plan_id)
         if plan_event is None:
             raise ExecutionStateError(f"plan {plan_id!r} is not reserved")
-        matches = [a for a in plan_event["payload"]["plan"]["actions"] if a["action_id"] == action_id]
+        try:
+            actions = plan_event["payload"]["plan"]["actions"]
+        except (KeyError, TypeError) as exc:
+            raise ExecutionLedgerIntegrityError("stored plan payload is invalid") from exc
+        matches = [
+            action for action in actions if action.get("action_id") == action_id
+        ]
         if len(matches) != 1:
-            raise ExecutionStateError(f"action {action_id!r} does not belong to plan")
+            raise ExecutionStateError(
+                f"action {action_id!r} does not belong to plan"
+            )
         return plan_event, matches[0]
+
+    @classmethod
+    def _receipt_identity(
+        cls,
+        events: list[dict[str, Any]],
+        event: dict[str, Any],
+    ) -> ExternalReceiptIdentity:
+        _, action = cls._action_payload(
+            events, event["plan_id"], event["action_id"]
+        )
+        return ExternalReceiptIdentity(
+            bookmaker_id=action["bookmaker_id"],
+            account_id=action["account_id"],
+            external_receipt_id=event["payload"]["external_receipt_id"],
+        )
+
+    @classmethod
+    def _receipt_owners(
+        cls, events: list[dict[str, Any]]
+    ) -> dict[ExternalReceiptIdentity, str]:
+        owners: dict[ExternalReceiptIdentity, str] = {}
+        for event in events:
+            if (
+                event["event_type"]
+                != EventType.EXTERNAL_ACKNOWLEDGEMENT.value
+            ):
+                continue
+            identity = cls._receipt_identity(events, event)
+            attempt = event["attempt_id"]
+            if identity in owners and owners[identity] != attempt:
+                raise ExecutionLedgerIntegrityError(
+                    "provider/account external receipt belongs to multiple attempts"
+                )
+            owners[identity] = attempt
+        return owners
+
+    @classmethod
+    def _stale(cls, events: list[dict[str, Any]], plan_id: str) -> bool:
+        plan_event = cls._plan_event(events, plan_id)
+        if plan_event is None:
+            return False
+        actions = plan_event["payload"]["plan"]["actions"]
+        if len(actions) <= 1:
+            return False
+        # The ACK event itself is the crash-atomic stale authority. There is no
+        # second fsync whose loss could reopen the old remaining plan.
+        return any(
+            event["plan_id"] == plan_id
+            and event["event_type"]
+            == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
+            for event in events
+        )
+
+    @classmethod
+    def _plan_from_dict(cls, value: object) -> ExecutionPlan:
+        if not isinstance(value, dict) or set(value) != {
+            "schema_version",
+            "plan_id",
+            "bookmaker_profile_version",
+            "decision_id",
+            "approval_id",
+            "created_at",
+            "actions",
+        }:
+            raise ExecutionLedgerIntegrityError("stored plan schema is invalid")
+        if not isinstance(value["actions"], list):
+            raise ExecutionLedgerIntegrityError("stored plan actions are invalid")
+        actions: list[ExecutionAction] = []
+        expected_action_fields = {
+            "action_id",
+            "bookmaker_id",
+            "account_id",
+            "event_id",
+            "market_id",
+            "selection_id",
+            "side",
+            "requested_odds",
+            "requested_stake",
+            "quote_id",
+            "quote_observed_at",
+            "expires_at",
+        }
+        try:
+            for raw in value["actions"]:
+                if not isinstance(raw, dict) or set(raw) != expected_action_fields:
+                    raise ExecutionLedgerIntegrityError(
+                        "stored action schema is invalid"
+                    )
+                actions.append(ExecutionAction(**raw))
+            return ExecutionPlan(
+                plan_id=value["plan_id"],
+                bookmaker_profile_version=value["bookmaker_profile_version"],
+                decision_id=value["decision_id"],
+                approval_id=value["approval_id"],
+                created_at=value["created_at"],
+                actions=tuple(actions),
+                schema_version=value["schema_version"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                "stored plan values are invalid"
+            ) from exc
+
+    @classmethod
+    def _validate_semantics(cls, events: list[dict[str, Any]]) -> None:
+        plan_ids: set[str] = set()
+        for event in events:
+            if event["event_type"] != EventType.PLAN_RESERVED.value:
+                continue
+            if set(event["payload"]) != {"plan_fingerprint", "plan"}:
+                raise ExecutionLedgerIntegrityError(
+                    "PLAN_RESERVED payload schema is invalid"
+                )
+            plan = cls._plan_from_dict(event["payload"]["plan"])
+            if event["plan_id"] != plan.plan_id:
+                raise ExecutionLedgerIntegrityError(
+                    "plan event identity does not match stored plan"
+                )
+            if event["action_id"] is not None or event["attempt_id"] is not None:
+                raise ExecutionLedgerIntegrityError(
+                    "PLAN_RESERVED cannot claim action/attempt identity"
+                )
+            if event["payload"]["plan_fingerprint"] != plan.fingerprint:
+                raise ExecutionLedgerIntegrityError(
+                    "stored plan fingerprint mismatch"
+                )
+            plan_ids.add(plan.plan_id)
+
+        attempt_ids = {
+            event["attempt_id"]
+            for event in events
+            if event["event_type"] == EventType.ATTEMPT_RESERVED.value
+        }
+        for attempt_id in attempt_ids:
+            attempt_events = cls._attempt_events(events, attempt_id)
+            first = attempt_events[0]
+            if first["event_type"] != EventType.ATTEMPT_RESERVED.value:
+                raise ExecutionLedgerIntegrityError(
+                    "attempt history does not begin with reservation"
+                )
+            if set(first["payload"]) != {"effect_fingerprint", "reserved_at"}:
+                raise ExecutionLedgerIntegrityError(
+                    "ATTEMPT_RESERVED payload schema is invalid"
+                )
+            try:
+                _timestamp(first["payload"]["reserved_at"], "reserved_at")
+            except (KeyError, ValueError) as exc:
+                raise ExecutionLedgerIntegrityError(
+                    "attempt reservation timestamp is invalid"
+                ) from exc
+            plan_event, action = cls._action_payload(
+                events, first["plan_id"], first["action_id"]
+            )
+            expected = _digest(
+                {
+                    "plan_fingerprint": plan_event["payload"][
+                        "plan_fingerprint"
+                    ],
+                    "action": action,
+                }
+            )
+            if first["payload"]["effect_fingerprint"] != expected:
+                raise ExecutionLedgerIntegrityError(
+                    "stored effect fingerprint mismatch"
+                )
+            for followup in attempt_events[1:]:
+                if (
+                    followup["plan_id"] != first["plan_id"]
+                    or followup["action_id"] != first["action_id"]
+                ):
+                    raise ExecutionLedgerIntegrityError(
+                        "attempt identity changes across history"
+                    )
+            cls._state(attempt_events)
+
+        for event in events:
+            if event["event_type"] == EventType.PLAN_RESERVED.value:
+                continue
+            if event["attempt_id"] not in attempt_ids:
+                raise ExecutionLedgerIntegrityError(
+                    "attempt event lacks reservation"
+                )
+            if event["plan_id"] not in plan_ids:
+                raise ExecutionLedgerIntegrityError(
+                    "attempt event references missing plan"
+                )
+        cls._receipt_owners(events)
 
     def reserve_plan(self, plan: ExecutionPlan) -> str:
         def operation() -> str:
             events = self._events()
             prior = self._plan_event(events, plan.plan_id)
             if prior:
-                if prior["payload"]["plan_fingerprint"] != plan.fingerprint:
-                    raise ExecutionIdentityConflict("plan_id reused with different immutable inputs")
+                if (
+                    prior["payload"]["plan_fingerprint"]
+                    != plan.fingerprint
+                ):
+                    raise ExecutionIdentityConflict(
+                        "plan_id reused with different immutable inputs"
+                    )
                 return plan.fingerprint
-            self._append(EventType.PLAN_RESERVED, plan.plan_id, None, None,
-                         {"plan_fingerprint": plan.fingerprint, "plan": plan.to_dict()})
+            self._append(
+                EventType.PLAN_RESERVED,
+                plan.plan_id,
+                None,
+                None,
+                {
+                    "plan_fingerprint": plan.fingerprint,
+                    "plan": plan.to_dict(),
+                },
+            )
             return plan.fingerprint
+
         return self._mutate(operation)
 
-    def begin_attempt(self, *, plan_id: str, action_id: str, attempt_id: str,
-                      reserved_at: str | None = None) -> ExecutionAttempt:
+    def begin_attempt(
+        self,
+        *,
+        plan_id: str,
+        action_id: str,
+        attempt_id: str,
+        reserved_at: str | None = None,
+    ) -> ExecutionAttempt:
         _text(attempt_id, "attempt_id")
         reserved_at = reserved_at or _now()
+        _timestamp(reserved_at, "reserved_at")
 
         def operation() -> ExecutionAttempt:
             events = self._events()
-            plan_event, action = self._action(events, plan_id, action_id)
+            plan_event, action = self._action_payload(
+                events, plan_id, action_id
+            )
             if self._stale(events, plan_id):
-                raise ExecutionStateError("execution plan is stale; recompute before another action")
-            fingerprint = _digest({
-                "plan_fingerprint": plan_event["payload"]["plan_fingerprint"],
-                "action": action,
-            })
+                raise ExecutionStateError(
+                    "execution plan is stale; recompute before another action"
+                )
+            fingerprint = _digest(
+                {
+                    "plan_fingerprint": plan_event["payload"][
+                        "plan_fingerprint"
+                    ],
+                    "action": action,
+                }
+            )
             prior_events = self._attempt_events(events, attempt_id)
             if prior_events:
                 prior = prior_events[0]
-                if (prior["plan_id"], prior["action_id"], prior["payload"].get("effect_fingerprint")) != (plan_id, action_id, fingerprint):
-                    raise ExecutionIdentityConflict("attempt_id reused with different immutable inputs")
-                return ExecutionAttempt(attempt_id, plan_id, action_id, fingerprint, prior["payload"]["reserved_at"])
+                if (
+                    prior["plan_id"],
+                    prior["action_id"],
+                    prior["payload"].get("effect_fingerprint"),
+                ) != (plan_id, action_id, fingerprint):
+                    raise ExecutionIdentityConflict(
+                        "attempt_id reused with different immutable inputs"
+                    )
+                return ExecutionAttempt(
+                    attempt_id,
+                    plan_id,
+                    action_id,
+                    fingerprint,
+                    prior["payload"]["reserved_at"],
+                )
             for event in events:
-                if event["plan_id"] == plan_id and event["action_id"] == action_id and event["event_type"] == EventType.ATTEMPT_RESERVED.value:
-                    if self._state(self._attempt_events(events, event["attempt_id"])) != AttemptState.RECONCILED_NOT_FOUND:
-                        raise ExecutionStateError("action already has unresolved/final attempt")
-            self._append(EventType.ATTEMPT_RESERVED, plan_id, action_id, attempt_id,
-                         {"effect_fingerprint": fingerprint, "reserved_at": reserved_at})
-            return ExecutionAttempt(attempt_id, plan_id, action_id, fingerprint, reserved_at)
+                if (
+                    event["plan_id"] == plan_id
+                    and event["action_id"] == action_id
+                    and event["event_type"]
+                    == EventType.ATTEMPT_RESERVED.value
+                ):
+                    if (
+                        self._state(
+                            self._attempt_events(events, event["attempt_id"])
+                        )
+                        != AttemptState.RECONCILED_NOT_FOUND
+                    ):
+                        raise ExecutionStateError(
+                            "action already has unresolved/final attempt"
+                        )
+            self._append(
+                EventType.ATTEMPT_RESERVED,
+                plan_id,
+                action_id,
+                attempt_id,
+                {
+                    "effect_fingerprint": fingerprint,
+                    "reserved_at": reserved_at,
+                },
+            )
+            return ExecutionAttempt(
+                attempt_id, plan_id, action_id, fingerprint, reserved_at
+            )
+
         return self._mutate(operation)
 
-    def mark_submitted(self, attempt_id: str, submitted_at: str | None = None) -> None:
+    def mark_submitted(
+        self, attempt_id: str, submitted_at: str | None = None
+    ) -> None:
+        if submitted_at is not None:
+            _timestamp(submitted_at, "submitted_at")
+
         def operation() -> None:
             events = self._events()
             attempt_events = self._attempt_events(events, attempt_id)
@@ -521,95 +954,206 @@ class RealExecutionLedger:
             if state == AttemptState.SUBMITTED:
                 return
             if state != AttemptState.RESERVED:
-                raise ExecutionStateError("only reserved attempt can be submitted")
+                raise ExecutionStateError(
+                    "only reserved attempt can be submitted"
+                )
             first = attempt_events[0]
-            self._append(EventType.ATTEMPT_SUBMITTED, first["plan_id"], first["action_id"],
-                         attempt_id, {"submitted_at": submitted_at or _now()})
+            self._append(
+                EventType.ATTEMPT_SUBMITTED,
+                first["plan_id"],
+                first["action_id"],
+                attempt_id,
+                {"submitted_at": submitted_at or _now()},
+            )
+
         self._mutate(operation)
 
-    def mark_unknown(self, attempt_id: str, *, reason: str, observed_at: str | None = None) -> None:
+    def mark_unknown(
+        self,
+        attempt_id: str,
+        *,
+        reason: str,
+        observed_at: str | None = None,
+    ) -> None:
         _text(reason, "reason")
+        if observed_at is not None:
+            _timestamp(observed_at, "observed_at")
+
         def operation() -> None:
             events = self._events()
             attempt_events = self._attempt_events(events, attempt_id)
             state = self._state(attempt_events)
             if state == AttemptState.UNKNOWN:
                 return
-            if state not in {AttemptState.RESERVED, AttemptState.SUBMITTED}:
-                raise ExecutionStateError("only unresolved attempt can become UNKNOWN")
+            if state not in {
+                AttemptState.RESERVED,
+                AttemptState.SUBMITTED,
+            }:
+                raise ExecutionStateError(
+                    "only unresolved attempt can become UNKNOWN"
+                )
             first = attempt_events[0]
-            self._append(EventType.ATTEMPT_UNKNOWN, first["plan_id"], first["action_id"],
-                         attempt_id, {"reason": reason, "observed_at": observed_at or _now()})
+            self._append(
+                EventType.ATTEMPT_UNKNOWN,
+                first["plan_id"],
+                first["action_id"],
+                attempt_id,
+                {
+                    "reason": reason,
+                    "observed_at": observed_at or _now(),
+                },
+            )
+
         self._mutate(operation)
 
-    def recover_uncertain(self, *, reason: str = "process_restart") -> tuple[str, ...]:
+    def recover_uncertain(
+        self, *, reason: str = "process_restart"
+    ) -> tuple[str, ...]:
+        _text(reason, "reason")
+
         def operation() -> tuple[str, ...]:
             promoted: list[str] = []
             events = self._events()
-            for reserved in [e for e in events if e["event_type"] == EventType.ATTEMPT_RESERVED.value]:
+            reserved_events = [
+                event
+                for event in events
+                if event["event_type"]
+                == EventType.ATTEMPT_RESERVED.value
+            ]
+            for reserved in reserved_events:
                 attempt_id = reserved["attempt_id"]
-                if self._state(self._attempt_events(events, attempt_id)) in {AttemptState.RESERVED, AttemptState.SUBMITTED}:
-                    self._append(EventType.ATTEMPT_UNKNOWN, reserved["plan_id"], reserved["action_id"],
-                                 attempt_id, {"reason": reason, "observed_at": _now()})
+                if self._state(
+                    self._attempt_events(events, attempt_id)
+                ) in {AttemptState.RESERVED, AttemptState.SUBMITTED}:
+                    self._append(
+                        EventType.ATTEMPT_UNKNOWN,
+                        reserved["plan_id"],
+                        reserved["action_id"],
+                        attempt_id,
+                        {"reason": reason, "observed_at": _now()},
+                    )
                     promoted.append(attempt_id)
                     events = self._events()
             return tuple(promoted)
+
         return self._mutate(operation)
 
-    def acknowledge(self, acknowledgement: ExternalAcknowledgement) -> None:
+    def acknowledge(
+        self, acknowledgement: ExternalAcknowledgement
+    ) -> None:
         payload = acknowledgement.to_dict()
+
         def operation() -> None:
             events = self._events()
-            attempt_events = self._attempt_events(events, acknowledgement.attempt_id)
-            existing = [e for e in attempt_events if e["event_type"] == EventType.EXTERNAL_ACKNOWLEDGEMENT.value]
+            attempt_events = self._attempt_events(
+                events, acknowledgement.attempt_id
+            )
+            existing = [
+                event
+                for event in attempt_events
+                if event["event_type"]
+                == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
+            ]
             if existing:
                 if existing[0]["payload"] == payload:
                     return
-                raise ExecutionIdentityConflict("attempt already has a different acknowledgement")
-            if self._state(attempt_events) not in {AttemptState.RESERVED, AttemptState.SUBMITTED, AttemptState.UNKNOWN}:
-                raise ExecutionStateError("acknowledgement requires unresolved attempt")
-            prior = self._receipt_owners(events).get(acknowledgement.external_receipt_id)
-            if prior is not None and prior != acknowledgement.attempt_id:
-                raise ExecutionIdentityConflict("external receipt already belongs to another attempt")
+                raise ExecutionIdentityConflict(
+                    "attempt already has a different acknowledgement"
+                )
+            state = self._state(attempt_events)
+            if state not in {
+                AttemptState.RESERVED,
+                AttemptState.SUBMITTED,
+                AttemptState.UNKNOWN,
+            }:
+                raise ExecutionStateError(
+                    "acknowledgement requires unresolved attempt"
+                )
+            if (
+                state == AttemptState.UNKNOWN
+                and not acknowledgement.reconciliation_evidence_id
+            ):
+                raise ExecutionStateError(
+                    "UNKNOWN attempt requires external reconciliation evidence"
+                )
             first = attempt_events[0]
-            self._append(EventType.EXTERNAL_ACKNOWLEDGEMENT, first["plan_id"], first["action_id"],
-                         acknowledgement.attempt_id, payload)
-            plan_event = self._plan_event(events, first["plan_id"])
-            if len(plan_event["payload"]["plan"]["actions"]) > 1 and not self._stale(events, first["plan_id"]):
-                self._append(EventType.PLAN_STALE, first["plan_id"], first["action_id"],
-                             acknowledgement.attempt_id,
-                             {"reason": "ack_requires_portfolio_recompute", "status": acknowledgement.status.value})
+            probe_event = {
+                "plan_id": first["plan_id"],
+                "action_id": first["action_id"],
+                "attempt_id": acknowledgement.attempt_id,
+                "payload": payload,
+            }
+            identity = self._receipt_identity(events, probe_event)
+            prior = self._receipt_owners(events).get(identity)
+            if prior is not None and prior != acknowledgement.attempt_id:
+                raise ExecutionIdentityConflict(
+                    "provider/account external receipt already belongs to another attempt"
+                )
+            self._append(
+                EventType.EXTERNAL_ACKNOWLEDGEMENT,
+                first["plan_id"],
+                first["action_id"],
+                acknowledgement.attempt_id,
+                payload,
+            )
+
         self._mutate(operation)
 
-    def reconcile_not_found(self, snapshot: ReconciliationSnapshot) -> None:
+    def reconcile_not_found(
+        self, snapshot: ReconciliationSnapshot
+    ) -> None:
         if snapshot.external_effect_found:
-            raise ValueError("found external effect must be reconciled as acknowledgement")
+            raise ValueError(
+                "found external effect must be reconciled as acknowledgement"
+            )
         payload = snapshot.to_dict()
+
         def operation() -> None:
             events = self._events()
-            attempt_events = self._attempt_events(events, snapshot.attempt_id)
-            existing = [e for e in attempt_events if e["event_type"] == EventType.RECONCILED_NOT_FOUND.value]
+            attempt_events = self._attempt_events(
+                events, snapshot.attempt_id
+            )
+            existing = [
+                event
+                for event in attempt_events
+                if event["event_type"]
+                == EventType.RECONCILED_NOT_FOUND.value
+            ]
             if existing:
                 if existing[0]["payload"] == payload:
                     return
-                raise ExecutionIdentityConflict("different reconciliation evidence already exists")
+                raise ExecutionIdentityConflict(
+                    "different reconciliation evidence already exists"
+                )
             if self._state(attempt_events) != AttemptState.UNKNOWN:
-                raise ExecutionStateError("retry requires UNKNOWN + external not-found evidence")
+                raise ExecutionStateError(
+                    "retry requires UNKNOWN + external not-found evidence"
+                )
             first = attempt_events[0]
-            self._append(EventType.RECONCILED_NOT_FOUND, first["plan_id"], first["action_id"],
-                         snapshot.attempt_id, payload)
+            self._append(
+                EventType.RECONCILED_NOT_FOUND,
+                first["plan_id"],
+                first["action_id"],
+                snapshot.attempt_id,
+                payload,
+            )
+
         self._mutate(operation)
 
     def verified_snapshot(self) -> VerifiedExecutionLedgerSnapshot:
         raw = self.path.read_bytes() if self.path.exists() else b""
         events = self._parse(raw)
-        return VerifiedExecutionLedgerSnapshot(raw, hashlib.sha256(raw).hexdigest(), len(events))
+        return VerifiedExecutionLedgerSnapshot(
+            raw, hashlib.sha256(raw).hexdigest(), len(events)
+        )
 
     def verify_integrity(self) -> int:
         return self.verified_snapshot().event_count
 
     def attempt_state(self, attempt_id: str) -> AttemptState:
-        state = self._state(self._attempt_events(self._events(), attempt_id))
+        state = self._state(
+            self._attempt_events(self._events(), attempt_id)
+        )
         if state is None:
             raise KeyError(attempt_id)
         return state
@@ -620,15 +1164,28 @@ class RealExecutionLedger:
             raise KeyError(plan_id)
         return self._stale(events, plan_id)
 
-    def can_retry_action(self, *, plan_id: str, action_id: str) -> bool:
+    def can_retry_action(
+        self, *, plan_id: str, action_id: str
+    ) -> bool:
         events = self._events()
-        self._action(events, plan_id, action_id)
+        self._action_payload(events, plan_id, action_id)
         if self._stale(events, plan_id):
             return False
-        attempts = [e["attempt_id"] for e in events
-                    if e["plan_id"] == plan_id and e["action_id"] == action_id
-                    and e["event_type"] == EventType.ATTEMPT_RESERVED.value]
-        return not attempts or self._state(self._attempt_events(events, attempts[-1])) == AttemptState.RECONCILED_NOT_FOUND
+        attempts = [
+            event["attempt_id"]
+            for event in events
+            if event["plan_id"] == plan_id
+            and event["action_id"] == action_id
+            and event["event_type"]
+            == EventType.ATTEMPT_RESERVED.value
+        ]
+        return (
+            not attempts
+            or self._state(
+                self._attempt_events(events, attempts[-1])
+            )
+            == AttemptState.RECONCILED_NOT_FOUND
+        )
 
     def saga(self, plan_id: str) -> ExecutionSaga:
         events = self._events()
@@ -638,11 +1195,31 @@ class RealExecutionLedger:
         attempts: dict[str, AttemptState] = {}
         action_ids: dict[str, str] = {}
         for event in events:
-            if event["plan_id"] == plan_id and event["event_type"] == EventType.ATTEMPT_RESERVED.value:
+            if (
+                event["plan_id"] == plan_id
+                and event["event_type"]
+                == EventType.ATTEMPT_RESERVED.value
+            ):
                 attempt_id = event["attempt_id"]
-                state = self._state(self._attempt_events(events, attempt_id))
+                state = self._state(
+                    self._attempt_events(events, attempt_id)
+                )
+                if state is None:
+                    raise ExecutionLedgerIntegrityError(
+                        "reserved attempt has no state"
+                    )
                 attempts[attempt_id] = state
                 action_ids[attempt_id] = event["action_id"]
-        receipts = {r: a for r, a in self._receipt_owners(events).items() if a in attempts}
-        return ExecutionSaga(plan_id, plan_event["payload"]["plan_fingerprint"],
-                             self._stale(events, plan_id), attempts, action_ids, receipts)
+        receipts = {
+            identity: attempt
+            for identity, attempt in self._receipt_owners(events).items()
+            if attempt in attempts
+        }
+        return ExecutionSaga(
+            plan_id,
+            plan_event["payload"]["plan_fingerprint"],
+            self._stale(events, plan_id),
+            attempts,
+            action_ids,
+            receipts,
+        )

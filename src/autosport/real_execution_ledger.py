@@ -683,6 +683,10 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "not-found reconciliation requires UNKNOWN"
                     )
+                if found_reconciliations:
+                    raise ExecutionLedgerIntegrityError(
+                        "not-found reconciliation conflicts with positive evidence"
+                    )
                 state = AttemptState.RECONCILED_NOT_FOUND
         return state
 
@@ -1598,6 +1602,13 @@ class RealExecutionLedger:
             if self._state(attempt_events) != AttemptState.UNKNOWN:
                 raise ExecutionStateError(
                     "retry requires UNKNOWN + external not-found evidence"
+                )
+            if any(
+                event["event_type"] == EventType.RECONCILED_FOUND.value
+                for event in attempt_events
+            ):
+                raise ExecutionStateError(
+                    "positive reconciliation evidence blocks not-found retry"
                 )
             uncertainty_boundaries: list[datetime] = [
                 _timestamp(

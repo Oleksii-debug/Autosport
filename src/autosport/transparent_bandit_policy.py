@@ -224,6 +224,10 @@ class BanditPolicyState:
             raise LearningEnvironmentError("reward/transition belongs to another policy environment")
         if reward.action_id != action.action_id or transition.action_id != action.action_id:
             raise LearningEnvironmentError("policy update does not bind the exact action")
+        if transition.observation_id != action.observation_id:
+            raise LearningEnvironmentError("policy update does not bind the exact observation")
+        if transition.outcome_id != reward.outcome_id:
+            raise LearningEnvironmentError("policy update does not bind the exact outcome")
         if transition.reward_id != reward.reward_id:
             raise LearningEnvironmentError("policy update does not bind the exact resolved reward")
         if action.action_id in self.applied_action_ids:

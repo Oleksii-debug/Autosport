@@ -11,6 +11,7 @@ from typing import Iterable, Mapping, Protocol, Sequence
 
 from .integrity import atomic_write_json, sha256_file
 from .scientific_registry import (
+    DuplicateExperimentFingerprintError,
     EvaluationBundleRef,
     ExperimentRecord,
     ModelVersion,
@@ -727,6 +728,36 @@ class ExperimentRunner:
             provenance_complete=True,
             rollback_target=current_champion,
         )
+        outcome = (
+            ResearchOutcome.POSITIVE
+            if promotion.verdict is PromotionVerdict.PROMOTE
+            else ResearchOutcome.NEGATIVE
+        )
+        experiment = ExperimentRecord(
+            spec.experiment_id,
+            spec.research_protocol_id,
+            spec.dataset_snapshot_id,
+            spec.feature_set_id,
+            spec.strategy_version_id,
+            spec.evaluation_bundle_id,
+            spec.seed,
+            config_sha256,
+            outcome,
+            spec.created_at,
+            model_version_id=spec.model_version_id,
+            completed_at=spec.completed_at,
+            notes="; ".join(promotion.reasons),
+        )
+        existing_experiment = self.registry.get("Experiment", spec.experiment_id)
+        if existing_experiment is None:
+            if self.registry.find_experiment_fingerprint(experiment.fingerprint):
+                raise DuplicateExperimentFingerprintError(
+                    "experiment fingerprint already has durable history; inspect negative/null results before repeating"
+                )
+        elif existing_experiment.payload != experiment.to_payload():
+            raise ValueError(
+                "conflicting immutable experiment identity must fail before factory mutation"
+            )
 
         model_payload = final_model.to_payload()
         model_payload.update(
@@ -833,26 +864,6 @@ class ExperimentRunner:
             )
         )
 
-        outcome = (
-            ResearchOutcome.POSITIVE
-            if promotion.verdict is PromotionVerdict.PROMOTE
-            else ResearchOutcome.NEGATIVE
-        )
-        experiment = ExperimentRecord(
-            spec.experiment_id,
-            spec.research_protocol_id,
-            spec.dataset_snapshot_id,
-            spec.feature_set_id,
-            spec.strategy_version_id,
-            spec.evaluation_bundle_id,
-            spec.seed,
-            config_sha256,
-            outcome,
-            spec.created_at,
-            model_version_id=spec.model_version_id,
-            completed_at=spec.completed_at,
-            notes="; ".join(promotion.reasons),
-        )
         self.registry.append(experiment)
 
         self.registry.record_promotion(

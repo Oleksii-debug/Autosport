@@ -291,11 +291,57 @@ def test_strategy_lineage_projection_is_complete_and_causally_fenced(tmp_path):
     reopened = ScientificRegistry(path)
     lineage = strategy_lineage_projection(reopened, "strategy-2", as_of=T3)
     assert lineage.strategy.record_id == "strategy-2"
+    assert [entry.record_id for entry in lineage.predecessor_strategies] == ["strategy-1"]
     assert [entry.record_id for entry in lineage.models] == ["model-1"]
     assert [entry.record_id for entry in lineage.datasets] == ["dataset-1"]
     assert [entry.record_id for entry in lineage.feature_sets] == ["features-1"]
     assert [entry.record_id for entry in lineage.protocols] == ["protocol-1"]
-    assert [entry.record_id for entry in lineage.experiments] == ["experiment-2"]
-    assert [entry.record_id for entry in lineage.evaluations] == ["eval-2"]
+    assert [entry.record_id for entry in lineage.experiments] == [
+        "experiment-1",
+        "experiment-2",
+    ]
+    assert [entry.record_id for entry in lineage.evaluations] == ["eval-1", "eval-2"]
     assert [entry.record_id for entry in lineage.promotion_decisions] == ["retain-2"]
     assert lineage.postmortems == ()
+
+
+def test_strategy_lineage_projection_traverses_model_predecessors(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    _seed_two_strategies(registry)
+    registry.append(
+        ModelVersion(
+            "model-2",
+            "fixture-model",
+            SHA_B,
+            SHA_C,
+            SHA_D,
+            "dataset-1",
+            "features-1",
+            "protocol-1",
+            11,
+            SHA_C,
+            T3,
+            predecessor_model_version_id="model-1",
+        )
+    )
+    registry.append(
+        StrategyVersion(
+            "strategy-3",
+            "predictive-edge:soccer:match-winner",
+            SHA_C,
+            SHA_D,
+            SHA_C,
+            T3,
+            model_version_id="model-2",
+            predecessor_strategy_version_id="strategy-2",
+        )
+    )
+
+    lineage = strategy_lineage_projection(registry, "strategy-3", as_of=T3)
+    assert [entry.record_id for entry in lineage.predecessor_strategies] == [
+        "strategy-1",
+        "strategy-2",
+    ]
+    assert [entry.record_id for entry in lineage.models] == ["model-1", "model-2"]

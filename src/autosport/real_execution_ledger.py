@@ -60,6 +60,7 @@ class EventType(str, Enum):
     ATTEMPT_SUBMITTED = "ATTEMPT_SUBMITTED"
     ATTEMPT_UNKNOWN = "ATTEMPT_UNKNOWN"
     EXTERNAL_ACKNOWLEDGEMENT = "EXTERNAL_ACKNOWLEDGEMENT"
+    RECONCILED_FOUND = "RECONCILED_FOUND"
     RECONCILED_NOT_FOUND = "RECONCILED_NOT_FOUND"
 
 
@@ -335,6 +336,34 @@ class ExternalAcknowledgement:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalEffectReconciliation:
+    attempt_id: str
+    evidence_id: str
+    external_receipt_id: str
+    observed_at: str
+    source: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "attempt_id",
+            "evidence_id",
+            "external_receipt_id",
+            "source",
+        ):
+            _text(getattr(self, name), name)
+        _timestamp(self.observed_at, "observed_at")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempt_id": self.attempt_id,
+            "evidence_id": self.evidence_id,
+            "external_receipt_id": self.external_receipt_id,
+            "observed_at": self.observed_at,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ReconciliationSnapshot:
     attempt_id: str
     evidence_id: str
@@ -575,6 +604,7 @@ class RealExecutionLedger:
     @classmethod
     def _state(cls, events: list[dict[str, Any]]) -> AttemptState | None:
         state = None
+        found_reconciliations: dict[str, dict[str, Any]] = {}
         for event in events:
             kind = event["event_type"]
             if kind == EventType.ATTEMPT_RESERVED.value:
@@ -595,6 +625,22 @@ class RealExecutionLedger:
                         "UNKNOWN from invalid state"
                     )
                 state = AttemptState.UNKNOWN
+            elif kind == EventType.RECONCILED_FOUND.value:
+                if state != AttemptState.UNKNOWN:
+                    raise ExecutionLedgerIntegrityError(
+                        "found reconciliation requires UNKNOWN"
+                    )
+                evidence_id = event["payload"].get("evidence_id")
+                if not isinstance(evidence_id, str) or not evidence_id.strip():
+                    raise ExecutionLedgerIntegrityError(
+                        "found reconciliation lacks evidence identity"
+                    )
+                prior = found_reconciliations.get(evidence_id)
+                if prior is not None and prior != event["payload"]:
+                    raise ExecutionLedgerIntegrityError(
+                        "conflicting found reconciliation evidence"
+                    )
+                found_reconciliations[evidence_id] = event["payload"]
             elif kind == EventType.EXTERNAL_ACKNOWLEDGEMENT.value:
                 if state not in {
                     AttemptState.RESERVED,
@@ -604,12 +650,27 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "acknowledgement from invalid state"
                     )
-                if (
-                    state == AttemptState.UNKNOWN
-                    and not event["payload"].get("reconciliation_evidence_id")
-                ):
+                evidence_id = event["payload"].get("reconciliation_evidence_id")
+                if state == AttemptState.UNKNOWN:
+                    if not evidence_id:
+                        raise ExecutionLedgerIntegrityError(
+                            "UNKNOWN acknowledgement lacks reconciliation evidence"
+                        )
+                    evidence = found_reconciliations.get(evidence_id)
+                    if evidence is None:
+                        raise ExecutionLedgerIntegrityError(
+                            "UNKNOWN acknowledgement references missing reconciliation evidence"
+                        )
+                    if (
+                        evidence.get("external_receipt_id")
+                        != event["payload"].get("external_receipt_id")
+                    ):
+                        raise ExecutionLedgerIntegrityError(
+                            "UNKNOWN acknowledgement receipt mismatches reconciliation evidence"
+                        )
+                elif evidence_id:
                     raise ExecutionLedgerIntegrityError(
-                        "UNKNOWN acknowledgement lacks reconciliation evidence"
+                        "reconciliation evidence is only valid for UNKNOWN acknowledgement"
                     )
                 try:
                     state = AttemptState(event["payload"]["status"])
@@ -626,6 +687,7 @@ class RealExecutionLedger:
         return state
 
     @classmethod
+    def _action_payload(    @classmethod
     def _action_payload(
         cls,
         events: list[dict[str, Any]],
@@ -785,6 +847,33 @@ class RealExecutionLedger:
             )
         return acknowledgement
 
+    @staticmethod
+    def _found_reconciliation_from_dict(
+        value: object,
+    ) -> ExternalEffectReconciliation:
+        expected_fields = {
+            "attempt_id",
+            "evidence_id",
+            "external_receipt_id",
+            "observed_at",
+            "source",
+        }
+        if not isinstance(value, dict) or set(value) != expected_fields:
+            raise ExecutionLedgerIntegrityError(
+                "stored found reconciliation schema is invalid"
+            )
+        try:
+            reconciliation = ExternalEffectReconciliation(**value)
+        except (TypeError, ValueError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                "stored found reconciliation values are invalid"
+            ) from exc
+        if reconciliation.to_dict() != value:
+            raise ExecutionLedgerIntegrityError(
+                "stored found reconciliation payload is not canonical"
+            )
+        return reconciliation
+
     @classmethod
     def _validate_semantics(cls, events: list[dict[str, Any]]) -> None:
         plan_ids: set[str] = set()
@@ -861,6 +950,7 @@ class RealExecutionLedger:
                 )
             submitted_time: datetime | None = None
             unknown_time: datetime | None = None
+            found_reconciliations: dict[str, ExternalEffectReconciliation] = {}
             for followup in attempt_events[1:]:
                 if (
                     followup["plan_id"] != first["plan_id"]
@@ -907,6 +997,42 @@ class RealExecutionLedger:
                             )
                     elif (
                         followup["event_type"]
+                        == EventType.RECONCILED_FOUND.value
+                    ):
+                        reconciliation = cls._found_reconciliation_from_dict(
+                            followup["payload"]
+                        )
+                        if reconciliation.attempt_id != attempt_id:
+                            raise ExecutionLedgerIntegrityError(
+                                "found reconciliation attempt identity mismatch"
+                            )
+                        if unknown_time is None:
+                            raise ExecutionLedgerIntegrityError(
+                                "found reconciliation lacks prior UNKNOWN boundary"
+                            )
+                        observed_time = _timestamp(
+                            reconciliation.observed_at, "observed_at"
+                        )
+                        causal_boundaries = [reserved_time, unknown_time]
+                        if submitted_time is not None:
+                            causal_boundaries.append(submitted_time)
+                        if observed_time <= max(causal_boundaries):
+                            raise ExecutionLedgerIntegrityError(
+                                "found reconciliation is not newer than "
+                                "attempt causal boundary"
+                            )
+                        prior = found_reconciliations.get(
+                            reconciliation.evidence_id
+                        )
+                        if prior is not None and prior != reconciliation:
+                            raise ExecutionLedgerIntegrityError(
+                                "conflicting found reconciliation evidence"
+                            )
+                        found_reconciliations[
+                            reconciliation.evidence_id
+                        ] = reconciliation
+                    elif (
+                        followup["event_type"]
                         == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
                     ):
                         acknowledgement = cls._acknowledgement_from_dict(
@@ -915,6 +1041,51 @@ class RealExecutionLedger:
                         if acknowledgement.attempt_id != attempt_id:
                             raise ExecutionLedgerIntegrityError(
                                 "stored acknowledgement attempt identity mismatch"
+                            )
+                        acknowledged_time = _timestamp(
+                            acknowledgement.acknowledged_at,
+                            "acknowledged_at",
+                        )
+                        causal_boundaries = [reserved_time]
+                        if submitted_time is not None:
+                            causal_boundaries.append(submitted_time)
+                        if unknown_time is not None:
+                            causal_boundaries.append(unknown_time)
+                        if acknowledged_time < max(causal_boundaries):
+                            raise ExecutionLedgerIntegrityError(
+                                "acknowledgement precedes attempt causal boundary"
+                            )
+                        evidence_id = acknowledgement.reconciliation_evidence_id
+                        if unknown_time is not None:
+                            if not evidence_id:
+                                raise ExecutionLedgerIntegrityError(
+                                    "UNKNOWN acknowledgement lacks reconciliation evidence"
+                                )
+                            reconciliation = found_reconciliations.get(evidence_id)
+                            if reconciliation is None:
+                                raise ExecutionLedgerIntegrityError(
+                                    "UNKNOWN acknowledgement references missing "
+                                    "reconciliation evidence"
+                                )
+                            if (
+                                reconciliation.external_receipt_id
+                                != acknowledgement.external_receipt_id
+                            ):
+                                raise ExecutionLedgerIntegrityError(
+                                    "UNKNOWN acknowledgement receipt mismatches "
+                                    "reconciliation evidence"
+                                )
+                            evidence_time = _timestamp(
+                                reconciliation.observed_at, "observed_at"
+                            )
+                            if acknowledged_time < evidence_time:
+                                raise ExecutionLedgerIntegrityError(
+                                    "acknowledgement precedes reconciliation evidence"
+                                )
+                        elif evidence_id:
+                            raise ExecutionLedgerIntegrityError(
+                                "reconciliation evidence is only valid for "
+                                "UNKNOWN acknowledgement"
                             )
                         if acknowledgement.accepted_stake is not None:
                             requested_stake = _decimal(
@@ -1240,14 +1411,69 @@ class RealExecutionLedger:
                 raise ExecutionStateError(
                     "acknowledgement requires unresolved attempt"
                 )
-            if (
-                state == AttemptState.UNKNOWN
-                and not acknowledgement.reconciliation_evidence_id
-            ):
-                raise ExecutionStateError(
-                    "UNKNOWN attempt requires external reconciliation evidence"
-                )
             first = attempt_events[0]
+            causal_boundaries: list[datetime] = [
+                _timestamp(first["payload"]["reserved_at"], "reserved_at")
+            ]
+            for event in attempt_events:
+                if event["event_type"] == EventType.ATTEMPT_SUBMITTED.value:
+                    causal_boundaries.append(
+                        _timestamp(event["payload"]["submitted_at"], "submitted_at")
+                    )
+                elif event["event_type"] == EventType.ATTEMPT_UNKNOWN.value:
+                    causal_boundaries.append(
+                        _timestamp(event["payload"]["observed_at"], "observed_at")
+                    )
+            acknowledged_time = _timestamp(
+                acknowledgement.acknowledged_at, "acknowledged_at"
+            )
+            if acknowledged_time < max(causal_boundaries):
+                raise ExecutionStateError(
+                    "acknowledgement precedes attempt causal boundary"
+                )
+            if state == AttemptState.UNKNOWN:
+                evidence_id = acknowledgement.reconciliation_evidence_id
+                if not evidence_id:
+                    raise ExecutionStateError(
+                        "UNKNOWN attempt requires external reconciliation evidence"
+                    )
+                matching = [
+                    event
+                    for event in attempt_events
+                    if event["event_type"] == EventType.RECONCILED_FOUND.value
+                    and event["payload"].get("evidence_id") == evidence_id
+                ]
+                if len(matching) != 1:
+                    raise ExecutionStateError(
+                        "UNKNOWN acknowledgement requires durable positive "
+                        "reconciliation evidence"
+                    )
+                reconciliation = self._found_reconciliation_from_dict(
+                    matching[0]["payload"]
+                )
+                if (
+                    reconciliation.external_receipt_id
+                    != acknowledgement.external_receipt_id
+                ):
+                    raise ExecutionStateError(
+                        "acknowledgement receipt mismatches reconciliation evidence"
+                    )
+                evidence_time = _timestamp(
+                    reconciliation.observed_at, "observed_at"
+                )
+                if evidence_time <= max(causal_boundaries):
+                    raise ExecutionStateError(
+                        "positive reconciliation evidence must be newer than "
+                        "attempt uncertainty boundary"
+                    )
+                if acknowledged_time < evidence_time:
+                    raise ExecutionStateError(
+                        "acknowledgement precedes reconciliation evidence"
+                    )
+            elif acknowledgement.reconciliation_evidence_id:
+                raise ExecutionStateError(
+                    "reconciliation evidence is only valid for UNKNOWN acknowledgement"
+                )
             if acknowledgement.accepted_stake is not None:
                 _, action = self._action_payload(
                     events, first["plan_id"], first["action_id"]
@@ -1276,6 +1502,69 @@ class RealExecutionLedger:
                 first["plan_id"],
                 first["action_id"],
                 acknowledgement.attempt_id,
+                payload,
+            )
+
+        self._mutate(operation)
+
+    def reconcile_found(
+        self, reconciliation: ExternalEffectReconciliation
+    ) -> None:
+        payload = reconciliation.to_dict()
+
+        def operation() -> None:
+            events = self._events()
+            attempt_events = self._attempt_events(
+                events, reconciliation.attempt_id
+            )
+            if self._state(attempt_events) != AttemptState.UNKNOWN:
+                raise ExecutionStateError(
+                    "positive reconciliation requires UNKNOWN attempt"
+                )
+            same_evidence = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.RECONCILED_FOUND.value
+                and event["payload"].get("evidence_id")
+                == reconciliation.evidence_id
+            ]
+            if same_evidence:
+                if len(same_evidence) == 1 and same_evidence[0]["payload"] == payload:
+                    return
+                raise ExecutionIdentityConflict(
+                    "different positive reconciliation evidence already exists"
+                )
+            causal_boundaries: list[datetime] = [
+                _timestamp(
+                    attempt_events[0]["payload"]["reserved_at"], "reserved_at"
+                )
+            ]
+            for event in attempt_events:
+                if event["event_type"] == EventType.ATTEMPT_SUBMITTED.value:
+                    causal_boundaries.append(
+                        _timestamp(
+                            event["payload"]["submitted_at"], "submitted_at"
+                        )
+                    )
+                elif event["event_type"] == EventType.ATTEMPT_UNKNOWN.value:
+                    causal_boundaries.append(
+                        _timestamp(
+                            event["payload"]["observed_at"], "observed_at"
+                        )
+                    )
+            if _timestamp(
+                reconciliation.observed_at, "observed_at"
+            ) <= max(causal_boundaries):
+                raise ExecutionStateError(
+                    "positive reconciliation evidence must be newer than "
+                    "attempt uncertainty boundary"
+                )
+            first = attempt_events[0]
+            self._append(
+                EventType.RECONCILED_FOUND,
+                first["plan_id"],
+                first["action_id"],
+                reconciliation.attempt_id,
                 payload,
             )
 

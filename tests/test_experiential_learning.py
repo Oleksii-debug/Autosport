@@ -1,0 +1,157 @@
+import tempfile
+import unittest
+from decimal import Decimal
+from pathlib import Path
+from unittest.mock import patch
+
+from autosport.experiential_learning import PolicyRetestSpec, run_policy_retest
+from autosport.learning_environment import EvidenceTruth
+from autosport.scientific_registry import ScientificRegistry
+from autosport.strategy_model_factory import (
+    ExperimentRunner,
+    FactoryArtifactStore,
+    FactoryRunResult,
+    PromotionAction,
+    PromotionRule,
+    PromotionVerdict,
+)
+from autosport.transparent_bandit_policy import (
+    ActionEstimate,
+    BanditPolicyState,
+    PolicyUpdateEvidence,
+)
+
+
+class ExperientialLearningFactoryBridgeTests(unittest.TestCase):
+    def _lineage(self):
+        predecessor = BanditPolicyState.initial(
+            environment_id="d" * 64,
+            protocol_id="protocol-experiential-v1",
+            config_sha256="c" * 64,
+            seed=17,
+            action_types=frozenset({"WAIT"}),
+        )
+        successor = BanditPolicyState(
+            environment_id=predecessor.environment_id,
+            protocol_id=predecessor.protocol_id,
+            config_sha256=predecessor.config_sha256,
+            seed=predecessor.seed,
+            generation=1,
+            estimates=(ActionEstimate("WAIT", 1, Decimal("0")),),
+            applied_action_ids=("a" * 64,),
+            applied_reward_ids=("b" * 64,),
+            predecessor_policy_id=predecessor.policy_id,
+        )
+        evidence = PolicyUpdateEvidence(
+            environment_id=successor.environment_id,
+            protocol_id=successor.protocol_id,
+            config_sha256=successor.config_sha256,
+            seed=successor.seed,
+            update_index=1,
+            predecessor_policy_id=predecessor.policy_id,
+            successor_policy_id=successor.policy_id,
+            transition_id="e" * 64,
+            action_id="a" * 64,
+            reward_id="b" * 64,
+            reward_truth=EvidenceTruth.OBSERVED,
+            simulation_model_id=None,
+        )
+        return predecessor, successor, evidence
+
+    def _spec(self):
+        return PolicyRetestSpec(
+            experiment_id="experiment-experiential-v1",
+            model_version_id="model-experiential-v1",
+            evaluation_bundle_id="evaluation-experiential-v1",
+            promotion_decision_id="promotion-experiential-v1",
+            canonical_strategy_id="canonical-experiential-policy",
+            dataset_snapshot_id="dataset-experiential-v1",
+            feature_set_id="features-experiential-v1",
+            source_sha256="f" * 64,
+            evaluator_source_sha256="9" * 64,
+            created_at="2026-09-17T13:10:00+00:00",
+            completed_at="2026-09-17T13:20:00+00:00",
+            decided_at="2026-09-17T13:21:00+00:00",
+            predecessor_strategy_version_id="strategy-champion-v1",
+            predecessor_model_version_id="model-champion-v1",
+        )
+
+    def test_factory_spec_binds_exact_policy_environment_protocol_seed_and_identity(self) -> None:
+        _, successor, _ = self._lineage()
+        factory_spec = self._spec().factory_spec(successor)
+
+        self.assertEqual(factory_spec.strategy_version_id, successor.policy_id)
+        self.assertEqual(factory_spec.environment_sha256, successor.environment_id)
+        self.assertEqual(factory_spec.research_protocol_id, successor.protocol_id)
+        self.assertEqual(factory_spec.seed, successor.seed)
+
+    def test_retest_delegates_to_canonical_experiment_runner_without_promotion_math(self) -> None:
+        predecessor, successor, evidence = self._lineage()
+        expected = FactoryRunResult(
+            "experiment-experiential-v1",
+            "model-experiential-v1",
+            successor.policy_id,
+            "evaluation-experiential-v1",
+            "promotion-experiential-v1",
+            "8" * 64,
+            "7" * 64,
+            PromotionVerdict.REJECT,
+            PromotionAction.REJECT,
+            {"mse": 1.0},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = ScientificRegistry.initialize_pristine(root / "scientific_registry.json")
+            runner = ExperimentRunner(registry, FactoryArtifactStore(root / "artifacts"))
+            rule = PromotionRule("mse", 0.0)
+            with patch.object(
+                ExperimentRunner,
+                "run_baseline_candidate",
+                autospec=True,
+                return_value=expected,
+            ) as delegated:
+                result = run_policy_retest(
+                    runner,
+                    predecessor_policy=predecessor,
+                    challenger_policy=successor,
+                    update_evidence=evidence,
+                    spec=self._spec(),
+                    points=(),
+                    rule=rule,
+                )
+
+        self.assertEqual(result, expected)
+        called_spec = delegated.call_args.args[1]
+        self.assertEqual(called_spec.strategy_version_id, successor.policy_id)
+        self.assertEqual(called_spec.environment_sha256, successor.environment_id)
+        self.assertEqual(called_spec.research_protocol_id, successor.protocol_id)
+        self.assertEqual(called_spec.seed, successor.seed)
+        self.assertEqual(delegated.call_args.kwargs["rule"], rule)
+
+    def test_retest_rejects_policy_successor_rebinding_before_factory_call(self) -> None:
+        predecessor, successor, evidence = self._lineage()
+        rebound = BanditPolicyState.initial(
+            environment_id=successor.environment_id,
+            protocol_id=successor.protocol_id,
+            config_sha256=successor.config_sha256,
+            seed=18,
+            action_types=frozenset({"WAIT"}),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = ScientificRegistry.initialize_pristine(root / "scientific_registry.json")
+            runner = ExperimentRunner(registry, FactoryArtifactStore(root / "artifacts"))
+            with self.assertRaisesRegex(ValueError, "predecessor identity mismatch"):
+                run_policy_retest(
+                    runner,
+                    predecessor_policy=predecessor,
+                    challenger_policy=rebound,
+                    update_evidence=evidence,
+                    spec=self._spec(),
+                    points=(),
+                    rule=PromotionRule("mse", 0.0),
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()

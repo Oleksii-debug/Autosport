@@ -121,7 +121,9 @@ def test_windows_surface_content_is_resolved_from_central_catalog():
         for attribute, field in WINDOWS_SURFACE_CONTENT_FIELDS.items():
             key = f"ui.windows.surface.{surface.key}.{field}"
             expected_keys.add(key)
-            assert getattr(surface, attribute) == text(key)
+            value = getattr(surface, attribute)
+            assert value == text(key)
+            assert "V1" not in value
 
         blocked_key = f"ui.windows.surface.{surface.key}.blocked_reason"
         if surface.blocked_reason_uk is None:
@@ -129,6 +131,7 @@ def test_windows_surface_content_is_resolved_from_central_catalog():
         else:
             expected_keys.add(blocked_key)
             assert surface.blocked_reason_uk == text(blocked_key)
+            assert "V1" not in surface.blocked_reason_uk
 
     assert expected_keys <= set(public_catalog)
 

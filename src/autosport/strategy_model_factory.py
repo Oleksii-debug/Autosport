@@ -989,6 +989,41 @@ class ExperimentRunner:
             raise ValueError("champion evaluation/metrics values mismatch")
         return champion_evaluation_bundle_id, metrics
 
+    def _preflight_promotion_history_order(self, spec: FactoryCandidateSpec) -> None:
+        """Reject retroactive decisions before candidate artifacts or registry rows exist."""
+        proposed_key = (
+            _instant(spec.decided_at, "decided_at"),
+            spec.promotion_decision_id,
+        )
+        all_history_cutoff = "9999-12-31T23:59:59.999999+00:00"
+        for decision in self.registry.causal_records(
+            "PromotionDecision", as_of=all_history_cutoff
+        ):
+            candidate_strategy_version_id = decision.payload.get(
+                "candidate_strategy_version_id"
+            )
+            if type(candidate_strategy_version_id) is not str:
+                raise ValueError(
+                    "durable promotion history lacks candidate strategy identity"
+                )
+            strategy = self.registry.get(
+                "StrategyVersion", candidate_strategy_version_id
+            )
+            if strategy is None:
+                raise ValueError(
+                    "durable promotion history references missing candidate strategy"
+                )
+            if strategy.payload.get("canonical_strategy_id") != spec.canonical_strategy_id:
+                continue
+            durable_key = (
+                _instant(decision.available_at, "PromotionDecision.available_at"),
+                decision.record_id,
+            )
+            if durable_key > proposed_key:
+                raise ValueError(
+                    "promotion decision cannot be backdated before durable promotion history in its strategy context"
+                )
+
     def run_baseline_candidate(
         self,
         spec: FactoryCandidateSpec,
@@ -1036,6 +1071,7 @@ class ExperimentRunner:
             raise ValueError("candidate predecessor does not match durable context champion")
         if current_champion is None:
             raise ValueError("factory challenger promotion requires a durable rollback champion")
+        self._preflight_promotion_history_order(spec)
         champion_evaluation_bundle_id, champion_metrics = self._durable_champion_metrics(
             champion_strategy_version_id=current_champion,
             as_of=spec.decided_at,

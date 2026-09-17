@@ -95,7 +95,11 @@ class TrainingPoint:
 
     @property
     def target_reveal_at(self) -> str:
-        return self.target_available_at or self.observed_at
+        if self.target_available_at is None:
+            raise ValueError(
+                "target_available_at is required for causal supervised labels"
+            )
+        return self.target_available_at
 
 
 @dataclass(frozen=True, slots=True)

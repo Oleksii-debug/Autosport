@@ -5,7 +5,7 @@ from pathlib import Path
 
 from autosport.agents import AgentContext
 from autosport.decision_ledger import JsonlDecisionLedger
-from autosport.domain import MarketEvent, TicketLeg
+from autosport.domain import MarketEvent, TicketLeg, TicketStatus
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
 from autosport.paper_strategy import Forecast, PaperValueAgent
@@ -71,6 +71,14 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             risk_policy=policy,
         )
 
+    @staticmethod
+    def _open_tickets(book: PaperBook):
+        return tuple(
+            ticket
+            for ticket in book.tickets.values()
+            if ticket.status is TicketStatus.OPEN
+        )
+
     def test_active_economic_goal_removes_fixed_caller_stake_authority(self) -> None:
         event = self._event()
         goal = self._goal()
@@ -86,8 +94,9 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
 
             self._agent(event, self._policy(goal)).on_market_event(event, context)
 
-            self.assertEqual(len(book.open_tickets), 1)
-            ticket = book.open_tickets[0]
+            open_tickets = self._open_tickets(book)
+            self.assertEqual(len(open_tickets), 1)
+            ticket = open_tickets[0]
             self.assertEqual(ticket.stake, Decimal("20.00"))
             self.assertNotEqual(ticket.stake, Decimal("999"))
             records = ledger.verified_records()
@@ -119,10 +128,11 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
 
             self._agent(event, self._policy(goal)).on_market_event(event, context)
 
-            self.assertEqual(len(book.open_tickets), 2)
+            open_tickets = self._open_tickets(book)
+            self.assertEqual(len(open_tickets), 2)
             new_ticket = next(
                 ticket
-                for ticket in book.open_tickets
+                for ticket in open_tickets
                 if ticket.legs[0].event_id == event.event_id
             )
             self.assertEqual(new_ticket.stake, Decimal("5.00"))
@@ -138,7 +148,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             )
             self._agent(event, self._policy(goal)).on_market_event(event, restarted_context)
 
-            self.assertEqual(len(restarted_book.open_tickets), 2)
+            self.assertEqual(len(self._open_tickets(restarted_book)), 2)
             self.assertEqual(restarted_book.committed_stake, Decimal("25.00"))
             self.assertEqual(len(restarted_context.decision_ledger.verified_records()), 1)
 
@@ -164,7 +174,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
 
             self._agent(event, self._policy(goal)).on_market_event(event, context)
 
-            self.assertEqual(tuple(book.open_tickets), (existing,))
+            self.assertEqual(self._open_tickets(book), (existing,))
             self.assertEqual(book.committed_stake, Decimal("20"))
             self.assertFalse((Path(tmp) / "decisions.jsonl").exists())
 

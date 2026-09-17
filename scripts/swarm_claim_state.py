@@ -500,7 +500,6 @@ def resolve_comments(
             state["latest_comment_id"] = comment_id
             state["release_reason"] = fields.get("REASON")
             state["release_evidence"] = fields.get("EVIDENCE")
-            state["ambiguous"] = False
 
     # Numeric GitHub issue-comment ids are monotonic in server order. Once that
     # invariant is broken, event precedence cannot be trusted. Preserve the
@@ -519,16 +518,16 @@ def resolve_comments(
     for run_id in original_claim_order:
         state = states[run_id]
 
-        if state["latest_event"] == "release":
-            released_runs.append(_public_state(state))
-            continue
-
         if (
             state.get("ambiguous")
             or state["latest_event"] == "ambiguous"
             or state.get("_lease_dt") is None
         ):
             ambiguous_runs.append(_public_state(state))
+            continue
+
+        if state["latest_event"] == "release":
+            released_runs.append(_public_state(state))
             continue
 
         if state["_lease_dt"] <= resolved_now:

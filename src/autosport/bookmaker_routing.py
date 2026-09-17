@@ -278,6 +278,19 @@ def route_residual(
                 )
             observation_ids.add(item.observation_id)
         if item.proposal_leg_id is not None:
+            if item.parent_plan_id is None or item.proposed_stake is None:
+                raise RoutingContractError("child identity is incomplete")
+            # Reuse the canonical proposal validator rather than trusting a caller-supplied
+            # digest or duplicating the child-hash algorithm in this lower-level path.
+            from .bookmaker_routing_plan import VenueLegProposal
+
+            VenueLegProposal(
+                parent_plan_id=item.parent_plan_id,
+                routing_request_id=item.routing_request_id,
+                leg_id=item.proposal_leg_id,
+                venue=by_identity[identity],
+                proposed_stake=item.proposed_stake,
+            )
             child_key = (item.parent_plan_id, item.proposal_leg_id)
             child_binding = (
                 item.routing_request_id,

@@ -389,7 +389,9 @@ class BetfairReadOnlyClient:
             code = error.get("code") if isinstance(error, Mapping) else None
             message = error.get("message") if isinstance(error, Mapping) else None
             detail = "Betfair JSON-RPC returned an error"
-            if isinstance(code, (str, int)) and not isinstance(code, bool):
+            if code is not None:
+                if not isinstance(code, int) or isinstance(code, bool):
+                    raise BetfairReadOnlyError("Betfair JSON-RPC returned a malformed error")
                 detail += f" code={code}"
             if isinstance(message, str) and message.strip():
                 detail += f" message={self._redact_provider_message(message)[:160]}"

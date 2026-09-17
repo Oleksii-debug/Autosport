@@ -128,6 +128,45 @@ def test_empty_settled_positions_page_is_bound_into_snapshot_evidence() -> None:
     assert transport.responses == []
 
 
+def test_empty_open_payload_change_changes_snapshot_evidence_identity() -> None:
+    details_payload = account_details()
+    first_open_payload = rpc({"currentOrders": [], "moreAvailable": False}, 2)
+    second_open_payload = rpc(
+        {"currentOrders": [], "moreAvailable": False, "providerMarker": "changed"},
+        2,
+    )
+
+    first_client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("application", "session"),
+        transport=FakeTransport([details_payload, first_open_payload]),
+        clock=lambda: NOW,
+    )
+    second_client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("application", "session"),
+        transport=FakeTransport([details_payload, second_open_payload]),
+        clock=lambda: NOW,
+    )
+
+    first_snapshot = first_client.read_account_snapshot(
+        frozenset({BookmakerCapability.OPEN_POSITIONS_READ})
+    )
+    second_snapshot = second_client.read_account_snapshot(
+        frozenset({BookmakerCapability.OPEN_POSITIONS_READ})
+    )
+
+    assert first_snapshot.open_positions == second_snapshot.open_positions == ()
+    assert first_snapshot.profile.source_payload_sha256 == snapshot_evidence_hash(
+        details_payload, first_open_payload
+    )
+    assert second_snapshot.profile.source_payload_sha256 == snapshot_evidence_hash(
+        details_payload, second_open_payload
+    )
+    assert (
+        first_snapshot.profile.source_payload_sha256
+        != second_snapshot.profile.source_payload_sha256
+    )
+
+
 def test_terminal_empty_open_page_remains_bound_once_in_page_order() -> None:
     details_payload = account_details()
     first_page_payload = rpc(

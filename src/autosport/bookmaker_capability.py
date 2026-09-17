@@ -7,7 +7,7 @@ bet placement/cancellation/cashout, bankroll mutation, or canonical execution se
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -272,7 +272,18 @@ class BookmakerBalanceObservation:
 
 @dataclass(frozen=True, slots=True)
 class BookmakerPositionObservation:
-    """Provider-native position evidence, not canonical settlement/P&L truth."""
+    """Provider-native position evidence, not canonical settlement/P&L truth.
+
+    ``provider_amount`` deliberately has no universal stake/liability meaning. Its exact
+    provider meaning is carried by ``provider_amount_semantics`` (for example Betfair
+    ``size`` can be recorded as ``backer_stake`` for both BACK and LAY). ``provider_side``
+    preserves the provider's side label when one exists. Consumers must not infer liability,
+    canonical stake, or P&L from these fields without a separate authoritative contract.
+
+    ``stake=`` remains an input-only compatibility shim for this not-yet-merged lineage. It
+    is converted to ``provider_amount`` with semantics ``legacy_stake`` and is never stored
+    as a position field. Provider adapters must use the explicit provider-native fields.
+    """
 
     venue_id: str
     account_id: str
@@ -280,15 +291,18 @@ class BookmakerPositionObservation:
     observation_id: str
     external_position_id: str
     state: BookmakerPositionState
-    stake: Decimal
     currency: str
     observed_at: str
     source_payload_sha256: str
+    provider_amount: Decimal | None = None
+    provider_amount_semantics: str | None = None
+    provider_side: str | None = None
     decimal_odds: Decimal | None = None
     gross_return: Decimal | None = None
     external_receipt_id: str | None = None
+    stake: InitVar[Decimal | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, stake: Decimal | None) -> None:
         _text(self.venue_id, "venue_id")
         _text(self.account_id, "account_id")
         _text(self.adapter_id, "adapter_id")
@@ -298,7 +312,27 @@ class BookmakerPositionObservation:
             raise BookmakerCapabilityError(
                 "state must be a BookmakerPositionState value"
             )
-        _money(self.stake, "stake")
+
+        provider_amount = self.provider_amount
+        provider_amount_semantics = self.provider_amount_semantics
+        if stake is not None:
+            if provider_amount is not None or provider_amount_semantics is not None:
+                raise BookmakerCapabilityError(
+                    "legacy stake cannot be combined with provider_amount semantics"
+                )
+            provider_amount = stake
+            provider_amount_semantics = "legacy_stake"
+        if provider_amount is None:
+            raise BookmakerCapabilityError("provider_amount is required")
+        if provider_amount_semantics is None:
+            raise BookmakerCapabilityError("provider_amount_semantics is required")
+        _money(provider_amount, "provider_amount")
+        _text(provider_amount_semantics, "provider_amount_semantics")
+        object.__setattr__(self, "provider_amount", provider_amount)
+        object.__setattr__(self, "provider_amount_semantics", provider_amount_semantics)
+        if self.provider_side is not None:
+            _text(self.provider_side, "provider_side")
+
         _currency(self.currency)
         _timestamp(self.observed_at, "observed_at")
         _sha256(self.source_payload_sha256, "source_payload_sha256")

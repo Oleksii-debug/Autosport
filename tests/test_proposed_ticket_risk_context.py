@@ -59,6 +59,8 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         values: dict[str, object] = {
             "legs": (leg,),
             "quotes": (cls._quote(leg),),
+            "bankroll_id": "paper-bankroll",
+            "currency": "USD",
             "proposal_ts": "2026-09-16T15:00:02+00:00",
         }
         values.update(overrides)
@@ -254,6 +256,8 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         context = ProposedTicketRiskContext(
             legs=(leg,),
             quotes=(quote,),
+            bankroll_id="paper-bankroll",
+            currency="USD",
             proposal_ts="2026-09-16T15:00:02+00:00",
         )
         exact = (quote.decimal_odds - leg.locked_odds) / quote.decimal_odds
@@ -276,6 +280,8 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         improved_context = ProposedTicketRiskContext(
             legs=(improved_leg,),
             quotes=(self._quote(improved_leg),),
+            bankroll_id="paper-bankroll",
+            currency="USD",
             proposal_ts="2026-09-16T15:00:02+00:00",
         )
         improved = self._permissive_policy(
@@ -296,6 +302,8 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
     def test_context_without_quote_evidence_fails_closed_for_goal_quote_checks(self) -> None:
         context = ProposedTicketRiskContext(
             legs=(self._leg(),),
+            bankroll_id="paper-bankroll",
+            currency="USD",
             proposal_ts="2026-09-16T15:00:02+00:00",
         )
         decision = self._permissive_policy(self._goal()).evaluate(

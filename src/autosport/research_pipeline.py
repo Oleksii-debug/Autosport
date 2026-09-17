@@ -37,6 +37,8 @@ _DEFAULT_BLOCKED_QUALITY_FLAGS = frozenset(
 _RESEARCH_MATERIAL_ACTION_SCHEMA = "autosport.research.open-ticket.v1"
 _RESEARCH_MATERIAL_ACTION_MARKER = "material_action_id="
 _RESEARCH_MATERIAL_ACTION_NAME = "OPEN_PAPER_RESEARCH_TICKET"
+_RESEARCH_MATERIAL_ACTION_INTENT_SCHEMA = "autosport.research.material-action-intent.v1"
+_RESEARCH_MATERIAL_ACTION_INTENT_PAYLOAD_KEY = "material_action_intent_sha256"
 _RESEARCH_DECISION_AGENT = "research-decision-pipeline"
 
 
@@ -127,6 +129,81 @@ def _research_material_action_id(
     }
     canonical = json.dumps(
         identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _research_material_action_intent_sha256(
+    *,
+    replay_run_id: str,
+    material_action_id: str,
+    decision_ts: str,
+    candidate: ParlayCandidate,
+    groups: list[ScenarioGroup],
+    forecasts: dict[str, ForecastRecord],
+    evidence: tuple[ResearchEvidence, ...],
+) -> str:
+    """Bind one caller idempotence key to the immutable research decision intent."""
+
+    candidate_keys = {leg.quote_key for leg in candidate.legs}
+    payload = {
+        "schema": _RESEARCH_MATERIAL_ACTION_INTENT_SCHEMA,
+        "replay_run_id": replay_run_id,
+        "material_action_id": material_action_id,
+        "decision_ts": decision_ts,
+        "candidate": [
+            {
+                **_candidate_identity_payload(leg),
+                "decimal_odds": str(leg.decimal_odds),
+                "probability": str(leg.probability),
+            }
+            for leg in candidate.legs
+        ],
+        "groups": [
+            {
+                "group_id": group.group_id,
+                "outcomes": [
+                    {
+                        "quote_key": outcome.quote_key,
+                        "probability": (
+                            str(outcome.probability)
+                            if outcome.probability is not None
+                            else None
+                        ),
+                    }
+                    for outcome in group.outcomes
+                ],
+            }
+            for group in groups
+        ],
+        "forecasts": [
+            {"quote_key": key, "forecast_hash": forecasts[key].canonical_hash}
+            for key in sorted(candidate_keys.intersection(forecasts))
+        ],
+        "evidence": [
+            {
+                "evidence_id": item.evidence_id,
+                "quote_key": item.quote_key,
+                "source_id": item.source_id,
+                "observed_at": item.observed_at,
+                "available_at": item.available_at,
+                "decimal_odds": str(item.decimal_odds),
+                "content_sha256": item.content_sha256,
+                "market_snapshot_hash": item.market_snapshot_hash,
+                "quality_flags": list(item.quality_flags),
+            }
+            for item in sorted(
+                (item for item in evidence if item.quote_key in candidate_keys),
+                key=lambda item: (item.quote_key, item.available_at, item.evidence_id),
+            )
+        ],
+    }
+    canonical = json.dumps(
+        payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -234,6 +311,7 @@ def _reconcile_existing_economic_action(
     ledger: JsonlDecisionLedger,
     goal,
     material_action_id: str,
+    intent_sha256: str,
     replay_run_id: str,
     decision_ts: str,
     candidate: ParlayCandidate,
@@ -259,6 +337,10 @@ def _reconcile_existing_economic_action(
         )
 
     payload = persisted.payload
+    if payload.get(_RESEARCH_MATERIAL_ACTION_INTENT_PAYLOAD_KEY) != intent_sha256:
+        raise ResearchDecisionReconciliationRequired(
+            "durable research material action does not match current decision intent"
+        )
     expected_quote_keys = tuple(leg.quote_key for leg in candidate.legs)
     if (
         persisted.replay_run_id != replay_run_id
@@ -580,8 +662,10 @@ class ResearchDecisionPipeline:
         _validate_canonical_string(replay_run_id, "replay_run_id")
         _validate_canonical_string(decision_ts, "decision_ts")
         parse_iso_timestamp(decision_ts)
+        evidence_items = tuple(evidence)
         goal = self.risk_policy.economic_goal
         resolved_material_action_id: str | None = None
+        resolved_material_action_intent_sha256: str | None = None
         if goal is not None:
             resolved_material_action_id = _research_material_action_id(
                 replay_run_id=replay_run_id,
@@ -589,11 +673,23 @@ class ResearchDecisionPipeline:
                 candidate=candidate,
                 supplied=material_action_id,
             )
+            resolved_material_action_intent_sha256 = (
+                _research_material_action_intent_sha256(
+                    replay_run_id=replay_run_id,
+                    material_action_id=resolved_material_action_id,
+                    decision_ts=decision_ts,
+                    candidate=candidate,
+                    groups=groups,
+                    forecasts=forecasts,
+                    evidence=evidence_items,
+                )
+            )
             _reconcile_existing_economic_action(
                 book=book,
                 ledger=decision_ledger,
                 goal=goal,
                 material_action_id=resolved_material_action_id,
+                intent_sha256=resolved_material_action_intent_sha256,
                 replay_run_id=replay_run_id,
                 decision_ts=decision_ts,
                 candidate=candidate,
@@ -613,7 +709,6 @@ class ResearchDecisionPipeline:
             amount = derived if derived is not None else Decimal("0")
             stake_source = "economic-goal-derived"
 
-        evidence_items = tuple(evidence)
         quote_items = tuple(market_quotes or ())
         context_hash = _research_context_hash(
             book=book,
@@ -742,7 +837,11 @@ class ResearchDecisionPipeline:
                 evidence=evidence_items,
             )
             if approved and resolved_material_action_id is not None:
+                assert resolved_material_action_intent_sha256 is not None
                 payload[MATERIAL_ACTION_ID_PAYLOAD_KEY] = resolved_material_action_id
+                payload[_RESEARCH_MATERIAL_ACTION_INTENT_PAYLOAD_KEY] = (
+                    resolved_material_action_intent_sha256
+                )
             record = DecisionRecord(
                 replay_run_id=replay_run_id,
                 agent=_RESEARCH_DECISION_AGENT,

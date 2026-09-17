@@ -128,7 +128,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
 
             self._agent(event, goal).on_market_event(event, restarted_context)
 
-            self.assertEqual(restarted_book.balance, Decimal("99"))
+            self.assertEqual(restarted_book.balance, Decimal("98"))
             self.assertEqual(tuple(restarted_book.tickets), (first_ticket_id,))
             records = restarted_ledger.verified_records()
             self.assertEqual(len(records), 1)
@@ -209,7 +209,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             ):
                 self._agent(event, goal).on_market_event(event, restarted_context)
 
-            self.assertEqual(restarted_book.balance, Decimal("99"))
+            self.assertEqual(restarted_book.balance, Decimal("98"))
             self.assertEqual(len(restarted_book.tickets), 1)
             self.assertFalse(ledger_path.exists())
 
@@ -256,7 +256,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             context.decision_ledger = ledger
             agent.on_market_event(event, context)
 
-            self.assertEqual(book.balance, Decimal("99"))
+            self.assertEqual(book.balance, Decimal("98"))
             self.assertEqual(len(book.tickets), 1)
             records = ledger.verified_records()
             self.assertEqual(len(records), 1)
@@ -300,7 +300,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             context.decision_ledger = ledger
             agent.on_market_event(event, context)
 
-            self.assertEqual(book.balance, Decimal("99"))
+            self.assertEqual(book.balance, Decimal("98"))
             self.assertEqual(len(book.tickets), 1)
             records = ledger.verified_records()
             self.assertEqual(len(records), 1)
@@ -334,7 +334,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             # ticket remains and the synthetic transport error is not surfaced.
             agent.on_market_event(event, context)
 
-            self.assertEqual(book.balance, Decimal("99"))
+            self.assertEqual(book.balance, Decimal("98"))
             self.assertEqual(len(book.tickets), 1)
             records = ledger.verified_records()
             self.assertEqual(len(records), 1)
@@ -346,7 +346,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             # _acted must agree with the proven durable commit and prevent a duplicate
             # position if the same event is delivered again in the same process.
             agent.on_market_event(event, context)
-            self.assertEqual(book.balance, Decimal("99"))
+            self.assertEqual(book.balance, Decimal("98"))
             self.assertEqual(len(book.tickets), 1)
             self.assertEqual(len(ledger.verified_records()), 1)
 

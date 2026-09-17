@@ -91,7 +91,8 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
         goal = self._goal()
         event = self._event(source_ts="2026-09-17T14:59:50+00:00")
         with tempfile.TemporaryDirectory() as tmp:
-            ledger = JsonlDecisionLedger(Path(tmp) / "decisions.jsonl")
+            ledger_path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(ledger_path)
             context = AgentContext(
                 PaperBook("100"),
                 latest_quotes={event.quote_key: event},
@@ -102,7 +103,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             self._agent(event, goal).on_market_event(event, context)
 
             self.assertEqual(len(context.paper_book.tickets), 0)
-            self.assertEqual(ledger.verified_records(), ())
+            self.assertFalse(ledger_path.exists())
 
 
 if __name__ == "__main__":

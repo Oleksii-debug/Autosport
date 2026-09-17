@@ -37,6 +37,7 @@ RENEW_IMMUTABLE_FIELDS = {
     "SEMANTIC_KEY": "semantic_key",
     "ACCOUNT_ID": "account_id",
     "CLAIM_MODE": "claim_mode",
+    "CLAIMED_AT": "claimed_at",
     "INTENDED_SLICE": "intended_slice",
 }
 

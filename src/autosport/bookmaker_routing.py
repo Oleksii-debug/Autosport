@@ -69,10 +69,10 @@ class VenueQuote:
 class VenueObservation:
     """Externally reconciled effect bound to one routing request and exact quote.
 
-    The optional child-receipt fields form one all-or-none identity bundle.  They
+    The optional child-receipt fields form one all-or-none identity bundle. They
     bind externally reconciled evidence back to a deterministic non-money-moving
-    proposal leg, but they deliberately do not create a durable execution ledger.
-    That future authority remains owned by the canonical #353 execution layer.
+    proposal leg, but deliberately do not create a durable execution ledger. That
+    future authority remains owned by the canonical #353 execution layer.
     """
 
     venue_id: str
@@ -152,7 +152,7 @@ def _dedupe_external_receipts(
     """Deduplicate exact receipt replays and fail closed on conflicting reuse.
 
     External receipt identifiers are provider/account scoped because independent
-    bookmakers may legitimately issue the same textual identifier.  Re-observing
+    bookmakers may legitimately issue the same textual identifier. Re-observing
     the exact same immutable receipt is idempotent; changing any bound evidence for
     the same receipt identity is ambiguous and therefore rejected.
     """
@@ -252,7 +252,8 @@ def route_residual(
             and item.external_receipt_id is None
         ):
             raise RoutingContractError(
-                "repeated venue/account observations require explicit evidence identity"
+                "repeated venue/account observations require unique observation_id "
+                "or external_receipt_id"
             )
         if item.observation_id is not None:
             if item.observation_id in observation_ids:

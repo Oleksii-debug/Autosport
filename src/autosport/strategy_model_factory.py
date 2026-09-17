@@ -762,12 +762,45 @@ class ExperimentRunner:
             raise ValueError("research protocol lacks frozen binding")
         if binding.get("promotion_rule") != rule.frozen_text:
             raise ValueError("promotion rule does not match frozen research protocol")
+        question_id = binding.get("research_question_id")
         hypothesis_id = binding.get("hypothesis_id")
-        if type(hypothesis_id) is not str:
-            raise ValueError("research protocol lacks frozen hypothesis identity")
+        if type(question_id) is not str or type(hypothesis_id) is not str:
+            raise ValueError("research protocol lacks frozen question/hypothesis identity")
+        question = self.registry.get("ResearchQuestion", question_id)
         hypothesis = self.registry.get("Hypothesis", hypothesis_id)
-        if hypothesis is None:
-            raise ValueError("frozen hypothesis is missing")
+        if question is None or hypothesis is None:
+            raise ValueError("frozen question/hypothesis is missing")
+        if hypothesis.payload.get("research_question_id") != question_id:
+            raise ValueError("frozen hypothesis does not reference frozen research question")
+        if _canonical_digest(question.payload) != _sha256(
+            binding.get("research_question_sha256"), "research_question_sha256"
+        ):
+            raise ValueError("research question does not match frozen research protocol")
+        if _canonical_digest(hypothesis.payload) != _sha256(
+            binding.get("hypothesis_sha256"), "hypothesis_sha256"
+        ):
+            raise ValueError("hypothesis does not match frozen research protocol")
+
+        question_available = _instant(question.available_at, "research question available_at")
+        hypothesis_available = _instant(hypothesis.available_at, "hypothesis available_at")
+        feature_available = _instant(feature.available_at, "feature set available_at")
+        protocol_frozen = _instant(binding.get("frozen_at_utc"), "protocol frozen_at_utc")
+        protocol_available = _instant(protocol.available_at, "research protocol available_at")
+        dataset_available = _instant(dataset.available_at, "dataset snapshot available_at")
+        experiment_start = _instant(spec.created_at, "experiment created_at")
+        if question_available > hypothesis_available:
+            raise ValueError("research question must precede frozen hypothesis")
+        if hypothesis_available > protocol_frozen:
+            raise ValueError("hypothesis must precede research protocol freeze")
+        if feature_available > protocol_frozen:
+            raise ValueError("feature set must be available by research protocol freeze")
+        if protocol_frozen > protocol_available:
+            raise ValueError("research protocol cannot be persisted before its freeze time")
+        if protocol_available > dataset_available:
+            raise ValueError("dataset snapshot must not precede durable research protocol")
+        if dataset_available > experiment_start:
+            raise ValueError("scientific foundation was not available by experiment start")
+
         if hypothesis.payload.get("primary_metric") != rule.primary_metric:
             raise ValueError("promotion primary metric does not match frozen hypothesis")
         protective = hypothesis.payload.get("protective_metrics")

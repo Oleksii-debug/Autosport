@@ -63,9 +63,10 @@ def _balance(**overrides) -> BookmakerBalanceObservation:
         "observation_id": "balance-1",
         "currency": "EUR",
         "available_balance": Decimal("90"),
-        "total_balance": Decimal("100"),
         "observed_at": _TS,
         "source_payload_sha256": _HASH,
+        "total_balance": Decimal("100"),
+        "total_balance_source_ref": "provider-total-balance-field",
     }
     values.update(overrides)
     return BookmakerBalanceObservation(**values)
@@ -167,11 +168,47 @@ def test_profile_requires_provenance_and_positive_version() -> None:
         )
 
 
+def test_balance_observation_accepts_provider_native_funds_without_total() -> None:
+    observation = _balance(
+        total_balance=None,
+        total_balance_source_ref=None,
+        exposure=Decimal("-12.50"),
+        retained_commission=Decimal("1.25"),
+        exposure_limit=Decimal("-500"),
+    )
+
+    assert observation.available_balance == Decimal("90")
+    assert observation.total_balance is None
+    assert observation.total_balance_source_ref is None
+    assert observation.exposure == Decimal("-12.50")
+    assert observation.retained_commission == Decimal("1.25")
+    assert observation.exposure_limit == Decimal("-500")
+
+
 def test_balance_observation_rejects_impossible_or_non_finite_money() -> None:
     with pytest.raises(BookmakerCapabilityError, match="cannot exceed"):
         _balance(available_balance=Decimal("101"))
     with pytest.raises(BookmakerCapabilityError, match="finite Decimal"):
         _balance(total_balance=Decimal("NaN"))
+    with pytest.raises(BookmakerCapabilityError, match="finite Decimal"):
+        _balance(
+            total_balance=None,
+            total_balance_source_ref=None,
+            exposure=Decimal("NaN"),
+        )
+
+
+def test_total_balance_requires_explicit_provenance() -> None:
+    with pytest.raises(
+        BookmakerCapabilityError,
+        match="total_balance requires explicit",
+    ):
+        _balance(total_balance_source_ref=None)
+    with pytest.raises(
+        BookmakerCapabilityError,
+        match="total_balance_source_ref requires total_balance",
+    ):
+        _balance(total_balance=None)
 
 
 def test_evidence_requires_timezone_and_payload_hash() -> None:

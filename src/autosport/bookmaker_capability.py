@@ -219,7 +219,7 @@ class BookmakerCapabilityProfile:
 
 @dataclass(frozen=True, slots=True)
 class BookmakerBalanceObservation:
-    """Provider-derived balance evidence; not a canonical execution ledger."""
+    """Provider-native funds evidence; never an inferred canonical balance ledger."""
 
     venue_id: str
     account_id: str
@@ -227,9 +227,13 @@ class BookmakerBalanceObservation:
     observation_id: str
     currency: str
     available_balance: Decimal
-    total_balance: Decimal
     observed_at: str
     source_payload_sha256: str
+    total_balance: Decimal | None = None
+    total_balance_source_ref: str | None = None
+    exposure: Decimal | None = None
+    retained_commission: Decimal | None = None
+    exposure_limit: Decimal | None = None
 
     def __post_init__(self) -> None:
         _text(self.venue_id, "venue_id")
@@ -238,13 +242,32 @@ class BookmakerBalanceObservation:
         _text(self.observation_id, "observation_id")
         _currency(self.currency)
         _money(self.available_balance, "available_balance")
-        _money(self.total_balance, "total_balance")
-        if self.available_balance > self.total_balance:
-            raise BookmakerCapabilityError(
-                "available_balance cannot exceed total_balance"
-            )
         _timestamp(self.observed_at, "observed_at")
         _sha256(self.source_payload_sha256, "source_payload_sha256")
+
+        if self.total_balance is None:
+            if self.total_balance_source_ref is not None:
+                raise BookmakerCapabilityError(
+                    "total_balance_source_ref requires total_balance"
+                )
+        else:
+            _money(self.total_balance, "total_balance")
+            if self.available_balance > self.total_balance:
+                raise BookmakerCapabilityError(
+                    "available_balance cannot exceed total_balance"
+                )
+            if self.total_balance_source_ref is None:
+                raise BookmakerCapabilityError(
+                    "total_balance requires explicit total_balance_source_ref"
+                )
+            _text(self.total_balance_source_ref, "total_balance_source_ref")
+
+        for field in ("exposure", "retained_commission", "exposure_limit"):
+            value = getattr(self, field)
+            if value is not None and (
+                not isinstance(value, Decimal) or not value.is_finite()
+            ):
+                raise BookmakerCapabilityError(f"{field} must be a finite Decimal")
 
 
 @dataclass(frozen=True, slots=True)

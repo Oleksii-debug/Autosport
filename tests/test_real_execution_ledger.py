@@ -223,6 +223,48 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     )
                 )
 
+    def test_positive_reconciliation_blocks_not_found_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
+            ledger.reconcile_found(
+                ExternalEffectReconciliation(
+                    attempt_id="try-1",
+                    evidence_id="found-readback",
+                    external_receipt_id="r1",
+                    observed_at=RECONCILED_AT,
+                    source="provider-readback",
+                )
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError, "positive reconciliation evidence"
+            ):
+                ledger.reconcile_not_found(
+                    ReconciliationSnapshot(
+                        attempt_id="try-1",
+                        evidence_id="not-found-readback",
+                        observed_at=RETRY_RESERVED_AT,
+                        external_effect_found=False,
+                        source="provider-readback",
+                    )
+                )
+            self.assertEqual(
+                ledger.attempt_state("try-1"), AttemptState.UNKNOWN
+            )
+            self.assertFalse(
+                ledger.can_retry_action(plan_id="p1", action_id="a1")
+            )
+
     def test_unknown_retry_only_after_not_found_reconciliation(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")

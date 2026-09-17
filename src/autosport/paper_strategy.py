@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from .agents import AgentContext
-from .decision_ledger import DecisionRecord
+from .decision_ledger import DecisionRecord, bind_economic_goal
 from .domain import MarketEvent, PaperTicket, TicketLeg
 from .forecasting import ForecastRecord, parse_iso_timestamp
 from .price_truth import paper_quote_rejection_reason
@@ -78,22 +78,20 @@ class PaperValueAgent:
         record: DecisionRecord,
         goal,
     ) -> bool:
-        """Resolve an uncertain append outcome from verified durable bytes only."""
+        """Resolve an uncertain append outcome from exact verified durable evidence."""
 
         ledger = context.decision_ledger
         if ledger is None:
             return False
         try:
             if goal is None:
-                return any(
-                    persisted.decision_id == record.decision_id
-                    for persisted in ledger.verified_records()
-                )
+                return any(persisted == record for persisted in ledger.verified_records())
             persisted = ledger.verified_economic_decision(record.decision_id, goal)
-            return persisted.decision_id == record.decision_id
+            return persisted == bind_economic_goal(record, goal)
         except Exception:
-            # Missing, unreadable or structurally invalid evidence is never treated as
-            # a successful economic commit. The caller will roll back the paper side.
+            # Missing, unreadable, structurally invalid, or merely ID-colliding evidence
+            # is never treated as a successful economic commit. The caller rolls back
+            # the paper side unless the exact material decision is restart-verifiable.
             return False
 
     def on_market_event(self, event: MarketEvent, context: AgentContext) -> None:

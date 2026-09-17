@@ -224,10 +224,55 @@ def test_lineage_indexes_bind_dataset_model_and_strategy_without_future_decision
     assert [entry.record_id for entry in model.datasets] == ["dataset-1"]
 
     strategy = index.by_strategy("strategy-2", as_of=T2)
+    assert [entry.record_id for entry in strategy.strategies] == ["strategy-1", "strategy-2"]
     assert [entry.record_id for entry in strategy.models] == ["model-1"]
-    assert [entry.record_id for entry in strategy.experiments] == ["experiment-2"]
-    assert [entry.record_id for entry in strategy.evaluations] == ["eval-2"]
-    assert strategy.promotions == ()
+    assert [entry.record_id for entry in strategy.experiments] == ["experiment-1", "experiment-2"]
+    assert [entry.record_id for entry in strategy.evaluations] == ["eval-1", "eval-2"]
+    assert [entry.record_id for entry in strategy.promotions] == ["promotion-1"]
+
+
+def test_lineage_indexes_traverse_strategy_and_model_predecessors(tmp_path):
+    registry = _seed_registry(tmp_path / "scientific_registry.json")
+    registry.append(
+        ModelVersion(
+            "model-2",
+            "baseline",
+            SHA_B,
+            SHA_C,
+            SHA_D,
+            "dataset-1",
+            "features-1",
+            "protocol-1",
+            11,
+            SHA_C,
+            T3,
+            predecessor_model_version_id="model-1",
+        )
+    )
+    registry.append(
+        StrategyVersion(
+            "strategy-3",
+            "paper-strategy",
+            SHA_C,
+            SHA_D,
+            SHA_C,
+            T3,
+            model_version_id="model-2",
+            predecessor_strategy_version_id="strategy-2",
+        )
+    )
+
+    index = ScientificRegistryIndex(registry)
+    model = index.by_model("model-2", as_of=T3)
+    assert [entry.record_id for entry in model.models] == ["model-1", "model-2"]
+
+    strategy = index.by_strategy("strategy-3", as_of=T3)
+    assert [entry.record_id for entry in strategy.strategies] == [
+        "strategy-1",
+        "strategy-2",
+        "strategy-3",
+    ]
+    assert [entry.record_id for entry in strategy.models] == ["model-1", "model-2"]
 
 
 def test_independent_strategy_contexts_have_independent_champions(tmp_path):

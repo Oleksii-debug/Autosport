@@ -35,7 +35,13 @@ def _mutation(run_id: str) -> dict:
         "branch": "canonical/source-branch",
         "prior_head": "old",
         "current_head": "new",
-        "mutations": [{"head": "new", "run_id": run_id}],
+        "mutations": [
+            {
+                "head": "new",
+                "run_id": run_id,
+                "parent_heads": ["old"],
+            }
+        ],
     }
 
 

@@ -16,6 +16,7 @@ from autosport.research_pipeline import (
     DeterministicResearchCritic,
     ResearchDecisionAlreadyCommitted,
     ResearchDecisionPipeline,
+    ResearchDecisionReconciliationRequired,
     ResearchDecisionPolicy,
     ResearchEvidence,
 )
@@ -482,6 +483,53 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             )
             self.assertEqual(restarted_book.balance, before_balance)
             self.assertEqual(set(restarted_book.tickets), before_ticket_ids)
+            self.assertEqual(restarted_book._lifecycle, before_lifecycle)
+            self.assertEqual(
+                JsonlDecisionLedger(ledger_path).verify_integrity(),
+                1,
+            )
+
+    def test_economic_material_action_restart_rejects_changed_intent(self):
+        goal = self._economic_goal()
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "research-decisions.jsonl"
+            book_path = Path(tmp) / "paper-book.json"
+            ledger = JsonlDecisionLedger(ledger_path)
+            book, _ledger, first = self._decide(
+                tmp,
+                candidate=self._candidate(probability="0.60"),
+                forecast=self._forecast(probability="0.60"),
+                pipeline=self._goal_pipeline(goal),
+                stake="NaN",
+                market_quotes=[self._market_event()],
+                decision_ledger=ledger,
+                material_action_id="research-action-intent",
+            )
+            self.assertTrue(first.approved)
+            book.save(book_path)
+            restarted_book = PaperBook.load(book_path)
+            before_balance = restarted_book.balance
+            before_tickets = dict(restarted_book.tickets)
+            before_lifecycle = list(restarted_book._lifecycle)
+
+            with self.assertRaisesRegex(
+                ResearchDecisionReconciliationRequired,
+                "does not match current decision intent",
+            ):
+                self._decide(
+                    tmp,
+                    book=restarted_book,
+                    candidate=self._candidate(probability="0.61"),
+                    forecast=self._forecast(probability="0.61"),
+                    pipeline=self._goal_pipeline(goal),
+                    stake="NaN",
+                    market_quotes=[self._market_event()],
+                    decision_ledger=JsonlDecisionLedger(ledger_path),
+                    material_action_id="research-action-intent",
+                )
+
+            self.assertEqual(restarted_book.balance, before_balance)
+            self.assertEqual(restarted_book.tickets, before_tickets)
             self.assertEqual(restarted_book._lifecycle, before_lifecycle)
             self.assertEqual(
                 JsonlDecisionLedger(ledger_path).verify_integrity(),

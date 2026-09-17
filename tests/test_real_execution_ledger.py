@@ -272,6 +272,132 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 ledger.attempt_state("try-1"), AttemptState.UNKNOWN
             )
 
+    def test_positive_reconciliation_receipt_is_owned_across_attempts_same_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action("a1"), action("a2")))
+            for action_id, attempt_id in (("a1", "try-1"), ("a2", "try-2")):
+                ledger.begin_attempt(
+                    plan_id="p1",
+                    action_id=action_id,
+                    attempt_id=attempt_id,
+                    reserved_at=RESERVED_AT,
+                )
+                ledger.mark_unknown(
+                    attempt_id, reason="timeout", observed_at=UNKNOWN_AT
+                )
+
+            ledger.reconcile_found(
+                ExternalEffectReconciliation(
+                    attempt_id="try-1",
+                    evidence_id="readback-1",
+                    external_receipt_id="shared-receipt",
+                    observed_at=RECONCILED_AT,
+                    source="provider-readback",
+                )
+            )
+            with self.assertRaisesRegex(
+                ExecutionIdentityConflict, "already belongs to another attempt"
+            ):
+                ledger.reconcile_found(
+                    ExternalEffectReconciliation(
+                        attempt_id="try-2",
+                        evidence_id="readback-2",
+                        external_receipt_id="shared-receipt",
+                        observed_at=SECOND_RECONCILED_AT,
+                        source="provider-readback",
+                    )
+                )
+            self.assertEqual(ledger.attempt_state("try-2"), AttemptState.UNKNOWN)
+
+    def test_restart_rejects_hash_valid_cross_attempt_found_receipt_reuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action("a1"), action("a2")))
+            for action_id, attempt_id in (("a1", "try-1"), ("a2", "try-2")):
+                ledger.begin_attempt(
+                    plan_id="p1",
+                    action_id=action_id,
+                    attempt_id=attempt_id,
+                    reserved_at=RESERVED_AT,
+                )
+                ledger.mark_unknown(
+                    attempt_id, reason="timeout", observed_at=UNKNOWN_AT
+                )
+
+            ledger.reconcile_found(
+                ExternalEffectReconciliation(
+                    attempt_id="try-1",
+                    evidence_id="readback-1",
+                    external_receipt_id="shared-receipt",
+                    observed_at=RECONCILED_AT,
+                    source="provider-readback",
+                )
+            )
+            ledger._append(
+                EventType.RECONCILED_FOUND,
+                "p1",
+                "a2",
+                "try-2",
+                ExternalEffectReconciliation(
+                    attempt_id="try-2",
+                    evidence_id="tampered-readback",
+                    external_receipt_id="shared-receipt",
+                    observed_at=SECOND_RECONCILED_AT,
+                    source="provider-readback-tamper",
+                ).to_dict(),
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError, "belongs to multiple attempts"
+            ):
+                restarted.verify_integrity()
+
+    def test_positive_reconciliation_same_native_receipt_allowed_across_account_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(
+                plan(
+                    action("a1", bookmaker_id="betfair", account_id="acct-1"),
+                    action("a2", bookmaker_id="betfair", account_id="acct-2"),
+                )
+            )
+            for action_id, attempt_id in (("a1", "try-1"), ("a2", "try-2")):
+                ledger.begin_attempt(
+                    plan_id="p1",
+                    action_id=action_id,
+                    attempt_id=attempt_id,
+                    reserved_at=RESERVED_AT,
+                )
+                ledger.mark_unknown(
+                    attempt_id, reason="timeout", observed_at=UNKNOWN_AT
+                )
+
+            ledger.reconcile_found(
+                ExternalEffectReconciliation(
+                    attempt_id="try-1",
+                    evidence_id="readback-1",
+                    external_receipt_id="provider-local-receipt",
+                    observed_at=RECONCILED_AT,
+                    source="provider-readback",
+                )
+            )
+            ledger.reconcile_found(
+                ExternalEffectReconciliation(
+                    attempt_id="try-2",
+                    evidence_id="readback-2",
+                    external_receipt_id="provider-local-receipt",
+                    observed_at=SECOND_RECONCILED_AT,
+                    source="provider-readback",
+                )
+            )
+
+            self.assertEqual(ledger.verify_integrity(), 7)
+            self.assertEqual(ledger.attempt_state("try-1"), AttemptState.UNKNOWN)
+            self.assertEqual(ledger.attempt_state("try-2"), AttemptState.UNKNOWN)
+
     def test_positive_reconciliation_blocks_not_found_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")

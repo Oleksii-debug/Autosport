@@ -751,10 +751,10 @@ class RealExecutionLedger:
     ) -> dict[ExternalReceiptIdentity, str]:
         owners: dict[ExternalReceiptIdentity, str] = {}
         for event in events:
-            if (
-                event["event_type"]
-                != EventType.EXTERNAL_ACKNOWLEDGEMENT.value
-            ):
+            if event["event_type"] not in {
+                EventType.RECONCILED_FOUND.value,
+                EventType.EXTERNAL_ACKNOWLEDGEMENT.value,
+            }:
                 continue
             identity = cls._receipt_identity(events, event)
             attempt = event["attempt_id"]
@@ -1603,6 +1603,18 @@ class RealExecutionLedger:
                     "attempt uncertainty boundary"
                 )
             first = attempt_events[0]
+            probe_event = {
+                "plan_id": first["plan_id"],
+                "action_id": first["action_id"],
+                "attempt_id": reconciliation.attempt_id,
+                "payload": payload,
+            }
+            identity = self._receipt_identity(events, probe_event)
+            prior = self._receipt_owners(events).get(identity)
+            if prior is not None and prior != reconciliation.attempt_id:
+                raise ExecutionIdentityConflict(
+                    "provider/account external receipt already belongs to another attempt"
+                )
             self._append(
                 EventType.RECONCILED_FOUND,
                 first["plan_id"],

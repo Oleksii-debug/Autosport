@@ -793,13 +793,13 @@ class ScientificRegistry:
             if action is PromotionAction.PROMOTE:
                 if predecessor != champion:
                     raise PromotionEvidenceError(
-                        "durable promotion history predecessor does not match current context champion"
+                        "durable promotion history predecessor does not match current champion in this strategy context"
                     )
                 champion = payload["candidate_strategy_version_id"]
             elif action is PromotionAction.ROLLBACK:
                 if champion != payload["candidate_strategy_version_id"]:
                     raise PromotionEvidenceError(
-                        "durable rollback candidate does not match current context champion"
+                        "durable rollback candidate does not match current champion in this strategy context"
                     )
                 rollback_target = payload["rollback_to_strategy_version_id"]
                 if ScientificRegistry._strategy_key_from_state(state, rollback_target) != wanted_key:
@@ -859,12 +859,12 @@ class ScientificRegistry:
             if decision.action is PromotionAction.PROMOTE:
                 if decision.predecessor_strategy_version_id != current_champion:
                     raise PromotionEvidenceError(
-                        "promotion predecessor does not match current context champion"
+                        "promotion predecessor does not match current champion in this strategy context"
                     )
             elif decision.action is PromotionAction.ROLLBACK:
                 if decision.candidate_strategy_version_id != current_champion:
                     raise PromotionEvidenceError(
-                        "rollback candidate does not match current context champion"
+                        "rollback candidate does not match current champion in this strategy context"
                     )
 
             protocol = require("ResearchProtocol", decision.research_protocol_id)
@@ -1014,13 +1014,13 @@ class ScientificRegistry:
             if action is PromotionAction.PROMOTE:
                 if predecessor != champion:
                     raise PromotionEvidenceError(
-                        "promotion predecessor does not match current context champion"
+                        "promotion predecessor does not match current champion in this strategy context"
                     )
                 champion = payload["candidate_strategy_version_id"]
             elif action is PromotionAction.ROLLBACK:
                 if champion != payload["candidate_strategy_version_id"]:
                     raise PromotionEvidenceError(
-                        "rollback candidate does not match current context champion"
+                        "rollback candidate does not match current champion in this strategy context"
                     )
                 rollback_target = payload["rollback_to_strategy_version_id"]
                 if self._strategy_key_from_state(state, rollback_target) != wanted_key:

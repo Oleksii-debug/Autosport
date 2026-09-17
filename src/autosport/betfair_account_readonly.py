@@ -51,14 +51,7 @@ class BetfairSessionCredentials:
 
 
 class BetfairHttpTransport(Protocol):
-    def post(
-        self,
-        url: str,
-        *,
-        headers: Mapping[str, str],
-        body: bytes,
-        timeout_seconds: float,
-    ) -> bytes: ...
+    def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes: ...
 
 
 class UrllibBetfairHttpTransport:
@@ -67,14 +60,7 @@ class UrllibBetfairHttpTransport:
             raise ValueError("max_response_bytes must be a positive integer")
         self._max_response_bytes = max_response_bytes
 
-    def post(
-        self,
-        url: str,
-        *,
-        headers: Mapping[str, str],
-        body: bytes,
-        timeout_seconds: float,
-    ) -> bytes:
+    def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes:
         request = Request(url, data=body, headers=dict(headers), method="POST")
         try:
             with urlopen(request, timeout=timeout_seconds) as response:
@@ -235,16 +221,7 @@ class _RpcResult:
 
 
 class BetfairReadOnlyClient:
-    def __init__(
-        self,
-        credentials: BetfairSessionCredentials,
-        *,
-        transport: BetfairHttpTransport | None = None,
-        timeout_seconds: float = 10.0,
-        clock: Callable[[], datetime] | None = None,
-        venue_id: str = "betfair",
-        account_id: str = "default-account",
-    ) -> None:
+    def __init__(self, credentials: BetfairSessionCredentials, *, transport: BetfairHttpTransport | None = None, timeout_seconds: float = 10.0, clock: Callable[[], datetime] | None = None, venue_id: str = "betfair", account_id: str = "default-account") -> None:
         if not isinstance(credentials, BetfairSessionCredentials):
             raise TypeError("credentials must be BetfairSessionCredentials")
         if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool) or timeout_seconds <= 0:
@@ -265,22 +242,22 @@ class BetfairReadOnlyClient:
         response = self._rpc(_GET_ACCOUNT_FUNDS, {})
         result = _mapping(response.result, "getAccountFunds result")
         return BetfairAccountFundsObservation(
-            available_to_bet_balance=_number(result, "availableToBetBalance", "available_to_bet_balance"),
-            exposure=_number(result, "exposure", "exposure"),
-            retained_commission=_number(result, "retainedCommission", "retained_commission"),
-            exposure_limit=_number(result, "exposureLimit", "exposure_limit"),
-            evidence=response.evidence,
+            _number(result, "availableToBetBalance", "available_to_bet_balance"),
+            _number(result, "exposure", "exposure"),
+            _number(result, "retainedCommission", "retained_commission"),
+            _number(result, "exposureLimit", "exposure_limit"),
+            response.evidence,
         )
 
     def read_account_details(self) -> BetfairAccountDetailsObservation:
         response = self._rpc(_GET_ACCOUNT_DETAILS, {})
         result = _mapping(response.result, "getAccountDetails result")
         return BetfairAccountDetailsObservation(
-            currency_code=_provider_text(result, "currencyCode", "currency_code"),
-            locale_code=_provider_optional_text(result, "localeCode", "locale_code"),
-            region=_provider_optional_text(result, "region", "region"),
-            timezone_name=_provider_optional_text(result, "timezone", "timezone"),
-            evidence=response.evidence,
+            _provider_text(result, "currencyCode", "currency_code"),
+            _provider_optional_text(result, "localeCode", "locale_code"),
+            _provider_optional_text(result, "region", "region"),
+            _provider_optional_text(result, "timezone", "timezone"),
+            response.evidence,
         )
 
     def read_current_orders_page(self, *, from_record: int = 0, record_count: int = 1000) -> BetfairCurrentOrderPage:
@@ -292,13 +269,7 @@ class BetfairReadOnlyClient:
         _unique_bet_ids(orders, "currentOrders")
         return BetfairCurrentOrderPage(orders, _provider_bool(report, "moreAvailable"), from_record, record_count, response.evidence)
 
-    def read_cleared_orders_page(
-        self,
-        *,
-        from_record: int = 0,
-        record_count: int = 1000,
-        settled_from: str | None = None,
-    ) -> BetfairClearedOrderPage:
+    def read_cleared_orders_page(self, *, from_record: int = 0, record_count: int = 1000, settled_from: str | None = None) -> BetfairClearedOrderPage:
         _page_bounds(from_record, record_count)
         params: dict[str, object] = {"betStatus": "SETTLED", "groupBy": "BET", "fromRecord": from_record, "recordCount": record_count}
         if settled_from is not None:
@@ -346,85 +317,49 @@ class BetfairReadOnlyClient:
             BookmakerCapability,
             BookmakerCapabilityFact,
             BookmakerCapabilityProfile,
+            BookmakerCapabilityState,
             BookmakerPositionObservation,
             BookmakerPositionState,
         )
         if not isinstance(requested_capabilities, frozenset):
             raise TypeError("requested_capabilities must be a frozenset")
         supported = {BookmakerCapability.BALANCE_READ, BookmakerCapability.OPEN_POSITIONS_READ, BookmakerCapability.SETTLED_POSITIONS_READ}
-        unknown = [c for c in requested_capabilities if c not in supported]
-        if unknown:
+        if any(c not in supported for c in requested_capabilities):
             raise BetfairReadOnlyError("requested capability is not implemented by the Betfair account adapter")
         details = self.read_account_details()
         funds = self.read_account_funds() if BookmakerCapability.BALANCE_READ in requested_capabilities else None
         current = self.read_all_current_orders() if BookmakerCapability.OPEN_POSITIONS_READ in requested_capabilities else ()
         cleared = self.read_all_cleared_orders() if BookmakerCapability.SETTLED_POSITIONS_READ in requested_capabilities else ()
         common_caps = frozenset(requested_capabilities)
-        facts = tuple(BookmakerCapabilityFact(c, BookmakerCapabilityState.SUPPORTED) for c in sorted(common_caps, key=lambda x: x.value)) if common_caps else ()
+        facts = tuple(BookmakerCapabilityFact(c, BookmakerCapabilityState.SUPPORTED) for c in sorted(common_caps, key=lambda x: x.value))
         hashes = [details.evidence.source_payload_sha256]
         if funds is not None:
             hashes.append(funds.evidence.source_payload_sha256)
         hashes.extend(o.evidence.source_payload_sha256 for o in current)
         hashes.extend(o.evidence.source_payload_sha256 for o in cleared)
         evidence_hash = sha256("|".join(hashes).encode("ascii")).hexdigest()
-        profile = BookmakerCapabilityProfile(
-            venue_id=self._venue_id,
-            account_id=self._account_id,
-            adapter_id=ADAPTER_ID,
-            adapter_version=ADAPTER_VERSION,
-            profile_version=1,
-            facts=facts,
-            observed_at=details.evidence.observed_at,
-            source_ref=f"betfair://account-snapshot/{evidence_hash}",
-            source_payload_sha256=evidence_hash,
-        )
+        profile = BookmakerCapabilityProfile(self._venue_id, self._account_id, ADAPTER_ID, ADAPTER_VERSION, 1, facts, details.evidence.observed_at, f"betfair://account-snapshot/{evidence_hash}", evidence_hash)
         balance = None
         if funds is not None:
-            balance = BookmakerBalanceObservation(
-                venue_id=self._venue_id,
-                account_id=self._account_id,
-                adapter_id=ADAPTER_ID,
-                observation_id=f"funds:{funds.evidence.source_payload_sha256}",
-                currency=details.currency_code,
-                available_balance=funds.available_to_bet_balance,
-                observed_at=funds.evidence.observed_at,
-                source_payload_sha256=funds.evidence.source_payload_sha256,
-                total_balance=None,
-                exposure=funds.exposure,
-                retained_commission=funds.retained_commission,
-                exposure_limit=funds.exposure_limit,
-            )
-        open_positions = tuple(self._to_position(o, BookmakerPositionState.OPEN) for o in current)
-        settled_positions = tuple(self._to_position(o, BookmakerPositionState.SETTLED) for o in cleared)
+            balance = BookmakerBalanceObservation(self._venue_id, self._account_id, ADAPTER_ID, f"funds:{funds.evidence.source_payload_sha256}", details.currency_code, funds.available_to_bet_balance, funds.evidence.observed_at, funds.evidence.source_payload_sha256, total_balance=None, exposure=funds.exposure, retained_commission=funds.retained_commission, exposure_limit=funds.exposure_limit)
+        open_positions = tuple(self._to_position(o, BookmakerPositionState.OPEN, details.currency_code) for o in current)
+        settled_positions = tuple(self._to_position(o, BookmakerPositionState.SETTLED, details.currency_code) for o in cleared)
         overlap = {p.external_position_id for p in open_positions} & {p.external_position_id for p in settled_positions}
         if overlap:
             raise BetfairReadOnlyError(f"provider returned positions in both OPEN and SETTLED states: {sorted(overlap)!r}")
-        observed_at = self._observed_at()
-        return BookmakerAccountSnapshot(profile, common_caps, observed_at, balance, open_positions, settled_positions)
+        return BookmakerAccountSnapshot(profile, common_caps, self._observed_at(), balance, open_positions, settled_positions)
 
-    def _to_position(self, order: object, state: object) -> object:
+    def _to_position(self, order: object, state: object, currency: str) -> object:
         from .bookmaker_capability import BookmakerPositionObservation
         if isinstance(order, BetfairCurrentOrderObservation):
             amount = order.size_matched
             odds = order.average_price_matched if order.average_price_matched > 0 else order.price
+            semantics = "betfair_size_matched"
         else:
             amount = order.size_settled
             odds = order.price_matched
-        return BookmakerPositionObservation(
-            venue_id=self._venue_id,
-            account_id=self._account_id,
-            adapter_id=ADAPTER_ID,
-            observation_id=f"{state.value}:{order.bet_id}:{order.evidence.source_payload_sha256}",
-            external_position_id=order.bet_id,
-            state=state,
-            currency="UNSPECIFIED" if not isinstance(order, BetfairClearedOrderObservation) else "UNSPECIFIED",
-            observed_at=order.evidence.observed_at,
-            source_payload_sha256=order.evidence.source_payload_sha256,
-            provider_amount=amount,
-            provider_amount_semantics="betfair_size_matched" if isinstance(order, BetfairCurrentOrderObservation) else "betfair_size_settled",
-            provider_side=order.side,
-            decimal_odds=odds,
-        )
+            semantics = "betfair_size_settled"
+        return BookmakerPositionObservation(self._venue_id, self._account_id, ADAPTER_ID, f"{state.value}:{order.bet_id}:{order.evidence.source_payload_sha256}", order.bet_id, state, currency, order.evidence.observed_at, order.evidence.source_payload_sha256, provider_amount=amount, provider_amount_semantics=semantics, provider_side=order.side, decimal_odds=odds)
 
     def _rpc(self, method: str, params: Mapping[str, object]) -> _RpcResult:
         endpoint = _READ_METHOD_ENDPOINT.get(method)
@@ -443,8 +378,7 @@ class BetfairReadOnlyClient:
             raise BetfairReadOnlyError("Betfair response has invalid jsonrpc version")
         if envelope.get("id") != request_id:
             raise BetfairReadOnlyError("Betfair response id does not match request id")
-        error_present = "error" in envelope and envelope["error"] is not None
-        if error_present:
+        if "error" in envelope and envelope["error"] is not None:
             if "result" in envelope:
                 raise BetfairReadOnlyError("Betfair response contains both error and result")
             error = envelope["error"]
@@ -480,17 +414,10 @@ def _decode_json(payload: bytes) -> object:
                 raise BetfairReadOnlyError(f"Betfair JSON contains duplicate object key {key!r}")
             result[key] = value
         return result
-
     def reject_constant(value: str) -> object:
         raise BetfairReadOnlyError(f"Betfair JSON contains non-standard numeric constant {value}")
-
     try:
-        return json.loads(
-            payload.decode("utf-8"),
-            parse_float=Decimal,
-            object_pairs_hook=reject_duplicate_pairs,
-            parse_constant=reject_constant,
-        )
+        return json.loads(payload.decode("utf-8"), parse_float=Decimal, object_pairs_hook=reject_duplicate_pairs, parse_constant=reject_constant)
     except BetfairReadOnlyError:
         raise
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -505,28 +432,12 @@ def _parse_current_order(value: object, evidence: BetfairEvidence, index: int) -
         price_map = _mapping(price_size, f"currentOrders[{index}].priceSize")
         price = _number(price_map, "price", "price")
         requested_size = _number(price_map, "size", "size")
-    return BetfairCurrentOrderObservation(
-        _provider_text(raw, "betId", "bet_id"), _provider_text(raw, "marketId", "market_id"),
-        _provider_int(raw, "selectionId", "selection_id"), _provider_text(raw, "side", "side"),
-        _provider_text(raw, "status", "status"), _provider_text(raw, "placedDate", "placed_date"),
-        price, requested_size, _number(raw, "averagePriceMatched", "average_price_matched"),
-        _number(raw, "sizeMatched", "size_matched"), _number(raw, "sizeRemaining", "size_remaining"),
-        _provider_optional_text(raw, "customerOrderRef", "customer_order_ref"),
-        _provider_optional_text(raw, "customerStrategyRef", "customer_strategy_ref"), evidence,
-    )
+    return BetfairCurrentOrderObservation(_provider_text(raw, "betId", "bet_id"), _provider_text(raw, "marketId", "market_id"), _provider_int(raw, "selectionId", "selection_id"), _provider_text(raw, "side", "side"), _provider_text(raw, "status", "status"), _provider_text(raw, "placedDate", "placed_date"), price, requested_size, _number(raw, "averagePriceMatched", "average_price_matched"), _number(raw, "sizeMatched", "size_matched"), _number(raw, "sizeRemaining", "size_remaining"), _provider_optional_text(raw, "customerOrderRef", "customer_order_ref"), _provider_optional_text(raw, "customerStrategyRef", "customer_strategy_ref"), evidence)
 
 
 def _parse_cleared_order(value: object, evidence: BetfairEvidence, index: int) -> BetfairClearedOrderObservation:
     raw = _mapping(value, f"clearedOrders[{index}]")
-    return BetfairClearedOrderObservation(
-        _provider_text(raw, "betId", "bet_id"), _provider_text(raw, "marketId", "market_id"),
-        _provider_int(raw, "selectionId", "selection_id"), _provider_text(raw, "side", "side"), "SETTLED",
-        _provider_text(raw, "placedDate", "placed_date"), _provider_text(raw, "settledDate", "settled_date"),
-        _number(raw, "priceRequested", "price_requested"), _number(raw, "priceMatched", "price_matched"),
-        _number(raw, "sizeSettled", "size_settled"), _number(raw, "profit", "profit"),
-        _provider_optional_text(raw, "customerOrderRef", "customer_order_ref"),
-        _provider_optional_text(raw, "customerStrategyRef", "customer_strategy_ref"), evidence,
-    )
+    return BetfairClearedOrderObservation(_provider_text(raw, "betId", "bet_id"), _provider_text(raw, "marketId", "market_id"), _provider_int(raw, "selectionId", "selection_id"), _provider_text(raw, "side", "side"), "SETTLED", _provider_text(raw, "placedDate", "placed_date"), _provider_text(raw, "settledDate", "settled_date"), _number(raw, "priceRequested", "price_requested"), _number(raw, "priceMatched", "price_matched"), _number(raw, "sizeSettled", "size_settled"), _number(raw, "profit", "profit"), _provider_optional_text(raw, "customerOrderRef", "customer_order_ref"), _provider_optional_text(raw, "customerStrategyRef", "customer_strategy_ref"), evidence)
 
 
 def _mapping(value: object, field: str) -> Mapping[str, object]:

@@ -78,7 +78,7 @@ def _binding(
         lawful_source_requirements="retained lawful source evidence",
         causal_cutoff=T1,
         evaluation_design="sealed walk-forward holdout",
-        feature_set_version="features-v1",
+        feature_set_version="v1",
         uncertainty_method="bootstrap intervals",
         multiple_comparison_control="single frozen primary metric",
         robustness_checks=("time split", "source split"),
@@ -86,7 +86,7 @@ def _binding(
         stopping_rule="one final evaluation",
         promotion_rule="promote only if primary improves and guardrails pass",
         expected_artifacts=("evaluation bundle", "decision"),
-        code_config_sha256=SHA_C,
+        code_config_sha256=SHA_B,
         frozen_at_utc=T0,
     )
 
@@ -135,6 +135,8 @@ def _foundation(registry: ScientificRegistry) -> dict[str, object]:
         protocol.protocol_sha256,
         (SHA_A, SHA_B),
         T2,
+        evaluated_strategy_version_id="strategy-1",
+        evaluated_model_version_id="model-1",
     )
     for record in (question, hypothesis, protocol, dataset, features, model, strategy, bundle):
         registry.append(record)
@@ -257,7 +259,7 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
         "canonical-strategy",
         SHA_C,
         SHA_D,
-        SHA_A,
+        SHA_B,
         T3,
         model_version_id="model-1",
         predecessor_strategy_version_id="strategy-1",
@@ -271,6 +273,8 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
         foundation["protocol"].protocol_sha256,
         (SHA_B,),
         T3,
+        evaluated_strategy_version_id="strategy-2",
+        evaluated_model_version_id="model-1",
     )
     registry.append(bundle2)
     experiment2 = replace(
@@ -278,7 +282,7 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
         experiment_id="experiment-2",
         strategy_version_id="strategy-2",
         evaluation_bundle_id="eval-2",
-        config_sha256=SHA_C,
+        config_sha256=SHA_B,
         completed_at=T3,
     )
     registry.append(experiment2)
@@ -474,7 +478,7 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
         "canonical-strategy",
         SHA_C,
         SHA_D,
-        SHA_A,
+        SHA_B,
         T2,
         model_version_id="model-1",
         predecessor_strategy_version_id="strategy-1",
@@ -487,6 +491,8 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
         foundation["protocol"].protocol_sha256,
         (SHA_B,),
         T2,
+        evaluated_strategy_version_id="strategy-offset-2",
+        evaluated_model_version_id="model-1",
     )
     registry.append(strategy2)
     registry.append(bundle2)
@@ -496,7 +502,7 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
             experiment_id="experiment-offset-2",
             strategy_version_id="strategy-offset-2",
             evaluation_bundle_id="eval-offset-2",
-            config_sha256=SHA_C,
+            config_sha256=SHA_B,
         )
     )
     later = PromotionDecision(

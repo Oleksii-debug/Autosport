@@ -16,6 +16,7 @@ from .research_factory_bridge import (
     FinalizedFactoryDecision,
     StagedFactoryEvaluation,
     finalize_staged_candidate,
+    stage_baseline_candidate,
 )
 from .research_supervisor import (
     ResearchPhase,
@@ -24,7 +25,12 @@ from .research_supervisor import (
     SupervisorSnapshot,
 )
 from .scientific_registry import PromotionAction, ResearchQuestion
-from .strategy_model_factory import ExperimentRunner, FactoryCandidateSpec
+from .strategy_model_factory import (
+    ExperimentRunner,
+    FactoryCandidateSpec,
+    PromotionRule,
+    TrainingPoint,
+)
 
 
 _PHASES = tuple(ResearchPhase)
@@ -33,7 +39,7 @@ _PHASE_INDEX = {phase: index for index, phase in enumerate(_PHASES)}
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentPhaseEvidence:
-    """Exact causal-environment checkpoint consumed by the supervisor."""
+    """Exact non-empty causal-environment checkpoint consumed by the supervisor."""
 
     environment_id: str
     checkpoint: EnvironmentCheckpoint
@@ -91,6 +97,53 @@ def _advance_once_or_replay(
     )
 
 
+def stage_factory_evaluation(
+    supervisor: ResearchSupervisor,
+    run_id: str,
+    *,
+    runner: ExperimentRunner,
+    spec: FactoryCandidateSpec,
+    points: Sequence[TrainingPoint],
+    rule: PromotionRule,
+    at: str,
+    budget_cost: int = 1,
+    minimum_train_size: int | None = None,
+) -> tuple[SupervisorSnapshot, StagedFactoryEvaluation]:
+    """Run/publish the canonical factory stage, then checkpoint EXPERIMENT once.
+
+    The canonical research-factory bridge publishes model/strategy/experiment and
+    evaluation evidence without publishing a PromotionDecision. Exact redelivery
+    reconstructs that staged evidence and this function then reuses the already
+    committed supervisor bindings instead of creating another experiment.
+    """
+
+    if not isinstance(supervisor, ResearchSupervisor):
+        raise TypeError("supervisor must be ResearchSupervisor")
+    staged = stage_baseline_candidate(
+        runner,
+        spec,
+        points,
+        rule=rule,
+        minimum_train_size=minimum_train_size,
+    )
+    bindings = (
+        ("evaluation_bundle_id", staged.evaluation_bundle_id),
+        ("experiment_id", staged.experiment_id),
+        ("model_version_id", staged.model_version_id),
+        ("strategy_version_id", staged.strategy_version_id),
+    )
+    snapshot = _advance_once_or_replay(
+        supervisor,
+        run_id,
+        expected_phase=ResearchPhase.EXPERIMENT,
+        next_phase=ResearchPhase.CAUSAL_EVALUATION,
+        at=at,
+        budget_cost=budget_cost,
+        bindings=bindings,
+    )
+    return snapshot, staged
+
+
 def checkpoint_causal_environment(
     supervisor: ResearchSupervisor,
     run_id: str,
@@ -99,11 +152,12 @@ def checkpoint_causal_environment(
     at: str,
     budget_cost: int = 1,
 ) -> tuple[SupervisorSnapshot, EnvironmentPhaseEvidence]:
-    """Bind one resolved causal-learning checkpoint to FORWARD/PAPER -> DECISION.
+    """Bind resolved causal-learning evidence to FORWARD/PAPER -> DECISION.
 
     ``environment.checkpoint()`` itself fails closed while an action is unresolved.
-    If a crash happens after the supervisor checkpoint, exact redelivery returns the
-    already-advanced snapshot; a different environment/checkpoint fails closed.
+    An empty environment is not evidence and cannot unlock DECISION. If a crash
+    happens after the supervisor checkpoint, exact redelivery returns the already-
+    advanced snapshot; a different environment/checkpoint fails closed.
     """
 
     if not isinstance(supervisor, ResearchSupervisor):
@@ -111,6 +165,10 @@ def checkpoint_causal_environment(
     if not isinstance(environment, CausalLearningEnvironment):
         raise TypeError("environment must be CausalLearningEnvironment")
     checkpoint = environment.checkpoint()
+    if checkpoint.step_index <= 0:
+        raise ResearchSupervisorError(
+            "causal learning environment must contain at least one resolved transition"
+        )
     evidence = EnvironmentPhaseEvidence(
         environment_id=environment.environment_id,
         checkpoint=checkpoint,
@@ -166,16 +224,15 @@ def finalize_factory_decision(
         robustness_evidence_sha256=robustness_evidence_sha256,
         forward_evidence_sha256=forward_evidence_sha256,
         reason=reason,
-        retest_conditions=retest_conditions,
+        retest_conditions=tuple(retest_conditions),
     )
     bindings = (
         ("evaluation_bundle_id", staged.evaluation_bundle_id),
         ("experiment_id", staged.experiment_id),
         ("promotion_decision_id", result.promotion_decision_id),
         ("strategy_version_id", staged.strategy_version_id),
+        ("model_version_id", staged.model_version_id),
     )
-    if staged.model_version_id is not None:
-        bindings += (("model_version_id", staged.model_version_id),)
     snapshot = _advance_once_or_replay(
         supervisor,
         run_id,

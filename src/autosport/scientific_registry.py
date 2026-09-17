@@ -689,21 +689,19 @@ class ScientificRegistry:
     def causal_records(self, record_type: str, *, as_of: str) -> tuple[RegistryEntry, ...]:
         if record_type not in _RECORD_TYPES:
             raise ValueError("unsupported record_type")
-        cutoff = datetime.fromisoformat(_iso(as_of, "as_of").replace("Z", "+00:00"))
+        cutoff = _instant(as_of, "as_of")
         values: list[RegistryEntry] = []
         for raw in self._read()["records"]:
             if raw["record_type"] != record_type:
                 continue
-            available = datetime.fromisoformat(raw["available_at"].replace("Z", "+00:00"))
+            available = _instant(raw["available_at"], "available_at")
             reveal = raw["payload"].get("outcome_reveal_after")
             if available > cutoff:
                 continue
-            if isinstance(reveal, str):
-                reveal_at = datetime.fromisoformat(_iso(reveal, "outcome_reveal_after").replace("Z", "+00:00"))
-                if reveal_at > cutoff:
-                    continue
+            if isinstance(reveal, str) and _instant(reveal, "outcome_reveal_after") > cutoff:
+                continue
             values.append(RegistryEntry(**raw))
-        values.sort(key=lambda item: (item.available_at, item.record_id))
+        values.sort(key=lambda item: (_instant(item.available_at, "available_at"), item.record_id))
         return tuple(values)
 
     def find_experiment_fingerprint(self, fingerprint: str) -> tuple[RegistryEntry, ...]:
@@ -714,17 +712,23 @@ class ScientificRegistry:
             if raw["record_type"] == "Experiment"
             and raw["payload"].get("fingerprint") == wanted
         ]
-        matches.sort(key=lambda item: (item.available_at, item.record_id))
+        matches.sort(key=lambda item: (_instant(item.available_at, "available_at"), item.record_id))
         return tuple(matches)
 
     def record_promotion(self, decision: PromotionDecision) -> str:
         state = self._read()
         entries = {(raw["record_type"], raw["record_id"]): raw for raw in state["records"]}
+        decision_at = _instant(decision.decided_at, "decided_at")
 
         def require(kind: str, identity: str) -> dict[str, Any]:
             value = entries.get((kind, identity))
             if value is None:
                 raise PromotionEvidenceError(f"promotion evidence missing {kind}:{identity}")
+            if _instant(value["available_at"], f"{kind}.available_at") > decision_at:
+                raise PromotionEvidenceError(f"promotion evidence {kind}:{identity} was not available at decision time")
+            reveal = value["payload"].get("outcome_reveal_after")
+            if isinstance(reveal, str) and _instant(reveal, f"{kind}.outcome_reveal_after") > decision_at:
+                raise PromotionEvidenceError(f"promotion evidence {kind}:{identity} was not causally revealed at decision time")
             return value
 
         strategy = require("StrategyVersion", decision.candidate_strategy_version_id)
@@ -745,7 +749,9 @@ class ScientificRegistry:
             raise PromotionEvidenceError("evaluation bundle is bound to a different protocol")
         if bundle["payload"].get("bundle_sha256") != decision.evaluation_bundle_sha256.lower():
             raise PromotionEvidenceError("promotion evaluation bundle hash does not match durable bundle")
-        require("DatasetSnapshot", bundle["payload"]["dataset_snapshot_id"])
+        dataset = require("DatasetSnapshot", bundle["payload"]["dataset_snapshot_id"])
+        if dataset["payload"].get("manifest_sha256") != protocol["payload"].get("dataset_manifest_sha256"):
+            raise PromotionEvidenceError("dataset manifest does not match frozen research protocol")
 
         strategy_model_id = strategy["payload"].get("model_version_id")
         if strategy_model_id != decision.candidate_model_version_id:
@@ -758,7 +764,7 @@ class ScientificRegistry:
         if decision.action is PromotionAction.ROLLBACK:
             require("StrategyVersion", decision.rollback_to_strategy_version_id or "")
 
-        matching_experiment: dict[str, Any] | None = None
+        matching_experiment_entry: dict[str, Any] | None = None
         for raw in state["records"]:
             if raw["record_type"] != "Experiment":
                 continue
@@ -769,13 +775,16 @@ class ScientificRegistry:
                 and payload.get("evaluation_bundle_id") == decision.evaluation_bundle_id
                 and payload.get("model_version_id") == decision.candidate_model_version_id
             ):
-                matching_experiment = payload
+                matching_experiment_entry = raw
                 break
-        if matching_experiment is None:
+        if matching_experiment_entry is None:
             raise PromotionEvidenceError("promotion has no durable matching experiment")
+        if _instant(matching_experiment_entry["available_at"], "Experiment.available_at") > decision_at:
+            raise PromotionEvidenceError("matching experiment was not complete at decision time")
+        matching_experiment = matching_experiment_entry["payload"]
         if bundle["payload"].get("dataset_snapshot_id") != matching_experiment.get("dataset_snapshot_id"):
             raise PromotionEvidenceError("evaluation bundle/experiment dataset lineage mismatch")
-        require("FeatureSet", matching_experiment["feature_set_id"])
+        feature = require("FeatureSet", matching_experiment["feature_set_id"])
         if model is not None:
             if model["payload"].get("research_protocol_id") != matching_experiment.get("research_protocol_id"):
                 raise PromotionEvidenceError("candidate model/experiment protocol lineage mismatch")

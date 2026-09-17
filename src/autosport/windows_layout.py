@@ -7,6 +7,7 @@ from tkinter import ttk
 
 import tk_uia
 
+from .localization import require_keys, text
 from .windows_surface_contract import (
     SURFACE_BY_KEY,
     SURFACES,
@@ -34,6 +35,26 @@ WINDOWS_SHELL_AUTOMATION_IDS = {
     "open": 303,
     "details": 304,
 }
+
+WINDOWS_SHELL_LOCALIZATION_KEYS = frozenset(
+    {
+        "ui.windows.shell.frame.title",
+        "ui.windows.shell.screen.label",
+        "ui.windows.shell.button.open",
+        "ui.windows.shell.state.active",
+        "ui.windows.shell.state.disabled",
+        "ui.windows.shell.state.presentation",
+        "ui.windows.shell.accessibility.navigation.name",
+        "ui.windows.shell.accessibility.navigation.description",
+        "ui.windows.shell.accessibility.state.name",
+        "ui.windows.shell.accessibility.state.description",
+        "ui.windows.shell.accessibility.open.name",
+        "ui.windows.shell.accessibility.open.description",
+        "ui.windows.shell.accessibility.details.name",
+        "ui.windows.shell.accessibility.details.description",
+    }
+)
+require_keys(WINDOWS_SHELL_LOCALIZATION_KEYS)
 
 
 def compact_surface_heights(app: Any) -> None:
@@ -74,9 +95,11 @@ def _render_shell_surface(app: Any, surface_key: str, *, persist: bool) -> None:
     app.shell_surface_display.set(surface.title_uk)
     app.shell_surface_state.set(
         {
-            "v1-active": "Активна V1-поверхня",
-            "visible-disabled": f"Вимкнено: {surface.blocked_reason_uk}",
-            "presentation-only": "Лише інформація — без доменної дії",
+            "v1-active": text("ui.windows.shell.state.active"),
+            "visible-disabled": text(
+                "ui.windows.shell.state.disabled", reason=surface.blocked_reason_uk or ""
+            ),
+            "presentation-only": text("ui.windows.shell.state.presentation"),
         }[surface.phase]
     )
     app.shell_details.delete(0, "end")
@@ -116,7 +139,7 @@ def install_windows_product_shell(app: Any) -> None:
     if frame is None:
         raise RuntimeError("Autosport root frame is missing")
 
-    shell = ttk.LabelFrame(frame, text="Навігація продукту", padding=(8, 4))
+    shell = ttk.LabelFrame(frame, text=text("ui.windows.shell.frame.title"), padding=(8, 4))
     first = frame.winfo_children()[0] if frame.winfo_children() else None
     if first is None:
         shell.pack(fill="x", pady=(0, 4))
@@ -129,7 +152,7 @@ def install_windows_product_shell(app: Any) -> None:
 
     nav_row = ttk.Frame(shell)
     nav_row.pack(fill="x")
-    ttk.Label(nav_row, text="Екран:").pack(side="left", padx=(0, 4))
+    ttk.Label(nav_row, text=text("ui.windows.shell.screen.label")).pack(side="left", padx=(0, 4))
     app.shell_navigation = ttk.Combobox(
         nav_row,
         textvariable=app.shell_surface_display,
@@ -143,7 +166,7 @@ def install_windows_product_shell(app: Any) -> None:
 
     app.shell_open_button = ttk.Button(
         nav_row,
-        text="Перейти до робочої поверхні",
+        text=text("ui.windows.shell.button.open"),
         command=lambda: _focus_surface_target(app, app.shell_surface_key.get()),
         takefocus=True,
     )
@@ -173,28 +196,28 @@ def install_windows_product_shell(app: Any) -> None:
 
 def configure_windows_product_shell_accessibility(app: Any) -> None:
     """Attach stable Windows UIA metadata after the canonical Tk/UIA bridge is enabled."""
-    tk_uia.set_acc_name(app.shell_navigation, "Навігація екранами Автоспорт")
+    tk_uia.set_acc_name(app.shell_navigation, text("ui.windows.shell.accessibility.navigation.name"))
     tk_uia.set_acc_description(
         app.shell_navigation,
-        "Виберіть один із канонічних екранів. F2 переводить фокус сюди; Control+Alt+Left/Right рухає між екранами.",
+        text("ui.windows.shell.accessibility.navigation.description"),
     )
     tk_uia.set_automation_id(app.shell_navigation, WINDOWS_SHELL_AUTOMATION_IDS["navigation"])
-    tk_uia.set_acc_name(app.shell_state, "Стан вибраної поверхні")
+    tk_uia.set_acc_name(app.shell_state, text("ui.windows.shell.accessibility.state.name"))
     tk_uia.set_acc_description(
         app.shell_state,
-        "Тільки для читання: активна, інформаційна або видима, але вимкнена capability.",
+        text("ui.windows.shell.accessibility.state.description"),
     )
     tk_uia.set_automation_id(app.shell_state, WINDOWS_SHELL_AUTOMATION_IDS["state"])
-    tk_uia.set_acc_name(app.shell_open_button, "Перейти до робочої поверхні")
+    tk_uia.set_acc_name(app.shell_open_button, text("ui.windows.shell.accessibility.open.name"))
     tk_uia.set_acc_description(
         app.shell_open_button,
-        "Переводить фокус до вже реалізованого робочого контролу. Для неактивних capability кнопка вимкнена.",
+        text("ui.windows.shell.accessibility.open.description"),
     )
     tk_uia.set_automation_id(app.shell_open_button, WINDOWS_SHELL_AUTOMATION_IDS["open"])
-    tk_uia.set_acc_name(app.shell_details, "Контракт вибраного екрана")
+    tk_uia.set_acc_name(app.shell_details, text("ui.windows.shell.accessibility.details.name"))
     tk_uia.set_acc_description(
         app.shell_details,
-        "Read-only опис задачі, клавіатури, станів, persistence та меж доменної істини вибраного екрана.",
+        text("ui.windows.shell.accessibility.details.description"),
     )
     tk_uia.set_automation_id(app.shell_details, WINDOWS_SHELL_AUTOMATION_IDS["details"])
 

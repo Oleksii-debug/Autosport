@@ -21,14 +21,16 @@ def bind_leg_receipt(
     leg: VenueLegProposal,
     *,
     effect: ExternalEffect,
-    external_receipt_id: str,
+    external_receipt_id: str | None = None,
     confirmed_accepted: Decimal = Decimal("0"),
     observation_id: str | None = None,
 ) -> VenueObservation:
     """Bind external evidence to one deterministic proposal child.
 
-    This is an identity/reconciliation helper only. It does not call a bookmaker,
-    authorize money movement, or create the future #353 real execution ledger.
+    ACCEPTED evidence requires a real external receipt ID. UNKNOWN/refusal may
+    truthfully have none yet; the deterministic child identity still prevents blind
+    reroute. This helper does not call a bookmaker, authorize money movement, or
+    create the future #353 real execution ledger.
     """
     if not isinstance(leg, VenueLegProposal):
         raise RoutingContractError("leg must be a VenueLegProposal")
@@ -66,12 +68,16 @@ def _validated_child_receipts(
         (venue.venue_id, venue.account_id): venue
         for venue in selected_venues
     }
-    accepted_by_leg: dict[str, Decimal] = {}
+    accepted_receipt_by_leg: dict[str, str] = {}
 
     for item in normalized:
-        if item.external_receipt_id is None:
+        if (
+            item.parent_plan_id is None
+            or item.proposal_leg_id is None
+            or item.proposed_stake is None
+        ):
             raise RoutingContractError(
-                "reconciliation requires child-bound external receipt identity"
+                "reconciliation requires deterministic child identity"
             )
         if item.parent_plan_id != parent_plan_id:
             raise RoutingContractError(
@@ -94,8 +100,8 @@ def _validated_child_receipts(
             )
 
         # VenueLegProposal owns the canonical child hash contract. Rebuilding the
-        # immutable child here proves the external receipt is bound to exactly
-        # parent + request + venue/account + quote + proposed stake.
+        # immutable child here proves evidence is bound to exactly parent +
+        # request + venue/account + quote + proposed stake.
         try:
             VenueLegProposal(
                 parent_plan_id=parent_plan_id,
@@ -110,16 +116,23 @@ def _validated_child_receipts(
             ) from exc
 
         if item.effect is ExternalEffect.ACCEPTED:
-            total = accepted_by_leg.get(
-                item.proposal_leg_id,
-                Decimal("0"),
-            )
-            total += item.confirmed_accepted
-            if total > item.proposed_stake:
+            if item.external_receipt_id is None:
                 raise RoutingContractError(
-                    "confirmed receipts exceed bound child proposal stake"
+                    "confirmed ACCEPTED reconciliation requires external_receipt_id"
                 )
-            accepted_by_leg[item.proposal_leg_id] = total
+            previous_receipt = accepted_receipt_by_leg.get(
+                item.proposal_leg_id
+            )
+            if (
+                previous_receipt is not None
+                and previous_receipt != item.external_receipt_id
+            ):
+                raise RoutingContractError(
+                    "multiple external receipts for one child are ambiguous"
+                )
+            accepted_receipt_by_leg[item.proposal_leg_id] = (
+                item.external_receipt_id
+            )
 
     return normalized
 
@@ -133,11 +146,13 @@ def reconcile_equal_split_residual(
     parent_plan_id: str,
     stake_quantum: Decimal,
 ) -> ParallelRoutingProposal:
-    """Reconcile child receipts, then derive the next non-money-moving proposal.
+    """Reconcile child evidence, then derive the next non-money-moving proposal.
 
-    Every external effect on this strict surface must carry a deterministic child
-    identity and provider/account-scoped external receipt ID. Exact receipt replay
-    is idempotent; conflicting receipt reuse fails closed in the routing contract.
+    Every external effect on this strict surface carries deterministic child
+    identity. Confirmed ACCEPTED effects additionally require a provider/account
+    external receipt ID. UNKNOWN/refusal may have no provider receipt yet and still
+    block or constrain reroute through the child binding. Exact receipt replay is
+    idempotent; conflicting receipt reuse fails closed in the routing contract.
     """
     venues = tuple(selected_venues)
     normalized = _validated_child_receipts(

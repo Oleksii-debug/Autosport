@@ -69,10 +69,11 @@ class VenueQuote:
 class VenueObservation:
     """Externally reconciled effect bound to one routing request and exact quote.
 
-    The optional child-receipt fields form one all-or-none identity bundle. They
-    bind externally reconciled evidence back to a deterministic non-money-moving
-    proposal leg, but deliberately do not create a durable execution ledger. That
-    future authority remains owned by the canonical #353 execution layer.
+    The optional child identity fields bind evidence to one deterministic
+    non-money-moving proposal leg. An external receipt is separate evidence:
+    child-bound ACCEPTED effects require it, while UNKNOWN/refusal may truthfully
+    have no provider receipt yet. This does not create a durable execution ledger;
+    that future authority remains owned by canonical #353.
     """
 
     venue_id: str
@@ -115,13 +116,13 @@ class VenueObservation:
             self.parent_plan_id,
             self.proposal_leg_id,
             self.proposed_stake,
-            self.external_receipt_id,
         )
-        if any(value is not None for value in child_fields):
+        child_bound = any(value is not None for value in child_fields)
+        if child_bound:
             if any(value is None for value in child_fields):
                 raise RoutingContractError(
-                    "child receipt identity requires parent_plan_id, proposal_leg_id, "
-                    "proposed_stake and external_receipt_id together"
+                    "child identity requires parent_plan_id, proposal_leg_id and "
+                    "proposed_stake together"
                 )
             _text(self.parent_plan_id, "parent_plan_id")
             _text(self.proposal_leg_id, "proposal_leg_id")
@@ -130,11 +131,25 @@ class VenueObservation:
                 "proposed_stake",
                 positive=True,
             )
-            _text(self.external_receipt_id, "external_receipt_id")
             if accepted > bound_stake:
                 raise RoutingContractError(
                     "confirmed accepted stake exceeds bound proposal stake"
                 )
+        elif self.external_receipt_id is not None:
+            raise RoutingContractError(
+                "external_receipt_id requires deterministic child identity"
+            )
+
+        if self.external_receipt_id is not None:
+            _text(self.external_receipt_id, "external_receipt_id")
+        if (
+            child_bound
+            and self.effect is ExternalEffect.ACCEPTED
+            and self.external_receipt_id is None
+        ):
+            raise RoutingContractError(
+                "child-bound ACCEPTED evidence requires external_receipt_id"
+            )
 
 
 @dataclass(frozen=True, slots=True)

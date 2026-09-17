@@ -537,18 +537,26 @@ def resolve_comments(
         live_runs.append(_public_state(state))
 
     live_runs.sort(key=lambda item: item["claim_order"])
+    source_live_runs = [
+        run for run in live_runs if run.get("claim_mode") == "SOURCE_MUTATION"
+    ]
+    non_source_live_runs = [
+        run for run in live_runs if run.get("claim_mode") != "SOURCE_MUTATION"
+    ]
 
     if capacity is None:
-        admitted_runs = list(live_runs)
+        admitted_runs = list(source_live_runs)
         collision_candidates: list[dict[str, Any]] = []
     else:
-        admitted_runs = live_runs[:capacity]
-        collision_candidates = live_runs[capacity:]
+        admitted_runs = source_live_runs[:capacity]
+        collision_candidates = source_live_runs[capacity:]
 
     return {
         "now": _format_instant(resolved_now),
         "capacity": capacity,
         "live_runs": live_runs,
+        "source_live_runs": source_live_runs,
+        "non_source_live_runs": non_source_live_runs,
         "admitted_runs": admitted_runs,
         "collision_candidates": collision_candidates,
         "released_runs": released_runs,
@@ -598,7 +606,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--capacity",
         type=int,
         default=None,
-        help="Optional task capacity; admitted_runs are the first live claims.",
+        help=(
+            "Optional SOURCE_MUTATION task capacity; admitted_runs/collision_candidates "
+            "exclude live read-only/non-source claims."
+        ),
     )
     return parser
 

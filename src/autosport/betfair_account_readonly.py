@@ -613,6 +613,6 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
         if not isinstance(bet_id, str):
             raise BetfairReadOnlyError(f"{field} order lacks canonical bet_id")
         if bet_id in seen:
-            raise BetfairReadOnlyError(f"{field} pagination returned duplicate bet_id")
+            raise BetfairReadOnlyError(f"{field} pagination returned duplicate bet_id {bet_id}")
         seen.add(bet_id)
         target.append(order)

@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from autosport.agents import AgentContext
-from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
 from autosport.domain import MarketEvent
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
@@ -186,6 +186,46 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             self.assertEqual(book.balance, Decimal("99"))
             self.assertEqual(len(book.tickets), 1)
             self.assertEqual(len(ledger.verified_records()), 1)
+
+    def test_post_write_same_id_different_decision_fails_closed(self) -> None:
+        class WrongDecisionAfterCommitLedger(JsonlDecisionLedger):
+            def append_economic(self, record, contract):
+                wrong = DecisionRecord(
+                    replay_run_id=record.replay_run_id,
+                    agent=record.agent,
+                    observed_ts=record.observed_ts,
+                    action="ALTERED_MATERIAL_ACTION",
+                    payload=dict(record.payload),
+                    context_hash=record.context_hash,
+                    decision_id=record.decision_id,
+                    recorded_at=record.recorded_at,
+                )
+                super().append_economic(wrong, contract)
+                raise OSError("injected mismatched durable decision")
+
+        goal = self._goal()
+        event = self._event()
+        agent = self._agent(event, goal)
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "decisions.jsonl"
+            ledger = WrongDecisionAfterCommitLedger(ledger_path)
+            book = PaperBook("100")
+            context = AgentContext(
+                book,
+                latest_quotes={event.quote_key: event},
+                replay_run_id="run-1",
+                decision_ledger=ledger,
+            )
+
+            with self.assertRaisesRegex(OSError, "injected mismatched durable decision"):
+                agent.on_market_event(event, context)
+
+            self.assertEqual(book.balance, Decimal("100"))
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.committed_stake, Decimal("0"))
+            records = ledger.verified_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].action, "ALTERED_MATERIAL_ACTION")
 
 
 if __name__ == "__main__":

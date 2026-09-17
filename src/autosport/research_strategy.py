@@ -12,7 +12,11 @@ from .agents import AgentContext
 from .candidate_search import CandidateLeg, ParlayCandidate
 from .domain import MarketEvent
 from .forecasting import ForecastRecord, parse_iso_timestamp
-from .research_pipeline import ResearchDecisionPipeline, ResearchEvidence
+from .research_pipeline import (
+    ResearchDecisionAlreadyCommitted,
+    ResearchDecisionPipeline,
+    ResearchEvidence,
+)
 from .scenario_search import ScenarioGroup, ScenarioOutcome
 
 
@@ -319,22 +323,27 @@ class ResearchReplayAgent:
         if context.decision_ledger is None:
             raise RuntimeError("research replay strategy requires a decision ledger")
         _validate_market_binding(instruction, context.latest_quotes)
-        self.pipeline.decide_and_open(
-            book=context.paper_book,
-            candidate=instruction.candidate,
-            groups=list(instruction.groups),
-            forecasts=instruction.forecasts_by_quote,
-            evidence=instruction.evidence,
-            # Compatibility input only; active EconomicGoal makes it non-authoritative.
-            stake=instruction.stake,
-            decision_ts=instruction.decision_ts,
-            market_quotes=tuple(
-                context.latest_quotes[leg.quote_key]
-                for leg in instruction.candidate.legs
-            ),
-            decision_ledger=context.decision_ledger,
-            replay_run_id=context.replay_run_id,
-        )
+        try:
+            self.pipeline.decide_and_open(
+                book=context.paper_book,
+                candidate=instruction.candidate,
+                groups=list(instruction.groups),
+                forecasts=instruction.forecasts_by_quote,
+                evidence=instruction.evidence,
+                # Compatibility input only; active EconomicGoal makes it non-authoritative.
+                stake=instruction.stake,
+                decision_ts=instruction.decision_ts,
+                market_quotes=tuple(
+                    context.latest_quotes[leg.quote_key]
+                    for leg in instruction.candidate.legs
+                ),
+                decision_ledger=context.decision_ledger,
+                replay_run_id=context.replay_run_id,
+                material_action_id=instruction.decision_id,
+            )
+        except ResearchDecisionAlreadyCommitted:
+            self._processed.add(instruction.decision_id)
+            return
         self._processed.add(instruction.decision_id)
 
     def finalize_replay(self, _context: AgentContext) -> None:

@@ -392,6 +392,22 @@ class BookmakerAccountSnapshot:
             "settled_positions",
             snapshot_at,
         )
+        self._validate_cross_state_position_identity()
+
+    def _validate_cross_state_position_identity(self) -> None:
+        open_external_ids = {
+            position.external_position_id for position in self.open_positions
+        }
+        settled_external_ids = {
+            position.external_position_id for position in self.settled_positions
+        }
+        duplicates = open_external_ids & settled_external_ids
+        if duplicates:
+            duplicate = min(duplicates)
+            raise BookmakerCapabilityError(
+                "open_positions and settled_positions contain the same "
+                f"external_position_id {duplicate}"
+            )
 
     def _validate_balance(self, snapshot_at: datetime) -> None:
         observed = BookmakerCapability.BALANCE_READ in self.observed_capabilities

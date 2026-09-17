@@ -9,7 +9,7 @@ from .domain import MarketEvent, TicketLeg
 from .forecasting import ForecastRecord, parse_iso_timestamp
 from .price_truth import paper_quote_rejection_reason
 from .probability import paper_value
-from .risk import PaperRiskPolicy
+from .risk import PaperRiskPolicy, ProposedTicketRiskContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,11 +59,27 @@ class PaperValueAgent:
         estimate = paper_value(event.quote_key, forecast.probability, event.decimal_odds)
         if estimate.expected_profit_per_unit < self.minimum_edge:
             return
-        risk = self.risk_policy.evaluate(context.paper_book, self.stake)
+
+        leg = TicketLeg(event.event_id, event.market_id, event.selection_id, event.decimal_odds)
+        goal = self.risk_policy.economic_goal
+        proposal_context = None
+        if goal is not None:
+            proposal_context = ProposedTicketRiskContext(
+                legs=(leg,),
+                quotes=(event,),
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+                proposal_ts=event.observed_ts,
+            )
+        risk = self.risk_policy.evaluate(
+            context.paper_book,
+            self.stake,
+            context=proposal_context,
+        )
         if not risk.allowed:
             return
         ticket = context.paper_book.open_ticket(
-            [TicketLeg(event.event_id, event.market_id, event.selection_id, event.decimal_odds)],
+            [leg],
             self.stake,
             reason=f"paper forecast {forecast.model_id}; EV/unit={estimate.expected_profit_per_unit}",
             placed_at=event.observed_ts,
@@ -93,13 +109,15 @@ class PaperValueAgent:
                         "market_snapshot_hash": forecast.market_snapshot_hash,
                     }
                 )
-            context.decision_ledger.append(
-                DecisionRecord(
-                    replay_run_id=context.replay_run_id,
-                    agent=self.name,
-                    observed_ts=event.observed_ts,
-                    action="OPEN_PAPER_VALUE_TICKET",
-                    payload=payload,
-                    context_hash=context.market_context_hash(),
-                )
+            record = DecisionRecord(
+                replay_run_id=context.replay_run_id,
+                agent=self.name,
+                observed_ts=event.observed_ts,
+                action="OPEN_PAPER_VALUE_TICKET",
+                payload=payload,
+                context_hash=context.market_context_hash(),
             )
+            if goal is None:
+                context.decision_ledger.append(record)
+            else:
+                context.decision_ledger.append_economic(record, goal)

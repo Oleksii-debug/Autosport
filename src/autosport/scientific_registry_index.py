@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from enum import StrEnum
 
 from .scientific_registry import (
     PromotionAction,
     RegistryEntry,
+    ResearchProtocol,
     ScientificRegistry,
     ScientificRegistryError,
 )
@@ -68,6 +71,64 @@ class ScientificRegistryIndex:
 
     def _records(self, record_type: str, as_of: str) -> tuple[RegistryEntry, ...]:
         return self.registry.causal_records(record_type, as_of=as_of)
+
+    @staticmethod
+    def protocol_fingerprint(protocol: RegistryEntry | ResearchProtocol) -> str:
+        """Hash frozen protocol science while excluding registration identity/time metadata.
+
+        The durable protocol id and freeze timestamp remain immutable evidence, but excluding
+        them here makes an accidental re-registration of the same frozen scientific protocol
+        discoverable under a fresh id. Source/environment/data hashes remain in the fingerprint.
+        """
+
+        if isinstance(protocol, RegistryEntry):
+            if protocol.record_type != "ResearchProtocol":
+                raise ValueError("protocol entry must be a ResearchProtocol")
+            payload = protocol.payload
+        elif isinstance(protocol, ResearchProtocol):
+            payload = protocol.to_payload()
+        else:
+            raise TypeError("protocol must be a ResearchProtocol or RegistryEntry")
+
+        binding = payload.get("binding")
+        if type(binding) is not dict:
+            raise ScientificRegistryError("durable protocol lacks scientific binding")
+        frozen_binding = dict(binding)
+        frozen_binding.pop("research_protocol_id", None)
+        frozen_binding.pop("frozen_at_utc", None)
+        fingerprint_payload = {
+            "binding": frozen_binding,
+            "source_sha256": payload.get("source_sha256"),
+            "environment_sha256": payload.get("environment_sha256"),
+            "dataset_manifest_sha256": payload.get("dataset_manifest_sha256"),
+        }
+        canonical = json.dumps(
+            fingerprint_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def find_protocol_fingerprint(
+        self,
+        fingerprint: str,
+        *,
+        as_of: str,
+    ) -> tuple[RegistryEntry, ...]:
+        if (
+            type(fingerprint) is not str
+            or len(fingerprint) != 64
+            or any(char not in "0123456789abcdef" for char in fingerprint.lower())
+        ):
+            raise ValueError("fingerprint must be a canonical SHA-256 hex string")
+        wanted = fingerprint.lower()
+        return tuple(
+            entry
+            for entry in self._records("ResearchProtocol", as_of)
+            if self.protocol_fingerprint(entry) == wanted
+        )
 
     @staticmethod
     def _only(values: tuple[RegistryEntry, ...], **matches: str) -> tuple[RegistryEntry, ...]:

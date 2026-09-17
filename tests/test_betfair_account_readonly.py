@@ -212,7 +212,10 @@ def test_current_orders_duplicate_bet_id_across_pages_fails_closed():
     final["moreAvailable"] = False
     client, _ = client_for(response(page, 1), response(final, 2))
 
-    with pytest.raises(BetfairReadOnlyError, match="duplicate bet_id same"):
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="currentOrders pagination returned duplicate bet_id",
+    ):
         client.read_all_current_orders(page_size=1)
 
 

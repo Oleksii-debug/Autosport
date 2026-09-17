@@ -557,6 +557,10 @@ class CausalLearningEnvironment:
         resolution_time = _timestamp("resolved_at", resolved_at)
         if reveal_time < decision_time or reward_time < decision_time:
             raise LearningEnvironmentError("outcome/reward leaks before the action decision")
+        if reward_time < reveal_time:
+            raise LearningEnvironmentError(
+                "reward evidence cannot be available before outcome reveal"
+            )
         if resolution_time < reveal_time or resolution_time < reward_time:
             raise LearningEnvironmentError("outcome/reward is not yet available at resolve time")
 

@@ -95,7 +95,7 @@ class SourceHealthHistoryTests(unittest.TestCase):
             self.success(store, "2026-09-17T12:00:08+00:00")
             baseline = path.read_bytes()
 
-            with self.assertRaisesRegex(ValueError, "nondecreasing"):
+            with self.assertRaisesRegex(ValueError, "strictly increasing"):
                 store.record_failure(
                     "provider-a",
                     now="2026-09-17T12:00:07+00:00",
@@ -103,6 +103,26 @@ class SourceHealthHistoryTests(unittest.TestCase):
                 )
 
             self.assertEqual(path.read_bytes(), baseline)
+            self.assertEqual(store.get("provider-a").status, "healthy")
+
+    def test_equal_timestamp_transition_is_rejected_without_rewriting_replay_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "health.json"
+            store = SourceHealthStore(path)
+            self.success(store, "2026-09-17T12:00:08+00:00")
+            baseline = path.read_bytes()
+            boundary = self.at(8)
+            self.assertEqual(store.get_as_of("provider-a", as_of=boundary).status, "healthy")
+
+            with self.assertRaisesRegex(ValueError, "strictly increasing"):
+                store.record_failure(
+                    "provider-a",
+                    now="2026-09-17T12:00:08+00:00",
+                    error=RuntimeError("same-time late transition"),
+                )
+
+            self.assertEqual(path.read_bytes(), baseline)
+            self.assertEqual(store.get_as_of("provider-a", as_of=boundary).status, "healthy")
             self.assertEqual(store.get("provider-a").status, "healthy")
 
     def test_naive_as_of_is_rejected(self) -> None:

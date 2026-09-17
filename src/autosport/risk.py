@@ -183,6 +183,37 @@ class RiskDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class StakeVectorDecision:
+    """Pure endogenous multi-candidate paper allocation result."""
+
+    action: str
+    stakes: tuple[Decimal, ...]
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.action not in {"STAKE_VECTOR", "WAIT", "ZERO"}:
+            raise ValueError("stake vector action must be STAKE_VECTOR, WAIT or ZERO")
+        if type(self.stakes) is not tuple:
+            raise ValueError("stake vector stakes must be a tuple")
+        for stake in self.stakes:
+            if (
+                not isinstance(stake, Decimal)
+                or not stake.is_finite()
+                or stake < Decimal("0")
+            ):
+                raise ValueError(
+                    "stake vector stakes must contain non-negative finite Decimal values"
+                )
+        has_positive_stake = any(stake > 0 for stake in self.stakes)
+        if self.action == "STAKE_VECTOR" and not has_positive_stake:
+            raise ValueError("STAKE_VECTOR requires at least one positive stake")
+        if self.action != "STAKE_VECTOR" and has_positive_stake:
+            raise ValueError("WAIT/ZERO stake vectors must not contain positive stakes")
+        if type(self.reason) is not str or not self.reason:
+            raise ValueError("stake vector reason must be a non-empty string")
+
+
+@dataclass(frozen=True, slots=True)
 class _HistoricalRiskMetrics:
     """Derived, non-persistent risk facts from one validated PaperBook lifecycle."""
 
@@ -698,6 +729,8 @@ class PaperRiskPolicy:
         self,
         book: PaperBook,
         signal_strength: Decimal | str,
+        *,
+        context: ProposedTicketRiskContext | None = None,
     ) -> Decimal | None:
         """Derive one bounded paper stake when an EconomicGoalContract is active.
 
@@ -717,18 +750,27 @@ class PaperRiskPolicy:
         if not signal.is_finite() or signal <= 0:
             return None
 
+        if context is not None and not isinstance(
+            context, ProposedTicketRiskContext
+        ):
+            return None
+
         state = self._book_state(book)
         if state is None:
             return None
         initial_bankroll, balance, committed_stake, open_position_count = state
         if goal.emergency_stop or open_position_count >= goal.max_concurrent_positions:
             return None
-        # This proposal-only sizing API has no canonical probabilistic ruin
-        # witness input. A nontrivial owner ruin ceiling therefore means the
-        # method must return ZERO rather than emit a stake that has not passed
-        # every required economic-risk evidence boundary.
+        # A nontrivial ruin ceiling is executable only when the caller supplies
+        # canonical proposal evidence. The single-candidate compatibility path
+        # without context therefore remains fail-closed.
         if goal.max_risk_of_ruin < Decimal("1"):
-            return None
+            if (
+                context is None
+                or context.risk_of_ruin_upper_bound is None
+                or context.risk_of_ruin_upper_bound > goal.max_risk_of_ruin
+            ):
+                return None
 
         history_rooms = self._goal_history_rooms(book, goal)
         if history_rooms is None:
@@ -761,6 +803,203 @@ class PaperRiskPolicy:
         if not isinstance(amount, Decimal) or not amount.is_finite() or amount <= 0:
             return None
         return amount
+
+    @staticmethod
+    def _shadow_book_for_allocation(book: PaperBook) -> PaperBook | None:
+        """Clone canonical paper state for pure sequential allocation checks."""
+        try:
+            PaperBook._validate_loaded_state(book)
+            shadow = PaperBook(book.initial_bankroll)
+            shadow.balance = book.balance
+            shadow.tickets = dict(book.tickets)
+            shadow._lifecycle = list(book._lifecycle)
+            PaperBook._validate_loaded_state(shadow)
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
+            return None
+        return shadow
+
+    @staticmethod
+    def _risk_rejection_requires_wait(reason: str) -> bool:
+        return any(
+            marker in reason
+            for marker in (
+                " required",
+                "cannot be proven",
+                "does not match",
+                " is invalid",
+                " evidence is invalid",
+            )
+        )
+
+    def derive_goal_stake_vector(
+        self,
+        book: PaperBook,
+        signal_strengths: tuple[Decimal | str, ...],
+        *,
+        contexts: tuple[ProposedTicketRiskContext, ...],
+    ) -> StakeVectorDecision:
+        """Derive a pure, whole-portfolio stake vector under one EconomicGoal.
+
+        Positive candidates are evaluated strongest-signal first with a canonical
+        quote-key tie-break. Every accepted candidate is opened only in a shadow
+        PaperBook, so later candidates see earlier vector exposure for aggregate
+        capital, reserve, history, concurrency and event/market concentration
+        limits. The caller's real PaperBook is never mutated.
+
+        Missing or contradictory canonical evidence returns WAIT with an all-zero
+        vector. A complete candidate set with no executable positive allocation
+        returns ZERO. This is deliberately a risk/allocation primitive only;
+        Generic Opportunity/PortfolioPlan orchestration remains outside this API.
+        """
+
+        context_count = len(contexts) if type(contexts) is tuple else 0
+        zero_vector = tuple(Decimal("0") for _ in range(context_count))
+        goal = self.economic_goal
+        if goal is None:
+            return StakeVectorDecision(
+                "WAIT",
+                zero_vector,
+                "economic goal is required for endogenous stake-vector allocation",
+            )
+        if type(contexts) is not tuple or type(signal_strengths) is not tuple:
+            return StakeVectorDecision(
+                "WAIT",
+                zero_vector,
+                "candidate vector shape is invalid",
+            )
+        if len(contexts) != len(signal_strengths):
+            return StakeVectorDecision(
+                "WAIT",
+                zero_vector,
+                "candidate signal/context cardinality does not match",
+            )
+        if not contexts:
+            return StakeVectorDecision("ZERO", (), "candidate set is empty")
+        if any(not isinstance(context, ProposedTicketRiskContext) for context in contexts):
+            return StakeVectorDecision(
+                "WAIT",
+                zero_vector,
+                "candidate risk context is invalid",
+            )
+
+        parsed_signals: list[Decimal] = []
+        for raw_signal in signal_strengths:
+            try:
+                signal = Decimal(str(raw_signal))
+            except (InvalidOperation, TypeError, ValueError):
+                return StakeVectorDecision(
+                    "WAIT",
+                    zero_vector,
+                    "candidate signal evidence is invalid",
+                )
+            if not signal.is_finite():
+                return StakeVectorDecision(
+                    "WAIT",
+                    zero_vector,
+                    "candidate signal evidence is invalid",
+                )
+            parsed_signals.append(signal)
+
+        if goal.emergency_stop:
+            return StakeVectorDecision(
+                "ZERO",
+                zero_vector,
+                "economic goal emergency stop is active",
+            )
+        positive_indices = [
+            index for index, signal in enumerate(parsed_signals) if signal > 0
+        ]
+        if not positive_indices:
+            return StakeVectorDecision(
+                "ZERO",
+                zero_vector,
+                "candidate set contains no positive signal",
+            )
+
+        for index in positive_indices:
+            context = contexts[index]
+            if (
+                context.bankroll_id is None
+                or context.currency is None
+                or context.bankroll_id != goal.bankroll_id
+                or context.currency != goal.currency
+                or not context.quotes
+                or context.proposal_ts is None
+            ):
+                return StakeVectorDecision(
+                    "WAIT",
+                    zero_vector,
+                    "candidate set lacks canonical bankroll/currency/quote/time evidence",
+                )
+            if goal.max_risk_of_ruin < Decimal("1") and (
+                context.risk_of_ruin_upper_bound is None
+                or context.risk_of_ruin_upper_bound > goal.max_risk_of_ruin
+            ):
+                return StakeVectorDecision(
+                    "WAIT",
+                    zero_vector,
+                    "candidate set lacks acceptable portfolio risk-of-ruin evidence",
+                )
+
+        shadow = self._shadow_book_for_allocation(book)
+        if shadow is None:
+            return StakeVectorDecision(
+                "WAIT",
+                zero_vector,
+                "virtual bankroll allocation state is invalid",
+            )
+
+        def candidate_key(index: int) -> tuple[Decimal, tuple[str, ...], int]:
+            quote_keys = tuple(leg.quote_key for leg in contexts[index].legs)
+            return (-parsed_signals[index], quote_keys, index)
+
+        stakes = [Decimal("0") for _ in contexts]
+        for index in sorted(positive_indices, key=candidate_key):
+            context = contexts[index]
+            amount = self.derive_goal_stake(
+                shadow,
+                parsed_signals[index],
+                context=context,
+            )
+            if amount is None:
+                continue
+            decision = self.evaluate(shadow, amount, context=context)
+            if not decision.allowed:
+                if self._risk_rejection_requires_wait(decision.reason):
+                    return StakeVectorDecision(
+                        "WAIT",
+                        zero_vector,
+                        f"candidate evidence is incomplete: {decision.reason}",
+                    )
+                continue
+
+            try:
+                shadow.open_ticket(
+                    context.legs,
+                    amount,
+                    reason=f"risk-vector-reservation:{index}",
+                    placed_at=context.proposal_ts,
+                )
+            except (ArithmeticError, AttributeError, TypeError, ValueError):
+                return StakeVectorDecision(
+                    "WAIT",
+                    zero_vector,
+                    "virtual bankroll allocation shadow failed closed",
+                )
+            stakes[index] = amount
+
+        result = tuple(stakes)
+        if any(stake > 0 for stake in result):
+            return StakeVectorDecision(
+                "STAKE_VECTOR",
+                result,
+                "endogenous whole-portfolio stake vector derived",
+            )
+        return StakeVectorDecision(
+            "ZERO",
+            zero_vector,
+            "no candidate fits the current economic-goal risk envelope",
+        )
 
     def _derived_risk_values(
         self,

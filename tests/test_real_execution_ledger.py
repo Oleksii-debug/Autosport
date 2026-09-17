@@ -14,6 +14,7 @@ from autosport.real_execution_ledger import (
     ExecutionStateError,
     EventType,
     ExternalAcknowledgement,
+    ExternalEffectReconciliation,
     RealExecutionLedger,
     ReconciliationSnapshot,
 )
@@ -105,7 +106,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     reserved_at=RETRY_RESERVED_AT,
                 )
 
-    def test_unknown_ack_requires_external_reconciliation_evidence(self):
+    def test_unknown_ack_requires_durable_positive_reconciliation_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
             ledger.reserve_plan(plan(action()))
@@ -115,7 +116,9 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 attempt_id="try-1",
                 reserved_at=RESERVED_AT,
             )
-            ledger.mark_unknown("try-1", reason="timeout")
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
 
             with self.assertRaisesRegex(ExecutionStateError, "reconciliation evidence"):
                 ledger.acknowledge(
@@ -123,9 +126,49 @@ class RealExecutionLedgerTests(unittest.TestCase):
                         attempt_id="try-1",
                         external_receipt_id="r1",
                         status=AcknowledgementStatus.ACCEPTED,
-                        acknowledged_at=TS,
+                        acknowledged_at=RECONCILED_AT,
                         accepted_odds="2.5",
                         accepted_stake="10",
+                    )
+                )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError, "durable positive reconciliation evidence"
+            ):
+                ledger.acknowledge(
+                    ExternalAcknowledgement(
+                        attempt_id="try-1",
+                        external_receipt_id="r1",
+                        status=AcknowledgementStatus.ACCEPTED,
+                        acknowledged_at=RECONCILED_AT,
+                        accepted_odds="2.5",
+                        accepted_stake="10",
+                        reconciliation_evidence_id="fake-readback",
+                    )
+                )
+
+            ledger.reconcile_found(
+                ExternalEffectReconciliation(
+                    attempt_id="try-1",
+                    evidence_id="readback-1",
+                    external_receipt_id="r1",
+                    observed_at=RECONCILED_AT,
+                    source="provider-readback",
+                )
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError, "precedes attempt causal boundary"
+            ):
+                ledger.acknowledge(
+                    ExternalAcknowledgement(
+                        attempt_id="try-1",
+                        external_receipt_id="r1",
+                        status=AcknowledgementStatus.ACCEPTED,
+                        acknowledged_at=SUBMITTED_AT,
+                        accepted_odds="2.5",
+                        accepted_stake="10",
+                        reconciliation_evidence_id="readback-1",
                     )
                 )
 
@@ -134,13 +177,51 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     attempt_id="try-1",
                     external_receipt_id="r1",
                     status=AcknowledgementStatus.ACCEPTED,
-                    acknowledged_at=TS,
+                    acknowledged_at=RECONCILED_AT,
                     accepted_odds="2.5",
                     accepted_stake="10",
                     reconciliation_evidence_id="readback-1",
                 )
             )
             self.assertEqual(ledger.attempt_state("try-1"), AttemptState.ACCEPTED)
+
+    def test_unknown_ack_rejects_mismatched_reconciliation_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
+            ledger.reconcile_found(
+                ExternalEffectReconciliation(
+                    attempt_id="try-1",
+                    evidence_id="readback-1",
+                    external_receipt_id="different-receipt",
+                    observed_at=RECONCILED_AT,
+                    source="provider-readback",
+                )
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError, "receipt mismatches reconciliation evidence"
+            ):
+                ledger.acknowledge(
+                    ExternalAcknowledgement(
+                        attempt_id="try-1",
+                        external_receipt_id="r1",
+                        status=AcknowledgementStatus.ACCEPTED,
+                        acknowledged_at=RECONCILED_AT,
+                        accepted_odds="2.5",
+                        accepted_stake="10",
+                        reconciliation_evidence_id="readback-1",
+                    )
+                )
 
     def test_unknown_retry_only_after_not_found_reconciliation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -395,6 +476,88 @@ class RealExecutionLedgerTests(unittest.TestCase):
             self.assertEqual(ledger.attempt_state("try-1"), AttemptState.RESERVED)
 
 
+    def test_restart_rejects_hash_valid_unknown_ack_evidence_tamper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
+            ledger.reconcile_found(
+                ExternalEffectReconciliation(
+                    attempt_id="try-1",
+                    evidence_id="readback-1",
+                    external_receipt_id="r1",
+                    observed_at=RECONCILED_AT,
+                    source="provider-readback",
+                )
+            )
+            ledger.acknowledge(
+                ExternalAcknowledgement(
+                    attempt_id="try-1",
+                    external_receipt_id="r1",
+                    status=AcknowledgementStatus.ACCEPTED,
+                    acknowledged_at=RECONCILED_AT,
+                    accepted_odds="2.5",
+                    accepted_stake="5",
+                    reconciliation_evidence_id="readback-1",
+                )
+            )
+
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            acknowledgement = next(
+                envelope
+                for envelope in lines
+                if envelope["event"]["event_type"]
+                == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
+            )
+            acknowledgement["event"]["payload"][
+                "reconciliation_evidence_id"
+            ] = "fabricated-readback"
+
+            import hashlib
+
+            body = json.dumps(
+                acknowledgement["event"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            acknowledgement["sha256"] = hashlib.sha256(
+                body.encode()
+            ).hexdigest()
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        envelope,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for envelope in lines
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "missing reconciliation evidence",
+            ):
+                restarted.verify_integrity()
+
     def test_restart_rejects_hash_valid_acknowledgement_stake_escalation(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"
@@ -553,7 +716,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                         attempt_id=attempt_id,
                         external_receipt_id="same-native-id",
                         status=AcknowledgementStatus.ACCEPTED,
-                        acknowledged_at=TS,
+                        acknowledged_at=RECONCILED_AT,
                         accepted_odds="2.5",
                         accepted_stake="10",
                     )
@@ -582,7 +745,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     attempt_id="t1",
                     external_receipt_id="r",
                     status=AcknowledgementStatus.ACCEPTED,
-                    acknowledged_at=TS,
+                    acknowledged_at=RECONCILED_AT,
                     accepted_odds="2.5",
                     accepted_stake="10",
                 )
@@ -593,7 +756,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                         attempt_id="t2",
                         external_receipt_id="r",
                         status=AcknowledgementStatus.ACCEPTED,
-                        acknowledged_at=TS,
+                        acknowledged_at=RECONCILED_AT,
                         accepted_odds="2.5",
                         accepted_stake="10",
                     )
@@ -615,7 +778,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     attempt_id="t1",
                     external_receipt_id="r1",
                     status=AcknowledgementStatus.PARTIAL,
-                    acknowledged_at=TS,
+                    acknowledged_at=RECONCILED_AT,
                     accepted_odds="2.4",
                     accepted_stake="5",
                 )
@@ -724,7 +887,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 attempt_id="t1",
                 external_receipt_id="r",
                 status=AcknowledgementStatus.REJECTED,
-                acknowledged_at=TS,
+                acknowledged_at=RECONCILED_AT,
                 accepted_odds="2.5",
                 accepted_stake="10",
             )

@@ -10,6 +10,8 @@ from typing import Callable
 from .ingestion import CommittedIngestionHealthError, IngestionEngine, IngestionStats
 from .ingestion_health import IngestionPolicy, SourceHealthStore
 from .market_bus import MarketEventBus, MarketEventDeliveryError
+from .market_mirror import MarketMirror
+from .market_mirror_runtime import BoundedMirrorInvalidationBuffer
 from .providers import MarketProvider, ProviderBatch
 from .session import ObservationResult
 from .storage import SQLiteMarketStore
@@ -261,16 +263,39 @@ def observe_workspace_once(
     max_items: int = 250,
     policy: IngestionPolicy | None = None,
     clock: Clock | None = None,
+    mirror_updates: BoundedMirrorInvalidationBuffer | None = None,
 ) -> ObservationResult:
-    """Thread-safe bounded snapshot observation using short-lived durable stores only."""
+    """Observe one bounded snapshot and feed the canonical persist-first Market Mirror.
+
+    ``SQLiteMarketStore`` remains the sole durable market authority. A caller may pass
+    a long-lived ``BoundedMirrorInvalidationBuffer`` to retain one provider-isolated
+    in-memory decision view and bounded downstream invalidations across observations.
+    If omitted, this call still composes the canonical mirror and returns current quotes
+    from that mirror rather than maintaining a second ad-hoc live quote dictionary.
+    """
 
     root = Path(workspace)
     root.mkdir(parents=True, exist_ok=True)
     store = SQLiteMarketStore(root / "market.db")
     try:
         health_store = SourceHealthStore(root / "source_health.json")
+        if mirror_updates is None:
+            mirror = MarketMirror.from_store(store)
+            mirror_updates = BoundedMirrorInvalidationBuffer(mirror)
+        else:
+            if not isinstance(mirror_updates, BoundedMirrorInvalidationBuffer):
+                raise TypeError("mirror_updates must be a BoundedMirrorInvalidationBuffer")
+            mirror = mirror_updates.mirror
+            # Reconcile the non-durable mirror from canonical append-only history at
+            # each observation boundary. Re-applying identical/stale events is
+            # idempotent and deliberately does not enqueue downstream invalidations.
+            for persisted_event in store.events():
+                mirror.apply(persisted_event)
+
+        bus = MarketEventBus(store)
+        bus.subscribe(mirror_updates.accept_persisted)
         engine = IngestionEngine(
-            MarketEventBus(store),
+            bus,
             policy=policy,
             health_store=health_store,
             clock=clock,
@@ -279,7 +304,7 @@ def observe_workspace_once(
         source_id = stats.source_id
         current = tuple(
             sorted(
-                (event for event in store.current().values() if event.source_id == source_id),
+                mirror.view(source_ids=source_id).events,
                 key=lambda event: (event.event_id, event.market_id, event.selection_id),
             )
         )

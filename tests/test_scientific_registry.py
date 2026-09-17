@@ -367,3 +367,47 @@ def test_protocol_record_reuses_existing_scientific_binding_hash(tmp_path):
     assert stored is not None
     assert stored.payload["protocol_sha256"] == _binding().binding_sha256
     assert stored.payload["binding"] == _binding().canonical_dict()
+
+
+def test_final_experiment_requires_completion_and_valid_time_order():
+    with pytest.raises(ValueError, match="completed_at is required"):
+        replace(_experiment(), completed_at=None)
+
+    with pytest.raises(ValueError, match="must not precede"):
+        replace(_experiment(), created_at=T2, completed_at=T1)
+
+
+def test_promotion_rejects_cross_dataset_model_experiment_lineage(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    foundation = _foundation(registry)
+    registry.append(
+        DatasetSnapshot(
+            "dataset-2",
+            SHA_B,
+            "lawful-provider:fixture-2",
+            "license-evidence:v1",
+            T1,
+            T0,
+            outcome_reveal_after=T1,
+        )
+    )
+    registry.append(
+        replace(
+            _experiment(outcome=ResearchOutcome.POSITIVE),
+            dataset_snapshot_id="dataset-2",
+        )
+    )
+    decision = PromotionDecision(
+        "promotion-cross-dataset",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        SHA_D,
+        T3,
+        candidate_model_version_id="model-1",
+    )
+
+    with pytest.raises(PromotionEvidenceError, match="dataset lineage mismatch"):
+        registry.record_promotion(decision)

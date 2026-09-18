@@ -46,6 +46,12 @@ class LiveDecisionMode(str, Enum):
     SHADOW = "shadow"
 
 
+class LiveControlState(str, Enum):
+    RUNNING = "running"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+
+
 class LiveCycleStatus(str, Enum):
     DECIDED = "decided"
     DUPLICATE_DECISION = "duplicate_decision"
@@ -106,6 +112,7 @@ _PROGRESS_KEYS = frozenset(
         "decision_ts",
         "market_state_sha256",
         "affected_input_ids",
+        "registered_input_ids",
         "decision_id",
         "plan_sha256",
         "gate",
@@ -116,6 +123,9 @@ _PHASE_COMMITTED = "committed"
 _GATE_NORMAL = "normal"
 _GATE_PROVIDER_GAP = "provider_gap"
 _SHA256_HEX = frozenset("0123456789abcdef")
+_CONTROL_SCHEMA = "autosport.live_decision_control"
+_CONTROL_VERSION = 1
+_CONTROL_KEYS = frozenset({"schema", "schema_version", "loop_id", "state"})
 
 
 def _canonical_text(name: str, value: object) -> str:
@@ -173,12 +183,48 @@ def _require_utc_clock(clock: Clock) -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
+class _Control:
+    loop_id: str
+    state: LiveControlState
+
+    def __post_init__(self) -> None:
+        _canonical_text("loop_id", self.loop_id)
+        if not isinstance(self.state, LiveControlState):
+            raise LiveDecisionProgressError("live control state is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema": _CONTROL_SCHEMA,
+            "schema_version": _CONTROL_VERSION,
+            "loop_id": self.loop_id,
+            "state": self.state.value,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "_Control":
+        if type(raw) is not dict or set(raw) != _CONTROL_KEYS:
+            raise LiveDecisionProgressError(
+                "live decision control must contain canonical fields"
+            )
+        if raw["schema"] != _CONTROL_SCHEMA or raw["schema_version"] != _CONTROL_VERSION:
+            raise LiveDecisionProgressError("unsupported live decision control schema")
+        try:
+            return cls(
+                loop_id=raw["loop_id"],
+                state=LiveControlState(raw["state"]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise LiveDecisionProgressError("live decision control is invalid") from exc
+
+
+@dataclass(frozen=True, slots=True)
 class _Progress:
     loop_id: str
     phase: str
     decision_ts: str
     market_state_sha256: str
     affected_input_ids: tuple[str, ...]
+    registered_input_ids: tuple[str, ...]
     decision_id: str | None
     plan_sha256: str | None
     gate: str
@@ -197,6 +243,12 @@ class _Progress:
             _canonical_text("affected input id", input_id)
         if len(self.affected_input_ids) != len(set(self.affected_input_ids)):
             raise LiveDecisionProgressError("affected_input_ids must be unique")
+        if type(self.registered_input_ids) is not tuple:
+            raise LiveDecisionProgressError("registered_input_ids must be a tuple")
+        for input_id in self.registered_input_ids:
+            _canonical_text("registered input id", input_id)
+        if len(self.registered_input_ids) != len(set(self.registered_input_ids)):
+            raise LiveDecisionProgressError("registered_input_ids must be unique")
         if self.phase == _PHASE_PENDING:
             if self.decision_id is not None or self.plan_sha256 is not None:
                 raise LiveDecisionProgressError(
@@ -219,6 +271,7 @@ class _Progress:
             "decision_ts": self.decision_ts,
             "market_state_sha256": self.market_state_sha256,
             "affected_input_ids": list(self.affected_input_ids),
+            "registered_input_ids": list(self.registered_input_ids),
             "decision_id": self.decision_id,
             "plan_sha256": self.plan_sha256,
             "gate": self.gate,
@@ -233,9 +286,16 @@ class _Progress:
         if raw["schema"] != _PROGRESS_SCHEMA or raw["schema_version"] != _PROGRESS_VERSION:
             raise LiveDecisionProgressError("unsupported live decision progress schema")
         input_ids = raw["affected_input_ids"]
+        registered_ids = raw["registered_input_ids"]
         if type(input_ids) is not list or any(type(value) is not str for value in input_ids):
             raise LiveDecisionProgressError(
                 "affected_input_ids must be a JSON string array"
+            )
+        if type(registered_ids) is not list or any(
+            type(value) is not str for value in registered_ids
+        ):
+            raise LiveDecisionProgressError(
+                "registered_input_ids must be a JSON string array"
             )
         try:
             return cls(
@@ -244,6 +304,7 @@ class _Progress:
                 decision_ts=raw["decision_ts"],
                 market_state_sha256=raw["market_state_sha256"],
                 affected_input_ids=tuple(input_ids),
+                registered_input_ids=tuple(registered_ids),
                 decision_id=raw["decision_id"],
                 plan_sha256=raw["plan_sha256"],
                 gate=raw["gate"],
@@ -266,6 +327,7 @@ class PersistentLiveDecisionLoop:
     """
 
     PROGRESS_FILE_NAME = "live_decision_progress.json"
+    CONTROL_FILE_NAME = "live_decision_control.json"
     AGENT_ID = "persistent-live-decision-loop"
 
     def __init__(
@@ -345,25 +407,32 @@ class PersistentLiveDecisionLoop:
             self._observe = observation_runner
 
         self.progress_path = self.workspace / self.PROGRESS_FILE_NAME
+        self.control_path = self.workspace / self.CONTROL_FILE_NAME
         self._progress = self._load_progress()
         if self._progress is not None and self._progress.loop_id != self.loop_id:
             raise LiveDecisionProgressError(
                 "persisted live progress belongs to a different loop_id"
             )
+        durable_control = self._load_control()
+        if durable_control is None:
+            durable_control = _Control(self.loop_id, LiveControlState.RUNNING)
+        elif durable_control.loop_id != self.loop_id:
+            raise LiveDecisionProgressError(
+                "persisted live control belongs to a different loop_id"
+            )
+        self._control = durable_control
         self._intent_cache: dict[str, tuple[object, ...]] = {}
         self._pending_affected: dict[str, None] = {}
         self._needs_cache_rebuild = True
         self._next_freshness_deadline: datetime | None = None
-        self._paused = False
-        self._stopped = False
 
     @property
     def paused(self) -> bool:
-        return self._paused
+        return self._control.state is LiveControlState.PAUSED
 
     @property
     def stopped(self) -> bool:
-        return self._stopped
+        return self._control.state is LiveControlState.STOPPED
 
     def register_input(
         self,
@@ -385,18 +454,17 @@ class PersistentLiveDecisionLoop:
         self._needs_cache_rebuild = True
 
     def pause(self) -> None:
-        if self._stopped:
+        if self.stopped:
             raise RuntimeError("cannot pause a stopped live loop")
-        self._paused = True
+        self._persist_control(LiveControlState.PAUSED)
 
     def resume(self) -> None:
-        if self._stopped:
+        if self.stopped:
             raise RuntimeError("cannot resume a stopped live loop")
-        self._paused = False
+        self._persist_control(LiveControlState.RUNNING)
 
     def stop(self) -> None:
-        self._stopped = True
-        self._paused = False
+        self._persist_control(LiveControlState.STOPPED)
 
     def run(
         self,
@@ -425,15 +493,15 @@ class PersistentLiveDecisionLoop:
         return tuple(results)
 
     def run_cycle(self) -> LiveCycleResult:
-        if self._stopped:
+        if self.stopped:
             return LiveCycleResult(
                 LiveCycleStatus.STOPPED,
-                detail="STOP is latched; provider was not polled",
+                detail="durable STOP is latched; provider was not polled",
             )
-        if self._paused:
+        if self.paused:
             return LiveCycleResult(
                 LiveCycleStatus.PAUSED,
-                detail="loop is paused; provider was not polled",
+                detail="durable PAUSE is active; provider was not polled",
             )
 
         now = _require_utc_clock(self.clock)
@@ -446,7 +514,8 @@ class PersistentLiveDecisionLoop:
         batch = self.mirror_updates.drain(
             max_items=self.bounds.max_dirty_per_cycle
         )
-        for input_id in self.dependencies.affected_inputs(batch):
+        batch_affected = self.dependencies.affected_inputs(batch)
+        for input_id in batch_affected:
             self._pending_affected[input_id] = None
         if batch.full_refresh_required:
             self._pending_affected = {
@@ -464,24 +533,56 @@ class PersistentLiveDecisionLoop:
                 ),
             )
 
-        if (
+        freshness_expired = (
             self._next_freshness_deadline is not None
             and now > self._next_freshness_deadline
-        ):
+        )
+        if freshness_expired:
             self._needs_cache_rebuild = True
 
+        registered_input_ids = self.dependencies.input_ids
         current_market_sha = self._market_state_sha256()
         recovering_pending = (
             self._progress is not None
             and self._progress.phase == _PHASE_PENDING
             and self._progress.gate == _GATE_NORMAL
             and self._progress.market_state_sha256 == current_market_sha
+            and self._progress.registered_input_ids == registered_input_ids
         )
         if recovering_pending:
             self._needs_cache_rebuild = True
 
+        clean_committed_restart = (
+            self._needs_cache_rebuild
+            and self._progress is not None
+            and self._progress.phase == _PHASE_COMMITTED
+            and self._progress.gate == _GATE_NORMAL
+            and self._progress.market_state_sha256 == current_market_sha
+            and self._progress.registered_input_ids == registered_input_ids
+            and not batch_affected
+            and not batch.full_refresh_required
+            and not freshness_expired
+        )
+        if clean_committed_restart:
+            assert self._progress is not None
+            _, previous_decision_time = _canonical_timestamp(
+                "committed decision_ts", self._progress.decision_ts
+            )
+            if self._active_views_equal(previous_decision_time, now):
+                self._refresh_intents(registered_input_ids, now)
+                self._pending_affected.clear()
+                self._needs_cache_rebuild = False
+                self._update_freshness_deadline(now)
+                return LiveCycleResult(
+                    LiveCycleStatus.NO_CHANGE,
+                    detail=(
+                        "clean restart rebuilt deterministic intent cache from the "
+                        "same canonical decision-visible market state"
+                    ),
+                )
+
         if self._needs_cache_rebuild:
-            for input_id in self.dependencies.input_ids:
+            for input_id in registered_input_ids:
                 self._pending_affected[input_id] = None
 
         affected = tuple(self._pending_affected)
@@ -532,6 +633,28 @@ class PersistentLiveDecisionLoop:
         self._needs_cache_rebuild = False
         self._update_freshness_deadline(decision_time)
         return result
+
+    def _active_views_equal(
+        self,
+        earlier: datetime,
+        later: datetime,
+    ) -> bool:
+        for input_id in self.dependencies.input_ids:
+            earlier_view = self.dependencies.decision_view(
+                input_id,
+                as_of=earlier,
+                max_age=self.max_quote_age,
+            )
+            later_view = self.dependencies.decision_view(
+                input_id,
+                as_of=later,
+                max_age=self.max_quote_age,
+            )
+            if tuple(event.to_dict() for event in earlier_view.events) != tuple(
+                event.to_dict() for event in later_view.events
+            ):
+                return False
+        return True
 
     def _refresh_intents(
         self,
@@ -674,6 +797,7 @@ class PersistentLiveDecisionLoop:
                 or durable_progress.decision_ts != plan.decision_ts
                 or durable_progress.market_state_sha256 != market_state_sha256
                 or durable_progress.affected_input_ids != affected_input_ids
+                or durable_progress.registered_input_ids != self.dependencies.input_ids
                 or durable_progress.gate != gate
             ):
                 raise LiveDecisionProgressError(
@@ -715,6 +839,7 @@ class PersistentLiveDecisionLoop:
                 decision_ts=plan.decision_ts,
                 market_state_sha256=market_state_sha256,
                 affected_input_ids=affected_input_ids,
+                registered_input_ids=self.dependencies.input_ids,
                 decision_id=decision_id,
                 plan_sha256=plan.plan_sha256,
                 gate=gate,
@@ -744,6 +869,7 @@ class PersistentLiveDecisionLoop:
             decision_ts=decision_ts,
             market_state_sha256=market_state_sha256,
             affected_input_ids=affected_input_ids,
+            registered_input_ids=self.dependencies.input_ids,
             decision_id=None,
             plan_sha256=None,
             gate=gate,
@@ -751,6 +877,35 @@ class PersistentLiveDecisionLoop:
         with WorkspaceEconomicLock(self.workspace):
             atomic_write_json(self.progress_path, pending.to_dict())
         self._progress = pending
+
+    def _persist_control(self, state: LiveControlState) -> None:
+        candidate = _Control(self.loop_id, state)
+        with WorkspaceEconomicLock(self.workspace):
+            durable = self._load_control()
+            if durable is not None:
+                if durable.loop_id != self.loop_id:
+                    raise LiveDecisionProgressError(
+                        "persisted live control belongs to a different loop_id"
+                    )
+                if (
+                    durable.state is LiveControlState.STOPPED
+                    and state is not LiveControlState.STOPPED
+                ):
+                    raise RuntimeError("durable STOP cannot be cleared by this loop")
+            atomic_write_json(self.control_path, candidate.to_dict())
+        self._control = candidate
+
+    def _load_control(self) -> _Control | None:
+        if not self.control_path.exists():
+            return None
+        try:
+            text = self.control_path.read_text(encoding="utf-8")
+            raw = strict_json_loads(text)
+            return _Control.from_dict(raw)
+        except (OSError, TypeError, ValueError) as exc:
+            raise LiveDecisionProgressError(
+                "cannot verify persisted live decision control"
+            ) from exc
 
     def _load_progress(self) -> _Progress | None:
         if not self.progress_path.exists():

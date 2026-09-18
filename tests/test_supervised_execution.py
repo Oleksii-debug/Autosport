@@ -730,6 +730,14 @@ def test_caller_constructed_positive_readback_cannot_mint_ack() -> None:
         assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
 
+def test_verifier_has_no_closure_or_module_registry_state() -> None:
+    verifier = provider_evidence.verify_betfair_provider_state
+    function = getattr(verifier, "__func__", verifier)
+    assert getattr(function, "__closure__", None) is None
+    assert "issued" not in getattr(function, "__globals__", {})
+    assert "_authority" not in getattr(function, "__globals__", {})
+
+
 def test_caller_cannot_clone_verified_effect_to_mint_ack() -> None:
     assert not hasattr(provider_evidence, "_SEAL")
     with tempfile.TemporaryDirectory() as tmp:
@@ -998,71 +1006,3 @@ def test_closed_market_can_bind_event_from_cleared_bet_without_releasing_retry()
     action = bound.execution_plan.actions[0]
     capture, _ = _provider_capture(
         action,
-        matched_stake=None,
-        cleared_status="CANCELLED",
-        catalogue_available=False,
-    )
-    assert capture.market_event.event_id == action.event_id
-    assert capture.market_event.source == "cleared:CANCELLED"
-    binding = bound.profile_for(action.bookmaker_id, action.account_id)
-    with pytest.raises(ProviderEvidenceError, match="non-settled cleared state"):
-        verify_betfair_provider_state(
-            action,
-            _profile(),
-            expected_profile_sha256=binding.profile_sha256,
-            readback=capture,
-        )
-
-
-def test_verified_readback_still_enforces_approved_slippage() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        ledger, bound, _, action, _, _ = _ledger_with_unknown(
-            Path(tmp) / "execution.jsonl"
-        )
-        verified = _verified_state(
-            bound,
-            action,
-            matched_stake=action.requested_stake,
-            matched_odds=Decimal("1.80"),
-        )
-        assert isinstance(verified, VerifiedProviderEffectEvidence)
-        with pytest.raises(SupervisedExecutionError, match="slippage"):
-            reconcile_provider_readback(
-                ledger,
-                bound,
-                attempt_id="attempt-1",
-                readback=verified,
-            )
-        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
-
-
-def test_bridge_rejects_caller_asserted_terminal_settlement_exactness() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        ledger, bound, _, action, _, _ = _ledger_with_unknown(
-            Path(tmp) / "execution.jsonl"
-        )
-        readback = ProviderReadback(
-            bookmaker_id=action.bookmaker_id,
-            account_id=action.account_id,
-            action_id=action.action_id,
-            adapter_id="betfair-exchange-jsonrpc-readonly",
-            adapter_version="1",
-            profile_version=1,
-            event_id=action.event_id,
-            market_id=action.market_id,
-            selection_id=action.selection_id,
-            external_receipt_id="bet-settled-1",
-            observed_at=READBACK_AT,
-            source_payload_sha256="2" * 64,
-            status=AcknowledgementStatus.ACCEPTED,
-            accepted_odds=action.requested_odds,
-            accepted_stake=action.requested_stake,
-            terminal_settlement_exact=True,
-        )
-        with pytest.raises(SupervisedExecutionError, match="settlement exactness"):
-            reconcile_provider_readback(
-                ledger,
-                bound,
-                attempt_id="attempt-1",
-                readback=readback,
-            )

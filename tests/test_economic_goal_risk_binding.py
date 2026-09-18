@@ -416,6 +416,33 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             "economic goal conservative session loss limit exceeded",
         )
 
+    def test_known_settlement_after_proposal_time_fails_closed(self) -> None:
+        book = PaperBook("100")
+        lost = book.open_ticket(
+            [self._leg()],
+            Decimal("4"),
+            placed_at="2026-09-16T14:00:00+00:00",
+        )
+        book.settle(
+            lost.ticket_id,
+            set(),
+            settled_at="2026-09-16T15:00:03+00:00",
+        )
+        policy = self._policy(
+            self._goal(max_session_loss_fraction=Decimal("0.50"))
+        )
+
+        decision = policy.evaluate(
+            book,
+            Decimal("1"),
+            context=self._context(),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "virtual bankroll risk history is invalid",
+        )
+
     def test_measurement_window_cannot_extend_beyond_proposal_time(self) -> None:
         with self.assertRaisesRegex(
             ValueError,

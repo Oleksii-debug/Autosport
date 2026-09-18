@@ -1117,13 +1117,30 @@ class ScientificRegistry:
                 if evidence_entry is None:
                     raise PromotionEvidenceError("promotion evidence record is missing")
                 evidence_payload = evidence_entry["payload"]
+                try:
+                    frozen_rule = json.loads(binding.get("promotion_rule", ""))
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise PromotionEvidenceError("frozen promotion rule is not valid JSON") from exc
+                if type(frozen_rule) is not dict:
+                    raise PromotionEvidenceError("frozen promotion rule is not an object")
+                frozen_primary_metric = frozen_rule.get("primary_metric")
+                frozen_direction = frozen_rule.get("metric_direction")
+                if type(frozen_primary_metric) is not str:
+                    raise PromotionEvidenceError("frozen promotion rule lacks primary metric")
+                expected_direction = (
+                    "LOWER_IS_BETTER"
+                    if frozen_direction == "lower_is_better"
+                    else "HIGHER_IS_BETTER"
+                    if frozen_direction == "higher_is_better"
+                    else None
+                )
                 checks = (
                     ("experiment_id", matching_experiment_entry["record_id"], "promotion evidence experiment identity mismatch"),
                     ("candidate_strategy_version_id", decision.candidate_strategy_version_id, "promotion evidence strategy identity mismatch"),
                     ("candidate_model_version_id", decision.candidate_model_version_id, "promotion evidence model identity mismatch"),
                     ("evaluation_bundle_id", decision.evaluation_bundle_id, "promotion evidence evaluation identity mismatch"),
-                    ("estimand", binding.get("promotion_primary_metric"), "promotion evidence estimand is not bound to the frozen primary metric"),
-                    ("direction", "LOWER_IS_BETTER", "promotion evidence direction does not match the frozen promotion contract"),
+                    ("estimand", frozen_primary_metric, "promotion evidence estimand is not bound to the frozen primary metric"),
+                    ("direction", expected_direction, "promotion evidence direction does not match the frozen promotion contract"),
                     ("rollback_target_strategy_version_id", decision.predecessor_strategy_version_id, "promotion evidence rollback lineage mismatch"),
                 )
                 for key, expected, message in checks:

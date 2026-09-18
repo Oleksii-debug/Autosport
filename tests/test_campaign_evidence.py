@@ -163,10 +163,22 @@ class PaperCampaignTests(unittest.TestCase):
         if len(identities) != len(timestamps):
             raise AssertionError("fixture observation identities must match timestamps")
         observations = [
-            {"observed_ts": observed_ts, "dedupe_key": dedupe_key}
-            for observed_ts, dedupe_key in zip(timestamps, identities, strict=True)
+            {
+                "observed_ts": observed_ts,
+                "sequence": sequence,
+                "dedupe_key": dedupe_key,
+            }
+            for sequence, (observed_ts, dedupe_key) in enumerate(
+                zip(timestamps, identities, strict=True)
+            )
         ]
-        observations.sort(key=lambda item: (item["observed_ts"], item["dedupe_key"]))
+        observations.sort(
+            key=lambda item: (
+                item["observed_ts"],
+                item["sequence"],
+                item["dedupe_key"],
+            )
+        )
         payload = {
             "schema_version": 1,
             "replay_dataset_hash": cls._replay_dataset_hash(run_id, timestamps),

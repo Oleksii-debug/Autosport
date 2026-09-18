@@ -596,6 +596,11 @@ class PersistentLiveDecisionLoop:
         if self.decision_ledger.path.exists() or self._progress is not None:
             with WorkspaceEconomicLock(self.workspace):
                 self.decision_ledger.verify_integrity()
+                if (
+                    self._progress is not None
+                    and self._progress.phase == _PHASE_COMMITTED
+                ):
+                    self._verify_committed_progress_ledger_binding(self._progress)
         if self._progress is not None:
             durable_input_ids = set(self.dependencies.input_ids)
             progress_input_ids = set(self._progress.registered_input_ids)
@@ -1259,6 +1264,68 @@ class PersistentLiveDecisionLoop:
         envelope = json.loads(line.decode("utf-8"))
         record = JsonlDecisionLedger._validate_record(envelope["record"])
         return DecisionRecord(**record)
+
+    def _verify_committed_progress_ledger_binding(
+        self,
+        progress: _Progress,
+    ) -> None:
+        if progress.phase != _PHASE_COMMITTED:
+            raise LiveDecisionProgressError(
+                "committed progress verification requires committed phase"
+            )
+        assert progress.decision_id is not None
+        assert progress.plan_sha256 is not None
+        assert progress.ledger_offset is not None
+
+        context_payload = {
+            "schema": "autosport.live_decision_context",
+            "schema_version": 1,
+            "loop_id": self.loop_id,
+            "mode": self.mode.value,
+            "gate": progress.gate,
+            "market_state_sha256": progress.market_state_sha256,
+            "plan_sha256": progress.plan_sha256,
+        }
+        expected_context_hash = _canonical_json_sha256(context_payload)
+        expected_decision_id = f"live-{expected_context_hash}"
+        if progress.decision_id != expected_decision_id:
+            raise DecisionLedgerIntegrityError(
+                "committed live progress decision identity is inconsistent"
+            )
+
+        existing = self._verified_ledger_record_at_offset(progress.ledger_offset)
+        if existing is None:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision is missing from Decision Ledger"
+            )
+        verify_economic_goal_binding(
+            existing,
+            self.authority.contract,
+            self.authority.risk_policy,
+        )
+        if (
+            existing.decision_id != progress.decision_id
+            or existing.replay_run_id != f"live:{self.loop_id}"
+            or existing.agent != self.AGENT_ID
+            or existing.observed_ts != progress.decision_ts
+            or existing.context_hash != expected_context_hash
+            or existing.payload.get("schema")
+            != "autosport.persistent_live_decision"
+            or existing.payload.get("schema_version") != 1
+            or existing.payload.get("loop_id") != self.loop_id
+            or existing.payload.get("mode") != self.mode.value
+            or existing.payload.get("gate") != progress.gate
+            or existing.payload.get("market_state_sha256")
+            != progress.market_state_sha256
+            or existing.payload.get("affected_input_ids")
+            != progress.affected_input_ids
+            or existing.payload.get("plan_sha256") != progress.plan_sha256
+            or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
+            != progress.decision_id
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live progress conflicts with Decision Ledger record"
+            )
 
     def _persist_control(self, state: LiveControlState) -> None:
         candidate = _Control(self.loop_id, state)

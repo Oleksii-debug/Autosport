@@ -147,28 +147,10 @@ class ScenarioSearchEngine:
         Unlike analyse(), this path never accepts caller-supplied ScenarioGroup values
         as completeness evidence and never samples an oversized terminal space.
         """
-        open_tickets = [
-            ticket for ticket in tickets if ticket.status is TicketStatus.OPEN
-        ]
-        if not open_tickets:
-            zero = Decimal("0")
-            return ScenarioSearchReport(
-                "authoritative-exact-enumeration",
-                1,
-                1,
-                zero,
-                zero,
-                zero,
-                zero,
-                True,
-                True,
-                None,
-                None,
-                True,
-                (),
-            )
         if type(authorities) not in (list, tuple) or not authorities:
-            raise ValueError("authoritative outcome analysis requires market authorities")
+            raise ValueError(
+                "authoritative outcome analysis requires market authorities"
+            )
         if any(
             not isinstance(authority, MarketSettlementOutcomeAuthority)
             for authority in authorities
@@ -186,32 +168,109 @@ class ScenarioSearchEngine:
                 ),
             )
         )
+        open_tickets = [
+            ticket for ticket in tickets if ticket.status is TicketStatus.OPEN
+        ]
+        if not open_tickets:
+            zero = Decimal("0")
+            return ScenarioSearchReport(
+                mode="authoritative-exact-enumeration",
+                total_states=1,
+                nodes_explored=1,
+                observed_worst=zero,
+                observed_best=zero,
+                conservative_floor=zero,
+                conservative_ceiling=zero,
+                worst_proven=True,
+                best_proven=True,
+                expected_case=None,
+                expected_mode=None,
+                outcome_space_exhaustive=True,
+                outcome_authority_sha256s=tuple(
+                    authority.authority_sha256 for authority in ordered
+                ),
+            )
+
+        market_groups: dict[
+            tuple[str, str, str, str],
+            list[MarketSettlementOutcomeAuthority],
+        ] = {}
+        for authority in ordered:
+            market_groups.setdefault(
+                authority.identity.market_key,
+                [],
+            ).append(authority)
+
         ticket_quote_keys = {
             leg.quote_key
             for ticket in open_tickets
             for leg in ticket.legs
         }
-        coverage: dict[str, str] = {}
+        coverage: dict[
+            str,
+            tuple[
+                tuple[str, str, str, str],
+                frozenset[str],
+            ],
+        ] = {}
         state_spaces: list[tuple[object, ...]] = []
-        for authority in ordered:
-            authority_quote_keys = set(authority.quote_keys)
+        state_authorities: list[MarketSettlementOutcomeAuthority] = []
+
+        for market_key in sorted(market_groups):
+            provider_authorities = market_groups[market_key]
+            baseline = provider_authorities[0]
+            provider_sources: set[str] = set()
+            for authority in provider_authorities:
+                source_id = authority.identity.source_id
+                if source_id in provider_sources:
+                    raise ValueError(
+                        "duplicate provider authority for canonical market identity"
+                    )
+                provider_sources.add(source_id)
+                if (
+                    authority.selection_ids != baseline.selection_ids
+                    or authority.settlement_semantics
+                    is not baseline.settlement_semantics
+                ):
+                    raise ValueError(
+                        "provider authorities disagree on canonical market terminal states"
+                    )
+
+            authority_quote_keys = set(baseline.quote_keys)
             if not ticket_quote_keys.intersection(authority_quote_keys):
                 raise ValueError(
                     "authoritative outcome universe is unrelated to the open portfolio"
                 )
-            for quote_key in authority.quote_keys:
+            bound_sources = frozenset(provider_sources)
+            for quote_key in baseline.quote_keys:
                 if quote_key in coverage:
                     raise ValueError(
                         "authoritative outcome universes overlap on quote identity"
                     )
-                coverage[quote_key] = authority.authority_sha256
-            state_spaces.append(authority.terminal_states)
+                coverage[quote_key] = (market_key, bound_sources)
+            state_spaces.append(baseline.terminal_states)
+            state_authorities.append(baseline)
 
         missing = ticket_quote_keys.difference(coverage)
         if missing:
             raise ValueError(
                 "ticket leg missing from authoritative outcome universe"
             )
+
+        for ticket in open_tickets:
+            if len(ticket.provider_source_ids) != 1:
+                raise ValueError(
+                    "authoritative outcome analysis requires exactly one provider "
+                    "source identity per open ticket"
+                )
+            ticket_source = ticket.provider_source_ids[0]
+            for leg in ticket.legs:
+                _market_key, allowed_sources = coverage[leg.quote_key]
+                if ticket_source not in allowed_sources:
+                    raise ValueError(
+                        "ticket provider source does not match authoritative "
+                        "market outcome evidence"
+                    )
 
         total_states = math.prod(len(states) for states in state_spaces)
         if total_states > self.exact_state_limit:
@@ -223,7 +282,7 @@ class ScenarioSearchEngine:
         profits: list[Decimal] = []
         for combination in itertools.product(*state_spaces):
             settlement_by_quote: dict[str, str] = {}
-            for authority, state in zip(ordered, combination):
+            for authority, state in zip(state_authorities, combination):
                 state_settlement = authority.settlement_by_quote(state)
                 if settlement_by_quote.keys() & state_settlement.keys():
                     raise ValueError(

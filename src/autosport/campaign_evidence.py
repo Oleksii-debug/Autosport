@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .integrity import atomic_write_json
+from .run_registry import ReconciliationError, RunRegistry
 from .scientific_registry import ScientificRegistry
 from .workspace_lock import WorkspaceEconomicLock
 
@@ -448,12 +449,28 @@ class PaperCampaign:
             ):
                 raise CampaignError("session outcome was not causally revealed at campaign evaluation_as_of")
 
-    def add_session(self, session: SessionEvidence) -> None:
+    def add_session(
+        self,
+        session: SessionEvidence,
+        *,
+        scientific_registry: ScientificRegistry,
+        run_registry: RunRegistry,
+    ) -> None:
         if self.finalized:
             raise CampaignFinalizedError("finalized campaign cannot accept new session evidence")
+        if not isinstance(scientific_registry, ScientificRegistry):
+            raise CampaignError("scientific_registry must be a ScientificRegistry")
+        if not isinstance(run_registry, RunRegistry):
+            raise CampaignError("run_registry must be a RunRegistry")
         self.sessions.append(session)
         try:
             self._validate_sessions()
+            _validate_authoritative_session(
+                self,
+                session,
+                scientific_registry=scientific_registry,
+                run_registry=run_registry,
+            )
         except Exception:
             self.sessions.pop()
             raise
@@ -632,6 +649,7 @@ class PaperCampaign:
         path: str | Path,
         *,
         scientific_registry: ScientificRegistry | None = None,
+        run_registry: RunRegistry | None = None,
     ) -> "PaperCampaign":
         destination = Path(path)
         raw_text = destination.read_text(encoding="utf-8")
@@ -701,8 +719,19 @@ class PaperCampaign:
             readiness=None if state["readiness"] is None else CampaignReadiness(state["readiness"]),
             campaign_sha256=state["campaign_sha256"],
         )
-        if scientific_registry is not None:
+        if (scientific_registry is None) != (run_registry is None):
+            raise CampaignError(
+                "scientific_registry and run_registry must be supplied together for authority revalidation"
+            )
+        if scientific_registry is not None and run_registry is not None:
             _validate_registry_bindings(campaign, scientific_registry)
+            for session in campaign.sessions:
+                _validate_authoritative_session(
+                    campaign,
+                    session,
+                    scientific_registry=scientific_registry,
+                    run_registry=run_registry,
+                )
         return campaign
 
     def evidence_summary(self) -> str:
@@ -877,30 +906,259 @@ def _session_from_payload(raw: object) -> SessionEvidence:
         raise CampaignIntegrityError("invalid session evidence payload") from exc
 
 
+def _required_registry_entry(
+    registry: ScientificRegistry,
+    record_type: str,
+    record_id: str,
+):
+    entry = registry.get(record_type, record_id)
+    if entry is None:
+        raise CampaignIntegrityError(
+            f"missing scientific registry binding {record_type}:{record_id}"
+        )
+    return entry
+
+
 def _validate_registry_bindings(campaign: PaperCampaign, registry: ScientificRegistry) -> None:
     if not isinstance(registry, ScientificRegistry):
         raise CampaignError("scientific_registry must be ScientificRegistry")
-    bindings = (
-        ("ResearchProtocol", campaign.research_protocol_id, campaign.protocol_sha256),
-        ("Hypothesis", campaign.hypothesis_id, None),
-    )
-    for kind, identity, expected_sha in bindings:
-        entry = registry.get(kind, identity)
-        if entry is None:
-            raise CampaignIntegrityError(f"missing scientific registry binding {kind}:{identity}")
-        if expected_sha is not None and entry.payload.get("protocol_sha256") != expected_sha.lower():
-            raise CampaignIntegrityError(f"{kind}:{identity} hash binding mismatch")
-    for session in campaign.sessions:
-        for kind, identity in (
-            ("StrategyVersion", session.strategy_version_id),
-            ("DatasetSnapshot", session.dataset_snapshot_id),
-        ):
-            entry = registry.get(kind, identity)
-            if entry is None:
-                raise CampaignIntegrityError(f"missing scientific registry binding {kind}:{identity}")
-        if session.model_version_id is not None and registry.get("ModelVersion", session.model_version_id) is None:
-            raise CampaignIntegrityError(f"missing scientific registry binding ModelVersion:{session.model_version_id}")
 
+    protocol = _required_registry_entry(
+        registry, "ResearchProtocol", campaign.research_protocol_id
+    )
+    if protocol.payload.get("protocol_sha256") != campaign.protocol_sha256.lower():
+        raise CampaignIntegrityError(
+            f"ResearchProtocol:{campaign.research_protocol_id} hash binding mismatch"
+        )
+    binding = protocol.payload.get("binding")
+    if not isinstance(binding, dict):
+        raise CampaignIntegrityError("ResearchProtocol binding payload is invalid")
+    if binding.get("hypothesis_id") != campaign.hypothesis_id:
+        raise CampaignIntegrityError("campaign hypothesis is not bound by ResearchProtocol")
+    if binding.get("promotion_rule") != campaign.readiness_rule:
+        raise CampaignIntegrityError("campaign readiness_rule is not the frozen protocol rule")
+
+    hypothesis = _required_registry_entry(registry, "Hypothesis", campaign.hypothesis_id)
+    if hypothesis.payload.get("primary_metric") != campaign.primary_metric:
+        raise CampaignIntegrityError("campaign primary_metric mismatches frozen Hypothesis")
+    if tuple(hypothesis.payload.get("protective_metrics", ())) != campaign.protective_metrics:
+        raise CampaignIntegrityError("campaign protective_metrics mismatch frozen Hypothesis")
+
+    for session in campaign.sessions:
+        dataset = _required_registry_entry(
+            registry, "DatasetSnapshot", session.dataset_snapshot_id
+        )
+        if dataset.payload.get("manifest_sha256") != session.dataset_manifest_sha256.lower():
+            raise CampaignIntegrityError(
+                f"DatasetSnapshot:{session.dataset_snapshot_id} manifest binding mismatch"
+            )
+        if protocol.payload.get("dataset_manifest_sha256") != session.dataset_manifest_sha256.lower():
+            raise CampaignIntegrityError(
+                "ResearchProtocol dataset manifest does not match campaign session"
+            )
+
+        strategy = _required_registry_entry(
+            registry, "StrategyVersion", session.strategy_version_id
+        )
+        if strategy.payload.get("source_sha256") != session.source_sha256.lower():
+            raise CampaignIntegrityError(
+                f"StrategyVersion:{session.strategy_version_id} source binding mismatch"
+            )
+        if strategy.payload.get("config_sha256") != session.config_sha256.lower():
+            raise CampaignIntegrityError(
+                f"StrategyVersion:{session.strategy_version_id} config binding mismatch"
+            )
+        if strategy.payload.get("model_version_id") != session.model_version_id:
+            raise CampaignIntegrityError(
+                f"StrategyVersion:{session.strategy_version_id} model binding mismatch"
+            )
+
+        if session.model_version_id is not None:
+            model = _required_registry_entry(
+                registry, "ModelVersion", session.model_version_id
+            )
+            if model.payload.get("dataset_snapshot_id") != session.dataset_snapshot_id:
+                raise CampaignIntegrityError(
+                    f"ModelVersion:{session.model_version_id} dataset binding mismatch"
+                )
+            if model.payload.get("research_protocol_id") != campaign.research_protocol_id:
+                raise CampaignIntegrityError(
+                    f"ModelVersion:{session.model_version_id} protocol binding mismatch"
+                )
+
+        bundle = _required_registry_entry(registry, "EvaluationBundle", session.evidence_id)
+        if bundle.payload.get("dataset_snapshot_id") != session.dataset_snapshot_id:
+            raise CampaignIntegrityError(
+                f"EvaluationBundle:{session.evidence_id} dataset binding mismatch"
+            )
+        if bundle.payload.get("protocol_sha256") != campaign.protocol_sha256.lower():
+            raise CampaignIntegrityError(
+                f"EvaluationBundle:{session.evidence_id} protocol binding mismatch"
+            )
+        if bundle.payload.get("evaluated_strategy_version_id") != session.strategy_version_id:
+            raise CampaignIntegrityError(
+                f"EvaluationBundle:{session.evidence_id} strategy binding mismatch"
+            )
+        if bundle.payload.get("evaluated_model_version_id") != session.model_version_id:
+            raise CampaignIntegrityError(
+                f"EvaluationBundle:{session.evidence_id} model binding mismatch"
+            )
+
+        authority_times = (
+            protocol.available_at,
+            hypothesis.available_at,
+            dataset.available_at,
+            strategy.available_at,
+            bundle.available_at,
+        )
+        if session.model_version_id is not None:
+            authority_times += (
+                _required_registry_entry(
+                    registry, "ModelVersion", session.model_version_id
+                ).available_at,
+            )
+        session_available = _instant(session.available_at, "session.available_at")
+        if any(
+            _instant(value, "scientific authority available_at") > session_available
+            for value in authority_times
+        ):
+            raise CampaignIntegrityError(
+                "session available_at predates a required scientific authority"
+            )
+
+        dataset_reveal = dataset.payload.get("outcome_reveal_after")
+        if dataset_reveal is None:
+            if session.outcome_reveal_after is not None:
+                raise CampaignIntegrityError(
+                    "session outcome_reveal_after is not backed by DatasetSnapshot"
+                )
+        elif session.outcome_reveal_after != dataset_reveal:
+            raise CampaignIntegrityError(
+                "session outcome_reveal_after mismatches DatasetSnapshot"
+            )
+
+
+def _evaluation_decimal(evaluation: Mapping[str, Any], field: str) -> Decimal:
+    value = evaluation.get(field)
+    if not isinstance(value, str):
+        raise CampaignIntegrityError(
+            f"completed run evaluation.{field} is not canonical text"
+        )
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise CampaignIntegrityError(
+            f"completed run evaluation.{field} is not Decimal-compatible"
+        ) from exc
+    if not parsed.is_finite():
+        raise CampaignIntegrityError(
+            f"completed run evaluation.{field} is non-finite"
+        )
+    return parsed
+
+
+def _evaluation_count(evaluation: Mapping[str, Any], field: str) -> int:
+    value = evaluation.get(field)
+    if type(value) is not int or isinstance(value, bool) or value < 0:
+        raise CampaignIntegrityError(
+            f"completed run evaluation.{field} is not a non-negative integer"
+        )
+    return value
+
+
+def _validate_authoritative_session(
+    campaign: PaperCampaign,
+    session: SessionEvidence,
+    *,
+    scientific_registry: ScientificRegistry,
+    run_registry: RunRegistry,
+) -> None:
+    _validate_registry_bindings(campaign, scientific_registry)
+    try:
+        summary, summary_sha256 = run_registry.verified_completed_summary_for_run(
+            session.run_id
+        )
+    except (KeyError, ReconciliationError, ValueError) as exc:
+        raise CampaignIntegrityError(
+            f"run {session.run_id} lacks verified completed summary authority"
+        ) from exc
+
+    strategy = _required_registry_entry(
+        scientific_registry, "StrategyVersion", session.strategy_version_id
+    )
+    runtime = summary.get("strategy_runtime")
+    if (
+        not isinstance(runtime, dict)
+        or runtime.get("canonical_strategy_id")
+        != strategy.payload.get("canonical_strategy_id")
+    ):
+        raise CampaignIntegrityError(
+            "completed run strategy identity mismatches StrategyVersion"
+        )
+
+    bundle = _required_registry_entry(
+        scientific_registry, "EvaluationBundle", session.evidence_id
+    )
+    artifact_hashes = bundle.payload.get("artifact_hashes")
+    if (
+        not isinstance(artifact_hashes, list)
+        or summary_sha256 not in artifact_hashes
+    ):
+        raise CampaignIntegrityError(
+            "EvaluationBundle does not bind the verified run summary artifact"
+        )
+
+    evaluation = summary.get("evaluation")
+    if not isinstance(evaluation, dict):
+        raise CampaignIntegrityError("completed run lacks evaluation authority")
+    authoritative_decimals = {
+        "starting_bankroll": _evaluation_decimal(evaluation, "initial_bankroll"),
+        "ending_bankroll": _evaluation_decimal(evaluation, "final_balance"),
+        "net_profit": _evaluation_decimal(evaluation, "net_profit"),
+        "turnover": _evaluation_decimal(evaluation, "settled_stake"),
+    }
+    for field, expected in authoritative_decimals.items():
+        if getattr(session, field) != expected:
+            raise CampaignIntegrityError(
+                f"session {field} mismatches completed run evaluation"
+            )
+
+    wins = _evaluation_count(evaluation, "won")
+    losses = _evaluation_count(evaluation, "lost")
+    voids = _evaluation_count(evaluation, "void")
+    if (session.wins, session.losses, session.voids) != (wins, losses, voids):
+        raise CampaignIntegrityError(
+            "session win/loss/void counts mismatch completed run evaluation"
+        )
+    if session.bets != wins + losses + voids:
+        raise CampaignIntegrityError(
+            "session bets mismatches completed run settled-result count"
+        )
+
+    expected_outcome = (
+        CampaignOutcome.POSITIVE
+        if session.net_profit > 0
+        else CampaignOutcome.NEGATIVE
+        if session.net_profit < 0
+        else CampaignOutcome.NULL
+    )
+    if session.outcome is not expected_outcome:
+        raise CampaignIntegrityError(
+            "session outcome is not mechanically derived from authoritative net_profit"
+        )
+
+    unsupported = {
+        "brier_sum": session.brier_sum,
+        "log_loss_sum": session.log_loss_sum,
+        "max_drawdown": session.max_drawdown,
+        "peak_exposure": session.peak_exposure,
+        "risk_of_ruin": session.risk_of_ruin,
+        "volatility": session.volatility,
+    }
+    if any(value is not None for value in unsupported.values()) or session.prediction_count != 0:
+        raise CampaignIntegrityError(
+            "session metrics without a canonical run authority must remain explicit TBD"
+        )
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}

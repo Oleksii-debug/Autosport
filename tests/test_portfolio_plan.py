@@ -25,6 +25,7 @@ from autosport.portfolio_plan import (
     PortfolioPlan,
     PortfolioPlanReconciliationRequired,
     TerminalStateCompletenessEvidence,
+    VerifiedTerminalEconomics,
     build_portfolio_plan,
     persist_portfolio_plan_decision,
 )
@@ -658,6 +659,46 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertEqual(plan.stakes, (Decimal("0"), Decimal("0")))
         self.assertIsNone(plan.terminal_economics)
         self.assertIn("authoritative exhaustive market-outcome semantics", plan.reason)
+
+        # Preserve direct restart/serialization coverage for the typed terminal proof
+        # even though external completeness evidence is not positive-action authority.
+        proof = VerifiedTerminalEconomics(
+            completeness_evidence=witness,
+            report_mode="exact-enumeration",
+            total_states=len(outcomes),
+            worst_terminal_profit=Decimal("1"),
+            best_terminal_profit=Decimal("2"),
+            worst_proven=True,
+            best_proven=True,
+        )
+        self.assertEqual(VerifiedTerminalEconomics.from_dict(proof.to_dict()), proof)
+
+        # Typed control evidence still has to bind the OpportunityEvidence identity;
+        # fail-closed market exhaustiveness must not mask a weaker control-drift check.
+        tampered_checks = tuple(
+            (
+                name,
+                ("7" * 64 if name == "routing_feasibility" else digest),
+            )
+            for name, digest in witness.execution_check_sha256s
+        )
+        tampered_witness = replace(
+            witness,
+            execution_check_sha256s=tampered_checks,
+        )
+        tampered = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            terminal_state_evidence=tampered_witness,
+        )
+        self.assertEqual(tampered.action, PortfolioAction.WAIT)
+        self.assertIn(
+            "execution assumptions do not match verified completeness",
+            tampered.reason,
+        )
 
     def test_verified_terminal_model_with_nonpositive_minimum_fails_closed(self) -> None:
         goal = self._goal()

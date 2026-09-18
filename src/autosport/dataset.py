@@ -90,6 +90,19 @@ def _require_canonical_string(raw: dict[str, Any], key: str, *, context: str) ->
     return value
 
 
+def _canonical_sport(value: object, *, field: str) -> str:
+    if type(value) is not str or not value or value.strip() != value:
+        raise ValueError(f"{field} must be a non-empty canonical sport identity")
+    if value != value.lower() or "|" in value or any(
+        character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
+        for character in value
+    ):
+        raise ValueError(
+            f"{field} must use lowercase ASCII letters, digits, '_' or '-' only"
+        )
+    return value
+
+
 def _require_digest(raw: dict[str, Any], key: str, *, context: str) -> str:
     value = _require_canonical_string(raw, key, context=context)
     if (
@@ -252,6 +265,33 @@ class ReplayDataset:
     def _assert_retention_current(self, retention_as_of: str | None = None) -> None:
         _assert_governance_retention_current(self.governance, retention_as_of)
 
+    def _assert_sport_scope(self, events: list[MarketEvent]) -> tuple[str, ...]:
+        if self.schema_version < 3:
+            if any(event.sport is not None for event in events):
+                raise ValueError(
+                    "legacy dataset schema cannot make event-level sport claims; use schema v3"
+                )
+            return ()
+
+        declared = _canonical_sport(self.sport, field="dataset manifest.sport")
+        if declared == "unknown":
+            raise ValueError("schema v3 dataset sport cannot be unknown")
+        if not events:
+            raise ValueError("schema v3 dataset requires at least one market event")
+        if any(event.sport is None for event in events):
+            raise ValueError("schema v3 requires explicit sport on every market event")
+        actual = tuple(sorted({event.sport for event in events if event.sport is not None}))
+        if declared == "mixed":
+            if len(actual) < 2:
+                raise ValueError(
+                    "dataset manifest.sport=mixed requires at least two explicit event sports"
+                )
+        elif actual != (declared,):
+            raise ValueError(
+                "market event sport scope contradicts dataset manifest.sport"
+            )
+        return actual
+
     def load_market_events(self) -> list[MarketEvent]:
         self._assert_retention_current()
         digest = hashlib.sha256()
@@ -270,6 +310,7 @@ class ReplayDataset:
                 events.append(MarketEvent.from_dict(raw_event))
         if digest.hexdigest() != self.market_sha256:
             raise ValueError("market dataset hash changed after verification")
+        self._assert_sport_scope(events)
         return events
 
     def load_results_after_replay(self) -> dict[str, str]:
@@ -729,16 +770,32 @@ def _import_identity(
     market_sha256: str,
     results_sha256: str,
 ) -> str:
-    payload = {
-        "schema_version": 2,
-        "name": raw.get("name", ""),
-        "sport": raw.get("sport", ""),
-        "market_file": raw["market_file"],
-        "results_file": raw["results_file"],
-        "market_sha256": market_sha256,
-        "results_sha256": results_sha256,
-        "governance": raw["governance"],
-    }
+    schema_version = raw.get("schema_version")
+    if schema_version == 2:
+        payload = {
+            "schema_version": 2,
+            "name": raw.get("name", ""),
+            "sport": raw.get("sport", ""),
+            "market_file": raw["market_file"],
+            "results_file": raw["results_file"],
+            "market_sha256": market_sha256,
+            "results_sha256": results_sha256,
+            "governance": raw["governance"],
+        }
+    elif schema_version == 3:
+        payload = {
+            "schema_version": 3,
+            "dataset_kind": raw.get("dataset_kind"),
+            "name": raw.get("name", ""),
+            "sport": raw.get("sport", ""),
+            "market_file": raw["market_file"],
+            "results_file": raw["results_file"],
+            "market_sha256": market_sha256,
+            "results_sha256": results_sha256,
+            "governance": raw.get("governance"),
+        }
+    else:
+        raise ValueError("import identity requires historical schema v2 or v3")
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -753,7 +810,7 @@ def load_dataset(root: str | Path) -> ReplayDataset:
     if not isinstance(raw, dict):
         raise ValueError("dataset manifest must be an object")
     schema_version = raw.get("schema_version")
-    if type(schema_version) is not int or schema_version not in {1, 2}:
+    if type(schema_version) is not int or schema_version not in {1, 2, 3}:
         raise ValueError("unsupported dataset schema")
 
     name_value = raw.get("name", root.name)
@@ -762,17 +819,32 @@ def load_dataset(root: str | Path) -> ReplayDataset:
         raise ValueError("dataset manifest.name must be a non-empty string")
     if not isinstance(sport_value, str) or not sport_value.strip():
         raise ValueError("dataset manifest.sport must be a non-empty string")
+    if schema_version == 3:
+        sport_value = _canonical_sport(
+            sport_value,
+            field="dataset manifest.sport",
+        )
+        if sport_value == "unknown":
+            raise ValueError("schema v3 dataset sport cannot be unknown")
 
     governance: DatasetGovernance | None = None
+    dataset_kind = raw.get("dataset_kind")
     if schema_version == 2:
-        if raw.get("dataset_kind") != "historical":
+        if dataset_kind != "historical":
             raise ValueError("schema v2 requires dataset_kind=historical")
         governance = _load_governance(raw, root=root)
         # Retention and authorization are byte-access boundaries, not merely replay API boundaries.
         # Governance authority is verified first, then an expired governed corpus is rejected
         # before market/results members are resolved, hashed or parsed.
         _assert_governance_retention_current(governance)
-
+    elif schema_version == 3:
+        if dataset_kind not in {"historical", "replay"}:
+            raise ValueError("schema v3 requires dataset_kind=historical or replay")
+        if dataset_kind == "historical":
+            governance = _load_governance(raw, root=root)
+            _assert_governance_retention_current(governance)
+        elif "governance" in raw:
+            raise ValueError("schema v3 replay dataset must not claim historical governance")
     market_file = _require_canonical_string(raw, "market_file", context="dataset manifest")
     results_file = _require_canonical_string(raw, "results_file", context="dataset manifest")
     market_path = _resolve_member(root, market_file, field="market_file")
@@ -792,7 +864,7 @@ def load_dataset(root: str | Path) -> ReplayDataset:
         raise ValueError("sealed results hash mismatch")
 
     import_identity: str | None = None
-    if schema_version == 2:
+    if schema_version == 2 or (schema_version == 3 and dataset_kind == "historical"):
         assert governance is not None
         _validate_historical_payloads(market_payload, results_payload, governance)
         import_identity = _import_identity(
@@ -805,7 +877,7 @@ def load_dataset(root: str | Path) -> ReplayDataset:
             if not isinstance(declared_identity, str) or declared_identity != import_identity:
                 raise ValueError("historical import identity mismatch")
 
-    return ReplayDataset(
+    dataset = ReplayDataset(
         root=root,
         name=name_value,
         sport=sport_value,
@@ -817,3 +889,8 @@ def load_dataset(root: str | Path) -> ReplayDataset:
         governance=governance,
         import_identity=import_identity,
     )
+    if schema_version == 3:
+        # Prove event-level sport truth while the verified market bytes are still
+        # bound to this manifest. Runtime will re-check on every later read.
+        dataset.load_market_events()
+    return dataset

@@ -1369,5 +1369,19 @@ class PersistentLiveDecisionLoop:
             ) from exc
 
     def _market_state_sha256(self) -> str:
-        payload = [event.to_dict() for event in self.mirror_updates.mirror.snapshot()]
+        specs = tuple(self._input_specs.values())
+        payload = [
+            event.to_dict()
+            for event in self.mirror_updates.mirror.snapshot()
+            if any(
+                (spec.source_ids is None or event.source_id in spec.source_ids)
+                and (spec.event_ids is None or event.event_id in spec.event_ids)
+                and (spec.market_ids is None or event.market_id in spec.market_ids)
+                and (
+                    spec.selection_ids is None
+                    or event.selection_id in spec.selection_ids
+                )
+                for spec in specs
+            )
+        ]
         return _canonical_json_sha256(payload)

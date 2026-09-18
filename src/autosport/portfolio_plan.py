@@ -7,6 +7,12 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 
+from .decision_ledger import (
+    MATERIAL_ACTION_ID_PAYLOAD_KEY,
+    DecisionRecord,
+    EconomicDecisionAuthority,
+    JsonlDecisionLedger,
+)
 from .domain import TicketStatus
 from .economic_goal_provenance import provenance_for
 from .opportunity import Opportunity, OpportunityDecision, QuoteRef, StrategyClass
@@ -79,15 +85,18 @@ def _decimal_from_serialized(name: str, value: object) -> Decimal:
     return parsed
 
 
-def _sha256_payload(payload: object) -> str:
-    canonical = json.dumps(
+def _canonical_json_payload(payload: object) -> str:
+    return json.dumps(
         payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
+    )
+
+
+def _sha256_payload(payload: object) -> str:
+    return hashlib.sha256(_canonical_json_payload(payload).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +152,55 @@ class OpportunityEvidence:
                 "execution_feasible": self.execution_feasible,
             }
         )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema": "autosport.opportunity_evidence",
+            "schema_version": 1,
+            "evidence_id": self.evidence_id,
+            "observed_at": self.observed_at,
+            "causal_cutoff": self.causal_cutoff,
+            "reproducibility_sha256": self.reproducibility_sha256,
+            "truth": self.truth.value,
+            "outcome_space_complete": self.outcome_space_complete,
+            "terminal_state_space_sha256": self.terminal_state_space_sha256,
+            "execution_assumptions_sha256": self.execution_assumptions_sha256,
+            "execution_feasible": self.execution_feasible,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "OpportunityEvidence":
+        expected = {
+            "schema",
+            "schema_version",
+            "evidence_id",
+            "observed_at",
+            "causal_cutoff",
+            "reproducibility_sha256",
+            "truth",
+            "outcome_space_complete",
+            "terminal_state_space_sha256",
+            "execution_assumptions_sha256",
+            "execution_feasible",
+        }
+        if type(raw) is not dict or set(raw) != expected:
+            raise ValueError("serialized opportunity evidence must contain canonical fields")
+        if raw["schema"] != "autosport.opportunity_evidence" or raw["schema_version"] != 1:
+            raise ValueError("unsupported opportunity evidence schema")
+        try:
+            return cls(
+                evidence_id=raw["evidence_id"],
+                observed_at=raw["observed_at"],
+                causal_cutoff=raw["causal_cutoff"],
+                reproducibility_sha256=raw["reproducibility_sha256"],
+                truth=EvidenceTruth(raw["truth"]),
+                outcome_space_complete=raw["outcome_space_complete"],
+                terminal_state_space_sha256=raw["terminal_state_space_sha256"],
+                execution_assumptions_sha256=raw["execution_assumptions_sha256"],
+                execution_feasible=raw["execution_feasible"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("serialized opportunity evidence is invalid") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +303,33 @@ class OpportunityIntent:
                 "config_sha256": self.config_sha256,
             }
         )
+
+    def audit_payload(self) -> dict[str, object]:
+        return {
+            "schema": "autosport.opportunity_intent_evidence",
+            "schema_version": 1,
+            "intent_id": self.intent_id,
+            "intent_sha256": self.intent_sha256,
+            "opportunity_id": self.opportunity.opportunity_id,
+            "opportunity": self.opportunity.to_dict(),
+            "evidence": self.evidence.to_dict(),
+            "evidence_sha256": self.evidence.evidence_sha256,
+            "candidate_sha256": self.candidate_sha256,
+            "signal_strength": str(self.signal_strength),
+            "strategy_id": self.strategy_id,
+            "model_id": self.model_id,
+            "config_sha256": self.config_sha256,
+            "risk_context": {
+                "provider_accounts": [
+                    list(binding) for binding in self.risk_context.provider_accounts
+                ],
+                "bankroll_id": self.risk_context.bankroll_id,
+                "currency": self.risk_context.currency,
+                "measurement_window_start": self.risk_context.measurement_window_start,
+                "measurement_window_end": self.risk_context.measurement_window_end,
+                "proposal_ts": self.risk_context.proposal_ts,
+            },
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,6 +646,146 @@ class PortfolioPlan:
             return plan
         except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
             raise ValueError("serialized portfolio plan is invalid") from exc
+
+
+_PORTFOLIO_PLAN_DECISION_AGENT = "portfolio-plan"
+_PORTFOLIO_PLAN_DECISION_ACTION = "RECORD_PORTFOLIO_PLAN"
+_PORTFOLIO_PLAN_JSON_PAYLOAD_KEY = "portfolio_plan_json"
+_PORTFOLIO_PLAN_SHA256_PAYLOAD_KEY = "portfolio_plan_sha256"
+_PORTFOLIO_INTENT_EVIDENCE_JSON_PAYLOAD_KEY = "portfolio_intent_evidence_json"
+
+
+class PortfolioPlanReconciliationRequired(RuntimeError):
+    """One durable material-action identity disagrees with current PortfolioPlan truth."""
+
+
+def _portfolio_intent_evidence_json(
+    plan: PortfolioPlan,
+    intents: tuple[OpportunityIntent, ...],
+) -> str:
+    if type(intents) is not tuple or any(
+        not isinstance(intent, OpportunityIntent) for intent in intents
+    ):
+        raise TypeError("intents must be a tuple of OpportunityIntent values")
+    if tuple(intent.intent_id for intent in intents) != plan.intent_ids:
+        raise ValueError("durable intent ids do not match PortfolioPlan")
+    if tuple(intent.intent_sha256 for intent in intents) != plan.intent_sha256s:
+        raise ValueError("durable intent hashes do not match PortfolioPlan")
+    if tuple(intent.opportunity_class.value for intent in intents) != plan.opportunity_classes:
+        raise ValueError("durable strategy classes do not match PortfolioPlan")
+    return _canonical_json_payload(
+        {
+            "schema": "autosport.portfolio_plan_intent_evidence",
+            "schema_version": 1,
+            "intents": [intent.audit_payload() for intent in intents],
+        }
+    )
+
+
+def persist_portfolio_plan_decision(
+    ledger: JsonlDecisionLedger,
+    plan: PortfolioPlan,
+    intents: tuple[OpportunityIntent, ...],
+    risk_policy: PaperRiskPolicy,
+    *,
+    replay_run_id: str,
+    material_action_id: str,
+) -> DecisionRecord:
+    """Fsync one exact plan to the canonical Decision Ledger, idempotently across restart."""
+
+    if not isinstance(ledger, JsonlDecisionLedger):
+        raise TypeError("ledger must be JsonlDecisionLedger")
+    if not isinstance(plan, PortfolioPlan):
+        raise TypeError("plan must be PortfolioPlan")
+    if not isinstance(risk_policy, PaperRiskPolicy):
+        raise TypeError("risk_policy must be PaperRiskPolicy")
+    replay_run_id = _canonical_text("replay_run_id", replay_run_id)
+    material_action_id = _canonical_text("material_action_id", material_action_id)
+
+    goal = risk_policy.economic_goal
+    if goal is None:
+        raise ValueError("durable PortfolioPlan decision requires canonical EconomicGoal")
+    if plan.economic_goal_contract_sha256 != provenance_for(goal).contract_sha256:
+        raise ValueError("PortfolioPlan EconomicGoal provenance does not match risk authority")
+    if plan.risk_policy_sha256 != risk_policy.provenance_sha256:
+        raise ValueError("PortfolioPlan RiskPolicy provenance does not match risk authority")
+
+    plan_json = _canonical_json_payload(plan.to_dict())
+    intent_evidence_json = _portfolio_intent_evidence_json(plan, intents)
+    context_hash = _sha256_payload(
+        {
+            "schema": "autosport.portfolio_plan_decision_context",
+            "schema_version": 1,
+            "plan_sha256": plan.plan_sha256,
+            "intent_evidence_sha256": hashlib.sha256(
+                intent_evidence_json.encode("utf-8")
+            ).hexdigest(),
+        }
+    )
+    payload = {
+        MATERIAL_ACTION_ID_PAYLOAD_KEY: material_action_id,
+        _PORTFOLIO_PLAN_SHA256_PAYLOAD_KEY: plan.plan_sha256,
+        _PORTFOLIO_PLAN_JSON_PAYLOAD_KEY: plan_json,
+        _PORTFOLIO_INTENT_EVIDENCE_JSON_PAYLOAD_KEY: intent_evidence_json,
+    }
+
+    existing = ledger.verified_economic_decision_for_material_action(
+        material_action_id,
+        goal,
+        risk_policy=risk_policy,
+    )
+    if existing is not None:
+        if (
+            existing.replay_run_id != replay_run_id
+            or existing.agent != _PORTFOLIO_PLAN_DECISION_AGENT
+            or existing.observed_ts != plan.decision_ts
+            or existing.action != _PORTFOLIO_PLAN_DECISION_ACTION
+            or existing.context_hash != context_hash
+            or existing.payload.get(_PORTFOLIO_PLAN_SHA256_PAYLOAD_KEY)
+            != plan.plan_sha256
+            or existing.payload.get(_PORTFOLIO_PLAN_JSON_PAYLOAD_KEY) != plan_json
+            or existing.payload.get(_PORTFOLIO_INTENT_EVIDENCE_JSON_PAYLOAD_KEY)
+            != intent_evidence_json
+        ):
+            raise PortfolioPlanReconciliationRequired(
+                "durable PortfolioPlan material action conflicts with current decision intent"
+            )
+        try:
+            restored = PortfolioPlan.from_dict(
+                json.loads(existing.payload[_PORTFOLIO_PLAN_JSON_PAYLOAD_KEY])
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PortfolioPlanReconciliationRequired(
+                "durable PortfolioPlan evidence cannot be reconstructed"
+            ) from exc
+        if restored != plan:
+            raise PortfolioPlanReconciliationRequired(
+                "durable PortfolioPlan evidence does not match current plan"
+            )
+        return existing
+
+    record = DecisionRecord(
+        replay_run_id=replay_run_id,
+        agent=_PORTFOLIO_PLAN_DECISION_AGENT,
+        observed_ts=plan.decision_ts,
+        action=_PORTFOLIO_PLAN_DECISION_ACTION,
+        payload=payload,
+        context_hash=context_hash,
+    )
+    ledger.append_economic(
+        record,
+        EconomicDecisionAuthority(goal, risk_policy),
+    )
+    persisted = ledger.verified_economic_decision_for_material_action(
+        material_action_id,
+        goal,
+        risk_policy=risk_policy,
+    )
+    if persisted is None:
+        raise PortfolioPlanReconciliationRequired(
+            "PortfolioPlan decision was not durably recoverable after append"
+        )
+    return persisted
 
 
 def _terminal_plan(

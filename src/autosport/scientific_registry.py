@@ -84,6 +84,24 @@ def _digest(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def _canonical_decimal(value: object, name: str) -> str:
+    text = _text(value, name)
+    if any(char in text for char in "eE"):
+        raise ValueError(f"{name} must use fixed-point decimal text")
+    try:
+        parsed = Decimal(text)
+    except Exception as exc:
+        raise ValueError(f"{name} must be a decimal string") from exc
+    if not parsed.is_finite():
+        raise ValueError(f"{name} must be finite")
+    normalized = format(parsed, "f")
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    if normalized in ("", "-0"):
+        normalized = "0"
+    return normalized
+
+
 
 def _sha256_text(value: object, name: str) -> str:
     return hashlib.sha256(_text(value, name).encode("utf-8")).hexdigest()

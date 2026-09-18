@@ -366,6 +366,8 @@ class PaperCampaign:
     outcome: CampaignOutcome | None = None
     readiness: CampaignReadiness | None = None
     campaign_sha256: str | None = None
+    _scientific_registry: ScientificRegistry | None = field(default=None, init=False, repr=False, compare=False)
+    _run_registry: RunRegistry | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         for name in (
@@ -462,6 +464,10 @@ class PaperCampaign:
             raise CampaignError("scientific_registry must be a ScientificRegistry")
         if not isinstance(run_registry, RunRegistry):
             raise CampaignError("run_registry must be a RunRegistry")
+        if self._scientific_registry is not None and self._scientific_registry is not scientific_registry:
+            raise CampaignError("scientific_registry authority binding cannot change")
+        if self._run_registry is not None and self._run_registry is not run_registry:
+            raise CampaignError("run_registry authority binding cannot change")
         self.sessions.append(session)
         try:
             self._validate_sessions()
@@ -474,6 +480,8 @@ class PaperCampaign:
         except Exception:
             self.sessions.pop()
             raise
+        self._scientific_registry = scientific_registry
+        self._run_registry = run_registry
 
     def remove_session(self, session_id: str) -> SessionEvidence:
         if self.finalized:
@@ -502,6 +510,18 @@ class PaperCampaign:
             raise CampaignError("finalized_at must not precede evaluation_as_of")
         if not self.sessions:
             raise CampaignError("campaign requires at least one session before finalization")
+        if self._scientific_registry is None or self._run_registry is None:
+            raise CampaignIntegrityError(
+                "finalized campaign requires canonical ScientificRegistry and RunRegistry authority"
+            )
+        _validate_registry_bindings(self, self._scientific_registry)
+        for session in self.sessions:
+            _validate_authoritative_session(
+                self,
+                session,
+                scientific_registry=self._scientific_registry,
+                run_registry=self._run_registry,
+            )
         self._validate_sessions()
         self.finalized = True
         self.finalized_at = when.isoformat().replace("+00:00", "Z")
@@ -635,6 +655,12 @@ class PaperCampaign:
         }
 
     def save(self, path: str | Path) -> None:
+        if self.finalized and (
+            self._scientific_registry is None or self._run_registry is None
+        ):
+            raise CampaignIntegrityError(
+                "finalized campaign requires canonical authority bindings before save"
+            )
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         payload = self.to_payload()
@@ -723,7 +749,15 @@ class PaperCampaign:
             raise CampaignError(
                 "scientific_registry and run_registry must be supplied together for authority revalidation"
             )
+        if campaign.finalized and (
+            scientific_registry is None or run_registry is None
+        ):
+            raise CampaignIntegrityError(
+                "finalized campaign load requires canonical ScientificRegistry and RunRegistry authority"
+            )
         if scientific_registry is not None and run_registry is not None:
+            campaign._scientific_registry = scientific_registry
+            campaign._run_registry = run_registry
             _validate_registry_bindings(campaign, scientific_registry)
             for session in campaign.sessions:
                 _validate_authoritative_session(

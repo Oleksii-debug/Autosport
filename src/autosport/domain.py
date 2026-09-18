@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import copy
+import json
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -64,6 +66,68 @@ def _optional_canonical_string(raw: dict[str, Any], field_name: str) -> str | No
     if value is None:
         return None
     return _canonical_string_value(value, field_name)
+
+
+_RESERVED_EVENT_SPORT_IDENTITIES = frozenset({"unknown", "mixed"})
+
+
+def _canonical_sport_value(value: object, field_name: str = "sport") -> str:
+    sport = _canonical_string_value(value, field_name)
+    if sport != sport.lower():
+        raise ValueError(f"{field_name} must be lowercase canonical sport identity")
+    if "|" in sport or any(
+        character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
+        for character in sport
+    ):
+        raise ValueError(
+            f"{field_name} must use lowercase ASCII letters, digits, '_' or '-' only"
+        )
+    if sport in _RESERVED_EVENT_SPORT_IDENTITIES:
+        raise ValueError(
+            f"{field_name} must not use reserved dataset scope identity {sport!r}"
+        )
+    return sport
+
+
+def _encoded_sport_identity(kind: str, *components: object) -> str:
+    """Return an explicit-sport identity disjoint from every legacy pipe key.
+
+    Legacy quote/dedupe identities always contain pipe separators. URL-safe
+    base64 never contains a pipe, so this namespace cannot alias legacy keys.
+    """
+    payload = json.dumps(
+        [kind, *components],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    token = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    return f"sport-v2-{token}"
+
+
+def _optional_sport(raw: dict[str, Any]) -> str | None:
+    value = raw.get("sport")
+    if value is None:
+        return None
+    return _canonical_sport_value(value)
+
+
+def _quote_identity(
+    event_id: str,
+    market_id: str,
+    selection_id: str,
+    sport: str | None,
+) -> str:
+    if sport is None:
+        return f"{event_id}|{market_id}|{selection_id}"
+    canonical_sport = _canonical_sport_value(sport)
+    return _encoded_sport_identity(
+        "quote",
+        canonical_sport,
+        event_id,
+        market_id,
+        selection_id,
+    )
 
 
 def _optional_canonical_timestamp(raw: dict[str, Any], field_name: str) -> str | None:
@@ -169,14 +233,37 @@ class MarketEvent:
     ingest_ts: str = field(default_factory=utc_now_iso)
     score_state: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    sport: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.sport is not None:
+            _canonical_sport_value(self.sport)
 
     @property
     def quote_key(self) -> str:
-        return f"{self.event_id}|{self.market_id}|{self.selection_id}"
+        return _quote_identity(
+            self.event_id,
+            self.market_id,
+            self.selection_id,
+            self.sport,
+        )
 
     @property
     def dedupe_key(self) -> str:
-        return f"{self.source_id}|{self.event_id}|{self.market_id}|{self.selection_id}|{self.sequence}"
+        if self.sport is None:
+            return (
+                f"{self.source_id}|{self.event_id}|{self.market_id}|"
+                f"{self.selection_id}|{self.sequence}"
+            )
+        return _encoded_sport_identity(
+            "dedupe",
+            self.source_id,
+            _canonical_sport_value(self.sport),
+            self.event_id,
+            self.market_id,
+            self.selection_id,
+            self.sequence,
+        )
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "MarketEvent":
@@ -203,6 +290,7 @@ class MarketEvent:
         source_ts = _optional_canonical_timestamp(raw, "source_ts")
         score_state = _optional_canonical_string(raw, "score_state")
         metadata = _serialized_metadata(raw)
+        sport = _optional_sport(raw)
 
         return cls(
             event_id=event_id,
@@ -218,10 +306,11 @@ class MarketEvent:
             ingest_ts=ingest_ts,
             score_state=score_state,
             metadata=metadata,
+            sport=sport,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "event_id": self.event_id,
             "market_id": self.market_id,
             "selection_id": self.selection_id,
@@ -236,6 +325,9 @@ class MarketEvent:
             "score_state": self.score_state,
             "metadata": self.metadata,
         }
+        if self.sport is not None:
+            payload["sport"] = self.sport
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,10 +336,20 @@ class TicketLeg:
     market_id: str
     selection_id: str
     locked_odds: Decimal
+    sport: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.sport is not None:
+            _canonical_sport_value(self.sport)
 
     @property
     def quote_key(self) -> str:
-        return f"{self.event_id}|{self.market_id}|{self.selection_id}"
+        return _quote_identity(
+            self.event_id,
+            self.market_id,
+            self.selection_id,
+            self.sport,
+        )
 
 
 @dataclass(slots=True)

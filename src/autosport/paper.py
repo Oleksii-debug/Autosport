@@ -24,8 +24,8 @@ from .forecasting import parse_iso_timestamp
 _PAPER_DECIMAL_PRECISION = 28
 _PAPER_DECIMAL_EMIN = -999999
 _PAPER_DECIMAL_EMAX = 999999
-_PAPER_SNAPSHOT_SCHEMA_VERSION = 5
-_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5})
+_PAPER_SNAPSHOT_SCHEMA_VERSION = 6
+_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6})
 _SCHEMA_MISSING = object()
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
@@ -301,7 +301,13 @@ class PaperBook:
                     "bankroll_id": t.bankroll_id,
                     "currency": t.currency,
                     "legs": [
-                        {"event_id": leg.event_id, "market_id": leg.market_id, "selection_id": leg.selection_id, "locked_odds": str(leg.locked_odds)}
+                        {
+                            "event_id": leg.event_id,
+                            "market_id": leg.market_id,
+                            "selection_id": leg.selection_id,
+                            "locked_odds": str(leg.locked_odds),
+                            "sport": leg.sport,
+                        }
                         for leg in t.legs
                     ],
                 }
@@ -493,6 +499,19 @@ class PaperBook:
             f"selection_id{suffix}",
             forbid_quote_key_delimiter=True,
         )
+        if leg.sport is not None:
+            sport = cls._require_canonical_text(
+                leg.sport,
+                f"sport{suffix}",
+                forbid_quote_key_delimiter=True,
+            )
+            if sport != sport.lower() or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
+                for character in sport
+            ):
+                raise ValueError(
+                    "PaperBook ticket sport must be a lowercase canonical sport identity"
+                )
         cls._require_finite(leg.locked_odds, f"locked_odds{suffix}")
         if leg.locked_odds <= 1:
             raise ValueError("PaperBook snapshot decimal odds must be greater than 1")
@@ -756,7 +775,11 @@ class PaperBook:
 
     @classmethod
     def _parse_snapshot_legs(
-        cls, value: object, ticket_id: str
+        cls,
+        value: object,
+        ticket_id: str,
+        *,
+        schema_version: int | None,
     ) -> tuple[TicketLeg, ...]:
         if type(value) is not list:
             raise ValueError(f"PaperBook snapshot legs for ticket {ticket_id} must be a list")
@@ -765,6 +788,17 @@ class PaperBook:
             if type(raw_leg) is not dict:
                 raise ValueError(
                     f"PaperBook snapshot leg {index} for ticket {ticket_id} must be an object"
+                )
+            sport = (
+                cls._required_snapshot_field(raw_leg, "sport", "ticket leg")
+                if schema_version == _PAPER_SNAPSHOT_SCHEMA_VERSION
+                else None
+            )
+            if sport is not None:
+                cls._require_canonical_text(
+                    sport,
+                    f"sport for ticket {ticket_id}",
+                    forbid_quote_key_delimiter=True,
                 )
             legs.append(
                 TicketLeg(
@@ -775,6 +809,7 @@ class PaperBook:
                         cls._required_snapshot_field(raw_leg, "locked_odds", "ticket leg"),
                         f"locked_odds for ticket {ticket_id}",
                     ),
+                    sport=sport,
                 )
             )
         return tuple(legs)
@@ -854,7 +889,7 @@ class PaperBook:
             if ticket_id in seen_ticket_ids:
                 raise ValueError("PaperBook snapshot contains duplicate ticket_id")
             seen_ticket_ids.add(ticket_id)
-            if schema_version in {3, 4, 5}:
+            if schema_version in {3, 4, 5, 6}:
                 provider_source_ids_raw = cls._required_snapshot_field(
                     item, "provider_source_ids", f"ticket {ticket_id}"
                 )
@@ -870,7 +905,7 @@ class PaperBook:
                         ),
                         ticket_id,
                     )
-                    if schema_version in {4, 5}
+                    if schema_version in {4, 5, 6}
                     else ()
                 )
                 bankroll_id = cls._required_snapshot_field(
@@ -894,6 +929,7 @@ class PaperBook:
                 legs=cls._parse_snapshot_legs(
                     cls._required_snapshot_field(item, "legs", f"ticket {ticket_id}"),
                     ticket_id,
+                    schema_version=None if is_legacy else schema_version,
                 ),
                 placed_at=cls._required_snapshot_field(
                     item, "placed_at", f"ticket {ticket_id}"
@@ -902,7 +938,7 @@ class PaperBook:
                     cls._required_snapshot_field(
                         item, "settled_at", f"ticket {ticket_id}"
                     )
-                    if schema_version == 5
+                    if schema_version in {5, 6}
                     else None
                 ),
                 status=cls._parse_snapshot_status(
@@ -933,7 +969,9 @@ class PaperBook:
             book._settlement_times = {}
         else:
             if "lifecycle" not in raw:
-                raise ValueError("PaperBook snapshot schema 2 requires lifecycle provenance")
+                raise ValueError(
+                    f"PaperBook snapshot schema {schema_version} requires lifecycle provenance"
+                )
             book._lifecycle, book._settlement_times = cls._parse_lifecycle(
                 raw["lifecycle"],
                 schema_version,

@@ -173,7 +173,13 @@ class PaperBaselineAgent:
         if event.metadata.get("paper_signal") is not True or self.stake > context.paper_book.balance:
             return
         ticket = context.paper_book.open_ticket(
-            [TicketLeg(event.event_id, event.market_id, event.selection_id, event.decimal_odds)],
+            [TicketLeg(
+                event.event_id,
+                event.market_id,
+                event.selection_id,
+                event.decimal_odds,
+                sport=event.sport,
+            )],
             self.stake,
             reason=f"fixture baseline signal {signal_id}",
             placed_at=event.observed_ts,

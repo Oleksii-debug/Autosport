@@ -99,7 +99,7 @@ class PortfolioAwareCandidateOptimizer:
         base_report = self.scenario_engine.analyse(open_existing, groups)
         ranked: list[CandidatePortfolioImpact] = []
         seen_candidate_identities: set[
-            tuple[tuple[str, str, str, str, str], ...]
+            tuple[tuple[str, str, str, str, str, str], ...]
         ] = set()
         for candidate in candidates:
             canonical_candidate = _canonical_candidate(candidate)
@@ -211,8 +211,9 @@ def _decimal_identity_key(value: Decimal) -> str:
 
 def _candidate_leg_identity_key(
     leg: CandidateLeg,
-) -> tuple[str, str, str, str, str]:
+) -> tuple[str, str, str, str, str, str]:
     return (
+        leg.sport or "",
         *leg.ticket_identity(),
         _decimal_identity_key(leg.decimal_odds),
         _decimal_identity_key(leg.probability),
@@ -256,20 +257,21 @@ def _candidate_ticket(
     candidate = _canonical_candidate(candidate)
     ticket_legs: list[TicketLeg] = []
     touched_groups: set[int] = set()
-    used_event_ids: set[str] = set()
+    used_event_ids: set[tuple[str | None, str]] = set()
     for leg in candidate.legs:
         if leg.quote_key not in quote_to_group:
             raise ValueError(f"candidate quote missing from scenario space: {leg.quote_key}")
         group_index = quote_to_group[leg.quote_key]
         if group_index in touched_groups:
             raise ValueError("candidate contains mutually exclusive outcomes from one scenario group")
-        if leg.event_id in used_event_ids:
+        event_identity = (leg.sport, leg.event_id)
+        if event_identity in used_event_ids:
             raise ValueError(
-                "candidate contains multiple legs from one event; "
-                "canonical research candidates require event isolation"
+                "candidate contains multiple legs from one event within the same "
+                "sport-qualified identity; canonical research candidates require event isolation"
             )
         touched_groups.add(group_index)
-        used_event_ids.add(leg.event_id)
+        used_event_ids.add(event_identity)
         if not leg.probability.is_finite():
             raise ValueError("candidate leg probability must be finite")
         if leg.probability < 0 or leg.probability > 1:
@@ -306,7 +308,13 @@ def _ticket_leg_from_candidate(leg: CandidateLeg) -> TicketLeg:
         raise ValueError("candidate decimal odds must be finite")
     if leg.decimal_odds <= 1:
         raise ValueError("candidate decimal odds must be greater than 1")
-    return TicketLeg(event_id, market_id, selection_id, leg.decimal_odds)
+    return TicketLeg(
+        event_id,
+        market_id,
+        selection_id,
+        leg.decimal_odds,
+        sport=leg.sport,
+    )
 
 
 def _dependent_existing_ticket_ids(
@@ -338,7 +346,7 @@ def _expected_change_mode(base: str | None, with_candidate: str | None) -> str |
 
 def _candidate_identity_key(
     candidate: ParlayCandidate,
-) -> tuple[tuple[str, str, str, str, str], ...]:
+) -> tuple[tuple[str, str, str, str, str, str], ...]:
     """Canonical deterministic tie-break independent of caller candidate order."""
 
     return tuple(sorted(_candidate_leg_identity_key(leg) for leg in candidate.legs))
@@ -353,7 +361,7 @@ def _ranking_key(
     Decimal,
     int,
     Decimal,
-    tuple[tuple[str, str, str, str, str], ...],
+    tuple[tuple[str, str, str, str, str, str], ...],
 ]:
     proof_tier = 1 if impact.worst_case_change_proven else 0
     expected_available = 1 if impact.expected_case_change is not None else 0

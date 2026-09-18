@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Iterable
 
-from .domain import MarketEvent
+from .domain import MarketEvent, _quote_identity
 from .forecasting import ForecastRecord
 
 
@@ -56,6 +56,33 @@ def _optional_text(value: object, field_name: str) -> str | None:
     if value is None:
         return None
     return _canonical_text(value, field_name)
+
+
+def _optional_sport(value: object, field_name: str = "quote sport") -> str | None:
+    if value is None:
+        return None
+    sport = _canonical_text(value, field_name)
+    if sport != sport.lower() or "|" in sport or any(
+        character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
+        for character in sport
+    ):
+        raise OpportunityContractError(
+            f"{field_name} must be a lowercase canonical sport identity"
+        )
+    if sport in {"unknown", "mixed"}:
+        raise OpportunityContractError(
+            f"{field_name} must not use a reserved dataset scope identity"
+        )
+    return sport
+
+
+def _quote_key(
+    event_id: str,
+    market_id: str,
+    selection_id: str,
+    sport: str | None,
+) -> str:
+    return _quote_identity(event_id, market_id, selection_id, sport)
 
 
 def _canonical_hash(value: object, field_name: str) -> str:
@@ -175,6 +202,7 @@ class QuoteRef:
     ingest_ts: str
     market_event_hash: str
     market_snapshot_hash: str | None = None
+    sport: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -187,6 +215,7 @@ class QuoteRef:
         ):
             _canonical_text(getattr(self, name), f"quote {name}")
         _optional_text(self.source_ts, "quote source_ts")
+        _optional_sport(self.sport)
         if type(self.sequence) is not int or self.sequence < 0:
             raise OpportunityContractError(
                 "quote sequence must be a non-negative non-boolean int"
@@ -201,11 +230,17 @@ class QuoteRef:
 
     @property
     def quote_key(self) -> str:
-        return f"{self.event_id}|{self.market_id}|{self.selection_id}"
+        return _quote_key(
+            self.event_id,
+            self.market_id,
+            self.selection_id,
+            self.sport,
+        )
 
     @property
-    def identity_key(self) -> tuple[str, str, str, str, int]:
+    def identity_key(self) -> tuple[str, str, str, str, str, int]:
         return (
+            self.sport or "",
             self.source_id,
             self.event_id,
             self.market_id,
@@ -244,10 +279,11 @@ class QuoteRef:
                 market_snapshot_hash,
                 "market_snapshot_hash",
             ),
+            sport=canonical.sport,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "event_id": self.event_id,
             "market_id": self.market_id,
             "selection_id": self.selection_id,
@@ -260,6 +296,9 @@ class QuoteRef:
             "market_event_hash": self.market_event_hash,
             "market_snapshot_hash": self.market_snapshot_hash,
         }
+        if self.sport is not None:
+            payload["sport"] = self.sport
+        return payload
 
     @classmethod
     def from_dict(cls, raw: object) -> "QuoteRef":
@@ -276,7 +315,10 @@ class QuoteRef:
             "market_event_hash",
             "market_snapshot_hash",
         }
-        if type(raw) is not dict or set(raw) != expected:
+        if type(raw) is not dict or frozenset(raw) not in {
+            frozenset(expected),
+            frozenset(expected | {"sport"}),
+        }:
             raise OpportunityContractError(
                 "quote reference must contain canonical fields"
             )
@@ -307,6 +349,7 @@ class QuoteRef:
             market_snapshot_hash=_optional_hash(
                 raw["market_snapshot_hash"], "market_snapshot_hash"
             ),
+            sport=_optional_sport(raw.get("sport")),
         )
 
 

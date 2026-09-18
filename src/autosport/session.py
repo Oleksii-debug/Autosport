@@ -205,12 +205,20 @@ class AutosportSession:
             outcome_lineage = outcome_lineage_binding_from_dataset(dataset)
             if outcome_lineage is not None:
                 self.registry.assert_outcome_lineage_compatible(outcome_lineage)
+            # Load and validate the exact causal market bytes, including schema-v3
+            # event-level sport scope, before registry/PaperBook/economic mutation.
+            # Reuse this verified snapshot for the whole run so a later path swap
+            # cannot change sport/quote identity after preflight.
+            market_events = dataset.load_market_events()
+            verified_sports = dataset._assert_sport_scope(market_events)
             # Research-plan market binding is deterministic from the sealed causal
             # stream, so reject a stale/forged plan before registry/PaperBook mutation.
             if self.research_plan is not None:
-                self.research_plan.preflight(dataset.load_market_events())
+                self.research_plan.preflight(market_events)
             return self._run_dataset_locked(
                 dataset,
+                market_events=market_events,
+                verified_sports=verified_sports,
                 speed=speed,
                 allow_repeat=allow_repeat,
                 outcome_lineage=outcome_lineage,
@@ -223,6 +231,8 @@ class AutosportSession:
         self,
         dataset: ReplayDataset,
         *,
+        market_events: list[MarketEvent],
+        verified_sports: tuple[str, ...],
         speed: float = 0.0,
         allow_repeat: bool = False,
         outcome_lineage: OutcomeLineageBinding | None = None,
@@ -283,7 +293,7 @@ class AutosportSession:
                 ledger=staged_ledger,
                 risk_policy=risk_policy,
             )
-            engine = ReplayEngine(dataset.load_market_events())
+            engine = ReplayEngine(market_events)
 
             def consume(event) -> None:
                 self.store.append(event)
@@ -343,6 +353,8 @@ class AutosportSession:
             self._run_summary_payload(
                 dataset,
                 result,
+                market_events=market_events,
+                verified_sports=verified_sports,
                 outcome_lineage=outcome_lineage,
                 economic_goal=economic_goal,
                 risk_policy=risk_policy,
@@ -404,12 +416,25 @@ class AutosportSession:
         dataset: ReplayDataset,
         result: SessionResult,
         *,
+        market_events: list[MarketEvent] | None = None,
+        verified_sports: tuple[str, ...] | None = None,
         outcome_lineage: OutcomeLineageBinding | None = None,
         economic_goal: EconomicGoalContract | None = None,
         risk_policy: PaperRiskPolicy | None = None,
         runtime_strategy_id: str | None = None,
     ) -> dict:
-        market_price_truth = market_price_truth_from_events(dataset.load_market_events())
+        # Runtime callers pass the already-verified snapshot to preserve the run-level
+        # TOCTOU boundary. Direct/reporting callers retain backward compatibility and
+        # may load once here when no snapshot was supplied.
+        if market_events is None:
+            market_events = dataset.load_market_events()
+        if verified_sports is None:
+            if dataset.schema_version >= 3 and hasattr(dataset, "_assert_sport_scope"):
+                verified_sports = dataset._assert_sport_scope(market_events)
+            else:
+                verified_sports = ()
+        market_price_truth = market_price_truth_from_events(market_events)
+        sport_identity_proven = dataset.schema_version >= 3 and bool(verified_sports)
         if risk_policy is None:
             risk_policy = PaperRiskPolicy(economic_goal=economic_goal)
         runtime_strategy_id = runtime_strategy_id or self._runtime_strategy_identity(
@@ -423,7 +448,9 @@ class AutosportSession:
         payload = {
             "schema_version": 2,
             "dataset_name": dataset.name,
-            "sport": dataset.sport,
+            "sport": dataset.sport if sport_identity_proven else "unknown",
+            "sport_scope": list(verified_sports),
+            "sport_identity_proven": sport_identity_proven,
             "dataset_schema_version": dataset.schema_version,
             "historical_import_identity": dataset.import_identity,
             "dataset_governance": asdict(dataset.governance) if dataset.governance is not None else None,

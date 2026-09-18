@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -250,6 +251,148 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             blocked.reason,
             "economic goal conservative day loss limit exceeded",
         )
+
+    def test_proven_out_of_window_loss_does_not_consume_session_or_day_room(self) -> None:
+        for field_name in ("max_session_loss_fraction", "max_day_loss_fraction"):
+            with self.subTest(field_name=field_name):
+                book = PaperBook("100")
+                lost = book.open_ticket(
+                    [self._leg()],
+                    Decimal("4"),
+                    placed_at="2026-09-16T12:00:00+00:00",
+                )
+                book.settle(
+                    lost.ticket_id,
+                    set(),
+                    settled_at="2026-09-16T12:30:00+00:00",
+                )
+                policy = self._policy(
+                    self._goal(**{field_name: Decimal("0.05")})
+                )
+                context = replace(
+                    self._context(),
+                    measurement_window_start="2026-09-16T14:00:00+00:00",
+                    measurement_window_end="2026-09-16T15:00:00+00:00",
+                )
+
+                self.assertEqual(
+                    policy.derive_goal_stake(
+                        book,
+                        Decimal("1"),
+                        context=context,
+                    ),
+                    Decimal("5"),
+                )
+                self.assertTrue(
+                    policy.evaluate(
+                        book,
+                        Decimal("5"),
+                        context=context,
+                    ).allowed
+                )
+                self.assertFalse(
+                    policy.evaluate(
+                        book,
+                        Decimal("5.01"),
+                        context=context,
+                    ).allowed
+                )
+
+    def test_proven_in_window_loss_consumes_exact_loss_room(self) -> None:
+        book = PaperBook("100")
+        lost = book.open_ticket(
+            [self._leg()],
+            Decimal("4"),
+            placed_at="2026-09-16T14:00:00+00:00",
+        )
+        book.settle(
+            lost.ticket_id,
+            set(),
+            settled_at="2026-09-16T14:30:00+00:00",
+        )
+        policy = self._policy(
+            self._goal(max_session_loss_fraction=Decimal("0.05"))
+        )
+        context = replace(
+            self._context(),
+            measurement_window_start="2026-09-16T14:00:00+00:00",
+            measurement_window_end="2026-09-16T15:00:00+00:00",
+        )
+
+        self.assertTrue(
+            policy.evaluate(book, Decimal("1"), context=context).allowed
+        )
+        blocked = policy.evaluate(
+            book,
+            Decimal("1.01"),
+            context=context,
+        )
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(
+            blocked.reason,
+            "economic goal conservative session loss limit exceeded",
+        )
+
+    def test_legacy_unknown_settlement_time_remains_conservatively_in_window_after_restart(self) -> None:
+        book = PaperBook("100")
+        lost = book.open_ticket(
+            [self._leg()],
+            Decimal("4"),
+            placed_at="2026-09-16T12:00:00+00:00",
+        )
+        book.settle(
+            lost.ticket_id,
+            set(),
+            settled_at="2026-09-16T12:30:00+00:00",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.json"
+            book.save(path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["schema_version"] = 4
+            for ticket in payload["tickets"]:
+                ticket.pop("settled_at")
+            for entry in payload["lifecycle"]:
+                if entry["action"] == "settle":
+                    entry.pop("settled_at")
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            restarted = PaperBook.load(path)
+
+        self.assertIsNone(restarted.tickets[lost.ticket_id].settled_at)
+        policy = self._policy(
+            self._goal(max_day_loss_fraction=Decimal("0.05"))
+        )
+        context = replace(
+            self._context(),
+            measurement_window_start="2026-09-16T14:00:00+00:00",
+            measurement_window_end="2026-09-16T15:00:00+00:00",
+        )
+
+        self.assertTrue(
+            policy.evaluate(restarted, Decimal("1"), context=context).allowed
+        )
+        blocked = policy.evaluate(
+            restarted,
+            Decimal("1.01"),
+            context=context,
+        )
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(
+            blocked.reason,
+            "economic goal conservative day loss limit exceeded",
+        )
+
+    def test_measurement_window_cannot_extend_beyond_proposal_time(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "measurement window end must not be after proposal time",
+        ):
+            replace(
+                self._context(),
+                measurement_window_start="2026-09-16T14:00:00+00:00",
+                measurement_window_end="2026-09-16T15:00:03+00:00",
+            )
 
     def test_drawdown_limit_uses_stake_basis_equity_high_watermark(self) -> None:
         book = PaperBook("100")

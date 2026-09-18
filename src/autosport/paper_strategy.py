@@ -248,7 +248,13 @@ class PaperValueAgent:
         if estimate.expected_profit_per_unit < self.minimum_edge:
             return
 
-        leg = TicketLeg(\n            event.event_id,\n            event.market_id,\n            event.selection_id,\n            event.decimal_odds,\n            sport=event.sport,\n        )
+        leg = TicketLeg(
+            event.event_id,
+            event.market_id,
+            event.selection_id,
+            event.decimal_odds,
+            sport=event.sport,
+        )
         goal = self.risk_policy.economic_goal
         if goal is not None and context.decision_ledger is None:
             return

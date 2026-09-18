@@ -11,7 +11,11 @@ from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.forecasting import ForecastRecord
 from autosport.paper import PaperBook
-from autosport.risk import PaperRiskPolicy
+from autosport.risk import (
+    PaperRiskPolicy,
+    ProposedTicketRiskContext,
+    RiskOfRuinEvidence,
+)
 from autosport.research_pipeline import (
     DeterministicResearchCritic,
     ResearchDecisionAlreadyCommitted,
@@ -125,6 +129,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
         stake="10",
         decision_ts="2026-09-13T10:00:03+00:00",
         market_quotes=None,
+        risk_of_ruin_evidence=None,
         decision_ledger=None,
         material_action_id=None,
     ):
@@ -145,6 +150,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             stake=stake,
             decision_ts=decision_ts,
             market_quotes=market_quotes,
+            risk_of_ruin_evidence=risk_of_ruin_evidence,
             decision_ledger=ledger,
             replay_run_id="research-run",
             material_action_id=material_action_id,
@@ -319,6 +325,54 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             )
         )
 
+    def _bound_ruin_evidence(
+        self,
+        *,
+        book: PaperBook,
+        candidate: ParlayCandidate,
+        pipeline: ResearchDecisionPipeline,
+        goal: EconomicGoalContract,
+        stake: Decimal = Decimal("20.00"),
+        upper_bound: Decimal = Decimal("0.01"),
+    ) -> RiskOfRuinEvidence:
+        quote = self._market_event()
+        ticket_legs = tuple(
+            TicketLeg(
+                leg.ticket_identity()[0],
+                leg.ticket_identity()[1],
+                leg.ticket_identity()[2],
+                leg.decimal_odds,
+            )
+            for leg in candidate.legs
+        )
+        base_context = ProposedTicketRiskContext(
+            legs=ticket_legs,
+            quotes=(quote,),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+            proposal_ts="2026-09-13T10:00:03+00:00",
+        )
+        portfolio_sha256 = pipeline.risk_policy.risk_of_ruin_portfolio_sha256(book)
+        candidate_sha256 = pipeline.risk_policy.risk_of_ruin_candidate_sha256(
+            base_context
+        )
+        self.assertIsNotNone(portfolio_sha256)
+        self.assertIsNotNone(candidate_sha256)
+        return RiskOfRuinEvidence(
+            evidence_id="research-pipeline-ror",
+            research_protocol_sha256="a" * 64,
+            reproducibility_bundle_sha256="b" * 64,
+            producer_identity="test-risk-model-source",
+            causal_cutoff="2026-09-13T10:00:01+00:00",
+            evaluated_at="2026-09-13T10:00:02+00:00",
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+            base_portfolio_sha256=portfolio_sha256,
+            candidate_sha256=candidate_sha256,
+            evaluated_stake=stake,
+            upper_bound=upper_bound,
+        )
+
     def test_active_economic_goal_ignores_caller_stake_and_persists_provenance(self):
         goal = self._economic_goal()
         with tempfile.TemporaryDirectory() as tmp:
@@ -346,6 +400,83 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                 goal,
             )
             self.assertEqual(rebound, records[0])
+
+    def test_nontrivial_ruin_goal_without_bound_evidence_fails_closed_to_zero(self):
+        goal = self._economic_goal(max_risk_of_ruin=Decimal("0.01"))
+        pipeline = self._goal_pipeline(goal)
+        book = self._book()
+        before = set(book.tickets)
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, decision = self._decide(
+                tmp,
+                book=book,
+                candidate=self._candidate(probability="0.60"),
+                forecast=self._forecast(probability="0.60"),
+                pipeline=pipeline,
+                stake="999999999999999999999",
+                market_quotes=[self._market_event()],
+            )
+
+            self.assertFalse(decision.approved)
+            self.assertIsNone(decision.portfolio_impact)
+            self.assertEqual(set(book.tickets), before)
+            self.assertTrue(any("ZERO stake" in reason for reason in decision.reasons))
+            record = ledger.verified_records()[0]
+            self.assertEqual(record.payload["stake"], "0")
+            self.assertNotIn("risk_of_ruin_evidence", record.payload)
+
+    def test_nontrivial_ruin_goal_uses_exact_bound_context_and_persists_witness(self):
+        goal = self._economic_goal(max_risk_of_ruin=Decimal("0.01"))
+        pipeline = self._goal_pipeline(goal)
+        book = self._book()
+        candidate = self._candidate(probability="0.60")
+        witness = self._bound_ruin_evidence(
+            book=book,
+            candidate=candidate,
+            pipeline=pipeline,
+            goal=goal,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, decision = self._decide(
+                tmp,
+                book=book,
+                candidate=candidate,
+                forecast=self._forecast(probability="0.60"),
+                pipeline=pipeline,
+                stake="NaN",
+                market_quotes=[self._market_event()],
+                risk_of_ruin_evidence=witness,
+                material_action_id="research-ror-action",
+            )
+
+            self.assertTrue(decision.approved)
+            self.assertTrue(decision.risk.allowed)
+            self.assertIsNotNone(decision.portfolio_impact)
+            self.assertEqual(decision.portfolio_impact.stake, Decimal("20.00"))
+            ticket = book.tickets[decision.ticket_id]
+            self.assertEqual(ticket.stake, Decimal("20.00"))
+            record = ledger.verified_records()[0]
+            self.assertEqual(record.payload["stake_source"], "economic-goal-derived")
+            self.assertEqual(
+                record.payload["risk_of_ruin_evidence"]["evidence_id"],
+                witness.evidence_id,
+            )
+            self.assertEqual(
+                record.payload["risk_of_ruin_evidence"]["candidate_sha256"],
+                witness.candidate_sha256,
+            )
+            self.assertEqual(
+                record.payload["risk_of_ruin_evidence"]["evaluated_stake"],
+                "20.00",
+            )
+            self.assertEqual(
+                record.payload["risk_of_ruin_evidence"]["upper_bound"],
+                "0.01",
+            )
+            JsonlDecisionLedger(ledger.path).verified_economic_decision(
+                record.decision_id,
+                goal,
+            )
 
     def test_active_economic_goal_exhaustion_records_zero_without_ticket(self):
         goal = self._economic_goal(max_stake_fraction=Decimal("0"))

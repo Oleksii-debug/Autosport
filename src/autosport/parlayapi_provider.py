@@ -14,14 +14,14 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .domain import MarketType, utc_now_iso
-from .providers import ProviderBatch, ProviderQuote
+from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
 
 
 class ProviderPayloadError(ValueError):
     pass
 
 
-class ProviderTransportError(RuntimeError):
+class ProviderTransportError(ProviderUnavailableError):
     def __init__(self, message: str, status_code: int | None = None, retry_after: float | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code

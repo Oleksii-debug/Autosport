@@ -544,9 +544,20 @@ class ResearchSupervisor:
                     f"drift finding context mismatch for {binding_key}"
                 )
 
-    def accept_trigger(self, trigger: ResearchTrigger) -> SupervisorSnapshot:
+    def accept_trigger(
+        self,
+        trigger: ResearchTrigger,
+        *,
+        exclusive_trigger_prefix: str | None = None,
+    ) -> SupervisorSnapshot:
         if not isinstance(trigger, ResearchTrigger):
             raise TypeError("trigger must be ResearchTrigger")
+        if exclusive_trigger_prefix is not None:
+            exclusive_trigger_prefix = _text(
+                exclusive_trigger_prefix, "exclusive_trigger_prefix"
+            )
+            if not exclusive_trigger_prefix.endswith(":"):
+                raise ValueError("exclusive_trigger_prefix must end with ':'")
         question = self.scientific_registry.get("ResearchQuestion", trigger.question_id)
         if question is None:
             raise ResearchSupervisorError(
@@ -563,6 +574,14 @@ class ResearchSupervisor:
         with WorkspaceEconomicLock(self.path.parent):
             state = self._read()
             for existing in state["runs"]:
+                if (
+                    exclusive_trigger_prefix is not None
+                    and existing["trigger_id"].startswith(exclusive_trigger_prefix)
+                    and existing["trigger_id"] != trigger.trigger_id
+                ):
+                    raise ConflictingResearchTriggerError(
+                        "exclusive trigger namespace is already bound to different immutable content"
+                    )
                 if existing["trigger_id"] != trigger.trigger_id:
                     continue
                 if existing["trigger_sha256"] != trigger.trigger_sha256:

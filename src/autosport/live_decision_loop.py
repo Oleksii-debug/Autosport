@@ -732,13 +732,13 @@ class PersistentLiveDecisionLoop:
                 detail="durable PAUSE is active; provider was not polled",
             )
 
-        now = _require_utc_clock(self.clock)
         if (
             self._progress is not None
             and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
         ):
             return self._recover_unfinished_progress()
 
+        now = _require_utc_clock(self.clock)
         try:
             self._observe(self.mirror_updates)
         except ProviderUnavailableError as exc:
@@ -776,15 +776,6 @@ class PersistentLiveDecisionLoop:
 
         registered_input_ids = self.dependencies.input_ids
         current_market_sha = self._market_state_sha256()
-        recovering_pending = (
-            self._progress is not None
-            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
-            and self._progress.gate == _GATE_NORMAL
-            and self._progress.market_state_sha256 == current_market_sha
-            and self._progress.registered_input_ids == registered_input_ids
-        )
-        if recovering_pending:
-            self._needs_cache_rebuild = True
 
         clean_committed_restart = (
             self._needs_cache_rebuild
@@ -820,38 +811,21 @@ class PersistentLiveDecisionLoop:
                 self._pending_affected[input_id] = None
 
         refresh_input_ids = tuple(self._pending_affected)
-        if recovering_pending:
-            assert self._progress is not None
-            affected = self._progress.affected_input_ids
-        else:
-            affected = refresh_input_ids
-        if not affected and not refresh_input_ids:
+        affected = refresh_input_ids
+        if not affected:
             return LiveCycleResult(
                 LiveCycleStatus.NO_CHANGE,
                 detail="no material quote, status, dependency, or freshness invalidation",
             )
 
-        if recovering_pending:
-            assert self._progress is not None
-            decision_ts, decision_time = _canonical_timestamp(
-                "pending decision_ts", self._progress.decision_ts
-            )
-        else:
-            decision_time = now
-            decision_ts = now.isoformat()
-
-        preserve_append_reservation = (
-            recovering_pending
-            and self._progress is not None
-            and self._progress.phase == _PHASE_APPEND_PENDING
+        decision_time = now
+        decision_ts = now.isoformat()
+        self._write_pending(
+            decision_ts=decision_ts,
+            market_state_sha256=current_market_sha,
+            affected_input_ids=affected,
+            gate=_GATE_NORMAL,
         )
-        if not preserve_append_reservation:
-            self._write_pending(
-                decision_ts=decision_ts,
-                market_state_sha256=current_market_sha,
-                affected_input_ids=affected,
-                gate=_GATE_NORMAL,
-            )
         self._refresh_intents(refresh_input_ids, decision_time)
 
         intents = self._all_cached_intents()

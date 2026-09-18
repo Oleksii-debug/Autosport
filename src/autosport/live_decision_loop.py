@@ -19,6 +19,7 @@ from .decision_ledger import (
     JsonlDecisionLedger,
     verify_economic_goal_binding,
 )
+from .economic_goal_provenance import provenance_for
 from .ingestion_health import IngestionPolicy
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
@@ -116,6 +117,7 @@ _PROGRESS_KEYS = frozenset(
         "phase",
         "decision_ts",
         "market_state_sha256",
+        "decision_context_sha256",
         "affected_input_ids",
         "registered_input_ids",
         "decision_id",
@@ -350,6 +352,7 @@ class _Progress:
     phase: str
     decision_ts: str
     market_state_sha256: str
+    decision_context_sha256: str
     affected_input_ids: tuple[str, ...]
     registered_input_ids: tuple[str, ...]
     decision_id: str | None
@@ -361,6 +364,7 @@ class _Progress:
         _canonical_text("loop_id", self.loop_id)
         _canonical_timestamp("decision_ts", self.decision_ts)
         _canonical_sha256("market_state_sha256", self.market_state_sha256)
+        _canonical_sha256("decision_context_sha256", self.decision_context_sha256)
         if self.phase not in {
             _PHASE_PENDING,
             _PHASE_APPEND_PENDING,
@@ -418,6 +422,7 @@ class _Progress:
             "phase": self.phase,
             "decision_ts": self.decision_ts,
             "market_state_sha256": self.market_state_sha256,
+            "decision_context_sha256": self.decision_context_sha256,
             "affected_input_ids": list(self.affected_input_ids),
             "registered_input_ids": list(self.registered_input_ids),
             "decision_id": self.decision_id,
@@ -452,6 +457,7 @@ class _Progress:
                 phase=raw["phase"],
                 decision_ts=raw["decision_ts"],
                 market_state_sha256=raw["market_state_sha256"],
+                decision_context_sha256=raw["decision_context_sha256"],
                 affected_input_ids=tuple(input_ids),
                 registered_input_ids=tuple(registered_ids),
                 decision_id=raw["decision_id"],
@@ -490,6 +496,7 @@ class PersistentLiveDecisionLoop:
         book: PaperBook,
         authority: EconomicDecisionAuthority,
         intent_factory: LiveIntentFactory,
+        intent_context_sha256: str,
         provider: MarketProvider | None = None,
         decision_ledger: JsonlDecisionLedger | None = None,
         ingestion_policy: IngestionPolicy | None = None,
@@ -510,6 +517,10 @@ class PersistentLiveDecisionLoop:
             raise TypeError("authority must be EconomicDecisionAuthority")
         if not callable(intent_factory):
             raise TypeError("intent_factory must be callable")
+        intent_context_sha256 = _canonical_sha256(
+            "intent_context_sha256",
+            intent_context_sha256,
+        )
         goal_quote_age = authority.contract.max_quote_age_seconds
         if max_quote_age is None:
             max_quote_age = _conservative_timedelta(goal_quote_age)
@@ -526,6 +537,7 @@ class PersistentLiveDecisionLoop:
         self.book = book
         self.authority = authority
         self.intent_factory = intent_factory
+        self.intent_context_sha256 = intent_context_sha256
         self.provider = provider
         self.decision_ledger = decision_ledger or JsonlDecisionLedger(
             self.workspace / "decisions.jsonl"
@@ -863,6 +875,31 @@ class PersistentLiveDecisionLoop:
         self._update_freshness_deadline(decision_time)
         return result
 
+    def _decision_context_sha256(self) -> str:
+        book_state_sha256 = self.authority.risk_policy.risk_of_ruin_portfolio_sha256(
+            self.book
+        )
+        if book_state_sha256 is None:
+            raise LiveDecisionProgressError(
+                "cannot derive canonical PaperBook decision context"
+            )
+        return _canonical_json_sha256(
+            {
+                "schema": "autosport.live_decision_runtime_context",
+                "schema_version": 1,
+                "mode": self.mode.value,
+                "intent_context_sha256": self.intent_context_sha256,
+                "economic_goal_contract_sha256": provenance_for(
+                    self.authority.contract
+                ).contract_sha256,
+                "risk_policy_sha256": self.authority.risk_policy.provenance_sha256,
+                "book_state_sha256": book_state_sha256,
+                "max_quote_age_seconds": str(
+                    _timedelta_decimal_seconds(self.max_quote_age)
+                ),
+            }
+        )
+
     def _recover_unfinished_progress(self) -> LiveCycleResult:
         progress = self._progress
         if progress is None or progress.phase not in {
@@ -875,6 +912,10 @@ class PersistentLiveDecisionLoop:
         if progress.registered_input_ids != self.dependencies.input_ids:
             raise LiveDecisionProgressError(
                 "unfinished live decision requires exact durable dependency registry"
+            )
+        if progress.decision_context_sha256 != self._decision_context_sha256():
+            raise LiveDecisionProgressError(
+                "unfinished live decision runtime context changed across restart"
             )
 
         decision_ts, decision_time = _canonical_timestamp(
@@ -1087,6 +1128,7 @@ class PersistentLiveDecisionLoop:
         gate: str,
         detail: str = "",
     ) -> LiveCycleResult:
+        decision_context_sha256 = self._decision_context_sha256()
         context_payload = {
             "schema": "autosport.live_decision_context",
             "schema_version": 1,
@@ -1094,6 +1136,7 @@ class PersistentLiveDecisionLoop:
             "mode": self.mode.value,
             "gate": gate,
             "market_state_sha256": market_state_sha256,
+            "decision_context_sha256": decision_context_sha256,
             "plan_sha256": plan.plan_sha256,
         }
         context_hash = _canonical_json_sha256(context_payload)
@@ -1110,6 +1153,7 @@ class PersistentLiveDecisionLoop:
                 "mode": self.mode.value,
                 "gate": gate,
                 "market_state_sha256": market_state_sha256,
+                "decision_context_sha256": decision_context_sha256,
                 "affected_input_ids": list(affected_input_ids),
                 "plan_sha256": plan.plan_sha256,
                 "plan": plan.to_dict(),
@@ -1130,6 +1174,8 @@ class PersistentLiveDecisionLoop:
                 or durable_progress.loop_id != self.loop_id
                 or durable_progress.decision_ts != plan.decision_ts
                 or durable_progress.market_state_sha256 != market_state_sha256
+                or durable_progress.decision_context_sha256
+                != decision_context_sha256
                 or durable_progress.affected_input_ids != affected_input_ids
                 or durable_progress.registered_input_ids != self.dependencies.input_ids
                 or durable_progress.gate != gate
@@ -1155,6 +1201,7 @@ class PersistentLiveDecisionLoop:
                     phase=_PHASE_APPEND_PENDING,
                     decision_ts=plan.decision_ts,
                     market_state_sha256=market_state_sha256,
+                    decision_context_sha256=decision_context_sha256,
                     affected_input_ids=affected_input_ids,
                     registered_input_ids=self.dependencies.input_ids,
                     decision_id=decision_id,
@@ -1173,6 +1220,7 @@ class PersistentLiveDecisionLoop:
                     phase=_PHASE_APPEND_PENDING,
                     decision_ts=plan.decision_ts,
                     market_state_sha256=market_state_sha256,
+                    decision_context_sha256=decision_context_sha256,
                     affected_input_ids=affected_input_ids,
                     registered_input_ids=self.dependencies.input_ids,
                     decision_id=decision_id,
@@ -1195,6 +1243,8 @@ class PersistentLiveDecisionLoop:
                     or existing.payload.get("plan_sha256") != plan.plan_sha256
                     or existing.payload.get("market_state_sha256")
                     != market_state_sha256
+                    or existing.payload.get("decision_context_sha256")
+                    != decision_context_sha256
                     or existing.payload.get("gate") != gate
                     or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
                     != decision_id
@@ -1213,6 +1263,7 @@ class PersistentLiveDecisionLoop:
                 phase=_PHASE_COMMITTED,
                 decision_ts=plan.decision_ts,
                 market_state_sha256=market_state_sha256,
+                decision_context_sha256=decision_context_sha256,
                 affected_input_ids=affected_input_ids,
                 registered_input_ids=self.dependencies.input_ids,
                 decision_id=decision_id,
@@ -1244,6 +1295,7 @@ class PersistentLiveDecisionLoop:
             phase=_PHASE_PENDING,
             decision_ts=decision_ts,
             market_state_sha256=market_state_sha256,
+            decision_context_sha256=self._decision_context_sha256(),
             affected_input_ids=affected_input_ids,
             registered_input_ids=self.dependencies.input_ids,
             decision_id=None,
@@ -1378,6 +1430,7 @@ class PersistentLiveDecisionLoop:
             "mode": self.mode.value,
             "gate": progress.gate,
             "market_state_sha256": progress.market_state_sha256,
+            "decision_context_sha256": progress.decision_context_sha256,
             "plan_sha256": progress.plan_sha256,
         }
         expected_context_hash = _canonical_json_sha256(context_payload)
@@ -1411,6 +1464,8 @@ class PersistentLiveDecisionLoop:
             or existing.payload.get("gate") != progress.gate
             or existing.payload.get("market_state_sha256")
             != progress.market_state_sha256
+            or existing.payload.get("decision_context_sha256")
+            != progress.decision_context_sha256
             or existing.payload.get("affected_input_ids")
             != progress.affected_input_ids
             or existing.payload.get("plan_sha256") != progress.plan_sha256

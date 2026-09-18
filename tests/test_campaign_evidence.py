@@ -136,7 +136,20 @@ class PaperCampaignTests(unittest.TestCase):
             self.scientific_registry.append(record)
 
     @staticmethod
+    def _replay_dataset_hash(run_id, observation_timestamps) -> str:
+        return hashlib.sha256(
+            (
+                "replay:"
+                + run_id
+                + ":"
+                + "|".join(observation_timestamps)
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @classmethod
     def _observation_membership_sha256(
+        cls,
+        run_id,
         observation_timestamps,
         identities=None,
     ) -> str:
@@ -149,11 +162,17 @@ class PaperCampaignTests(unittest.TestCase):
             identities = tuple(identities)
         if len(identities) != len(timestamps):
             raise AssertionError("fixture observation identities must match timestamps")
-        payload = [
+        observations = [
             {"observed_ts": observed_ts, "dedupe_key": dedupe_key}
             for observed_ts, dedupe_key in zip(timestamps, identities, strict=True)
         ]
-        payload.sort(key=lambda item: (item["observed_ts"], item["dedupe_key"]))
+        observations.sort(key=lambda item: (item["observed_ts"], item["dedupe_key"]))
+        payload = {
+            "schema_version": 1,
+            "replay_dataset_hash": cls._replay_dataset_hash(run_id, timestamps),
+            "event_count": len(timestamps),
+            "observations": observations,
+        }
         return hashlib.sha256(
             json.dumps(
                 payload,
@@ -165,6 +184,7 @@ class PaperCampaignTests(unittest.TestCase):
         ).hexdigest()
 
     def session(self, **overrides) -> SessionEvidence:
+        run_id = overrides.get("run_id", "run-1")
         observation_timestamps = tuple(
             overrides.get(
                 "observation_timestamps",
@@ -177,7 +197,7 @@ class PaperCampaignTests(unittest.TestCase):
         )
         values = {
             "session_id": "session-1",
-            "run_id": "run-1",
+            "run_id": run_id,
             "evidence_id": "evidence-1",
             "source_sha256": "22" * 32,
             "research_protocol_id": "protocol-1",
@@ -194,7 +214,8 @@ class PaperCampaignTests(unittest.TestCase):
             "outcome_reveal_after": "2026-09-04T00:00:00Z",
             "observation_timestamps": observation_timestamps,
             "observation_membership_sha256": self._observation_membership_sha256(
-                observation_timestamps
+                run_id,
+                observation_timestamps,
             ),
             "starting_bankroll": Decimal("1000"),
             "ending_bankroll": Decimal("1060"),
@@ -739,6 +760,7 @@ class PaperCampaignTests(unittest.TestCase):
         )
 
         altered_membership = self._observation_membership_sha256(
+            authoritative.run_id,
             observation_timestamps,
             identities=(
                 "fixture-source|event-0",

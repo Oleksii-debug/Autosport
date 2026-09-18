@@ -279,7 +279,7 @@ class DriftReference:
 
     @property
     def available_at(self) -> str:
-        return self.baseline_as_of
+        return _timestamp_identity(self.baseline_as_of, "baseline_as_of")
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -304,6 +304,8 @@ class DriftReference:
             "sample_count": self.sample_count,
             "mean_fraction": self.mean_fraction,
             "truth": DriftTruth.STATISTICAL_EVIDENCE_ONLY.value,
+            "arithmetic_truth": "EXACT_RATIONAL_FROM_CANONICAL_DECIMALS",
+            "interpretation_assumption": "THRESHOLD_DIAGNOSTIC_NOT_SIGNIFICANCE_TEST",
         }
 
     @property
@@ -355,7 +357,7 @@ class DriftObservation:
 
     @property
     def available_at(self) -> str:
-        return self.observation_as_of
+        return _timestamp_identity(self.observation_as_of, "observation_as_of")
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -469,7 +471,7 @@ class DriftFinding:
 
     @property
     def available_at(self) -> str:
-        return self.evaluated_at
+        return _timestamp_identity(self.evaluated_at, "evaluated_at")
 
     def to_payload(self) -> dict[str, Any]:
         return {

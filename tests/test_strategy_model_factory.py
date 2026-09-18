@@ -576,7 +576,43 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
     runner = ExperimentRunner(
         registry, store, baseline_model_factory=model_factory
     )
-    result = _run_candidate(runner, _candidate_points(), rule)
+    dataset = registry.get("DatasetSnapshot", "dataset-factory")
+    assert dataset is not None
+    promotion_evidence = PromotionEvidence(
+        "promotion-evidence-v2",
+        "experiment-v2",
+        "strategy-v2",
+        "model-v2",
+        "eval-v2",
+        "mse",
+        "LOWER_IS_BETTER",
+        "candidate-holdout",
+        64,
+        "0.20",
+        "0.05",
+        "0.30",
+        "0.10",
+        True,
+        "confirm-holdout-v2",
+        "access-v2",
+        _canonical_sha({
+            "dataset_manifest_sha256": dataset.payload["manifest_sha256"],
+            "outcome_reveal_after": dataset.payload["outcome_reveal_after"],
+            "confirmation_holdout_id": "confirm-holdout-v2",
+            "cohort_id": "candidate-holdout",
+        }),
+        "trial-family-v2",
+        hashlib.sha256("one final evaluation".encode("utf-8")).hexdigest(),
+        "VALID",
+        "strategy-v1",
+        T6,
+    )
+    result = _run_candidate(
+        runner,
+        _candidate_points(),
+        rule,
+        promotion_evidence=promotion_evidence,
+    )
 
     assert result.verdict is PromotionVerdict.PROMOTE
     assert result.candidate_metrics["max_squared_error"] <= 0.50
@@ -609,6 +645,19 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
     assert restarted.champion_strategy_version_id == "strategy-v2"
     assert restarted.outcome is ResearchOutcome.POSITIVE
     assert restarted.reproducibility_bundle_sha256 == result.reproducibility_bundle_sha256
+
+
+def test_factory_retain_inconclusive_when_statistical_evidence_is_missing(tmp_path):
+    registry, _, rule, store, _, _ = _factory_foundation(tmp_path)
+    result = _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
+    assert result.verdict is PromotionVerdict.INCONCLUSIVE
+    assert result.registry_action is PromotionAction.RETAIN
+    decision = registry.get("PromotionDecision", "promotion-v2")
+    assert decision is not None
+    assert decision.payload["action"] == PromotionAction.RETAIN.value
+    experiment = registry.get("Experiment", "experiment-v2")
+    assert experiment is not None
+    assert experiment.payload["outcome"] == ResearchOutcome.INCONCLUSIVE.value
 
 
 def test_factory_fails_closed_on_frozen_promotion_rule_tampering(tmp_path):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -444,6 +445,43 @@ class AutosportSession:
         goal_provenance, policy_provenance = self._economic_runtime_provenance(
             economic_goal,
             risk_policy,
+        )
+
+        # Preserve exact causal observation membership inside the existing
+        # transaction-bound run summary. This is not a second authority: the
+        # same market_events snapshot already drives ReplayEngine and
+        # replay_dataset_hash. Campaign evidence may later consume this compact
+        # projection, but cannot mint or rewrite it.
+        normalized_observation_timestamps: list[str] = []
+        for event in market_events:
+            try:
+                observed = datetime.fromisoformat(
+                    event.observed_ts.replace("Z", "+00:00")
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    f"invalid market event observed_ts: {event.observed_ts}"
+                ) from exc
+            if observed.tzinfo is None or observed.utcoffset() is None:
+                raise ValueError("market event observed_ts must include timezone")
+            normalized_observation_timestamps.append(
+                observed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            )
+        observation_timestamps = tuple(
+            sorted(set(normalized_observation_timestamps))
+        )
+        campaign_causal_membership = (
+            None
+            if not observation_timestamps
+            else {
+                "schema_version": 1,
+                "replay_dataset_hash": result.replay.dataset_hash,
+            "campaign_causal_membership": campaign_causal_membership,
+                "event_count": result.replay.event_count,
+                "evaluation_window_start": observation_timestamps[0],
+                "evaluation_window_end": observation_timestamps[-1],
+                "observation_timestamps": list(observation_timestamps),
+            }
         )
         payload = {
             "schema_version": 2,

@@ -240,8 +240,10 @@ class PaperRiskPolicy:
     canonical PaperBook lifecycle and therefore survive snapshot restart without a
     second state authority. Risk-of-ruin remains evidence-gated because a balance
     history is not a probability model. Event/market concentration is enforced
-    against the whole open stake set; provider/sport concentration remains
-    fail-closed where canonical historical identity is unavailable.
+    against the whole open stake set. Provider concentration is executable when
+    every relevant open ticket carries canonical durable provider/bankroll
+    provenance; missing historical provenance fails closed. Sport concentration
+    remains fail-closed until canonical sport identity exists.
     """
 
     max_ticket_fraction: Decimal = Decimal("0.02")
@@ -556,6 +558,19 @@ class PaperRiskPolicy:
         elif dimension == "market":
             proposed_identities = context.market_ids
             identity_attribute = "market_id"
+        elif dimension == "provider":
+            proposed_identities = context.source_ids
+            identity_attribute = None
+            if (
+                not proposed_identities
+                or context.bankroll_id is None
+                or context.currency is None
+            ):
+                return RiskDecision(
+                    False,
+                    "owner provider concentration limit cannot be proven without "
+                    "canonical whole-portfolio exposure evidence",
+                )
         else:
             raise ValueError("unsupported concentration dimension")
 
@@ -570,9 +585,23 @@ class PaperRiskPolicy:
             for ticket in book.tickets.values():
                 if ticket.status is not TicketStatus.OPEN:
                     continue
-                identities = frozenset(
-                    getattr(leg, identity_attribute) for leg in ticket.legs
-                )
+                if dimension == "provider":
+                    if (
+                        not ticket.provider_source_ids
+                        or ticket.bankroll_id != context.bankroll_id
+                        or ticket.currency != context.currency
+                    ):
+                        return RiskDecision(
+                            False,
+                            "owner provider concentration limit cannot be proven without "
+                            "canonical whole-portfolio exposure evidence",
+                        )
+                    identities = frozenset(ticket.provider_source_ids)
+                else:
+                    assert identity_attribute is not None
+                    identities = frozenset(
+                        getattr(leg, identity_attribute) for leg in ticket.legs
+                    )
                 for identity in identities:
                     exposure_by_identity[identity] = cls._exact_positive_sum(
                         (
@@ -628,6 +657,7 @@ class PaperRiskPolicy:
         for dimension, limit in (
             ("event", goal.max_event_concentration_fraction),
             ("market", goal.max_market_concentration_fraction),
+            ("provider", goal.max_provider_concentration_fraction),
         ):
             decision = cls._identity_concentration_decision(
                 book,
@@ -639,20 +669,14 @@ class PaperRiskPolicy:
             if decision is not None:
                 return decision
 
-        # PaperTicket deliberately persists event/market/selection identity but not
-        # provider or sport identity. Never invent those historical dimensions from
-        # current quote evidence. Restrictive provider/sport concentration therefore
-        # remains fail-closed until their canonical durable identity authorities exist.
-        for dimension, limit in (
-            ("provider", goal.max_provider_concentration_fraction),
-            ("sport", goal.max_sport_concentration_fraction),
-        ):
-            if limit < Decimal("1"):
-                return RiskDecision(
-                    False,
-                    f"owner {dimension} concentration limit cannot be proven without "
-                    "canonical whole-portfolio exposure evidence",
-                )
+        # Sport identity still has no canonical durable authority. Never infer it
+        # from event/market/provider strings or free-form metadata.
+        if goal.max_sport_concentration_fraction < Decimal("1"):
+            return RiskDecision(
+                False,
+                "owner sport concentration limit cannot be proven without "
+                "canonical whole-portfolio exposure evidence",
+            )
         return None
 
     @staticmethod
@@ -998,6 +1022,9 @@ class PaperRiskPolicy:
                     amount,
                     reason=f"risk-vector-reservation:{index}",
                     placed_at=context.proposal_ts,
+                    provider_source_ids=tuple(sorted(context.source_ids)),
+                    bankroll_id=context.bankroll_id,
+                    currency=context.currency,
                 )
             except (ArithmeticError, AttributeError, TypeError, ValueError):
                 return StakeVectorDecision(

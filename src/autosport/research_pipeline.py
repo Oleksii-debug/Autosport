@@ -814,6 +814,13 @@ class ResearchDecisionPipeline:
                 amount,
                 reason=strategy_reason,
                 placed_at=decision_ts,
+                provider_source_ids=(
+                    tuple(sorted(proposal_context.source_ids))
+                    if proposal_context is not None
+                    else ()
+                ),
+                bankroll_id=goal.bankroll_id if goal is not None else None,
+                currency=goal.currency if goal is not None else None,
             )
 
         record: DecisionRecord | None = None

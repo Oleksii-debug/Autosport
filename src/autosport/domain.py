@@ -259,6 +259,9 @@ class PaperTicket:
     status: TicketStatus = TicketStatus.OPEN
     payout: Decimal = Decimal("0")
     strategy_reason: str = ""
+    provider_source_ids: tuple[str, ...] = ()
+    bankroll_id: str | None = None
+    currency: str | None = None
 
     @property
     def combined_odds(self) -> Decimal:

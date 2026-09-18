@@ -1,5 +1,7 @@
+import tempfile
 import unittest
 from decimal import Decimal
+from pathlib import Path
 
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
@@ -414,10 +416,77 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
             "owner market concentration limit exceeded",
         )
 
-    def test_unpersisted_provider_and_sport_concentration_remain_fail_closed(self) -> None:
-        provider = self._permissive_policy(
-            self._goal(max_provider_concentration_fraction=Decimal("0.99"))
-        ).evaluate(PaperBook("100"), Decimal("1"), context=self._context())
+    def test_provider_concentration_uses_durable_restart_provenance(self) -> None:
+        goal = self._goal(
+            max_session_loss_fraction=Decimal("1"),
+            max_day_loss_fraction=Decimal("1"),
+            max_drawdown_fraction=Decimal("1"),
+            max_turnover_fraction=Decimal("1000"),
+            max_provider_concentration_fraction=Decimal("0.50"),
+        )
+        policy = self._permissive_policy(goal)
+        book = PaperBook("100")
+        existing_leg = self._leg(
+            "event-existing",
+            "market-existing",
+            "selection-existing",
+        )
+        book.open_ticket(
+            (existing_leg,),
+            Decimal("1"),
+            placed_at="2026-09-16T14:00:00+00:00",
+            provider_source_ids=("provider-1",),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.json"
+            book.save(path)
+            restarted = PaperBook.load(path)
+
+        proposed_leg = self._leg(
+            "event-provider-2",
+            "market-provider-2",
+            "selection-provider-2",
+        )
+        provider_2 = ProposedTicketRiskContext(
+            legs=(proposed_leg,),
+            quotes=(self._quote(proposed_leg, source_id="provider-2"),),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+        at_boundary = policy.evaluate(restarted, Decimal("1"), context=provider_2)
+        self.assertTrue(at_boundary.allowed)
+
+        provider_1 = ProposedTicketRiskContext(
+            legs=(proposed_leg,),
+            quotes=(self._quote(proposed_leg, source_id="provider-1"),),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+        exceeded = policy.evaluate(restarted, Decimal("1"), context=provider_1)
+        self.assertFalse(exceeded.allowed)
+        self.assertEqual(
+            exceeded.reason,
+            "owner provider concentration limit exceeded",
+        )
+
+    def test_provider_concentration_fails_closed_on_missing_historical_provenance(self) -> None:
+        goal = self._goal(max_provider_concentration_fraction=Decimal("0.99"))
+        book = PaperBook("100")
+        book.open_ticket(
+            (self._leg("legacy-event", "legacy-market", "legacy-selection"),),
+            Decimal("1"),
+        )
+
+        provider = self._permissive_policy(goal).evaluate(
+            book,
+            Decimal("1"),
+            context=self._context(),
+        )
         self.assertFalse(provider.allowed)
         self.assertEqual(
             provider.reason,
@@ -425,6 +494,7 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
             "canonical whole-portfolio exposure evidence",
         )
 
+    def test_sport_concentration_remains_fail_closed_without_canonical_identity(self) -> None:
         sport = self._permissive_policy(
             self._goal(max_sport_concentration_fraction=Decimal("0.99"))
         ).evaluate(PaperBook("100"), Decimal("1"), context=self._context())

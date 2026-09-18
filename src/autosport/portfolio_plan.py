@@ -1087,18 +1087,16 @@ class PortfolioPlan:
                 )
             )
             if outcome_independent_positive:
-                if self.terminal_economics is None:
-                    raise ValueError(
-                        "positive outcome-independent action requires terminal economics"
-                    )
-                if (
-                    not self.terminal_economics.worst_proven
-                    or self.terminal_economics.worst_terminal_profit
-                    <= Decimal("0")
-                ):
-                    raise ValueError(
-                        "positive outcome-independent action requires proven positive minimum terminal profit"
-                    )
+                # The canonical builder already fails closed here because the current
+                # market/settlement model cannot prove that externally supplied
+                # ScenarioGroups exhaust every real terminal outcome.  Direct
+                # construction and durable readback must enforce the same authority
+                # boundary; an internally consistent terminal-economics object is
+                # diagnostic evidence, not proof of market-outcome exhaustiveness.
+                raise ValueError(
+                    "positive outcome-independent action requires authoritative "
+                    "exhaustive market-outcome semantics"
+                )
 
     @property
     def dependency_graph_sha256(self) -> str | None:

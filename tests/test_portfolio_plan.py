@@ -673,6 +673,50 @@ class PortfolioPlanTests(unittest.TestCase):
         )
         self.assertEqual(VerifiedTerminalEconomics.from_dict(proof.to_dict()), proof)
 
+        # A self-consistent external terminal proof remains diagnostic only.  It must
+        # not recover positive outcome-independent authority through direct object
+        # construction or through a hash-consistent schema-v3 durable payload when the
+        # canonical builder itself must fail closed for missing exhaustive market truth.
+        policy = self._policy(goal)
+        portfolio_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        self.assertIsNotNone(portfolio_sha256)
+        assert portfolio_sha256 is not None
+        unsafe_fields = {
+            "decision_ts": self.DECISION_TS,
+            "action": PortfolioAction.PAPER_PLAN,
+            "stakes": (Decimal("50.00"), Decimal("50.00")),
+            "intent_ids": tuple(intent.intent_id for intent in intents),
+            "intent_sha256s": tuple(intent.intent_sha256 for intent in intents),
+            "opportunity_classes": tuple(
+                intent.opportunity_class.value for intent in intents
+            ),
+            "portfolio_sha256": portfolio_sha256,
+            "dependency_graph": graph,
+            "terminal_economics": proof,
+            "economic_goal_contract_sha256": "a" * 64,
+            "risk_policy_sha256": policy.provenance_sha256,
+            "portfolio_truth": EvidenceTruth.EXACT,
+            "reason": "externally asserted positive outcome-independent proof",
+        }
+        with self.assertRaisesRegex(
+            ValueError,
+            "authoritative exhaustive market-outcome semantics",
+        ):
+            PortfolioPlan(**unsafe_fields)
+
+        # Build a deliberately bypassed instance only to synthesize the exact
+        # hash-consistent durable payload an attacker/corrupted restart could present.
+        # from_dict() must reconstruct through the real invariants and reject it.
+        unsafe_plan = object.__new__(PortfolioPlan)
+        for field_name, field_value in unsafe_fields.items():
+            object.__setattr__(unsafe_plan, field_name, field_value)
+        unsafe_payload = unsafe_plan.to_dict()
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized portfolio plan is invalid",
+        ):
+            PortfolioPlan.from_dict(unsafe_payload)
+
         # Typed control evidence still has to bind the OpportunityEvidence identity;
         # fail-closed market exhaustiveness must not mask a weaker control-drift check.
         tampered_checks = tuple(

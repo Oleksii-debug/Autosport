@@ -436,6 +436,7 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
             Decimal("1"),
             placed_at="2026-09-16T14:00:00+00:00",
             provider_source_ids=("provider-1",),
+            provider_accounts=(("provider-1", "account-A"),),
             bankroll_id=goal.bankroll_id,
             currency=goal.currency,
         )
@@ -453,6 +454,7 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         provider_2 = ProposedTicketRiskContext(
             legs=(proposed_leg,),
             quotes=(self._quote(proposed_leg, source_id="provider-2"),),
+            provider_accounts=(("provider-2", "account-B"),),
             bankroll_id=goal.bankroll_id,
             currency=goal.currency,
             proposal_ts="2026-09-16T15:00:02+00:00",
@@ -463,6 +465,7 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         provider_1 = ProposedTicketRiskContext(
             legs=(proposed_leg,),
             quotes=(self._quote(proposed_leg, source_id="provider-1"),),
+            provider_accounts=(("provider-1", "account-A"),),
             bankroll_id=goal.bankroll_id,
             currency=goal.currency,
             proposal_ts="2026-09-16T15:00:02+00:00",
@@ -480,10 +483,40 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         book.open_ticket(
             (self._leg("legacy-event", "legacy-market", "legacy-selection"),),
             Decimal("1"),
+            provider_source_ids=("provider-1",),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
+        proposed_leg = self._leg(
+            "event-provider-2",
+            "market-provider-2",
+            "selection-provider-2",
+        )
+        context = ProposedTicketRiskContext(
+            legs=(proposed_leg,),
+            quotes=(self._quote(proposed_leg, source_id="provider-2"),),
+            provider_accounts=(("provider-2", "account-B"),),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+            proposal_ts="2026-09-16T15:00:02+00:00",
         )
 
         provider = self._permissive_policy(goal).evaluate(
             book,
+            Decimal("1"),
+            context=context,
+        )
+        self.assertFalse(provider.allowed)
+        self.assertEqual(
+            provider.reason,
+            "owner provider concentration limit cannot be proven without "
+            "canonical whole-portfolio exposure evidence",
+        )
+
+    def test_provider_concentration_fails_closed_without_proposal_account_identity(self) -> None:
+        goal = self._goal(max_provider_concentration_fraction=Decimal("0.99"))
+        provider = self._permissive_policy(goal).evaluate(
+            PaperBook("100"),
             Decimal("1"),
             context=self._context(),
         )
@@ -493,6 +526,21 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
             "owner provider concentration limit cannot be proven without "
             "canonical whole-portfolio exposure evidence",
         )
+
+    def test_provider_account_binding_must_match_quote_provider_exactly(self) -> None:
+        leg = self._leg()
+        with self.assertRaisesRegex(
+            ValueError,
+            "provider_accounts must cover quote provider sources exactly",
+        ):
+            ProposedTicketRiskContext(
+                legs=(leg,),
+                quotes=(self._quote(leg, source_id="provider-1"),),
+                provider_accounts=(("provider-2", "account-A"),),
+                bankroll_id="paper-bankroll",
+                currency="USD",
+                proposal_ts="2026-09-16T15:00:02+00:00",
+            )
 
     def test_sport_concentration_remains_fail_closed_without_canonical_identity(self) -> None:
         sport = self._permissive_policy(

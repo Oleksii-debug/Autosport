@@ -24,8 +24,8 @@ from .forecasting import parse_iso_timestamp
 _PAPER_DECIMAL_PRECISION = 28
 _PAPER_DECIMAL_EMIN = -999999
 _PAPER_DECIMAL_EMAX = 999999
-_PAPER_SNAPSHOT_SCHEMA_VERSION = 3
-_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3})
+_PAPER_SNAPSHOT_SCHEMA_VERSION = 4
+_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4})
 _SCHEMA_MISSING = object()
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
@@ -102,6 +102,7 @@ class PaperBook:
         placed_at: str | None = None,
         *,
         provider_source_ids: tuple[str, ...] = (),
+        provider_accounts: tuple[tuple[str, str], ...] = (),
         bankroll_id: str | None = None,
         currency: str | None = None,
     ) -> PaperTicket:
@@ -112,8 +113,14 @@ class PaperBook:
             placed_at if placed_at is not None else utc_now_iso()
         )
         self._require_utf8_string(reason, "strategy_reason")
-        provider_source_ids, bankroll_id, currency = self._validate_ticket_provenance(
+        (
             provider_source_ids,
+            provider_accounts,
+            bankroll_id,
+            currency,
+        ) = self._validate_ticket_provenance(
+            provider_source_ids,
+            provider_accounts,
             bankroll_id,
             currency,
         )
@@ -132,6 +139,7 @@ class PaperBook:
             placed_at=ticket_placed_at,
             strategy_reason=reason,
             provider_source_ids=provider_source_ids,
+            provider_accounts=provider_accounts,
             bankroll_id=bankroll_id,
             currency=currency,
         )
@@ -266,6 +274,10 @@ class PaperBook:
                     "payout": str(t.payout),
                     "strategy_reason": t.strategy_reason,
                     "provider_source_ids": list(t.provider_source_ids),
+                    "provider_accounts": [
+                        {"source_id": source_id, "account_id": account_id}
+                        for source_id, account_id in t.provider_accounts
+                    ],
                     "bankroll_id": t.bankroll_id,
                     "currency": t.currency,
                     "legs": [
@@ -334,9 +346,15 @@ class PaperBook:
     def _validate_ticket_provenance(
         cls,
         provider_source_ids: object,
+        provider_accounts: object,
         bankroll_id: object,
         currency: object,
-    ) -> tuple[tuple[str, ...], str | None, str | None]:
+    ) -> tuple[
+        tuple[str, ...],
+        tuple[tuple[str, str], ...],
+        str | None,
+        str | None,
+    ]:
         if type(provider_source_ids) is not tuple:
             raise ValueError("PaperBook provider_source_ids must be a canonical tuple")
         canonical_sources = tuple(
@@ -349,12 +367,43 @@ class PaperBook:
         ):
             raise ValueError("PaperBook provider_source_ids must be sorted and unique")
 
+        if type(provider_accounts) is not tuple:
+            raise ValueError("PaperBook provider_accounts must be a canonical tuple")
+        account_bindings: list[tuple[str, str]] = []
+        for binding in provider_accounts:
+            if type(binding) is not tuple or len(binding) != 2:
+                raise ValueError(
+                    "PaperBook provider_accounts must contain (source_id, account_id) tuples"
+                )
+            source_id, account_id = binding
+            account_bindings.append(
+                (
+                    cls._require_canonical_text(source_id, "provider account source_id"),
+                    cls._require_canonical_text(account_id, "provider account_id"),
+                )
+            )
+        canonical_accounts = tuple(account_bindings)
+        if (
+            canonical_accounts != tuple(sorted(canonical_accounts))
+            or len(canonical_accounts) != len(set(canonical_accounts))
+        ):
+            raise ValueError("PaperBook provider_accounts must be sorted and unique")
+        account_sources = tuple(source_id for source_id, _ in canonical_accounts)
+        if len(account_sources) != len(set(account_sources)):
+            raise ValueError(
+                "PaperBook provider_accounts may bind at most one account_id per provider source"
+            )
+        if canonical_accounts and frozenset(account_sources) != frozenset(canonical_sources):
+            raise ValueError(
+                "PaperBook provider_accounts must cover provider_source_ids exactly"
+            )
+
         if (bankroll_id is None) != (currency is None):
             raise ValueError(
                 "PaperBook bankroll_id and currency provenance must be supplied together"
             )
         if bankroll_id is None:
-            return canonical_sources, None, None
+            return canonical_sources, canonical_accounts, None, None
 
         canonical_bankroll = cls._require_canonical_text(bankroll_id, "bankroll_id")
         canonical_currency = cls._require_canonical_text(currency, "currency")
@@ -367,7 +416,7 @@ class PaperBook:
             raise ValueError(
                 "PaperBook currency provenance must be a three-letter uppercase ASCII code"
             )
-        return canonical_sources, canonical_bankroll, canonical_currency
+        return canonical_sources, canonical_accounts, canonical_bankroll, canonical_currency
 
     @classmethod
     def _validate_placed_at(cls, value: object, *, snapshot: bool = False) -> str:
@@ -516,6 +565,7 @@ class PaperBook:
             cls._require_utf8_string(ticket.strategy_reason, "snapshot strategy_reason")
             cls._validate_ticket_provenance(
                 ticket.provider_source_ids,
+                ticket.provider_accounts,
                 ticket.bankroll_id,
                 ticket.currency,
             )
@@ -642,6 +692,33 @@ class PaperBook:
             )
         return tuple(legs)
 
+    @classmethod
+    def _parse_snapshot_provider_accounts(
+        cls, value: object, ticket_id: str
+    ) -> tuple[tuple[str, str], ...]:
+        if type(value) is not list:
+            raise ValueError(
+                f"PaperBook snapshot provider_accounts for ticket {ticket_id} must be a list"
+            )
+        bindings: list[tuple[str, str]] = []
+        for index, raw_binding in enumerate(value):
+            if type(raw_binding) is not dict or set(raw_binding) != {"source_id", "account_id"}:
+                raise ValueError(
+                    "PaperBook snapshot provider account binding "
+                    f"{index} for ticket {ticket_id} must contain exactly source_id and account_id"
+                )
+            bindings.append(
+                (
+                    cls._require_canonical_text(
+                        raw_binding["source_id"], "snapshot provider account source_id"
+                    ),
+                    cls._require_canonical_text(
+                        raw_binding["account_id"], "snapshot provider account_id"
+                    ),
+                )
+            )
+        return tuple(bindings)
+
     @staticmethod
     def _parse_snapshot_status(value: object, ticket_id: str) -> TicketStatus:
         if not isinstance(value, str):
@@ -690,7 +767,7 @@ class PaperBook:
             if ticket_id in seen_ticket_ids:
                 raise ValueError("PaperBook snapshot contains duplicate ticket_id")
             seen_ticket_ids.add(ticket_id)
-            if schema_version == 3:
+            if schema_version in {3, 4}:
                 provider_source_ids_raw = cls._required_snapshot_field(
                     item, "provider_source_ids", f"ticket {ticket_id}"
                 )
@@ -699,6 +776,16 @@ class PaperBook:
                         f"PaperBook snapshot provider_source_ids for ticket {ticket_id} must be a list"
                     )
                 provider_source_ids = tuple(provider_source_ids_raw)
+                provider_accounts = (
+                    cls._parse_snapshot_provider_accounts(
+                        cls._required_snapshot_field(
+                            item, "provider_accounts", f"ticket {ticket_id}"
+                        ),
+                        ticket_id,
+                    )
+                    if schema_version == 4
+                    else ()
+                )
                 bankroll_id = cls._required_snapshot_field(
                     item, "bankroll_id", f"ticket {ticket_id}"
                 )
@@ -707,6 +794,7 @@ class PaperBook:
                 )
             else:
                 provider_source_ids = ()
+                provider_accounts = ()
                 bankroll_id = None
                 currency = None
 
@@ -733,6 +821,7 @@ class PaperBook:
                 ),
                 strategy_reason=item.get("strategy_reason", ""),
                 provider_source_ids=provider_source_ids,
+                provider_accounts=provider_accounts,
                 bankroll_id=bankroll_id,
                 currency=currency,
             )

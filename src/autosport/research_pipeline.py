@@ -172,6 +172,7 @@ def _research_material_action_intent_sha256(
     groups: list[ScenarioGroup],
     forecasts: dict[str, ForecastRecord],
     evidence: tuple[ResearchEvidence, ...],
+    provider_accounts: tuple[tuple[str, str], ...] = (),
     risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
 ) -> str:
     """Bind one caller idempotence key to the immutable research decision intent."""
@@ -210,6 +211,10 @@ def _research_material_action_intent_sha256(
         "forecasts": [
             {"quote_key": key, "forecast_hash": forecasts[key].canonical_hash}
             for key in sorted(candidate_keys.intersection(forecasts))
+        ],
+        "provider_accounts": [
+            {"source_id": source_id, "account_id": account_id}
+            for source_id, account_id in provider_accounts
         ],
         "evidence": [
             {
@@ -265,6 +270,10 @@ def _ticket_matches_candidate(
     candidate: ParlayCandidate,
     *,
     decision_ts: str,
+    provider_source_ids: tuple[str, ...],
+    provider_accounts: tuple[tuple[str, str], ...],
+    bankroll_id: str,
+    currency: str,
 ) -> bool:
     return (
         isinstance(ticket.stake, Decimal)
@@ -272,6 +281,10 @@ def _ticket_matches_candidate(
         and ticket.stake > 0
         and ticket.placed_at == decision_ts
         and tuple(ticket.legs) == tuple(_ticket_legs(candidate))
+        and ticket.provider_source_ids == provider_source_ids
+        and ticket.provider_accounts == provider_accounts
+        and ticket.bankroll_id == bankroll_id
+        and ticket.currency == currency
     )
 
 
@@ -346,6 +359,8 @@ def _reconcile_existing_economic_action(
     replay_run_id: str,
     decision_ts: str,
     candidate: ParlayCandidate,
+    provider_source_ids: tuple[str, ...],
+    provider_accounts: tuple[tuple[str, str], ...],
 ) -> None:
     if getattr(ledger, "path", None) is not None and not ledger.path.exists():
         persisted = None
@@ -382,7 +397,15 @@ def _reconcile_existing_economic_action(
         or payload.get("ticket_id") != ticket.ticket_id
         or payload.get("stake") != str(ticket.stake)
         or tuple(payload.get("candidate_quote_keys", ())) != expected_quote_keys
-        or not _ticket_matches_candidate(ticket, candidate, decision_ts=decision_ts)
+        or not _ticket_matches_candidate(
+            ticket,
+            candidate,
+            decision_ts=decision_ts,
+            provider_source_ids=provider_source_ids,
+            provider_accounts=provider_accounts,
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
     ):
         raise ResearchDecisionReconciliationRequired(
             "PaperBook and Decision Ledger research material-action evidence do not match exactly"
@@ -686,6 +709,7 @@ class ResearchDecisionPipeline:
         stake: Decimal | str | None,
         decision_ts: str,
         market_quotes: Iterable[MarketEvent] | None = None,
+        provider_accounts: tuple[tuple[str, str], ...] = (),
         risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
         decision_ledger: JsonlDecisionLedger,
         replay_run_id: str,
@@ -696,9 +720,23 @@ class ResearchDecisionPipeline:
         parse_iso_timestamp(decision_ts)
         evidence_items = tuple(evidence)
         goal = self.risk_policy.economic_goal
+        quote_items = tuple(market_quotes or ())
+        proposal_context: ProposedTicketRiskContext | None = None
+        if goal is not None:
+            proposal_context = ProposedTicketRiskContext(
+                legs=tuple(_ticket_legs(candidate)),
+                quotes=quote_items,
+                provider_accounts=provider_accounts,
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+                proposal_ts=decision_ts,
+                risk_of_ruin_evidence=risk_of_ruin_evidence,
+            )
+
         resolved_material_action_id: str | None = None
         resolved_material_action_intent_sha256: str | None = None
         if goal is not None:
+            assert proposal_context is not None
             resolved_material_action_id = _research_material_action_id(
                 replay_run_id=replay_run_id,
                 decision_ts=decision_ts,
@@ -714,6 +752,7 @@ class ResearchDecisionPipeline:
                     groups=groups,
                     forecasts=forecasts,
                     evidence=evidence_items,
+                    provider_accounts=proposal_context.provider_accounts,
                     risk_of_ruin_evidence=risk_of_ruin_evidence,
                 )
             )
@@ -726,18 +765,8 @@ class ResearchDecisionPipeline:
                 replay_run_id=replay_run_id,
                 decision_ts=decision_ts,
                 candidate=candidate,
-            )
-
-        quote_items = tuple(market_quotes or ())
-        proposal_context: ProposedTicketRiskContext | None = None
-        if goal is not None:
-            proposal_context = ProposedTicketRiskContext(
-                legs=tuple(_ticket_legs(candidate)),
-                quotes=quote_items,
-                bankroll_id=goal.bankroll_id,
-                currency=goal.currency,
-                proposal_ts=decision_ts,
-                risk_of_ruin_evidence=risk_of_ruin_evidence,
+                provider_source_ids=tuple(sorted(proposal_context.source_ids)),
+                provider_accounts=proposal_context.provider_accounts,
             )
 
         if goal is None:
@@ -763,6 +792,11 @@ class ResearchDecisionPipeline:
             forecasts=forecasts,
             evidence=evidence_items,
             decision_ts=decision_ts,
+            provider_accounts=(
+                proposal_context.provider_accounts
+                if proposal_context is not None
+                else ()
+            ),
             risk_of_ruin_evidence=risk_of_ruin_evidence,
         )
 
@@ -857,6 +891,11 @@ class ResearchDecisionPipeline:
                     if proposal_context is not None
                     else ()
                 ),
+                provider_accounts=(
+                    proposal_context.provider_accounts
+                    if proposal_context is not None
+                    else ()
+                ),
                 bankroll_id=goal.bankroll_id if goal is not None else None,
                 currency=goal.currency if goal is not None else None,
             )
@@ -880,6 +919,11 @@ class ResearchDecisionPipeline:
                 ticket_id=ticket.ticket_id if ticket else None,
                 forecasts=forecasts,
                 evidence=evidence_items,
+                provider_accounts=(
+                    proposal_context.provider_accounts
+                    if proposal_context is not None
+                    else ()
+                ),
                 risk_of_ruin_evidence=risk_of_ruin_evidence,
             )
             if approved and resolved_material_action_id is not None:
@@ -974,6 +1018,7 @@ def _audit_payload(
     ticket_id: str | None,
     forecasts: dict[str, ForecastRecord],
     evidence: tuple[ResearchEvidence, ...],
+    provider_accounts: tuple[tuple[str, str], ...] = (),
     risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
 ) -> dict:
     candidate_keys = {leg.quote_key for leg in candidate.legs}
@@ -1032,6 +1077,10 @@ def _audit_payload(
             }
         ),
         "risk": {"allowed": risk.allowed, "reason": risk.reason},
+        "provider_accounts": [
+            {"source_id": source_id, "account_id": account_id}
+            for source_id, account_id in provider_accounts
+        ],
         "forecasts": [
             {
                 "quote_key": key,
@@ -1077,6 +1126,7 @@ def _research_context_hash(
     forecasts: dict[str, ForecastRecord],
     evidence: tuple[ResearchEvidence, ...],
     decision_ts: str,
+    provider_accounts: tuple[tuple[str, str], ...] = (),
     risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
 ) -> str:
     candidate_keys = {leg.quote_key for leg in candidate.legs}
@@ -1091,6 +1141,13 @@ def _research_context_hash(
                     "stake": str(ticket.stake),
                     "status": ticket.status.value,
                     "payout": str(ticket.payout),
+                    "provider_source_ids": list(ticket.provider_source_ids),
+                    "provider_accounts": [
+                        {"source_id": source_id, "account_id": account_id}
+                        for source_id, account_id in ticket.provider_accounts
+                    ],
+                    "bankroll_id": ticket.bankroll_id,
+                    "currency": ticket.currency,
                     "legs": [
                         {"quote_key": leg.quote_key, "locked_odds": str(leg.locked_odds)}
                         for leg in ticket.legs
@@ -1099,6 +1156,10 @@ def _research_context_hash(
                 for ticket in sorted(book.tickets.values(), key=lambda item: item.ticket_id)
             ],
         },
+        "provider_accounts": [
+            {"source_id": source_id, "account_id": account_id}
+            for source_id, account_id in provider_accounts
+        ],
         "candidate": [
             {
                 **_candidate_identity_payload(leg),

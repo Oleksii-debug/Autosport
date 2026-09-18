@@ -173,12 +173,15 @@ class ProposedTicketRiskContext:
     risk-of-ruin ceiling requires an explicit canonical upper-bound witness in this
     context; it is never inferred from PaperBook balances. Event/market concentration
     is derived exactly from canonical open PaperBook stake plus the proposed stake.
-    Provider/sport concentration remains fail-closed until those historical identities
-    have canonical durable authorities.
+    Provider concentration additionally requires source-scoped bookmaker account
+    identity for every relevant proposal/open ticket; provider-only history is not
+    sufficient account-scoped exposure proof. Sport concentration remains fail-closed
+    until canonical sport identity has a durable authority.
     """
 
     legs: tuple[TicketLeg, ...]
     quotes: tuple[MarketEvent, ...] = ()
+    provider_accounts: tuple[tuple[str, str], ...] = ()
     bankroll_id: str | None = None
     currency: str | None = None
     measurement_window_start: str | None = None
@@ -226,6 +229,38 @@ class ProposedTicketRiskContext:
         if quote_keys and quote_keys != leg_keys:
             raise ValueError(
                 "proposed ticket quote evidence must cover every proposed leg exactly once"
+            )
+
+        if type(self.provider_accounts) is not tuple:
+            raise ValueError("provider_accounts must be a canonical tuple")
+        validated_accounts: list[tuple[str, str]] = []
+        for binding in self.provider_accounts:
+            if type(binding) is not tuple or len(binding) != 2:
+                raise ValueError(
+                    "provider_accounts must contain (source_id, account_id) tuples"
+                )
+            source_id, account_id = binding
+            validated_accounts.append(
+                (
+                    _canonical_context_text("provider account source_id", source_id),
+                    _canonical_context_text("provider account_id", account_id),
+                )
+            )
+        canonical_accounts = tuple(validated_accounts)
+        if (
+            canonical_accounts != tuple(sorted(canonical_accounts))
+            or len(canonical_accounts) != len(set(canonical_accounts))
+        ):
+            raise ValueError("provider_accounts must be sorted and unique")
+        account_sources = tuple(source_id for source_id, _ in canonical_accounts)
+        if len(account_sources) != len(set(account_sources)):
+            raise ValueError(
+                "provider_accounts may bind at most one account_id per provider source"
+            )
+        quote_sources = frozenset(quote.source_id for quote in self.quotes)
+        if canonical_accounts and frozenset(account_sources) != quote_sources:
+            raise ValueError(
+                "provider_accounts must cover quote provider sources exactly"
             )
 
         if (self.bankroll_id is None) != (self.currency is None):
@@ -293,6 +328,10 @@ class ProposedTicketRiskContext:
     @property
     def source_ids(self) -> frozenset[str]:
         return frozenset(quote.source_id for quote in self.quotes)
+
+    @property
+    def provider_account_keys(self) -> frozenset[tuple[str, str]]:
+        return frozenset(self.provider_accounts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -496,6 +535,10 @@ class PaperRiskPolicy:
                         "payout": str(ticket.payout),
                         "strategy_reason": ticket.strategy_reason,
                         "provider_source_ids": list(ticket.provider_source_ids),
+                        "provider_accounts": [
+                            {"source_id": source_id, "account_id": account_id}
+                            for source_id, account_id in ticket.provider_accounts
+                        ],
                         "bankroll_id": ticket.bankroll_id,
                         "currency": ticket.currency,
                         "legs": [
@@ -524,7 +567,7 @@ class PaperRiskPolicy:
                 )
             return _sha256_payload(
                 {
-                    "schema": "autosport.paper-risk-state.v1",
+                    "schema": "autosport.paper-risk-state.v2",
                     "initial_bankroll": str(book.initial_bankroll),
                     "balance": str(book.balance),
                     "tickets": tickets,
@@ -558,9 +601,13 @@ class PaperRiskPolicy:
             ]
             return _sha256_payload(
                 {
-                    "schema": "autosport.risk-candidate.v1",
+                    "schema": "autosport.risk-candidate.v2",
                     "legs": legs,
                     "quotes": quotes,
+                    "provider_accounts": [
+                        {"source_id": source_id, "account_id": account_id}
+                        for source_id, account_id in context.provider_accounts
+                    ],
                     "bankroll_id": context.bankroll_id,
                     "currency": context.currency,
                     "measurement_window_start": context.measurement_window_start,
@@ -846,6 +893,7 @@ class PaperRiskPolicy:
             identity_attribute = None
             if (
                 not proposed_identities
+                or not context.provider_accounts
                 or context.bankroll_id is None
                 or context.currency is None
             ):
@@ -871,6 +919,11 @@ class PaperRiskPolicy:
                 if dimension == "provider":
                     if (
                         not ticket.provider_source_ids
+                        or not ticket.provider_accounts
+                        or frozenset(
+                            source_id for source_id, _ in ticket.provider_accounts
+                        )
+                        != frozenset(ticket.provider_source_ids)
                         or ticket.bankroll_id != context.bankroll_id
                         or ticket.currency != context.currency
                     ):

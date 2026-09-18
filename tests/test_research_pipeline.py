@@ -130,6 +130,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
         stake="10",
         decision_ts="2026-09-13T10:00:03+00:00",
         market_quotes=None,
+        provider_accounts=(),
         risk_of_ruin_evidence=None,
         decision_ledger=None,
         material_action_id=None,
@@ -151,6 +152,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             stake=stake,
             decision_ts=decision_ts,
             market_quotes=market_quotes,
+            provider_accounts=provider_accounts,
             risk_of_ruin_evidence=risk_of_ruin_evidence,
             decision_ledger=ledger,
             replay_run_id="research-run",
@@ -384,6 +386,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                 pipeline=self._goal_pipeline(goal),
                 stake="NaN",
                 market_quotes=[self._market_event()],
+                provider_accounts=(("provider-1", "account-paper-1"),),
             )
 
             self.assertTrue(decision.approved)
@@ -391,11 +394,19 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             self.assertEqual(decision.portfolio_impact.stake, Decimal("20.00"))
             ticket = book.tickets[decision.ticket_id]
             self.assertEqual(ticket.stake, Decimal("20.00"))
+            self.assertEqual(
+                ticket.provider_accounts,
+                (("provider-1", "account-paper-1"),),
+            )
             records = ledger.verified_records()
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0].decision_kind, ECONOMIC_DECISION_KIND)
             self.assertEqual(records[0].payload["stake"], "20.00")
             self.assertEqual(records[0].payload["stake_source"], "economic-goal-derived")
+            self.assertEqual(
+                records[0].payload["provider_accounts"],
+                [{"source_id": "provider-1", "account_id": "account-paper-1"}],
+            )
             rebound = JsonlDecisionLedger(ledger.path).verified_economic_decision(
                 records[0].decision_id,
                 goal,

@@ -291,6 +291,119 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(len(ledger.verified_records()), 1)
             self.assertEqual([item[0] for item in resumed_factory.calls], ["input-a"])
 
+    def test_append_pending_restart_recovers_before_polling_new_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            crashes = {"remaining": 1}
+
+            def crash_after_append() -> None:
+                if crashes["remaining"]:
+                    crashes["remaining"] -= 1
+                    raise RuntimeError("simulated process loss after ledger append")
+
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+                post_append_hook=crash_after_append,
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+
+            ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+            first_id = ledger.verified_records()[0].decision_id
+            resumed_observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(
+                            selection="selection-a",
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(seconds=2),
+                        ),
+                    )
+                ],
+            )
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+            )
+
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DUPLICATE_DECISION)
+            self.assertEqual(recovered.decision_id, first_id)
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertEqual(len(ledger.verified_records()), 1)
+
+            advanced = resumed.run_cycle()
+            self.assertEqual(advanced.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(resumed_observer.calls, 1)
+            self.assertEqual(len(ledger.verified_records()), 2)
+
+    def test_pending_restart_recovers_before_polling_new_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first_observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+
+            def fail_after_pending(input_id, snapshot):
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            first = self._loop(
+                workspace,
+                observer=first_observer,
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            resumed_observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(
+                            selection="selection-a",
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(seconds=2),
+                        ),
+                    )
+                ],
+            )
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+            )
+
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(resumed_observer.calls, 0)
+            ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+            self.assertEqual(len(ledger.verified_records()), 1)
+
+            advanced = resumed.run_cycle()
+            self.assertEqual(advanced.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(resumed_observer.calls, 1)
+            self.assertEqual(len(ledger.verified_records()), 2)
+
     def test_multi_input_crash_rebuilds_all_but_preserves_affected_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

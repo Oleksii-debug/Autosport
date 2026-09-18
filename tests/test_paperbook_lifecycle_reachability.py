@@ -201,6 +201,54 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
         self.assertEqual(ticket.payout, Decimal("0"))
         self.assertIsNone(ticket.settled_at)
 
+    def test_omitted_settlement_time_remains_unknown_and_durable(self) -> None:
+        book = PaperBook("100")
+        leg = self._leg("event-1", "alice", "2")
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        book.settle(ticket.ticket_id, set())
+
+        self.assertIsNone(ticket.settled_at)
+        self.assertIsNone(book._settlement_times[ticket.ticket_id])
+
+        book.save(self.path)
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        settlement_entry = next(
+            entry for entry in payload["lifecycle"] if entry["action"] == "settle"
+        )
+        self.assertIsNone(payload["tickets"][0]["settled_at"])
+        self.assertIsNone(settlement_entry["settled_at"])
+
+        restored = PaperBook.load(self.path)
+        self.assertIsNone(restored.tickets[ticket.ticket_id].settled_at)
+        self.assertIsNone(restored._settlement_times[ticket.ticket_id])
+
+    def test_post_settlement_timestamp_mutation_fails_before_save(self) -> None:
+        book = PaperBook("100")
+        leg = self._leg("event-1", "alice", "2")
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-14T10:00:00+00:00",
+        )
+        ticket.settled_at = "2026-09-14T11:00:00+00:00"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settled_at is inconsistent with lifecycle provenance",
+        ):
+            book.save(self.path)
+
+        self.assertFalse(self.path.exists())
+
     def test_legacy_open_only_snapshot_remains_loadable_and_upgrades_on_save(self) -> None:
         payload = {
             "initial_bankroll": "100",

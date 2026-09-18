@@ -63,7 +63,13 @@ class PaperValueAgent:
         if not risk.allowed:
             return
         ticket = context.paper_book.open_ticket(
-            [TicketLeg(event.event_id, event.market_id, event.selection_id, event.decimal_odds)],
+            [TicketLeg(
+                event.event_id,
+                event.market_id,
+                event.selection_id,
+                event.decimal_odds,
+                sport=event.sport,
+            )],
             self.stake,
             reason=f"paper forecast {forecast.model_id}; EV/unit={estimate.expected_profit_per_unit}",
             placed_at=event.observed_ts,

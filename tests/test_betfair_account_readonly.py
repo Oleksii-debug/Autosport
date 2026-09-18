@@ -338,3 +338,94 @@ def test_naive_clock_and_oversized_page_fail_closed_before_accepting_evidence():
     client, _ = client_for()
     with pytest.raises(BetfairReadOnlyError, match="cannot exceed"):
         client.read_current_orders_page(record_count=1001)
+
+
+
+def test_execution_readback_binds_action_market_account_and_all_cleared_statuses():
+    client, transport = client_for(
+        response(
+            [{"marketId": "1.234", "event": {"id": "event-1"}}],
+            1,
+        ),
+        response({"currentOrders": [], "moreAvailable": False}, 2),
+        response({"clearedOrders": [], "moreAvailable": False}, 3),
+        response({"clearedOrders": [], "moreAvailable": False}, 4),
+        response({"clearedOrders": [], "moreAvailable": False}, 5),
+        response({"clearedOrders": [], "moreAvailable": False}, 6),
+    )
+
+    capture = client.read_execution_readback(
+        action_id="action-1",
+        market_id="1.234",
+    )
+
+    assert capture.venue_id == "betfair"
+    assert capture.account_id == "default-account"
+    assert capture.action_id == "action-1"
+    assert capture.market_event.event_id == "event-1"
+    assert tuple(status for status, _ in capture.cleared_pages_by_status) == (
+        "SETTLED",
+        "VOIDED",
+        "LAPSED",
+        "CANCELLED",
+    )
+
+    requests = [json.loads(call["body"]) for call in transport.calls]
+    assert requests[0]["method"] == "SportsAPING/v1.0/listMarketCatalogue"
+    assert requests[0]["params"] == {
+        "filter": {"marketIds": ["1.234"]},
+        "marketProjection": ["EVENT"],
+        "maxResults": 1,
+    }
+    assert requests[1]["params"]["customerOrderRefs"] == ["action-1"]
+    assert requests[1]["params"]["marketIds"] == ["1.234"]
+    assert requests[1]["params"]["orderProjection"] == "ALL"
+    assert [request["params"]["betStatus"] for request in requests[2:]] == [
+        "SETTLED",
+        "VOIDED",
+        "LAPSED",
+        "CANCELLED",
+    ]
+    for request in requests[2:]:
+        params = request["params"]
+        assert params["customerOrderRefs"] == ["action-1"]
+        assert params["marketIds"] == ["1.234"]
+        assert params["groupBy"] == "BET"
+        assert "settledDateRange" not in params
+
+
+def test_execution_readback_fails_closed_when_market_event_identity_is_unavailable():
+    client, transport = client_for(response([], 1))
+
+    with pytest.raises(BetfairReadOnlyError, match="market-to-event identity"):
+        client.read_execution_readback(
+            action_id="action-1",
+            market_id="1.234",
+        )
+
+    assert len(transport.calls) == 1
+
+
+def test_bet_readback_capability_is_advertised_only_by_real_readonly_adapter():
+    from autosport.bookmaker_capability import BookmakerCapability
+
+    client, _ = client_for(
+        response(
+            {
+                "currencyCode": "GBP",
+                "localeCode": "en",
+                "region": "GBR",
+                "timezone": "Europe/London",
+            },
+            1,
+        )
+    )
+
+    snapshot = client.read_account_snapshot(
+        frozenset({BookmakerCapability.BET_READBACK})
+    )
+
+    assert snapshot.observed_capabilities == frozenset(
+        {BookmakerCapability.BET_READBACK}
+    )
+    snapshot.profile.require(BookmakerCapability.BET_READBACK)

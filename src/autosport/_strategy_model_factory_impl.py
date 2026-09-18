@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from decimal import Decimal
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -18,6 +19,9 @@ from .scientific_registry import (
     Postmortem,
     PromotionAction,
     PromotionDecision,
+    PromotionEvidence,
+    PromotionEvidenceDirection,
+    PromotionEvidenceValidity,
     ResearchOutcome,
     ScientificRegistry,
     StrategyVersion,

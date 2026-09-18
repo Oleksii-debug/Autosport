@@ -473,6 +473,7 @@ def _candidate_identity_payload(leg) -> dict[str, str]:
     event_id, market_id, selection_id = leg.ticket_identity()
     return {
         "quote_key": leg.quote_key,
+        "sport": leg.sport,
         "event_id": event_id,
         "market_id": market_id,
         "selection_id": selection_id,
@@ -483,7 +484,15 @@ def _ticket_legs(candidate: ParlayCandidate) -> list[TicketLeg]:
     legs: list[TicketLeg] = []
     for item in candidate.legs:
         event_id, market_id, selection_id = item.ticket_identity()
-        legs.append(TicketLeg(event_id, market_id, selection_id, item.decimal_odds))
+        legs.append(
+            TicketLeg(
+                event_id,
+                market_id,
+                selection_id,
+                item.decimal_odds,
+                sport=item.sport,
+            )
+        )
     return legs
 
 

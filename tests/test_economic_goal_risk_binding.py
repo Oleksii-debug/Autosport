@@ -383,6 +383,39 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             "economic goal conservative day loss limit exceeded",
         )
 
+    def test_unanchored_measurement_window_cannot_narrow_historical_loss(self) -> None:
+        book = PaperBook("100")
+        lost = book.open_ticket(
+            [self._leg()],
+            Decimal("4"),
+            placed_at="2026-09-16T12:00:00+00:00",
+        )
+        book.settle(
+            lost.ticket_id,
+            set(),
+            settled_at="2026-09-16T12:30:00+00:00",
+        )
+        policy = self._policy(
+            self._goal(max_session_loss_fraction=Decimal("0.05"))
+        )
+        context = replace(
+            self._context(),
+            proposal_ts=None,
+            measurement_window_start="2026-09-16T14:00:00+00:00",
+            measurement_window_end="2026-09-16T15:00:00+00:00",
+        )
+
+        blocked = policy.evaluate(
+            book,
+            Decimal("1.01"),
+            context=context,
+        )
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(
+            blocked.reason,
+            "economic goal conservative session loss limit exceeded",
+        )
+
     def test_measurement_window_cannot_extend_beyond_proposal_time(self) -> None:
         with self.assertRaisesRegex(
             ValueError,

@@ -106,6 +106,29 @@ def _canonical_decimal(value: object, name: str) -> str:
 def _sha256_text(value: object, name: str) -> str:
     return hashlib.sha256(_text(value, name).encode("utf-8")).hexdigest()
 
+
+def promotion_holdout_access_id(
+    *,
+    research_protocol_id: str,
+    dataset_manifest_sha256: str,
+    source_identity: str,
+    license_identity: str,
+    confirmation_trial_family_id: str,
+) -> str:
+    """Derive one stable holdout identity across renamed dataset snapshots."""
+    return _digest(
+        {
+            "schema_version": 1,
+            "research_protocol_id": _text(research_protocol_id, "research_protocol_id"),
+            "dataset_manifest_sha256": _sha256(dataset_manifest_sha256, "dataset_manifest_sha256"),
+            "source_identity": _text(source_identity, "source_identity"),
+            "license_identity": _text(license_identity, "license_identity"),
+            "confirmation_trial_family_id": _text(
+                confirmation_trial_family_id, "confirmation_trial_family_id"
+            ),
+        }
+    )
+
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -1143,6 +1166,15 @@ class ScientificRegistry:
                     raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
                 if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:
                     raise PromotionEvidenceError("PROMOTE requires a positive durable experiment outcome")
+                dataset = require("DatasetSnapshot", matching_experiment["dataset_snapshot_id"])
+                evidence_trial_family = f"{decision.research_protocol_id}:confirmation-trial-family"
+                expected_holdout_access_id = promotion_holdout_access_id(
+                    research_protocol_id=decision.research_protocol_id,
+                    dataset_manifest_sha256=dataset["payload"].get("manifest_sha256"),
+                    source_identity=dataset["payload"].get("source_identity"),
+                    license_identity=dataset["payload"].get("license_identity"),
+                    confirmation_trial_family_id=evidence_trial_family,
+                )
                 if not promotion_evidence_required:
                     return self._append_entry_locked(state, entry)
                 evidence_id = decision.promotion_evidence_id
@@ -1163,6 +1195,8 @@ class ScientificRegistry:
                     "estimand": hypothesis["payload"].get("primary_metric"),
                     "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
                     "rollback_identity": decision.predecessor_strategy_version_id or "NONE",
+                    "confirmation_trial_family_id": evidence_trial_family,
+                    "holdout_access_id": expected_holdout_access_id,
                 }
                 for key, value in expected.items():
                     if ep.get(key) != value:

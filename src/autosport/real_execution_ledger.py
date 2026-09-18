@@ -56,9 +56,12 @@ class AttemptState(str, Enum):
 
 class EventType(str, Enum):
     PLAN_RESERVED = "PLAN_RESERVED"
+    SUPERVISED_APPROVAL_BOUND = "SUPERVISED_APPROVAL_BOUND"
+    SUPERVISED_APPROVAL_REVOKED = "SUPERVISED_APPROVAL_REVOKED"
     ATTEMPT_RESERVED = "ATTEMPT_RESERVED"
     ATTEMPT_SUBMITTED = "ATTEMPT_SUBMITTED"
     ATTEMPT_UNKNOWN = "ATTEMPT_UNKNOWN"
+    PROVIDER_EVIDENCE_BOUND = "PROVIDER_EVIDENCE_BOUND"
     EXTERNAL_ACKNOWLEDGEMENT = "EXTERNAL_ACKNOWLEDGEMENT"
     RECONCILED_FOUND = "RECONCILED_FOUND"
     RECONCILED_NOT_FOUND = "RECONCILED_NOT_FOUND"
@@ -75,6 +78,13 @@ def _text(value: str, name: str) -> str:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ValueError(f"{name} must be valid UTF-8 text") from exc
+    return value
+
+
+def _sha256_text(value: str, name: str) -> str:
+    _text(value, name)
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise ValueError(f"{name} must be lowercase SHA-256 hex")
     return value
 
 
@@ -709,6 +719,11 @@ class RealExecutionLedger:
                     )
                 found_receipt_id = external_receipt_id
                 found_reconciliations[evidence_id] = event["payload"]
+            elif kind == EventType.PROVIDER_EVIDENCE_BOUND.value:
+                if state not in {AttemptState.SUBMITTED, AttemptState.UNKNOWN}:
+                    raise ExecutionLedgerIntegrityError(
+                        "provider evidence requires submitted/UNKNOWN attempt"
+                    )
             elif kind == EventType.EXTERNAL_ACKNOWLEDGEMENT.value:
                 if state not in {
                     AttemptState.SUBMITTED,
@@ -996,6 +1011,99 @@ class RealExecutionLedger:
                 )
             plan_ids.add(plan.plan_id)
 
+        approval_state: dict[str, tuple[str, str, datetime, bool]] = {}
+        for event in events:
+            kind = event["event_type"]
+            if kind not in {
+                EventType.SUPERVISED_APPROVAL_BOUND.value,
+                EventType.SUPERVISED_APPROVAL_REVOKED.value,
+            }:
+                continue
+            if event["action_id"] is not None or event["attempt_id"] is not None:
+                raise ExecutionLedgerIntegrityError(
+                    "supervised approval event cannot claim action/attempt identity"
+                )
+            plan_event = cls._plan_event(events, event["plan_id"])
+            if plan_event is None:
+                raise ExecutionLedgerIntegrityError(
+                    "supervised approval event references missing plan"
+                )
+            payload = event["payload"]
+            if kind == EventType.SUPERVISED_APPROVAL_BOUND.value:
+                if set(payload) != {
+                    "approval_id",
+                    "approval_fingerprint",
+                    "approved_at",
+                    "evidence_sha256",
+                }:
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised approval binding schema is invalid"
+                    )
+                try:
+                    _sha256_text(payload["approval_fingerprint"], "approval_fingerprint")
+                    _sha256_text(payload["evidence_sha256"], "evidence_sha256")
+                    approved_at = _timestamp(payload["approved_at"], "approved_at")
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised approval binding values are invalid"
+                    ) from exc
+                if payload["approval_id"] != plan_event["payload"]["plan"]["approval_id"]:
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised approval identity mismatches stored plan"
+                    )
+                prior = approval_state.get(event["plan_id"])
+                current = (
+                    payload["approval_id"],
+                    payload["approval_fingerprint"],
+                    approved_at,
+                    False,
+                )
+                if prior is not None and prior != current:
+                    raise ExecutionLedgerIntegrityError(
+                        "conflicting supervised approval binding"
+                    )
+                approval_state[event["plan_id"]] = current
+            else:
+                if set(payload) != {
+                    "approval_id",
+                    "approval_fingerprint",
+                    "revoked_at",
+                    "revocation_evidence_sha256",
+                }:
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised approval revocation schema is invalid"
+                    )
+                prior = approval_state.get(event["plan_id"])
+                if prior is None:
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised approval revocation lacks binding"
+                    )
+                try:
+                    _sha256_text(payload["approval_fingerprint"], "approval_fingerprint")
+                    _sha256_text(
+                        payload["revocation_evidence_sha256"],
+                        "revocation_evidence_sha256",
+                    )
+                    revoked_at = _timestamp(payload["revoked_at"], "revoked_at")
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised approval revocation values are invalid"
+                    ) from exc
+                if (
+                    payload["approval_id"] != prior[0]
+                    or payload["approval_fingerprint"] != prior[1]
+                    or revoked_at < prior[2]
+                ):
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised approval revocation identity/chronology mismatch"
+                    )
+                approval_state[event["plan_id"]] = (
+                    prior[0],
+                    prior[1],
+                    prior[2],
+                    True,
+                )
+
         attempt_ids = {
             event["attempt_id"]
             for event in events
@@ -1140,6 +1248,34 @@ class RealExecutionLedger:
                         ] = reconciliation
                     elif (
                         followup["event_type"]
+                        == EventType.PROVIDER_EVIDENCE_BOUND.value
+                    ):
+                        if set(followup["payload"]) != {
+                            "evidence_id",
+                            "observed_at",
+                            "source",
+                        }:
+                            raise ExecutionLedgerIntegrityError(
+                                "provider evidence binding schema is invalid"
+                            )
+                        _sha256_text(
+                            followup["payload"]["evidence_id"], "evidence_id"
+                        )
+                        _text(followup["payload"]["source"], "source")
+                        evidence_time = _timestamp(
+                            followup["payload"]["observed_at"], "observed_at"
+                        )
+                        causal_boundaries = [reserved_time]
+                        if submitted_time is not None:
+                            causal_boundaries.append(submitted_time)
+                        if unknown_time is not None:
+                            causal_boundaries.append(unknown_time)
+                        if evidence_time < max(causal_boundaries):
+                            raise ExecutionLedgerIntegrityError(
+                                "provider evidence precedes attempt causal boundary"
+                            )
+                    elif (
+                        followup["event_type"]
                         == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
                     ):
                         acknowledgement = cls._acknowledgement_from_dict(
@@ -1239,7 +1375,11 @@ class RealExecutionLedger:
             cls._state(attempt_events)
 
         for event in events:
-            if event["event_type"] == EventType.PLAN_RESERVED.value:
+            if event["event_type"] in {
+                EventType.PLAN_RESERVED.value,
+                EventType.SUPERVISED_APPROVAL_BOUND.value,
+                EventType.SUPERVISED_APPROVAL_REVOKED.value,
+            }:
                 continue
             if event["attempt_id"] not in attempt_ids:
                 raise ExecutionLedgerIntegrityError(
@@ -1250,6 +1390,240 @@ class RealExecutionLedger:
                     "attempt event references missing plan"
                 )
         cls._receipt_owners(events)
+
+    def bind_supervised_approval(
+        self,
+        *,
+        plan_id: str,
+        approval_id: str,
+        approval_fingerprint: str,
+        approved_at: str,
+        evidence_sha256: str,
+    ) -> None:
+        _text(approval_id, "approval_id")
+        _sha256_text(approval_fingerprint, "approval_fingerprint")
+        _timestamp(approved_at, "approved_at")
+        _sha256_text(evidence_sha256, "evidence_sha256")
+
+        def operation() -> None:
+            events = self._events()
+            plan_event = self._plan_event(events, plan_id)
+            if plan_event is None:
+                raise ExecutionStateError("approval binding requires reserved plan")
+            if plan_event["payload"]["plan"]["approval_id"] != approval_id:
+                raise ExecutionIdentityConflict(
+                    "approval identity mismatches durable execution plan"
+                )
+            bindings = [
+                event
+                for event in events
+                if event["plan_id"] == plan_id
+                and event["event_type"] == EventType.SUPERVISED_APPROVAL_BOUND.value
+            ]
+            payload = {
+                "approval_id": approval_id,
+                "approval_fingerprint": approval_fingerprint,
+                "approved_at": approved_at,
+                "evidence_sha256": evidence_sha256,
+            }
+            if bindings:
+                if len(bindings) == 1 and bindings[0]["payload"] == payload:
+                    return
+                raise ExecutionIdentityConflict(
+                    "durable supervised approval binding conflicts"
+                )
+            self._append(
+                EventType.SUPERVISED_APPROVAL_BOUND,
+                plan_id,
+                None,
+                None,
+                payload,
+            )
+
+        self._mutate(operation)
+
+    def revoke_supervised_approval(
+        self,
+        *,
+        plan_id: str,
+        approval_id: str,
+        approval_fingerprint: str,
+        revoked_at: str,
+        revocation_evidence_sha256: str,
+    ) -> None:
+        _text(approval_id, "approval_id")
+        _sha256_text(approval_fingerprint, "approval_fingerprint")
+        _timestamp(revoked_at, "revoked_at")
+        _sha256_text(revocation_evidence_sha256, "revocation_evidence_sha256")
+
+        def operation() -> None:
+            events = self._events()
+            bindings = [
+                event
+                for event in events
+                if event["plan_id"] == plan_id
+                and event["event_type"] == EventType.SUPERVISED_APPROVAL_BOUND.value
+            ]
+            if len(bindings) != 1:
+                raise ExecutionStateError(
+                    "approval revocation requires one durable approval binding"
+                )
+            binding = bindings[0]["payload"]
+            if (
+                binding["approval_id"] != approval_id
+                or binding["approval_fingerprint"] != approval_fingerprint
+            ):
+                raise ExecutionIdentityConflict(
+                    "approval revocation identity mismatches durable binding"
+                )
+            if _timestamp(revoked_at, "revoked_at") < _timestamp(
+                binding["approved_at"], "approved_at"
+            ):
+                raise ExecutionStateError(
+                    "approval revocation predates durable approval"
+                )
+            payload = {
+                "approval_id": approval_id,
+                "approval_fingerprint": approval_fingerprint,
+                "revoked_at": revoked_at,
+                "revocation_evidence_sha256": revocation_evidence_sha256,
+            }
+            revocations = [
+                event
+                for event in events
+                if event["plan_id"] == plan_id
+                and event["event_type"]
+                == EventType.SUPERVISED_APPROVAL_REVOKED.value
+            ]
+            if revocations:
+                if len(revocations) == 1 and revocations[0]["payload"] == payload:
+                    return
+                raise ExecutionIdentityConflict(
+                    "durable supervised approval has conflicting revocation"
+                )
+            self._append(
+                EventType.SUPERVISED_APPROVAL_REVOKED,
+                plan_id,
+                None,
+                None,
+                payload,
+            )
+
+        self._mutate(operation)
+
+    def supervised_approval_is_active(
+        self,
+        *,
+        plan_id: str,
+        approval_id: str,
+        approval_fingerprint: str,
+    ) -> bool:
+        events = self._events()
+        bindings = [
+            event
+            for event in events
+            if event["plan_id"] == plan_id
+            and event["event_type"] == EventType.SUPERVISED_APPROVAL_BOUND.value
+        ]
+        if len(bindings) != 1:
+            return False
+        payload = bindings[0]["payload"]
+        if (
+            payload["approval_id"] != approval_id
+            or payload["approval_fingerprint"] != approval_fingerprint
+        ):
+            return False
+        return not any(
+            event["plan_id"] == plan_id
+            and event["event_type"] == EventType.SUPERVISED_APPROVAL_REVOKED.value
+            for event in events
+        )
+
+    def bind_provider_evidence(
+        self,
+        *,
+        attempt_id: str,
+        evidence_id: str,
+        observed_at: str,
+        source: str,
+    ) -> None:
+        _text(attempt_id, "attempt_id")
+        _sha256_text(evidence_id, "evidence_id")
+        _timestamp(observed_at, "observed_at")
+        _text(source, "source")
+
+        def operation() -> None:
+            events = self._events()
+            attempt_events = self._attempt_events(events, attempt_id)
+            if not attempt_events:
+                raise ExecutionStateError(
+                    "provider evidence requires reserved attempt"
+                )
+            payload = {
+                "evidence_id": evidence_id,
+                "observed_at": observed_at,
+                "source": source,
+            }
+            existing = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value
+            ]
+            if existing:
+                if len(existing) == 1 and existing[0]["payload"] == payload:
+                    return
+                raise ExecutionIdentityConflict(
+                    "attempt already has different provider evidence"
+                )
+            state = self._state(attempt_events)
+            if state not in {AttemptState.SUBMITTED, AttemptState.UNKNOWN}:
+                raise ExecutionStateError(
+                    "new provider evidence requires SUBMITTED/UNKNOWN attempt"
+                )
+            first = attempt_events[0]
+            boundaries = [
+                _timestamp(first["payload"]["reserved_at"], "reserved_at")
+            ]
+            for event in attempt_events:
+                if event["event_type"] == EventType.ATTEMPT_SUBMITTED.value:
+                    boundaries.append(
+                        _timestamp(event["payload"]["submitted_at"], "submitted_at")
+                    )
+                elif event["event_type"] == EventType.ATTEMPT_UNKNOWN.value:
+                    boundaries.append(
+                        _timestamp(event["payload"]["observed_at"], "observed_at")
+                    )
+            if _timestamp(observed_at, "observed_at") < max(boundaries):
+                raise ExecutionStateError(
+                    "provider evidence precedes attempt causal boundary"
+                )
+            self._append(
+                EventType.PROVIDER_EVIDENCE_BOUND,
+                first["plan_id"],
+                first["action_id"],
+                attempt_id,
+                payload,
+            )
+
+        self._mutate(operation)
+
+    def provider_evidence_binding(
+        self,
+        attempt_id: str,
+    ) -> dict[str, str] | None:
+        events = self._events()
+        matches = [
+            event["payload"]
+            for event in self._attempt_events(events, attempt_id)
+            if event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise ExecutionLedgerIntegrityError(
+                "attempt has multiple provider evidence bindings"
+            )
+        return dict(matches[0])
 
     def reserve_plan(self, plan: ExecutionPlan) -> str:
         def operation() -> str:

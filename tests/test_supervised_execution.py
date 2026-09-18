@@ -7,6 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from autosport.betfair_account_readonly import (
+    BetfairClearedOrderPage,
+    BetfairCurrentOrderObservation,
+    BetfairCurrentOrderPage,
+    BetfairEvidence,
+)
 from autosport.bookmaker_capability import (
     BookmakerAccountSnapshot,
     BookmakerCapability,
@@ -48,7 +54,14 @@ from autosport.supervised_execution import (
     reconcile_provider_not_found,
     reconcile_provider_readback,
     reserve_supervised_plan,
+    revoke_supervised_approval,
     supervised_execution_terms_sha256,
+    verify_betfair_provider_state,
+)
+from autosport.supervised_provider_evidence import (
+    ProviderEvidenceError,
+    VerifiedProviderAbsenceEvidence,
+    VerifiedProviderEffectEvidence,
 )
 
 
@@ -61,6 +74,14 @@ UNKNOWN_AT = "2026-09-18T13:20:05+00:00"
 READBACK_AT = "2026-09-18T13:20:06+00:00"
 QUOTE_EXPIRES_AT = "2026-09-18T13:21:00+00:00"
 APPROVAL_EXPIRES_AT = "2026-09-18T13:25:00+00:00"
+
+
+@pytest.fixture(autouse=True)
+def _fixed_trusted_execution_clock(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: RESERVED_AT,
+    )
 
 
 def _goal() -> EconomicGoalContract:
@@ -92,8 +113,8 @@ def _intent() -> tuple[OpportunityIntent, PaperRiskPolicy, PaperBook]:
     )
     leg = TicketLeg(
         "event-1",
-        "winner",
-        "home",
+        "1.23456789",
+        "42",
         Decimal("2.00"),
         sport="soccer",
     )
@@ -223,7 +244,7 @@ def _bound():
 def _ledger_with_unknown(path: Path):
     bound, approval, portfolio, intent = _bound()
     ledger = RealExecutionLedger(path)
-    reserve_supervised_plan(ledger, bound, approval, reserved_at=RESERVED_AT)
+    reserve_supervised_plan(ledger, bound, approval)
     action = bound.execution_plan.actions[0]
     begin_supervised_attempt(
         ledger,
@@ -231,7 +252,6 @@ def _ledger_with_unknown(path: Path):
         approval,
         action_id=action.action_id,
         attempt_id="attempt-1",
-        reserved_at=RESERVED_AT,
     )
     ledger.mark_submitted("attempt-1", submitted_at=SUBMITTED_AT)
     ledger.mark_unknown("attempt-1", reason="ambiguous_external_effect", observed_at=UNKNOWN_AT)
@@ -288,13 +308,13 @@ def test_build_binds_portfolio_intent_approval_profiles_and_quote_constraints() 
     assert portfolio.plan_sha256 in execution.decision_id
     assert intent.intent_sha256 in execution.decision_id
     assert execution.approval_id == approval.ledger_identity
-    assert execution.plan_id.startswith("supervised-v1-")
+    assert execution.plan_id.startswith("supervised-v2-")
     assert execution.bookmaker_profile_version.startswith("profile-set-v1-")
     assert action.bookmaker_id == "betfair"
     assert action.account_id == "acct-1"
     assert action.event_id == "event-1"
-    assert action.market_id == "winner"
-    assert action.selection_id == "home"
+    assert action.market_id == "1.23456789"
+    assert action.selection_id == "42"
     assert action.side == "BACK"
     assert action.requested_stake == portfolio.stakes[0]
     assert action.expires_at == QUOTE_EXPIRES_AT
@@ -345,24 +365,145 @@ def test_approval_binds_exact_route_and_slippage_terms() -> None:
         )
 
 
-def test_revoked_approval_cannot_begin_attempt_after_plan_reservation() -> None:
+def _provider_pages(
+    action,
+    *,
+    matched_stake: Decimal | None,
+    matched_odds: Decimal | None = None,
+    customer_order_ref: str | None = None,
+    market_id: str | None = None,
+    selection_id: int | None = None,
+    more_available: bool = False,
+):
+    current_evidence = BetfairEvidence(READBACK_AT, "d" * 64)
+    cleared_evidence = BetfairEvidence(READBACK_AT, "e" * 64)
+    orders = ()
+    if matched_stake is not None:
+        remaining = action.requested_stake - matched_stake
+        orders = (
+            BetfairCurrentOrderObservation(
+                bet_id="bet-1",
+                market_id=market_id or action.market_id,
+                selection_id=(
+                    int(action.selection_id)
+                    if selection_id is None
+                    else selection_id
+                ),
+                side=action.side,
+                status="EXECUTABLE",
+                placed_date=SUBMITTED_AT,
+                price=action.requested_odds,
+                requested_size=action.requested_stake,
+                average_price_matched=(
+                    matched_odds
+                    if matched_odds is not None
+                    else action.requested_odds
+                ),
+                size_matched=matched_stake,
+                size_remaining=remaining,
+                customer_order_ref=(
+                    action.action_id
+                    if customer_order_ref is None
+                    else customer_order_ref
+                ),
+                customer_strategy_ref=None,
+                evidence=current_evidence,
+            ),
+        )
+    current = BetfairCurrentOrderPage(
+        orders=orders,
+        more_available=more_available,
+        from_record=0,
+        record_count=1000,
+        evidence=current_evidence,
+    )
+    cleared = BetfairClearedOrderPage(
+        orders=(),
+        more_available=False,
+        from_record=0,
+        record_count=1000,
+        evidence=cleared_evidence,
+    )
+    return (current,), (cleared,)
+
+
+def _verified_state(bound, action, *, matched_stake: Decimal | None, **kwargs):
+    current, cleared = _provider_pages(
+        action,
+        matched_stake=matched_stake,
+        **kwargs,
+    )
+    binding = bound.profile_for(action.bookmaker_id, action.account_id)
+    return verify_betfair_provider_state(
+        action,
+        _profile(),
+        expected_profile_sha256=binding.profile_sha256,
+        current_pages=current,
+        cleared_pages=cleared,
+    )
+
+
+def test_lay_is_fail_closed_until_upstream_liability_authority_exists() -> None:
+    bound, _, _, _ = _bound()
+    constraint = bound.constraints[0]
+    with pytest.raises(SupervisedExecutionError, match="BACK only"):
+        replace(constraint, side="LAY")
+
+
+def test_bound_metadata_substitution_is_rejected_by_plan_identity() -> None:
+    bound, _, _, _ = _bound()
+    forged_constraint = replace(
+        bound.constraints[0],
+        max_slippage_fraction=Decimal("0.25"),
+    )
+    with pytest.raises(SupervisedExecutionError, match="durable plan identity"):
+        replace(bound, constraints=(forged_constraint,))
+
+
+def test_durable_revocation_rejects_original_approved_object_after_restart() -> None:
     bound, approval, _, _ = _bound()
-    revoked = replace(approval, state=ApprovalState.REVOKED)
     with tempfile.TemporaryDirectory() as tmp:
-        ledger = RealExecutionLedger(Path(tmp) / "execution.jsonl")
-        reserve_supervised_plan(ledger, bound, approval, reserved_at=RESERVED_AT)
-        with pytest.raises(SupervisedExecutionError, match="not APPROVED|changed or was revoked"):
+        path = Path(tmp) / "execution.jsonl"
+        ledger = RealExecutionLedger(path)
+        reserve_supervised_plan(ledger, bound, approval)
+        restarted = RealExecutionLedger(path)
+        revoke_supervised_approval(
+            restarted,
+            bound,
+            approval,
+            revocation_evidence_sha256="8" * 64,
+        )
+        after_revoke = RealExecutionLedger(path)
+        with pytest.raises(SupervisedExecutionError, match="missing or revoked"):
             begin_supervised_attempt(
-                ledger,
+                after_revoke,
                 bound,
-                revoked,
+                approval,
                 action_id=bound.execution_plan.actions[0].action_id,
                 attempt_id="attempt-revoked",
-                reserved_at=RESERVED_AT,
             )
 
 
-def test_generic_snapshot_cannot_authorize_positive_effect_but_exact_readback_can() -> None:
+def test_trusted_clock_prevents_backdating_expired_quote(monkeypatch) -> None:
+    bound, approval, _, _ = _bound()
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = RealExecutionLedger(Path(tmp) / "execution.jsonl")
+        reserve_supervised_plan(ledger, bound, approval)
+        monkeypatch.setattr(
+            "autosport.supervised_execution._trusted_now",
+            lambda: "2026-09-18T13:21:01+00:00",
+        )
+        with pytest.raises(SupervisedExecutionError, match="quote expiry"):
+            begin_supervised_attempt(
+                ledger,
+                bound,
+                approval,
+                action_id=bound.execution_plan.actions[0].action_id,
+                attempt_id="attempt-too-late",
+            )
+
+
+def test_generic_snapshot_cannot_authorize_positive_but_verified_provider_pages_can() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "execution.jsonl"
         ledger, bound, _, action, _, _ = _ledger_with_unknown(path)
@@ -377,65 +518,33 @@ def test_generic_snapshot_cannot_authorize_positive_effect_but_exact_readback_ca
             ),
             external_receipt_id="bet-1",
         )
-
         assert generic.outcome is ReadbackOutcome.UNKNOWN
         assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
-        assert ledger.can_retry_action(
-            plan_id=bound.execution_plan.plan_id,
-            action_id=action.action_id,
-        ) is False
 
-        exact = reconcile_provider_readback(
+        verified = _verified_state(
+            bound,
+            action,
+            matched_stake=action.requested_stake / Decimal("2"),
+            matched_odds=Decimal("1.99"),
+        )
+        assert isinstance(verified, VerifiedProviderEffectEvidence)
+        result = reconcile_provider_readback(
             ledger,
             bound,
             attempt_id="attempt-1",
-            readback=ProviderReadback(
-                bookmaker_id=action.bookmaker_id,
-                account_id=action.account_id,
-                action_id=action.action_id,
-                adapter_id="betfair-exchange-jsonrpc-readonly",
-                adapter_version="1",
-                profile_version=1,
-                event_id=action.event_id,
-                market_id=action.market_id,
-                selection_id=action.selection_id,
-                external_receipt_id="bet-1",
-                observed_at=READBACK_AT,
-                source_payload_sha256="d" * 64,
-                status=AcknowledgementStatus.PARTIAL,
-                reconciliation_evidence_required=True,
-                accepted_odds=Decimal("1.99"),
-                accepted_stake=action.requested_stake / Decimal("2"),
-            ),
+            readback=verified,
         )
-        assert exact.outcome is ReadbackOutcome.PARTIAL
-        assert exact.attempt_state is AttemptState.PARTIAL
-        before_replay = ledger.verified_snapshot().event_count
+        assert result.outcome is ReadbackOutcome.PARTIAL
+        assert result.attempt_state is AttemptState.PARTIAL
+        before = ledger.verified_snapshot().event_count
         replay = reconcile_provider_readback(
             ledger,
             bound,
             attempt_id="attempt-1",
-            readback=ProviderReadback(
-                bookmaker_id=action.bookmaker_id,
-                account_id=action.account_id,
-                action_id=action.action_id,
-                adapter_id="betfair-exchange-jsonrpc-readonly",
-                adapter_version="1",
-                profile_version=1,
-                event_id=action.event_id,
-                market_id=action.market_id,
-                selection_id=action.selection_id,
-                external_receipt_id="bet-1",
-                observed_at=READBACK_AT,
-                source_payload_sha256="d" * 64,
-                status=AcknowledgementStatus.PARTIAL,
-                reconciliation_evidence_required=True,
-                accepted_odds=Decimal("1.99"),
-                accepted_stake=action.requested_stake / Decimal("2"),
-            ),
+            readback=verified,
         )
-        assert replay == exact
-        assert ledger.verified_snapshot().event_count == before_replay
+        assert replay == result
+        assert ledger.verified_snapshot().event_count == before
 
         restarted = RealExecutionLedger(path)
         assert restarted.verify_integrity() > 0
@@ -446,151 +555,59 @@ def test_generic_snapshot_cannot_authorize_positive_effect_but_exact_readback_ca
         ) is False
 
 
-def test_generic_absence_does_not_release_retry_but_exact_current_cleared_proof_does() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        ledger, bound, _, action, _, _ = _ledger_with_unknown(Path(tmp) / "execution.jsonl")
-        generic = reconcile_account_snapshot(
-            ledger,
-            bound,
-            attempt_id="attempt-1",
-            snapshot=_snapshot(
-                action,
-                observed_at="2026-09-18T13:20:07+00:00",
-                include_open=False,
-                include_settled_capability=True,
-            ),
-            external_receipt_id="caller-selected-not-found-id",
-        )
-        assert generic.outcome is ReadbackOutcome.UNKNOWN
-        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
-        assert ledger.can_retry_action(
-            plan_id=bound.execution_plan.plan_id,
-            action_id=action.action_id,
-        ) is False
-
-        exact = reconcile_provider_not_found(
-            ledger,
-            bound,
-            attempt_id="attempt-1",
-            readback=ProviderNotFoundReadback(
-                bookmaker_id=action.bookmaker_id,
-                account_id=action.account_id,
-                action_id=action.action_id,
-                adapter_id="betfair-exchange-jsonrpc-readonly",
-                adapter_version="1",
-                profile_version=1,
-                event_id=action.event_id,
-                market_id=action.market_id,
-                selection_id=action.selection_id,
-                observed_at="2026-09-18T13:20:08+00:00",
-                current_source_payload_sha256="3" * 64,
-                cleared_source_payload_sha256="4" * 64,
-            ),
-        )
-        assert exact.outcome is ReadbackOutcome.NOT_FOUND
-        assert exact.attempt_state is AttemptState.RECONCILED_NOT_FOUND
-        assert ledger.can_retry_action(
-            plan_id=bound.execution_plan.plan_id,
-            action_id=action.action_id,
-        ) is True
-
-
-def test_not_found_readback_rejects_cross_market_identity() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        ledger, bound, _, action, _, _ = _ledger_with_unknown(Path(tmp) / "execution.jsonl")
-        evidence = ProviderNotFoundReadback(
-            bookmaker_id=action.bookmaker_id,
-            account_id=action.account_id,
-            action_id=action.action_id,
-            adapter_id="betfair-exchange-jsonrpc-readonly",
-            adapter_version="1",
-            profile_version=1,
-            event_id=action.event_id,
-            market_id="different-market",
-            selection_id=action.selection_id,
-            observed_at=READBACK_AT,
-            current_source_payload_sha256="5" * 64,
-            cleared_source_payload_sha256="6" * 64,
-        )
-        with pytest.raises(SupervisedExecutionError, match="identity mismatches"):
-            reconcile_provider_not_found(
-                ledger, bound, attempt_id="attempt-1", readback=evidence
-            )
-        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
-
-
-def test_provider_readback_rejects_adverse_slippage_and_identity_mismatch() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        ledger, bound, _, action, _, _ = _ledger_with_unknown(Path(tmp) / "execution.jsonl")
-        bad_slippage = ProviderReadback(
-            bookmaker_id="betfair",
-            account_id="acct-1",
-            action_id=action.action_id,
-            adapter_id="betfair-exchange-jsonrpc-readonly",
-            adapter_version="1",
-            profile_version=1,
-            event_id=action.event_id,
-            market_id=action.market_id,
-            selection_id=action.selection_id,
-            external_receipt_id="bet-slip",
-            observed_at=READBACK_AT,
-            source_payload_sha256="f" * 64,
-            status=AcknowledgementStatus.ACCEPTED,
-            reconciliation_evidence_required=True,
-            accepted_odds=Decimal("1.80"),
-            accepted_stake=action.requested_stake,
-        )
-        with pytest.raises(SupervisedExecutionError, match="slippage"):
-            reconcile_provider_readback(
-                ledger,
-                bound,
-                attempt_id="attempt-1",
-                readback=bad_slippage,
-            )
-
-        wrong_account = replace(
-            bad_slippage,
-            accepted_odds=Decimal("2.00"),
-            account_id="different-account",
-        )
-        with pytest.raises(SupervisedExecutionError, match="identity mismatches"):
-            reconcile_provider_readback(
-                ledger,
-                bound,
-                attempt_id="attempt-1",
-                readback=wrong_account,
-            )
-
-        wrong_market = replace(
-            bad_slippage,
-            accepted_odds=Decimal("2.00"),
-            market_id="different-market",
-        )
-        with pytest.raises(SupervisedExecutionError, match="identity mismatches"):
-            reconcile_provider_readback(
-                ledger,
-                bound,
-                attempt_id="attempt-1",
-                readback=wrong_market,
-            )
-
-
-def test_explicit_rejected_readback_is_recorded_without_provider_write_surface() -> None:
+def test_direct_submitted_ack_persists_exact_provider_evidence_across_restart() -> None:
     bound, approval, _, _ = _bound()
     with tempfile.TemporaryDirectory() as tmp:
-        ledger = RealExecutionLedger(Path(tmp) / "execution.jsonl")
-        reserve_supervised_plan(ledger, bound, approval, reserved_at=RESERVED_AT)
+        path = Path(tmp) / "execution.jsonl"
+        ledger = RealExecutionLedger(path)
+        reserve_supervised_plan(ledger, bound, approval)
         action = bound.execution_plan.actions[0]
         begin_supervised_attempt(
             ledger,
             bound,
             approval,
             action_id=action.action_id,
-            attempt_id="attempt-rejected",
-            reserved_at=RESERVED_AT,
+            attempt_id="attempt-direct",
         )
-        ledger.mark_submitted("attempt-rejected", submitted_at=SUBMITTED_AT)
-        readback = ProviderReadback(
+        ledger.mark_submitted("attempt-direct", submitted_at=SUBMITTED_AT)
+        verified = _verified_state(
+            bound,
+            action,
+            matched_stake=action.requested_stake,
+        )
+        assert isinstance(verified, VerifiedProviderEffectEvidence)
+        result = reconcile_provider_readback(
+            ledger,
+            bound,
+            attempt_id="attempt-direct",
+            readback=verified,
+        )
+        assert result.outcome is ReadbackOutcome.ACCEPTED
+
+        restarted = RealExecutionLedger(path)
+        binding = restarted.provider_evidence_binding("attempt-direct")
+        assert binding is not None
+        assert binding["evidence_id"] == verified.evidence_id
+        assert binding["source"] == (
+            f"betfair-readonly:{verified.source_payload_sha256}"
+        )
+        before = restarted.verified_snapshot().event_count
+        replay = reconcile_provider_readback(
+            restarted,
+            bound,
+            attempt_id="attempt-direct",
+            readback=verified,
+        )
+        assert replay == result
+        assert restarted.verified_snapshot().event_count == before
+
+
+def test_caller_constructed_positive_readback_cannot_mint_ack() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl"
+        )
+        forged = ProviderReadback(
             bookmaker_id=action.bookmaker_id,
             account_id=action.account_id,
             action_id=action.action_id,
@@ -600,24 +617,166 @@ def test_explicit_rejected_readback_is_recorded_without_provider_write_surface()
             event_id=action.event_id,
             market_id=action.market_id,
             selection_id=action.selection_id,
-            external_receipt_id="provider-rejection-1",
+            external_receipt_id="forged",
             observed_at=READBACK_AT,
-            source_payload_sha256="1" * 64,
-            status=AcknowledgementStatus.REJECTED,
+            source_payload_sha256="f" * 64,
+            status=AcknowledgementStatus.ACCEPTED,
+            accepted_odds=action.requested_odds,
+            accepted_stake=action.requested_stake,
         )
-        result = reconcile_provider_readback(
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="verified canonical provider evidence",
+        ):
+            reconcile_provider_readback(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=forged,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
+
+
+def test_complete_provider_absence_is_required_before_retry_release() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl"
+        )
+        verified = _verified_state(bound, action, matched_stake=None)
+        assert isinstance(verified, VerifiedProviderAbsenceEvidence)
+        result = reconcile_provider_not_found(
             ledger,
             bound,
-            attempt_id="attempt-rejected",
-            readback=readback,
+            attempt_id="attempt-1",
+            readback=verified,
         )
-        assert result.outcome is ReadbackOutcome.REJECTED
-        assert result.attempt_state is AttemptState.REJECTED
+        assert result.outcome is ReadbackOutcome.NOT_FOUND
+        assert ledger.attempt_state("attempt-1") is AttemptState.RECONCILED_NOT_FOUND
+        assert ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        ) is True
+
+
+def test_opaque_not_found_hashes_cannot_release_retry() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl"
+        )
+        forged = ProviderNotFoundReadback(
+            bookmaker_id=action.bookmaker_id,
+            account_id=action.account_id,
+            action_id=action.action_id,
+            adapter_id="betfair-exchange-jsonrpc-readonly",
+            adapter_version="1",
+            profile_version=1,
+            event_id=action.event_id,
+            market_id=action.market_id,
+            selection_id=action.selection_id,
+            observed_at=READBACK_AT,
+            current_source_payload_sha256="3" * 64,
+            cleared_source_payload_sha256="4" * 64,
+        )
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="verified complete provider absence",
+        ):
+            reconcile_provider_not_found(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=forged,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
+        assert ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        ) is False
+
+
+def test_incomplete_provider_pagination_cannot_prove_absence() -> None:
+    bound, _, _, _ = _bound()
+    action = bound.execution_plan.actions[0]
+    current, cleared = _provider_pages(
+        action,
+        matched_stake=None,
+        more_available=True,
+    )
+    binding = bound.profile_for(action.bookmaker_id, action.account_id)
+    with pytest.raises(ProviderEvidenceError, match="incomplete"):
+        verify_betfair_provider_state(
+            action,
+            _profile(),
+            expected_profile_sha256=binding.profile_sha256,
+            current_pages=current,
+            cleared_pages=cleared,
+        )
+
+
+def test_future_profile_version_cannot_rebind_approved_plan() -> None:
+    bound, _, _, _ = _bound()
+    action = bound.execution_plan.actions[0]
+    current, cleared = _provider_pages(
+        action,
+        matched_stake=action.requested_stake,
+    )
+    binding = bound.profile_for(action.bookmaker_id, action.account_id)
+    with pytest.raises(ProviderEvidenceError, match="exact bound profile"):
+        verify_betfair_provider_state(
+            action,
+            replace(_profile(), profile_version=2),
+            expected_profile_sha256=binding.profile_sha256,
+            current_pages=current,
+            cleared_pages=cleared,
+        )
+
+
+def test_provider_order_identity_conflict_fails_closed() -> None:
+    bound, _, _, _ = _bound()
+    action = bound.execution_plan.actions[0]
+    current, cleared = _provider_pages(
+        action,
+        matched_stake=action.requested_stake,
+        market_id="different-market",
+    )
+    binding = bound.profile_for(action.bookmaker_id, action.account_id)
+    with pytest.raises(ProviderEvidenceError, match="identity conflicts"):
+        verify_betfair_provider_state(
+            action,
+            _profile(),
+            expected_profile_sha256=binding.profile_sha256,
+            current_pages=current,
+            cleared_pages=cleared,
+        )
+
+
+def test_verified_readback_still_enforces_approved_slippage() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl"
+        )
+        verified = _verified_state(
+            bound,
+            action,
+            matched_stake=action.requested_stake,
+            matched_odds=Decimal("1.80"),
+        )
+        assert isinstance(verified, VerifiedProviderEffectEvidence)
+        with pytest.raises(SupervisedExecutionError, match="slippage"):
+            reconcile_provider_readback(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=verified,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
 
 def test_bridge_rejects_caller_asserted_terminal_settlement_exactness() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        ledger, bound, _, action, _, _ = _ledger_with_unknown(Path(tmp) / "execution.jsonl")
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl"
+        )
         readback = ProviderReadback(
             bookmaker_id=action.bookmaker_id,
             account_id=action.account_id,
@@ -632,7 +791,6 @@ def test_bridge_rejects_caller_asserted_terminal_settlement_exactness() -> None:
             observed_at=READBACK_AT,
             source_payload_sha256="2" * 64,
             status=AcknowledgementStatus.ACCEPTED,
-            reconciliation_evidence_required=True,
             accepted_odds=action.requested_odds,
             accepted_stake=action.requested_stake,
             terminal_settlement_exact=True,

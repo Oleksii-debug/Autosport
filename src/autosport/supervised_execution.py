@@ -3,18 +3,25 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
+    BookmakerCapability,
+    BookmakerCapabilityError,
     BookmakerCapabilityProfile,
     BookmakerPositionObservation,
 )
 from .bookmaker_routing import RoutingState
 from .bookmaker_routing_plan import ParallelRoutingProposal
 from .portfolio_plan import OpportunityIntent, PortfolioAction, PortfolioPlan
+from .supervised_provider_evidence import (
+    VerifiedProviderAbsenceEvidence,
+    VerifiedProviderEffectEvidence,
+    verify_betfair_provider_state,
+)
 from .real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
@@ -81,6 +88,10 @@ def _digest(value: object) -> str:
     except (TypeError, ValueError, UnicodeEncodeError) as exc:
         raise SupervisedExecutionError("bridge evidence is not canonical JSON") from exc
     return hashlib.sha256(raw).hexdigest()
+
+
+def _trusted_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _quote_payload(quote: object) -> dict[str, object]:
@@ -182,8 +193,10 @@ class ExecutionLegConstraint:
 
     def __post_init__(self) -> None:
         _sha(self.leg_id, "leg_id")
-        if _text(self.side, "side") not in {"BACK", "LAY"}:
-            raise SupervisedExecutionError("side must be BACK or LAY")
+        if _text(self.side, "side") != "BACK":
+            raise SupervisedExecutionError(
+                "supervised bridge supports BACK only until upstream LAY liability authority exists"
+            )
         _time(self.quote_expires_at, "quote_expires_at")
         if (
             not isinstance(self.max_slippage_fraction, Decimal)
@@ -263,6 +276,24 @@ class BoundSupervisedExecutionPlan:
     profile_bindings: tuple[ProfileBinding, ...]
     constraints: tuple[ExecutionLegConstraint, ...]
 
+    def __post_init__(self) -> None:
+        self.verify_binding()
+
+    def verify_binding(self) -> None:
+        expected = _bound_binding_sha256(
+            self.execution_plan,
+            self.portfolio_plan_sha256,
+            self.intent_id,
+            self.intent_sha256,
+            self.approval_fingerprint,
+            self.profile_bindings,
+            self.constraints,
+        )
+        if self.execution_plan.plan_id != f"supervised-v2-{expected}":
+            raise SupervisedExecutionError(
+                "bound execution metadata does not match durable plan identity"
+            )
+
     def action_for(self, action_id: str) -> ExecutionAction:
         matches = [item for item in self.execution_plan.actions if item.action_id == action_id]
         if len(matches) != 1:
@@ -284,6 +315,42 @@ class BoundSupervisedExecutionPlan:
         if len(matches) != 1:
             raise SupervisedExecutionError("action lacks exact profile binding")
         return matches[0]
+
+
+def _bound_binding_sha256(
+    execution_plan: ExecutionPlan,
+    portfolio_plan_sha256: str,
+    intent_id: str,
+    intent_sha256: str,
+    approval_fingerprint: str,
+    profile_bindings: tuple[ProfileBinding, ...],
+    constraints: tuple[ExecutionLegConstraint, ...],
+) -> str:
+    plan = execution_plan.to_dict()
+    plan.pop("plan_id")
+    return _digest(
+        {
+            "schema": "autosport.supervised_execution_bridge_binding",
+            "schema_version": 2,
+            "execution_plan_without_id": plan,
+            "portfolio_plan_sha256": portfolio_plan_sha256,
+            "intent_id": intent_id,
+            "intent_sha256": intent_sha256,
+            "approval_fingerprint": approval_fingerprint,
+            "profile_bindings": [
+                {
+                    "venue_id": item.venue_id,
+                    "account_id": item.account_id,
+                    "adapter_id": item.adapter_id,
+                    "adapter_version": item.adapter_version,
+                    "profile_version": item.profile_version,
+                    "profile_sha256": item.profile_sha256,
+                }
+                for item in profile_bindings
+            ],
+            "constraints": [item.to_dict() for item in constraints],
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,7 +528,7 @@ def _profile_bindings(
                 profile.adapter_id,
                 profile.adapter_version,
                 profile.profile_version,
-                _digest(payload),
+                profile.profile_id,
             )
         )
     ordered = sorted(zip(bindings, payloads, strict=True), key=lambda pair: (pair[0].venue_id, pair[0].account_id))
@@ -515,6 +582,17 @@ def build_supervised_execution_plan(
     if selected_stake <= 0 or routing_proposal.residual_before != selected_stake:
         raise SupervisedExecutionError("routing residual must equal positive approved portfolio stake")
 
+    for profile in profiles:
+        try:
+            profile.require(BookmakerCapability.BET_READBACK)
+        except BookmakerCapabilityError as exc:
+            raise SupervisedExecutionError(
+                "execution bridge requires SUPPORTED BET_READBACK capability"
+            ) from exc
+        if _time(profile.observed_at, "profile observed_at") > created:
+            raise SupervisedExecutionError(
+                "execution bridge cannot consume future capability evidence"
+            )
     bindings, profile_set_sha = _profile_bindings(profiles)
     profiles_by_identity = {(item.venue_id, item.account_id): item for item in bindings}
     constraint_by_leg = {item.leg_id: item for item in constraints}
@@ -576,29 +654,29 @@ def build_supervised_execution_plan(
             }
         )
 
-    bridge_id = _digest(
-        {
-            "schema": "autosport.supervised_execution_bridge",
-            "schema_version": 1,
-            "portfolio_plan_sha256": plan_sha,
-            "risk_policy_sha256": portfolio_plan.risk_policy_sha256,
-            "economic_goal_contract_sha256": portfolio_plan.economic_goal_contract_sha256,
-            "intent_id": intent.intent_id,
-            "intent_sha256": intent.intent_sha256,
-            "strategy_id": intent.strategy_id,
-            "model_id": intent.model_id,
-            "config_sha256": intent.config_sha256,
-            "routing_request_id": routing_proposal.routing_request_id,
-            "approval_fingerprint": approval.fingerprint,
-            "profile_set_sha256": profile_set_sha,
-            "created_at": created_at,
-            "actions": action_bindings,
-        }
+    profile_version_id = f"profile-set-v1-{profile_set_sha}"
+    decision_id = f"portfolio:{plan_sha}:intent:{intent.intent_sha256}"
+    provisional = ExecutionPlan(
+        plan_id="pending-supervised-v2-binding",
+        bookmaker_profile_version=profile_version_id,
+        decision_id=decision_id,
+        approval_id=approval.ledger_identity,
+        created_at=created_at,
+        actions=tuple(actions),
+    )
+    bridge_id = _bound_binding_sha256(
+        provisional,
+        plan_sha,
+        intent.intent_id,
+        intent.intent_sha256,
+        approval.fingerprint,
+        bindings,
+        constraints,
     )
     execution = ExecutionPlan(
-        plan_id=f"supervised-v1-{bridge_id}",
-        bookmaker_profile_version=f"profile-set-v1-{profile_set_sha}",
-        decision_id=f"portfolio:{plan_sha}:intent:{intent.intent_sha256}",
+        plan_id=f"supervised-v2-{bridge_id}",
+        bookmaker_profile_version=profile_version_id,
+        decision_id=decision_id,
         approval_id=approval.ledger_identity,
         created_at=created_at,
         actions=tuple(actions),
@@ -619,6 +697,7 @@ def _require_approval(
     approval: SupervisedApproval,
     at: str,
 ) -> None:
+    bound.verify_binding()
     approval.require_active(at)
     if (
         approval.portfolio_plan_sha256 != bound.portfolio_plan_sha256
@@ -629,7 +708,23 @@ def _require_approval(
         raise SupervisedExecutionError("approval evidence changed or was revoked")
 
 
+def _require_durable_approval(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+) -> None:
+    if not ledger.supervised_approval_is_active(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+    ):
+        raise SupervisedExecutionError(
+            "durable supervised approval is missing or revoked"
+        )
+
+
 def _require_reserved(ledger: RealExecutionLedger, bound: BoundSupervisedExecutionPlan) -> None:
+    bound.verify_binding()
     try:
         saga = ledger.saga(bound.execution_plan.plan_id)
     except KeyError as exc:
@@ -642,11 +737,43 @@ def reserve_supervised_plan(
     ledger: RealExecutionLedger,
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
-    *,
-    reserved_at: str,
 ) -> str:
-    _require_approval(bound, approval, reserved_at)
-    return ledger.reserve_plan(bound.execution_plan)
+    now = _trusted_now()
+    _require_approval(bound, approval, now)
+    fingerprint = ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    _require_durable_approval(ledger, bound, approval)
+    return fingerprint
+
+
+def revoke_supervised_approval(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+    *,
+    revocation_evidence_sha256: str,
+) -> None:
+    _require_reserved(ledger, bound)
+    if (
+        approval.fingerprint != bound.approval_fingerprint
+        or approval.ledger_identity != bound.execution_plan.approval_id
+    ):
+        raise SupervisedExecutionError("approval identity mismatches bound plan")
+    ledger.revoke_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        revoked_at=_trusted_now(),
+        revocation_evidence_sha256=_sha(
+            revocation_evidence_sha256, "revocation_evidence_sha256"
+        ),
+    )
 
 
 def begin_supervised_attempt(
@@ -656,18 +783,19 @@ def begin_supervised_attempt(
     *,
     action_id: str,
     attempt_id: str,
-    reserved_at: str,
 ) -> ExecutionAttempt:
-    _require_approval(bound, approval, reserved_at)
+    now = _trusted_now()
+    _require_approval(bound, approval, now)
     _require_reserved(ledger, bound)
+    _require_durable_approval(ledger, bound, approval)
     action = bound.action_for(action_id)
-    if _time(reserved_at, "reserved_at") >= _time(action.expires_at, "expires_at"):
+    if _time(now, "trusted current time") >= _time(action.expires_at, "expires_at"):
         raise SupervisedExecutionError("attempt is at/after quote expiry")
     return ledger.begin_attempt(
         plan_id=bound.execution_plan.plan_id,
         action_id=action_id,
         attempt_id=attempt_id,
-        reserved_at=reserved_at,
+        reserved_at=now,
     )
 
 
@@ -699,18 +827,45 @@ def _validate_slippage(
             raise SupervisedExecutionError("accepted LAY odds exceed approved slippage")
 
 
+def _require_verified_profile(
+    bound: BoundSupervisedExecutionPlan,
+    action: ExecutionAction,
+    *,
+    adapter_id: str,
+    adapter_version: str,
+    profile_version: int,
+) -> None:
+    planned = bound.profile_for(action.bookmaker_id, action.account_id)
+    if (
+        adapter_id != planned.adapter_id
+        or adapter_version != planned.adapter_version
+        or profile_version != planned.profile_version
+    ):
+        raise SupervisedExecutionError(
+            "provider evidence does not use exact approved capability profile"
+        )
+
+
 def reconcile_provider_readback(
     ledger: RealExecutionLedger,
     bound: BoundSupervisedExecutionPlan,
     *,
     attempt_id: str,
-    readback: ProviderReadback,
+    readback: VerifiedProviderEffectEvidence | ProviderReadback,
 ) -> ReconciliationResult:
-    """Persist typed provider readback; this function has no provider write capability."""
+    """Persist only mechanically verified canonical provider read-only evidence."""
 
-    if readback.terminal_settlement_exact:
+    if isinstance(readback, ProviderReadback):
+        if readback.terminal_settlement_exact:
+            raise SupervisedExecutionError(
+                "terminal settlement exactness is outside supervised execution authority"
+            )
         raise SupervisedExecutionError(
-            "terminal settlement exactness is outside supervised execution authority"
+            "verified canonical provider evidence is required"
+        )
+    if not isinstance(readback, VerifiedProviderEffectEvidence):
+        raise SupervisedExecutionError(
+            "verified canonical provider evidence is required"
         )
     action, state = _attempt_action(ledger, bound, attempt_id)
     if (
@@ -728,31 +883,35 @@ def reconcile_provider_readback(
         action.market_id,
         action.selection_id,
     ):
-        raise SupervisedExecutionError("provider readback identity mismatches execution action")
-    if readback.status in {AcknowledgementStatus.ACCEPTED, AcknowledgementStatus.PARTIAL}:
-        assert readback.accepted_odds is not None and readback.accepted_stake is not None
-        if readback.accepted_stake > action.requested_stake:
-            raise SupervisedExecutionError("readback exceeds requested stake")
-        if (
-            readback.status is AcknowledgementStatus.ACCEPTED
-            and readback.accepted_stake != action.requested_stake
-        ) or (
-            readback.status is AcknowledgementStatus.PARTIAL
-            and readback.accepted_stake >= action.requested_stake
-        ):
-            raise SupervisedExecutionError("provider status conflicts with accepted stake")
-        _validate_slippage(action, bound.constraint_for(action.action_id), readback.accepted_odds)
-
-    planned_profile = bound.profile_for(action.bookmaker_id, action.account_id)
+        raise SupervisedExecutionError(
+            "verified provider evidence identity mismatches execution action"
+        )
+    _require_verified_profile(
+        bound,
+        action,
+        adapter_id=readback.adapter_id,
+        adapter_version=readback.adapter_version,
+        profile_version=readback.profile_version,
+    )
+    if readback.accepted_stake > action.requested_stake:
+        raise SupervisedExecutionError("readback exceeds requested stake")
     if (
-        readback.adapter_id != planned_profile.adapter_id
-        or readback.adapter_version != planned_profile.adapter_version
-        or readback.profile_version < planned_profile.profile_version
+        readback.status is AcknowledgementStatus.ACCEPTED
+        and readback.accepted_stake != action.requested_stake
+    ) or (
+        readback.status is AcknowledgementStatus.PARTIAL
+        and readback.accepted_stake >= action.requested_stake
     ):
-        raise SupervisedExecutionError("provider readback adapter/profile authority drifted")
+        raise SupervisedExecutionError("provider status conflicts with accepted stake")
+    _validate_slippage(
+        action,
+        bound.constraint_for(action.action_id),
+        readback.accepted_odds,
+    )
 
-    evidence_id = (
-        readback.evidence_id if readback.reconciliation_evidence_required else None
+    direct_binding = ledger.provider_evidence_binding(attempt_id)
+    reconciliation_evidence_id = (
+        None if direct_binding is not None else readback.evidence_id
     )
     acknowledgement = ExternalAcknowledgement(
         attempt_id=attempt_id,
@@ -761,32 +920,54 @@ def reconcile_provider_readback(
         acknowledged_at=readback.observed_at,
         accepted_odds=readback.accepted_odds,
         accepted_stake=readback.accepted_stake,
-        reconciliation_evidence_id=evidence_id,
+        reconciliation_evidence_id=reconciliation_evidence_id,
     )
     if state in {AttemptState.ACCEPTED, AttemptState.PARTIAL, AttemptState.REJECTED}:
-        # The canonical ledger compares the complete stored acknowledgement and
-        # makes an exact replay idempotent while rejecting any conflicting receipt.
+        if direct_binding is not None and (
+            direct_binding["evidence_id"] != readback.evidence_id
+            or direct_binding["source"]
+            != f"betfair-readonly:{readback.source_payload_sha256}"
+        ):
+            raise SupervisedExecutionError(
+                "durable direct-ACK provider evidence conflicts on replay"
+            )
         ledger.acknowledge(acknowledgement)
     elif state is AttemptState.UNKNOWN:
-        if not readback.reconciliation_evidence_required:
-            raise SupervisedExecutionError(
-                "UNKNOWN readback requires explicit reconciliation evidence mode"
-            )
         ledger.reconcile_found(
             ExternalEffectReconciliation(
                 attempt_id=attempt_id,
                 evidence_id=readback.evidence_id,
                 external_receipt_id=readback.external_receipt_id,
                 observed_at=readback.observed_at,
-                source=f"read-only-provider:{readback.source_payload_sha256}",
+                source=f"betfair-readonly:{readback.source_payload_sha256}",
             )
+        )
+        acknowledgement = ExternalAcknowledgement(
+            attempt_id=attempt_id,
+            external_receipt_id=readback.external_receipt_id,
+            status=readback.status,
+            acknowledged_at=readback.observed_at,
+            accepted_odds=readback.accepted_odds,
+            accepted_stake=readback.accepted_stake,
+            reconciliation_evidence_id=readback.evidence_id,
         )
         ledger.acknowledge(acknowledgement)
     elif state is AttemptState.SUBMITTED:
-        if readback.reconciliation_evidence_required:
-            raise SupervisedExecutionError(
-                "SUBMITTED direct acknowledgement cannot claim UNKNOWN reconciliation"
-            )
+        ledger.bind_provider_evidence(
+            attempt_id=attempt_id,
+            evidence_id=readback.evidence_id,
+            observed_at=readback.observed_at,
+            source=f"betfair-readonly:{readback.source_payload_sha256}",
+        )
+        acknowledgement = ExternalAcknowledgement(
+            attempt_id=attempt_id,
+            external_receipt_id=readback.external_receipt_id,
+            status=readback.status,
+            acknowledged_at=readback.observed_at,
+            accepted_odds=readback.accepted_odds,
+            accepted_stake=readback.accepted_stake,
+            reconciliation_evidence_id=None,
+        )
         ledger.acknowledge(acknowledgement)
     else:
         raise SupervisedExecutionError(
@@ -799,7 +980,9 @@ def reconcile_provider_readback(
         AttemptState.REJECTED: ReadbackOutcome.REJECTED,
     }.get(final)
     if outcome is None:
-        raise SupervisedExecutionError("readback did not reach deterministic acknowledgement")
+        raise SupervisedExecutionError(
+            "readback did not reach deterministic acknowledgement"
+        )
     return ReconciliationResult(outcome, final, readback.evidence_id)
 
 
@@ -808,10 +991,18 @@ def reconcile_provider_not_found(
     bound: BoundSupervisedExecutionPlan,
     *,
     attempt_id: str,
-    readback: ProviderNotFoundReadback,
+    readback: VerifiedProviderAbsenceEvidence | ProviderNotFoundReadback,
 ) -> ReconciliationResult:
-    """Release UNKNOWN retry only after exact current+cleared provider absence proof."""
+    """Release UNKNOWN retry only from complete canonical provider absence evidence."""
 
+    if isinstance(readback, ProviderNotFoundReadback):
+        raise SupervisedExecutionError(
+            "verified complete provider absence evidence is required"
+        )
+    if not isinstance(readback, VerifiedProviderAbsenceEvidence):
+        raise SupervisedExecutionError(
+            "verified complete provider absence evidence is required"
+        )
     action, state = _attempt_action(ledger, bound, attempt_id)
     if state is not AttemptState.UNKNOWN:
         raise SupervisedExecutionError("not-found readback requires UNKNOWN attempt")
@@ -830,14 +1021,16 @@ def reconcile_provider_not_found(
         action.market_id,
         action.selection_id,
     ):
-        raise SupervisedExecutionError("not-found readback identity mismatches execution action")
-    planned_profile = bound.profile_for(action.bookmaker_id, action.account_id)
-    if (
-        readback.adapter_id != planned_profile.adapter_id
-        or readback.adapter_version != planned_profile.adapter_version
-        or readback.profile_version < planned_profile.profile_version
-    ):
-        raise SupervisedExecutionError("not-found readback adapter/profile authority drifted")
+        raise SupervisedExecutionError(
+            "verified not-found evidence identity mismatches execution action"
+        )
+    _require_verified_profile(
+        bound,
+        action,
+        adapter_id=readback.adapter_id,
+        adapter_version=readback.adapter_version,
+        profile_version=readback.profile_version,
+    )
     ledger.reconcile_not_found(
         ReconciliationSnapshot(
             attempt_id=attempt_id,
@@ -845,7 +1038,7 @@ def reconcile_provider_not_found(
             observed_at=readback.observed_at,
             external_effect_found=False,
             source=(
-                "read-only-provider-current+cleared:"
+                "betfair-readonly-complete-current+cleared:"
                 f"{readback.current_source_payload_sha256}:"
                 f"{readback.cleared_source_payload_sha256}"
             ),
@@ -891,7 +1084,7 @@ def reconcile_account_snapshot(
     if (
         snapshot.profile.adapter_id != planned.adapter_id
         or snapshot.profile.adapter_version != planned.adapter_version
-        or snapshot.profile.profile_version < planned.profile_version
+        or snapshot.profile.profile_version != planned.profile_version
     ):
         raise SupervisedExecutionError("snapshot adapter/profile authority drifted")
 

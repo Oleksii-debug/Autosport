@@ -15,6 +15,7 @@ from .betfair_account_readonly import (
     BetfairCurrentOrderObservation,
     BetfairCurrentOrderPage,
     BetfairExecutionReadbackEnvelope,
+    BetfairReadOnlyError,
 )
 from .bookmaker_capability import (
     BookmakerCapability,
@@ -287,6 +288,12 @@ def verify_betfair_provider_state(
         raise ProviderEvidenceError(
             "provider evidence requires canonical action-scoped readback envelope"
         )
+    try:
+        readback.assert_authoritative()
+    except BetfairReadOnlyError as exc:
+        raise ProviderEvidenceError(
+            "provider evidence requires authoritative canonical readback capture"
+        ) from exc
     if (
         readback.venue_id != action.bookmaker_id
         or readback.account_id != action.account_id

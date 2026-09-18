@@ -87,7 +87,11 @@ class ResearchStrategyRiskOfRuinIngressTests(unittest.TestCase):
                         {
                             "quote_key": event.quote_key,
                             "probability": "0.60",
-                        }
+                        },
+                        {
+                            "quote_key": "abstract-complement:event-1-winner",
+                            "probability": "0.40",
+                        },
                     ],
                 }
             ],

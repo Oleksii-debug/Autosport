@@ -731,7 +731,7 @@ class PaperRiskPolicy:
             turnover = Decimal("0")
 
             for raw_entry in book._lifecycle:
-                action, ticket_id, winners_raw, voids_raw, settled_at = (
+                action, ticket_id, winners_raw, voids_raw = (
                     PaperBook._validate_lifecycle_entry(raw_entry)
                 )
                 ticket = book.tickets.get(ticket_id)
@@ -764,9 +764,12 @@ class PaperRiskPolicy:
                         return None
 
                     include_loss = True
-                    if realized_loss_window is not None and settled_at is not None:
+                    if (
+                        realized_loss_window is not None
+                        and ticket.settled_at is not None
+                    ):
                         _, settlement_time = _canonical_context_timestamp(
-                            "settlement settled_at", settled_at
+                            "settlement settled_at", ticket.settled_at
                         )
                         window_start, window_end = realized_loss_window
                         include_loss = window_start <= settlement_time <= window_end

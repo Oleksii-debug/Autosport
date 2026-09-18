@@ -124,6 +124,7 @@ class SupervisedApproval:
     portfolio_plan_sha256: str
     intent_id: str
     routing_request_id: str
+    execution_terms_sha256: str
     approved_at: str
     expires_at: str
     evidence_sha256: str
@@ -134,6 +135,7 @@ class SupervisedApproval:
         _sha(self.portfolio_plan_sha256, "portfolio_plan_sha256")
         _text(self.intent_id, "intent_id")
         _text(self.routing_request_id, "routing_request_id")
+        _sha(self.execution_terms_sha256, "execution_terms_sha256")
         if _time(self.expires_at, "expires_at") <= _time(self.approved_at, "approved_at"):
             raise SupervisedExecutionError("approval expiry must follow approval time")
         _sha(self.evidence_sha256, "evidence_sha256")
@@ -150,6 +152,7 @@ class SupervisedApproval:
                 "portfolio_plan_sha256": self.portfolio_plan_sha256,
                 "intent_id": self.intent_id,
                 "routing_request_id": self.routing_request_id,
+                "execution_terms_sha256": self.execution_terms_sha256,
                 "approved_at": self.approved_at,
                 "expires_at": self.expires_at,
                 "evidence_sha256": self.evidence_sha256,
@@ -198,6 +201,47 @@ class ExecutionLegConstraint:
             "quote_expires_at": self.quote_expires_at,
             "max_slippage_fraction": str(self.max_slippage_fraction),
         }
+
+
+def supervised_execution_terms_sha256(
+    routing_proposal: ParallelRoutingProposal,
+    constraints: tuple[ExecutionLegConstraint, ...],
+) -> str:
+    if not isinstance(routing_proposal, ParallelRoutingProposal):
+        raise SupervisedExecutionError("routing_proposal must be ParallelRoutingProposal")
+    if type(constraints) is not tuple or any(
+        not isinstance(item, ExecutionLegConstraint) for item in constraints
+    ):
+        raise SupervisedExecutionError("constraints must contain ExecutionLegConstraint values")
+    by_leg = {item.leg_id: item for item in constraints}
+    if len(by_leg) != len(constraints) or set(by_leg) != {
+        leg.leg_id for leg in routing_proposal.legs
+    }:
+        raise SupervisedExecutionError("constraints must exactly cover unique routing legs")
+    return _digest(
+        {
+            "schema": "autosport.supervised_execution_terms",
+            "schema_version": 1,
+            "parent_plan_id": routing_proposal.parent_plan_id,
+            "routing_request_id": routing_proposal.routing_request_id,
+            "state": routing_proposal.state.value,
+            "residual_before": str(routing_proposal.residual_before),
+            "confirmed_total": str(routing_proposal.confirmed_total),
+            "proposed_total": str(routing_proposal.proposed_total),
+            "stake_quantum": str(routing_proposal.stake_quantum),
+            "legs": [
+                {
+                    "leg_id": leg.leg_id,
+                    "venue_id": leg.venue.venue_id,
+                    "account_id": leg.venue.account_id,
+                    "proposed_stake": str(leg.proposed_stake),
+                    "quote": _quote_payload(leg.venue.quote),
+                    "constraint": by_leg[leg.leg_id].to_dict(),
+                }
+                for leg in routing_proposal.legs
+            ],
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,6 +446,10 @@ def build_supervised_execution_plan(
         leg.leg_id for leg in routing_proposal.legs
     }:
         raise SupervisedExecutionError("constraints must exactly cover unique routing legs")
+    if approval.execution_terms_sha256 != supervised_execution_terms_sha256(
+        routing_proposal, constraints
+    ):
+        raise SupervisedExecutionError("approval does not bind exact execution terms")
 
     actions: list[ExecutionAction] = []
     action_bindings: list[dict[str, object]] = []

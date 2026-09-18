@@ -27,6 +27,9 @@ _RECORD_TYPES = frozenset(
         "Experiment",
         "PromotionDecision",
         "Postmortem",
+        "DriftReference",
+        "DriftObservation",
+        "DriftFinding",
     }
 )
 

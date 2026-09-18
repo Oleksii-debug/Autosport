@@ -926,6 +926,7 @@ class PersistentLiveDecisionLoop:
             self._refresh_intents_from_replay(
                 progress.registered_input_ids,
                 decision_time,
+                expected_market_state_sha256=progress.market_state_sha256,
             )
             intents = self._all_cached_intents()
             graph = (
@@ -963,9 +964,15 @@ class PersistentLiveDecisionLoop:
         self,
         input_ids: tuple[str, ...],
         as_of: datetime,
+        *,
+        expected_market_state_sha256: str,
     ) -> None:
         from .portfolio_plan import OpportunityIntent
 
+        _canonical_sha256(
+            "expected replay market_state_sha256",
+            expected_market_state_sha256,
+        )
         store = SQLiteMarketStore(self.workspace / "market.db")
         try:
             snapshot = MarketMirror.replay_view_from_store(
@@ -975,6 +982,12 @@ class PersistentLiveDecisionLoop:
             )
         finally:
             store.close()
+
+        replay_market_sha256 = self._market_state_sha256_for_events(snapshot.events)
+        if replay_market_sha256 != expected_market_state_sha256:
+            raise LiveDecisionProgressError(
+                "unfinished live decision replayed market state changed across restart"
+            )
 
         for input_id in input_ids:
             try:
@@ -1518,10 +1531,15 @@ class PersistentLiveDecisionLoop:
             ) from exc
 
     def _market_state_sha256(self) -> str:
+        return self._market_state_sha256_for_events(
+            self.mirror_updates.mirror.snapshot()
+        )
+
+    def _market_state_sha256_for_events(self, events) -> str:
         specs = tuple(self._input_specs.values())
         payload = [
             event.to_dict()
-            for event in self.mirror_updates.mirror.snapshot()
+            for event in events
             if any(
                 (spec.source_ids is None or event.source_id in spec.source_ids)
                 and (spec.event_ids is None or event.event_id in spec.event_ids)

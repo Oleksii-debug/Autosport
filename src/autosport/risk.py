@@ -884,6 +884,17 @@ class PaperRiskPolicy:
                 "candidate risk context is invalid",
             )
 
+        candidate_identities = [
+            tuple(sorted(leg.quote_key for leg in context.legs))
+            for context in contexts
+        ]
+        if len(candidate_identities) != len(set(candidate_identities)):
+            return StakeVectorDecision(
+                "WAIT",
+                zero_vector,
+                "candidate set contains duplicate or ambiguous executable identity",
+            )
+
         parsed_signals: list[Decimal] = []
         for raw_signal in signal_strengths:
             try:
@@ -916,6 +927,12 @@ class PaperRiskPolicy:
                 "ZERO",
                 zero_vector,
                 "candidate set contains no positive signal",
+            )
+        if goal.max_risk_of_ruin < Decimal("1") and len(positive_indices) > 1:
+            return StakeVectorDecision(
+                "WAIT",
+                zero_vector,
+                "multi-candidate portfolio risk-of-ruin requires vector-bound evidence",
             )
 
         for index in positive_indices:

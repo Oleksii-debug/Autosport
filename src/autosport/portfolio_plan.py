@@ -66,6 +66,18 @@ def _optional_sha256(name: str, value: object) -> str | None:
     return _canonical_sha256(name, value)
 
 
+def _decimal_from_serialized(name: str, value: object) -> Decimal:
+    if type(value) is not str or not value or value != value.strip():
+        raise ValueError(f"{name} must be a canonical finite Decimal string")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError(f"{name} must be a canonical finite Decimal string") from exc
+    if not parsed.is_finite() or str(parsed) != value:
+        raise ValueError(f"{name} must be a canonical finite Decimal string")
+    return parsed
+
+
 def _sha256_payload(payload: object) -> str:
     canonical = json.dumps(
         payload,
@@ -235,6 +247,125 @@ class OpportunityIntent:
 
 
 @dataclass(frozen=True, slots=True)
+class PortfolioDependencyGraph:
+    """Canonical dependency/correlation evidence bound to exact plan inputs."""
+
+    portfolio_sha256: str
+    intent_sha256s: tuple[str, ...]
+    candidate_sha256s: tuple[str, ...]
+    dependency_edges: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        _canonical_sha256("dependency portfolio_sha256", self.portfolio_sha256)
+        if type(self.intent_sha256s) is not tuple or type(self.candidate_sha256s) is not tuple:
+            raise ValueError("dependency identity vectors must be tuples")
+        if len(self.intent_sha256s) != len(self.candidate_sha256s):
+            raise ValueError("dependency identity vectors must have matching cardinality")
+        for digest in self.intent_sha256s:
+            _canonical_sha256("dependency intent_sha256", digest)
+        for digest in self.candidate_sha256s:
+            _canonical_sha256("dependency candidate_sha256", digest)
+        if len(self.intent_sha256s) != len(set(self.intent_sha256s)):
+            raise ValueError("dependency intent identities must be unique")
+        if len(self.candidate_sha256s) != len(set(self.candidate_sha256s)):
+            raise ValueError("dependency candidate identities must be unique")
+        if type(self.dependency_edges) is not tuple:
+            raise ValueError("dependency_edges must be a canonical tuple")
+        candidates = set(self.candidate_sha256s)
+        validated_edges: list[tuple[str, str]] = []
+        for edge in self.dependency_edges:
+            if type(edge) is not tuple or len(edge) != 2:
+                raise ValueError("dependency edge must contain exactly two candidate hashes")
+            left = _canonical_sha256("dependency edge candidate", edge[0])
+            right = _canonical_sha256("dependency edge candidate", edge[1])
+            if left == right:
+                raise ValueError("dependency edge cannot self-reference a candidate")
+            canonical_edge = tuple(sorted((left, right)))
+            if edge != canonical_edge:
+                raise ValueError("dependency edges must use canonical endpoint order")
+            if left not in candidates or right not in candidates:
+                raise ValueError("dependency edge must reference the exact candidate set")
+            validated_edges.append(canonical_edge)
+        if tuple(validated_edges) != tuple(sorted(validated_edges)):
+            raise ValueError("dependency_edges must be sorted")
+        if len(validated_edges) != len(set(validated_edges)):
+            raise ValueError("dependency_edges must be unique")
+
+    @classmethod
+    def for_inputs(
+        cls,
+        book: PaperBook,
+        intents: tuple[OpportunityIntent, ...],
+        *,
+        dependency_edges: tuple[tuple[str, str], ...] = (),
+    ) -> "PortfolioDependencyGraph":
+        if not isinstance(book, PaperBook):
+            raise TypeError("book must be PaperBook")
+        if type(intents) is not tuple or any(
+            not isinstance(intent, OpportunityIntent) for intent in intents
+        ):
+            raise TypeError("intents must be a tuple of OpportunityIntent values")
+        portfolio_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        if portfolio_sha256 is None:
+            raise ValueError("canonical current portfolio identity cannot be proven")
+        return cls(
+            portfolio_sha256=portfolio_sha256,
+            intent_sha256s=tuple(intent.intent_sha256 for intent in intents),
+            candidate_sha256s=tuple(intent.candidate_sha256 for intent in intents),
+            dependency_edges=dependency_edges,
+        )
+
+    @property
+    def graph_sha256(self) -> str:
+        return _sha256_payload(self.to_dict())
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema": "autosport.portfolio_dependency_graph",
+            "schema_version": 1,
+            "portfolio_sha256": self.portfolio_sha256,
+            "intent_sha256s": list(self.intent_sha256s),
+            "candidate_sha256s": list(self.candidate_sha256s),
+            "dependency_edges": [list(edge) for edge in self.dependency_edges],
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "PortfolioDependencyGraph":
+        expected = {
+            "schema",
+            "schema_version",
+            "portfolio_sha256",
+            "intent_sha256s",
+            "candidate_sha256s",
+            "dependency_edges",
+        }
+        if type(raw) is not dict or set(raw) != expected:
+            raise ValueError("serialized dependency graph must contain canonical fields")
+        if raw["schema"] != "autosport.portfolio_dependency_graph":
+            raise ValueError("unsupported dependency graph schema")
+        if raw["schema_version"] != 1:
+            raise ValueError("unsupported dependency graph schema_version")
+        intent_sha256s = raw["intent_sha256s"]
+        candidate_sha256s = raw["candidate_sha256s"]
+        edges_raw = raw["dependency_edges"]
+        if type(intent_sha256s) is not list or type(candidate_sha256s) is not list:
+            raise ValueError("serialized dependency identity vectors must be lists")
+        if type(edges_raw) is not list:
+            raise ValueError("serialized dependency edges must be a list")
+        edges: list[tuple[str, str]] = []
+        for edge in edges_raw:
+            if type(edge) is not list or len(edge) != 2:
+                raise ValueError("serialized dependency edge must contain two endpoints")
+            edges.append((edge[0], edge[1]))
+        return cls(
+            portfolio_sha256=raw["portfolio_sha256"],
+            intent_sha256s=tuple(intent_sha256s),
+            candidate_sha256s=tuple(candidate_sha256s),
+            dependency_edges=tuple(edges),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PortfolioPlan:
     decision_ts: str
     action: PortfolioAction
@@ -243,7 +374,7 @@ class PortfolioPlan:
     intent_sha256s: tuple[str, ...]
     opportunity_classes: tuple[str, ...]
     portfolio_sha256: str | None
-    dependency_graph_sha256: str | None
+    dependency_graph: PortfolioDependencyGraph | None
     economic_goal_contract_sha256: str | None
     risk_policy_sha256: str
     portfolio_truth: EvidenceTruth
@@ -285,7 +416,13 @@ class PortfolioPlan:
         for opportunity_class in self.opportunity_classes:
             StrategyClass(opportunity_class)
         _optional_sha256("portfolio_sha256", self.portfolio_sha256)
-        _optional_sha256("dependency_graph_sha256", self.dependency_graph_sha256)
+        if self.dependency_graph is not None:
+            if not isinstance(self.dependency_graph, PortfolioDependencyGraph):
+                raise ValueError("dependency_graph must be PortfolioDependencyGraph")
+            if self.portfolio_sha256 != self.dependency_graph.portfolio_sha256:
+                raise ValueError("dependency graph must bind the exact portfolio identity")
+            if self.intent_sha256s != self.dependency_graph.intent_sha256s:
+                raise ValueError("dependency graph must bind the exact intent vector")
         _optional_sha256(
             "economic_goal_contract_sha256", self.economic_goal_contract_sha256
         )
@@ -302,11 +439,28 @@ class PortfolioPlan:
             raise ValueError("positive portfolio action requires at least one positive stake")
         if self.action in {PortfolioAction.WAIT, PortfolioAction.ZERO} and positive:
             raise ValueError("WAIT/ZERO plans must not carry positive stakes")
+        if positive:
+            if self.portfolio_truth is not EvidenceTruth.EXACT:
+                raise ValueError("positive portfolio action requires exact portfolio truth")
+            if self.portfolio_sha256 is None:
+                raise ValueError("positive portfolio action requires portfolio identity")
+            if self.dependency_graph is None:
+                raise ValueError("positive portfolio action requires bound dependency graph")
+            if self.economic_goal_contract_sha256 is None:
+                raise ValueError("positive portfolio action requires economic-goal identity")
 
-    def to_dict(self) -> dict[str, object]:
+    @property
+    def dependency_graph_sha256(self) -> str | None:
+        return (
+            None
+            if self.dependency_graph is None
+            else self.dependency_graph.graph_sha256
+        )
+
+    def _identity_payload(self) -> dict[str, object]:
         return {
             "schema": "autosport.portfolio_plan",
-            "schema_version": 1,
+            "schema_version": 2,
             "decision_ts": self.decision_ts,
             "action": self.action.value,
             "stakes": [str(value) for value in self.stakes],
@@ -314,6 +468,9 @@ class PortfolioPlan:
             "intent_sha256s": list(self.intent_sha256s),
             "opportunity_classes": list(self.opportunity_classes),
             "portfolio_sha256": self.portfolio_sha256,
+            "dependency_graph": (
+                None if self.dependency_graph is None else self.dependency_graph.to_dict()
+            ),
             "dependency_graph_sha256": self.dependency_graph_sha256,
             "economic_goal_contract_sha256": self.economic_goal_contract_sha256,
             "risk_policy_sha256": self.risk_policy_sha256,
@@ -321,13 +478,38 @@ class PortfolioPlan:
             "reason": self.reason,
         }
 
+    @property
+    def plan_sha256(self) -> str:
+        return _sha256_payload(self._identity_payload())
+
+    def to_dict(self) -> dict[str, object]:
+        return {**self._identity_payload(), "plan_sha256": self.plan_sha256}
+
     @classmethod
     def from_dict(cls, raw: object) -> "PortfolioPlan":
-        if type(raw) is not dict:
-            raise ValueError("serialized portfolio plan must be a JSON object")
-        if raw.get("schema") != "autosport.portfolio_plan":
+        expected = {
+            "schema",
+            "schema_version",
+            "decision_ts",
+            "action",
+            "stakes",
+            "intent_ids",
+            "intent_sha256s",
+            "opportunity_classes",
+            "portfolio_sha256",
+            "dependency_graph",
+            "dependency_graph_sha256",
+            "economic_goal_contract_sha256",
+            "risk_policy_sha256",
+            "portfolio_truth",
+            "reason",
+            "plan_sha256",
+        }
+        if type(raw) is not dict or set(raw) != expected:
+            raise ValueError("serialized portfolio plan must contain canonical fields")
+        if raw["schema"] != "autosport.portfolio_plan":
             raise ValueError("unsupported portfolio plan schema")
-        if raw.get("schema_version") != 1:
+        if raw["schema_version"] != 2:
             raise ValueError("unsupported portfolio plan schema_version")
         try:
             stakes_raw = raw["stakes"]
@@ -344,28 +526,40 @@ class PortfolioPlan:
                 )
             ):
                 raise ValueError("serialized portfolio plan vectors must be lists")
-            return cls(
+            graph_raw = raw["dependency_graph"]
+            graph = (
+                None
+                if graph_raw is None
+                else PortfolioDependencyGraph.from_dict(graph_raw)
+            )
+            plan = cls(
                 decision_ts=raw["decision_ts"],
                 action=PortfolioAction(raw["action"]),
-                stakes=tuple(Decimal(value) for value in stakes_raw),
+                stakes=tuple(
+                    _decimal_from_serialized("serialized portfolio stake", value)
+                    for value in stakes_raw
+                ),
                 intent_ids=tuple(intent_ids_raw),
                 intent_sha256s=tuple(intent_sha256s_raw),
                 opportunity_classes=tuple(classes_raw),
-                portfolio_sha256=raw.get("portfolio_sha256"),
-                dependency_graph_sha256=raw.get("dependency_graph_sha256"),
-                economic_goal_contract_sha256=raw.get(
-                    "economic_goal_contract_sha256"
-                ),
+                portfolio_sha256=raw["portfolio_sha256"],
+                dependency_graph=graph,
+                economic_goal_contract_sha256=raw["economic_goal_contract_sha256"],
                 risk_policy_sha256=raw["risk_policy_sha256"],
                 portfolio_truth=EvidenceTruth(raw["portfolio_truth"]),
                 reason=raw["reason"],
             )
+            serialized_graph_sha256 = raw["dependency_graph_sha256"]
+            if serialized_graph_sha256 != plan.dependency_graph_sha256:
+                raise ValueError("serialized dependency graph digest does not match graph")
+            serialized_plan_sha256 = _canonical_sha256(
+                "serialized plan_sha256", raw["plan_sha256"]
+            )
+            if serialized_plan_sha256 != plan.plan_sha256:
+                raise ValueError("serialized plan identity does not match plan contents")
+            return plan
         except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
             raise ValueError("serialized portfolio plan is invalid") from exc
-
-    @property
-    def plan_sha256(self) -> str:
-        return _sha256_payload(self.to_dict())
 
 
 def _terminal_plan(
@@ -375,7 +569,7 @@ def _terminal_plan(
     reason: str,
     intents: tuple[OpportunityIntent, ...],
     portfolio_sha256: str | None,
-    dependency_graph_sha256: str | None,
+    dependency_graph: PortfolioDependencyGraph | None,
     policy: PaperRiskPolicy,
     portfolio_truth: EvidenceTruth,
 ) -> PortfolioPlan:
@@ -390,7 +584,7 @@ def _terminal_plan(
             intent.opportunity_class.value for intent in intents
         ),
         portfolio_sha256=portfolio_sha256,
-        dependency_graph_sha256=dependency_graph_sha256,
+        dependency_graph=dependency_graph,
         economic_goal_contract_sha256=(
             provenance_for(goal).contract_sha256 if goal is not None else None
         ),
@@ -398,7 +592,6 @@ def _terminal_plan(
         portfolio_truth=portfolio_truth,
         reason=reason,
     )
-
 
 def _intent_preflight_reason(
     intent: OpportunityIntent,
@@ -450,7 +643,7 @@ def build_portfolio_plan(
     decision_ts: str,
     *,
     portfolio_truth: EvidenceTruth = EvidenceTruth.EXACT,
-    dependency_graph_sha256: str | None,
+    dependency_graph: PortfolioDependencyGraph | None,
     risk_of_ruin_vector_evidence: RiskOfRuinVectorEvidence | None = None,
 ) -> PortfolioPlan:
     """Build one pure whole-portfolio paper plan under canonical RiskPolicy authority."""
@@ -465,9 +658,11 @@ def build_portfolio_plan(
         raise TypeError("risk_policy must be PaperRiskPolicy")
     if not isinstance(portfolio_truth, EvidenceTruth):
         raise TypeError("portfolio_truth must be EvidenceTruth")
+    if dependency_graph is not None and not isinstance(
+        dependency_graph, PortfolioDependencyGraph
+    ):
+        raise TypeError("dependency_graph must be PortfolioDependencyGraph")
     decision_ts, decision_time = _canonical_timestamp("decision_ts", decision_ts)
-    if dependency_graph_sha256 is not None:
-        _canonical_sha256("dependency_graph_sha256", dependency_graph_sha256)
 
     portfolio_sha256 = risk_policy.risk_of_ruin_portfolio_sha256(book)
     if portfolio_sha256 is None:
@@ -477,7 +672,7 @@ def build_portfolio_plan(
             reason="canonical current portfolio identity cannot be proven",
             intents=intents,
             portfolio_sha256=None,
-            dependency_graph_sha256=dependency_graph_sha256,
+            dependency_graph=None,
             policy=risk_policy,
             portfolio_truth=portfolio_truth,
         )
@@ -488,7 +683,7 @@ def build_portfolio_plan(
             reason="opportunity set is empty",
             intents=intents,
             portfolio_sha256=portfolio_sha256,
-            dependency_graph_sha256=dependency_graph_sha256,
+            dependency_graph=None,
             policy=risk_policy,
             portfolio_truth=portfolio_truth,
         )
@@ -501,63 +696,106 @@ def build_portfolio_plan(
             reason="opportunity set contains duplicate immutable intent identity",
             intents=intents,
             portfolio_sha256=portfolio_sha256,
-            dependency_graph_sha256=dependency_graph_sha256,
+            dependency_graph=None,
             policy=risk_policy,
             portfolio_truth=portfolio_truth,
         )
 
-    positive = tuple(
+    potential_positive = tuple(
         intent
         for intent in intents
         if intent.signal_strength > 0
         and intent.opportunity.decision is OpportunityDecision.ACTIONABLE
     )
-    if positive and portfolio_truth is not EvidenceTruth.EXACT:
+    if potential_positive and portfolio_truth is not EvidenceTruth.EXACT:
         return _terminal_plan(
             decision_ts=decision_ts,
             action=PortfolioAction.WAIT,
             reason="positive portfolio action requires exact portfolio completeness truth",
             intents=intents,
             portfolio_sha256=portfolio_sha256,
-            dependency_graph_sha256=dependency_graph_sha256,
+            dependency_graph=None,
             policy=risk_policy,
             portfolio_truth=portfolio_truth,
         )
-    if positive and dependency_graph_sha256 is None:
+    if potential_positive and dependency_graph is None:
         return _terminal_plan(
             decision_ts=decision_ts,
             action=PortfolioAction.WAIT,
             reason="positive portfolio action requires dependency-graph evidence",
             intents=intents,
             portfolio_sha256=portfolio_sha256,
-            dependency_graph_sha256=None,
+            dependency_graph=None,
             policy=risk_policy,
             portfolio_truth=portfolio_truth,
         )
 
-    for intent in intents:
-        reason = _intent_preflight_reason(intent, decision_time)
-        if reason is not None:
+    if dependency_graph is not None:
+        expected_candidates = tuple(intent.candidate_sha256 for intent in intents)
+        if (
+            dependency_graph.portfolio_sha256 != portfolio_sha256
+            or dependency_graph.intent_sha256s != intent_sha256s
+            or dependency_graph.candidate_sha256s != expected_candidates
+        ):
             return _terminal_plan(
                 decision_ts=decision_ts,
                 action=PortfolioAction.WAIT,
-                reason=reason,
+                reason="dependency graph does not bind exact portfolio and candidate inputs",
                 intents=intents,
                 portfolio_sha256=portfolio_sha256,
-                dependency_graph_sha256=dependency_graph_sha256,
+                dependency_graph=None,
                 policy=risk_policy,
                 portfolio_truth=portfolio_truth,
             )
 
-    allocation_signals = tuple(
-        intent.signal_strength
-        if intent.opportunity.decision is OpportunityDecision.ACTIONABLE
-        else Decimal("0")
-        for intent in intents
-    )
+    allocation_signals: list[Decimal] = []
+    rejected: list[tuple[str, str]] = []
+    has_canonical_zero = False
+    for intent in intents:
+        if intent.opportunity.decision is OpportunityDecision.ZERO:
+            has_canonical_zero = True
+            allocation_signals.append(Decimal("0"))
+            rejected.append((intent.intent_id, "canonical opportunity decision is ZERO"))
+            continue
+        reason = _intent_preflight_reason(intent, decision_time)
+        if reason is not None:
+            allocation_signals.append(Decimal("0"))
+            rejected.append((intent.intent_id, reason))
+            continue
+        allocation_signals.append(
+            intent.signal_strength
+            if intent.opportunity.decision is OpportunityDecision.ACTIONABLE
+            else Decimal("0")
+        )
+
+    if not any(signal > 0 for signal in allocation_signals):
+        if rejected:
+            if has_canonical_zero and all(
+                intent.opportunity.decision is OpportunityDecision.ZERO
+                or intent.signal_strength <= 0
+                for intent in intents
+            ):
+                action = PortfolioAction.ZERO
+                reason = "canonical opportunity decision is ZERO"
+            else:
+                action = PortfolioAction.WAIT
+                reason = "no safe actionable opportunity remains after preflight: " + "; ".join(
+                    f"{intent_id}={rejection}" for intent_id, rejection in rejected
+                )
+            return _terminal_plan(
+                decision_ts=decision_ts,
+                action=action,
+                reason=reason,
+                intents=intents,
+                portfolio_sha256=portfolio_sha256,
+                dependency_graph=dependency_graph,
+                policy=risk_policy,
+                portfolio_truth=portfolio_truth,
+            )
+
     allocation = risk_policy.derive_goal_stake_vector(
         book,
-        allocation_signals,
+        tuple(allocation_signals),
         contexts=tuple(intent.risk_context for intent in intents),
         risk_of_ruin_vector_evidence=risk_of_ruin_vector_evidence,
     )
@@ -577,6 +815,15 @@ def build_portfolio_plan(
             "ZERO": PortfolioAction.ZERO,
         }[allocation.action]
     goal = risk_policy.economic_goal
+    reason = allocation.reason
+    if action in {
+        PortfolioAction.STAKE_VECTOR,
+        PortfolioAction.HEDGE_REBALANCE,
+        PortfolioAction.PAPER_PLAN,
+    } and rejected:
+        reason += "; ineligible intents zeroed: " + "; ".join(
+            f"{intent_id}={rejection}" for intent_id, rejection in rejected
+        )
     return PortfolioPlan(
         decision_ts=decision_ts,
         action=action,
@@ -587,11 +834,11 @@ def build_portfolio_plan(
             intent.opportunity_class.value for intent in intents
         ),
         portfolio_sha256=portfolio_sha256,
-        dependency_graph_sha256=dependency_graph_sha256,
+        dependency_graph=dependency_graph,
         economic_goal_contract_sha256=(
             provenance_for(goal).contract_sha256 if goal is not None else None
         ),
         risk_policy_sha256=risk_policy.provenance_sha256,
         portfolio_truth=portfolio_truth,
-        reason=allocation.reason,
+        reason=reason,
     )

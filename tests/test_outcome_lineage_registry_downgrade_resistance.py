@@ -200,6 +200,45 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "run summary SHA-256 mismatch"):
                 RunRegistry(registry.path)
 
+    def test_schema_downgrade_cannot_reuse_lineage_run_id_as_completed_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            accepted = self._binding("accepted-root")
+            self._accept(registry, accepted)
+            self._write_bound_summary(root, accepted)
+
+            state = json.loads(registry.path.read_text(encoding="utf-8"))
+            state["schema_version"] = 1
+            state.pop("outcome_lineage_trust")
+            for entry in state["runs"].values():
+                entry.pop("outcome_lineage", None)
+            registry.path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "lineage-trust schema was downgraded"):
+                RunRegistry(registry.path)
+
+    def test_marker_removal_cannot_reuse_lineage_run_id_as_completed_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            accepted = self._binding("accepted-root")
+            self._accept(registry, accepted)
+            summary_path = self._write_bound_summary(root, accepted)
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary.pop("outcome_lineage_trust")
+            summary_path.write_text(json.dumps(summary, sort_keys=True), encoding="utf-8")
+
+            state = json.loads(registry.path.read_text(encoding="utf-8"))
+            state["schema_version"] = 1
+            state.pop("outcome_lineage_trust")
+            for entry in state["runs"].values():
+                entry.pop("outcome_lineage", None)
+            registry.path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "run summary SHA-256 mismatch"):
+                RunRegistry(registry.path)
+
     def test_schema_two_registry_must_cover_hash_bound_durable_summary_trust(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -703,8 +703,7 @@ class RunRegistry:
     def _durable_summary_lineage_bindings(
         self,
         *,
-        registry_run_ids: frozenset[str] = frozenset(),
-        skip_known_legacy_runs: bool = False,
+        active_legacy_run_ids: frozenset[str] = frozenset(),
     ) -> tuple[OutcomeLineageBinding, ...]:
         """Recover lineage trust duplicated into checksum-bound completed summaries.
 
@@ -717,10 +716,10 @@ class RunRegistry:
             if not summary_path.is_file():
                 continue
             filename_run_id = summary_path.name.removeprefix("run-").removesuffix(".json")
-            if skip_known_legacy_runs and filename_run_id in registry_run_ids:
-                # Existing schema-one runs retain their established recovery error
-                # boundaries.  The downgrade scan targets transaction-bound summaries
-                # whose lineage-bearing run history disappeared from the registry.
+            if filename_run_id in active_legacy_run_ids:
+                # Active schema-one runs retain their established recovery error
+                # boundaries.  They cannot authorize a new run until recovery succeeds,
+                # so skipping them here does not turn an unresolved run into authority.
                 continue
             try:
                 summary_bytes = summary_path.read_bytes()
@@ -1030,16 +1029,20 @@ class RunRegistry:
         # check; durable hash-bound lineage evidence must still make that downgrade
         # impossible.  Active legacy summaries without lineage evidence remain outside
         # this trust check and are reconciled by the recovery path itself.
-        registry_run_ids = frozenset(
+        active_legacy_run_ids = frozenset(
             item.get("run_id")
             for item in raw["runs"].values()
             if isinstance(item, dict)
             and isinstance(item.get("run_id"), str)
             and item.get("run_id")
+            and item.get("status") == "in_progress"
         )
         durable_summary_bindings = self._durable_summary_lineage_bindings(
-            registry_run_ids=registry_run_ids,
-            skip_known_legacy_runs=schema_version == _LEGACY_SCHEMA_VERSION,
+            active_legacy_run_ids=(
+                active_legacy_run_ids
+                if schema_version == _LEGACY_SCHEMA_VERSION
+                else frozenset()
+            ),
         )
         if schema_version == _LEGACY_SCHEMA_VERSION and durable_summary_bindings:
             raise ValueError(

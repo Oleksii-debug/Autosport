@@ -487,7 +487,7 @@ class PaperCampaign:
             raise CampaignError("campaign requires at least one session before finalization")
         self._validate_sessions()
         self.finalized = True
-        self.finalized_at = _timestamp(when, "finalized_at")
+        self.finalized_at = when.isoformat().replace("+00:00", "Z")
         self.outcome = outcome
         self.readiness = readiness
         self.campaign_sha256 = self._computed_campaign_sha256()

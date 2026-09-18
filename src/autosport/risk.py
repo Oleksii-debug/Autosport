@@ -17,6 +17,7 @@ from decimal import (
 
 from .domain import MarketEvent, PaperTicket, TicketLeg, TicketStatus
 from .economic_goal import EconomicGoalContract
+from .economic_goal_provenance import provenance_for
 from .paper import PaperBook
 
 
@@ -533,6 +534,25 @@ class PaperRiskPolicy:
             self.economic_goal, EconomicGoalContract
         ):
             raise TypeError("economic_goal must be an EconomicGoalContract or None")
+
+    def provenance_payload(self) -> dict[str, object]:
+        """Canonical identity of the exact executable paper-risk authority."""
+
+        goal = self.economic_goal
+        return {
+            "schema": "autosport.paper_risk_policy_provenance",
+            "schema_version": 1,
+            "max_ticket_fraction": str(self.max_ticket_fraction),
+            "max_committed_fraction": str(self.max_committed_fraction),
+            "minimum_cash_reserve_fraction": str(self.minimum_cash_reserve_fraction),
+            "economic_goal_contract_sha256": (
+                provenance_for(goal).contract_sha256 if goal is not None else None
+            ),
+        }
+
+    @property
+    def provenance_sha256(self) -> str:
+        return _sha256_payload(self.provenance_payload())
 
     @staticmethod
     def _decimal_context() -> Context:

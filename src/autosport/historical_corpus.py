@@ -501,6 +501,10 @@ def _snapshot(
         if not isinstance(raw, dict):
             raise ValueError(f"snapshot market line {line_number} must be an object")
         event = MarketEvent.from_dict(raw)
+        if event.sport is not None and event.sport != sport_key:
+            raise ValueError(
+                "snapshot event sport contradicts SHA-bound snapshot evidence sport_key"
+            )
         if event.source_id != canonical_source_id:
             raise ValueError("snapshot evidence provider/sport does not match captured market source_id")
         if event.source_ts is None or not event.ingest_ts:
@@ -662,6 +666,17 @@ def assemble_historical_corpus(
     source_ids = tuple(sorted({event.source_id for event, _ in events}))
     if source_ids != proof["source_ids"]:
         raise ValueError("governance proof.source_ids do not match historical snapshot source_ids")
+    event_sports = {event.sport for event, _ in events}
+    if event_sports == {ParlayApiTableTennisProvider.sport_key}:
+        corpus_schema_version = 3
+    elif event_sports == {None}:
+        # Preserve old captured evidence as legacy schema-v2 truth. Do not infer
+        # event sport from manifest/evidence after the fact.
+        corpus_schema_version = 2
+    else:
+        raise ValueError(
+            "historical snapshots mix legacy/unproven and explicit sport identities"
+        )
     market_types = tuple(sorted({event.market_type.value for event, _ in events}))
 
     results_path_obj = Path(results_path)
@@ -844,7 +859,7 @@ def assemble_historical_corpus(
             "outcome_evidence": outcome_evidence,
         }
         manifest = {
-            "schema_version": 2,
+            "schema_version": corpus_schema_version,
             "dataset_kind": "historical",
             "name": name.strip(),
             "sport": "table_tennis",
@@ -890,7 +905,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="autosport-build-historical-corpus",
         description=(
             "Assemble selected authenticated table-tennis historical snapshots and separate sealed "
-            "outcomes into a governed schema-v2 replay corpus without claiming complete window coverage."
+            "outcomes into a governed replay corpus; new explicit-sport captures use schema-v3 while "
+            "legacy captures remain schema-v2 without inventing event-level sport truth."
         ),
     )
     parser.add_argument(

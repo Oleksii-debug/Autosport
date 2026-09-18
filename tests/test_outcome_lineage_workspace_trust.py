@@ -139,6 +139,18 @@ class OutcomeLineageWorkspaceTrustTests(unittest.TestCase):
 
             # A previously trusted prefix remains acceptable after a later extension.
             registry.assert_outcome_lineage_compatible(self._binding(first))
+            with self.assertRaisesRegex(
+                OutcomeLineageTrustError,
+                "older than the trusted current head",
+            ):
+                registry.begin(
+                    first.market_sha256,
+                    first.results_sha256,
+                    "baseline-v1",
+                    "stale-prefix-new-run",
+                    allow_repeat=True,
+                    outcome_lineage=self._binding(first),
+                )
             state = json.loads((root / "run_registry.json").read_text(encoding="utf-8"))
             histories = [
                 item["outcome_lineage"]["revisions"]

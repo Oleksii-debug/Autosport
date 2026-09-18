@@ -469,7 +469,9 @@ class RunRegistry:
 
         state = self._read()
         if outcome_lineage is not None:
-            self._assert_outcome_lineage_compatible_state(state, outcome_lineage)
+            self._assert_outcome_lineage_admissible_for_new_run_state(
+                state, outcome_lineage
+            )
         base_identity = self.experiment_identity(market_sha256, results_sha256, strategy_id)
         existing_pairs = [
             (key, item)
@@ -855,6 +857,23 @@ class RunRegistry:
                 context="run registry outcome_lineage",
             )
             assert_compatible_outcome_lineages(lineage, incoming)
+
+    @classmethod
+    def _assert_outcome_lineage_admissible_for_new_run_state(
+        cls,
+        state: dict,
+        incoming: OutcomeLineageBinding,
+    ) -> None:
+        """Reject stale prefixes for new runs while preserving historical readability."""
+
+        cls._assert_outcome_lineage_compatible_state(state, incoming)
+        trusted = cls._outcome_lineage_trust_bindings(state).get(
+            (incoming.source_identity, incoming.record_id)
+        )
+        if trusted is not None and len(incoming.revisions) < len(trusted.revisions):
+            raise OutcomeLineageTrustError(
+                "new economic run outcome lineage is older than the trusted current head"
+            )
 
     def _validate_entry(self, key: object, item: object) -> None:
         if not isinstance(key, str) or not key:

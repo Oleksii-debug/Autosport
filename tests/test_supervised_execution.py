@@ -37,6 +37,7 @@ from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.supervised_execution import (
     ApprovalState,
     ExecutionLegConstraint,
+    ProviderNotFoundReadback,
     ProviderReadback,
     ReadbackOutcome,
     SupervisedApproval,
@@ -44,6 +45,7 @@ from autosport.supervised_execution import (
     begin_supervised_attempt,
     build_supervised_execution_plan,
     reconcile_account_snapshot,
+    reconcile_provider_not_found,
     reconcile_provider_readback,
     reserve_supervised_plan,
     supervised_execution_terms_sha256,
@@ -414,28 +416,10 @@ def test_generic_snapshot_cannot_authorize_positive_effect_but_exact_readback_ca
         ) is False
 
 
-def test_absence_requires_open_and_settled_readback_before_retry_is_released() -> None:
+def test_generic_absence_does_not_release_retry_but_exact_current_cleared_proof_does() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger, bound, _, action, _, _ = _ledger_with_unknown(Path(tmp) / "execution.jsonl")
-        incomplete = reconcile_account_snapshot(
-            ledger,
-            bound,
-            attempt_id="attempt-1",
-            snapshot=_snapshot(
-                action,
-                include_open=False,
-                include_settled_capability=False,
-            ),
-            external_receipt_id="not-found-1",
-        )
-        assert incomplete.outcome is ReadbackOutcome.UNKNOWN
-        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
-        assert ledger.can_retry_action(
-            plan_id=bound.execution_plan.plan_id,
-            action_id=action.action_id,
-        ) is False
-
-        complete = reconcile_account_snapshot(
+        generic = reconcile_account_snapshot(
             ledger,
             bound,
             attempt_id="attempt-1",
@@ -445,14 +429,58 @@ def test_absence_requires_open_and_settled_readback_before_retry_is_released() -
                 include_open=False,
                 include_settled_capability=True,
             ),
-            external_receipt_id="not-found-1",
+            external_receipt_id="caller-selected-not-found-id",
         )
-        assert complete.outcome is ReadbackOutcome.NOT_FOUND
-        assert complete.attempt_state is AttemptState.RECONCILED_NOT_FOUND
+        assert generic.outcome is ReadbackOutcome.UNKNOWN
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
+        assert ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        ) is False
+
+        exact = reconcile_provider_not_found(
+            ledger,
+            bound,
+            attempt_id="attempt-1",
+            readback=ProviderNotFoundReadback(
+                bookmaker_id=action.bookmaker_id,
+                account_id=action.account_id,
+                action_id=action.action_id,
+                event_id=action.event_id,
+                market_id=action.market_id,
+                selection_id=action.selection_id,
+                observed_at="2026-09-18T13:20:08+00:00",
+                current_source_payload_sha256="3" * 64,
+                cleared_source_payload_sha256="4" * 64,
+            ),
+        )
+        assert exact.outcome is ReadbackOutcome.NOT_FOUND
+        assert exact.attempt_state is AttemptState.RECONCILED_NOT_FOUND
         assert ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         ) is True
+
+
+def test_not_found_readback_rejects_cross_market_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(Path(tmp) / "execution.jsonl")
+        evidence = ProviderNotFoundReadback(
+            bookmaker_id=action.bookmaker_id,
+            account_id=action.account_id,
+            action_id=action.action_id,
+            event_id=action.event_id,
+            market_id="different-market",
+            selection_id=action.selection_id,
+            observed_at=READBACK_AT,
+            current_source_payload_sha256="5" * 64,
+            cleared_source_payload_sha256="6" * 64,
+        )
+        with pytest.raises(SupervisedExecutionError, match="identity mismatches"):
+            reconcile_provider_not_found(
+                ledger, bound, attempt_id="attempt-1", readback=evidence
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
 
 def test_provider_readback_rejects_adverse_slippage_and_identity_mismatch() -> None:

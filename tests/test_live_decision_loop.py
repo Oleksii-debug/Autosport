@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.decision_ledger import EconomicDecisionAuthority, JsonlDecisionLedger
 from autosport.domain import MarketEvent
@@ -18,6 +19,7 @@ from autosport.live_decision_loop import (
 )
 from autosport.market_bus import MarketEventBus
 from autosport.paper import PaperBook
+from autosport.providers import ProviderUnavailableError
 from autosport.risk import PaperRiskPolicy
 from autosport.storage import SQLiteMarketStore
 
@@ -271,9 +273,14 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 factory=resumed_factory,
                 clock=_ManualClock(self.START + timedelta(seconds=4)),
             )
-            resumed.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(resumed.dependencies.input_ids, ("input-a",))
 
-            result = resumed.run_cycle()
+            with patch.object(
+                JsonlDecisionLedger,
+                "verified_records",
+                side_effect=AssertionError("full Decision Ledger scan is forbidden"),
+            ):
+                result = resumed.run_cycle()
 
             self.assertEqual(result.status, LiveCycleStatus.DUPLICATE_DECISION)
             self.assertEqual(result.decision_id, first_id)
@@ -337,8 +344,16 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 factory=resumed_factory,
                 clock=_ManualClock(self.START + timedelta(seconds=4)),
             )
-            self._register_two(resumed)
-            result = resumed.run_cycle()
+            self.assertEqual(
+                resumed.dependencies.input_ids,
+                ("input-a", "input-b"),
+            )
+            with patch.object(
+                JsonlDecisionLedger,
+                "verified_records",
+                side_effect=AssertionError("full Decision Ledger scan is forbidden"),
+            ):
+                result = resumed.run_cycle()
 
             self.assertEqual(result.status, LiveCycleStatus.DUPLICATE_DECISION)
             self.assertEqual(result.affected_input_ids, ("input-a",))
@@ -381,7 +396,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 factory=resumed_factory,
                 clock=_ManualClock(self.START + timedelta(seconds=3)),
             )
-            resumed.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(resumed.dependencies.input_ids, ("input-a",))
 
             result = resumed.run_cycle()
 
@@ -457,7 +472,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             observer = _DurableObserver(
                 workspace,
                 [
-                    RuntimeError("provider unavailable"),
+                    ProviderUnavailableError("provider unavailable"),
                     (self._event(selection="selection-a", sequence=1),),
                 ],
             )
@@ -473,7 +488,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             gap = loop.run_cycle()
             self.assertEqual(gap.status, LiveCycleStatus.PROVIDER_GAP)
             self.assertEqual(gap.plan.action.value, "zero")
-            self.assertIn("RuntimeError", gap.detail)
+            self.assertIn("ProviderUnavailableError", gap.detail)
             records = JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()
             self.assertEqual(records[-1].payload["gate"], "provider_gap")
 
@@ -481,6 +496,28 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             recovered = loop.run_cycle()
             self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
             self.assertEqual([item[0] for item in factory.calls], ["input-a"])
+
+    def test_local_observation_failure_propagates_without_provider_gap_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [RuntimeError("local SQLite/integrity failure")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            with self.assertRaisesRegex(RuntimeError, "SQLite/integrity failure"):
+                loop.run_cycle()
+
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
 
     def test_suspended_quote_recomputes_input_with_empty_active_view(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -564,7 +601,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 factory=_EmptyIntentFactory(),
                 clock=_ManualClock(self.START),
             )
-            paused_restart.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(paused_restart.dependencies.input_ids, ("input-a",))
             self.assertEqual(
                 paused_restart.run_cycle().status,
                 LiveCycleStatus.PAUSED,
@@ -584,7 +621,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 factory=_EmptyIntentFactory(),
                 clock=_ManualClock(self.START),
             )
-            stopped_restart.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(stopped_restart.dependencies.input_ids, ("input-a",))
             self.assertEqual(
                 stopped_restart.run_cycle().status,
                 LiveCycleStatus.STOPPED,
@@ -592,6 +629,102 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(stopped_observer.calls, 0)
             with self.assertRaises(RuntimeError):
                 stopped_restart.resume()
+
+    def test_durable_dependency_registry_restores_exact_selectors_without_manual_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            first.register_input(
+                "exact-input",
+                source_ids="provider-a",
+                event_ids="event-1",
+                market_ids="market-1",
+                selection_ids="selection-a",
+            )
+
+            resumed_factory = _EmptyIntentFactory()
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=resumed_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+
+            self.assertEqual(resumed.dependencies.input_ids, ("exact-input",))
+            result = resumed.run_cycle()
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                resumed_factory.calls,
+                [("exact-input", (("selection-a", 1, "open"),))],
+            )
+
+    def test_hot_path_does_not_scan_complete_historical_decision_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            batches = []
+            for sequence in range(1, 17):
+                batches.append(
+                    (
+                        self._event(
+                            sequence=sequence,
+                            odds=f"2.{sequence:02d}",
+                            observed=self.START + timedelta(milliseconds=sequence),
+                        ),
+                    )
+                )
+            observer = _DurableObserver(workspace, batches)
+            factory = _EmptyIntentFactory()
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            for index in range(15):
+                clock.value = self.START + timedelta(
+                    seconds=1,
+                    milliseconds=index,
+                )
+                self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            before_size = (workspace / "decisions.jsonl").stat().st_size
+            clock.value = self.START + timedelta(seconds=2)
+            with patch.object(
+                JsonlDecisionLedger,
+                "verified_records",
+                side_effect=AssertionError("full Decision Ledger scan is forbidden"),
+            ):
+                final = loop.run_cycle()
+
+            self.assertEqual(final.status, LiveCycleStatus.DECIDED)
+            self.assertGreater((workspace / "decisions.jsonl").stat().st_size, before_size)
+
+    def test_corrupted_dependency_registry_fails_closed_on_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / PersistentLiveDecisionLoop.INPUTS_FILE_NAME).write_text(
+                '{"schema":"autosport.live_decision_inputs","schema":"duplicate"}\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(LiveDecisionProgressError):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START),
+                )
 
     def test_corrupted_control_fails_closed_on_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

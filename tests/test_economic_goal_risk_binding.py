@@ -1,11 +1,17 @@
+import tempfile
 import unittest
 from dataclasses import replace
 from decimal import Decimal, localcontext
+from pathlib import Path
 
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
-from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
+from autosport.risk import (
+    PaperRiskPolicy,
+    ProposedTicketRiskContext,
+    RiskOfRuinEvidence,
+)
 
 
 class EconomicGoalRiskBindingTests(unittest.TestCase):
@@ -43,6 +49,38 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         stake: Decimal,
     ):
         return policy.evaluate(book, stake, context=cls._context())
+
+    @classmethod
+    def _bound_ruin_context(
+        cls,
+        policy: PaperRiskPolicy,
+        book: PaperBook,
+        stake: Decimal,
+        upper_bound: Decimal,
+        **evidence_overrides: object,
+    ) -> ProposedTicketRiskContext:
+        base = cls._context()
+        portfolio_sha256 = policy.risk_of_ruin_portfolio_sha256(book)
+        candidate_sha256 = policy.risk_of_ruin_candidate_sha256(base)
+        assert portfolio_sha256 is not None
+        assert candidate_sha256 is not None
+        evidence = RiskOfRuinEvidence(
+            evidence_id="ror-evidence-binding",
+            research_protocol_sha256="a" * 64,
+            reproducibility_bundle_sha256="b" * 64,
+            producer_identity="test-risk-model-source",
+            causal_cutoff="2026-09-16T14:59:58+00:00",
+            evaluated_at="2026-09-16T15:00:01+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+            base_portfolio_sha256=portfolio_sha256,
+            candidate_sha256=candidate_sha256,
+            evaluated_stake=stake,
+            upper_bound=upper_bound,
+        )
+        if evidence_overrides:
+            evidence = replace(evidence, **evidence_overrides)
+        return replace(base, risk_of_ruin_evidence=evidence)
 
     @staticmethod
     def _goal(**overrides: object) -> EconomicGoalContract:
@@ -250,7 +288,7 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         self.assertFalse(blocked.allowed)
         self.assertEqual(blocked.reason, "economic goal turnover limit exceeded")
 
-    def test_nontrivial_risk_of_ruin_requires_explicit_canonical_upper_bound(self) -> None:
+    def test_nontrivial_risk_of_ruin_requires_provenance_bound_evidence(self) -> None:
         goal = self._goal(max_risk_of_ruin=Decimal("0.01"))
         policy = self._policy(goal)
         book = PaperBook("100")
@@ -259,10 +297,10 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         self.assertFalse(missing.allowed)
         self.assertEqual(
             missing.reason,
-            "portfolio risk-of-ruin evidence is required by economic goal",
+            "portfolio risk-of-ruin provenance-bound evidence is required by economic goal",
         )
 
-        at_boundary = policy.evaluate(
+        bare_scalar = policy.evaluate(
             book,
             Decimal("1"),
             context=replace(
@@ -270,14 +308,32 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
                 risk_of_ruin_upper_bound=Decimal("0.01"),
             ),
         )
+        self.assertFalse(bare_scalar.allowed)
+        self.assertEqual(
+            bare_scalar.reason,
+            "portfolio risk-of-ruin provenance-bound evidence is required by economic goal",
+        )
+
+        at_boundary = policy.evaluate(
+            book,
+            Decimal("1"),
+            context=self._bound_ruin_context(
+                policy,
+                book,
+                Decimal("1"),
+                Decimal("0.01"),
+            ),
+        )
         self.assertTrue(at_boundary.allowed)
 
         exceeded = policy.evaluate(
             book,
             Decimal("1"),
-            context=replace(
-                self._context(),
-                risk_of_ruin_upper_bound=Decimal("0.0100001"),
+            context=self._bound_ruin_context(
+                policy,
+                book,
+                Decimal("1"),
+                Decimal("0.0100001"),
             ),
         )
         self.assertFalse(exceeded.allowed)
@@ -285,6 +341,77 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             exceeded.reason,
             "portfolio risk-of-ruin upper bound exceeds economic goal limit",
         )
+
+        wrong_stake = policy.evaluate(
+            book,
+            Decimal("1.01"),
+            context=self._bound_ruin_context(
+                policy,
+                book,
+                Decimal("1"),
+                Decimal("0.01"),
+            ),
+        )
+        self.assertFalse(wrong_stake.allowed)
+        self.assertEqual(
+            wrong_stake.reason,
+            "portfolio risk-of-ruin evidence does not match exact proposal state",
+        )
+
+    def test_risk_of_ruin_evidence_rejects_future_or_changed_portfolio_state(self) -> None:
+        goal = self._goal(max_risk_of_ruin=Decimal("0.01"))
+        policy = self._policy(goal)
+        book = PaperBook("100")
+
+        future = policy.evaluate(
+            book,
+            Decimal("1"),
+            context=self._bound_ruin_context(
+                policy,
+                book,
+                Decimal("1"),
+                Decimal("0.01"),
+                evaluated_at="2026-09-16T15:00:03+00:00",
+            ),
+        )
+        self.assertFalse(future.allowed)
+        self.assertEqual(
+            future.reason,
+            "portfolio risk-of-ruin evidence uses future information",
+        )
+
+        bound = self._bound_ruin_context(
+            policy,
+            book,
+            Decimal("1"),
+            Decimal("0.01"),
+        )
+        book.open_ticket([self._leg()], Decimal("1"))
+        changed = policy.evaluate(book, Decimal("1"), context=bound)
+        self.assertFalse(changed.allowed)
+        self.assertEqual(
+            changed.reason,
+            "portfolio risk-of-ruin evidence does not match exact proposal state",
+        )
+
+    def test_risk_of_ruin_portfolio_binding_is_stable_across_exact_restart(self) -> None:
+        goal = self._goal(max_risk_of_ruin=Decimal("0.01"))
+        policy = self._policy(goal)
+        book = PaperBook("100")
+        bound = self._bound_ruin_context(
+            policy,
+            book,
+            Decimal("1"),
+            Decimal("0.01"),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.json"
+            book.save(path)
+            restarted = PaperBook.load(path)
+
+        decision = policy.evaluate(restarted, Decimal("1"), context=bound)
+        self.assertTrue(decision.allowed)
 
     def test_owner_concurrent_position_limit_counts_only_canonical_open_tickets(self) -> None:
         book = PaperBook("100")

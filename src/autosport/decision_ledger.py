@@ -20,6 +20,7 @@ from .economic_goal_provenance import (
     provenance_for,
     verify_provenance,
 )
+from .risk import PaperRiskPolicy
 
 
 class DecisionLedgerIntegrityError(RuntimeError):
@@ -60,6 +61,7 @@ def _detached_decision_payload(value: Any) -> Any:
 GENERAL_DECISION_KIND = "GENERAL"
 ECONOMIC_DECISION_KIND = "ECONOMIC"
 ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY = "economic_goal_provenance"
+RISK_POLICY_PROVENANCE_PAYLOAD_KEY = "risk_policy_provenance"
 MATERIAL_ACTION_ID_PAYLOAD_KEY = "material_action_id"
 
 
@@ -151,9 +153,17 @@ def _economic_goal_provenance_from_payload(
         ) from exc
 
 
+def _risk_policy_provenance_payload(
+    policy: PaperRiskPolicy,
+) -> dict[str, object]:
+    payload = policy.provenance_payload()
+    return {**payload, "sha256": policy.provenance_sha256}
+
+
 def bind_economic_goal(
     record: DecisionRecord,
     contract: EconomicGoalContract,
+    risk_policy: PaperRiskPolicy | None = None,
 ) -> DecisionRecord:
     """Return the same economic decision identity with canonical goal evidence bound."""
 
@@ -169,15 +179,28 @@ def bind_economic_goal(
     payload = _detached_decision_payload(record.payload)
     if not isinstance(payload, dict):
         raise DecisionLedgerIntegrityError("Decision Ledger record payload is invalid")
-    if ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY in payload:
+    if (
+        ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY in payload
+        or RISK_POLICY_PROVENANCE_PAYLOAD_KEY in payload
+    ):
         raise DecisionLedgerIntegrityError(
-            "Decision Ledger economic-goal provenance must be derived, not caller supplied"
+            "Decision Ledger economic provenance must be derived, not caller supplied"
         )
 
     provenance = provenance_for(contract)
     payload[ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY] = _economic_goal_provenance_payload(
         provenance
     )
+    if risk_policy is not None:
+        if not isinstance(risk_policy, PaperRiskPolicy):
+            raise TypeError("risk_policy must be a PaperRiskPolicy or None")
+        if risk_policy.economic_goal != contract:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger risk policy is not bound to the supplied EconomicGoalContract"
+            )
+        payload[RISK_POLICY_PROVENANCE_PAYLOAD_KEY] = _risk_policy_provenance_payload(
+            risk_policy
+        )
     return DecisionRecord(
         replay_run_id=record.replay_run_id,
         agent=record.agent,
@@ -194,6 +217,7 @@ def bind_economic_goal(
 def verify_economic_goal_binding(
     record: DecisionRecord,
     contract: EconomicGoalContract,
+    risk_policy: PaperRiskPolicy | None = None,
 ) -> EconomicGoalProvenance:
     """Fail closed unless one durable economic decision is bound to ``contract`` exactly."""
 
@@ -218,6 +242,18 @@ def verify_economic_goal_binding(
         raise DecisionLedgerIntegrityError(
             f"Decision Ledger economic-goal provenance mismatch: {exc}"
         ) from exc
+    if risk_policy is not None:
+        if not isinstance(risk_policy, PaperRiskPolicy):
+            raise TypeError("risk_policy must be a PaperRiskPolicy or None")
+        if risk_policy.economic_goal != contract:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger risk policy is not bound to the supplied EconomicGoalContract"
+            )
+        actual_policy = record.payload.get(RISK_POLICY_PROVENANCE_PAYLOAD_KEY)
+        if actual_policy != _risk_policy_provenance_payload(risk_policy):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger risk-policy provenance mismatch"
+            )
     return provenance
 
 
@@ -408,6 +444,7 @@ class JsonlDecisionLedger:
         if (
             record.decision_kind == ECONOMIC_DECISION_KIND
             or ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY in record.payload
+            or RISK_POLICY_PROVENANCE_PAYLOAD_KEY in record.payload
         ):
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger material economic decision must use append_economic"
@@ -418,10 +455,14 @@ class JsonlDecisionLedger:
         self,
         record: DecisionRecord,
         contract: EconomicGoalContract,
+        *,
+        risk_policy: PaperRiskPolicy | None = None,
     ) -> str:
-        """Persist a material economic decision with derived goal provenance bound."""
+        """Persist a material economic decision with derived goal and policy provenance."""
 
-        return self._append_validated(bind_economic_goal(record, contract))
+        return self._append_validated(
+            bind_economic_goal(record, contract, risk_policy)
+        )
 
     @classmethod
     def _verify_bytes(cls, raw: bytes) -> int:
@@ -533,12 +574,14 @@ class JsonlDecisionLedger:
         self,
         decision_id: str,
         contract: EconomicGoalContract,
+        *,
+        risk_policy: PaperRiskPolicy | None = None,
     ) -> DecisionRecord:
         if not isinstance(decision_id, str) or not decision_id.strip():
             raise ValueError("decision_id must be a non-empty string")
         for record in self.verified_records():
             if record.decision_id == decision_id:
-                verify_economic_goal_binding(record, contract)
+                verify_economic_goal_binding(record, contract, risk_policy)
                 return record
         raise DecisionLedgerIntegrityError(
             "Decision Ledger economic decision_id was not found"
@@ -548,6 +591,8 @@ class JsonlDecisionLedger:
         self,
         material_action_id: str,
         contract: EconomicGoalContract,
+        *,
+        risk_policy: PaperRiskPolicy | None = None,
     ) -> DecisionRecord | None:
         """Return one exact durable economic action identity, or ``None`` if absent.
 
@@ -574,7 +619,7 @@ class JsonlDecisionLedger:
                 raise DecisionLedgerIntegrityError(
                     "Decision Ledger material_action_id is attached to a non-economic decision"
                 )
-            verify_economic_goal_binding(record, contract)
+            verify_economic_goal_binding(record, contract, risk_policy)
             matched.append(record)
         if len(matched) > 1:
             raise DecisionLedgerIntegrityError(

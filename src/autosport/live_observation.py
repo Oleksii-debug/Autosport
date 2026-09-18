@@ -256,6 +256,42 @@ def _drain_snapshot(
     )
 
 
+def poll_open_market_store_once(
+    store: SQLiteMarketStore,
+    health_store: SourceHealthStore,
+    provider: MarketProvider,
+    *,
+    mirror_updates: BoundedMirrorInvalidationBuffer,
+    max_items: int = 250,
+    policy: IngestionPolicy | None = None,
+    clock: Clock | None = None,
+) -> IngestionStats:
+    """Poll one provider snapshot through an already-open canonical market store.
+
+    This is the bounded long-lived ingestion seam. The caller owns the store lifetime
+    and initializes the mirror from durable state once; each subsequent poll persists
+    only the new provider batch and publishes its material invalidations. It therefore
+    avoids re-opening/rebuilding append-only market history on every live cycle.
+    """
+    if not isinstance(store, SQLiteMarketStore):
+        raise TypeError("store must be a SQLiteMarketStore")
+    if not isinstance(health_store, SourceHealthStore):
+        raise TypeError("health_store must be a SourceHealthStore")
+    if not isinstance(mirror_updates, BoundedMirrorInvalidationBuffer):
+        raise TypeError("mirror_updates must be a BoundedMirrorInvalidationBuffer")
+
+    bus = MarketEventBus(store)
+    bus.subscribe(mirror_updates.accept_persisted)
+    engine = IngestionEngine(
+        bus,
+        policy=policy,
+        health_store=health_store,
+        clock=clock,
+    )
+    return _drain_snapshot(engine, provider, max_items=max_items)
+
+
+def observe_workspace_once(
 def observe_workspace_once(
     workspace: str | Path,
     provider: MarketProvider,

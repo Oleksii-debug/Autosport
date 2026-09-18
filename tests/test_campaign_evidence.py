@@ -349,6 +349,27 @@ class PaperCampaignTests(unittest.TestCase):
         self.assertEqual(loaded.sessions[0].model_version_id, "model-1")
         self.assertEqual(loaded.campaign_sha256, campaign.campaign_sha256)
 
+    def test_direct_constructor_finalization_requires_canonical_authority(self):
+        session = self.session()
+        campaign = self.campaign()
+        campaign.sessions = [session]
+        with self.assertRaises(CampaignIntegrityError):
+            campaign.finalize(
+                outcome=CampaignOutcome.POSITIVE,
+                readiness=CampaignReadiness.ELIGIBLE,
+                finalized_at="2026-09-11T00:00:00Z",
+            )
+        self.assertFalse(campaign.finalized)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "campaign.json"
+            campaign.finalized = True
+            campaign.finalized_at = "2026-09-11T00:00:00Z"
+            campaign.outcome = CampaignOutcome.POSITIVE
+            campaign.readiness = CampaignReadiness.ELIGIBLE
+            campaign.campaign_sha256 = campaign._computed_campaign_sha256()
+            with self.assertRaises(CampaignIntegrityError):
+                campaign.save(path)
+
     def test_available_after_as_of_is_rejected(self):
         with self.assertRaises(ValueError):
             self.session(

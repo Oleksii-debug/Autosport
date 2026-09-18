@@ -13,6 +13,8 @@ from decimal import (
     localcontext,
 )
 
+from .domain import _quote_identity
+
 
 # Candidate economics must not inherit precision, exponent range, rounding, traps,
 # or flags from unrelated caller/default-context configuration. These values match
@@ -38,6 +40,10 @@ class CandidateLeg:
     market_id: str | None = None
     selection_id: str | None = None
     sport: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.sport is not None:
+            _canonical_sport(self.sport)
 
     @property
     def paper_value_per_unit(self) -> Decimal:
@@ -86,7 +92,11 @@ class CandidateLeg:
                 )
             return self.event_id, self.market_id, self.selection_id
 
-        prefix = _candidate_quote_prefix(self.event_id, self.sport)
+        if self.sport is not None:
+            raise ValueError(
+                "sport-qualified candidate leg requires structured market_id and selection_id"
+            )
+        prefix = _candidate_quote_prefix(self.event_id, None)
         if not self.quote_key.startswith(prefix):
             raise ValueError(
                 "candidate quote_key is not canonical event|market|selection for structured event_id"
@@ -118,13 +128,17 @@ def _canonical_sport(value: object) -> str:
         for character in value
     ):
         raise ValueError("candidate leg sport must be a lowercase canonical sport identity")
+    if value in {"unknown", "mixed"}:
+        raise ValueError("candidate leg sport must not use a reserved dataset scope identity")
     return value
 
 
 def _candidate_quote_prefix(event_id: str, sport: str | None) -> str:
-    if sport is None:
-        return f"{event_id}|"
-    return f"sport-v1|{sport}|{event_id}|"
+    if sport is not None:
+        raise ValueError(
+            "sport-qualified candidate identity is encoded and requires structured fields"
+        )
+    return f"{event_id}|"
 
 
 def _candidate_quote_key(
@@ -133,7 +147,7 @@ def _candidate_quote_key(
     selection_id: str,
     sport: str | None,
 ) -> str:
-    return f"{_candidate_quote_prefix(event_id, sport)}{market_id}|{selection_id}"
+    return _quote_identity(event_id, market_id, selection_id, sport)
 
 
 def _require_positive_integer(value: int, *, field: str) -> int:
@@ -157,11 +171,8 @@ def _quote_key_is_consistent_with_event(
     """
 
     if sport is not None:
-        try:
-            _canonical_sport(sport)
-        except ValueError:
-            return False
-    prefix = _candidate_quote_prefix(event_id, sport)
+        return False
+    prefix = _candidate_quote_prefix(event_id, None)
     if not quote_key.startswith(prefix):
         return False
     remainder = quote_key[len(prefix) :]
@@ -240,19 +251,24 @@ class BeamParlayCandidateSearch:
                 raise ValueError(
                     f"candidate leg {index} event_id must be a non-empty canonical string"
                 )
-            if not _quote_key_is_consistent_with_event(
-                leg.quote_key,
-                leg.event_id,
-                leg.sport,
-            ):
-                raise ValueError(
-                    f"candidate leg {index} quote_key is not consistent with structured event_id"
-                )
             if leg.market_id is not None or leg.selection_id is not None:
                 try:
                     leg.ticket_identity()
                 except ValueError as exc:
                     raise ValueError(f"candidate leg {index}: {exc}") from exc
+            elif leg.sport is not None:
+                raise ValueError(
+                    f"candidate leg {index} sport-qualified identity requires structured "
+                    "market_id and selection_id"
+                )
+            elif not _quote_key_is_consistent_with_event(
+                leg.quote_key,
+                leg.event_id,
+                None,
+            ):
+                raise ValueError(
+                    f"candidate leg {index} quote_key is not consistent with structured event_id"
+                )
             if not isinstance(leg.decimal_odds, Decimal):
                 raise ValueError(f"candidate leg {index} decimal_odds must be Decimal")
             if not leg.decimal_odds.is_finite():

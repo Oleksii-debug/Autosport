@@ -66,6 +66,8 @@ def _validate_sport(value: object) -> str:
         for character in sport
     ):
         raise ValueError("sport must be a lowercase canonical sport identity")
+    if sport in {"unknown", "mixed"}:
+        raise ValueError("sport must not use a reserved dataset scope identity")
     return sport
 
 

@@ -7,10 +7,13 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
+from autosport.candidate_search import CandidateLeg
 from autosport.dataset import ReplayDataset
 from autosport.domain import MarketEvent, TicketLeg
+from autosport.opportunity import QuoteRef
 from autosport.paper import PaperBook
 from autosport.parlayapi_provider import ParlayApiTableTennisProvider
+from autosport.providers import ProviderQuote
 from autosport.session import AutosportSession
 from autosport.storage import SQLiteMarketStore
 
@@ -72,8 +75,10 @@ class SportIdentityContractTests(unittest.TestCase):
 
         self.assertNotEqual(table_tennis.quote_key, soccer.quote_key)
         self.assertNotEqual(table_tennis.dedupe_key, soccer.dedupe_key)
-        self.assertTrue(table_tennis.quote_key.startswith("sport-v1|table_tennis|"))
-        self.assertTrue(soccer.quote_key.startswith("sport-v1|soccer|"))
+        self.assertTrue(table_tennis.quote_key.startswith("sport-v2-"))
+        self.assertTrue(soccer.quote_key.startswith("sport-v2-"))
+        self.assertNotIn("|", table_tennis.quote_key)
+        self.assertNotIn("|", table_tennis.dedupe_key)
 
         tt_leg = TicketLeg("event-1", "market-1", "selection-1", Decimal("2"), sport="table_tennis")
         soccer_leg = TicketLeg("event-1", "market-1", "selection-1", Decimal("2"), sport="soccer")
@@ -105,6 +110,90 @@ class SportIdentityContractTests(unittest.TestCase):
                 Decimal("2"),
                 sport="table|tennis",
             )
+
+    def test_reserved_manifest_sports_fail_at_direct_identity_boundaries(self) -> None:
+        for reserved in ("unknown", "mixed"):
+            with self.subTest(reserved=reserved, boundary="event"):
+                with self.assertRaises(ValueError):
+                    self._event(sport=reserved)
+            with self.subTest(reserved=reserved, boundary="ticket"):
+                with self.assertRaises(ValueError):
+                    TicketLeg(
+                        "event-1", "market-1", "selection-1", Decimal("2"), sport=reserved
+                    )
+            with self.subTest(reserved=reserved, boundary="candidate"):
+                with self.assertRaises(ValueError):
+                    CandidateLeg(
+                        quote_key="irrelevant",
+                        event_id="event-1",
+                        decimal_odds=Decimal("2"),
+                        probability=Decimal("0.5"),
+                        market_id="market-1",
+                        selection_id="selection-1",
+                        sport=reserved,
+                    )
+            with self.subTest(reserved=reserved, boundary="opportunity"):
+                with self.assertRaises(ValueError):
+                    QuoteRef(
+                        event_id="event-1",
+                        market_id="market-1",
+                        selection_id="selection-1",
+                        source_id="provider-a",
+                        sequence=1,
+                        decimal_odds=Decimal("2"),
+                        observed_ts="2026-09-18T12:00:00+00:00",
+                        source_ts=None,
+                        ingest_ts="2026-09-18T12:00:01+00:00",
+                        market_event_hash="0" * 64,
+                        sport=reserved,
+                    )
+            with self.subTest(reserved=reserved, boundary="provider"):
+                with self.assertRaises(ValueError):
+                    ProviderQuote(
+                        provider_event_id="event-1",
+                        provider_market_id="market-1",
+                        provider_selection_id="selection-1",
+                        decimal_odds=Decimal("2"),
+                        observed_ts="2026-09-18T12:00:00+00:00",
+                        sequence=1,
+                        sport=reserved,
+                    )
+
+    def test_schema_v3_mixed_rejects_reserved_event_sport_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as data_tmp, tempfile.TemporaryDirectory() as work_tmp:
+            root = Path(data_tmp)
+            raw_event = self._event(sport=None).to_dict()
+            raw_event["sport"] = "unknown"
+            market_payload = (
+                json.dumps(raw_event, ensure_ascii=False, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            market_path = root / "market.jsonl"
+            market_path.write_bytes(market_payload)
+            results_payload = json.dumps(
+                {"schema_version": 1, "quote_outcomes": {}},
+                separators=(",", ":"),
+            ).encode("utf-8")
+            results_path = root / "results.json"
+            results_path.write_bytes(results_payload)
+            dataset = ReplayDataset(
+                root=root,
+                name="reserved-sport",
+                sport="mixed",
+                market_path=market_path,
+                results_path=results_path,
+                market_sha256=hashlib.sha256(market_payload).hexdigest(),
+                results_sha256=hashlib.sha256(results_payload).hexdigest(),
+                schema_version=3,
+            )
+            session = AutosportSession(work_tmp, "1000", strategy_id="observe-only-v1")
+            try:
+                with self.assertRaises(ValueError):
+                    session.run_dataset(dataset)
+                self.assertEqual(session.registry.strategy_ids(), ())
+                self.assertFalse((Path(work_tmp) / "paper_book.json").exists())
+                self.assertEqual(tuple(Path(work_tmp).glob("run-*.json")), ())
+            finally:
+                session.close()
 
     def test_schema_v3_single_and_mixed_sport_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -192,6 +281,66 @@ class SportIdentityContractTests(unittest.TestCase):
             path.write_text(json.dumps(raw), encoding="utf-8")
             legacy = PaperBook.load(path)
             self.assertIsNone(legacy.tickets[ticket.ticket_id].legs[0].sport)
+
+    def test_encoded_sport_identity_cannot_alias_legacy_pipe_identity(self) -> None:
+        explicit = self._event(
+            sport="soccer",
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            source_id="provider-a",
+            sequence=1,
+        )
+        legacy_quote_collision_shape = self._event(
+            sport=None,
+            event_id="sport-v1",
+            market_id="soccer",
+            selection_id="event-1|market-1|selection-1",
+            source_id="provider-a",
+            sequence=2,
+        )
+        legacy_dedupe_collision_shape = self._event(
+            sport=None,
+            event_id="provider-a",
+            market_id="soccer",
+            selection_id="event-1|market-1|selection-1",
+            source_id="sport-v1",
+            sequence=1,
+        )
+        self.assertNotEqual(explicit.quote_key, legacy_quote_collision_shape.quote_key)
+        self.assertNotEqual(explicit.dedupe_key, legacy_dedupe_collision_shape.dedupe_key)
+        self.assertNotIn("|", explicit.quote_key)
+        self.assertNotIn("|", explicit.dedupe_key)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "identity.db"
+            store = SQLiteMarketStore(path)
+            try:
+                self.assertTrue(store.append(explicit))
+                self.assertTrue(store.append(legacy_quote_collision_shape))
+                self.assertTrue(store.append(legacy_dedupe_collision_shape))
+                self.assertEqual(len(store.events()), 3)
+            finally:
+                store.close()
+            reopened = SQLiteMarketStore(path)
+            try:
+                restored = reopened.events()
+                self.assertEqual(len(restored), 3)
+                self.assertIn(explicit.quote_key, {event.quote_key for event in restored})
+                self.assertIn(explicit.dedupe_key, {event.dedupe_key for event in restored})
+            finally:
+                reopened.close()
+
+    def test_paperbook_settlement_uses_collision_free_sport_key(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg(
+            "event-1", "market-1", "selection-1", Decimal("2"), sport="soccer"
+        )
+        ticket = book.open_ticket([leg], "10")
+        self.assertTrue(leg.quote_key.startswith("sport-v2-"))
+        self.assertNotIn("|", leg.quote_key)
+        settled = book.settle(ticket.ticket_id, {leg.quote_key})
+        self.assertEqual(settled.status.value, "won")
 
     def test_sqlite_restart_preserves_cross_sport_identity_without_aliasing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

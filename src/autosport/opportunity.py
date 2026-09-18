@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Iterable
 
-from .domain import MarketEvent
+from .domain import MarketEvent, _quote_identity
 from .forecasting import ForecastRecord
 
 
@@ -69,6 +69,10 @@ def _optional_sport(value: object, field_name: str = "quote sport") -> str | Non
         raise OpportunityContractError(
             f"{field_name} must be a lowercase canonical sport identity"
         )
+    if sport in {"unknown", "mixed"}:
+        raise OpportunityContractError(
+            f"{field_name} must not use a reserved dataset scope identity"
+        )
     return sport
 
 
@@ -78,9 +82,7 @@ def _quote_key(
     selection_id: str,
     sport: str | None,
 ) -> str:
-    if sport is None:
-        return f"{event_id}|{market_id}|{selection_id}"
-    return f"sport-v1|{sport}|{event_id}|{market_id}|{selection_id}"
+    return _quote_identity(event_id, market_id, selection_id, sport)
 
 
 def _canonical_hash(value: object, field_name: str) -> str:

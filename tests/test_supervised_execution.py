@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from dataclasses import replace
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from autosport.betfair_account_readonly import (
-    BetfairClearedOrderPage,
-    BetfairCurrentOrderObservation,
-    BetfairCurrentOrderPage,
-    BetfairEvidence,
+    BetfairReadOnlyClient,
+    BetfairReadOnlyError,
+    BetfairSessionCredentials,
 )
 from autosport.bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -365,7 +366,40 @@ def test_approval_binds_exact_route_and_slippage_terms() -> None:
         )
 
 
-def _provider_pages(
+class _ExecutionReadbackTransport:
+    def __init__(self, responses: list[bytes]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers,
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        self.calls.append(
+            {
+                "url": url,
+                "headers": dict(headers),
+                "body": body,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        if not self.responses:
+            raise AssertionError("unexpected Betfair readback transport call")
+        return self.responses.pop(0)
+
+
+def _rpc_result(result: object, request_id: int) -> bytes:
+    return json.dumps(
+        {"jsonrpc": "2.0", "result": result, "id": request_id},
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _provider_capture(
     action,
     *,
     matched_stake: Decimal | None,
@@ -373,62 +407,113 @@ def _provider_pages(
     customer_order_ref: str | None = None,
     market_id: str | None = None,
     selection_id: int | None = None,
-    more_available: bool = False,
+    current_more_available: bool = False,
+    account_id: str = "acct-1",
+    provider_event_id: str | None = None,
+    cleared_status: str | None = None,
+    cleared_event_id: str | None = None,
 ):
-    current_evidence = BetfairEvidence(READBACK_AT, "d" * 64)
-    cleared_evidence = BetfairEvidence(READBACK_AT, "e" * 64)
-    orders = ()
+    event_id = provider_event_id or action.event_id
+    current_orders: list[dict[str, object]] = []
     if matched_stake is not None:
-        remaining = action.requested_stake - matched_stake
-        orders = (
-            BetfairCurrentOrderObservation(
-                bet_id="bet-1",
-                market_id=market_id or action.market_id,
-                selection_id=(
+        current_orders.append(
+            {
+                "betId": "bet-1",
+                "marketId": market_id or action.market_id,
+                "selectionId": (
                     int(action.selection_id)
                     if selection_id is None
                     else selection_id
                 ),
-                side=action.side,
-                status="EXECUTABLE",
-                placed_date=SUBMITTED_AT,
-                price=action.requested_odds,
-                requested_size=action.requested_stake,
-                average_price_matched=(
+                "side": action.side,
+                "status": "EXECUTABLE",
+                "placedDate": SUBMITTED_AT,
+                "priceSize": {
+                    "price": float(action.requested_odds),
+                    "size": float(action.requested_stake),
+                },
+                "averagePriceMatched": float(
                     matched_odds
                     if matched_odds is not None
                     else action.requested_odds
                 ),
-                size_matched=matched_stake,
-                size_remaining=remaining,
-                customer_order_ref=(
+                "sizeMatched": float(matched_stake),
+                "sizeRemaining": float(action.requested_stake - matched_stake),
+                "customerOrderRef": (
                     action.action_id
                     if customer_order_ref is None
                     else customer_order_ref
                 ),
-                customer_strategy_ref=None,
-                evidence=current_evidence,
-            ),
+            }
         )
-    current = BetfairCurrentOrderPage(
-        orders=orders,
-        more_available=more_available,
-        from_record=0,
-        record_count=1000,
-        evidence=current_evidence,
+
+    responses = [
+        _rpc_result(
+            [
+                {
+                    "marketId": action.market_id,
+                    "event": {"id": event_id},
+                }
+            ],
+            1,
+        ),
+        _rpc_result(
+            {
+                "currentOrders": current_orders,
+                "moreAvailable": current_more_available,
+            },
+            2,
+        ),
+    ]
+    if not current_more_available:
+        request_id = 3
+        for status in ("SETTLED", "VOIDED", "LAPSED", "CANCELLED"):
+            orders: list[dict[str, object]] = []
+            if cleared_status == status:
+                orders.append(
+                    {
+                        "betId": "bet-cleared-1",
+                        "eventId": cleared_event_id or action.event_id,
+                        "marketId": action.market_id,
+                        "selectionId": int(action.selection_id),
+                        "side": action.side,
+                        "placedDate": SUBMITTED_AT,
+                        "settledDate": READBACK_AT,
+                        "priceRequested": float(action.requested_odds),
+                        "priceMatched": float(action.requested_odds),
+                        "sizeSettled": 0.0,
+                        "profit": 0.0,
+                        "customerOrderRef": action.action_id,
+                    }
+                )
+            responses.append(
+                _rpc_result(
+                    {
+                        "clearedOrders": orders,
+                        "moreAvailable": False,
+                    },
+                    request_id,
+                )
+            )
+            request_id += 1
+
+    transport = _ExecutionReadbackTransport(responses)
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: datetime.fromisoformat(READBACK_AT),
+        venue_id="betfair",
+        account_id=account_id,
     )
-    cleared = BetfairClearedOrderPage(
-        orders=(),
-        more_available=False,
-        from_record=0,
-        record_count=1000,
-        evidence=cleared_evidence,
+    capture = client.read_execution_readback(
+        action_id=action.action_id,
+        market_id=action.market_id,
     )
-    return (current,), (cleared,)
+    return capture, transport
 
 
 def _verified_state(bound, action, *, matched_stake: Decimal | None, **kwargs):
-    current, cleared = _provider_pages(
+    capture, _ = _provider_capture(
         action,
         matched_stake=matched_stake,
         **kwargs,
@@ -438,10 +523,8 @@ def _verified_state(bound, action, *, matched_stake: Decimal | None, **kwargs):
         action,
         _profile(),
         expected_profile_sha256=binding.profile_sha256,
-        current_pages=current,
-        cleared_pages=cleared,
+        readback=capture,
     )
-
 
 def test_lay_is_fail_closed_until_upstream_liability_authority_exists() -> None:
     bound, _, _, _ = _bound()
@@ -697,26 +780,18 @@ def test_opaque_not_found_hashes_cannot_release_retry() -> None:
 def test_incomplete_provider_pagination_cannot_prove_absence() -> None:
     bound, _, _, _ = _bound()
     action = bound.execution_plan.actions[0]
-    current, cleared = _provider_pages(
-        action,
-        matched_stake=None,
-        more_available=True,
-    )
-    binding = bound.profile_for(action.bookmaker_id, action.account_id)
-    with pytest.raises(ProviderEvidenceError, match="incomplete"):
-        verify_betfair_provider_state(
+    with pytest.raises(BetfairReadOnlyError, match="cannot advance"):
+        _provider_capture(
             action,
-            _profile(),
-            expected_profile_sha256=binding.profile_sha256,
-            current_pages=current,
-            cleared_pages=cleared,
+            matched_stake=None,
+            current_more_available=True,
         )
 
 
 def test_future_profile_version_cannot_rebind_approved_plan() -> None:
     bound, _, _, _ = _bound()
     action = bound.execution_plan.actions[0]
-    current, cleared = _provider_pages(
+    capture, _ = _provider_capture(
         action,
         matched_stake=action.requested_stake,
     )
@@ -726,15 +801,14 @@ def test_future_profile_version_cannot_rebind_approved_plan() -> None:
             action,
             replace(_profile(), profile_version=2),
             expected_profile_sha256=binding.profile_sha256,
-            current_pages=current,
-            cleared_pages=cleared,
+            readback=capture,
         )
 
 
 def test_provider_order_identity_conflict_fails_closed() -> None:
     bound, _, _, _ = _bound()
     action = bound.execution_plan.actions[0]
-    current, cleared = _provider_pages(
+    capture, _ = _provider_capture(
         action,
         matched_stake=action.requested_stake,
         market_id="different-market",
@@ -745,8 +819,80 @@ def test_provider_order_identity_conflict_fails_closed() -> None:
             action,
             _profile(),
             expected_profile_sha256=binding.profile_sha256,
-            current_pages=current,
-            cleared_pages=cleared,
+            readback=capture,
+        )
+
+
+def test_cross_account_capture_cannot_authorize_reconciliation() -> None:
+    bound, _, _, _ = _bound()
+    action = bound.execution_plan.actions[0]
+    capture, _ = _provider_capture(
+        action,
+        matched_stake=None,
+        account_id="other-account",
+    )
+    binding = bound.profile_for(action.bookmaker_id, action.account_id)
+    with pytest.raises(ProviderEvidenceError, match="scope conflicts"):
+        verify_betfair_provider_state(
+            action,
+            _profile(),
+            expected_profile_sha256=binding.profile_sha256,
+            readback=capture,
+        )
+
+
+def test_provider_market_event_identity_conflict_fails_closed() -> None:
+    bound, _, _, _ = _bound()
+    action = bound.execution_plan.actions[0]
+    capture, _ = _provider_capture(
+        action,
+        matched_stake=action.requested_stake,
+        provider_event_id="different-event",
+    )
+    binding = bound.profile_for(action.bookmaker_id, action.account_id)
+    with pytest.raises(ProviderEvidenceError, match="market-to-event identity"):
+        verify_betfair_provider_state(
+            action,
+            _profile(),
+            expected_profile_sha256=binding.profile_sha256,
+            readback=capture,
+        )
+
+
+def test_non_settled_cleared_order_blocks_absence_retry_release() -> None:
+    bound, _, _, _ = _bound()
+    action = bound.execution_plan.actions[0]
+    capture, _ = _provider_capture(
+        action,
+        matched_stake=None,
+        cleared_status="CANCELLED",
+    )
+    binding = bound.profile_for(action.bookmaker_id, action.account_id)
+    with pytest.raises(ProviderEvidenceError, match="non-settled cleared state"):
+        verify_betfair_provider_state(
+            action,
+            _profile(),
+            expected_profile_sha256=binding.profile_sha256,
+            readback=capture,
+        )
+
+
+def test_cleared_provider_event_mismatch_fails_closed() -> None:
+    bound, _, _, _ = _bound()
+    action = bound.execution_plan.actions[0]
+    capture, _ = _provider_capture(
+        action,
+        matched_stake=None,
+        cleared_status="CANCELLED",
+        cleared_event_id="different-event",
+    )
+    binding = bound.profile_for(action.bookmaker_id, action.account_id)
+    with pytest.raises(ProviderEvidenceError, match="event identity conflicts"):
+        verify_betfair_provider_state(
+            action,
+            _profile(),
+            expected_profile_sha256=binding.profile_sha256,
+            readback=capture,
         )
 
 

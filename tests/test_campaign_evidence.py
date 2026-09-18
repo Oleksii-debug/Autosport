@@ -148,8 +148,8 @@ class PaperCampaignTests(unittest.TestCase):
             "strategy_version_id": "strategy-1",
             "model_version_id": "model-1",
             "config_sha256": "44" * 32,
-            "evaluation_window_start": "2026-09-01T00:00:00Z",
-            "evaluation_window_end": "2026-09-03T23:59:59Z",
+            "evaluation_window_start": "2026-09-01T10:00:00Z",
+            "evaluation_window_end": "2026-09-03T10:00:00Z",
             "as_of": "2026-09-04T00:00:00Z",
             "available_at": "2026-09-04T00:00:00Z",
             "outcome_reveal_after": "2026-09-04T00:00:00Z",
@@ -216,6 +216,30 @@ class PaperCampaignTests(unittest.TestCase):
                 "market_sha256": market_sha256,
                 "sealed_results_sha256": results_sha256,
                 "run_id": session.run_id,
+                "event_count": len(session.observation_timestamps),
+                "replay_dataset_hash": hashlib.sha256(
+                    (
+                        "replay:"
+                        + session.run_id
+                        + ":"
+                        + "|".join(session.observation_timestamps)
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "campaign_causal_membership": {
+                    "schema_version": 1,
+                    "replay_dataset_hash": hashlib.sha256(
+                        (
+                            "replay:"
+                            + session.run_id
+                            + ":"
+                            + "|".join(session.observation_timestamps)
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                    "event_count": len(session.observation_timestamps),
+                    "evaluation_window_start": session.observation_timestamps[0],
+                    "evaluation_window_end": session.observation_timestamps[-1],
+                    "observation_timestamps": list(session.observation_timestamps),
+                },
                 "evaluation": {
                     "initial_bankroll": str(session.starting_bankroll),
                     "final_balance": str(session.ending_bankroll),
@@ -620,6 +644,42 @@ class PaperCampaignTests(unittest.TestCase):
                 mutated,
                 establish_authority=False,
             )
+
+    def test_authoritative_admission_rejects_mutated_causal_membership(self):
+        authoritative = self.session()
+        self._ensure_run_authority(authoritative)
+
+        mutations = (
+            {
+                "evaluation_window_start": "2026-09-01T09:00:00Z",
+            },
+            {
+                "evaluation_window_end": "2026-09-03T11:00:00Z",
+            },
+            {
+                "observation_timestamps": (
+                    "2026-09-01T10:00:00Z",
+                    "2026-09-02T11:00:00Z",
+                    "2026-09-03T10:00:00Z",
+                ),
+            },
+            {
+                "as_of": "2026-09-04T01:00:00Z",
+            },
+            {
+                "available_at": "2026-09-04T00:30:00Z",
+                "as_of": "2026-09-04T00:30:00Z",
+            },
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                mutated = self.session(**mutation)
+                with self.assertRaises(CampaignIntegrityError):
+                    self.add_session(
+                        self.campaign(),
+                        mutated,
+                        establish_authority=False,
+                    )
 
     def test_authoritative_admission_rejects_mutated_economic_metrics(self):
         authoritative = self.session()

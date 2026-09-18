@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from .domain import PaperTicket, TicketStatus
+from .market_outcome_universe import MarketOutcomeUniverse, OutcomeUniverseError
 from .portfolio import PortfolioEngine
 
 
@@ -132,6 +133,79 @@ class ScenarioSearchEngine:
             observed_worst, observed_best, floor, ceiling, min_result[2], max_result[2], expected,
             "sampled-independent-groups" if expected is not None else None,
         )
+
+    def analyse_authoritative(
+        self,
+        tickets: list[PaperTicket],
+        universes: list[MarketOutcomeUniverse],
+        *,
+        decision_ts: str,
+    ) -> ScenarioSearchReport:
+        """Analyse only scenario groups derived from typed exhaustive market authority.
+
+        The legacy analyse(tickets, groups) entrypoint remains useful for explicitly
+        caller-supplied/conservative scenarios, but those groups are never promoted
+        to authoritative exhaustiveness. This entrypoint derives exact membership
+        from MarketOutcomeUniverse and fails closed when the authoritative contract
+        cannot represent one-winner mutually exclusive terminal states.
+        """
+
+        if type(universes) is not list or not universes:
+            raise ValueError("authoritative market universes required")
+        if any(not isinstance(item, MarketOutcomeUniverse) for item in universes):
+            raise ValueError(
+                "authoritative market universes must be MarketOutcomeUniverse values"
+            )
+
+        groups: list[ScenarioGroup] = []
+        market_sources: dict[tuple[str, str, str], str] = {}
+        universe_keys: list[set[str]] = []
+        for universe in universes:
+            identity = universe.market_identity
+            previous_source = market_sources.get(identity)
+            if previous_source is not None:
+                if previous_source != universe.source_id:
+                    raise ValueError(
+                        "conflicting authoritative providers for the same market identity"
+                    )
+                raise ValueError(
+                    "duplicate authoritative universe for the same market identity"
+                )
+            market_sources[identity] = universe.source_id
+            try:
+                quote_keys = universe.scenario_quote_keys(decision_ts=decision_ts)
+            except OutcomeUniverseError as exc:
+                raise ValueError(
+                    f"authoritative market universe is not scenario-compatible: {exc}"
+                ) from exc
+            key_set = set(quote_keys)
+            universe_keys.append(key_set)
+            groups.append(
+                ScenarioGroup(
+                    group_id=f"authoritative:{universe.universe_id}",
+                    outcomes=tuple(ScenarioOutcome(key) for key in quote_keys),
+                )
+            )
+
+        open_tickets = [
+            ticket for ticket in tickets if ticket.status is TicketStatus.OPEN
+        ]
+        ticket_keys = {
+            leg.quote_key for ticket in open_tickets for leg in ticket.legs
+        }
+        authoritative_keys = set().union(*universe_keys)
+        missing = sorted(ticket_keys - authoritative_keys)
+        if missing:
+            raise ValueError(
+                f"ticket leg missing from authoritative market universe: {missing[0]}"
+            )
+        for key_set in universe_keys:
+            if not ticket_keys.intersection(key_set):
+                raise ValueError(
+                    "authoritative market universe is unrelated to every open ticket"
+                )
+
+        return self.analyse(tickets, groups)
 
     def _validate_and_map(self, tickets: list[PaperTicket], groups: list[ScenarioGroup]) -> dict[str, int]:
         if not groups:

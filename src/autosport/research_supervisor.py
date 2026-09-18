@@ -78,12 +78,14 @@ _SCIENTIFIC_BINDINGS = {
     "hypothesis_id": "Hypothesis",
     "research_protocol_id": "ResearchProtocol",
     "dataset_snapshot_id": "DatasetSnapshot",
+    "feature_set_id": "FeatureSet",
     "model_version_id": "ModelVersion",
     "strategy_version_id": "StrategyVersion",
     "evaluation_bundle_id": "EvaluationBundle",
     "experiment_id": "Experiment",
     "promotion_decision_id": "PromotionDecision",
     "postmortem_id": "Postmortem",
+    "drift_finding_id": "DriftFinding",
     "next_question_id": "ResearchQuestion",
 }
 _SHA_BINDINGS = frozenset(
@@ -507,6 +509,41 @@ class ResearchSupervisor:
                 raise ResearchSupervisorError(f"unsupported supervisor binding: {key}")
         return tuple(normalized)
 
+    def _validate_drift_context(
+        self,
+        existing_bindings: dict[str, str],
+        incoming_bindings: tuple[tuple[str, str], ...],
+    ) -> None:
+        merged = dict(existing_bindings)
+        for key, value in incoming_bindings:
+            existing = merged.get(key)
+            if existing is not None and existing != value:
+                raise ResearchSupervisorError(
+                    f"immutable binding conflict for {key}"
+                )
+            merged[key] = value
+        drift_finding_id = merged.get("drift_finding_id")
+        if drift_finding_id is None:
+            return
+        finding = self.scientific_registry.get("DriftFinding", drift_finding_id)
+        if finding is None:
+            raise ResearchSupervisorError(
+                f"binding references missing DriftFinding:{drift_finding_id}"
+            )
+        for binding_key in (
+            "model_version_id",
+            "strategy_version_id",
+            "feature_set_id",
+            "experiment_id",
+        ):
+            bound_value = merged.get(binding_key)
+            if bound_value is None:
+                continue
+            if finding.payload.get(binding_key) != bound_value:
+                raise ResearchSupervisorError(
+                    f"drift finding context mismatch for {binding_key}"
+                )
+
     def accept_trigger(self, trigger: ResearchTrigger) -> SupervisorSnapshot:
         if not isinstance(trigger, ResearchTrigger):
             raise TypeError("trigger must be ResearchTrigger")
@@ -598,6 +635,7 @@ class ResearchSupervisor:
                 raise ResearchSupervisorError(f"run is not active: {run['status']}")
             if now_instant < _instant(run["updated_at"], "updated_at"):
                 raise ValueError("advance timestamp cannot move backwards")
+            self._validate_drift_context(run["bindings"], validated_bindings)
             deadline = run["deadline_at"]
             if deadline is not None and now_instant > _instant(deadline, "deadline_at"):
                 run["status"] = SupervisorStatus.STOPPED.value

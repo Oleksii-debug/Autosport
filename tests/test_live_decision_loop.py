@@ -757,6 +757,38 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     clock=_ManualClock(self.START + timedelta(seconds=4)),
                 )
 
+    def test_missing_decision_ledger_with_durable_progress_fails_closed_on_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertTrue(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            (workspace / "decisions.jsonl").unlink()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "missing or unreadable",
+            ):
+                self._loop(
+                    workspace,
+                    observer=resumed_observer,
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                )
+            self.assertEqual(resumed_observer.calls, 0)
+
     def test_corrupted_dependency_registry_fails_closed_on_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

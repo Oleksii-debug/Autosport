@@ -35,6 +35,12 @@ from autosport.scenario_search import ScenarioGroup, ScenarioOutcome
 class PortfolioPlanTests(unittest.TestCase):
     DECISION_TS = "2026-09-18T13:20:00+00:00"
     SNAPSHOT_SHA = "9" * 64
+    TERMINAL_EXECUTION_CHECKS = (
+        ("market_quote_freshness_status", "3" * 64),
+        ("paper_risk_policy", "4" * 64),
+        ("routing_feasibility", "5" * 64),
+        ("settlement_rule_scope", "6" * 64),
+    )
 
     @staticmethod
     def _goal(**overrides: object) -> EconomicGoalContract:
@@ -230,13 +236,22 @@ class PortfolioPlanTests(unittest.TestCase):
             dependency_edges=dependency_edges,
         )
 
-    @staticmethod
+    @classmethod
     def _bind_terminal_state(
+        cls,
         intents: tuple[OpportunityIntent, ...],
         groups: tuple[ScenarioGroup, ...],
     ) -> tuple[OpportunityIntent, ...]:
         state_sha256 = TerminalStateCompletenessEvidence.state_space_sha256_for(
             groups
+        )
+        execution_sha256 = (
+            TerminalStateCompletenessEvidence.execution_assumptions_sha256_for(
+                verifier_identity="paper-terminal-verifier",
+                verification_protocol_sha256="1" * 64,
+                reproducibility_bundle_sha256="2" * 64,
+                execution_check_sha256s=cls.TERMINAL_EXECUTION_CHECKS,
+            )
         )
         return tuple(
             replace(
@@ -246,15 +261,16 @@ class PortfolioPlanTests(unittest.TestCase):
                     truth=EvidenceTruth.EXACT,
                     outcome_space_complete=True,
                     terminal_state_space_sha256=state_sha256,
-                    execution_assumptions_sha256="d" * 64,
+                    execution_assumptions_sha256=execution_sha256,
                     execution_feasible=True,
                 ),
             )
             for intent in intents
         )
 
-    @staticmethod
+    @classmethod
     def _terminal_witness(
+        cls,
         book: PaperBook,
         intents: tuple[OpportunityIntent, ...],
         graph: PortfolioDependencyGraph,
@@ -274,7 +290,7 @@ class PortfolioPlanTests(unittest.TestCase):
             intent_sha256s=tuple(intent.intent_sha256 for intent in intents),
             candidate_sha256s=tuple(intent.candidate_sha256 for intent in intents),
             scenario_groups=groups,
-            execution_assumptions_sha256="d" * 64,
+            execution_check_sha256s=cls.TERMINAL_EXECUTION_CHECKS,
         )
 
     def test_predictive_intent_uses_canonical_opportunity_and_risk_policy(self) -> None:

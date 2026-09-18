@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+from decimal import localcontext
 
 import pytest
 
@@ -13,7 +14,12 @@ from autosport.drift_control import (
     DriftState,
     DriftWindow,
 )
-from autosport.research_supervisor import ResearchPhase, ResearchSupervisor, ResearchTrigger
+from autosport.research_supervisor import (
+    ResearchPhase,
+    ResearchSupervisor,
+    ResearchSupervisorError,
+    ResearchTrigger,
+)
 from autosport.scientific_registry import (
     ConflictingScientificRecordError,
     DatasetSnapshot,
@@ -42,7 +48,9 @@ CURRENT_AS_OF = "2026-02-11T00:00:00Z"
 EVALUATED_AT = "2026-02-12T00:00:00Z"
 
 
-def _registry(tmp_path):
+def _registry(tmp_path, *, baseline_window=None, current_window=None):
+    baseline_window = _baseline_window() if baseline_window is None else baseline_window
+    current_window = _current_window() if current_window is None else current_window
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific-registry.json")
     registry.append(
         ResearchQuestion(
@@ -65,7 +73,7 @@ def _registry(tmp_path):
     registry.append(
         DatasetSnapshot(
             dataset_snapshot_id="dataset-baseline",
-            manifest_sha256=SHA_B,
+            manifest_sha256=baseline_window.evidence_sha256,
             source_identity="lawful:feed-a",
             license_identity="license:test",
             causal_cutoff=BASELINE_END,
@@ -75,7 +83,7 @@ def _registry(tmp_path):
     registry.append(
         DatasetSnapshot(
             dataset_snapshot_id="dataset-current",
-            manifest_sha256=SHA_C,
+            manifest_sha256=current_window.evidence_sha256,
             source_identity="lawful:feed-a",
             license_identity="license:test",
             causal_cutoff=CURRENT_END,
@@ -140,38 +148,42 @@ def _baseline_window(**overrides):
     values = {
         "dataset_snapshot_id": "dataset-baseline",
         "source_identity": "lawful:feed-a",
-        "revision_id": "baseline-r1",
         "window_start": BASELINE_START,
         "window_end": BASELINE_END,
         "as_of": BASELINE_AS_OF,
         "values": ("1", "2"),
+        "value_observed_at": (
+            "2026-02-01T12:00:00Z",
+            "2026-02-02T00:00:00Z",
+        ),
         "value_available_at": (
             "2026-02-03T00:00:00Z",
             "2026-02-03T00:00:00Z",
         ),
-        "evidence_sha256": SHA_B,
     }
     values.update(overrides)
-    return DriftWindow(**values)
+    return DriftWindow.from_samples(**values)
 
 
 def _current_window(**overrides):
     values = {
         "dataset_snapshot_id": "dataset-current",
         "source_identity": "lawful:feed-a",
-        "revision_id": "current-r1",
         "window_start": CURRENT_START,
         "window_end": CURRENT_END,
         "as_of": CURRENT_AS_OF,
         "values": ("2", "3"),
+        "value_observed_at": (
+            "2026-02-09T12:00:00Z",
+            "2026-02-10T00:00:00Z",
+        ),
         "value_available_at": (
             "2026-02-10T12:00:00Z",
             "2026-02-10T12:00:00Z",
         ),
-        "evidence_sha256": SHA_C,
     }
     values.update(overrides)
-    return DriftWindow(**values)
+    return DriftWindow.from_samples(**values)
 
 
 def _reference(monitor, **overrides):
@@ -240,12 +252,13 @@ def test_timezone_equivalent_reference_collapses_to_one_identity(tmp_path):
 
 
 def test_equal_threshold_is_no_drift_not_a_noisy_false_positive(tmp_path):
-    monitor = DriftMonitor(_registry(tmp_path))
+    current = _current_window(values=("2", "2"))
+    monitor = DriftMonitor(_registry(tmp_path, current_window=current))
     reference = _reference(monitor)
 
     finding = monitor.evaluate(
         reference.reference_id,
-        _current_window(values=("2", "2")),
+        current,
         evaluated_at=EVALUATED_AT,
     )
 
@@ -255,16 +268,18 @@ def test_equal_threshold_is_no_drift_not_a_noisy_false_positive(tmp_path):
 
 
 def test_insufficient_window_is_first_class_durable_evidence(tmp_path):
-    registry = _registry(tmp_path)
+    current = _current_window(
+        values=("2",),
+        value_observed_at=("2026-02-10T00:00:00Z",),
+        value_available_at=("2026-02-10T12:00:00Z",),
+    )
+    registry = _registry(tmp_path, current_window=current)
     monitor = DriftMonitor(registry)
     reference = _reference(monitor, min_samples=3)
 
     finding = monitor.evaluate(
         reference.reference_id,
-        _current_window(
-            values=("2",),
-            value_available_at=("2026-02-10T12:00:00Z",),
-        ),
+        current,
         evaluated_at=EVALUATED_AT,
     )
 
@@ -277,11 +292,15 @@ def test_insufficient_window_is_first_class_durable_evidence(tmp_path):
 
 
 def test_incomparable_source_is_fail_closed_as_insufficient_evidence(tmp_path):
+    other = _current_window(
+        dataset_snapshot_id="dataset-other-source",
+        source_identity="lawful:feed-b",
+    )
     registry = _registry(tmp_path)
     registry.append(
         DatasetSnapshot(
             dataset_snapshot_id="dataset-other-source",
-            manifest_sha256=SHA_D,
+            manifest_sha256=other.evidence_sha256,
             source_identity="lawful:feed-b",
             license_identity="license:test",
             causal_cutoff=CURRENT_END,
@@ -293,10 +312,7 @@ def test_incomparable_source_is_fail_closed_as_insufficient_evidence(tmp_path):
 
     finding = monitor.evaluate(
         reference.reference_id,
-        _current_window(
-            dataset_snapshot_id="dataset-other-source",
-            source_identity="lawful:feed-b",
-        ),
+        other,
         evaluated_at=EVALUATED_AT,
     )
 
@@ -305,11 +321,12 @@ def test_incomparable_source_is_fail_closed_as_insufficient_evidence(tmp_path):
 
 
 def test_future_dataset_and_future_value_are_rejected(tmp_path):
+    future = _current_window(dataset_snapshot_id="dataset-future")
     registry = _registry(tmp_path)
     registry.append(
         DatasetSnapshot(
             dataset_snapshot_id="dataset-future",
-            manifest_sha256=SHA_D,
+            manifest_sha256=future.evidence_sha256,
             source_identity="lawful:feed-a",
             license_identity="license:test",
             causal_cutoff=CURRENT_END,
@@ -322,7 +339,7 @@ def test_future_dataset_and_future_value_are_rejected(tmp_path):
     with pytest.raises(DriftCausalityError, match="unavailable"):
         monitor.evaluate(
             reference.reference_id,
-            _current_window(dataset_snapshot_id="dataset-future"),
+            future,
             evaluated_at=EVALUATED_AT,
         )
 
@@ -353,12 +370,13 @@ def test_model_feature_lineage_mismatch_is_rejected(tmp_path):
 
 
 def test_baseline_before_training_cutoff_is_rejected(tmp_path):
-    monitor = DriftMonitor(_registry(tmp_path))
+    baseline = _baseline_window(window_start="2025-12-31T00:00:00Z")
+    monitor = DriftMonitor(_registry(tmp_path, baseline_window=baseline))
 
     with pytest.raises(DriftCausalityError, match="training cutoff"):
         _reference(
             monitor,
-            baseline=_baseline_window(window_start="2025-12-31T00:00:00Z"),
+            baseline=baseline,
         )
 
 
@@ -375,11 +393,17 @@ def test_duplicate_evaluation_is_idempotent_and_conflicting_finding_fails(tmp_pa
     current = _current_window()
 
     first = monitor.evaluate(reference.reference_id, current, evaluated_at=EVALUATED_AT)
-    second = monitor.evaluate(reference.reference_id, current, evaluated_at=EVALUATED_AT)
+    reopened = ScientificRegistry(registry.path)
+    second = DriftMonitor(reopened).evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at="2026-02-13T00:00:00Z",
+    )
 
     assert second == first
-    assert len(registry.causal_records("DriftObservation", as_of=EVALUATED_AT)) == 1
-    assert len(registry.causal_records("DriftFinding", as_of=EVALUATED_AT)) == 1
+    assert first.evaluated_at == CURRENT_AS_OF
+    assert len(reopened.causal_records("DriftObservation", as_of="2026-02-13T00:00:00Z")) == 1
+    assert len(reopened.causal_records("DriftFinding", as_of="2026-02-13T00:00:00Z")) == 1
 
     conflicting = replace(first, evidence_sha256=SHA_A)
     with pytest.raises(ConflictingScientificRecordError, match="conflicting immutable"):
@@ -410,18 +434,30 @@ def test_later_data_revision_creates_new_evidence_without_rewriting_history(tmp_
     monitor = DriftMonitor(registry)
     reference = _reference(monitor)
 
+    first_window = _current_window()
+    second_window = _current_window(
+        dataset_snapshot_id="dataset-current-r2",
+        values=("2", "2.5"),
+    )
+    registry.append(
+        DatasetSnapshot(
+            dataset_snapshot_id=second_window.dataset_snapshot_id,
+            manifest_sha256=second_window.evidence_sha256,
+            source_identity=second_window.source_identity,
+            license_identity="license:test",
+            causal_cutoff=CURRENT_END,
+            available_at_utc="2026-02-10T12:00:00Z",
+        )
+    )
+
     first = monitor.evaluate(
         reference.reference_id,
-        _current_window(revision_id="current-r1", evidence_sha256=SHA_C),
+        first_window,
         evaluated_at=EVALUATED_AT,
     )
     second = monitor.evaluate(
         reference.reference_id,
-        _current_window(
-            revision_id="current-r2",
-            evidence_sha256=SHA_D,
-            values=("2", "2.5"),
-        ),
+        second_window,
         evaluated_at="2026-02-13T00:00:00Z",
     )
 
@@ -468,3 +504,118 @@ def test_drift_finding_can_only_enter_supervisor_as_bounded_evidence_binding(tmp
     assert registry.causal_records(
         "PromotionDecision", as_of="2026-02-12T00:02:00Z"
     ) == ()
+
+
+def test_snapshot_must_cover_entire_drift_window(tmp_path):
+    stale = _current_window(dataset_snapshot_id="dataset-stale")
+    registry = _registry(tmp_path)
+    registry.append(
+        DatasetSnapshot(
+            dataset_snapshot_id=stale.dataset_snapshot_id,
+            manifest_sha256=stale.evidence_sha256,
+            source_identity=stale.source_identity,
+            license_identity="license:test",
+            causal_cutoff="2026-02-09T18:00:00Z",
+            available_at_utc="2026-02-10T12:00:00Z",
+        )
+    )
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor)
+
+    with pytest.raises(DriftCausalityError, match="cover drift window_end"):
+        monitor.evaluate(reference.reference_id, stale, evaluated_at=EVALUATED_AT)
+
+
+def test_exact_samples_are_bound_to_registered_dataset_manifest(tmp_path):
+    registry = _registry(tmp_path)
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor)
+    altered = _current_window(values=("2", "4"))
+
+    with pytest.raises(DriftLineageError, match="DatasetSnapshot manifest"):
+        monitor.evaluate(reference.reference_id, altered, evaluated_at=EVALUATED_AT)
+
+
+def test_sample_observation_must_belong_to_declared_window():
+    with pytest.raises(DriftCausalityError, match="outside the declared window"):
+        _current_window(
+            value_observed_at=(
+                "2026-02-08T23:59:59Z",
+                "2026-02-10T00:00:00Z",
+            )
+        )
+
+
+def test_revision_identity_cannot_be_relabelled_without_new_evidence():
+    current = _current_window()
+    with pytest.raises(ValueError, match="revision_id"):
+        replace(current, revision_id=SHA_D)
+
+
+def test_decimal_canonicalization_is_independent_of_ambient_context():
+    value = "1.234567890123456789"
+    with localcontext() as context:
+        context.prec = 6
+        low_precision = _current_window(values=(value, "2"))
+    with localcontext() as context:
+        context.prec = 50
+        high_precision = _current_window(values=(value, "2"))
+
+    assert low_precision.evidence_sha256 == high_precision.evidence_sha256
+    assert low_precision.mean_fraction == high_precision.mean_fraction
+
+
+def test_supervisor_rejects_drift_finding_from_incompatible_context(tmp_path):
+    registry = _registry(tmp_path)
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor)
+    finding = monitor.evaluate(
+        reference.reference_id,
+        _current_window(),
+        evaluated_at=EVALUATED_AT,
+    )
+    registry.append(
+        ModelVersion(
+            model_version_id="model-2",
+            model_family="other-context",
+            artifact_sha256=SHA_B,
+            source_sha256=SHA_C,
+            environment_sha256=SHA_D,
+            dataset_snapshot_id="dataset-train",
+            feature_set_id="feature-1",
+            research_protocol_id="protocol-1",
+            seed=9,
+            config_sha256=SHA_E,
+            created_at="2026-01-04T00:00:00Z",
+        )
+    )
+    supervisor = ResearchSupervisor.initialize_pristine(
+        tmp_path / "research-supervisor.json",
+        registry,
+    )
+    started = supervisor.accept_trigger(
+        ResearchTrigger(
+            trigger_id="trigger-context-mismatch",
+            question_id="question-drift",
+            requested_at="2026-02-12T00:01:00Z",
+            budget_units=8,
+        )
+    )
+    contextual = supervisor.advance(
+        started.run_id,
+        expected_phase=ResearchPhase.QUESTION,
+        at="2026-02-12T00:02:00Z",
+        bindings=(("model_version_id", "model-2"),),
+    )
+
+    with pytest.raises(ResearchSupervisorError, match="drift finding context mismatch"):
+        supervisor.advance(
+            contextual.run_id,
+            expected_phase=ResearchPhase.HYPOTHESIS,
+            at="2026-02-12T00:03:00Z",
+            bindings=monitor.finding_binding(finding),
+        )
+
+    unchanged = supervisor.status(contextual.run_id)
+    assert unchanged.phase is ResearchPhase.HYPOTHESIS
+    assert unchanged.bindings == (("model_version_id", "model-2"),)

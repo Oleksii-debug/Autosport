@@ -30,15 +30,17 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
             placed_at="2026-09-14T09:00:00+00:00",
         )
 
+        settlement_time = "2026-09-14T10:00:00+00:00"
         book.settle(
             ticket.ticket_id,
             {first.quote_key},
             {second.quote_key},
+            settled_at=settlement_time,
         )
         book.save(self.path)
 
         payload = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema_version"], 4)
+        self.assertEqual(payload["schema_version"], 5)
         self.assertEqual(
             payload["lifecycle"],
             [
@@ -48,6 +50,7 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
                     "ticket_id": ticket.ticket_id,
                     "winning_quote_keys": [first.quote_key],
                     "void_quote_keys": [second.quote_key],
+                    "settled_at": settlement_time,
                 },
             ],
         )
@@ -56,6 +59,7 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
         restored_ticket = restored.tickets[ticket.ticket_id]
         self.assertIs(restored_ticket.status, TicketStatus.WON)
         self.assertEqual(restored_ticket.payout, Decimal("20"))
+        self.assertEqual(restored_ticket.settled_at, settlement_time)
         self.assertEqual(restored.balance, Decimal("110"))
 
     def test_schema2_rejects_economically_unreachable_won_payout(self) -> None:
@@ -175,6 +179,28 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
         self.assertIs(ticket.status, TicketStatus.OPEN)
         self.assertEqual(ticket.payout, Decimal("0"))
 
+    def test_settlement_timestamp_cannot_precede_ticket_placement(self) -> None:
+        book = PaperBook("100")
+        leg = self._leg("event-1", "alice", "2")
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        before_balance = book.balance
+
+        with self.assertRaisesRegex(ValueError, "settled_at must not precede placed_at"):
+            book.settle(
+                ticket.ticket_id,
+                {leg.quote_key},
+                settled_at="2026-09-14T08:59:59+00:00",
+            )
+
+        self.assertEqual(book.balance, before_balance)
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+        self.assertIsNone(ticket.settled_at)
+
     def test_legacy_open_only_snapshot_remains_loadable_and_upgrades_on_save(self) -> None:
         payload = {
             "initial_bankroll": "100",
@@ -204,7 +230,7 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
         book.save(self.path)
         upgraded = json.loads(self.path.read_text(encoding="utf-8"))
 
-        self.assertEqual(upgraded["schema_version"], 4)
+        self.assertEqual(upgraded["schema_version"], 5)
         self.assertEqual(
             upgraded["lifecycle"],
             [{"action": "open", "ticket_id": "ticket-1"}],

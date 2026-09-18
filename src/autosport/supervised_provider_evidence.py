@@ -541,23 +541,23 @@ def verify_betfair_provider_state(
         evidence_id,
     )
 
-# Verified provider state is an in-process capability, not a caller assertion.
-# The verifier issues object identities into a non-exported closure and reconciliation
-# rechecks that exact identity plus the immutable payload fingerprint before any ledger
-# transition. A public dataclass constructor or dataclasses.replace() therefore cannot
-# mint provider authority, and there is no importable sentinel/token to reuse.
-def _install_verified_provider_evidence_authority() -> None:
-    issued: dict[int, tuple[object, str]] = {}
-    raw_verify = verify_betfair_provider_state
+class _ProviderEvidenceAuthority:
+    """Own provider-evidence issuance without module-global or verifier-closure state."""
 
-    def authoritative_verify(
+    __slots__ = ("__issued",)
+
+    def __init__(self) -> None:
+        self.__issued: dict[int, tuple[object, str]] = {}
+
+    def verify(
+        self,
         action: ExecutionAction,
         profile: BookmakerCapabilityProfile,
         *,
         expected_profile_sha256: str,
         readback: BetfairExecutionReadbackEnvelope,
     ) -> VerifiedProviderState:
-        evidence = raw_verify(
+        evidence = _verify_betfair_provider_state_unbound(
             action,
             profile,
             expected_profile_sha256=expected_profile_sha256,
@@ -566,23 +566,21 @@ def _install_verified_provider_evidence_authority() -> None:
         evidence_key = id(evidence)
 
         def forget(_weakref: object, *, key: int = evidence_key) -> None:
-            issued.pop(key, None)
+            self.__issued.pop(key, None)
 
-        issued[evidence_key] = (
+        self.__issued[evidence_key] = (
             ref(evidence, forget),
             _verified_provider_evidence_fingerprint(evidence),
         )
         return evidence
 
-    def assert_verified_provider_evidence_authoritative(
-        evidence: VerifiedProviderState,
-    ) -> None:
+    def assert_authoritative(self, evidence: VerifiedProviderState) -> None:
         if not isinstance(
             evidence,
             (VerifiedProviderEffectEvidence, VerifiedProviderAbsenceEvidence),
         ):
             raise ProviderEvidenceError("provider evidence type is not canonical")
-        record = issued.get(id(evidence))
+        record = self.__issued.get(id(evidence))
         if record is None or record[0]() is not evidence:
             raise ProviderEvidenceError(
                 "verified provider evidence was not issued by canonical verifier"
@@ -592,12 +590,14 @@ def _install_verified_provider_evidence_authority() -> None:
                 "verified provider evidence changed after canonical verification"
             )
 
-    globals()["verify_betfair_provider_state"] = authoritative_verify
-    globals()[
-        "assert_verified_provider_evidence_authoritative"
-    ] = assert_verified_provider_evidence_authoritative
 
+# The raw deterministic derivation remains module-local. The exported verifier is a
+# bound method, so there is no verifier function closure containing issuance state.
+# The authority registry is instance state rather than an importable module binding.
+_verify_betfair_provider_state_unbound = verify_betfair_provider_state
+_authority = _ProviderEvidenceAuthority()
+verify_betfair_provider_state = _authority.verify
+assert_verified_provider_evidence_authoritative = _authority.assert_authoritative
 
-_install_verified_provider_evidence_authority()
-del _install_verified_provider_evidence_authority
-
+del _ProviderEvidenceAuthority
+del _authority

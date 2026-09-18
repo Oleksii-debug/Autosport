@@ -15,11 +15,12 @@ from .decision_ledger import (
     EconomicDecisionAuthority,
     JsonlDecisionLedger,
 )
-from .domain import TicketStatus
+from .domain import PaperTicket, TicketStatus
 from .economic_goal_provenance import provenance_for
 from .opportunity import Opportunity, OpportunityDecision, QuoteRef, StrategyClass
 from .paper import PaperBook
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskOfRuinVectorEvidence
+from .scenario_search import ScenarioGroup, ScenarioOutcome, ScenarioSearchEngine
 
 
 class EvidenceTruth(str, Enum):
@@ -454,6 +455,424 @@ class PortfolioDependencyGraph:
 
 
 @dataclass(frozen=True, slots=True)
+class TerminalStateCompletenessEvidence:
+    """Typed external witness for an exhaustive paper terminal-state model.
+
+    This value does not invent market/provider settlement rules. It binds one
+    externally verified completeness/reproducibility claim to the exact current
+    portfolio, intent/candidate vector, dependency graph and canonical ScenarioGroup
+    model. build_portfolio_plan independently re-runs ScenarioSearchEngine over
+    current+proposed paper tickets before the witness can authorize any plan.
+    """
+
+    evidence_id: str
+    verifier_identity: str
+    verification_protocol_sha256: str
+    reproducibility_bundle_sha256: str
+    causal_cutoff: str
+    evaluated_at: str
+    portfolio_sha256: str
+    dependency_graph_sha256: str
+    intent_sha256s: tuple[str, ...]
+    candidate_sha256s: tuple[str, ...]
+    scenario_groups: tuple[ScenarioGroup, ...]
+    execution_assumptions_sha256: str
+
+    def __post_init__(self) -> None:
+        _canonical_text("terminal completeness evidence_id", self.evidence_id)
+        _canonical_text("terminal completeness verifier_identity", self.verifier_identity)
+        _canonical_sha256(
+            "terminal completeness verification_protocol_sha256",
+            self.verification_protocol_sha256,
+        )
+        _canonical_sha256(
+            "terminal completeness reproducibility_bundle_sha256",
+            self.reproducibility_bundle_sha256,
+        )
+        _, cutoff = _canonical_timestamp(
+            "terminal completeness causal_cutoff", self.causal_cutoff
+        )
+        _, evaluated = _canonical_timestamp(
+            "terminal completeness evaluated_at", self.evaluated_at
+        )
+        if cutoff > evaluated:
+            raise ValueError(
+                "terminal completeness causal cutoff must not be after evaluation"
+            )
+        _canonical_sha256(
+            "terminal completeness portfolio_sha256", self.portfolio_sha256
+        )
+        _canonical_sha256(
+            "terminal completeness dependency_graph_sha256",
+            self.dependency_graph_sha256,
+        )
+        _canonical_sha256(
+            "terminal completeness execution_assumptions_sha256",
+            self.execution_assumptions_sha256,
+        )
+        if (
+            type(self.intent_sha256s) is not tuple
+            or type(self.candidate_sha256s) is not tuple
+        ):
+            raise ValueError("terminal completeness identity vectors must be tuples")
+        if len(self.intent_sha256s) != len(self.candidate_sha256s):
+            raise ValueError("terminal completeness identity vectors must match")
+        if len(self.intent_sha256s) != len(set(self.intent_sha256s)):
+            raise ValueError("terminal completeness intent identities must be unique")
+        if len(self.candidate_sha256s) != len(set(self.candidate_sha256s)):
+            raise ValueError("terminal completeness candidate identities must be unique")
+        for digest in self.intent_sha256s:
+            _canonical_sha256("terminal completeness intent_sha256", digest)
+        for digest in self.candidate_sha256s:
+            _canonical_sha256("terminal completeness candidate_sha256", digest)
+
+        if type(self.scenario_groups) is not tuple or not self.scenario_groups:
+            raise ValueError("terminal completeness requires canonical scenario groups")
+        if any(not isinstance(group, ScenarioGroup) for group in self.scenario_groups):
+            raise ValueError("terminal completeness contains invalid scenario group")
+        group_ids = tuple(group.group_id for group in self.scenario_groups)
+        for group_id in group_ids:
+            _canonical_text("terminal scenario group_id", group_id)
+        if (
+            group_ids != tuple(sorted(group_ids))
+            or len(group_ids) != len(set(group_ids))
+        ):
+            raise ValueError(
+                "terminal scenario groups must be sorted and uniquely identified"
+            )
+        seen_quotes: set[str] = set()
+        for group in self.scenario_groups:
+            keys = tuple(outcome.quote_key for outcome in group.outcomes)
+            if keys != tuple(sorted(keys)):
+                raise ValueError(
+                    "terminal scenario outcomes must use canonical quote-key order"
+                )
+            for outcome in group.outcomes:
+                _canonical_text("terminal scenario quote_key", outcome.quote_key)
+                if outcome.quote_key in seen_quotes:
+                    raise ValueError(
+                        "terminal scenario quote_key may appear in only one group"
+                    )
+                seen_quotes.add(outcome.quote_key)
+                if outcome.probability is not None and (
+                    not isinstance(outcome.probability, Decimal)
+                    or not outcome.probability.is_finite()
+                ):
+                    raise ValueError(
+                        "terminal scenario probability must be a finite exact Decimal"
+                    )
+
+    @staticmethod
+    def _groups_payload(
+        groups: tuple[ScenarioGroup, ...],
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "group_id": group.group_id,
+                "outcomes": [
+                    {
+                        "quote_key": outcome.quote_key,
+                        "probability": (
+                            None
+                            if outcome.probability is None
+                            else str(outcome.probability)
+                        ),
+                    }
+                    for outcome in group.outcomes
+                ],
+            }
+            for group in groups
+        ]
+
+    @classmethod
+    def state_space_sha256_for(
+        cls, groups: tuple[ScenarioGroup, ...]
+    ) -> str:
+        if type(groups) is not tuple or not groups:
+            raise ValueError("terminal state-space hash requires scenario groups")
+        return _sha256_payload(
+            {
+                "schema": "autosport.terminal_state_space",
+                "schema_version": 1,
+                "scenario_groups": cls._groups_payload(groups),
+            }
+        )
+
+    @property
+    def terminal_state_space_sha256(self) -> str:
+        return self.state_space_sha256_for(self.scenario_groups)
+
+    def _identity_payload(self) -> dict[str, object]:
+        return {
+            "schema": "autosport.terminal_state_completeness_evidence",
+            "schema_version": 1,
+            "evidence_id": self.evidence_id,
+            "verifier_identity": self.verifier_identity,
+            "verification_protocol_sha256": self.verification_protocol_sha256,
+            "reproducibility_bundle_sha256": self.reproducibility_bundle_sha256,
+            "causal_cutoff": self.causal_cutoff,
+            "evaluated_at": self.evaluated_at,
+            "portfolio_sha256": self.portfolio_sha256,
+            "dependency_graph_sha256": self.dependency_graph_sha256,
+            "intent_sha256s": list(self.intent_sha256s),
+            "candidate_sha256s": list(self.candidate_sha256s),
+            "scenario_groups": self._groups_payload(self.scenario_groups),
+            "terminal_state_space_sha256": self.terminal_state_space_sha256,
+            "execution_assumptions_sha256": self.execution_assumptions_sha256,
+        }
+
+    @property
+    def evidence_sha256(self) -> str:
+        return _sha256_payload(self._identity_payload())
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            **self._identity_payload(),
+            "evidence_sha256": self.evidence_sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "TerminalStateCompletenessEvidence":
+        expected = {
+            "schema",
+            "schema_version",
+            "evidence_id",
+            "verifier_identity",
+            "verification_protocol_sha256",
+            "reproducibility_bundle_sha256",
+            "causal_cutoff",
+            "evaluated_at",
+            "portfolio_sha256",
+            "dependency_graph_sha256",
+            "intent_sha256s",
+            "candidate_sha256s",
+            "scenario_groups",
+            "terminal_state_space_sha256",
+            "execution_assumptions_sha256",
+            "evidence_sha256",
+        }
+        if type(raw) is not dict or set(raw) != expected:
+            raise ValueError(
+                "serialized terminal completeness evidence must contain canonical fields"
+            )
+        if (
+            raw["schema"] != "autosport.terminal_state_completeness_evidence"
+            or raw["schema_version"] != 1
+        ):
+            raise ValueError("unsupported terminal completeness evidence schema")
+        try:
+            intents_raw = raw["intent_sha256s"]
+            candidates_raw = raw["candidate_sha256s"]
+            groups_raw = raw["scenario_groups"]
+            if (
+                type(intents_raw) is not list
+                or type(candidates_raw) is not list
+                or type(groups_raw) is not list
+            ):
+                raise ValueError(
+                    "serialized terminal completeness vectors must be lists"
+                )
+            groups: list[ScenarioGroup] = []
+            for group_raw in groups_raw:
+                if (
+                    type(group_raw) is not dict
+                    or set(group_raw) != {"group_id", "outcomes"}
+                ):
+                    raise ValueError("serialized terminal scenario group is invalid")
+                outcomes_raw = group_raw["outcomes"]
+                if type(outcomes_raw) is not list:
+                    raise ValueError(
+                        "serialized terminal scenario outcomes must be a list"
+                    )
+                outcomes: list[ScenarioOutcome] = []
+                for outcome_raw in outcomes_raw:
+                    if (
+                        type(outcome_raw) is not dict
+                        or set(outcome_raw) != {"quote_key", "probability"}
+                    ):
+                        raise ValueError(
+                            "serialized terminal scenario outcome is invalid"
+                        )
+                    probability_raw = outcome_raw["probability"]
+                    probability = (
+                        None
+                        if probability_raw is None
+                        else _decimal_from_serialized(
+                            "terminal scenario probability", probability_raw
+                        )
+                    )
+                    outcomes.append(
+                        ScenarioOutcome(
+                            quote_key=outcome_raw["quote_key"],
+                            probability=probability,
+                        )
+                    )
+                groups.append(
+                    ScenarioGroup(
+                        group_id=group_raw["group_id"],
+                        outcomes=tuple(outcomes),
+                    )
+                )
+            evidence = cls(
+                evidence_id=raw["evidence_id"],
+                verifier_identity=raw["verifier_identity"],
+                verification_protocol_sha256=raw[
+                    "verification_protocol_sha256"
+                ],
+                reproducibility_bundle_sha256=raw[
+                    "reproducibility_bundle_sha256"
+                ],
+                causal_cutoff=raw["causal_cutoff"],
+                evaluated_at=raw["evaluated_at"],
+                portfolio_sha256=raw["portfolio_sha256"],
+                dependency_graph_sha256=raw["dependency_graph_sha256"],
+                intent_sha256s=tuple(intents_raw),
+                candidate_sha256s=tuple(candidates_raw),
+                scenario_groups=tuple(groups),
+                execution_assumptions_sha256=raw[
+                    "execution_assumptions_sha256"
+                ],
+            )
+            if (
+                raw["terminal_state_space_sha256"]
+                != evidence.terminal_state_space_sha256
+            ):
+                raise ValueError(
+                    "serialized terminal state-space digest does not match groups"
+                )
+            serialized_evidence_sha256 = _canonical_sha256(
+                "serialized terminal completeness evidence_sha256",
+                raw["evidence_sha256"],
+            )
+            if serialized_evidence_sha256 != evidence.evidence_sha256:
+                raise ValueError(
+                    "serialized terminal completeness identity does not match"
+                )
+            return evidence
+        except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "serialized terminal completeness evidence is invalid"
+            ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedTerminalEconomics:
+    """Canonical ScenarioSearch result bound to one completeness witness."""
+
+    completeness_evidence: TerminalStateCompletenessEvidence
+    report_mode: str
+    total_states: int
+    worst_terminal_profit: Decimal
+    best_terminal_profit: Decimal
+    worst_proven: bool
+    best_proven: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(
+            self.completeness_evidence, TerminalStateCompletenessEvidence
+        ):
+            raise ValueError(
+                "terminal economics requires TerminalStateCompletenessEvidence"
+            )
+        _canonical_text("terminal economics report_mode", self.report_mode)
+        if type(self.total_states) is not int or self.total_states < 1:
+            raise ValueError(
+                "terminal economics total_states must be a positive integer"
+            )
+        for label, value in (
+            ("worst_terminal_profit", self.worst_terminal_profit),
+            ("best_terminal_profit", self.best_terminal_profit),
+        ):
+            if not isinstance(value, Decimal) or not value.is_finite():
+                raise ValueError(f"{label} must be a finite exact Decimal")
+        if (
+            type(self.worst_proven) is not bool
+            or type(self.best_proven) is not bool
+        ):
+            raise ValueError("terminal economics proof flags must be bools")
+        if self.worst_terminal_profit > self.best_terminal_profit:
+            raise ValueError(
+                "terminal economics worst profit cannot exceed best profit"
+            )
+
+    def _identity_payload(self) -> dict[str, object]:
+        return {
+            "schema": "autosport.verified_terminal_economics",
+            "schema_version": 1,
+            "completeness_evidence": self.completeness_evidence.to_dict(),
+            "report_mode": self.report_mode,
+            "total_states": self.total_states,
+            "worst_terminal_profit": str(self.worst_terminal_profit),
+            "best_terminal_profit": str(self.best_terminal_profit),
+            "worst_proven": self.worst_proven,
+            "best_proven": self.best_proven,
+        }
+
+    @property
+    def proof_sha256(self) -> str:
+        return _sha256_payload(self._identity_payload())
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            **self._identity_payload(),
+            "proof_sha256": self.proof_sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "VerifiedTerminalEconomics":
+        expected = {
+            "schema",
+            "schema_version",
+            "completeness_evidence",
+            "report_mode",
+            "total_states",
+            "worst_terminal_profit",
+            "best_terminal_profit",
+            "worst_proven",
+            "best_proven",
+            "proof_sha256",
+        }
+        if type(raw) is not dict or set(raw) != expected:
+            raise ValueError(
+                "serialized terminal economics must contain canonical fields"
+            )
+        if (
+            raw["schema"] != "autosport.verified_terminal_economics"
+            or raw["schema_version"] != 1
+        ):
+            raise ValueError("unsupported terminal economics schema")
+        try:
+            proof = cls(
+                completeness_evidence=TerminalStateCompletenessEvidence.from_dict(
+                    raw["completeness_evidence"]
+                ),
+                report_mode=raw["report_mode"],
+                total_states=raw["total_states"],
+                worst_terminal_profit=_decimal_from_serialized(
+                    "serialized worst_terminal_profit",
+                    raw["worst_terminal_profit"],
+                ),
+                best_terminal_profit=_decimal_from_serialized(
+                    "serialized best_terminal_profit",
+                    raw["best_terminal_profit"],
+                ),
+                worst_proven=raw["worst_proven"],
+                best_proven=raw["best_proven"],
+            )
+            serialized_proof_sha256 = _canonical_sha256(
+                "serialized terminal economics proof_sha256",
+                raw["proof_sha256"],
+            )
+            if serialized_proof_sha256 != proof.proof_sha256:
+                raise ValueError(
+                    "serialized terminal economics identity does not match"
+                )
+            return proof
+        except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+            raise ValueError("serialized terminal economics is invalid") from exc
+
+
+@dataclass(frozen=True, slots=True)
 class PortfolioPlan:
     decision_ts: str
     action: PortfolioAction
@@ -463,6 +882,7 @@ class PortfolioPlan:
     opportunity_classes: tuple[str, ...]
     portfolio_sha256: str | None
     dependency_graph: PortfolioDependencyGraph | None
+    terminal_economics: VerifiedTerminalEconomics | None
     economic_goal_contract_sha256: str | None
     risk_policy_sha256: str
     portfolio_truth: EvidenceTruth
@@ -511,6 +931,31 @@ class PortfolioPlan:
                 raise ValueError("dependency graph must bind the exact portfolio identity")
             if self.intent_sha256s != self.dependency_graph.intent_sha256s:
                 raise ValueError("dependency graph must bind the exact intent vector")
+        if self.terminal_economics is not None:
+            if not isinstance(self.terminal_economics, VerifiedTerminalEconomics):
+                raise ValueError(
+                    "terminal_economics must be VerifiedTerminalEconomics"
+                )
+            terminal_evidence = self.terminal_economics.completeness_evidence
+            if self.portfolio_sha256 != terminal_evidence.portfolio_sha256:
+                raise ValueError(
+                    "terminal economics must bind exact portfolio identity"
+                )
+            if self.dependency_graph is None:
+                raise ValueError(
+                    "terminal economics requires a bound dependency graph"
+                )
+            if (
+                self.dependency_graph.graph_sha256
+                != terminal_evidence.dependency_graph_sha256
+            ):
+                raise ValueError(
+                    "terminal economics must bind exact dependency graph"
+                )
+            if self.intent_sha256s != terminal_evidence.intent_sha256s:
+                raise ValueError(
+                    "terminal economics must bind exact intent vector"
+                )
         _optional_sha256(
             "economic_goal_contract_sha256", self.economic_goal_contract_sha256
         )
@@ -536,6 +981,33 @@ class PortfolioPlan:
                 raise ValueError("positive portfolio action requires bound dependency graph")
             if self.economic_goal_contract_sha256 is None:
                 raise ValueError("positive portfolio action requires economic-goal identity")
+            outcome_independent_positive = any(
+                stake > 0
+                and StrategyClass(opportunity_class)
+                in {
+                    StrategyClass.ARBITRAGE,
+                    StrategyClass.DUTCHING,
+                    StrategyClass.HEDGE_REBALANCE,
+                }
+                for stake, opportunity_class in zip(
+                    self.stakes,
+                    self.opportunity_classes,
+                    strict=True,
+                )
+            )
+            if outcome_independent_positive:
+                if self.terminal_economics is None:
+                    raise ValueError(
+                        "positive outcome-independent action requires terminal economics"
+                    )
+                if (
+                    not self.terminal_economics.worst_proven
+                    or self.terminal_economics.worst_terminal_profit
+                    <= Decimal("0")
+                ):
+                    raise ValueError(
+                        "positive outcome-independent action requires proven positive minimum terminal profit"
+                    )
 
     @property
     def dependency_graph_sha256(self) -> str | None:
@@ -548,7 +1020,7 @@ class PortfolioPlan:
     def _identity_payload(self) -> dict[str, object]:
         return {
             "schema": "autosport.portfolio_plan",
-            "schema_version": 2,
+            "schema_version": 3,
             "decision_ts": self.decision_ts,
             "action": self.action.value,
             "stakes": [str(value) for value in self.stakes],
@@ -560,6 +1032,11 @@ class PortfolioPlan:
                 None if self.dependency_graph is None else self.dependency_graph.to_dict()
             ),
             "dependency_graph_sha256": self.dependency_graph_sha256,
+            "terminal_economics": (
+                None
+                if self.terminal_economics is None
+                else self.terminal_economics.to_dict()
+            ),
             "economic_goal_contract_sha256": self.economic_goal_contract_sha256,
             "risk_policy_sha256": self.risk_policy_sha256,
             "portfolio_truth": self.portfolio_truth.value,
@@ -587,6 +1064,7 @@ class PortfolioPlan:
             "portfolio_sha256",
             "dependency_graph",
             "dependency_graph_sha256",
+            "terminal_economics",
             "economic_goal_contract_sha256",
             "risk_policy_sha256",
             "portfolio_truth",
@@ -597,7 +1075,7 @@ class PortfolioPlan:
             raise ValueError("serialized portfolio plan must contain canonical fields")
         if raw["schema"] != "autosport.portfolio_plan":
             raise ValueError("unsupported portfolio plan schema")
-        if raw["schema_version"] != 2:
+        if raw["schema_version"] != 3:
             raise ValueError("unsupported portfolio plan schema_version")
         try:
             stakes_raw = raw["stakes"]
@@ -620,6 +1098,12 @@ class PortfolioPlan:
                 if graph_raw is None
                 else PortfolioDependencyGraph.from_dict(graph_raw)
             )
+            terminal_raw = raw["terminal_economics"]
+            terminal_economics = (
+                None
+                if terminal_raw is None
+                else VerifiedTerminalEconomics.from_dict(terminal_raw)
+            )
             plan = cls(
                 decision_ts=raw["decision_ts"],
                 action=PortfolioAction(raw["action"]),
@@ -632,6 +1116,7 @@ class PortfolioPlan:
                 opportunity_classes=tuple(classes_raw),
                 portfolio_sha256=raw["portfolio_sha256"],
                 dependency_graph=graph,
+                terminal_economics=terminal_economics,
                 economic_goal_contract_sha256=raw["economic_goal_contract_sha256"],
                 risk_policy_sha256=raw["risk_policy_sha256"],
                 portfolio_truth=EvidenceTruth(raw["portfolio_truth"]),
@@ -829,6 +1314,7 @@ def _terminal_plan(
         ),
         portfolio_sha256=portfolio_sha256,
         dependency_graph=dependency_graph,
+        terminal_economics=None,
         economic_goal_contract_sha256=(
             provenance_for(goal).contract_sha256 if goal is not None else None
         ),
@@ -877,11 +1363,164 @@ def _intent_preflight_reason(
             return (
                 "outcome-independent opportunity lacks execution-assumption evidence"
             )
+    return None
+
+
+def _terminal_state_bindings_reason(
+    evidence: TerminalStateCompletenessEvidence,
+    *,
+    portfolio_sha256: str,
+    dependency_graph: PortfolioDependencyGraph,
+    intents: tuple[OpportunityIntent, ...],
+    decision_time: datetime,
+) -> str | None:
+    if evidence.portfolio_sha256 != portfolio_sha256:
+        return "terminal completeness evidence does not bind current portfolio"
+    if evidence.dependency_graph_sha256 != dependency_graph.graph_sha256:
+        return "terminal completeness evidence does not bind current dependency graph"
+    if evidence.intent_sha256s != tuple(
+        intent.intent_sha256 for intent in intents
+    ):
+        return "terminal completeness evidence does not bind current intent vector"
+    if evidence.candidate_sha256s != tuple(
+        intent.candidate_sha256 for intent in intents
+    ):
+        return "terminal completeness evidence does not bind current candidate vector"
+    _, cutoff = _canonical_timestamp(
+        "terminal completeness causal_cutoff", evidence.causal_cutoff
+    )
+    _, evaluated = _canonical_timestamp(
+        "terminal completeness evaluated_at", evidence.evaluated_at
+    )
+    if cutoff > decision_time or evaluated > decision_time:
         return (
-            "outcome-independent positive action requires verified terminal-state "
-            "economics; hash-only completeness/execution digests are not executable authority"
+            "terminal completeness evidence is from the future relative to decision time"
         )
     return None
+
+
+def _proposed_terminal_ticket(
+    intent: OpportunityIntent,
+    stake: Decimal,
+    decision_ts: str,
+) -> PaperTicket:
+    context = intent.risk_context
+    return PaperTicket(
+        ticket_id=f"proposal-{intent.candidate_sha256}",
+        stake=stake,
+        legs=context.legs,
+        placed_at=decision_ts,
+        status=TicketStatus.OPEN,
+        payout=Decimal("0"),
+        strategy_reason=f"portfolio-plan:{intent.intent_id}",
+        provider_source_ids=tuple(sorted(context.source_ids)),
+        provider_accounts=context.provider_accounts,
+        bankroll_id=context.bankroll_id,
+        currency=context.currency,
+    )
+
+
+def _verify_terminal_economics(
+    book: PaperBook,
+    intents: tuple[OpportunityIntent, ...],
+    stakes: tuple[Decimal, ...],
+    dependency_graph: PortfolioDependencyGraph,
+    evidence: TerminalStateCompletenessEvidence,
+    *,
+    portfolio_sha256: str,
+    decision_ts: str,
+    decision_time: datetime,
+) -> tuple[VerifiedTerminalEconomics | None, str | None]:
+    binding_reason = _terminal_state_bindings_reason(
+        evidence,
+        portfolio_sha256=portfolio_sha256,
+        dependency_graph=dependency_graph,
+        intents=intents,
+        decision_time=decision_time,
+    )
+    if binding_reason is not None:
+        return None, binding_reason
+
+    positive_pairs = tuple(
+        (intent, stake)
+        for intent, stake in zip(intents, stakes, strict=True)
+        if stake > 0
+    )
+    if not positive_pairs:
+        return (
+            None,
+            "terminal economics requires at least one positive proposed stake",
+        )
+
+    outcome_independent = tuple(
+        intent
+        for intent, _ in positive_pairs
+        if intent.opportunity_class
+        in {
+            StrategyClass.ARBITRAGE,
+            StrategyClass.DUTCHING,
+            StrategyClass.HEDGE_REBALANCE,
+        }
+    )
+    for intent in outcome_independent:
+        if (
+            intent.evidence.terminal_state_space_sha256
+            != evidence.terminal_state_space_sha256
+        ):
+            return (
+                None,
+                "outcome-independent evidence terminal-state identity does not match verified completeness",
+            )
+        if (
+            intent.evidence.execution_assumptions_sha256
+            != evidence.execution_assumptions_sha256
+        ):
+            return (
+                None,
+                "outcome-independent execution assumptions do not match verified completeness",
+            )
+
+    tickets = [
+        ticket
+        for ticket in book.tickets.values()
+        if ticket.status is TicketStatus.OPEN
+    ]
+    tickets.extend(
+        _proposed_terminal_ticket(intent, stake, decision_ts)
+        for intent, stake in positive_pairs
+    )
+    try:
+        report = ScenarioSearchEngine().analyse(
+            tickets,
+            list(evidence.scenario_groups),
+        )
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        return (
+            None,
+            f"verified terminal-state model is not executable: {exc}",
+        )
+
+    proof = VerifiedTerminalEconomics(
+        completeness_evidence=evidence,
+        report_mode=report.mode,
+        total_states=report.total_states,
+        worst_terminal_profit=report.observed_worst,
+        best_terminal_profit=report.observed_best,
+        worst_proven=report.worst_proven,
+        best_proven=report.best_proven,
+    )
+    if outcome_independent:
+        if not proof.worst_proven:
+            return (
+                None,
+                "outcome-independent terminal minimum is not exactly proven",
+            )
+        if proof.worst_terminal_profit <= Decimal("0"):
+            return (
+                None,
+                "outcome-independent exact minimum terminal net P&L is not positive",
+            )
+    return proof, None
 
 
 def build_portfolio_plan(
@@ -893,6 +1532,7 @@ def build_portfolio_plan(
     portfolio_truth: EvidenceTruth = EvidenceTruth.EXACT,
     dependency_graph: PortfolioDependencyGraph | None,
     risk_of_ruin_vector_evidence: RiskOfRuinVectorEvidence | None = None,
+    terminal_state_evidence: TerminalStateCompletenessEvidence | None = None,
 ) -> PortfolioPlan:
     """Build one pure whole-portfolio paper plan under canonical RiskPolicy authority."""
 
@@ -910,6 +1550,12 @@ def build_portfolio_plan(
         dependency_graph, PortfolioDependencyGraph
     ):
         raise TypeError("dependency_graph must be PortfolioDependencyGraph")
+    if terminal_state_evidence is not None and not isinstance(
+        terminal_state_evidence, TerminalStateCompletenessEvidence
+    ):
+        raise TypeError(
+            "terminal_state_evidence must be TerminalStateCompletenessEvidence"
+        )
     decision_ts, decision_time = _canonical_timestamp("decision_ts", decision_ts)
 
     portfolio_sha256 = risk_policy.risk_of_ruin_portfolio_sha256(book)
@@ -1053,7 +1699,7 @@ def build_portfolio_plan(
     # every new positive candidate evaluated alongside an already-open position.
     # This makes omission non-authoritative rather than treating an empty edge list
     # as evidence of independence.
-    if len(positive_candidates) > 1:
+    if len(positive_candidates) > 1 and terminal_state_evidence is None:
         return _terminal_plan(
             decision_ts=decision_ts,
             action=PortfolioAction.WAIT,
@@ -1067,8 +1713,13 @@ def build_portfolio_plan(
             policy=risk_policy,
             portfolio_truth=portfolio_truth,
         )
-    if positive_candidates and any(
-        ticket.status is TicketStatus.OPEN for ticket in book.tickets.values()
+    if (
+        positive_candidates
+        and terminal_state_evidence is None
+        and any(
+            ticket.status is TicketStatus.OPEN
+            for ticket in book.tickets.values()
+        )
     ):
         return _terminal_plan(
             decision_ts=decision_ts,
@@ -1090,7 +1741,85 @@ def build_portfolio_plan(
         contexts=tuple(intent.risk_context for intent in intents),
         risk_of_ruin_vector_evidence=risk_of_ruin_vector_evidence,
     )
+    terminal_economics: VerifiedTerminalEconomics | None = None
     if allocation.action == "STAKE_VECTOR":
+        actual_positive = tuple(
+            intent
+            for intent, stake in zip(
+                intents,
+                allocation.stakes,
+                strict=True,
+            )
+            if stake > 0
+        )
+        needs_complete_dependency = (
+            len(actual_positive) > 1
+            or (
+                bool(actual_positive)
+                and any(
+                    ticket.status is TicketStatus.OPEN
+                    for ticket in book.tickets.values()
+                )
+            )
+        )
+        needs_terminal_economics = any(
+            intent.opportunity_class
+            in {
+                StrategyClass.ARBITRAGE,
+                StrategyClass.DUTCHING,
+                StrategyClass.HEDGE_REBALANCE,
+            }
+            for intent in actual_positive
+        )
+        if needs_complete_dependency or needs_terminal_economics:
+            if terminal_state_evidence is None:
+                return _terminal_plan(
+                    decision_ts=decision_ts,
+                    action=PortfolioAction.WAIT,
+                    reason=(
+                        "positive portfolio vector requires typed verified terminal-state "
+                        "completeness for current+proposed positions"
+                    ),
+                    intents=intents,
+                    portfolio_sha256=portfolio_sha256,
+                    dependency_graph=dependency_graph,
+                    policy=risk_policy,
+                    portfolio_truth=portfolio_truth,
+                )
+            if dependency_graph is None:
+                return _terminal_plan(
+                    decision_ts=decision_ts,
+                    action=PortfolioAction.WAIT,
+                    reason=(
+                        "verified terminal-state economics requires dependency graph"
+                    ),
+                    intents=intents,
+                    portfolio_sha256=portfolio_sha256,
+                    dependency_graph=None,
+                    policy=risk_policy,
+                    portfolio_truth=portfolio_truth,
+                )
+            terminal_economics, terminal_reason = _verify_terminal_economics(
+                book,
+                intents,
+                allocation.stakes,
+                dependency_graph,
+                terminal_state_evidence,
+                portfolio_sha256=portfolio_sha256,
+                decision_ts=decision_ts,
+                decision_time=decision_time,
+            )
+            if terminal_reason is not None:
+                return _terminal_plan(
+                    decision_ts=decision_ts,
+                    action=PortfolioAction.WAIT,
+                    reason=terminal_reason,
+                    intents=intents,
+                    portfolio_sha256=portfolio_sha256,
+                    dependency_graph=dependency_graph,
+                    policy=risk_policy,
+                    portfolio_truth=portfolio_truth,
+                )
         action = (
             PortfolioAction.HEDGE_REBALANCE
             if any(
@@ -1126,10 +1855,22 @@ def build_portfolio_plan(
         ),
         portfolio_sha256=portfolio_sha256,
         dependency_graph=dependency_graph,
+        terminal_economics=terminal_economics,
         economic_goal_contract_sha256=(
             provenance_for(goal).contract_sha256 if goal is not None else None
         ),
         risk_policy_sha256=risk_policy.provenance_sha256,
         portfolio_truth=portfolio_truth,
-        reason=reason,
+        reason=(
+            reason
+            + (
+                ""
+                if terminal_economics is None
+                else (
+                    "; typed terminal-state completeness verified with canonical "
+                    f"{terminal_economics.report_mode} worst-case P&L="
+                    f"{terminal_economics.worst_terminal_profit}"
+                )
+            )
+        ),
     )

@@ -7,7 +7,11 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from autosport.decision_ledger import EconomicDecisionAuthority, JsonlDecisionLedger
+from autosport.decision_ledger import (
+    DecisionLedgerIntegrityError,
+    EconomicDecisionAuthority,
+    JsonlDecisionLedger,
+)
 from autosport.domain import MarketEvent
 from autosport.economic_goal import EconomicGoalContract
 from autosport.live_decision_loop import (
@@ -709,6 +713,49 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             self.assertEqual(final.status, LiveCycleStatus.DECIDED)
             self.assertGreater((workspace / "decisions.jsonl").stat().st_size, before_size)
+
+    def test_restart_verifies_complete_historical_decision_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [
+                        (self._event(sequence=1),),
+                        (
+                            self._event(
+                                sequence=2,
+                                odds="2.10",
+                                observed=self.START + timedelta(seconds=2),
+                            ),
+                        ),
+                    ],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            clock.value = self.START + timedelta(seconds=3)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            ledger_path = workspace / "decisions.jsonl"
+            lines = ledger_path.read_bytes().splitlines(keepends=True)
+            self.assertEqual(len(lines), 2)
+            ledger_path.write_bytes(b"".join(lines + [lines[0]]))
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "duplicate decision_id",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=4)),
+                )
 
     def test_corrupted_dependency_registry_fails_closed_on_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

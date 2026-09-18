@@ -210,6 +210,52 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 2,
             )
 
+    def test_decision_timestamp_follows_observation_receipt_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            durable = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(
+                            selection="selection-a",
+                            sequence=1,
+                            observed=self.START + timedelta(seconds=2),
+                        ),
+                    )
+                ],
+            )
+
+            def observer(updates):
+                result = durable(updates)
+                clock.value = self.START + timedelta(seconds=3)
+                return result
+
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(
+                record.observed_ts,
+                (self.START + timedelta(seconds=3)).isoformat(),
+            )
+
     def test_duplicate_redelivery_does_not_emit_second_decision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

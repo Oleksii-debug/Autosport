@@ -347,6 +347,19 @@ def _json_object_bytes(
     def _reject_nonstandard_constant(value: str) -> None:
         raise ValueError(f"{context} contains non-standard JSON constant: {value}")
 
+    # Bound parser work even when a syntactically valid payload contains pathological
+    # nesting that would otherwise be accepted by the JSON decoder.
+    depth = 0
+    max_depth = 0
+    for byte in payload:
+        if byte in (91, 123):  # '[' or '{'
+            depth += 1
+            max_depth = max(max_depth, depth)
+        elif byte in (93, 125):  # ']' or '}'
+            depth = max(0, depth - 1)
+    if max_depth > 1024:
+        raise ValueError(f"{context} is not readable valid JSON: {path}")
+
     try:
         raw = json.loads(
             payload.decode("utf-8"),

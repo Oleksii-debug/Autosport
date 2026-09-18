@@ -93,7 +93,7 @@ class GuiWorkspaceRecoveryTests(unittest.TestCase):
         return app
 
     def test_packaged_windows_entry_uses_responsive_gui(self) -> None:
-        source = inspect.getsource(windows_entry.main)
+        source = inspect.getsource(windows_entry._run_interactive_gui)
         self.assertIn("from autosport.windows_gui import main as gui_main", source)
         self.assertEqual(AUTOMATION_IDS["repair_workspace"], 108)
 
@@ -182,7 +182,7 @@ class GuiWorkspaceRecoveryTests(unittest.TestCase):
             self.assertEqual(app._busy_states, [True, False])
             self.assertIs(app._recovery_view, result.session_view)
             self.assertIsNone(app._recovery_blocked_workspace)
-            self.assertIn("Workspace готовий", app.status.value)
+            self.assertIn("Робоча область готова", app.status.value)
             self.assertGreaterEqual(app._ticket_refreshes, 2)
             info.assert_called_once()
 
@@ -207,7 +207,7 @@ class GuiWorkspaceRecoveryTests(unittest.TestCase):
                 WindowsAutosportApp._poll_recovery_worker(app)
 
             self.assertEqual(app._recovery_blocked_workspace, root)
-            self.assertIn("unresolved", app.status.value)
+            self.assertIn("невирішених=1", app.status.value)
             warning.assert_called_once()
 
     def test_recovery_error_never_reopens_sqlite_session_on_tk_thread(self) -> None:
@@ -235,13 +235,13 @@ class GuiWorkspaceRecoveryTests(unittest.TestCase):
             app._bell_rang = False
 
             WindowsAutosportApp.run_dataset(app)
-            self.assertIn("recovery ще виконується", app.status.value)
+            self.assertIn("відновлення робочої області ще виконується", app.status.value)
 
             WindowsAutosportApp.refresh_live_snapshot(app)
             self.assertIn("не запускається одночасно", app.status.value)
 
             WindowsAutosportApp.repair_workspace(app)
-            self.assertIn("уже виконується", app.status.value)
+            self.assertIn("вже виконується", app.status.value)
 
             WindowsAutosportApp.close_app(app)
             self.assertTrue(app._bell_rang)
@@ -255,7 +255,7 @@ class GuiWorkspaceRecoveryTests(unittest.TestCase):
             app._selected_replay_configuration = lambda: ("baseline-v1", None)
 
             WindowsAutosportApp.run_dataset(app)
-            self.assertIn("заблоковано fail-closed", app.status.value)
+            self.assertIn("заблоковано закрито при помилці", app.status.value)
 
 
 if __name__ == "__main__":

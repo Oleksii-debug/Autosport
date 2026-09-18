@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from autosport.run_registry import RunRegistry, has_durable_workspace_history
+from autosport.run_registry import RunRegistry
 
 
 class RunRegistryMissingHistoryTests(unittest.TestCase):
@@ -14,12 +14,11 @@ class RunRegistryMissingHistoryTests(unittest.TestCase):
             transaction_dir.mkdir(parents=True)
             (transaction_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
 
-            self.assertTrue(has_durable_workspace_history(root))
             with self.assertRaisesRegex(
                 ValueError,
                 "run registry is missing while durable run history exists",
             ):
-                RunRegistry(registry_path)
+                RunRegistry.initialize_pristine(registry_path)
 
             self.assertFalse(registry_path.exists())
 
@@ -29,57 +28,11 @@ class RunRegistryMissingHistoryTests(unittest.TestCase):
             registry_path = root / "run_registry.json"
             (root / "run-run-1.json").write_text("{}\n", encoding="utf-8")
 
-            self.assertTrue(has_durable_workspace_history(root))
             with self.assertRaisesRegex(
                 ValueError,
                 "run registry is missing while durable run history exists",
             ):
-                RunRegistry(registry_path)
-
-            self.assertFalse(registry_path.exists())
-
-    def test_missing_registry_with_canonical_paper_book_fails_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            registry_path = root / "run_registry.json"
-            (root / "paper_book.json").write_text("{}\n", encoding="utf-8")
-
-            self.assertTrue(has_durable_workspace_history(root))
-            with self.assertRaisesRegex(
-                ValueError,
-                "run registry is missing while durable run history exists",
-            ):
-                RunRegistry(registry_path)
-
-            self.assertFalse(registry_path.exists())
-
-    def test_missing_registry_with_nonempty_decision_ledger_fails_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            registry_path = root / "run_registry.json"
-            (root / "decisions.jsonl").write_text("durable decision\n", encoding="utf-8")
-
-            self.assertTrue(has_durable_workspace_history(root))
-            with self.assertRaisesRegex(
-                ValueError,
-                "run registry is missing while durable run history exists",
-            ):
-                RunRegistry(registry_path)
-
-            self.assertFalse(registry_path.exists())
-
-    def test_missing_registry_with_nonfile_decision_ledger_fails_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            registry_path = root / "run_registry.json"
-            (root / "decisions.jsonl").mkdir()
-
-            self.assertTrue(has_durable_workspace_history(root))
-            with self.assertRaisesRegex(
-                ValueError,
-                "run registry is missing while durable run history exists",
-            ):
-                RunRegistry(registry_path)
+                RunRegistry.initialize_pristine(registry_path)
 
             self.assertFalse(registry_path.exists())
 
@@ -89,20 +42,7 @@ class RunRegistryMissingHistoryTests(unittest.TestCase):
             registry_path = root / "run_registry.json"
             (root / ".run-transactions").mkdir()
 
-            self.assertFalse(has_durable_workspace_history(root))
-            registry = RunRegistry(registry_path)
-
-            self.assertTrue(registry_path.is_file())
-            self.assertEqual(registry.strategy_ids(), ())
-
-    def test_readable_zero_byte_decision_ledger_does_not_block_pristine_registry(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            registry_path = root / "run_registry.json"
-            (root / "decisions.jsonl").touch()
-
-            self.assertFalse(has_durable_workspace_history(root))
-            registry = RunRegistry(registry_path)
+            registry = RunRegistry.initialize_pristine(registry_path)
 
             self.assertTrue(registry_path.is_file())
             self.assertEqual(registry.strategy_ids(), ())

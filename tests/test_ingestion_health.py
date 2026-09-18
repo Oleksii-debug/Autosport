@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -35,11 +36,20 @@ class IngestionHealthTests(unittest.TestCase):
         store = SQLiteMarketStore(Path(tmp) / "market.db")
         bus = MarketEventBus(store)
         health = SourceHealthStore(Path(tmp) / "source-health.json")
+        clock_point = datetime.fromisoformat(now)
+        clock_tick = 0
+
+        def clock() -> str:
+            nonlocal clock_tick
+            point = clock_point + timedelta(microseconds=clock_tick)
+            clock_tick += 1
+            return point.isoformat()
+
         engine = IngestionEngine(
             bus,
             policy=policy or IngestionPolicy(max_batch_size=100, stale_after_seconds=60, max_future_skew_seconds=5),
             health_store=health,
-            clock=lambda: now,
+            clock=clock,
         )
         return engine, store, health
 
@@ -161,6 +171,39 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(reopened.total_accepted, 1)
             self.assertEqual(reopened.consecutive_failures, 0)
             self.assertEqual(reopened.last_cursor, "cursor-1")
+            store.close()
+
+    def test_normalization_rejection_degrades_source_health(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            invalid_quote = ProviderQuote(
+                provider_event_id="event-1",
+                provider_market_id="winner",
+                provider_selection_id="invalid-odds",
+                decimal_odds=Decimal("1.0"),
+                observed_ts="2026-09-12T12:00:00+00:00",
+                sequence=1,
+            )
+            provider = StaticProvider(
+                "source",
+                [ProviderBatch("source", (invalid_quote,), cursor="cursor-invalid")],
+            )
+
+            stats = engine.poll_once(provider, max_items=10)
+
+            self.assertEqual(stats.received, 1)
+            self.assertEqual(stats.accepted, 0)
+            self.assertEqual(stats.rejected, 1)
+            self.assertEqual(stats.quality_flags, ("INVALID_QUOTE",))
+            self.assertEqual(stats.health_status, "degraded")
+            self.assertEqual(len(store.events()), 0)
+            persisted = health.get("source")
+            self.assertEqual(persisted.status, "degraded")
+            self.assertEqual(persisted.total_received, 1)
+            self.assertEqual(persisted.total_accepted, 0)
+            self.assertEqual(persisted.total_rejected, 1)
+            self.assertEqual(persisted.quality_flags, ("INVALID_QUOTE",))
+            self.assertEqual(persisted.last_cursor, "cursor-invalid")
             store.close()
 
     def test_stale_future_skew_and_invalid_source_time_are_truth_labeled(self):

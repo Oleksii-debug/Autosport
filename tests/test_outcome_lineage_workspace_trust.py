@@ -121,7 +121,7 @@ class OutcomeLineageWorkspaceTrustTests(unittest.TestCase):
     def test_identical_reimport_and_extension_persist_in_existing_run_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             r1 = ("results-r1", self._sha("r1"))
             r2 = ("results-r2", self._sha("r2"))
             r3 = ("results-r3", self._sha("r3"))
@@ -151,7 +151,7 @@ class OutcomeLineageWorkspaceTrustTests(unittest.TestCase):
     def test_restart_from_different_revision_one_root_is_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             accepted = self._dataset(
                 root,
                 revisions=(("results-r1", self._sha("accepted-root")),),
@@ -179,7 +179,7 @@ class OutcomeLineageWorkspaceTrustTests(unittest.TestCase):
     def test_same_root_divergent_correction_fork_is_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             root_revision = ("results-r1", self._sha("root"))
             accepted = self._dataset(
                 root,
@@ -199,7 +199,7 @@ class OutcomeLineageWorkspaceTrustTests(unittest.TestCase):
     def test_registry_reopen_rejects_tampered_conflicting_lineage_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             r1 = ("results-r1", self._sha("root"))
             first = self._dataset(
                 root,
@@ -225,7 +225,7 @@ class OutcomeLineageWorkspaceTrustTests(unittest.TestCase):
     def test_results_hash_drift_is_rejected_before_registry_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             dataset = self._dataset(
                 root,
                 revisions=(("results-r1", self._sha("r1")),),

@@ -63,7 +63,7 @@ class OutcomeLineageRegistryTrustPersistenceTests(unittest.TestCase):
     def test_registry_level_trust_survives_completed_run_entry_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             accepted = self._binding("accepted-root")
             restarted = self._binding(
                 "different-root",
@@ -97,7 +97,7 @@ class OutcomeLineageRegistryTrustPersistenceTests(unittest.TestCase):
     def test_lineage_registry_cannot_drop_registry_level_trust_section(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             self._accept(registry, self._binding("accepted-root"))
 
             state = json.loads(registry.path.read_text(encoding="utf-8"))
@@ -111,7 +111,7 @@ class OutcomeLineageRegistryTrustPersistenceTests(unittest.TestCase):
     def test_run_lineage_cannot_exceed_registry_level_trust_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             accepted = self._binding("accepted-root", "accepted-correction")
             self._accept(registry, accepted)
 
@@ -130,7 +130,7 @@ class OutcomeLineageRegistryTrustPersistenceTests(unittest.TestCase):
     def test_registry_level_trust_advances_to_longest_compatible_extension(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             initial = self._binding("accepted-root")
             extended = self._binding("accepted-root", "accepted-correction")
             self._accept(registry, initial, run_id="run-one")

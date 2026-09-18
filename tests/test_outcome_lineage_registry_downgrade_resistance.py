@@ -124,7 +124,7 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
     def test_schema_two_workspace_cannot_be_rewritten_as_schema_one_after_durable_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             accepted = self._binding("accepted-root")
             self._accept(registry, accepted)
             self._write_bound_summary(root, accepted)
@@ -140,7 +140,7 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
     def test_schema_two_registry_must_cover_hash_bound_durable_summary_trust(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             accepted = self._binding("accepted-root")
             self._accept(registry, accepted)
             self._write_bound_summary(root, accepted)
@@ -160,7 +160,7 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
     def test_lineage_summary_trust_must_match_transaction_summary_hash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             accepted = self._binding("accepted-root")
             self._accept(registry, accepted)
             self._write_bound_summary(
@@ -175,7 +175,7 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
     def test_marker_removal_cannot_bypass_manifest_hash_before_schema_downgrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             accepted = self._binding("accepted-root")
             self._accept(registry, accepted)
             summary_path = self._write_bound_summary(root, accepted)
@@ -197,7 +197,7 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
     def test_transaction_bound_summary_bytes_are_read_once_for_hash_and_parse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             accepted = self._binding("accepted-root")
             self._accept(registry, accepted)
             summary_path = self._write_bound_summary(root, accepted)
@@ -220,7 +220,7 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
     def test_genuine_never_upgraded_schema_one_workspace_remains_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             key = registry.begin(
                 "a" * 64,
                 "b" * 64,

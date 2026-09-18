@@ -358,6 +358,8 @@ def _strict_json_object(payload: bytes, *, context: str) -> dict[str, Any]:
         raise OutcomeLineageTrustError(f"{context} is not valid UTF-8") from exc
     except json.JSONDecodeError as exc:
         raise OutcomeLineageTrustError(f"{context} is not valid JSON") from exc
+    except RecursionError as exc:
+        raise OutcomeLineageTrustError(f"{context} is not valid JSON") from exc
     if not isinstance(raw, dict):
         raise OutcomeLineageTrustError(f"{context} must be a JSON object")
     return raw

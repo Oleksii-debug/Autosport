@@ -4,9 +4,16 @@ import hashlib
 import json
 import os
 import stat
+import time
 from pathlib import Path
 
-from .integrity import sha256_file
+from .integrity import atomic_write_json, sha256_file
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    _open_read_only_descriptor,
+    _stable_stat_metadata,
+)
 from .outcome_trust import (
     OutcomeLineageBinding,
     OutcomeLineageTrustError,
@@ -55,14 +62,11 @@ _FINAL_ONLY_FIELDS = frozenset(
         "reconciled_from_summary",
     }
 )
+_FIRST_OPEN_RETRY_SECONDS = 0.01
+_FIRST_OPEN_MAX_WAIT_SECONDS = 5.0
 _LEGACY_SCHEMA_VERSION = 1
 _LINEAGE_TRUST_SCHEMA_VERSION = 2
 _LINEAGE_TRUST_FIELD = "outcome_lineage_trust"
-_TRANSACTION_SCHEMA_VERSION = 1
-_TRANSACTION_PHASES = frozenset(
-    {"staging", "precommitted", "canonical_committed", "completed", "aborted"}
-)
-_TERMINAL_SUMMARY_PHASES = frozenset({"canonical_committed", "completed"})
 
 
 def _is_canonical_sha256(value: object) -> bool:
@@ -103,80 +107,133 @@ def _reject_nonfinite_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON constant: {value}")
 
 
-def _strict_json_object_bytes(payload: bytes, *, context: str) -> dict[str, object]:
+def _lstat_or_none(path: Path) -> os.stat_result | None:
     try:
-        raw = json.loads(
-            payload.decode("utf-8"),
-            object_pairs_hook=_reject_duplicate_json_keys,
-            parse_constant=_reject_nonfinite_json_constant,
+        return os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _path_matches_open_descriptor(
+    path: Path,
+    descriptor: int,
+    expected_path_stat: os.stat_result,
+) -> bool:
+    """Prove the current no-follow pathname still names the already-open descriptor."""
+
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or current.st_nlink != 1
+        or not _stable_stat_metadata(expected_path_stat, current)
+    ):
+        return False
+
+    try:
+        verification_descriptor = _open_read_only_descriptor(path)
+    except OSError:
+        return False
+    matched = False
+    try:
+        try:
+            same_file = os.path.sameopenfile(descriptor, verification_descriptor)
+            current_after_open = os.stat(path, follow_symlinks=False)
+        except OSError:
+            return False
+        matched = (
+            same_file
+            and stat.S_ISREG(current_after_open.st_mode)
+            and current_after_open.st_nlink == 1
+            and _stable_stat_metadata(expected_path_stat, current_after_open)
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
-        raise ValueError(f"{context} is invalid") from exc
-    if not isinstance(raw, dict):
-        raise ValueError(f"{context} is invalid")
-    return raw
+    finally:
+        try:
+            os.close(verification_descriptor)
+        except OSError:
+            return False
+    return matched
 
 
 def has_durable_workspace_history(workspace: str | Path) -> bool:
-    """Return whether recreating a missing registry would discard durable economic history.
+    """Return whether a missing registry would discard surviving economic/run evidence.
 
-    The predicate is intentionally conservative. Unreadable or non-regular canonical
-    evidence fails closed, while a genuinely pristine workspace may contain an empty
-    transaction directory and a readable zero-byte Decision Ledger.
+    A pristine readable zero-byte Decision Ledger and an empty transaction directory are
+    allowed first-open artifacts. Everything else named here is durable product history
+    or filesystem uncertainty and must make missing-registry initialization fail closed.
     """
 
     root = Path(workspace)
     transaction_root = root / ".run-transactions"
-    try:
-        transaction_stat = transaction_root.lstat()
-    except FileNotFoundError:
-        pass
-    except OSError:
-        return True
-    else:
+    transaction_stat = _lstat_or_none(transaction_root)
+    if transaction_stat is not None:
         if not stat.S_ISDIR(transaction_stat.st_mode):
             return True
         try:
             next(transaction_root.iterdir())
         except StopIteration:
             pass
-        except OSError:
-            return True
         else:
             return True
 
-    try:
-        if any(root.glob("run-*.json")):
+    for entry in root.iterdir():
+        if entry.name.startswith("run-") and entry.name.endswith(".json"):
             return True
-    except OSError:
+
+    if _lstat_or_none(root / "paper_book.json") is not None:
         return True
 
-    paper_book = root / "paper_book.json"
-    try:
-        paper_book.lstat()
-    except FileNotFoundError:
-        pass
-    except OSError:
-        return True
-    else:
-        return True
+    ledger_path = root / "decisions.jsonl"
+    ledger_stat = _lstat_or_none(ledger_path)
+    if ledger_stat is not None:
+        if (
+            not stat.S_ISREG(ledger_stat.st_mode)
+            or ledger_stat.st_nlink != 1
+            or ledger_stat.st_size > 0
+        ):
+            return True
+        try:
+            descriptor = _open_read_only_descriptor(ledger_path)
+        except OSError:
+            return True
 
-    decision_ledger = root / "decisions.jsonl"
-    try:
-        ledger_stat = decision_ledger.lstat()
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    if not stat.S_ISREG(ledger_stat.st_mode):
-        return True
-    if ledger_stat.st_size > 0:
-        return True
-    try:
-        with decision_ledger.open("rb") as handle:
-            return bool(handle.read(1))
-    except OSError:
-        return True
+        ledger_is_pristine = False
+        try:
+            try:
+                opened_before = os.fstat(descriptor)
+            except OSError:
+                return True
+            if (
+                not stat.S_ISREG(opened_before.st_mode)
+                or opened_before.st_nlink != 1
+                or not _path_matches_open_descriptor(ledger_path, descriptor, ledger_stat)
+            ):
+                return True
+
+            try:
+                first_byte = os.read(descriptor, 1)
+                opened_after = os.fstat(descriptor)
+            except OSError:
+                return True
+            if (
+                first_byte
+                or not stat.S_ISREG(opened_after.st_mode)
+                or opened_after.st_nlink != 1
+                or not _stable_stat_metadata(opened_before, opened_after)
+                or not _path_matches_open_descriptor(ledger_path, descriptor, ledger_stat)
+            ):
+                return True
+            ledger_is_pristine = True
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                ledger_is_pristine = False
+        if not ledger_is_pristine:
+            return True
+    return False
 
 
 class RepeatedExperimentError(RuntimeError):
@@ -200,14 +257,170 @@ class RunRegistry:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            if has_durable_workspace_history(self.path.parent):
-                raise ValueError("run registry is missing while durable run history exists")
-            self._write({"schema_version": _LEGACY_SCHEMA_VERSION, "runs": {}})
-        else:
-            # Validate recovery/economic truth before a session can use an existing workspace.
-            self._read()
+        try:
+            self._read_existing()
+        except FileNotFoundError as exc:
+            raise ValueError("run registry is missing") from exc
+
+    @classmethod
+    def initialize_pristine(cls, path: str | Path) -> "RunRegistry":
+        """Explicitly create the first registry only for a verified pristine workspace.
+
+        Ordinary construction is a read/verification operation and never publishes missing
+        durable state. Product startup is the sole first-open creation boundary and uses
+        this method, which serializes publication with the canonical workspace economic lock.
+        """
+
+        registry = cls.__new__(cls)
+        registry.path = Path(path)
+        registry.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            registry._read_existing()
+        except FileNotFoundError:
+            registry._initialize_missing_registry()
+        return registry
+
+    def _read_existing_bytes(self) -> bytes:
+        """Read bytes only from the exact stable regular object named by the registry path."""
+
+        path_before = _lstat_or_none(self.path)
+        if path_before is None:
+            raise FileNotFoundError(self.path)
+        if not stat.S_ISREG(path_before.st_mode) or path_before.st_nlink != 1:
+            raise ValueError("run registry path is not a regular non-aliased file")
+
+        try:
+            descriptor = _open_read_only_descriptor(self.path)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise ValueError("run registry path is unreadable") from exc
+
+        primary_error: BaseException | None = None
+        try:
+            try:
+                opened_before = os.fstat(descriptor)
+            except OSError as exc:
+                raise ValueError("run registry path changed while validating") from exc
+            if (
+                not stat.S_ISREG(opened_before.st_mode)
+                or opened_before.st_nlink != 1
+                or not _path_matches_open_descriptor(self.path, descriptor, path_before)
+            ):
+                raise ValueError("run registry path changed while validating")
+
+            chunks: list[bytes] = []
+            try:
+                while True:
+                    chunk = os.read(descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                opened_after = os.fstat(descriptor)
+            except OSError as exc:
+                raise ValueError("run registry path changed or became unreadable while validating") from exc
+
+            if (
+                not stat.S_ISREG(opened_after.st_mode)
+                or opened_after.st_nlink != 1
+                or not _stable_stat_metadata(opened_before, opened_after)
+                or not _path_matches_open_descriptor(self.path, descriptor, path_before)
+            ):
+                raise ValueError("run registry path changed while validating")
+            return b"".join(chunks)
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError as close_error:
+                if primary_error is None:
+                    raise ValueError("run registry descriptor cleanup failed") from close_error
+                try:
+                    primary_error.add_note(
+                        "run registry descriptor cleanup also failed: "
+                        f"{type(close_error).__name__}: {close_error}"
+                    )
+                except BaseException:
+                    pass
+
+    def _read_existing(self) -> dict:
+        """Read and validate only bytes bound to the current canonical registry object."""
+
+        return self._parse_registry_payload(self._read_existing_bytes())
+
+    def _initialize_missing_registry(self) -> None:
+        """Serialize first publication against every cooperating economic writer.
+
+        The initial missing-path observation is never publication authority. We first
+        acquire the canonical workspace lock, then re-read the registry under that lock.
+        If another process already owns the lock, a registry it has durably published can
+        be adopted immediately; otherwise we briefly retry until that writer publishes or
+        releases. The bounded retry also guarantees a caller that already owns the lock
+        cannot deadlock itself if an external actor removed the registry unexpectedly.
+        """
+
+        deadline = time.monotonic() + _FIRST_OPEN_MAX_WAIT_SECONDS
+        while True:
+            lock = WorkspaceEconomicLock(self.path.parent)
+            try:
+                lock.acquire()
+            except WorkspaceEconomicLockBusyError as contention:
+                # Only typed native advisory-lock contention permits winner re-read.
+                # Alias, identity, creation and backend failures remain fail-closed and
+                # propagate without being reclassified as another writer's ownership.
+                try:
+                    self._read_existing()
+                except FileNotFoundError:
+                    if time.monotonic() >= deadline:
+                        raise WorkspaceEconomicLockBusyError(
+                            "run registry first-open could not serialize with the active economic writer"
+                        ) from contention
+                    time.sleep(_FIRST_OPEN_RETRY_SECONDS)
+                    continue
+                return
+
+            primary_error: BaseException | None = None
+            try:
+                # The winner may have published while this process was waiting for
+                # the OS lock. Existing bytes are authoritative and are never replaced
+                # with a stale empty state.
+                try:
+                    self._read_existing()
+                except FileNotFoundError:
+                    pass
+                else:
+                    return
+                try:
+                    durable_history = has_durable_workspace_history(self.path.parent)
+                except OSError as exc:
+                    raise ValueError(
+                        "cannot determine durable workspace history while run registry is missing"
+                    ) from exc
+                if durable_history:
+                    raise ValueError("run registry is missing while durable run history exists")
+                self._write({"schema_version": 1, "runs": {}})
+                # Verify the exact published registry before exposing this object.
+                self._read_existing()
+                return
+            except BaseException as exc:
+                primary_error = exc
+                raise
+            finally:
+                if primary_error is None:
+                    lock.release()
+                else:
+                    try:
+                        lock.release()
+                    except BaseException as release_error:
+                        try:
+                            primary_error.add_note(
+                                "WorkspaceEconomicLock release also failed during run registry first-open: "
+                                f"{type(release_error).__name__}: {release_error}"
+                            )
+                        except BaseException:
+                            pass
 
     @staticmethod
     def experiment_identity(market_sha256: str, results_sha256: str, strategy_id: str) -> str:
@@ -486,139 +699,66 @@ class RunRegistry:
         self._write(state)
 
     def _durable_summary_lineage_bindings(self) -> tuple[OutcomeLineageBinding, ...]:
-        """Recover trust only from manifest-bound terminal summary bytes.
+        """Recover lineage trust duplicated into checksum-bound completed summaries.
 
-        The transaction manifest is the discovery authority. A terminal manifest
-        obligates validation of the exact summary bytes and transaction identity
-        before the optional lineage marker is inspected. This prevents marker removal
-        from bypassing hash validation and prevents parse-A/hash-B path-swap races.
+        Legacy summaries carry no such field and remain outside this check. A summary
+        that does carry the field must still be bound to its existing transaction
+        manifest SHA-256 so registry downgrade detection cannot trust an unbound copy.
         """
-
-        transaction_root = self.path.parent / ".run-transactions"
-        try:
-            transaction_root_stat = transaction_root.lstat()
-        except FileNotFoundError:
-            return ()
-        except OSError as exc:
-            raise ValueError("durable lineage-trust transaction root is unreadable") from exc
-        if not stat.S_ISDIR(transaction_root_stat.st_mode):
-            raise ValueError("durable lineage-trust transaction root is invalid")
-        try:
-            transaction_dirs = sorted(transaction_root.iterdir(), key=lambda path: path.name)
-        except OSError as exc:
-            raise ValueError("durable lineage-trust transaction root is unreadable") from exc
-
         bindings: list[OutcomeLineageBinding] = []
-        for transaction_dir in transaction_dirs:
-            manifest_path = transaction_dir / "manifest.json"
-            try:
-                manifest_stat = manifest_path.lstat()
-            except FileNotFoundError:
+        for summary_path in sorted(self.path.parent.glob("run-*.json")):
+            if not summary_path.is_file():
                 continue
-            except OSError as exc:
-                raise ValueError("durable lineage-trust transaction manifest is unreadable") from exc
-            if not stat.S_ISREG(manifest_stat.st_mode):
-                raise ValueError("durable lineage-trust transaction manifest is invalid")
-            try:
-                manifest_bytes = manifest_path.read_bytes()
-            except OSError as exc:
-                raise ValueError("durable lineage-trust transaction manifest is unreadable") from exc
-            manifest = _strict_json_object_bytes(
-                manifest_bytes,
-                context="durable lineage-trust transaction manifest",
-            )
-
-            manifest_schema = manifest.get("schema_version")
-            run_id = manifest.get("run_id")
-            phase = manifest.get("phase")
-            if type(manifest_schema) is not int or manifest_schema != _TRANSACTION_SCHEMA_VERSION:
-                raise ValueError("durable lineage-trust transaction manifest schema is invalid")
-            if not isinstance(run_id, str) or not run_id or transaction_dir.name != run_id:
-                raise ValueError("durable lineage-trust transaction manifest identity is invalid")
-            if not isinstance(phase, str) or phase not in _TRANSACTION_PHASES:
-                raise ValueError("durable lineage-trust transaction manifest phase is invalid")
-            if manifest.get("real_money_execution") is not False:
-                raise ValueError("durable lineage-trust transaction manifest truth boundary is invalid")
-            if phase not in _TERMINAL_SUMMARY_PHASES:
-                continue
-
-            experiment_key = manifest.get("experiment_key")
-            market_sha256 = manifest.get("market_sha256")
-            results_sha256 = manifest.get("sealed_results_sha256")
-            strategy_id = manifest.get("strategy_id")
-            if not isinstance(experiment_key, str) or not experiment_key:
-                raise ValueError("durable lineage-trust transaction manifest identity is invalid")
-            if not _is_canonical_sha256(market_sha256) or not _is_canonical_sha256(results_sha256):
-                raise ValueError("durable lineage-trust transaction manifest identity is invalid")
-            if not isinstance(strategy_id, str) or not strategy_id:
-                raise ValueError("durable lineage-trust transaction manifest identity is invalid")
-
-            targets = manifest.get("targets")
-            expected_summary_name = f"run-{run_id}.json"
-            if not isinstance(targets, dict) or targets.get("summary") != expected_summary_name:
-                raise ValueError("durable lineage-trust transaction summary target is invalid")
-            new_state = manifest.get("new")
-            if not isinstance(new_state, dict):
-                raise ValueError("durable lineage-trust transaction NEW evidence is invalid")
-            expected_summary_sha = new_state.get("summary_sha256")
-            expected_book_sha = new_state.get("paper_book_sha256")
-            expected_ledger_sha = new_state.get("decision_ledger_sha256")
-            if not all(
-                _is_canonical_sha256(value)
-                for value in (expected_summary_sha, expected_book_sha, expected_ledger_sha)
-            ):
-                raise ValueError("durable lineage-trust transaction NEW evidence is invalid")
-
-            summary_path = self.path.parent / expected_summary_name
-            try:
-                summary_stat = summary_path.lstat()
-            except FileNotFoundError as exc:
-                raise ValueError("durable lineage-trust run summary is missing") from exc
-            except OSError as exc:
-                raise ValueError("durable lineage-trust run summary is unreadable") from exc
-            if not stat.S_ISREG(summary_stat.st_mode):
-                raise ValueError("durable lineage-trust run summary is invalid")
             try:
                 summary_bytes = summary_path.read_bytes()
-            except OSError as exc:
-                raise ValueError("durable lineage-trust run summary is unreadable") from exc
+                text = summary_bytes.decode("utf-8")
+            except (OSError, UnicodeError):
+                continue
+            try:
+                summary = json.loads(
+                    summary_bytes,
+                    object_pairs_hook=_reject_duplicate_json_keys,
+                    parse_constant=_reject_nonfinite_json_constant,
+                )
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError("durable lineage-trust run summary is invalid") from exc
+            if not isinstance(summary, dict):
+                raise ValueError("durable lineage-trust run summary is invalid")
+            raw_binding = summary.get(_LINEAGE_TRUST_FIELD)
+            run_id = summary.get("run_id")
+            if not isinstance(run_id, str) or not run_id or summary_path.name != f"run-{run_id}.json":
+                if raw_binding is None:
+                    continue
+                raise ValueError("durable lineage-trust run summary identity is invalid")
+
+            manifest_path = self.path.parent / ".run-transactions" / run_id / "manifest.json"
+            if not manifest_path.is_file():
+                if raw_binding is None:
+                    continue
+                raise ValueError("durable lineage-trust run summary lacks transaction manifest")
+            try:
+                manifest = json.loads(
+                    manifest_path.read_text(encoding="utf-8"),
+                    object_pairs_hook=_reject_duplicate_json_keys,
+                    parse_constant=_reject_nonfinite_json_constant,
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+                raise ValueError("durable lineage-trust transaction manifest is invalid") from exc
+            if not isinstance(manifest, dict) or manifest.get("run_id") != run_id:
+                raise ValueError("durable lineage-trust transaction manifest identity is invalid")
+            if raw_binding is None and manifest.get("phase") not in {"canonical_committed", "completed"}:
+                continue
+            targets = manifest.get("targets")
+            if not isinstance(targets, dict) or targets.get("summary") != summary_path.name:
+                raise ValueError("durable lineage-trust transaction summary target is invalid")
+            new_state = manifest.get("new")
+            expected_summary_sha = (
+                new_state.get("summary_sha256") if isinstance(new_state, dict) else None
+            )
+            if not _is_canonical_sha256(expected_summary_sha):
+                raise ValueError("durable lineage-trust transaction lacks summary SHA-256")
             if hashlib.sha256(summary_bytes).hexdigest() != expected_summary_sha:
                 raise ValueError("durable lineage-trust run summary SHA-256 mismatch")
-            summary = _strict_json_object_bytes(
-                summary_bytes,
-                context="durable lineage-trust run summary",
-            )
-
-            summary_schema = summary.get("schema_version")
-            transaction_schema = summary.get("transaction_schema_version")
-            expected_identity = {
-                "run_id": run_id,
-                "transaction_run_id": run_id,
-                "experiment_key": experiment_key,
-                "market_sha256": market_sha256,
-                "sealed_results_sha256": results_sha256,
-                "strategy_id": strategy_id,
-                "paper_book_sha256": expected_book_sha,
-                "decision_ledger_sha256": expected_ledger_sha,
-            }
-            mismatches = [
-                field
-                for field, expected_value in expected_identity.items()
-                if summary.get(field) != expected_value
-            ]
-            if type(summary_schema) is not int or summary_schema != 2:
-                mismatches.append("schema_version")
-            if type(transaction_schema) is not int or transaction_schema != manifest_schema:
-                mismatches.append("transaction_schema_version")
-            if summary.get("real_money_execution") is not False:
-                mismatches.append("real_money_execution")
-            if mismatches:
-                raise ValueError(
-                    "durable lineage-trust run summary identity is invalid: "
-                    + ",".join(sorted(mismatches))
-                )
-
-            raw_binding = summary.get(_LINEAGE_TRUST_FIELD)
             if raw_binding is None:
                 continue
             try:
@@ -829,10 +969,10 @@ class RunRegistry:
                 if "paper_book_sha256" not in fields:
                     raise ValueError("reconciled run registry entry lacks PaperBook hash evidence")
 
-    def _read(self) -> dict:
+    def _parse_registry_payload(self, payload: bytes) -> dict:
         try:
             raw = json.loads(
-                self.path.read_text(encoding="utf-8"),
+                payload.decode("utf-8"),
                 object_pairs_hook=_reject_duplicate_json_keys,
                 parse_constant=_reject_nonfinite_json_constant,
             )
@@ -855,7 +995,14 @@ class RunRegistry:
         if not isinstance(raw.get("runs"), dict):
             raise ValueError("invalid run registry")
 
-        durable_summary_bindings = self._durable_summary_lineage_bindings()
+        # Scan transaction-bound summaries when validating a trust-bearing registry,
+        # or when a downgraded/empty registry has no run entries left to validate.
+        # Active legacy transactions are reconciled by the recovery path itself.
+        durable_summary_bindings = (
+            self._durable_summary_lineage_bindings()
+            if schema_version == _LINEAGE_TRUST_SCHEMA_VERSION or not raw["runs"]
+            else ()
+        )
         if schema_version == _LEGACY_SCHEMA_VERSION and durable_summary_bindings:
             raise ValueError(
                 "run registry lineage-trust schema was downgraded despite durable run summary evidence"
@@ -919,11 +1066,8 @@ class RunRegistry:
                 raise ValueError("run registry contains conflicting outcome lineage evidence") from exc
         return raw
 
+    def _read(self) -> dict:
+        return self._read_existing()
+
     def _write(self, raw: dict) -> None:
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(raw, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, self.path)
+        atomic_write_json(self.path, raw)

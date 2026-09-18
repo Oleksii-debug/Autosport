@@ -186,11 +186,11 @@ class MarketPriceTruthTests(unittest.TestCase):
             )
             lines = evaluation_lines(ui_result)
 
-        price_lines = [line for line in lines if line.startswith("Price truth |")]
+        price_lines = [line for line in lines if line.startswith("Істина ціни |")]
         self.assertEqual(len(price_lines), 1)
         self.assertIn("last-traded/last-matched", price_lines[0])
-        self.assertIn("executable quote verified=false", price_lines[0])
-        self.assertIn("paper fill fidelity verified=false", price_lines[0])
+        self.assertIn("виконувану котировку перевірено=ні", price_lines[0])
+        self.assertIn("відповідність паперового виконання перевірено=ні", price_lines[0])
 
     def test_explicit_invalid_fill_claim_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "fill fidelity"):

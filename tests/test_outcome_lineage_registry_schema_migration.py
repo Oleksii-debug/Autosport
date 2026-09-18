@@ -30,7 +30,7 @@ class OutcomeLineageRegistrySchemaMigrationTests(unittest.TestCase):
     def test_first_lineage_acceptance_migrates_existing_schema_one_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry = RunRegistry(root / "run_registry.json")
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
             legacy_key = registry.begin(
                 "a" * 64,
                 "b" * 64,

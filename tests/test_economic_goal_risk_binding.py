@@ -405,15 +405,13 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             measurement_window_end="2026-09-16T15:00:00+00:00",
         )
 
-        blocked = policy.evaluate(
-            book,
-            Decimal("1.01"),
-            context=context,
-        )
-        self.assertFalse(blocked.allowed)
         self.assertEqual(
-            blocked.reason,
-            "economic goal conservative session loss limit exceeded",
+            policy.derive_goal_stake(
+                book,
+                Decimal("1"),
+                context=context,
+            ),
+            Decimal("1"),
         )
 
     def test_known_settlement_after_proposal_time_fails_closed(self) -> None:

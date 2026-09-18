@@ -9,7 +9,6 @@ from enum import Enum
 
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
-    BookmakerCapability,
     BookmakerCapabilityProfile,
     BookmakerPositionObservation,
 )
@@ -352,6 +351,51 @@ class ProviderReadback:
                 "accepted_odds": None if self.accepted_odds is None else str(self.accepted_odds),
                 "accepted_stake": None if self.accepted_stake is None else str(self.accepted_stake),
                 "terminal_settlement_exact": self.terminal_settlement_exact,
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderNotFoundReadback:
+    bookmaker_id: str
+    account_id: str
+    action_id: str
+    event_id: str
+    market_id: str
+    selection_id: str
+    observed_at: str
+    current_source_payload_sha256: str
+    cleared_source_payload_sha256: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "bookmaker_id",
+            "account_id",
+            "action_id",
+            "event_id",
+            "market_id",
+            "selection_id",
+        ):
+            _text(getattr(self, name), name)
+        _time(self.observed_at, "observed_at")
+        _sha(self.current_source_payload_sha256, "current_source_payload_sha256")
+        _sha(self.cleared_source_payload_sha256, "cleared_source_payload_sha256")
+
+    @property
+    def evidence_id(self) -> str:
+        return _digest(
+            {
+                "schema": "autosport.provider_execution_not_found_readback",
+                "schema_version": 1,
+                "bookmaker_id": self.bookmaker_id,
+                "account_id": self.account_id,
+                "action_id": self.action_id,
+                "event_id": self.event_id,
+                "market_id": self.market_id,
+                "selection_id": self.selection_id,
+                "observed_at": self.observed_at,
+                "current_source_payload_sha256": self.current_source_payload_sha256,
+                "cleared_source_payload_sha256": self.cleared_source_payload_sha256,
             }
         )
 
@@ -704,43 +748,56 @@ def reconcile_provider_readback(
     return ReconciliationResult(outcome, final, readback.evidence_id)
 
 
+def reconcile_provider_not_found(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+    *,
+    attempt_id: str,
+    readback: ProviderNotFoundReadback,
+) -> ReconciliationResult:
+    """Release UNKNOWN retry only after exact current+cleared provider absence proof."""
+
+    action, state = _attempt_action(ledger, bound, attempt_id)
+    if state is not AttemptState.UNKNOWN:
+        raise SupervisedExecutionError("not-found readback requires UNKNOWN attempt")
+    if (
+        readback.bookmaker_id,
+        readback.account_id,
+        readback.action_id,
+        readback.event_id,
+        readback.market_id,
+        readback.selection_id,
+    ) != (
+        action.bookmaker_id,
+        action.account_id,
+        action.action_id,
+        action.event_id,
+        action.market_id,
+        action.selection_id,
+    ):
+        raise SupervisedExecutionError("not-found readback identity mismatches execution action")
+    ledger.reconcile_not_found(
+        ReconciliationSnapshot(
+            attempt_id=attempt_id,
+            evidence_id=readback.evidence_id,
+            observed_at=readback.observed_at,
+            external_effect_found=False,
+            source=(
+                "read-only-provider-current+cleared:"
+                f"{readback.current_source_payload_sha256}:"
+                f"{readback.cleared_source_payload_sha256}"
+            ),
+        )
+    )
+    return ReconciliationResult(
+        ReadbackOutcome.NOT_FOUND,
+        ledger.attempt_state(attempt_id),
+        readback.evidence_id,
+    )
+
+
 def _position_receipt(position: BookmakerPositionObservation) -> str:
     return position.external_receipt_id or position.external_position_id
-
-
-def _snapshot_hash(
-    snapshot: BookmakerAccountSnapshot,
-    position: BookmakerPositionObservation | None,
-    receipt_id: str,
-) -> str:
-    return _digest(
-        {
-            "schema": "autosport.bookmaker_account_execution_readback",
-            "schema_version": 1,
-            "venue_id": snapshot.profile.venue_id,
-            "account_id": snapshot.profile.account_id,
-            "adapter_id": snapshot.profile.adapter_id,
-            "adapter_version": snapshot.profile.adapter_version,
-            "profile_version": snapshot.profile.profile_version,
-            "snapshot_observed_at": snapshot.observed_at,
-            "profile_source_payload_sha256": snapshot.profile.source_payload_sha256,
-            "receipt_id": receipt_id,
-            "position": None
-            if position is None
-            else {
-                "observation_id": position.observation_id,
-                "external_position_id": position.external_position_id,
-                "state": position.state.value,
-                "observed_at": position.observed_at,
-                "source_payload_sha256": position.source_payload_sha256,
-                "provider_amount": str(position.provider_amount),
-                "provider_amount_semantics": position.provider_amount_semantics,
-                "provider_side": position.provider_side,
-                "decimal_odds": None if position.decimal_odds is None else str(position.decimal_odds),
-                "external_receipt_id": position.external_receipt_id,
-            },
-        }
-    )
 
 
 def reconcile_account_snapshot(
@@ -751,11 +808,12 @@ def reconcile_account_snapshot(
     snapshot: BookmakerAccountSnapshot,
     external_receipt_id: str,
 ) -> ReconciliationResult:
-    """Use generic account evidence only for complete NOT_FOUND proof.
+    """Qualify generic account evidence without releasing UNKNOWN.
 
-    Positive generic position evidence cannot acknowledge an attempt because the
-    canonical BookmakerPositionObservation contract omits market/selection identity.
-    Positive effects require ProviderReadback with exact identity.
+    Canonical BookmakerPositionObservation omits market/selection identity. Therefore
+    neither a matching generic position nor absence of a caller-selected receipt can
+    prove the exact execution effect. Exact positive and NOT_FOUND transitions require
+    provider-specific typed readback evidence.
     """
 
     receipt_id = _text(external_receipt_id, "external_receipt_id")
@@ -782,38 +840,11 @@ def reconcile_account_snapshot(
     ]
     if len(matches) > 1:
         raise SupervisedExecutionError("receipt appears in multiple account observations")
-    if not matches:
-        required = {
-            BookmakerCapability.OPEN_POSITIONS_READ,
-            BookmakerCapability.SETTLED_POSITIONS_READ,
-        }
-        if not required.issubset(snapshot.observed_capabilities):
-            return ReconciliationResult(ReadbackOutcome.UNKNOWN, AttemptState.UNKNOWN, None)
-        evidence_id = _snapshot_hash(snapshot, None, receipt_id)
-        ledger.reconcile_not_found(
-            ReconciliationSnapshot(
-                attempt_id=attempt_id,
-                evidence_id=evidence_id,
-                observed_at=snapshot.observed_at,
-                external_effect_found=False,
-                source=f"bookmaker-account-snapshot:{snapshot.profile.adapter_id}",
-            )
-        )
-        return ReconciliationResult(
-            ReadbackOutcome.NOT_FOUND,
-            ledger.attempt_state(attempt_id),
-            evidence_id,
-        )
+    if matches:
+        position = matches[0]
+        if position.provider_side is not None and position.provider_side != action.side:
+            raise SupervisedExecutionError("snapshot side mismatches action")
+        if position.provider_amount is not None and position.provider_amount > action.requested_stake:
+            raise SupervisedExecutionError("matched stake exceeds requested stake")
 
-    position = matches[0]
-    if position.provider_side is not None and position.provider_side != action.side:
-        raise SupervisedExecutionError("snapshot side mismatches action")
-    if position.provider_amount is not None and position.provider_amount > action.requested_stake:
-        raise SupervisedExecutionError("matched stake exceeds requested stake")
-
-    # Generic BookmakerPositionObservation intentionally does not carry provider
-    # market_id/selection_id. A receipt match in BookmakerAccountSnapshot therefore
-    # cannot prove that the external effect belongs to this exact execution action.
-    # Preserve UNKNOWN until a provider-specific typed ProviderReadback carries the
-    # exact event/market/selection identity and raw source hash.
     return ReconciliationResult(ReadbackOutcome.UNKNOWN, AttemptState.UNKNOWN, None)

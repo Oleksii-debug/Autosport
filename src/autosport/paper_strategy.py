@@ -212,8 +212,8 @@ class PaperValueAgent:
         book.balance = balance_before
         del book._lifecycle[lifecycle_len_before:]
 
-    @staticmethod
     def _decision_is_durable(
+        self,
         context: AgentContext,
         record: DecisionRecord,
         goal,

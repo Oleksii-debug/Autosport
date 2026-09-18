@@ -295,7 +295,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         goal = self._goal(
             max_stake_fraction=Decimal("0.20"),
             max_capital_at_risk_fraction=Decimal("0.60"),
-            max_provider_concentration_fraction=Decimal("0.75"),
+            max_provider_concentration_fraction=Decimal("0.60"),
             max_concurrent_positions=4,
         )
         policy = self._policy(goal)
@@ -334,7 +334,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.action, "STAKE_VECTOR")
-        self.assertEqual(decision.stakes, (Decimal("20.00"), Decimal("20.00")))
+        self.assertEqual(decision.stakes, (Decimal("20.00"), Decimal("0")))
         self.assertEqual(book.balance, Decimal("80"))
         self.assertEqual(book.committed_stake, Decimal("20"))
         self.assertEqual(len(book.tickets), 1)

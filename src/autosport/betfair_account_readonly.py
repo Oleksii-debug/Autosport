@@ -236,7 +236,10 @@ class BetfairClearedOrderPage:
         _positive_int(self.record_count, "record_count")
 
 
-@dataclass(frozen=True, slots=True, init=False)
+_EXECUTION_READBACK_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True)
 class BetfairExecutionReadbackEnvelope:
     venue_id: str
     account_id: str
@@ -248,53 +251,27 @@ class BetfairExecutionReadbackEnvelope:
     current_pages: tuple[BetfairCurrentOrderPage, ...]
     cleared_pages_by_status: tuple[tuple[str, tuple[BetfairClearedOrderPage, ...]], ...]
     observed_at: str
+    page_size: int
     request_scope_sha256: str
     evidence_sha256: str
+    _seal: object
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        raise BetfairReadOnlyError(
-            "execution readback envelope must come from BetfairReadOnlyClient"
-        )
-
-    @classmethod
-    def _from_client(
-        cls,
-        *,
-        venue_id: str,
-        account_id: str,
-        action_id: str,
-        market_id: str,
-        market_event: BetfairMarketEventObservation,
-        current_pages: tuple[BetfairCurrentOrderPage, ...],
-        cleared_pages_by_status: tuple[tuple[str, tuple[BetfairClearedOrderPage, ...]], ...],
-        observed_at: str,
-        request_scope_sha256: str,
-        evidence_sha256: str,
-    ) -> "BetfairExecutionReadbackEnvelope":
-        self = object.__new__(cls)
-        for name, value in {
-            "venue_id": venue_id,
-            "account_id": account_id,
-            "adapter_id": ADAPTER_ID,
-            "adapter_version": ADAPTER_VERSION,
-            "action_id": action_id,
-            "market_id": market_id,
-            "market_event": market_event,
-            "current_pages": current_pages,
-            "cleared_pages_by_status": cleared_pages_by_status,
-            "observed_at": observed_at,
-            "request_scope_sha256": request_scope_sha256,
-            "evidence_sha256": evidence_sha256,
-        }.items():
-            object.__setattr__(self, name, value)
+    def __post_init__(self) -> None:
+        if self._seal is not _EXECUTION_READBACK_SEAL:
+            raise BetfairReadOnlyError(
+                "execution readback must come from canonical BetfairReadOnlyClient"
+            )
         self._validate()
-        return self
+        self.assert_authoritative()
 
     def _validate(self) -> None:
         _required_text(self.venue_id, "venue_id")
         _required_text(self.account_id, "account_id")
         _required_text(self.action_id, "action_id")
         _required_text(self.market_id, "market_id")
+        _positive_int(self.page_size, "page_size")
+        if self.page_size > 1000:
+            raise BetfairReadOnlyError("execution readback page_size exceeds provider limit")
         if self.adapter_id != ADAPTER_ID or self.adapter_version != ADAPTER_VERSION:
             raise BetfairReadOnlyError("execution readback adapter identity mismatch")
         if not isinstance(self.market_event, BetfairMarketEventObservation):
@@ -305,6 +282,8 @@ class BetfairExecutionReadbackEnvelope:
             raise BetfairReadOnlyError("execution readback requires current-order pages")
         if any(not isinstance(page, BetfairCurrentOrderPage) for page in self.current_pages):
             raise BetfairReadOnlyError("execution readback current pages are not canonical")
+        if any(page.record_count != self.page_size for page in self.current_pages):
+            raise BetfairReadOnlyError("execution readback current page size changed")
         statuses = tuple(item[0] for item in self.cleared_pages_by_status)
         if statuses != _EXECUTION_CLEARED_STATUSES:
             raise BetfairReadOnlyError("execution readback cleared-status coverage is incomplete")
@@ -313,9 +292,128 @@ class BetfairExecutionReadbackEnvelope:
                 raise BetfairReadOnlyError("invalid execution cleared-status evidence")
             if any(not isinstance(page, BetfairClearedOrderPage) for page in pages):
                 raise BetfairReadOnlyError("execution cleared pages are not canonical")
+            if any(page.record_count != self.page_size for page in pages):
+                raise BetfairReadOnlyError("execution readback cleared page size changed")
         _iso_timestamp(self.observed_at, "observed_at")
         _sha256_hex(self.request_scope_sha256, "request_scope_sha256")
         _sha256_hex(self.evidence_sha256, "evidence_sha256")
+
+    def assert_authoritative(self) -> None:
+        if self._seal is not _EXECUTION_READBACK_SEAL:
+            raise BetfairReadOnlyError(
+                "execution readback authority seal is invalid"
+            )
+        expected_scope = _canonical_sha256(
+            _execution_request_scope(
+                venue_id=self.venue_id,
+                account_id=self.account_id,
+                action_id=self.action_id,
+                market_id=self.market_id,
+                page_size=self.page_size,
+            )
+        )
+        if self.request_scope_sha256 != expected_scope:
+            raise BetfairReadOnlyError(
+                "execution readback request scope digest mismatch"
+            )
+        expected_evidence = _canonical_sha256(
+            _execution_evidence_payload(
+                request_scope_sha256=self.request_scope_sha256,
+                market_event=self.market_event,
+                current_pages=self.current_pages,
+                cleared_pages_by_status=self.cleared_pages_by_status,
+            )
+        )
+        if self.evidence_sha256 != expected_evidence:
+            raise BetfairReadOnlyError(
+                "execution readback capture digest mismatch"
+            )
+
+
+def _execution_request_scope(
+    *,
+    venue_id: str,
+    account_id: str,
+    action_id: str,
+    market_id: str,
+    page_size: int,
+) -> dict[str, object]:
+    return {
+        "schema": "autosport.betfair_execution_readback_scope",
+        "schema_version": 1,
+        "venue_id": venue_id,
+        "account_id": account_id,
+        "adapter_id": ADAPTER_ID,
+        "adapter_version": ADAPTER_VERSION,
+        "action_id": action_id,
+        "market_id": market_id,
+        "market_catalogue": {
+            "method": _LIST_MARKET_CATALOGUE,
+            "filter": {"marketIds": [market_id]},
+            "marketProjection": ["EVENT"],
+            "maxResults": 1,
+        },
+        "current": {
+            "method": _LIST_CURRENT_ORDERS,
+            "orderProjection": "ALL",
+            "customerOrderRefs": [action_id],
+            "marketIds": [market_id],
+            "page_size": page_size,
+        },
+        "cleared": {
+            "method": _LIST_CLEARED_ORDERS,
+            "statuses": list(_EXECUTION_CLEARED_STATUSES),
+            "groupBy": "BET",
+            "customerOrderRefs": [action_id],
+            "marketIds": [market_id],
+            "settledDateRange": None,
+            "page_size": page_size,
+        },
+    }
+
+
+def _execution_evidence_payload(
+    *,
+    request_scope_sha256: str,
+    market_event: BetfairMarketEventObservation,
+    current_pages: tuple[BetfairCurrentOrderPage, ...],
+    cleared_pages_by_status: tuple[
+        tuple[str, tuple[BetfairClearedOrderPage, ...]], ...
+    ],
+) -> dict[str, object]:
+    return {
+        "request_scope_sha256": request_scope_sha256,
+        "market_event": {
+            "market_id": market_event.market_id,
+            "event_id": market_event.event_id,
+            "source": market_event.source,
+            "response_sha256": market_event.evidence.source_payload_sha256,
+        },
+        "current_pages": [
+            {
+                "from_record": page.from_record,
+                "record_count": page.record_count,
+                "more_available": page.more_available,
+                "response_sha256": page.evidence.source_payload_sha256,
+            }
+            for page in current_pages
+        ],
+        "cleared_pages": [
+            {
+                "status": status,
+                "pages": [
+                    {
+                        "from_record": page.from_record,
+                        "record_count": page.record_count,
+                        "more_available": page.more_available,
+                        "response_sha256": page.evidence.source_payload_sha256,
+                    }
+                    for page in pages
+                ],
+            }
+            for status, pages in cleared_pages_by_status
+        ],
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,83 +652,39 @@ class BetfairReadOnlyClient:
             all_evidence,
             key=lambda evidence: _iso_timestamp(evidence.observed_at, "observed_at"),
         ).observed_at
-        request_scope = {
-            "schema": "autosport.betfair_execution_readback_scope",
-            "schema_version": 1,
-            "venue_id": self._venue_id,
-            "account_id": self._account_id,
-            "adapter_id": ADAPTER_ID,
-            "adapter_version": ADAPTER_VERSION,
-            "action_id": action,
-            "market_id": market,
-            "market_catalogue": {
-                "method": _LIST_MARKET_CATALOGUE,
-                "filter": {"marketIds": [market]},
-                "marketProjection": ["EVENT"],
-                "maxResults": 1,
-            },
-            "current": {
-                "method": _LIST_CURRENT_ORDERS,
-                "orderProjection": "ALL",
-                "customerOrderRefs": [action],
-                "marketIds": [market],
-                "page_size": page_size,
-            },
-            "cleared": {
-                "method": _LIST_CLEARED_ORDERS,
-                "statuses": list(_EXECUTION_CLEARED_STATUSES),
-                "groupBy": "BET",
-                "customerOrderRefs": [action],
-                "marketIds": [market],
-                "settledDateRange": None,
-                "page_size": page_size,
-            },
-        }
-        request_scope_sha256 = _canonical_sha256(request_scope)
-        evidence_payload = {
-            "request_scope_sha256": request_scope_sha256,
-            "market_event": {
-                "market_id": market_event.market_id,
-                "event_id": market_event.event_id,
-                "source": market_event.source,
-                "response_sha256": market_event.evidence.source_payload_sha256,
-            },
-            "current_pages": [
-                {
-                    "from_record": page.from_record,
-                    "record_count": page.record_count,
-                    "more_available": page.more_available,
-                    "response_sha256": page.evidence.source_payload_sha256,
-                }
-                for page in current_pages
-            ],
-            "cleared_pages": [
-                {
-                    "status": status,
-                    "pages": [
-                        {
-                            "from_record": page.from_record,
-                            "record_count": page.record_count,
-                            "more_available": page.more_available,
-                            "response_sha256": page.evidence.source_payload_sha256,
-                        }
-                        for page in pages
-                    ],
-                }
-                for status, pages in cleared_groups
-            ],
-        }
-        return BetfairExecutionReadbackEnvelope._from_client(
+        request_scope = _execution_request_scope(
             venue_id=self._venue_id,
             account_id=self._account_id,
             action_id=action,
             market_id=market,
-            market_event=market_event,
-            current_pages=tuple(current_pages),
-            cleared_pages_by_status=tuple(cleared_groups),
-            observed_at=observed_at,
-            request_scope_sha256=request_scope_sha256,
-            evidence_sha256=_canonical_sha256(evidence_payload),
+            page_size=page_size,
+        )
+        request_scope_sha256 = _canonical_sha256(request_scope)
+        current_pages_tuple = tuple(current_pages)
+        cleared_groups_tuple = tuple(cleared_groups)
+        evidence_sha256 = _canonical_sha256(
+            _execution_evidence_payload(
+                request_scope_sha256=request_scope_sha256,
+                market_event=market_event,
+                current_pages=current_pages_tuple,
+                cleared_pages_by_status=cleared_groups_tuple,
+            )
+        )
+        return BetfairExecutionReadbackEnvelope(
+            self._venue_id,
+            self._account_id,
+            ADAPTER_ID,
+            ADAPTER_VERSION,
+            action,
+            market,
+            market_event,
+            current_pages_tuple,
+            cleared_groups_tuple,
+            observed_at,
+            page_size,
+            request_scope_sha256,
+            evidence_sha256,
+            _EXECUTION_READBACK_SEAL,
         )
 
     def _read_all_current_orders_with_evidence(self, *, page_size: int = 1000, max_pages: int = 100) -> tuple[tuple[BetfairCurrentOrderObservation, ...], tuple[BetfairEvidence, ...]]:

@@ -4,9 +4,11 @@ import itertools
 import math
 import random
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from .domain import PaperTicket, TicketStatus
+from .market_outcomes import MarketSettlementOutcomeAuthority
 from .portfolio import PortfolioEngine
 
 
@@ -51,6 +53,9 @@ class ScenarioSearchReport:
     best_proven: bool
     expected_case: Decimal | None
     expected_mode: str | None
+    outcome_space_exhaustive: bool = False
+    outcome_space_exact: bool = False
+    outcome_authority_sha256s: tuple[str, ...] = ()
 
 
 class PortfolioDependencyIndex:
@@ -131,6 +136,227 @@ class ScenarioSearchEngine:
             "bounded-approximation", total_states, min_result[1] + max_result[1] + self.sample_count,
             observed_worst, observed_best, floor, ceiling, min_result[2], max_result[2], expected,
             "sampled-independent-groups" if expected is not None else None,
+        )
+
+    def analyse_authoritative(
+        self,
+        tickets: list[PaperTicket],
+        authorities: list[MarketSettlementOutcomeAuthority]
+        | tuple[MarketSettlementOutcomeAuthority, ...],
+        *,
+        decision_as_of: datetime,
+    ) -> ScenarioSearchReport:
+        """Evaluate a complete authority-derived terminal-state cover.
+
+        Authority evidence is provider-bound and causally fenced at decision_as_of.
+        A conservative terminal superset is exhaustive but not exact; the report
+        labels those two truths separately and never samples an oversized space.
+        """
+        if type(authorities) not in (list, tuple) or not authorities:
+            raise ValueError(
+                "authoritative outcome analysis requires market authorities"
+            )
+        if any(
+            not isinstance(authority, MarketSettlementOutcomeAuthority)
+            for authority in authorities
+        ):
+            raise ValueError(
+                "authoritative outcome analysis requires canonical market authorities"
+            )
+
+        ordered = tuple(
+            sorted(
+                authorities,
+                key=lambda authority: (
+                    authority.identity.identity_key,
+                    authority.authority_sha256,
+                ),
+            )
+        )
+        for authority in ordered:
+            authority.assert_available_as_of(decision_as_of)
+
+        open_tickets = [
+            ticket for ticket in tickets if ticket.status is TicketStatus.OPEN
+        ]
+        if not open_tickets:
+            zero = Decimal("0")
+            return ScenarioSearchReport(
+                mode="authoritative-exact-enumeration",
+                total_states=1,
+                nodes_explored=1,
+                observed_worst=zero,
+                observed_best=zero,
+                conservative_floor=zero,
+                conservative_ceiling=zero,
+                worst_proven=True,
+                best_proven=True,
+                expected_case=None,
+                expected_mode=None,
+                outcome_space_exhaustive=True,
+                outcome_space_exact=True,
+                outcome_authority_sha256s=tuple(
+                    authority.authority_sha256 for authority in ordered
+                ),
+            )
+
+        market_groups: dict[
+            tuple[str, str, str, str],
+            list[MarketSettlementOutcomeAuthority],
+        ] = {}
+        for authority in ordered:
+            market_groups.setdefault(
+                authority.identity.market_key,
+                [],
+            ).append(authority)
+
+        ticket_quote_keys = {
+            leg.quote_key
+            for ticket in open_tickets
+            for leg in ticket.legs
+        }
+        coverage: dict[
+            str,
+            tuple[
+                tuple[str, str, str, str],
+                frozenset[str],
+            ],
+        ] = {}
+        state_authorities: list[MarketSettlementOutcomeAuthority] = []
+        state_counts: list[int] = []
+
+        for market_key in sorted(market_groups):
+            provider_authorities = market_groups[market_key]
+            baseline = provider_authorities[0]
+            provider_sources: set[str] = set()
+            for authority in provider_authorities:
+                source_id = authority.identity.source_id
+                if source_id in provider_sources:
+                    raise ValueError(
+                        "duplicate provider authority for canonical market identity"
+                    )
+                provider_sources.add(source_id)
+                if (
+                    authority.selection_ids != baseline.selection_ids
+                    or authority.settlement_semantics
+                    is not baseline.settlement_semantics
+                ):
+                    raise ValueError(
+                        "provider authorities disagree on canonical market terminal states"
+                    )
+                if (
+                    authority.settlement_rules_sha256
+                    != baseline.settlement_rules_sha256
+                ):
+                    raise ValueError(
+                        "provider authorities disagree on canonical settlement rules"
+                    )
+
+            bound_sources = frozenset(provider_sources)
+            for quote_key in baseline.quote_keys:
+                if quote_key in coverage:
+                    raise ValueError(
+                        "authoritative outcome universes overlap on quote identity"
+                    )
+                coverage[quote_key] = (market_key, bound_sources)
+            state_authorities.append(baseline)
+            state_counts.append(baseline.terminal_state_count)
+
+        missing = ticket_quote_keys.difference(coverage)
+        if missing:
+            raise ValueError(
+                "ticket leg missing from authoritative outcome universe"
+            )
+
+        relevant_market_keys = {
+            coverage[quote_key][0] for quote_key in ticket_quote_keys
+        }
+        authority_market_keys = {
+            authority.identity.market_key for authority in state_authorities
+        }
+        unrelated = authority_market_keys.difference(relevant_market_keys)
+        if unrelated:
+            raise ValueError(
+                "authoritative outcome universe is unrelated to the open portfolio"
+            )
+
+        for ticket in open_tickets:
+            if len(ticket.provider_source_ids) != 1:
+                raise ValueError(
+                    "authoritative outcome analysis requires exactly one provider "
+                    "source identity per open ticket"
+                )
+            ticket_source = ticket.provider_source_ids[0]
+            for leg in ticket.legs:
+                _market_key, allowed_sources = coverage[leg.quote_key]
+                if ticket_source not in allowed_sources:
+                    raise ValueError(
+                        "ticket provider source does not match authoritative "
+                        "market outcome evidence"
+                    )
+
+        total_states = math.prod(state_counts)
+        if total_states > self.exact_state_limit:
+            raise ValueError(
+                "authoritative terminal outcome space exceeds exact_state_limit; "
+                "complete-state truth cannot be approximated"
+            )
+
+        state_spaces = [
+            authority.terminal_states for authority in state_authorities
+        ]
+        profits: list[Decimal] = []
+        for combination in itertools.product(*state_spaces):
+            settlement_by_quote: dict[str, str] = {}
+            for authority, state in zip(state_authorities, combination):
+                state_settlement = authority.settlement_by_quote(state)
+                if settlement_by_quote.keys() & state_settlement.keys():
+                    raise ValueError(
+                        "authoritative terminal states overlap on quote identity"
+                    )
+                settlement_by_quote.update(state_settlement)
+            profits.append(
+                PortfolioEngine.scenario_profit_settlements(
+                    open_tickets,
+                    settlement_by_quote,
+                )
+            )
+
+        floor = -sum(
+            (ticket.stake for ticket in open_tickets),
+            Decimal("0"),
+        )
+        ceiling = sum(
+            (
+                ticket.stake * ticket.combined_odds - ticket.stake
+                for ticket in open_tickets
+            ),
+            Decimal("0"),
+        )
+        outcome_space_exact = all(
+            authority.terminal_space_exact for authority in state_authorities
+        )
+        return ScenarioSearchReport(
+            mode=(
+                "authoritative-exact-enumeration"
+                if outcome_space_exact
+                else "authoritative-conservative-enumeration"
+            ),
+            total_states=total_states,
+            nodes_explored=total_states,
+            observed_worst=min(profits),
+            observed_best=max(profits),
+            conservative_floor=floor,
+            conservative_ceiling=ceiling,
+            worst_proven=outcome_space_exact,
+            best_proven=outcome_space_exact,
+            expected_case=None,
+            expected_mode=None,
+            outcome_space_exhaustive=True,
+            outcome_space_exact=outcome_space_exact,
+            outcome_authority_sha256s=tuple(
+                authority.authority_sha256 for authority in ordered
+            ),
         )
 
     def _validate_and_map(self, tickets: list[PaperTicket], groups: list[ScenarioGroup]) -> dict[str, int]:

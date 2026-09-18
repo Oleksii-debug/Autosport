@@ -386,7 +386,14 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             Decimal("1"),
             Decimal("0.01"),
         )
-        book.open_ticket([self._leg()], Decimal("1"))
+        book.open_ticket(
+            [self._leg()],
+            Decimal("1"),
+            placed_at="2026-09-16T14:00:00+00:00",
+            provider_source_ids=("provider-1",),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
         changed = policy.evaluate(book, Decimal("1"), context=bound)
         self.assertFalse(changed.allowed)
         self.assertEqual(

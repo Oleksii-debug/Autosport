@@ -1381,6 +1381,7 @@ class ExperimentRunner:
             for fold in champion_evaluation.get("walk_forward", {}).get("folds", [])
             if isinstance(fold, dict) and isinstance(fold.get("evaluation_at"), str)
         }
+        binding = protocol["payload"]["binding"]
         paired_deltas: list[Decimal] = []
         for fold in walk_forward.folds:
             prior = champion_folds.get(fold.evaluation_at)
@@ -1403,7 +1404,6 @@ class ExperimentRunner:
                 text = text.rstrip("0").rstrip(".")
             return "0" if text in ("", "-0") else text
 
-        binding = protocol["payload"]["binding"]
         stopping_sha = hashlib.sha256(str(binding["stopping_rule"]).encode("utf-8")).hexdigest()
         comparison_sha = hashlib.sha256(
             str(binding["multiple_comparison_control"]).encode("utf-8")

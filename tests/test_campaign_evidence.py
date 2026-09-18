@@ -525,6 +525,37 @@ class PaperCampaignTests(unittest.TestCase):
         self.assertFalse(fork.finalized)
         self.assertEqual(fork.sessions, [])
 
+    def test_finalized_campaign_seals_membership_and_public_state(self):
+        campaign = self.campaign()
+        self.add_session(campaign, self.session())
+        frozen = campaign.finalize(
+            outcome=CampaignOutcome.POSITIVE,
+            readiness=CampaignReadiness.ELIGIBLE,
+            finalized_at="2026-09-11T00:00:00Z",
+        )
+        replacement = self.session(
+            session_id="session-2",
+            run_id="run-2",
+            evidence_id="evidence-2",
+        )
+
+        self.assertIsInstance(campaign.sessions, tuple)
+        with self.assertRaises(AttributeError):
+            campaign.sessions.append(replacement)
+        with self.assertRaises(CampaignFinalizedError):
+            campaign.sessions = [replacement]
+        with self.assertRaises(CampaignFinalizedError):
+            campaign.readiness = CampaignReadiness.NOT_ELIGIBLE
+        with self.assertRaises(CampaignFinalizedError):
+            campaign.finalized = False
+
+        self.assertEqual(campaign.summary(), frozen)
+
+    def test_draft_cannot_self_assert_finalized_state(self):
+        campaign = self.campaign()
+        with self.assertRaises(CampaignFinalizedError):
+            campaign.finalized = True
+
     def test_restart_roundtrip_preserves_final_identity_and_summary(self):
         campaign = self.campaign()
         self.add_session(campaign, self.session())

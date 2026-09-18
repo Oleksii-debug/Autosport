@@ -351,8 +351,20 @@ def _json_object_bytes(
     # nesting that would otherwise be accepted by the JSON decoder.
     depth = 0
     max_depth = 0
+    in_string = False
+    escaped = False
     for byte in payload:
-        if byte in (91, 123):  # '[' or '{'
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 92:  # '\\'
+                escaped = True
+            elif byte == 34:  # '"'
+                in_string = False
+            continue
+        if byte == 34:  # '"'
+            in_string = True
+        elif byte in (91, 123):  # '[' or '{'
             depth += 1
             max_depth = max(max_depth, depth)
         elif byte in (93, 125):  # ']' or '}'

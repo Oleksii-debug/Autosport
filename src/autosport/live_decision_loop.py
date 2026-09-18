@@ -593,7 +593,7 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "persisted live progress belongs to a different loop_id"
             )
-        if self.decision_ledger.path.exists() or self._progress is not None:
+        if self.decision_ledger.path.exists():
             with WorkspaceEconomicLock(self.workspace):
                 self.decision_ledger.verify_integrity()
                 if (
@@ -601,6 +601,13 @@ class PersistentLiveDecisionLoop:
                     and self._progress.phase == _PHASE_COMMITTED
                 ):
                     self._verify_committed_progress_ledger_binding(self._progress)
+        elif (
+            self._progress is not None
+            and self._progress.phase == _PHASE_COMMITTED
+        ):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file is missing or unreadable"
+            )
         if self._progress is not None:
             durable_input_ids = set(self.dependencies.input_ids)
             progress_input_ids = set(self._progress.registered_input_ids)

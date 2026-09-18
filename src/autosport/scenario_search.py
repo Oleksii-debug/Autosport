@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from .domain import PaperTicket, TicketStatus
+from .market_outcomes import MarketSettlementOutcomeAuthority
 from .portfolio import PortfolioEngine
 
 
@@ -51,6 +52,8 @@ class ScenarioSearchReport:
     best_proven: bool
     expected_case: Decimal | None
     expected_mode: str | None
+    outcome_space_exhaustive: bool = False
+    outcome_authority_sha256s: tuple[str, ...] = ()
 
 
 class PortfolioDependencyIndex:
@@ -131,6 +134,136 @@ class ScenarioSearchEngine:
             "bounded-approximation", total_states, min_result[1] + max_result[1] + self.sample_count,
             observed_worst, observed_best, floor, ceiling, min_result[2], max_result[2], expected,
             "sampled-independent-groups" if expected is not None else None,
+        )
+
+    def analyse_authoritative(
+        self,
+        tickets: list[PaperTicket],
+        authorities: list[MarketSettlementOutcomeAuthority]
+        | tuple[MarketSettlementOutcomeAuthority, ...],
+    ) -> ScenarioSearchReport:
+        """Evaluate only terminal states derived from canonical exhaustive authority.
+
+        Unlike analyse(), this path never accepts caller-supplied ScenarioGroup values
+        as completeness evidence and never samples an oversized terminal space.
+        """
+        open_tickets = [
+            ticket for ticket in tickets if ticket.status is TicketStatus.OPEN
+        ]
+        if not open_tickets:
+            zero = Decimal("0")
+            return ScenarioSearchReport(
+                "authoritative-exact-enumeration",
+                1,
+                1,
+                zero,
+                zero,
+                zero,
+                zero,
+                True,
+                True,
+                None,
+                None,
+                True,
+                (),
+            )
+        if type(authorities) not in (list, tuple) or not authorities:
+            raise ValueError("authoritative outcome analysis requires market authorities")
+        if any(
+            not isinstance(authority, MarketSettlementOutcomeAuthority)
+            for authority in authorities
+        ):
+            raise ValueError(
+                "authoritative outcome analysis requires canonical market authorities"
+            )
+
+        ordered = tuple(
+            sorted(
+                authorities,
+                key=lambda authority: (
+                    authority.identity.identity_key,
+                    authority.authority_sha256,
+                ),
+            )
+        )
+        ticket_quote_keys = {
+            leg.quote_key
+            for ticket in open_tickets
+            for leg in ticket.legs
+        }
+        coverage: dict[str, str] = {}
+        state_spaces: list[tuple[object, ...]] = []
+        for authority in ordered:
+            authority_quote_keys = set(authority.quote_keys)
+            if not ticket_quote_keys.intersection(authority_quote_keys):
+                raise ValueError(
+                    "authoritative outcome universe is unrelated to the open portfolio"
+                )
+            for quote_key in authority.quote_keys:
+                if quote_key in coverage:
+                    raise ValueError(
+                        "authoritative outcome universes overlap on quote identity"
+                    )
+                coverage[quote_key] = authority.authority_sha256
+            state_spaces.append(authority.terminal_states)
+
+        missing = ticket_quote_keys.difference(coverage)
+        if missing:
+            raise ValueError(
+                "ticket leg missing from authoritative outcome universe"
+            )
+
+        total_states = math.prod(len(states) for states in state_spaces)
+        if total_states > self.exact_state_limit:
+            raise ValueError(
+                "authoritative terminal outcome space exceeds exact_state_limit; "
+                "complete-state truth cannot be approximated"
+            )
+
+        profits: list[Decimal] = []
+        for combination in itertools.product(*state_spaces):
+            settlement_by_quote: dict[str, str] = {}
+            for authority, state in zip(ordered, combination):
+                state_settlement = authority.settlement_by_quote(state)
+                if settlement_by_quote.keys() & state_settlement.keys():
+                    raise ValueError(
+                        "authoritative terminal states overlap on quote identity"
+                    )
+                settlement_by_quote.update(state_settlement)
+            profits.append(
+                PortfolioEngine.scenario_profit_settlements(
+                    open_tickets,
+                    settlement_by_quote,
+                )
+            )
+
+        floor = -sum(
+            (ticket.stake for ticket in open_tickets),
+            Decimal("0"),
+        )
+        ceiling = sum(
+            (
+                ticket.stake * ticket.combined_odds - ticket.stake
+                for ticket in open_tickets
+            ),
+            Decimal("0"),
+        )
+        return ScenarioSearchReport(
+            mode="authoritative-exact-enumeration",
+            total_states=total_states,
+            nodes_explored=total_states,
+            observed_worst=min(profits),
+            observed_best=max(profits),
+            conservative_floor=floor,
+            conservative_ceiling=ceiling,
+            worst_proven=True,
+            best_proven=True,
+            expected_case=None,
+            expected_mode=None,
+            outcome_space_exhaustive=True,
+            outcome_authority_sha256s=tuple(
+                authority.authority_sha256 for authority in ordered
+            ),
         )
 
     def _validate_and_map(self, tickets: list[PaperTicket], groups: list[ScenarioGroup]) -> dict[str, int]:

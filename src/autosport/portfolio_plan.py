@@ -1911,15 +1911,22 @@ def build_portfolio_plan(
                     policy=risk_policy,
                     portfolio_truth=portfolio_truth,
                 )
-        action = (
-            PortfolioAction.HEDGE_REBALANCE
-            if any(
-                stake > 0
-                and intent.opportunity.strategy_class is StrategyClass.HEDGE_REBALANCE
-                for intent, stake in zip(intents, allocation.stakes, strict=True)
-            )
-            else PortfolioAction.STAKE_VECTOR
-        )
+        positive_strategy_classes = {
+            intent.opportunity.strategy_class
+            for intent, stake in zip(intents, allocation.stakes, strict=True)
+            if stake > 0
+        }
+        if StrategyClass.HEDGE_REBALANCE in positive_strategy_classes:
+            action = PortfolioAction.HEDGE_REBALANCE
+        elif positive_strategy_classes.intersection(
+            {StrategyClass.ARBITRAGE, StrategyClass.DUTCHING}
+        ):
+            # Terminal economics here are canonical paper proof.  Even a typed
+            # external execution witness does not grant irreversible bookmaker
+            # authority, so arbitrage/dutching remains explicitly a PaperPlan seam.
+            action = PortfolioAction.PAPER_PLAN
+        else:
+            action = PortfolioAction.STAKE_VECTOR
     else:
         action = {
             "WAIT": PortfolioAction.WAIT,
@@ -1961,6 +1968,14 @@ def build_portfolio_plan(
                     "; typed terminal-state completeness verified with canonical "
                     f"{terminal_economics.report_mode} worst-case P&L="
                     f"{terminal_economics.worst_terminal_profit}"
+                )
+            )
+            + (
+                ""
+                if action is not PortfolioAction.PAPER_PLAN
+                else (
+                    "; paper-only outcome-independent plan: no real-money or "
+                    "irreversible bookmaker execution authority"
                 )
             )
         ),

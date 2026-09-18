@@ -569,6 +569,7 @@ class PromotionEvidence:
             raise ValueError("validity must be a PromotionEvidenceValidity")
         for name in ("evaluation_bundle_sha256", "stopping_rule_sha256", "multiple_comparison_control_sha256"):
             _sha256(getattr(self, name), name)
+        _iso(self.created_at, "created_at")
         if not isinstance(self.guardrails_passed, bool):
             raise ValueError("guardrails_passed must be boolean")
         if not isinstance(self.holdout_consumed, bool):
@@ -1134,7 +1135,7 @@ class ScientificRegistry:
                     "dataset_snapshot_id": matching_experiment.get("dataset_snapshot_id"),
                     "estimand": hypothesis["payload"].get("primary_metric"),
                     "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
-                    "rollback_identity": decision.predecessor_strategy_version_id,
+                    "rollback_identity": decision.predecessor_strategy_version_id or "NONE",
                 }
                 for key, value in expected.items():
                     if ep.get(key) != value:
@@ -1269,3 +1270,113 @@ class ScientificRegistry:
         bundle = self.reproducibility_bundle(experiment_id)
         atomic_write_json(path, bundle)
         return bundle["bundle_sha256"]
+
+
+def test_promotion_requires_typed_evidence_and_strict_improvement(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    foundation = _foundation(registry)
+    experiment = _experiment(outcome=ResearchOutcome.POSITIVE)
+    registry.append(experiment)
+    decision = PromotionDecision(
+        "promotion-no-evidence",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        foundation["bundle"].bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+    )
+    with pytest.raises(PromotionEvidenceError, match="typed PromotionEvidence"):
+        registry.record_promotion(decision)
+
+    evidence = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="strict-positive",
+        rollback_identity="NONE",
+        practical="0",
+        interval_low="0",
+        interval_high="0",
+    )
+    registry.append(evidence)
+    with pytest.raises(PromotionEvidenceError):
+        registry.record_promotion(
+            replace(decision, promotion_evidence_id=evidence.promotion_evidence_id)
+        )
+
+
+def test_promotion_rejects_consumed_holdout_reuse(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    foundation = _foundation(registry)
+    experiment = _experiment(outcome=ResearchOutcome.POSITIVE)
+    registry.append(experiment)
+    evidence = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="consume-1",
+        rollback_identity="NONE",
+        holdout_access_id="shared-holdout",
+    )
+    registry.append(evidence)
+    decision = PromotionDecision(
+        "promotion-consume-1",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        foundation["bundle"].bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=evidence.promotion_evidence_id,
+    )
+    registry.record_promotion(decision)
+    with pytest.raises(PromotionEvidenceError, match="already been consumed"):
+        registry.record_promotion(
+            replace(decision, promotion_decision_id="promotion-consume-2")
+        )
+
+
+def test_promotion_rejects_consumed_evidence_at_creation(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    foundation = _foundation(registry)
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
+    evidence = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="consumed-creation",
+        rollback_identity="NONE",
+        consumed=True,
+    )
+    registry.append(evidence)
+    decision = PromotionDecision(
+        "promotion-consumed",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        foundation["bundle"].bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=evidence.promotion_evidence_id,
+    )
+    with pytest.raises(PromotionEvidenceError, match="unconsumed confirmation holdout"):
+        registry.record_promotion(decision)

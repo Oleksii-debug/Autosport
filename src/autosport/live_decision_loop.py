@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -645,7 +646,9 @@ class PersistentLiveDecisionLoop:
         self._intent_cache: dict[str, tuple[object, ...]] = {}
         self._pending_affected: dict[str, None] = {}
         self._needs_cache_rebuild = True
-        self._next_freshness_deadline: datetime | None = None
+        self._freshness_deadlines: dict[str, datetime | None] = {}
+        self._freshness_generations: dict[str, int] = {}
+        self._freshness_heap: list[tuple[datetime, str, int]] = []
 
     @property
     def paused(self) -> bool:
@@ -789,12 +792,10 @@ class PersistentLiveDecisionLoop:
                 ),
             )
 
-        freshness_expired = (
-            self._next_freshness_deadline is not None
-            and now > self._next_freshness_deadline
-        )
-        if freshness_expired:
-            self._needs_cache_rebuild = True
+        freshness_expired_inputs = self._expire_freshness_inputs(now)
+        for input_id in freshness_expired_inputs:
+            self._pending_affected[input_id] = None
+        freshness_expired = bool(freshness_expired_inputs)
 
         registered_input_ids = self.dependencies.input_ids
         current_market_sha = self._market_state_sha256()
@@ -819,7 +820,6 @@ class PersistentLiveDecisionLoop:
                 self._refresh_intents(registered_input_ids, now)
                 self._pending_affected.clear()
                 self._needs_cache_rebuild = False
-                self._update_freshness_deadline(now)
                 return LiveCycleResult(
                     LiveCycleStatus.NO_CHANGE,
                     detail=(
@@ -872,7 +872,6 @@ class PersistentLiveDecisionLoop:
         )
         self._pending_affected.clear()
         self._needs_cache_rebuild = False
-        self._update_freshness_deadline(decision_time)
         return result
 
     def _decision_context_sha256(self) -> str:
@@ -957,7 +956,9 @@ class PersistentLiveDecisionLoop:
         )
         self._pending_affected.clear()
         self._needs_cache_rebuild = True
-        self._next_freshness_deadline = None
+        self._freshness_deadlines.clear()
+        self._freshness_generations.clear()
+        self._freshness_heap.clear()
         return result
 
     def _refresh_intents_from_replay(
@@ -1064,6 +1065,7 @@ class PersistentLiveDecisionLoop:
                     "intent_factory must return only canonical OpportunityIntent values"
                 )
             self._intent_cache[input_id] = produced
+            self._record_freshness_deadline(input_id, snapshot)
 
     def _all_cached_intents(self) -> tuple[object, ...]:
         flattened: list[object] = []
@@ -1071,26 +1073,55 @@ class PersistentLiveDecisionLoop:
             flattened.extend(self._intent_cache.get(input_id, ()))
         return tuple(flattened)
 
-    def _update_freshness_deadline(self, as_of: datetime) -> None:
+    def _record_freshness_deadline(
+        self,
+        input_id: str,
+        snapshot: MirrorSnapshot,
+    ) -> None:
         deadlines: list[datetime] = []
-        for input_id in self.dependencies.input_ids:
-            snapshot = self.dependencies.decision_view(
-                input_id,
-                as_of=as_of,
-                max_age=self.max_quote_age,
+        for event in snapshot.events:
+            raw = event.source_ts or event.observed_ts
+            try:
+                timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                continue
+            deadlines.append(
+                timestamp.astimezone(timezone.utc) + self.max_quote_age
             )
-            for event in snapshot.events:
-                raw = event.source_ts or event.observed_ts
-                try:
-                    timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                except ValueError:
-                    continue
-                if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-                    continue
-                deadlines.append(
-                    timestamp.astimezone(timezone.utc) + self.max_quote_age
-                )
-        self._next_freshness_deadline = min(deadlines) if deadlines else None
+
+        deadline = min(deadlines) if deadlines else None
+        generation = self._freshness_generations.get(input_id, 0) + 1
+        self._freshness_generations[input_id] = generation
+        self._freshness_deadlines[input_id] = deadline
+        if deadline is not None:
+            heapq.heappush(
+                self._freshness_heap,
+                (deadline, input_id, generation),
+            )
+
+    def _expire_freshness_inputs(
+        self,
+        now: datetime,
+    ) -> tuple[str, ...]:
+        expired: list[str] = []
+        while self._freshness_heap:
+            deadline, input_id, generation = self._freshness_heap[0]
+            current_generation = self._freshness_generations.get(input_id)
+            current_deadline = self._freshness_deadlines.get(input_id)
+            if (
+                current_generation != generation
+                or current_deadline != deadline
+            ):
+                heapq.heappop(self._freshness_heap)
+                continue
+            if now <= deadline:
+                break
+            heapq.heappop(self._freshness_heap)
+            self._freshness_deadlines[input_id] = None
+            expired.append(input_id)
+        return tuple(expired)
 
     def _persist_provider_gap(
         self,
@@ -1531,9 +1562,17 @@ class PersistentLiveDecisionLoop:
             ) from exc
 
     def _market_state_sha256(self) -> str:
-        return self._market_state_sha256_for_events(
-            self.mirror_updates.mirror.snapshot()
+        events = tuple(
+            event
+            for source_id, quote_key in self.dependencies.all_matching_keys()
+            if (
+                event := self.mirror_updates.mirror.event_for_quote_key(
+                    source_id,
+                    quote_key,
+                )
+            ) is not None
         )
+        return self._market_state_sha256_for_events(events)
 
     def _market_state_sha256_for_events(self, events) -> str:
         specs = tuple(self._input_specs.values())

@@ -153,6 +153,7 @@ class PaperValueAgent:
             persisted = ledger.verified_economic_decision_for_material_action(
                 material_action_id,
                 goal,
+                risk_policy=self.risk_policy,
             )
         ticket = self._material_action_ticket(context, material_action_id)
 
@@ -225,8 +226,12 @@ class PaperValueAgent:
         try:
             if goal is None:
                 return any(persisted == record for persisted in ledger.verified_records())
-            persisted = ledger.verified_economic_decision(record.decision_id, goal)
-            return persisted == bind_economic_goal(record, goal)
+            persisted = ledger.verified_economic_decision(
+                record.decision_id,
+                goal,
+                risk_policy=self.risk_policy,
+            )
+            return persisted == bind_economic_goal(record, goal, self.risk_policy)
         except Exception:
             return False
 
@@ -356,7 +361,11 @@ class PaperValueAgent:
                 if goal is None:
                     context.decision_ledger.append(record)
                 else:
-                    context.decision_ledger.append_economic(record, goal)
+                    context.decision_ledger.append_economic(
+                        record,
+                        goal,
+                        risk_policy=self.risk_policy,
+                    )
         except Exception:
             if record is not None and self._decision_is_durable(context, record, goal):
                 self._acted.add(event.quote_key)

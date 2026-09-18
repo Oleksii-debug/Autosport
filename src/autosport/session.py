@@ -14,6 +14,11 @@ from .ingestion import IngestionEngine, IngestionStats
 from .ingestion_health import IngestionPolicy, SourceHealthState, SourceHealthStore
 from .integrity import ensure_durable_file, sha256_file
 from .market_bus import MarketEventBus
+from .outcome_trust import (
+    OutcomeLineageBinding,
+    outcome_lineage_binding_from_dataset,
+    outcome_lineage_payload,
+)
 from .paper import PaperBook
 from .portfolio import PortfolioEngine, PortfolioReport
 from .price_truth import market_price_truth_from_events
@@ -136,11 +141,22 @@ class AutosportSession:
 
     def run_dataset(self, dataset: ReplayDataset, speed: float = 0.0, allow_repeat: bool = False) -> SessionResult:
         with WorkspaceEconomicLock(self.workspace):
+            # Recover the exact checksum-bound schema-v2 outcome chain and reject a
+            # previously accepted restart/fork before PaperBook/ledger mutation.
+            # The same binding is then persisted on the canonical RunRegistry item.
+            outcome_lineage = outcome_lineage_binding_from_dataset(dataset)
+            if outcome_lineage is not None:
+                self.registry.assert_outcome_lineage_compatible(outcome_lineage)
             # Research-plan market binding is deterministic from the sealed causal
             # stream, so reject a stale/forged plan before registry/PaperBook mutation.
             if self.research_plan is not None:
                 self.research_plan.preflight(dataset.load_market_events())
-            return self._run_dataset_locked(dataset, speed=speed, allow_repeat=allow_repeat)
+            return self._run_dataset_locked(
+                dataset,
+                speed=speed,
+                allow_repeat=allow_repeat,
+                outcome_lineage=outcome_lineage,
+            )
 
     def _run_dataset_locked(
         self,
@@ -148,6 +164,7 @@ class AutosportSession:
         *,
         speed: float = 0.0,
         allow_repeat: bool = False,
+        outcome_lineage: OutcomeLineageBinding | None = None,
     ) -> SessionResult:
         base_ledger_snapshot = self._ensure_canonical_economic_base()
         base_book_hash = sha256_file(self.book_path)
@@ -162,6 +179,7 @@ class AutosportSession:
             allow_repeat=allow_repeat,
             base_paper_book_sha256=base_book_hash,
             base_decision_ledger_sha256=base_ledger_hash,
+            outcome_lineage=outcome_lineage,
         )
         try:
             transaction = RunTransaction.start(
@@ -246,7 +264,13 @@ class AutosportSession:
         # After durable PRECOMMIT begins, failures deliberately remain unresolved.
         # Recovery owns deciding whether BASE or NEW is canonical and must never
         # downgrade an uncertain commit into an ordinary strategy rejection.
-        summary = transaction.precommit(self._run_summary_payload(dataset, result))
+        summary = transaction.precommit(
+            self._run_summary_payload(
+                dataset,
+                result,
+                outcome_lineage=outcome_lineage,
+            )
+        )
         transaction.commit()
 
         # From this point canonical PaperBook is NEW. Keep in-memory state aligned
@@ -298,9 +322,11 @@ class AutosportSession:
         self,
         dataset: ReplayDataset,
         result: SessionResult,
+        *,
+        outcome_lineage: OutcomeLineageBinding | None = None,
     ) -> dict:
         market_price_truth = market_price_truth_from_events(dataset.load_market_events())
-        return {
+        payload = {
             "schema_version": 2,
             "dataset_name": dataset.name,
             "sport": dataset.sport,
@@ -337,6 +363,13 @@ class AutosportSession:
             },
             "real_money_execution": False,
         }
+        if outcome_lineage is not None:
+            # Duplicate only the compact canonical trust binding into the existing
+            # checksum-bound run summary. This makes prior schema-v2 activation
+            # discoverable after restart even if the mutable registry is rewritten
+            # to look like a never-upgraded schema-v1 workspace.
+            payload["outcome_lineage_trust"] = outcome_lineage_payload(outcome_lineage)
+        return payload
 
     def close(self) -> None:
         # Canonical PaperBook persistence is owned by the workspace-locked run

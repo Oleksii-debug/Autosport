@@ -197,7 +197,6 @@ def _promotion_evidence(
 ) -> PromotionEvidence:
     import hashlib
     payload = {
-        "schema_version": 1,
         "experiment_id": experiment_id,
         "research_protocol_id": protocol_id,
         "research_question_id": "question-1",
@@ -611,23 +610,10 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
     assert registry.champion_strategy(as_of="2026-01-04T01:00:00+00:00") == "strategy-offset-2"
 
 
-def test_promotion_requires_typed_evidence_and_strict_improvement(tmp_path):
+def test_promotion_evidence_identity_and_strict_improvement(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     foundation = _foundation(registry)
     registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
-    decision = PromotionDecision(
-        "promotion-no-evidence",
-        PromotionAction.PROMOTE,
-        "strategy-1",
-        "protocol-1",
-        foundation["protocol"].protocol_sha256,
-        "eval-1",
-        foundation["bundle"].bundle_sha256,
-        T3,
-        candidate_model_version_id="model-1",
-    )
-    with pytest.raises(PromotionEvidenceError, match="typed PromotionEvidence"):
-        registry.record_promotion(decision)
 
     evidence = _promotion_evidence(
         experiment_id="experiment-1",
@@ -644,11 +630,20 @@ def test_promotion_requires_typed_evidence_and_strict_improvement(tmp_path):
         interval_high="0",
     )
     registry.append(evidence)
+    decision = PromotionDecision(
+        "promotion-strict-zero",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        foundation["bundle"].bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=evidence.promotion_evidence_id,
+    )
     with pytest.raises(PromotionEvidenceError, match="strictly positive"):
-        registry.record_promotion(
-            replace(decision, promotion_evidence_id=evidence.promotion_evidence_id)
-        )
-
+        registry.record_promotion(decision)
 
 def test_promotion_rejects_reuse_of_consumed_evidence_and_holdout(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")

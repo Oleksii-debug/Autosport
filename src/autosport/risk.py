@@ -1359,6 +1359,7 @@ class PaperRiskPolicy:
                     reason=f"risk-vector-reservation:{index}",
                     placed_at=context.proposal_ts,
                     provider_source_ids=tuple(sorted(context.source_ids)),
+                    provider_accounts=context.provider_accounts,
                     bankroll_id=context.bankroll_id,
                     currency=context.currency,
                 )

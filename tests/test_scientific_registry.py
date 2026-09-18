@@ -15,6 +15,9 @@ from autosport.scientific_registry import (
     Postmortem,
     PromotionAction,
     PromotionDecision,
+    PromotionEvidence,
+    PromotionEvidenceDirection,
+    PromotionEvidenceValidity,
     PromotionEvidenceError,
     ResearchOutcome,
     ResearchProtocol,
@@ -551,7 +554,7 @@ def test_promotion_requires_typed_evidence_and_strict_improvement(tmp_path):
         T3,
         candidate_model_version_id="model-1",
     )
-    with pytest.raises(Exception, match="typed PromotionEvidence"):
+    with pytest.raises(PromotionEvidenceError, match="typed PromotionEvidence"):
         registry.record_promotion(decision)
 
     evidence = _promotion_evidence(
@@ -569,7 +572,7 @@ def test_promotion_requires_typed_evidence_and_strict_improvement(tmp_path):
         interval_high="0",
     )
     registry.append(evidence)
-    with pytest.raises(Exception, match="strictly positive"):
+    with pytest.raises(PromotionEvidenceError, match="strictly positive"):
         registry.record_promotion(
             replace(decision, promotion_evidence_id=evidence.promotion_evidence_id)
         )
@@ -605,7 +608,7 @@ def test_promotion_rejects_reuse_of_consumed_evidence_and_holdout(tmp_path):
         promotion_evidence_id=evidence.promotion_evidence_id,
     )
     registry.record_promotion(decision)
-    with pytest.raises(Exception, match="already been consumed"):
+    with pytest.raises(PromotionEvidenceError, match="already been consumed"):
         registry.record_promotion(replace(decision, promotion_decision_id="promotion-consume-2"))
 
 
@@ -638,5 +641,5 @@ def test_promotion_rejects_preconsumed_confirmation_holdout(tmp_path):
         candidate_model_version_id="model-1",
         promotion_evidence_id=evidence.promotion_evidence_id,
     )
-    with pytest.raises(Exception, match="unconsumed confirmation holdout"):
+    with pytest.raises(PromotionEvidenceError, match="unconsumed confirmation holdout"):
         registry.record_promotion(decision)

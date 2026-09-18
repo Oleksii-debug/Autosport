@@ -534,7 +534,7 @@ class PromotionEvidence:
     trial_family_id: str
     stopping_rule_sha256: str
     validity: str
-    rollback_target_strategy_version_id: str
+    rollback_target_strategy_version_id: str | None
     created_at: str
 
     def __post_init__(self) -> None:
@@ -550,9 +550,10 @@ class PromotionEvidence:
             "holdout_access_id",
             "trial_family_id",
             "validity",
-            "rollback_target_strategy_version_id",
         ):
             _text(getattr(self, name), name)
+        if self.rollback_target_strategy_version_id is not None:
+            _text(self.rollback_target_strategy_version_id, "rollback_target_strategy_version_id")
         if self.candidate_model_version_id is not None:
             _text(self.candidate_model_version_id, "candidate_model_version_id")
         if self.direction not in {"HIGHER_IS_BETTER", "LOWER_IS_BETTER"}:

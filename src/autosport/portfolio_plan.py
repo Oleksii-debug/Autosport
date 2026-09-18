@@ -167,6 +167,10 @@ class OpportunityEvidence:
             "truth": self.truth.value,
             "outcome_space_complete": self.outcome_space_complete,
             "terminal_state_space_sha256": self.terminal_state_space_sha256,
+            "execution_check_sha256s": [
+                [name, digest]
+                for name, digest in self.execution_check_sha256s
+            ],
             "execution_assumptions_sha256": self.execution_assumptions_sha256,
             "execution_feasible": self.execution_feasible,
         }
@@ -454,6 +458,16 @@ class PortfolioDependencyGraph:
         )
 
 
+_REQUIRED_TERMINAL_EXECUTION_CHECKS = frozenset(
+    {
+        "market_quote_freshness_status",
+        "paper_risk_policy",
+        "routing_feasibility",
+        "settlement_rule_scope",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class TerminalStateCompletenessEvidence:
     """Typed external witness for an exhaustive paper terminal-state model.
@@ -476,7 +490,7 @@ class TerminalStateCompletenessEvidence:
     intent_sha256s: tuple[str, ...]
     candidate_sha256s: tuple[str, ...]
     scenario_groups: tuple[ScenarioGroup, ...]
-    execution_assumptions_sha256: str
+    execution_check_sha256s: tuple[tuple[str, str], ...]
 
     def __post_init__(self) -> None:
         _canonical_text("terminal completeness evidence_id", self.evidence_id)
@@ -506,10 +520,38 @@ class TerminalStateCompletenessEvidence:
             "terminal completeness dependency_graph_sha256",
             self.dependency_graph_sha256,
         )
-        _canonical_sha256(
-            "terminal completeness execution_assumptions_sha256",
-            self.execution_assumptions_sha256,
-        )
+        if type(self.execution_check_sha256s) is not tuple:
+            raise ValueError(
+                "terminal execution checks must be a canonical tuple"
+            )
+        validated_execution_checks: list[tuple[str, str]] = []
+        for item in self.execution_check_sha256s:
+            if type(item) is not tuple or len(item) != 2:
+                raise ValueError(
+                    "terminal execution checks must contain (check, sha256) tuples"
+                )
+            check_name = _canonical_text(
+                "terminal execution check", item[0]
+            )
+            digest = _canonical_sha256(
+                "terminal execution check sha256", item[1]
+            )
+            validated_execution_checks.append((check_name, digest))
+        canonical_execution_checks = tuple(validated_execution_checks)
+        if (
+            canonical_execution_checks
+            != tuple(sorted(canonical_execution_checks))
+            or len(canonical_execution_checks)
+            != len(set(canonical_execution_checks))
+        ):
+            raise ValueError(
+                "terminal execution checks must be sorted and unique"
+            )
+        check_names = {name for name, _ in canonical_execution_checks}
+        if not _REQUIRED_TERMINAL_EXECUTION_CHECKS.issubset(check_names):
+            raise ValueError(
+                "terminal execution witness lacks required canonical control evidence"
+            )
         if (
             type(self.intent_sha256s) is not tuple
             or type(self.candidate_sha256s) is not tuple
@@ -602,6 +644,37 @@ class TerminalStateCompletenessEvidence:
     def terminal_state_space_sha256(self) -> str:
         return self.state_space_sha256_for(self.scenario_groups)
 
+    @staticmethod
+    def execution_assumptions_sha256_for(
+        *,
+        verifier_identity: str,
+        verification_protocol_sha256: str,
+        reproducibility_bundle_sha256: str,
+        execution_check_sha256s: tuple[tuple[str, str], ...],
+    ) -> str:
+        return _sha256_payload(
+            {
+                "schema": "autosport.terminal_execution_assumptions",
+                "schema_version": 1,
+                "verifier_identity": verifier_identity,
+                "verification_protocol_sha256": verification_protocol_sha256,
+                "reproducibility_bundle_sha256": reproducibility_bundle_sha256,
+                "execution_check_sha256s": [
+                    [name, digest]
+                    for name, digest in execution_check_sha256s
+                ],
+            }
+        )
+
+    @property
+    def execution_assumptions_sha256(self) -> str:
+        return self.execution_assumptions_sha256_for(
+            verifier_identity=self.verifier_identity,
+            verification_protocol_sha256=self.verification_protocol_sha256,
+            reproducibility_bundle_sha256=self.reproducibility_bundle_sha256,
+            execution_check_sha256s=self.execution_check_sha256s,
+        )
+
     def _identity_payload(self) -> dict[str, object]:
         return {
             "schema": "autosport.terminal_state_completeness_evidence",
@@ -648,6 +721,7 @@ class TerminalStateCompletenessEvidence:
             "candidate_sha256s",
             "scenario_groups",
             "terminal_state_space_sha256",
+            "execution_check_sha256s",
             "execution_assumptions_sha256",
             "evidence_sha256",
         }
@@ -713,6 +787,18 @@ class TerminalStateCompletenessEvidence:
                         outcomes=tuple(outcomes),
                     )
                 )
+            execution_checks_raw = raw["execution_check_sha256s"]
+            if type(execution_checks_raw) is not list:
+                raise ValueError(
+                    "serialized terminal execution checks must be a list"
+                )
+            execution_checks: list[tuple[str, str]] = []
+            for item in execution_checks_raw:
+                if type(item) is not list or len(item) != 2:
+                    raise ValueError(
+                        "serialized terminal execution check must contain two fields"
+                    )
+                execution_checks.append((item[0], item[1]))
             evidence = cls(
                 evidence_id=raw["evidence_id"],
                 verifier_identity=raw["verifier_identity"],
@@ -729,9 +815,7 @@ class TerminalStateCompletenessEvidence:
                 intent_sha256s=tuple(intents_raw),
                 candidate_sha256s=tuple(candidates_raw),
                 scenario_groups=tuple(groups),
-                execution_assumptions_sha256=raw[
-                    "execution_assumptions_sha256"
-                ],
+                execution_check_sha256s=tuple(execution_checks),
             )
             if (
                 raw["terminal_state_space_sha256"]
@@ -739,6 +823,13 @@ class TerminalStateCompletenessEvidence:
             ):
                 raise ValueError(
                     "serialized terminal state-space digest does not match groups"
+                )
+            if (
+                raw["execution_assumptions_sha256"]
+                != evidence.execution_assumptions_sha256
+            ):
+                raise ValueError(
+                    "serialized terminal execution-assumption digest does not match typed checks"
                 )
             serialized_evidence_sha256 = _canonical_sha256(
                 "serialized terminal completeness evidence_sha256",

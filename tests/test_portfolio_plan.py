@@ -1,7 +1,11 @@
+import json
+import tempfile
 import unittest
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 
+from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.opportunity import (
@@ -19,7 +23,9 @@ from autosport.portfolio_plan import (
     PortfolioAction,
     PortfolioDependencyGraph,
     PortfolioPlan,
+    PortfolioPlanReconciliationRequired,
     build_portfolio_plan,
+    persist_portfolio_plan_decision,
 )
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 
@@ -688,6 +694,141 @@ class PortfolioPlanTests(unittest.TestCase):
         tampered_reason["reason"] = "tampered durable plan"
         with self.assertRaisesRegex(ValueError, "serialized portfolio plan is invalid"):
             PortfolioPlan.from_dict(tampered_reason)
+
+
+    def test_predictive_and_nonforecast_plans_survive_restart_idempotently(self) -> None:
+        goal = self._goal()
+        policy = self._policy(goal)
+        cases = (
+            ("predictive", StrategyClass.PREDICTIVE_EDGE),
+            ("live-price", StrategyClass.LIVE_PRICE_MOVEMENT),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "decisions.jsonl"
+
+            for index, (label, strategy_class) in enumerate(cases, start=1):
+                intent = self._intent(
+                    goal,
+                    suffix=f"durable-{index}",
+                    strategy_class=strategy_class,
+                    signal=Decimal("0.05"),
+                )
+                book = PaperBook("1000")
+                plan = build_portfolio_plan(
+                    book,
+                    (intent,),
+                    policy,
+                    self.DECISION_TS,
+                    dependency_graph=self._graph(book, (intent,)),
+                )
+                self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
+                material_action_id = f"portfolio-plan-{label}"
+                first = persist_portfolio_plan_decision(
+                    JsonlDecisionLedger(ledger_path),
+                    plan,
+                    (intent,),
+                    policy,
+                    replay_run_id="replay-portfolio-plan",
+                    material_action_id=material_action_id,
+                )
+
+                restarted = JsonlDecisionLedger(ledger_path)
+                retry = persist_portfolio_plan_decision(
+                    restarted,
+                    plan,
+                    (intent,),
+                    policy,
+                    replay_run_id="replay-portfolio-plan",
+                    material_action_id=material_action_id,
+                )
+                self.assertEqual(retry.decision_id, first.decision_id)
+
+                durable = restarted.verified_economic_decision_for_material_action(
+                    material_action_id,
+                    goal,
+                    risk_policy=policy,
+                )
+                self.assertIsNotNone(durable)
+                assert durable is not None
+                self.assertEqual(
+                    PortfolioPlan.from_dict(
+                        json.loads(durable.payload["portfolio_plan_json"])
+                    ),
+                    plan,
+                )
+                intent_evidence = json.loads(
+                    durable.payload["portfolio_intent_evidence_json"]
+                )
+                restored_intent = intent_evidence["intents"][0]
+                self.assertEqual(restored_intent["intent_sha256"], intent.intent_sha256)
+                self.assertEqual(restored_intent["evidence"], intent.evidence.to_dict())
+                self.assertEqual(
+                    restored_intent["opportunity"],
+                    intent.opportunity.to_dict(),
+                )
+                self.assertEqual(restored_intent["strategy_id"], intent.strategy_id)
+                self.assertEqual(restored_intent["model_id"], intent.model_id)
+
+            self.assertEqual(
+                len(JsonlDecisionLedger(ledger_path).verified_records()),
+                2,
+            )
+
+    def test_durable_plan_conflicting_retry_fails_before_duplicate_append(self) -> None:
+        goal = self._goal()
+        policy = self._policy(goal)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "decisions.jsonl"
+            first_intent = self._intent(goal, suffix="durable-conflict-a")
+            first_book = PaperBook("1000")
+            first_plan = build_portfolio_plan(
+                first_book,
+                (first_intent,),
+                policy,
+                self.DECISION_TS,
+                dependency_graph=self._graph(first_book, (first_intent,)),
+            )
+            persist_portfolio_plan_decision(
+                JsonlDecisionLedger(ledger_path),
+                first_plan,
+                (first_intent,),
+                policy,
+                replay_run_id="replay-portfolio-plan-conflict",
+                material_action_id="portfolio-plan-conflict",
+            )
+            self.assertEqual(
+                len(JsonlDecisionLedger(ledger_path).verified_records()),
+                1,
+            )
+
+            second_intent = self._intent(goal, suffix="durable-conflict-b")
+            second_book = PaperBook("1000")
+            second_plan = build_portfolio_plan(
+                second_book,
+                (second_intent,),
+                policy,
+                self.DECISION_TS,
+                dependency_graph=self._graph(second_book, (second_intent,)),
+            )
+            with self.assertRaisesRegex(
+                PortfolioPlanReconciliationRequired,
+                "conflicts with current decision intent",
+            ):
+                persist_portfolio_plan_decision(
+                    JsonlDecisionLedger(ledger_path),
+                    second_plan,
+                    (second_intent,),
+                    policy,
+                    replay_run_id="replay-portfolio-plan-conflict",
+                    material_action_id="portfolio-plan-conflict",
+                )
+
+            self.assertEqual(
+                len(JsonlDecisionLedger(ledger_path).verified_records()),
+                1,
+            )
 
     def test_duplicate_intent_waits_without_accepting_fake_dependency_hash(self) -> None:
         goal = self._goal()

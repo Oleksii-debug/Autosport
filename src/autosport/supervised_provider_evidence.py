@@ -14,6 +14,7 @@ from .betfair_account_readonly import (
     BetfairClearedOrderPage,
     BetfairCurrentOrderObservation,
     BetfairCurrentOrderPage,
+    BetfairExecutionReadbackEnvelope,
 )
 from .bookmaker_capability import (
     BookmakerCapability,
@@ -77,6 +78,7 @@ def _current_order_payload(order: BetfairCurrentOrderObservation) -> dict[str, o
 def _cleared_order_payload(order: BetfairClearedOrderObservation) -> dict[str, object]:
     return {
         "bet_id": order.bet_id,
+        "event_id": order.event_id,
         "market_id": order.market_id,
         "selection_id": order.selection_id,
         "side": order.side,
@@ -267,31 +269,77 @@ def _require_bound_profile(
         raise ProviderEvidenceError("provider evidence predates capability profile")
 
 
+_REQUIRED_CLEARED_STATUSES = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
+
+
 def verify_betfair_provider_state(
     action: ExecutionAction,
     profile: BookmakerCapabilityProfile,
     *,
     expected_profile_sha256: str,
-    current_pages: tuple[BetfairCurrentOrderPage, ...],
-    cleared_pages: tuple[BetfairClearedOrderPage, ...],
+    readback: BetfairExecutionReadbackEnvelope,
 ) -> VerifiedProviderState:
-    """Derive effect/absence only from complete canonical Betfair read-only pages.
-
-    The future write adapter must submit ExecutionAction.action_id as Betfair
-    customerOrderRef. This verifier never accepts caller-selected status, amount,
-    receipt, or opaque evidence hashes as execution truth.
-    """
+    """Derive execution truth only from a client-sealed, action-scoped Betfair capture."""
 
     if not isinstance(action, ExecutionAction):
         raise ProviderEvidenceError("action must be canonical ExecutionAction")
-    current, current_sha, current_at = _complete_current_pages(current_pages)
-    cleared, cleared_sha, cleared_at = _complete_cleared_pages(cleared_pages)
-    observed_at = (
-        current_at
-        if _time(current_at, "current observed_at")
-        >= _time(cleared_at, "cleared observed_at")
-        else cleared_at
+    if not isinstance(readback, BetfairExecutionReadbackEnvelope):
+        raise ProviderEvidenceError(
+            "provider evidence requires canonical action-scoped readback envelope"
+        )
+    if (
+        readback.venue_id != action.bookmaker_id
+        or readback.account_id != action.account_id
+        or readback.adapter_id != BETFAIR_ADAPTER_ID
+        or readback.adapter_version != BETFAIR_ADAPTER_VERSION
+        or readback.action_id != action.action_id
+        or readback.market_id != action.market_id
+    ):
+        raise ProviderEvidenceError("provider readback scope conflicts with execution action")
+    if (
+        readback.market_event.market_id != action.market_id
+        or readback.market_event.event_id != action.event_id
+    ):
+        raise ProviderEvidenceError(
+            "provider market-to-event identity conflicts with execution action"
+        )
+
+    current, current_sha, current_at = _complete_current_pages(readback.current_pages)
+    statuses = tuple(status for status, _ in readback.cleared_pages_by_status)
+    if statuses != _REQUIRED_CLEARED_STATUSES:
+        raise ProviderEvidenceError("cleared-order status coverage is incomplete")
+
+    cleared: list[tuple[str, BetfairClearedOrderObservation]] = []
+    cleared_parts: list[dict[str, object]] = []
+    observed_times = [current_at, readback.market_event.evidence.observed_at]
+    for status, pages in readback.cleared_pages_by_status:
+        orders, pages_sha, pages_at = _complete_cleared_pages(pages)
+        observed_times.append(pages_at)
+        for order in orders:
+            if order.bet_status != status:
+                raise ProviderEvidenceError(
+                    "cleared-order status does not match captured request scope"
+                )
+            if order.market_id != action.market_id:
+                raise ProviderEvidenceError(
+                    "cleared-order market conflicts with captured execution scope"
+                )
+            if order.event_id is None or order.event_id != action.event_id:
+                raise ProviderEvidenceError(
+                    "cleared-order event identity conflicts with execution action"
+                )
+            cleared.append((status, order))
+        cleared_parts.append({"status": status, "pages_sha256": pages_sha})
+
+    latest_raw = max(
+        observed_times,
+        key=lambda value: _time(value, "provider observed_at"),
     )
+    if latest_raw != readback.observed_at:
+        raise ProviderEvidenceError("readback observed_at does not match captured pages")
+    observed_at = readback.observed_at
+    cleared_sha = _digest(cleared_parts)
+
     _require_bound_profile(
         profile,
         expected_profile_sha256=expected_profile_sha256,
@@ -311,16 +359,20 @@ def verify_betfair_provider_state(
         )
 
     candidates: list[
-        tuple[str, BetfairCurrentOrderObservation | BetfairClearedOrderObservation]
+        tuple[
+            str,
+            str | None,
+            BetfairCurrentOrderObservation | BetfairClearedOrderObservation,
+        ]
     ] = []
     for order in current:
         if order.customer_order_ref == action.action_id:
-            candidates.append(("current", order))
-    for order in cleared:
+            candidates.append(("current", None, order))
+    for status, order in cleared:
         if order.customer_order_ref == action.action_id:
-            candidates.append(("cleared", order))
+            candidates.append(("cleared", status, order))
 
-    for _, order in candidates:
+    for kind, _, order in candidates:
         if (
             order.market_id != action.market_id
             or order.selection_id != provider_selection_id
@@ -329,7 +381,13 @@ def verify_betfair_provider_state(
             raise ProviderEvidenceError(
                 "provider order identity conflicts with execution action"
             )
-    receipt_ids = {order.bet_id for _, order in candidates}
+        if kind == "cleared":
+            assert isinstance(order, BetfairClearedOrderObservation)
+            if order.event_id != action.event_id:
+                raise ProviderEvidenceError(
+                    "provider cleared order event conflicts with execution action"
+                )
+    receipt_ids = {order.bet_id for _, _, order in candidates}
     if len(receipt_ids) > 1:
         raise ProviderEvidenceError(
             "multiple provider receipts claim one execution action"
@@ -339,13 +397,15 @@ def verify_betfair_provider_state(
         evidence_id = _digest(
             {
                 "schema": "autosport.betfair_execution_absence",
-                "schema_version": 1,
+                "schema_version": 2,
                 "bookmaker_id": action.bookmaker_id,
                 "account_id": action.account_id,
                 "action_id": action.action_id,
-                "event_id": action.event_id,
+                "event_id": readback.market_event.event_id,
                 "market_id": action.market_id,
                 "selection_id": action.selection_id,
+                "request_scope_sha256": readback.request_scope_sha256,
+                "capture_evidence_sha256": readback.evidence_sha256,
                 "current_pages_sha256": current_sha,
                 "cleared_pages_sha256": cleared_sha,
                 "observed_at": observed_at,
@@ -358,7 +418,7 @@ def verify_betfair_provider_state(
             profile.adapter_id,
             profile.adapter_version,
             profile.profile_version,
-            action.event_id,
+            readback.market_event.event_id,
             action.market_id,
             action.selection_id,
             observed_at,
@@ -368,11 +428,19 @@ def verify_betfair_provider_state(
             _SEAL,
         )
 
-    # A transition can make the same bet visible in current and cleared snapshots.
-    # Prefer cleared evidence, but require all appearances to use the same receipt.
-    kind, order = sorted(candidates, key=lambda item: item[0] != "cleared")[0]
+    # A transition can expose the same receipt in current and cleared evidence.
+    # Cleared evidence is stronger, but non-SETTLED cleared states do not prove
+    # accepted execution economics and therefore remain fail-closed.
+    kind, cleared_status, order = sorted(
+        candidates,
+        key=lambda item: item[0] != "cleared",
+    )[0]
     if kind == "cleared":
         assert isinstance(order, BetfairClearedOrderObservation)
+        if cleared_status != "SETTLED":
+            raise ProviderEvidenceError(
+                "provider order exists in non-settled cleared state; execution economics unresolved"
+            )
         accepted_stake = order.size_settled
         accepted_odds = order.price_matched
         order_at = order.evidence.observed_at
@@ -395,6 +463,8 @@ def verify_betfair_provider_state(
     )
     source_sha = _digest(
         {
+            "capture_evidence_sha256": readback.evidence_sha256,
+            "request_scope_sha256": readback.request_scope_sha256,
             "current_pages_sha256": current_sha,
             "cleared_pages_sha256": cleared_sha,
             "receipt_id": order.bet_id,
@@ -404,11 +474,11 @@ def verify_betfair_provider_state(
     evidence_id = _digest(
         {
             "schema": "autosport.betfair_execution_effect",
-            "schema_version": 1,
+            "schema_version": 2,
             "bookmaker_id": action.bookmaker_id,
             "account_id": action.account_id,
             "action_id": action.action_id,
-            "event_id": action.event_id,
+            "event_id": readback.market_event.event_id,
             "market_id": action.market_id,
             "selection_id": action.selection_id,
             "external_receipt_id": order.bet_id,
@@ -426,7 +496,7 @@ def verify_betfair_provider_state(
         profile.adapter_id,
         profile.adapter_version,
         profile.profile_version,
-        action.event_id,
+        readback.market_event.event_id,
         action.market_id,
         action.selection_id,
         order.bet_id,

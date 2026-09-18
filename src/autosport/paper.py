@@ -24,11 +24,11 @@ from .forecasting import parse_iso_timestamp
 _PAPER_DECIMAL_PRECISION = 28
 _PAPER_DECIMAL_EMIN = -999999
 _PAPER_DECIMAL_EMAX = 999999
-_PAPER_SNAPSHOT_SCHEMA_VERSION = 4
-_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4})
+_PAPER_SNAPSHOT_SCHEMA_VERSION = 5
+_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5})
 _SCHEMA_MISSING = object()
 
-_LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
+_LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...], str | None]
 
 
 def _paper_decimal_context() -> Context:
@@ -145,7 +145,7 @@ class PaperBook:
         )
         self.balance = new_balance
         self.tickets[ticket.ticket_id] = ticket
-        self._lifecycle.append(("open", ticket.ticket_id, (), ()))
+        self._lifecycle.append(("open", ticket.ticket_id, (), (), None))
         return ticket
 
     @staticmethod
@@ -205,7 +205,14 @@ class PaperBook:
             raise ValueError("PaperBook settlement arithmetic is not representable") from exc
         return status, payout, new_balance
 
-    def settle(self, ticket_id: str, winning_quote_keys: set[str], void_quote_keys: set[str] | None = None) -> PaperTicket:
+    def settle(
+        self,
+        ticket_id: str,
+        winning_quote_keys: set[str],
+        void_quote_keys: set[str] | None = None,
+        *,
+        settled_at: str | None = None,
+    ) -> PaperTicket:
         ticket = self.tickets[ticket_id]
         if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")
@@ -216,6 +223,10 @@ class PaperBook:
             if void_quote_keys is None
             else self._normalize_resolution_keys(void_quote_keys, "void_quote_keys")
         )
+        settlement_time = self._validate_settled_at(
+            settled_at if settled_at is not None else utc_now_iso(),
+            ticket.placed_at,
+        )
         status, payout, new_balance = self._settlement_result(
             ticket,
             self.balance,
@@ -225,6 +236,7 @@ class PaperBook:
 
         ticket.payout = payout
         ticket.status = status
+        ticket.settled_at = settlement_time
         self.balance = new_balance
         self._lifecycle.append(
             (
@@ -232,6 +244,7 @@ class PaperBook:
                 ticket.ticket_id,
                 tuple(sorted(winners)),
                 tuple(sorted(voids)),
+                settlement_time,
             )
         )
         return ticket
@@ -239,7 +252,7 @@ class PaperBook:
     @staticmethod
     def _lifecycle_to_json(entries: list[_LifecycleEntry]) -> list[dict[str, object]]:
         payload: list[dict[str, object]] = []
-        for action, ticket_id, winners, voids in entries:
+        for action, ticket_id, winners, voids, settled_at in entries:
             if action == "open":
                 payload.append({"action": "open", "ticket_id": ticket_id})
             else:
@@ -249,6 +262,7 @@ class PaperBook:
                         "ticket_id": ticket_id,
                         "winning_quote_keys": list(winners),
                         "void_quote_keys": list(voids),
+                        "settled_at": settled_at,
                     }
                 )
         return payload
@@ -270,6 +284,7 @@ class PaperBook:
                     "ticket_id": t.ticket_id,
                     "stake": str(t.stake),
                     "placed_at": t.placed_at,
+                    "settled_at": t.settled_at,
                     "status": t.status.value,
                     "payout": str(t.payout),
                     "strategy_reason": t.strategy_reason,
@@ -419,8 +434,7 @@ class PaperBook:
         return canonical_sources, canonical_accounts, canonical_bankroll, canonical_currency
 
     @classmethod
-    def _validate_placed_at(cls, value: object, *, snapshot: bool = False) -> str:
-        label = "snapshot placed_at" if snapshot else "placed_at"
+    def _validate_timestamp(cls, value: object, label: str) -> str:
         message = f"PaperBook {label} must be a non-empty trimmed timezone-aware ISO timestamp"
         try:
             text = cls._require_utf8_string(value, label)
@@ -433,6 +447,26 @@ class PaperBook:
         except ValueError as exc:
             raise ValueError(message) from exc
         return text
+
+    @classmethod
+    def _validate_placed_at(cls, value: object, *, snapshot: bool = False) -> str:
+        label = "snapshot placed_at" if snapshot else "placed_at"
+        return cls._validate_timestamp(value, label)
+
+    @classmethod
+    def _validate_settled_at(
+        cls,
+        value: object,
+        placed_at: object,
+        *,
+        snapshot: bool = False,
+    ) -> str:
+        label = "snapshot settled_at" if snapshot else "settled_at"
+        settled_text = cls._validate_timestamp(value, label)
+        placed_text = cls._validate_placed_at(placed_at, snapshot=snapshot)
+        if parse_iso_timestamp(settled_text) < parse_iso_timestamp(placed_text):
+            raise ValueError("PaperBook settled_at must not precede placed_at")
+        return settled_text
 
     @classmethod
     def _validate_ticket_leg(cls, leg: object, *, ticket_id: str | None = None) -> TicketLeg:
@@ -461,9 +495,9 @@ class PaperBook:
 
     @classmethod
     def _validate_lifecycle_entry(cls, entry: object) -> _LifecycleEntry:
-        if type(entry) is not tuple or len(entry) != 4:
+        if type(entry) is not tuple or len(entry) != 5:
             raise ValueError("PaperBook lifecycle entries must be canonical tuples")
-        action, ticket_id, winners, voids = entry
+        action, ticket_id, winners, voids, settled_at = entry
         if action not in {"open", "settle"}:
             raise ValueError("PaperBook lifecycle action must be open or settle")
         cls._require_canonical_text(ticket_id, "lifecycle ticket_id")
@@ -474,9 +508,14 @@ class PaperBook:
                 cls._require_canonical_text(value, f"lifecycle {label}")
             if values != tuple(sorted(values)) or len(values) != len(set(values)):
                 raise ValueError(f"PaperBook lifecycle {label} must be sorted and unique")
-        if action == "open" and (winners or voids):
-            raise ValueError("PaperBook lifecycle open action cannot contain settlement keys")
-        return action, ticket_id, winners, voids
+        if action == "open":
+            if winners or voids:
+                raise ValueError("PaperBook lifecycle open action cannot contain settlement keys")
+            if settled_at is not None:
+                raise ValueError("PaperBook lifecycle open action cannot contain settled_at")
+        elif settled_at is not None:
+            cls._validate_timestamp(settled_at, "lifecycle settled_at")
+        return action, ticket_id, winners, voids, settled_at
 
     @classmethod
     def _validate_lifecycle_reachability(cls, book: "PaperBook") -> None:
@@ -489,7 +528,9 @@ class PaperBook:
         open_order: list[str] = []
 
         for raw_entry in book._lifecycle:
-            action, ticket_id, winners_raw, voids_raw = cls._validate_lifecycle_entry(raw_entry)
+            action, ticket_id, winners_raw, voids_raw, settled_at = (
+                cls._validate_lifecycle_entry(raw_entry)
+            )
             ticket = book.tickets.get(ticket_id)
             if ticket is None:
                 raise ValueError("PaperBook lifecycle references unknown ticket_id")
@@ -511,6 +552,16 @@ class PaperBook:
                 raise ValueError("PaperBook lifecycle settles a ticket before opening it")
             if ticket_id in settled:
                 raise ValueError("PaperBook lifecycle settles a ticket more than once")
+            if ticket.settled_at != settled_at:
+                raise ValueError(
+                    f"PaperBook ticket {ticket_id} settled_at is inconsistent with lifecycle provenance"
+                )
+            if settled_at is not None:
+                cls._validate_settled_at(
+                    settled_at,
+                    ticket.placed_at,
+                    snapshot=True,
+                )
             winners = set(winners_raw)
             voids = set(voids_raw)
             status, payout, replay_balance = cls._settlement_result(
@@ -562,6 +613,14 @@ class PaperBook:
             if ticket_key != ticket.ticket_id:
                 raise ValueError("PaperBook ticket mapping key must match ticket_id")
             cls._validate_placed_at(ticket.placed_at, snapshot=True)
+            if ticket.settled_at is not None:
+                cls._validate_settled_at(
+                    ticket.settled_at,
+                    ticket.placed_at,
+                    snapshot=True,
+                )
+            if ticket.status is TicketStatus.OPEN and ticket.settled_at is not None:
+                raise ValueError("PaperBook snapshot open ticket cannot have settled_at")
             cls._require_utf8_string(ticket.strategy_reason, "snapshot strategy_reason")
             cls._validate_ticket_provenance(
                 ticket.provider_source_ids,
@@ -608,7 +667,11 @@ class PaperBook:
         return normalized
 
     @classmethod
-    def _parse_lifecycle(cls, value: object) -> list[_LifecycleEntry]:
+    def _parse_lifecycle(
+        cls,
+        value: object,
+        schema_version: int,
+    ) -> list[_LifecycleEntry]:
         if type(value) is not list:
             raise ValueError("PaperBook snapshot lifecycle must be a list")
         entries: list[_LifecycleEntry] = []
@@ -620,15 +683,19 @@ class PaperBook:
             if action == "open":
                 if set(item) != {"action", "ticket_id"}:
                     raise ValueError("PaperBook snapshot open lifecycle entry has unexpected fields")
-                entry: _LifecycleEntry = ("open", ticket_id, (), ())
+                entry: _LifecycleEntry = ("open", ticket_id, (), (), None)
             elif action == "settle":
-                if set(item) != {
+                expected_fields = {
                     "action",
                     "ticket_id",
                     "winning_quote_keys",
                     "void_quote_keys",
-                }:
+                }
+                if schema_version >= 5:
+                    expected_fields.add("settled_at")
+                if set(item) != expected_fields:
                     raise ValueError("PaperBook snapshot settle lifecycle entry has unexpected fields")
+                settled_at = item.get("settled_at") if schema_version >= 5 else None
                 entry = (
                     "settle",
                     ticket_id,
@@ -638,6 +705,7 @@ class PaperBook:
                     cls._parse_lifecycle_key_list(
                         item["void_quote_keys"], "void_quote_keys"
                     ),
+                    settled_at,
                 )
             else:
                 raise ValueError("PaperBook snapshot lifecycle action must be open or settle")
@@ -767,7 +835,7 @@ class PaperBook:
             if ticket_id in seen_ticket_ids:
                 raise ValueError("PaperBook snapshot contains duplicate ticket_id")
             seen_ticket_ids.add(ticket_id)
-            if schema_version in {3, 4}:
+            if schema_version in {3, 4, 5}:
                 provider_source_ids_raw = cls._required_snapshot_field(
                     item, "provider_source_ids", f"ticket {ticket_id}"
                 )
@@ -783,7 +851,7 @@ class PaperBook:
                         ),
                         ticket_id,
                     )
-                    if schema_version == 4
+                    if schema_version in {4, 5}
                     else ()
                 )
                 bankroll_id = cls._required_snapshot_field(
@@ -811,6 +879,13 @@ class PaperBook:
                 placed_at=cls._required_snapshot_field(
                     item, "placed_at", f"ticket {ticket_id}"
                 ),
+                settled_at=(
+                    cls._required_snapshot_field(
+                        item, "settled_at", f"ticket {ticket_id}"
+                    )
+                    if schema_version == 5
+                    else None
+                ),
                 status=cls._parse_snapshot_status(
                     cls._required_snapshot_field(item, "status", f"ticket {ticket_id}"),
                     ticket_id,
@@ -833,13 +908,13 @@ class PaperBook:
             # insertion order. Settled legacy books fail closed later in lifecycle
             # validation after all older structural/status invariants have run.
             book._lifecycle = [
-                ("open", ticket_id, (), ())
+                ("open", ticket_id, (), (), None)
                 for ticket_id in book.tickets
             ]
         else:
             if "lifecycle" not in raw:
                 raise ValueError("PaperBook snapshot schema 2 requires lifecycle provenance")
-            book._lifecycle = cls._parse_lifecycle(raw["lifecycle"])
+            book._lifecycle = cls._parse_lifecycle(raw["lifecycle"], schema_version)
 
         cls._validate_loaded_state(book)
         return book

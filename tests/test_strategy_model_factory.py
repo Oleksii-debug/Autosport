@@ -208,7 +208,7 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
         causal_cutoff=T2,
         evaluation_design=evaluator_config.frozen_text,
         feature_set_version="v1",
-        uncertainty_method="deterministic baseline checkpoint",
+        uncertainty_method="paired min/max interval",
         multiple_comparison_control="single frozen primary metric",
         robustness_checks=("time order", "protective metric"),
         random_seed_policy="seed fixed before evaluation",

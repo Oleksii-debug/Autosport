@@ -474,10 +474,16 @@ class AutosportSession:
             )
         normalized_observations.sort(key=lambda item: (item[0], item[1]))
         observation_timestamps = tuple(item[0] for item in normalized_observations)
-        observation_membership_payload = [
+        observation_identity_payload = [
             {"observed_ts": observed_ts, "dedupe_key": dedupe_key}
             for observed_ts, dedupe_key in normalized_observations
         ]
+        observation_membership_payload = {
+            "schema_version": 1,
+            "replay_dataset_hash": result.replay.dataset_hash,
+            "event_count": result.replay.event_count,
+            "observations": observation_identity_payload,
+        }
         observation_membership_sha256 = (
             hashlib.sha256(
                 json.dumps(
@@ -488,7 +494,7 @@ class AutosportSession:
                     allow_nan=False,
                 ).encode("utf-8")
             ).hexdigest()
-            if observation_membership_payload
+            if observation_identity_payload
             else None
         )
         campaign_causal_membership = (

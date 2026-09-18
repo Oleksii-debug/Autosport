@@ -280,6 +280,81 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(len(ledger.verified_records()), 1)
             self.assertEqual([item[0] for item in resumed_factory.calls], ["input-a"])
 
+    def test_multi_input_crash_rebuilds_all_but_preserves_affected_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(selection="selection-a", sequence=1),
+                        self._event(selection="selection-b", sequence=1),
+                    ),
+                    (
+                        self._event(
+                            selection="selection-a",
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(seconds=2),
+                        ),
+                    ),
+                ],
+            )
+            factory = _EmptyIntentFactory()
+            append_count = {"value": 0}
+
+            def crash_on_second_append() -> None:
+                append_count["value"] += 1
+                if append_count["value"] == 2:
+                    raise RuntimeError("simulated second-cycle process loss")
+
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+                post_append_hook=crash_on_second_append,
+            )
+            self._register_two(loop)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=3)
+            with self.assertRaisesRegex(RuntimeError, "second-cycle process loss"):
+                loop.run_cycle()
+
+            records = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[-1].payload["affected_input_ids"], ["input-a"])
+
+            resumed_factory = _EmptyIntentFactory()
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=resumed_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=4)),
+            )
+            self._register_two(resumed)
+            result = resumed.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DUPLICATE_DECISION)
+            self.assertEqual(result.affected_input_ids, ("input-a",))
+            self.assertEqual(
+                [item[0] for item in resumed_factory.calls],
+                ["input-a", "input-b"],
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                2,
+            )
+
     def test_clean_restart_rebuilds_cache_without_duplicate_decision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -348,6 +423,32 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(second.status, LiveCycleStatus.DECIDED)
             self.assertEqual(set(second.affected_input_ids), {"input-a", "input-b"})
             self.assertEqual([item[0] for item in factory.calls], ["input-a", "input-b"])
+
+    def test_quote_age_cannot_exceed_owner_economic_goal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            goal = EconomicGoalContract(
+                goal_id="goal-live-age",
+                revision=1,
+                bankroll_id="bankroll-live-age",
+                currency="EUR",
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            with self.assertRaisesRegex(ValueError, "cannot exceed EconomicGoalContract"):
+                PersistentLiveDecisionLoop(
+                    workspace,
+                    loop_id="live-age-test",
+                    mode=LiveDecisionMode.PAPER,
+                    book=PaperBook("1000"),
+                    authority=authority,
+                    intent_factory=_EmptyIntentFactory(),
+                    observation_runner=_DurableObserver(workspace, [()]),
+                    max_quote_age=timedelta(seconds=6),
+                    clock=_ManualClock(self.START),
+                )
 
     def test_provider_gap_persists_zero_and_forces_rebuild_on_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

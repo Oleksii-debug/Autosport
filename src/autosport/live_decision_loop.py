@@ -593,6 +593,20 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "persisted live progress belongs to a different loop_id"
             )
+        if self._progress is not None:
+            durable_input_ids = set(self.dependencies.input_ids)
+            progress_input_ids = set(self._progress.registered_input_ids)
+            if not progress_input_ids.issubset(durable_input_ids):
+                raise LiveDecisionProgressError(
+                    "persisted live progress references missing durable dependency inputs"
+                )
+            if (
+                self._progress.phase == _PHASE_APPEND_PENDING
+                and self._progress.registered_input_ids != self.dependencies.input_ids
+            ):
+                raise LiveDecisionProgressError(
+                    "unfinished ledger append requires exact durable dependency registry"
+                )
         durable_control = self._load_control()
         if durable_control is None:
             durable_control = _Control(self.loop_id, LiveControlState.RUNNING)

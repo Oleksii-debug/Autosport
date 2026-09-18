@@ -248,6 +248,9 @@ class ProviderReadback:
     bookmaker_id: str
     account_id: str
     action_id: str
+    event_id: str
+    market_id: str
+    selection_id: str
     external_receipt_id: str
     observed_at: str
     source_payload_sha256: str
@@ -257,7 +260,15 @@ class ProviderReadback:
     terminal_settlement_exact: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("bookmaker_id", "account_id", "action_id", "external_receipt_id"):
+        for name in (
+            "bookmaker_id",
+            "account_id",
+            "action_id",
+            "event_id",
+            "market_id",
+            "selection_id",
+            "external_receipt_id",
+        ):
             _text(getattr(self, name), name)
         _time(self.observed_at, "observed_at")
         _sha(self.source_payload_sha256, "source_payload_sha256")
@@ -287,6 +298,9 @@ class ProviderReadback:
                 "bookmaker_id": self.bookmaker_id,
                 "account_id": self.account_id,
                 "action_id": self.action_id,
+                "event_id": self.event_id,
+                "market_id": self.market_id,
+                "selection_id": self.selection_id,
                 "external_receipt_id": self.external_receipt_id,
                 "observed_at": self.observed_at,
                 "source_payload_sha256": self.source_payload_sha256,
@@ -575,10 +589,20 @@ def reconcile_provider_readback(
             "terminal settlement exactness is outside supervised execution authority"
         )
     action, state = _attempt_action(ledger, bound, attempt_id)
-    if (readback.bookmaker_id, readback.account_id, readback.action_id) != (
+    if (
+        readback.bookmaker_id,
+        readback.account_id,
+        readback.action_id,
+        readback.event_id,
+        readback.market_id,
+        readback.selection_id,
+    ) != (
         action.bookmaker_id,
         action.account_id,
         action.action_id,
+        action.event_id,
+        action.market_id,
+        action.selection_id,
     ):
         raise SupervisedExecutionError("provider readback identity mismatches execution action")
     if readback.status in {AcknowledgementStatus.ACCEPTED, AcknowledgementStatus.PARTIAL}:
@@ -679,7 +703,12 @@ def reconcile_account_snapshot(
     snapshot: BookmakerAccountSnapshot,
     external_receipt_id: str,
 ) -> ReconciliationResult:
-    """Reconcile UNKNOWN against canonical current+cleared read-only account evidence."""
+    """Use generic account evidence only for complete NOT_FOUND proof.
+
+    Positive generic position evidence cannot acknowledge an attempt because the
+    canonical BookmakerPositionObservation contract omits market/selection identity.
+    Positive effects require ProviderReadback with exact identity.
+    """
 
     receipt_id = _text(external_receipt_id, "external_receipt_id")
     action, state = _attempt_action(ledger, bound, attempt_id)
@@ -731,31 +760,12 @@ def reconcile_account_snapshot(
     position = matches[0]
     if position.provider_side is not None and position.provider_side != action.side:
         raise SupervisedExecutionError("snapshot side mismatches action")
-    if position.provider_amount_semantics not in {"betfair_size_matched", "betfair_size_settled"}:
-        return ReconciliationResult(ReadbackOutcome.UNKNOWN, AttemptState.UNKNOWN, None)
-    if position.provider_amount is None or position.provider_amount <= 0 or position.decimal_odds is None:
-        return ReconciliationResult(ReadbackOutcome.UNKNOWN, AttemptState.UNKNOWN, None)
-    if position.provider_amount > action.requested_stake:
+    if position.provider_amount is not None and position.provider_amount > action.requested_stake:
         raise SupervisedExecutionError("matched stake exceeds requested stake")
-    status = (
-        AcknowledgementStatus.ACCEPTED
-        if position.provider_amount == action.requested_stake
-        else AcknowledgementStatus.PARTIAL
-    )
-    snapshot_hash = _snapshot_hash(snapshot, position, receipt_id)
-    return reconcile_provider_readback(
-        ledger,
-        bound,
-        attempt_id=attempt_id,
-        readback=ProviderReadback(
-            bookmaker_id=action.bookmaker_id,
-            account_id=action.account_id,
-            action_id=action.action_id,
-            external_receipt_id=receipt_id,
-            observed_at=snapshot.observed_at,
-            source_payload_sha256=snapshot_hash,
-            status=status,
-            accepted_odds=position.decimal_odds,
-            accepted_stake=position.provider_amount,
-        ),
-    )
+
+    # Generic BookmakerPositionObservation intentionally does not carry provider
+    # market_id/selection_id. A receipt match in BookmakerAccountSnapshot therefore
+    # cannot prove that the external effect belongs to this exact execution action.
+    # Preserve UNKNOWN until a provider-specific typed ProviderReadback carries the
+    # exact event/market/selection identity and raw source hash.
+    return ReconciliationResult(ReadbackOutcome.UNKNOWN, AttemptState.UNKNOWN, None)

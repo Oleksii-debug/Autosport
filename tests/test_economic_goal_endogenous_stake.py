@@ -14,6 +14,7 @@ from autosport.risk import (
     PaperRiskPolicy,
     ProposedTicketRiskContext,
     RiskOfRuinEvidence,
+    RiskOfRuinVectorEvidence,
 )
 
 
@@ -146,6 +147,40 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
                 upper_bound=upper_bound,
             ),
         )
+
+    @classmethod
+    def _bound_ruin_vector_evidence(
+        cls,
+        policy: PaperRiskPolicy,
+        book: PaperBook,
+        contexts: tuple[ProposedTicketRiskContext, ...],
+        stakes: tuple[Decimal, ...],
+        *,
+        upper_bound: Decimal,
+        **overrides: object,
+    ) -> RiskOfRuinVectorEvidence:
+        portfolio_sha256 = policy.risk_of_ruin_portfolio_sha256(book)
+        candidate_vector_sha256 = policy.risk_of_ruin_candidate_vector_sha256(
+            contexts
+        )
+        assert portfolio_sha256 is not None
+        assert candidate_vector_sha256 is not None
+        values: dict[str, object] = {
+            "evidence_id": "ror-vector-evidence-1",
+            "research_protocol_sha256": "c" * 64,
+            "reproducibility_bundle_sha256": "d" * 64,
+            "producer_identity": "test-vector-risk-model-source",
+            "causal_cutoff": "2026-09-17T14:59:58+00:00",
+            "evaluated_at": "2026-09-17T14:59:59+00:00",
+            "bankroll_id": contexts[0].bankroll_id,
+            "currency": contexts[0].currency,
+            "base_portfolio_sha256": portfolio_sha256,
+            "candidate_vector_sha256": candidate_vector_sha256,
+            "evaluated_stakes": stakes,
+            "upper_bound": upper_bound,
+        }
+        values.update(overrides)
+        return RiskOfRuinVectorEvidence(**values)  # type: ignore[arg-type]
 
     def test_active_economic_goal_removes_fixed_caller_stake_authority(self) -> None:
         event = self._event()
@@ -409,6 +444,148 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
         self.assertEqual(book.committed_stake, Decimal("0"))
+
+    def test_multi_candidate_vector_accepts_exact_vector_bound_ruin_evidence(self) -> None:
+        first = self._event(
+            event_id="event-vector-ror-1",
+            market_id="market-vector-ror-1",
+            selection_id="selection-vector-ror-1",
+            sequence=30,
+        )
+        second = self._event(
+            event_id="event-vector-ror-2",
+            market_id="market-vector-ror-2",
+            selection_id="selection-vector-ror-2",
+            sequence=31,
+        )
+        goal = self._goal(
+            max_risk_of_ruin=Decimal("0.10"),
+            max_concurrent_positions=3,
+        )
+        policy = self._policy(goal)
+        book = PaperBook("100")
+        contexts = (
+            self._risk_context(first, goal),
+            self._risk_context(second, goal),
+        )
+        expected_stakes = (Decimal("2.00"), Decimal("2.00"))
+        witness = self._bound_ruin_vector_evidence(
+            policy,
+            book,
+            contexts,
+            expected_stakes,
+            upper_bound=Decimal("0.05"),
+        )
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("1"), Decimal("1")),
+            contexts=contexts,
+            risk_of_ruin_vector_evidence=witness,
+        )
+
+        self.assertEqual(decision.action, "STAKE_VECTOR")
+        self.assertEqual(decision.stakes, expected_stakes)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+        self.assertEqual(book.committed_stake, Decimal("0"))
+
+    def test_multi_candidate_vector_rejects_mismatched_vector_ruin_evidence(self) -> None:
+        first = self._event(
+            event_id="event-vector-ror-mismatch-1",
+            market_id="market-vector-ror-mismatch-1",
+            selection_id="selection-vector-ror-mismatch-1",
+            sequence=32,
+        )
+        second = self._event(
+            event_id="event-vector-ror-mismatch-2",
+            market_id="market-vector-ror-mismatch-2",
+            selection_id="selection-vector-ror-mismatch-2",
+            sequence=33,
+        )
+        goal = self._goal(
+            max_risk_of_ruin=Decimal("0.10"),
+            max_concurrent_positions=3,
+        )
+        policy = self._policy(goal)
+        book = PaperBook("100")
+        contexts = (
+            self._risk_context(first, goal),
+            self._risk_context(second, goal),
+        )
+        wrong_stakes = self._bound_ruin_vector_evidence(
+            policy,
+            book,
+            contexts,
+            (Decimal("2.00"), Decimal("1.99")),
+            upper_bound=Decimal("0.05"),
+        )
+        wrong_candidates = self._bound_ruin_vector_evidence(
+            policy,
+            book,
+            tuple(reversed(contexts)),
+            (Decimal("2.00"), Decimal("2.00")),
+            upper_bound=Decimal("0.05"),
+        )
+
+        for witness in (wrong_stakes, wrong_candidates):
+            with self.subTest(evidence_id=witness.evidence_id):
+                decision = policy.derive_goal_stake_vector(
+                    book,
+                    (Decimal("1"), Decimal("1")),
+                    contexts=contexts,
+                    risk_of_ruin_vector_evidence=witness,
+                )
+                self.assertEqual(decision.action, "WAIT")
+                self.assertEqual(
+                    decision.stakes,
+                    (Decimal("0"), Decimal("0")),
+                )
+                self.assertEqual(book.balance, Decimal("100"))
+                self.assertEqual(book.tickets, {})
+
+    def test_multi_candidate_vector_zero_when_vector_ruin_bound_exceeds_goal(self) -> None:
+        first = self._event(
+            event_id="event-vector-ror-high-1",
+            market_id="market-vector-ror-high-1",
+            selection_id="selection-vector-ror-high-1",
+            sequence=34,
+        )
+        second = self._event(
+            event_id="event-vector-ror-high-2",
+            market_id="market-vector-ror-high-2",
+            selection_id="selection-vector-ror-high-2",
+            sequence=35,
+        )
+        goal = self._goal(
+            max_risk_of_ruin=Decimal("0.10"),
+            max_concurrent_positions=3,
+        )
+        policy = self._policy(goal)
+        book = PaperBook("100")
+        contexts = (
+            self._risk_context(first, goal),
+            self._risk_context(second, goal),
+        )
+        witness = self._bound_ruin_vector_evidence(
+            policy,
+            book,
+            contexts,
+            (Decimal("2.00"), Decimal("2.00")),
+            upper_bound=Decimal("0.11"),
+        )
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("1"), Decimal("1")),
+            contexts=contexts,
+            risk_of_ruin_vector_evidence=witness,
+        )
+
+        self.assertEqual(decision.action, "ZERO")
+        self.assertEqual(decision.stakes, (Decimal("0"), Decimal("0")))
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
 
     def test_multi_candidate_vector_waits_on_incomplete_candidate_evidence(self) -> None:
         event = self._event(event_id="event-wait", market_id="market-wait", sequence=13)

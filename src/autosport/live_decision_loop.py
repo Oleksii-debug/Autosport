@@ -644,6 +644,7 @@ class PersistentLiveDecisionLoop:
             )
         self._control = durable_control
         self._intent_cache: dict[str, tuple[object, ...]] = {}
+        self._input_market_sha256: dict[str, str] = {}
         self._pending_affected: dict[str, None] = {}
         self._needs_cache_rebuild = True
         self._freshness_deadlines: dict[str, datetime | None] = {}
@@ -798,6 +799,20 @@ class PersistentLiveDecisionLoop:
         freshness_expired = bool(freshness_expired_inputs)
 
         registered_input_ids = self.dependencies.input_ids
+        if self._needs_cache_rebuild:
+            for input_id in registered_input_ids:
+                self._pending_affected[input_id] = None
+
+        refresh_input_ids = tuple(self._pending_affected)
+        affected = refresh_input_ids
+        if not affected:
+            return LiveCycleResult(
+                LiveCycleStatus.NO_CHANGE,
+                detail="no material quote, status, dependency, or freshness invalidation",
+            )
+
+        decision_time = now
+        snapshots = self._capture_input_views(refresh_input_ids, decision_time)
         current_market_sha = self._market_state_sha256()
 
         clean_committed_restart = (
@@ -812,35 +827,17 @@ class PersistentLiveDecisionLoop:
             and not freshness_expired
         )
         if clean_committed_restart:
-            assert self._progress is not None
-            _, previous_decision_time = _canonical_timestamp(
-                "committed decision_ts", self._progress.decision_ts
-            )
-            if self._active_views_equal(previous_decision_time, now):
-                self._refresh_intents(registered_input_ids, now)
-                self._pending_affected.clear()
-                self._needs_cache_rebuild = False
-                return LiveCycleResult(
-                    LiveCycleStatus.NO_CHANGE,
-                    detail=(
-                        "clean restart rebuilt deterministic intent cache from the "
-                        "same canonical decision-visible market state"
-                    ),
-                )
-
-        if self._needs_cache_rebuild:
-            for input_id in registered_input_ids:
-                self._pending_affected[input_id] = None
-
-        refresh_input_ids = tuple(self._pending_affected)
-        affected = refresh_input_ids
-        if not affected:
+            self._refresh_intents_from_snapshots(snapshots)
+            self._pending_affected.clear()
+            self._needs_cache_rebuild = False
             return LiveCycleResult(
                 LiveCycleStatus.NO_CHANGE,
-                detail="no material quote, status, dependency, or freshness invalidation",
+                detail=(
+                    "clean restart rebuilt deterministic intent cache from the "
+                    "same canonical decision-visible market state"
+                ),
             )
 
-        decision_time = now
         decision_ts = now.isoformat()
         self._write_pending(
             decision_ts=decision_ts,
@@ -848,7 +845,7 @@ class PersistentLiveDecisionLoop:
             affected_input_ids=affected,
             gate=_GATE_NORMAL,
         )
-        self._refresh_intents(refresh_input_ids, decision_time)
+        self._refresh_intents_from_snapshots(snapshots)
 
         intents = self._all_cached_intents()
         graph = (
@@ -956,6 +953,7 @@ class PersistentLiveDecisionLoop:
         )
         self._pending_affected.clear()
         self._needs_cache_rebuild = True
+        self._input_market_sha256.clear()
         self._freshness_deadlines.clear()
         self._freshness_generations.clear()
         self._freshness_heap.clear()
@@ -1022,41 +1020,32 @@ class PersistentLiveDecisionLoop:
                 )
             self._intent_cache[input_id] = produced
 
-    def _active_views_equal(
-        self,
-        earlier: datetime,
-        later: datetime,
-    ) -> bool:
-        for input_id in self.dependencies.input_ids:
-            earlier_view = self.dependencies.decision_view(
-                input_id,
-                as_of=earlier,
-                max_age=self.max_quote_age,
-            )
-            later_view = self.dependencies.decision_view(
-                input_id,
-                as_of=later,
-                max_age=self.max_quote_age,
-            )
-            if tuple(event.to_dict() for event in earlier_view.events) != tuple(
-                event.to_dict() for event in later_view.events
-            ):
-                return False
-        return True
-
-    def _refresh_intents(
+    def _capture_input_views(
         self,
         input_ids: tuple[str, ...],
         as_of: datetime,
-    ) -> None:
-        from .portfolio_plan import OpportunityIntent
-
+    ) -> dict[str, MirrorSnapshot]:
+        snapshots: dict[str, MirrorSnapshot] = {}
         for input_id in input_ids:
             snapshot = self.dependencies.decision_view(
                 input_id,
                 as_of=as_of,
                 max_age=self.max_quote_age,
             )
+            snapshots[input_id] = snapshot
+            self._input_market_sha256[input_id] = _canonical_json_sha256(
+                [event.to_dict() for event in snapshot.events]
+            )
+            self._record_freshness_deadline(input_id, snapshot)
+        return snapshots
+
+    def _refresh_intents_from_snapshots(
+        self,
+        snapshots: dict[str, MirrorSnapshot],
+    ) -> None:
+        from .portfolio_plan import OpportunityIntent
+
+        for input_id, snapshot in snapshots.items():
             produced = self.intent_factory(input_id, snapshot)
             if type(produced) is not tuple:
                 raise TypeError("intent_factory must return a tuple")
@@ -1065,7 +1054,6 @@ class PersistentLiveDecisionLoop:
                     "intent_factory must return only canonical OpportunityIntent values"
                 )
             self._intent_cache[input_id] = produced
-            self._record_freshness_deadline(input_id, snapshot)
 
     def _all_cached_intents(self) -> tuple[object, ...]:
         flattened: list[object] = []
@@ -1129,8 +1117,9 @@ class PersistentLiveDecisionLoop:
         exc: Exception,
     ) -> LiveCycleResult:
         decision_ts = now.isoformat()
-        market_sha = self._market_state_sha256()
         affected = self.dependencies.input_ids
+        self._capture_input_views(affected, now)
+        market_sha = self._market_state_sha256()
         self._write_pending(
             decision_ts=decision_ts,
             market_state_sha256=market_sha,
@@ -1562,32 +1551,38 @@ class PersistentLiveDecisionLoop:
             ) from exc
 
     def _market_state_sha256(self) -> str:
-        events = tuple(
-            event
-            for source_id, quote_key in self.dependencies.all_matching_keys()
-            if (
-                event := self.mirror_updates.mirror.event_for_quote_key(
-                    source_id,
-                    quote_key,
-                )
-            ) is not None
-        )
-        return self._market_state_sha256_for_events(events)
+        payload: list[dict[str, str]] = []
+        for input_id in self.dependencies.input_ids:
+            try:
+                digest = self._input_market_sha256[input_id]
+            except KeyError as exc:
+                raise LiveDecisionProgressError(
+                    "decision-visible market identity cache is incomplete"
+                ) from exc
+            payload.append({"input_id": input_id, "sha256": digest})
+        return _canonical_json_sha256(payload)
 
     def _market_state_sha256_for_events(self, events) -> str:
-        specs = tuple(self._input_specs.values())
-        payload = [
-            event.to_dict()
-            for event in events
-            if any(
-                (spec.source_ids is None or event.source_id in spec.source_ids)
-                and (spec.event_ids is None or event.event_id in spec.event_ids)
-                and (spec.market_ids is None or event.market_id in spec.market_ids)
-                and (
-                    spec.selection_ids is None
-                    or event.selection_id in spec.selection_ids
+        event_tuple = tuple(events)
+        input_hashes: dict[str, str] = {}
+        for input_id, spec in self._input_specs.items():
+            payload = [
+                event.to_dict()
+                for event in event_tuple
+                if (
+                    (spec.source_ids is None or event.source_id in spec.source_ids)
+                    and (spec.event_ids is None or event.event_id in spec.event_ids)
+                    and (spec.market_ids is None or event.market_id in spec.market_ids)
+                    and (
+                        spec.selection_ids is None
+                        or event.selection_id in spec.selection_ids
+                    )
                 )
-                for spec in specs
-            )
-        ]
-        return _canonical_json_sha256(payload)
+            ]
+            input_hashes[input_id] = _canonical_json_sha256(payload)
+        return _canonical_json_sha256(
+            [
+                {"input_id": input_id, "sha256": input_hashes[input_id]}
+                for input_id in self.dependencies.input_ids
+            ]
+        )

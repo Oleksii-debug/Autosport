@@ -20,7 +20,12 @@ from .domain import MarketEvent, PaperTicket, TicketLeg
 from .forecasting import ForecastRecord, parse_iso_timestamp
 from .paper import PaperBook
 from .price_truth import paper_quote_rejection_reason
-from .risk import (\n    PaperRiskPolicy,\n    ProposedTicketRiskContext,\n    RiskDecision,\n    RiskOfRuinEvidence,\n)
+from .risk import (
+    PaperRiskPolicy,
+    ProposedTicketRiskContext,
+    RiskDecision,
+    RiskOfRuinEvidence,
+)
 from .scenario_search import ScenarioGroup
 
 
@@ -137,6 +142,27 @@ def _research_material_action_id(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _risk_of_ruin_evidence_payload(
+    evidence: RiskOfRuinEvidence | None,
+) -> dict[str, str] | None:
+    if evidence is None:
+        return None
+    return {
+        "evidence_id": evidence.evidence_id,
+        "research_protocol_sha256": evidence.research_protocol_sha256,
+        "reproducibility_bundle_sha256": evidence.reproducibility_bundle_sha256,
+        "producer_identity": evidence.producer_identity,
+        "causal_cutoff": evidence.causal_cutoff,
+        "evaluated_at": evidence.evaluated_at,
+        "bankroll_id": evidence.bankroll_id,
+        "currency": evidence.currency,
+        "base_portfolio_sha256": evidence.base_portfolio_sha256,
+        "candidate_sha256": evidence.candidate_sha256,
+        "evaluated_stake": str(evidence.evaluated_stake),
+        "upper_bound": str(evidence.upper_bound),
+    }
+
+
 def _research_material_action_intent_sha256(
     *,
     replay_run_id: str,
@@ -146,6 +172,7 @@ def _research_material_action_intent_sha256(
     groups: list[ScenarioGroup],
     forecasts: dict[str, ForecastRecord],
     evidence: tuple[ResearchEvidence, ...],
+    risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
 ) -> str:
     """Bind one caller idempotence key to the immutable research decision intent."""
 
@@ -202,6 +229,10 @@ def _research_material_action_intent_sha256(
             )
         ],
     }
+    if risk_of_ruin_evidence is not None:
+        payload["risk_of_ruin_evidence"] = _risk_of_ruin_evidence_payload(
+            risk_of_ruin_evidence
+        )
     canonical = json.dumps(
         payload,
         ensure_ascii=False,
@@ -682,6 +713,7 @@ class ResearchDecisionPipeline:
                     groups=groups,
                     forecasts=forecasts,
                     evidence=evidence_items,
+                    risk_of_ruin_evidence=risk_of_ruin_evidence,
                 )
             )
             _reconcile_existing_economic_action(
@@ -723,7 +755,6 @@ class ResearchDecisionPipeline:
             amount = derived if derived is not None else Decimal("0")
             stake_source = "economic-goal-derived"
 
-        quote_items = tuple(market_quotes or ())
         context_hash = _research_context_hash(
             book=book,
             candidate=candidate,
@@ -731,6 +762,7 @@ class ResearchDecisionPipeline:
             forecasts=forecasts,
             evidence=evidence_items,
             decision_ts=decision_ts,
+            risk_of_ruin_evidence=risk_of_ruin_evidence,
         )
 
         impact = (
@@ -847,6 +879,7 @@ class ResearchDecisionPipeline:
                 ticket_id=ticket.ticket_id if ticket else None,
                 forecasts=forecasts,
                 evidence=evidence_items,
+                risk_of_ruin_evidence=risk_of_ruin_evidence,
             )
             if approved and resolved_material_action_id is not None:
                 assert resolved_material_action_intent_sha256 is not None
@@ -940,13 +973,14 @@ def _audit_payload(
     ticket_id: str | None,
     forecasts: dict[str, ForecastRecord],
     evidence: tuple[ResearchEvidence, ...],
+    risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
 ) -> dict:
     candidate_keys = {leg.quote_key for leg in candidate.legs}
     relevant_evidence = sorted(
         (item for item in evidence if item.quote_key in candidate_keys),
         key=lambda item: (item.quote_key, item.available_at, item.evidence_id),
     )
-    return {
+    payload = {
         "approved": approved,
         "reasons": list(reasons),
         "ticket_id": ticket_id,
@@ -1027,6 +1061,11 @@ def _audit_payload(
         ],
         "real_money_execution": False,
     }
+    if risk_of_ruin_evidence is not None:
+        payload["risk_of_ruin_evidence"] = _risk_of_ruin_evidence_payload(
+            risk_of_ruin_evidence
+        )
+    return payload
 
 
 def _research_context_hash(
@@ -1037,6 +1076,7 @@ def _research_context_hash(
     forecasts: dict[str, ForecastRecord],
     evidence: tuple[ResearchEvidence, ...],
     decision_ts: str,
+    risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
 ) -> str:
     candidate_keys = {leg.quote_key for leg in candidate.legs}
     payload = {
@@ -1098,5 +1138,9 @@ def _research_context_hash(
             )
         ],
     }
+    if risk_of_ruin_evidence is not None:
+        payload["risk_of_ruin_evidence"] = _risk_of_ruin_evidence_payload(
+            risk_of_ruin_evidence
+        )
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

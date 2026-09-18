@@ -119,7 +119,8 @@ def _canonical_decimal(value: object, name: str) -> str:
     if parsed == 0:
         canonical = "0"
     else:
-        canonical = format(parsed.normalize(), "f")
+        # Decimal.normalize() uses the ambient process context and can round.
+        canonical = format(parsed, "f")
         if "." in canonical:
             canonical = canonical.rstrip("0").rstrip(".")
         if canonical == "-0":
@@ -127,6 +128,42 @@ def _canonical_decimal(value: object, name: str) -> str:
     if text != canonical:
         raise ValueError(f"{name} must be canonical decimal text: {canonical}")
     return canonical
+
+
+def _window_evidence_sha256(
+    *,
+    dataset_snapshot_id: object,
+    source_identity: object,
+    window_start: object,
+    window_end: object,
+    as_of: object,
+    values: tuple[str, ...],
+    value_observed_at: tuple[str, ...],
+    value_available_at: tuple[str, ...],
+) -> str:
+    return _digest(
+        {
+            "schema": "autosport.drift-window-evidence",
+            "schema_version": 1,
+            "dataset_snapshot_id": _text(dataset_snapshot_id, "dataset_snapshot_id"),
+            "source_identity": _text(source_identity, "source_identity"),
+            "window_start": _timestamp_identity(window_start, "window_start"),
+            "window_end": _timestamp_identity(window_end, "window_end"),
+            "as_of": _timestamp_identity(as_of, "as_of"),
+            "values": [
+                _canonical_decimal(value, f"values[{index}]")
+                for index, value in enumerate(values)
+            ],
+            "value_observed_at": [
+                _timestamp_identity(value, f"value_observed_at[{index}]")
+                for index, value in enumerate(value_observed_at)
+            ],
+            "value_available_at": [
+                _timestamp_identity(value, f"value_available_at[{index}]")
+                for index, value in enumerate(value_available_at)
+            ],
+        }
+    )
 
 
 def _fraction_from_decimal(value: str, name: str) -> Fraction:
@@ -171,12 +208,14 @@ class DriftWindow:
     window_end: str
     as_of: str
     values: tuple[str, ...]
+    value_observed_at: tuple[str, ...]
     value_available_at: tuple[str, ...]
     evidence_sha256: str
 
     def __post_init__(self) -> None:
-        for name in ("dataset_snapshot_id", "source_identity", "revision_id"):
+        for name in ("dataset_snapshot_id", "source_identity"):
             _text(getattr(self, name), name)
+        revision = _sha256(self.revision_id, "revision_id")
         start = _instant(self.window_start, "window_start")
         end = _instant(self.window_end, "window_end")
         cutoff = _instant(self.as_of, "as_of")
@@ -184,18 +223,96 @@ class DriftWindow:
             raise ValueError("window_end must not precede window_start")
         if cutoff < end:
             raise DriftCausalityError("window end is later than its causal as_of boundary")
-        if type(self.values) is not tuple or type(self.value_available_at) is not tuple:
-            raise ValueError("values and value_available_at must be tuples")
-        if len(self.values) != len(self.value_available_at):
-            raise ValueError("each drift value requires one availability timestamp")
+        if (
+            type(self.values) is not tuple
+            or type(self.value_observed_at) is not tuple
+            or type(self.value_available_at) is not tuple
+        ):
+            raise ValueError(
+                "values, value_observed_at and value_available_at must be tuples"
+            )
+        if not (
+            len(self.values)
+            == len(self.value_observed_at)
+            == len(self.value_available_at)
+        ):
+            raise ValueError(
+                "each drift value requires one observation and availability timestamp"
+            )
         for index, value in enumerate(self.values):
             _canonical_decimal(value, f"values[{index}]")
-        for index, available_at in enumerate(self.value_available_at):
-            if _instant(available_at, f"value_available_at[{index}]") > cutoff:
+        for index, observed_at in enumerate(self.value_observed_at):
+            observed = _instant(observed_at, f"value_observed_at[{index}]")
+            if observed < start or observed > end:
+                raise DriftCausalityError(
+                    "drift sample observation is outside the declared window"
+                )
+            available = _instant(
+                self.value_available_at[index], f"value_available_at[{index}]"
+            )
+            if available < observed:
+                raise DriftCausalityError(
+                    "drift value cannot be available before it was observed"
+                )
+            if available > cutoff:
                 raise DriftCausalityError(
                     "drift window contains a value unavailable at its causal as_of boundary"
                 )
-        _sha256(self.evidence_sha256, "evidence_sha256")
+        expected_evidence = _window_evidence_sha256(
+            dataset_snapshot_id=self.dataset_snapshot_id,
+            source_identity=self.source_identity,
+            window_start=self.window_start,
+            window_end=self.window_end,
+            as_of=self.as_of,
+            values=self.values,
+            value_observed_at=self.value_observed_at,
+            value_available_at=self.value_available_at,
+        )
+        evidence = _sha256(self.evidence_sha256, "evidence_sha256")
+        if evidence != expected_evidence:
+            raise ValueError(
+                "evidence_sha256 does not match exact drift window sample membership"
+            )
+        if revision != evidence:
+            raise ValueError(
+                "revision_id must equal the canonical immutable drift evidence identity"
+            )
+
+    @classmethod
+    def from_samples(
+        cls,
+        *,
+        dataset_snapshot_id: str,
+        source_identity: str,
+        window_start: str,
+        window_end: str,
+        as_of: str,
+        values: tuple[str, ...],
+        value_observed_at: tuple[str, ...],
+        value_available_at: tuple[str, ...],
+    ) -> "DriftWindow":
+        evidence = _window_evidence_sha256(
+            dataset_snapshot_id=dataset_snapshot_id,
+            source_identity=source_identity,
+            window_start=window_start,
+            window_end=window_end,
+            as_of=as_of,
+            values=values,
+            value_observed_at=value_observed_at,
+            value_available_at=value_available_at,
+        )
+        return cls(
+            dataset_snapshot_id=dataset_snapshot_id,
+            source_identity=source_identity,
+            revision_id=evidence,
+            window_start=window_start,
+            window_end=window_end,
+            as_of=as_of,
+            values=values,
+            value_observed_at=value_observed_at,
+            value_available_at=value_available_at,
+            evidence_sha256=evidence,
+        )
 
     @property
     def sample_count(self) -> int:
@@ -544,11 +661,25 @@ class DriftMonitor:
         causal_cutoff = payload.get("causal_cutoff")
         if not isinstance(causal_cutoff, str):
             raise DriftLineageError("DatasetSnapshot lacks causal cutoff")
-        if _instant(causal_cutoff, "DatasetSnapshot.causal_cutoff") > _instant(
-            window.as_of, "window.as_of"
-        ):
+        cutoff = _instant(causal_cutoff, "DatasetSnapshot.causal_cutoff")
+        if cutoff < _instant(window.window_end, "window.window_end"):
+            raise DriftCausalityError(
+                "DatasetSnapshot does not cover drift window_end"
+            )
+        if cutoff > _instant(window.as_of, "window.as_of"):
             raise DriftCausalityError(
                 "DatasetSnapshot causal cutoff is later than drift window as_of"
+            )
+        manifest = payload.get("manifest_sha256")
+        if not isinstance(manifest, str):
+            raise DriftLineageError("DatasetSnapshot lacks manifest identity")
+        if _sha256(manifest, "DatasetSnapshot.manifest_sha256") != window.evidence_sha256:
+            raise DriftLineageError(
+                "drift window evidence does not match DatasetSnapshot manifest"
+            )
+        if window.revision_id != window.evidence_sha256:
+            raise DriftLineageError(
+                "drift revision identity is not bound to canonical window evidence"
             )
         return entry
 
@@ -772,7 +903,9 @@ class DriftMonitor:
             absolute_delta_fraction=delta_text,
             threshold=reference["threshold"],
             insufficiency_reason=insufficiency_reason,
-            evaluated_at=evaluated_at,
+            # evaluated_at is an admission upper bound only; persist the
+            # immutable observation boundary for restart-idempotent findings.
+            evaluated_at=current.as_of,
             evidence_sha256=evidence_sha256,
         )
         self.scientific_registry.append(finding)

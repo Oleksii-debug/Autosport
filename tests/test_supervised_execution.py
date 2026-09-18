@@ -412,6 +412,7 @@ def _provider_capture(
     provider_event_id: str | None = None,
     cleared_status: str | None = None,
     cleared_event_id: str | None = None,
+    catalogue_available: bool = True,
 ):
     event_id = provider_event_id or action.event_id
     current_orders: list[dict[str, object]] = []
@@ -449,12 +450,16 @@ def _provider_capture(
 
     responses = [
         _rpc_result(
-            [
-                {
-                    "marketId": action.market_id,
-                    "event": {"id": event_id},
-                }
-            ],
+            (
+                [
+                    {
+                        "marketId": action.market_id,
+                        "event": {"id": event_id},
+                    }
+                ]
+                if catalogue_available
+                else []
+            ),
             1,
         ),
         _rpc_result(
@@ -480,7 +485,11 @@ def _provider_capture(
                         "placedDate": SUBMITTED_AT,
                         "settledDate": READBACK_AT,
                         "priceRequested": float(action.requested_odds),
-                        "priceMatched": float(action.requested_odds),
+                        "priceMatched": (
+                            float(action.requested_odds)
+                            if status == "SETTLED"
+                            else 0.0
+                        ),
                         "sizeSettled": 0.0,
                         "profit": 0.0,
                         "customerOrderRef": action.action_id,
@@ -888,6 +897,27 @@ def test_cleared_provider_event_mismatch_fails_closed() -> None:
     )
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
     with pytest.raises(ProviderEvidenceError, match="event identity conflicts"):
+        verify_betfair_provider_state(
+            action,
+            _profile(),
+            expected_profile_sha256=binding.profile_sha256,
+            readback=capture,
+        )
+
+
+def test_closed_market_can_bind_event_from_cleared_bet_without_releasing_retry() -> None:
+    bound, _, _, _ = _bound()
+    action = bound.execution_plan.actions[0]
+    capture, _ = _provider_capture(
+        action,
+        matched_stake=None,
+        cleared_status="CANCELLED",
+        catalogue_available=False,
+    )
+    assert capture.market_event.event_id == action.event_id
+    assert capture.market_event.source == "cleared:CANCELLED"
+    binding = bound.profile_for(action.bookmaker_id, action.account_id)
+    with pytest.raises(ProviderEvidenceError, match="non-settled cleared state"):
         verify_betfair_provider_state(
             action,
             _profile(),

@@ -175,7 +175,7 @@ def _dict_sha(payload: dict[str, object]) -> str:
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def _promotion_evidence(*, evidence_id, experiment_id, strategy_id, model_id, bundle_id, dataset, metric="roi", direction="HIGHER_IS_BETTER", cohort_id="cohort-1", access_id="access-1", created_at=T3):
+def _promotion_evidence(*, evidence_id, experiment_id, strategy_id, model_id, bundle_id, dataset, metric="roi", direction="HIGHER_IS_BETTER", cohort_id="cohort-1", access_id="access-1", rollback_target=None, created_at=T3):
     scope_sha = _dict_sha({
         "dataset_manifest_sha256": dataset.manifest_sha256,
         "outcome_reveal_after": dataset.outcome_reveal_after,
@@ -204,7 +204,7 @@ def _promotion_evidence(*, evidence_id, experiment_id, strategy_id, model_id, bu
         "trial-family-1",
         stopping_sha,
         "VALID",
-        "strategy-0",
+        rollback_target,
         created_at,
     )
 
@@ -339,7 +339,7 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
         predecessor_strategy_version_id="strategy-1",
         candidate_model_version_id="model-1",
     )
-    registry.append(_promotion_evidence(evidence_id="promotion-evidence-2", experiment_id="experiment-2", strategy_id="strategy-2", model_id="model-1", bundle_id="eval-2", dataset=foundation["dataset"], metric="roi", direction="HIGHER_IS_BETTER", cohort_id="cohort-2", access_id="access-2"))
+    registry.append(_promotion_evidence(evidence_id="promotion-evidence-2", experiment_id="experiment-2", strategy_id="strategy-2", model_id="model-1", bundle_id="eval-2", dataset=foundation["dataset"], metric="roi", direction="HIGHER_IS_BETTER", cohort_id="cohort-2", access_id="access-2", rollback_target="strategy-1"))
     promote2 = replace(promote2, promotion_evidence_id="promotion-evidence-2")
     registry.record_promotion(promote2)
     assert registry.champion_strategy(as_of=T3) == "strategy-2"

@@ -4,6 +4,7 @@ import itertools
 import math
 import random
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from .domain import PaperTicket, TicketStatus
@@ -53,6 +54,7 @@ class ScenarioSearchReport:
     expected_case: Decimal | None
     expected_mode: str | None
     outcome_space_exhaustive: bool = False
+    outcome_space_exact: bool = False
     outcome_authority_sha256s: tuple[str, ...] = ()
 
 
@@ -141,11 +143,14 @@ class ScenarioSearchEngine:
         tickets: list[PaperTicket],
         authorities: list[MarketSettlementOutcomeAuthority]
         | tuple[MarketSettlementOutcomeAuthority, ...],
+        *,
+        decision_as_of: datetime,
     ) -> ScenarioSearchReport:
-        """Evaluate only terminal states derived from canonical exhaustive authority.
+        """Evaluate a complete authority-derived terminal-state cover.
 
-        Unlike analyse(), this path never accepts caller-supplied ScenarioGroup values
-        as completeness evidence and never samples an oversized terminal space.
+        Authority evidence is provider-bound and causally fenced at decision_as_of.
+        A conservative terminal superset is exhaustive but not exact; the report
+        labels those two truths separately and never samples an oversized space.
         """
         if type(authorities) not in (list, tuple) or not authorities:
             raise ValueError(
@@ -168,6 +173,9 @@ class ScenarioSearchEngine:
                 ),
             )
         )
+        for authority in ordered:
+            authority.assert_available_as_of(decision_as_of)
+
         open_tickets = [
             ticket for ticket in tickets if ticket.status is TicketStatus.OPEN
         ]
@@ -186,6 +194,7 @@ class ScenarioSearchEngine:
                 expected_case=None,
                 expected_mode=None,
                 outcome_space_exhaustive=True,
+                outcome_space_exact=True,
                 outcome_authority_sha256s=tuple(
                     authority.authority_sha256 for authority in ordered
                 ),
@@ -213,8 +222,8 @@ class ScenarioSearchEngine:
                 frozenset[str],
             ],
         ] = {}
-        state_spaces: list[tuple[object, ...]] = []
         state_authorities: list[MarketSettlementOutcomeAuthority] = []
+        state_counts: list[int] = []
 
         for market_key in sorted(market_groups):
             provider_authorities = market_groups[market_key]
@@ -235,12 +244,14 @@ class ScenarioSearchEngine:
                     raise ValueError(
                         "provider authorities disagree on canonical market terminal states"
                     )
+                if (
+                    authority.settlement_rules_sha256
+                    != baseline.settlement_rules_sha256
+                ):
+                    raise ValueError(
+                        "provider authorities disagree on canonical settlement rules"
+                    )
 
-            authority_quote_keys = set(baseline.quote_keys)
-            if not ticket_quote_keys.intersection(authority_quote_keys):
-                raise ValueError(
-                    "authoritative outcome universe is unrelated to the open portfolio"
-                )
             bound_sources = frozenset(provider_sources)
             for quote_key in baseline.quote_keys:
                 if quote_key in coverage:
@@ -248,13 +259,25 @@ class ScenarioSearchEngine:
                         "authoritative outcome universes overlap on quote identity"
                     )
                 coverage[quote_key] = (market_key, bound_sources)
-            state_spaces.append(baseline.terminal_states)
             state_authorities.append(baseline)
+            state_counts.append(baseline.terminal_state_count)
 
         missing = ticket_quote_keys.difference(coverage)
         if missing:
             raise ValueError(
                 "ticket leg missing from authoritative outcome universe"
+            )
+
+        relevant_market_keys = {
+            coverage[quote_key][0] for quote_key in ticket_quote_keys
+        }
+        authority_market_keys = {
+            authority.identity.market_key for authority in state_authorities
+        }
+        unrelated = authority_market_keys.difference(relevant_market_keys)
+        if unrelated:
+            raise ValueError(
+                "authoritative outcome universe is unrelated to the open portfolio"
             )
 
         for ticket in open_tickets:
@@ -272,13 +295,16 @@ class ScenarioSearchEngine:
                         "market outcome evidence"
                     )
 
-        total_states = math.prod(len(states) for states in state_spaces)
+        total_states = math.prod(state_counts)
         if total_states > self.exact_state_limit:
             raise ValueError(
                 "authoritative terminal outcome space exceeds exact_state_limit; "
                 "complete-state truth cannot be approximated"
             )
 
+        state_spaces = [
+            authority.terminal_states for authority in state_authorities
+        ]
         profits: list[Decimal] = []
         for combination in itertools.product(*state_spaces):
             settlement_by_quote: dict[str, str] = {}
@@ -307,19 +333,27 @@ class ScenarioSearchEngine:
             ),
             Decimal("0"),
         )
+        outcome_space_exact = all(
+            authority.terminal_space_exact for authority in state_authorities
+        )
         return ScenarioSearchReport(
-            mode="authoritative-exact-enumeration",
+            mode=(
+                "authoritative-exact-enumeration"
+                if outcome_space_exact
+                else "authoritative-conservative-enumeration"
+            ),
             total_states=total_states,
             nodes_explored=total_states,
             observed_worst=min(profits),
             observed_best=max(profits),
             conservative_floor=floor,
             conservative_ceiling=ceiling,
-            worst_proven=True,
-            best_proven=True,
+            worst_proven=outcome_space_exact,
+            best_proven=outcome_space_exact,
             expected_case=None,
             expected_mode=None,
             outcome_space_exhaustive=True,
+            outcome_space_exact=outcome_space_exact,
             outcome_authority_sha256s=tuple(
                 authority.authority_sha256 for authority in ordered
             ),

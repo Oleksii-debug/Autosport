@@ -4,10 +4,16 @@ from decimal import Decimal
 
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
+from autosport.opportunity import (
+    ForecastRef,
+    Opportunity,
+    OpportunityDecision,
+    QuoteRef,
+    StrategyClass,
+)
 from autosport.paper import PaperBook
 from autosport.portfolio_plan import (
     EvidenceTruth,
-    OpportunityClass,
     OpportunityEvidence,
     OpportunityIntent,
     PortfolioAction,
@@ -19,6 +25,7 @@ from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 
 class PortfolioPlanTests(unittest.TestCase):
     DECISION_TS = "2026-09-18T13:20:00+00:00"
+    SNAPSHOT_SHA = "9" * 64
 
     @staticmethod
     def _goal(**overrides: object) -> EconomicGoalContract:
@@ -56,12 +63,14 @@ class PortfolioPlanTests(unittest.TestCase):
         goal: EconomicGoalContract,
         *,
         suffix: str = "1",
+        sport: str = "soccer",
     ) -> ProposedTicketRiskContext:
         leg = TicketLeg(
             f"event-{suffix}",
             f"market-{suffix}",
             f"selection-{suffix}",
             Decimal("2"),
+            sport=sport,
         )
         quote = MarketEvent(
             event_id=leg.event_id,
@@ -73,6 +82,7 @@ class PortfolioPlanTests(unittest.TestCase):
             sequence=1,
             source_ts="2026-09-18T13:19:59+00:00",
             ingest_ts="2026-09-18T13:19:59+00:00",
+            sport=sport,
         )
         return ProposedTicketRiskContext(
             legs=(leg,),
@@ -86,7 +96,6 @@ class PortfolioPlanTests(unittest.TestCase):
     def _evidence(
         *,
         evidence_id: str = "evidence-1",
-        forecast: bool = False,
         truth: EvidenceTruth = EvidenceTruth.EXACT,
         outcome_space_complete: bool = False,
         execution_feasible: bool = True,
@@ -97,7 +106,6 @@ class PortfolioPlanTests(unittest.TestCase):
             causal_cutoff="2026-09-18T13:19:58+00:00",
             reproducibility_sha256="a" * 64,
             truth=truth,
-            forecast_sha256=("b" * 64 if forecast else None),
             outcome_space_complete=outcome_space_complete,
             terminal_state_space_sha256=(
                 "c" * 64 if outcome_space_complete else None
@@ -109,39 +117,91 @@ class PortfolioPlanTests(unittest.TestCase):
         )
 
     @classmethod
+    def _opportunity(
+        cls,
+        context: ProposedTicketRiskContext,
+        *,
+        strategy_class: StrategyClass,
+        decision: OpportunityDecision = OpportunityDecision.ACTIONABLE,
+    ) -> Opportunity:
+        refs = tuple(
+            QuoteRef.from_market_event(
+                quote,
+                market_snapshot_hash=cls.SNAPSHOT_SHA,
+            )
+            for quote in context.quotes
+        )
+        forecast_dependent = strategy_class in {
+            StrategyClass.PREDICTIVE_EDGE,
+            StrategyClass.HYBRID,
+        }
+        forecasts = (
+            tuple(
+                ForecastRef(
+                    forecast_id=f"forecast-{index}",
+                    forecast_hash=("8" * 63) + str(index % 10),
+                    quote_key=quote.quote_key,
+                    probability=Decimal("0.55"),
+                    input_cutoff_ts="2026-09-18T13:19:58+00:00",
+                    market_snapshot_hash=quote.market_snapshot_hash or cls.SNAPSHOT_SHA,
+                    quote_market_event_hash=quote.market_event_hash,
+                )
+                for index, quote in enumerate(refs)
+            )
+            if forecast_dependent
+            else ()
+        )
+        return Opportunity(
+            strategy_class=strategy_class,
+            decision=decision,
+            quotes=refs,
+            claims_probability_edge=forecast_dependent,
+            forecasts=forecasts,
+        )
+
+    @classmethod
     def _intent(
         cls,
         goal: EconomicGoalContract,
         *,
         suffix: str = "1",
-        opportunity_class: OpportunityClass = OpportunityClass.PREDICTIVE_EDGE,
+        strategy_class: StrategyClass = StrategyClass.PREDICTIVE_EDGE,
+        decision: OpportunityDecision = OpportunityDecision.ACTIONABLE,
         signal: Decimal = Decimal("0.05"),
         evidence: OpportunityEvidence | None = None,
+        sport: str = "soccer",
     ) -> OpportunityIntent:
-        needs_forecast = opportunity_class in {
-            OpportunityClass.PREDICTIVE_EDGE,
-            OpportunityClass.HYBRID,
+        context = cls._context(goal, suffix=suffix, sport=sport)
+        requires_complete = strategy_class in {
+            StrategyClass.ARBITRAGE,
+            StrategyClass.DUTCHING,
+            StrategyClass.HEDGE_REBALANCE,
         }
         return OpportunityIntent(
             intent_id=f"intent-{suffix}",
-            opportunity_class=opportunity_class,
+            opportunity=cls._opportunity(
+                context,
+                strategy_class=strategy_class,
+                decision=decision,
+            ),
             evidence=evidence
             or cls._evidence(
                 evidence_id=f"evidence-{suffix}",
-                forecast=needs_forecast,
-                outcome_space_complete=opportunity_class
-                in {OpportunityClass.ARBITRAGE, OpportunityClass.DUTCHING},
+                outcome_space_complete=requires_complete,
             ),
-            risk_context=cls._context(goal, suffix=suffix),
+            risk_context=context,
             signal_strength=signal,
             strategy_id=f"strategy-{suffix}",
-            model_id=(f"model-{suffix}" if needs_forecast else None),
+            model_id=(
+                f"model-{suffix}"
+                if strategy_class
+                in {StrategyClass.PREDICTIVE_EDGE, StrategyClass.HYBRID}
+                else None
+            ),
             config_sha256="e" * 64,
         )
 
-    def test_predictive_intent_delegates_stake_math_to_canonical_risk_policy(
-        self,
-    ) -> None:
+    def test_predictive_intent_uses_canonical_opportunity_and_risk_policy(self) -> None:
         goal = self._goal()
         policy = self._policy(goal)
         book = PaperBook("1000")
@@ -155,19 +215,20 @@ class PortfolioPlanTests(unittest.TestCase):
             dependency_graph_sha256="f" * 64,
         )
 
+        self.assertEqual(intent.opportunity_class, StrategyClass.PREDICTIVE_EDGE)
         self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
         self.assertEqual(plan.stakes, (Decimal("50.00"),))
         self.assertEqual(book.balance, Decimal("1000"))
         self.assertEqual(book.tickets, {})
         self.assertEqual(plan.risk_policy_sha256, policy.provenance_sha256)
-        self.assertIsNotNone(plan.economic_goal_contract_sha256)
+        self.assertEqual(len(intent.intent_sha256), 64)
         self.assertEqual(len(plan.plan_sha256), 64)
 
     def test_nonforecast_arbitrage_uses_same_portfolio_risk_path(self) -> None:
         goal = self._goal()
         intent = self._intent(
             goal,
-            opportunity_class=OpportunityClass.ARBITRAGE,
+            strategy_class=StrategyClass.ARBITRAGE,
             signal=Decimal("0.04"),
         )
 
@@ -181,38 +242,84 @@ class PortfolioPlanTests(unittest.TestCase):
 
         self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
         self.assertEqual(plan.stakes, (Decimal("40.00"),))
-        self.assertIsNone(intent.evidence.forecast_sha256)
+        self.assertFalse(intent.opportunity.forecasts)
         self.assertIsNone(intent.model_id)
 
-    def test_predictive_and_hybrid_require_forecast_model_identity(self) -> None:
+    def test_hedge_rebalance_is_labeled_without_bypassing_risk_policy(self) -> None:
         goal = self._goal()
-        with self.assertRaisesRegex(ValueError, "requires forecast_sha256"):
+        intent = self._intent(
+            goal,
+            strategy_class=StrategyClass.HEDGE_REBALANCE,
+            signal=Decimal("0.03"),
+        )
+
+        plan = build_portfolio_plan(
+            PaperBook("1000"),
+            (intent,),
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph_sha256="7" * 64,
+        )
+
+        self.assertEqual(plan.action, PortfolioAction.HEDGE_REBALANCE)
+        self.assertEqual(plan.stakes, (Decimal("30.00"),))
+        self.assertEqual(plan.reason, "endogenous whole-portfolio stake vector derived")
+
+    def test_intent_rejects_quote_or_sport_identity_drift(self) -> None:
+        goal = self._goal()
+        soccer = self._context(goal, suffix="same", sport="soccer")
+        tennis = self._context(goal, suffix="same", sport="tennis")
+        opportunity = self._opportunity(
+            soccer,
+            strategy_class=StrategyClass.ARBITRAGE,
+        )
+
+        with self.assertRaisesRegex(ValueError, "exactly match canonical opportunity"):
             OpportunityIntent(
-                intent_id="bad-predictive",
-                opportunity_class=OpportunityClass.PREDICTIVE_EDGE,
-                evidence=self._evidence(),
-                risk_context=self._context(goal),
+                intent_id="identity-drift",
+                opportunity=opportunity,
+                evidence=self._evidence(outcome_space_complete=True),
+                risk_context=tennis,
                 signal_strength=Decimal("0.01"),
                 strategy_id="strategy",
-                model_id="model",
                 config_sha256="e" * 64,
             )
 
+    def test_predictive_requires_model_identity_but_nonforecast_rejects_it(self) -> None:
+        goal = self._goal()
+        predictive_context = self._context(goal)
         with self.assertRaisesRegex(ValueError, "requires model_id"):
             OpportunityIntent(
-                intent_id="bad-hybrid",
-                opportunity_class=OpportunityClass.HYBRID,
-                evidence=self._evidence(forecast=True),
-                risk_context=self._context(goal),
+                intent_id="bad-predictive",
+                opportunity=self._opportunity(
+                    predictive_context,
+                    strategy_class=StrategyClass.PREDICTIVE_EDGE,
+                ),
+                evidence=self._evidence(),
+                risk_context=predictive_context,
                 signal_strength=Decimal("0.01"),
                 strategy_id="strategy",
                 model_id=None,
                 config_sha256="e" * 64,
             )
 
-    def test_positive_action_fails_closed_on_approximate_or_missing_dependency_truth(
-        self,
-    ) -> None:
+        arb_context = self._context(goal, suffix="arb")
+        with self.assertRaisesRegex(ValueError, "forecast-dependent"):
+            OpportunityIntent(
+                intent_id="bad-arb",
+                opportunity=self._opportunity(
+                    arb_context,
+                    strategy_class=StrategyClass.ARBITRAGE,
+                ),
+                evidence=self._evidence(outcome_space_complete=True),
+                risk_context=arb_context,
+                signal_strength=Decimal("0.01"),
+                strategy_id="strategy",
+                model_id="must-not-authorize",
+                config_sha256="e" * 64,
+            )
+
+    def test_positive_action_fails_closed_on_approximate_or_missing_dependency_truth(self) -> None:
         goal = self._goal()
         policy = self._policy(goal)
         intent = self._intent(goal)
@@ -239,14 +346,15 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertEqual(missing_graph.action, PortfolioAction.WAIT)
         self.assertIn("dependency-graph", missing_graph.reason)
 
-    def test_outcome_independent_positive_requires_complete_exact_terminal_evidence(
-        self,
-    ) -> None:
+    def test_outcome_independent_positive_requires_complete_exact_terminal_evidence(self) -> None:
         goal = self._goal()
         approximate = self._intent(
             goal,
-            opportunity_class=OpportunityClass.ARBITRAGE,
-            evidence=self._evidence(truth=EvidenceTruth.APPROXIMATE),
+            strategy_class=StrategyClass.ARBITRAGE,
+            evidence=self._evidence(
+                truth=EvidenceTruth.APPROXIMATE,
+                outcome_space_complete=True,
+            ),
         )
         plan = build_portfolio_plan(
             PaperBook("1000"),
@@ -261,7 +369,7 @@ class PortfolioPlanTests(unittest.TestCase):
         incomplete = self._intent(
             goal,
             suffix="2",
-            opportunity_class=OpportunityClass.ARBITRAGE,
+            strategy_class=StrategyClass.ARBITRAGE,
             evidence=self._evidence(
                 evidence_id="incomplete",
                 outcome_space_complete=False,
@@ -277,11 +385,11 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertEqual(plan.action, PortfolioAction.WAIT)
         self.assertIn("terminal-state", plan.reason)
 
-    def test_future_or_infeasible_evidence_cannot_create_positive_action(self) -> None:
+    def test_future_infeasible_and_canonical_wait_cannot_create_positive_action(self) -> None:
         goal = self._goal()
         policy = self._policy(goal)
         future_evidence = replace(
-            self._evidence(forecast=True),
+            self._evidence(),
             observed_at="2026-09-18T13:20:01+00:00",
             causal_cutoff="2026-09-18T13:20:01+00:00",
         )
@@ -298,7 +406,6 @@ class PortfolioPlanTests(unittest.TestCase):
             suffix="2",
             evidence=self._evidence(
                 evidence_id="infeasible",
-                forecast=True,
                 execution_feasible=False,
             ),
         )
@@ -309,22 +416,42 @@ class PortfolioPlanTests(unittest.TestCase):
             self.DECISION_TS,
             dependency_graph_sha256="f" * 64,
         )
+        canonical_wait = self._intent(
+            goal,
+            suffix="3",
+            decision=OpportunityDecision.WAIT,
+        )
+        wait_plan = build_portfolio_plan(
+            PaperBook("1000"),
+            (canonical_wait,),
+            policy,
+            self.DECISION_TS,
+            dependency_graph_sha256="f" * 64,
+        )
 
         self.assertEqual(future_plan.action, PortfolioAction.WAIT)
         self.assertIn("future", future_plan.reason)
         self.assertEqual(infeasible_plan.action, PortfolioAction.WAIT)
         self.assertIn("not proven feasible", infeasible_plan.reason)
+        self.assertEqual(wait_plan.action, PortfolioAction.WAIT)
+        self.assertIn("canonical opportunity decision", wait_plan.reason)
 
-    def test_zero_signal_and_owner_emergency_stop_produce_zero_semantics(self) -> None:
+    def test_zero_decision_and_owner_emergency_stop_produce_zero_semantics(self) -> None:
         goal = self._goal()
-        zero = build_portfolio_plan(
+        canonical_zero = build_portfolio_plan(
             PaperBook("1000"),
-            (self._intent(goal, signal=Decimal("0")),),
+            (
+                self._intent(
+                    goal,
+                    decision=OpportunityDecision.ZERO,
+                    signal=Decimal("0.05"),
+                ),
+            ),
             self._policy(goal),
             self.DECISION_TS,
             dependency_graph_sha256=None,
         )
-        self.assertEqual(zero.action, PortfolioAction.ZERO)
+        self.assertEqual(canonical_zero.action, PortfolioAction.ZERO)
 
         stopped_goal = self._goal(emergency_stop=True)
         stopped = build_portfolio_plan(
@@ -337,9 +464,7 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertEqual(stopped.action, PortfolioAction.ZERO)
         self.assertIn("emergency stop", stopped.reason)
 
-    def test_duplicate_intent_identity_waits_and_plan_roundtrip_is_hash_stable(
-        self,
-    ) -> None:
+    def test_duplicate_intent_waits_and_plan_roundtrip_is_hash_stable(self) -> None:
         goal = self._goal()
         intent = self._intent(goal)
         policy = self._policy(goal)

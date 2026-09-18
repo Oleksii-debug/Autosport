@@ -167,10 +167,6 @@ class OpportunityEvidence:
             "truth": self.truth.value,
             "outcome_space_complete": self.outcome_space_complete,
             "terminal_state_space_sha256": self.terminal_state_space_sha256,
-            "execution_check_sha256s": [
-                [name, digest]
-                for name, digest in self.execution_check_sha256s
-            ],
             "execution_assumptions_sha256": self.execution_assumptions_sha256,
             "execution_feasible": self.execution_feasible,
         }
@@ -690,6 +686,10 @@ class TerminalStateCompletenessEvidence:
             "intent_sha256s": list(self.intent_sha256s),
             "candidate_sha256s": list(self.candidate_sha256s),
             "scenario_groups": self._groups_payload(self.scenario_groups),
+            "execution_check_sha256s": [
+                [name, digest]
+                for name, digest in self.execution_check_sha256s
+            ],
             "terminal_state_space_sha256": self.terminal_state_space_sha256,
             "execution_assumptions_sha256": self.execution_assumptions_sha256,
         }
@@ -1911,6 +1911,27 @@ def build_portfolio_plan(
                     policy=risk_policy,
                     portfolio_truth=portfolio_truth,
                 )
+            # ScenarioSearch proves extrema only inside the supplied ScenarioGroups.
+            # The current canonical market/settlement model has no authoritative
+            # exhaustive roster proving that a real terminal outcome was not omitted.
+            # Therefore even a hash-bound external witness is diagnostic evidence,
+            # not positive-action authority.  Keep the richer proof for future
+            # reconciliation, but fail closed until canonical market-outcome
+            # exhaustiveness exists.
+            return _terminal_plan(
+                decision_ts=decision_ts,
+                action=PortfolioAction.WAIT,
+                reason=(
+                    "positive whole-position or outcome-independent action requires "
+                    "authoritative exhaustive market-outcome semantics; external "
+                    "scenario groups cannot prove omitted real outcomes absent"
+                ),
+                intents=intents,
+                portfolio_sha256=portfolio_sha256,
+                dependency_graph=dependency_graph,
+                policy=risk_policy,
+                portfolio_truth=portfolio_truth,
+            )
         positive_strategy_classes = {
             intent.opportunity.strategy_class
             for intent, stake in zip(intents, allocation.stakes, strict=True)

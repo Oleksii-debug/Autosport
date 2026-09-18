@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -452,7 +454,7 @@ class AutosportSession:
         # same market_events snapshot already drives ReplayEngine and
         # replay_dataset_hash. Campaign evidence may later consume this compact
         # projection, but cannot mint or rewrite it.
-        normalized_observation_timestamps: list[str] = []
+        normalized_observations: list[tuple[str, str]] = []
         for event in market_events:
             try:
                 observed = datetime.fromisoformat(
@@ -464,22 +466,42 @@ class AutosportSession:
                 ) from exc
             if observed.tzinfo is None or observed.utcoffset() is None:
                 raise ValueError("market event observed_ts must include timezone")
-            normalized_observation_timestamps.append(
-                observed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            normalized_observations.append(
+                (
+                    observed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    event.dedupe_key,
+                )
             )
-        observation_timestamps = tuple(
-            sorted(set(normalized_observation_timestamps))
+        normalized_observations.sort(key=lambda item: (item[0], item[1]))
+        observation_timestamps = tuple(item[0] for item in normalized_observations)
+        observation_membership_payload = [
+            {"observed_ts": observed_ts, "dedupe_key": dedupe_key}
+            for observed_ts, dedupe_key in normalized_observations
+        ]
+        observation_membership_sha256 = (
+            hashlib.sha256(
+                json.dumps(
+                    observation_membership_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            if observation_membership_payload
+            else None
         )
         campaign_causal_membership = (
             None
             if not observation_timestamps
             else {
-                "schema_version": 1,
+                "schema_version": 2,
                 "replay_dataset_hash": result.replay.dataset_hash,
                 "event_count": result.replay.event_count,
                 "evaluation_window_start": observation_timestamps[0],
                 "evaluation_window_end": observation_timestamps[-1],
                 "observation_timestamps": list(observation_timestamps),
+                "observation_membership_sha256": observation_membership_sha256,
             }
         )
         payload = {

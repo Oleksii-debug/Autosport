@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.supervised_provider_evidence as provider_evidence
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairReadOnlyError,
@@ -729,6 +730,33 @@ def test_caller_constructed_positive_readback_cannot_mint_ack() -> None:
         assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
 
+def test_caller_cannot_clone_verified_effect_to_mint_ack() -> None:
+    assert not hasattr(provider_evidence, "_SEAL")
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl"
+        )
+        genuine = _verified_state(
+            bound,
+            action,
+            matched_stake=action.requested_stake,
+        )
+        assert isinstance(genuine, VerifiedProviderEffectEvidence)
+        forged = replace(genuine)
+
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="provider evidence is not authoritative",
+        ):
+            reconcile_provider_readback(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=forged,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
+
+
 def test_complete_provider_absence_is_required_before_retry_release() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger, bound, _, action, _, _ = _ledger_with_unknown(
@@ -772,6 +800,33 @@ def test_opaque_not_found_hashes_cannot_release_retry() -> None:
         with pytest.raises(
             SupervisedExecutionError,
             match="verified complete provider absence",
+        ):
+            reconcile_provider_not_found(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=forged,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
+        assert ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        ) is False
+
+
+def test_caller_cannot_clone_verified_absence_to_release_retry() -> None:
+    assert not hasattr(provider_evidence, "_SEAL")
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl"
+        )
+        genuine = _verified_state(bound, action, matched_stake=None)
+        assert isinstance(genuine, VerifiedProviderAbsenceEvidence)
+        forged = replace(genuine)
+
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="provider absence evidence is not authoritative",
         ):
             reconcile_provider_not_found(
                 ledger,

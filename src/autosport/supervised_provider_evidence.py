@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import TypeAlias
+from weakref import ref
 
 from .betfair_account_readonly import (
     ADAPTER_ID as BETFAIR_ADAPTER_ID,
@@ -183,10 +184,7 @@ def _complete_cleared_pages(
     return tuple(orders), _digest(payload), latest_raw
 
 
-_SEAL = object()
-
-
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class VerifiedProviderEffectEvidence:
     bookmaker_id: str
     account_id: str
@@ -204,16 +202,9 @@ class VerifiedProviderEffectEvidence:
     accepted_odds: Decimal
     accepted_stake: Decimal
     evidence_id: str
-    _seal: object
-
-    def __post_init__(self) -> None:
-        if self._seal is not _SEAL:
-            raise ProviderEvidenceError(
-                "verified provider effect evidence must come from canonical verifier"
-            )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class VerifiedProviderAbsenceEvidence:
     bookmaker_id: str
     account_id: str
@@ -228,18 +219,54 @@ class VerifiedProviderAbsenceEvidence:
     current_source_payload_sha256: str
     cleared_source_payload_sha256: str
     evidence_id: str
-    _seal: object
-
-    def __post_init__(self) -> None:
-        if self._seal is not _SEAL:
-            raise ProviderEvidenceError(
-                "verified provider absence evidence must come from canonical verifier"
-            )
 
 
 VerifiedProviderState: TypeAlias = (
     VerifiedProviderEffectEvidence | VerifiedProviderAbsenceEvidence
 )
+
+
+def _verified_provider_evidence_fingerprint(evidence: VerifiedProviderState) -> str:
+    if isinstance(evidence, VerifiedProviderEffectEvidence):
+        payload: dict[str, object] = {
+            "kind": "effect",
+            "bookmaker_id": evidence.bookmaker_id,
+            "account_id": evidence.account_id,
+            "action_id": evidence.action_id,
+            "adapter_id": evidence.adapter_id,
+            "adapter_version": evidence.adapter_version,
+            "profile_version": evidence.profile_version,
+            "event_id": evidence.event_id,
+            "market_id": evidence.market_id,
+            "selection_id": evidence.selection_id,
+            "external_receipt_id": evidence.external_receipt_id,
+            "observed_at": evidence.observed_at,
+            "source_payload_sha256": evidence.source_payload_sha256,
+            "status": evidence.status.value,
+            "accepted_odds": str(evidence.accepted_odds),
+            "accepted_stake": str(evidence.accepted_stake),
+            "evidence_id": evidence.evidence_id,
+        }
+    elif isinstance(evidence, VerifiedProviderAbsenceEvidence):
+        payload = {
+            "kind": "absence",
+            "bookmaker_id": evidence.bookmaker_id,
+            "account_id": evidence.account_id,
+            "action_id": evidence.action_id,
+            "adapter_id": evidence.adapter_id,
+            "adapter_version": evidence.adapter_version,
+            "profile_version": evidence.profile_version,
+            "event_id": evidence.event_id,
+            "market_id": evidence.market_id,
+            "selection_id": evidence.selection_id,
+            "observed_at": evidence.observed_at,
+            "current_source_payload_sha256": evidence.current_source_payload_sha256,
+            "cleared_source_payload_sha256": evidence.cleared_source_payload_sha256,
+            "evidence_id": evidence.evidence_id,
+        }
+    else:
+        raise ProviderEvidenceError("provider evidence type is not canonical")
+    return _digest(payload)
 
 
 def _require_bound_profile(
@@ -432,7 +459,6 @@ def verify_betfair_provider_state(
             current_sha,
             cleared_sha,
             evidence_id,
-            _SEAL,
         )
 
     # A transition can expose the same receipt in current and cleared evidence.
@@ -513,5 +539,65 @@ def verify_betfair_provider_state(
         accepted_odds,
         accepted_stake,
         evidence_id,
-        _SEAL,
     )
+
+# Verified provider state is an in-process capability, not a caller assertion.
+# The verifier issues object identities into a non-exported closure and reconciliation
+# rechecks that exact identity plus the immutable payload fingerprint before any ledger
+# transition. A public dataclass constructor or dataclasses.replace() therefore cannot
+# mint provider authority, and there is no importable sentinel/token to reuse.
+def _install_verified_provider_evidence_authority() -> None:
+    issued: dict[int, tuple[object, str]] = {}
+    raw_verify = verify_betfair_provider_state
+
+    def authoritative_verify(
+        action: ExecutionAction,
+        profile: BookmakerCapabilityProfile,
+        *,
+        expected_profile_sha256: str,
+        readback: BetfairExecutionReadbackEnvelope,
+    ) -> VerifiedProviderState:
+        evidence = raw_verify(
+            action,
+            profile,
+            expected_profile_sha256=expected_profile_sha256,
+            readback=readback,
+        )
+        evidence_key = id(evidence)
+
+        def forget(_weakref: object, *, key: int = evidence_key) -> None:
+            issued.pop(key, None)
+
+        issued[evidence_key] = (
+            ref(evidence, forget),
+            _verified_provider_evidence_fingerprint(evidence),
+        )
+        return evidence
+
+    def assert_verified_provider_evidence_authoritative(
+        evidence: VerifiedProviderState,
+    ) -> None:
+        if not isinstance(
+            evidence,
+            (VerifiedProviderEffectEvidence, VerifiedProviderAbsenceEvidence),
+        ):
+            raise ProviderEvidenceError("provider evidence type is not canonical")
+        record = issued.get(id(evidence))
+        if record is None or record[0]() is not evidence:
+            raise ProviderEvidenceError(
+                "verified provider evidence was not issued by canonical verifier"
+            )
+        if record[1] != _verified_provider_evidence_fingerprint(evidence):
+            raise ProviderEvidenceError(
+                "verified provider evidence changed after canonical verification"
+            )
+
+    globals()["verify_betfair_provider_state"] = authoritative_verify
+    globals()[
+        "assert_verified_provider_evidence_authoritative"
+    ] = assert_verified_provider_evidence_authoritative
+
+
+_install_verified_provider_evidence_authority()
+del _install_verified_provider_evidence_authority
+

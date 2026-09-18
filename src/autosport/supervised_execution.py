@@ -18,8 +18,10 @@ from .bookmaker_routing import RoutingState
 from .bookmaker_routing_plan import ParallelRoutingProposal
 from .portfolio_plan import OpportunityIntent, PortfolioAction, PortfolioPlan
 from .supervised_provider_evidence import (
+    ProviderEvidenceError,
     VerifiedProviderAbsenceEvidence,
     VerifiedProviderEffectEvidence,
+    assert_verified_provider_evidence_authoritative,
     verify_betfair_provider_state,
 )
 from .real_execution_ledger import (
@@ -867,6 +869,12 @@ def reconcile_provider_readback(
         raise SupervisedExecutionError(
             "verified canonical provider evidence is required"
         )
+    try:
+        assert_verified_provider_evidence_authoritative(readback)
+    except ProviderEvidenceError as exc:
+        raise SupervisedExecutionError(
+            "verified canonical provider evidence is not authoritative"
+        ) from exc
     action, state = _attempt_action(ledger, bound, attempt_id)
     if (
         readback.bookmaker_id,
@@ -1003,6 +1011,12 @@ def reconcile_provider_not_found(
         raise SupervisedExecutionError(
             "verified complete provider absence evidence is required"
         )
+    try:
+        assert_verified_provider_evidence_authoritative(readback)
+    except ProviderEvidenceError as exc:
+        raise SupervisedExecutionError(
+            "verified complete provider absence evidence is not authoritative"
+        ) from exc
     action, state = _attempt_action(ledger, bound, attempt_id)
     if state is not AttemptState.UNKNOWN:
         raise SupervisedExecutionError("not-found readback requires UNKNOWN attempt")

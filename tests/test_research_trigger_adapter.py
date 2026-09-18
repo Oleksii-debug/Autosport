@@ -1,6 +1,10 @@
 import pytest
 
-from autosport.research_supervisor import ConflictingResearchTriggerError, ResearchSupervisor
+from autosport.research_supervisor import (
+    ConflictingResearchTriggerError,
+    ResearchPhase,
+    ResearchSupervisor,
+)
 from autosport.research_trigger_adapter import (
     ExternalResearchTrigger,
     ResearchTriggerAdapter,
@@ -130,6 +134,27 @@ def test_event_chronology_and_deadline_are_fail_closed_at_the_boundary(tmp_path)
         _event(question, deadline_at="2026-09-18T12:00:59Z")
     with pytest.raises(ValueError, match="lowercase canonical"):
         _event(question, source_evidence_sha256=("A" * 64))
+
+
+def test_exact_redelivery_after_advance_and_restart_preserves_acceptance_receipt(tmp_path):
+    registry, supervisor, question = _workspace(tmp_path)
+    event = _event(question)
+    first = ResearchTriggerAdapter(supervisor).accept(event)
+
+    advanced = supervisor.advance(
+        first.run_id,
+        expected_phase=ResearchPhase.QUESTION,
+        at="2026-09-18T12:02:00Z",
+        budget_cost=1,
+    )
+    assert advanced.checkpoint_sha256 != first.checkpoint_sha256
+
+    reopened = ResearchSupervisor(supervisor.path, registry)
+    replay = ResearchTriggerAdapter(reopened).accept(event)
+
+    assert replay == first
+    assert replay.receipt_sha256 == first.receipt_sha256
+    assert reopened.status(first.run_id).checkpoint_sha256 == advanced.checkpoint_sha256
 
 
 def test_reopened_supervisor_preserves_external_event_replay_receipt(tmp_path):

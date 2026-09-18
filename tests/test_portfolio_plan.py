@@ -24,10 +24,12 @@ from autosport.portfolio_plan import (
     PortfolioDependencyGraph,
     PortfolioPlan,
     PortfolioPlanReconciliationRequired,
+    TerminalStateCompletenessEvidence,
     build_portfolio_plan,
     persist_portfolio_plan_decision,
 )
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
+from autosport.scenario_search import ScenarioGroup, ScenarioOutcome
 
 
 class PortfolioPlanTests(unittest.TestCase):
@@ -71,19 +73,20 @@ class PortfolioPlanTests(unittest.TestCase):
         *,
         suffix: str = "1",
         sport: str = "soccer",
+        odds: Decimal = Decimal("2"),
     ) -> ProposedTicketRiskContext:
         leg = TicketLeg(
             f"event-{suffix}",
             f"market-{suffix}",
             f"selection-{suffix}",
-            Decimal("2"),
+            odds,
             sport=sport,
         )
         quote = MarketEvent(
             event_id=leg.event_id,
             market_id=leg.market_id,
             selection_id=leg.selection_id,
-            decimal_odds=Decimal("2"),
+            decimal_odds=odds,
             observed_ts="2026-09-18T13:19:59+00:00",
             source_id=f"provider-{suffix}",
             sequence=1,
@@ -177,8 +180,14 @@ class PortfolioPlanTests(unittest.TestCase):
         signal: Decimal = Decimal("0.05"),
         evidence: OpportunityEvidence | None = None,
         sport: str = "soccer",
+        odds: Decimal = Decimal("2"),
     ) -> OpportunityIntent:
-        context = cls._context(goal, suffix=suffix, sport=sport)
+        context = cls._context(
+            goal,
+            suffix=suffix,
+            sport=sport,
+            odds=odds,
+        )
         requires_complete = strategy_class in {
             StrategyClass.ARBITRAGE,
             StrategyClass.DUTCHING,
@@ -219,6 +228,53 @@ class PortfolioPlanTests(unittest.TestCase):
             book,
             intents,
             dependency_edges=dependency_edges,
+        )
+
+    @staticmethod
+    def _bind_terminal_state(
+        intents: tuple[OpportunityIntent, ...],
+        groups: tuple[ScenarioGroup, ...],
+    ) -> tuple[OpportunityIntent, ...]:
+        state_sha256 = TerminalStateCompletenessEvidence.state_space_sha256_for(
+            groups
+        )
+        return tuple(
+            replace(
+                intent,
+                evidence=replace(
+                    intent.evidence,
+                    truth=EvidenceTruth.EXACT,
+                    outcome_space_complete=True,
+                    terminal_state_space_sha256=state_sha256,
+                    execution_assumptions_sha256="d" * 64,
+                    execution_feasible=True,
+                ),
+            )
+            for intent in intents
+        )
+
+    @staticmethod
+    def _terminal_witness(
+        book: PaperBook,
+        intents: tuple[OpportunityIntent, ...],
+        graph: PortfolioDependencyGraph,
+        groups: tuple[ScenarioGroup, ...],
+    ) -> TerminalStateCompletenessEvidence:
+        portfolio_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        assert portfolio_sha256 is not None
+        return TerminalStateCompletenessEvidence(
+            evidence_id="terminal-completeness-1",
+            verifier_identity="paper-terminal-verifier",
+            verification_protocol_sha256="1" * 64,
+            reproducibility_bundle_sha256="2" * 64,
+            causal_cutoff="2026-09-18T13:19:58+00:00",
+            evaluated_at="2026-09-18T13:19:59+00:00",
+            portfolio_sha256=portfolio_sha256,
+            dependency_graph_sha256=graph.graph_sha256,
+            intent_sha256s=tuple(intent.intent_sha256 for intent in intents),
+            candidate_sha256s=tuple(intent.candidate_sha256 for intent in intents),
+            scenario_groups=groups,
+            execution_assumptions_sha256="d" * 64,
         )
 
     def test_predictive_intent_uses_canonical_opportunity_and_risk_policy(self) -> None:
@@ -526,6 +582,160 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertEqual(plan.action, PortfolioAction.WAIT)
         self.assertEqual(plan.stakes, (Decimal("0"),))
         self.assertIn("existing open positions", plan.reason)
+
+    def test_verified_complete_arbitrage_requires_positive_exact_terminal_minimum(self) -> None:
+        goal = self._goal()
+        base_intents = (
+            self._intent(
+                goal,
+                suffix="arb-a",
+                strategy_class=StrategyClass.ARBITRAGE,
+                signal=Decimal("0.05"),
+                odds=Decimal("3"),
+            ),
+            self._intent(
+                goal,
+                suffix="arb-b",
+                strategy_class=StrategyClass.ARBITRAGE,
+                signal=Decimal("0.05"),
+                odds=Decimal("3"),
+            ),
+        )
+        outcomes = tuple(
+            ScenarioOutcome(quote_key=key)
+            for key in sorted(
+                intent.risk_context.legs[0].quote_key
+                for intent in base_intents
+            )
+        )
+        groups = (ScenarioGroup("complete-terminal-market", outcomes),)
+        intents = self._bind_terminal_state(base_intents, groups)
+        book = PaperBook("1000")
+        edge = tuple(
+            sorted((intents[0].candidate_sha256, intents[1].candidate_sha256))
+        )
+        graph = self._graph(book, intents, dependency_edges=(edge,))
+        witness = self._terminal_witness(book, intents, graph, groups)
+
+        plan = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            terminal_state_evidence=witness,
+        )
+
+        self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
+        self.assertTrue(all(stake > 0 for stake in plan.stakes))
+        self.assertIsNotNone(plan.terminal_economics)
+        assert plan.terminal_economics is not None
+        self.assertTrue(plan.terminal_economics.worst_proven)
+        self.assertGreater(
+            plan.terminal_economics.worst_terminal_profit,
+            Decimal("0"),
+        )
+        self.assertEqual(PortfolioPlan.from_dict(plan.to_dict()), plan)
+
+    def test_verified_terminal_model_with_nonpositive_minimum_fails_closed(self) -> None:
+        goal = self._goal()
+        base_intents = (
+            self._intent(
+                goal,
+                suffix="zero-min-a",
+                strategy_class=StrategyClass.ARBITRAGE,
+                signal=Decimal("0.05"),
+                odds=Decimal("2"),
+            ),
+            self._intent(
+                goal,
+                suffix="zero-min-b",
+                strategy_class=StrategyClass.ARBITRAGE,
+                signal=Decimal("0.05"),
+                odds=Decimal("2"),
+            ),
+        )
+        groups = (
+            ScenarioGroup(
+                "complete-zero-min-market",
+                tuple(
+                    ScenarioOutcome(quote_key=key)
+                    for key in sorted(
+                        intent.risk_context.legs[0].quote_key
+                        for intent in base_intents
+                    )
+                ),
+            ),
+        )
+        intents = self._bind_terminal_state(base_intents, groups)
+        book = PaperBook("1000")
+        edge = tuple(
+            sorted((intents[0].candidate_sha256, intents[1].candidate_sha256))
+        )
+        graph = self._graph(book, intents, dependency_edges=(edge,))
+        witness = self._terminal_witness(book, intents, graph, groups)
+
+        plan = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            terminal_state_evidence=witness,
+        )
+
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"), Decimal("0")))
+        self.assertIn("minimum terminal net P&L is not positive", plan.reason)
+
+    def test_typed_terminal_witness_cannot_hide_missing_candidate_outcome(self) -> None:
+        goal = self._goal()
+        base_intents = (
+            self._intent(
+                goal,
+                suffix="missing-a",
+                strategy_class=StrategyClass.ARBITRAGE,
+                signal=Decimal("0.05"),
+                odds=Decimal("3"),
+            ),
+            self._intent(
+                goal,
+                suffix="missing-b",
+                strategy_class=StrategyClass.ARBITRAGE,
+                signal=Decimal("0.05"),
+                odds=Decimal("3"),
+            ),
+        )
+        first_key = base_intents[0].risk_context.legs[0].quote_key
+        groups = (
+            ScenarioGroup(
+                "incomplete-terminal-market",
+                tuple(
+                    ScenarioOutcome(quote_key=key)
+                    for key in sorted((first_key, "terminal-other"))
+                ),
+            ),
+        )
+        intents = self._bind_terminal_state(base_intents, groups)
+        book = PaperBook("1000")
+        edge = tuple(
+            sorted((intents[0].candidate_sha256, intents[1].candidate_sha256))
+        )
+        graph = self._graph(book, intents, dependency_edges=(edge,))
+        witness = self._terminal_witness(book, intents, graph, groups)
+
+        plan = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            terminal_state_evidence=witness,
+        )
+
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"), Decimal("0")))
+        self.assertIn("ticket leg missing from scenario space", plan.reason)
 
     def test_future_infeasible_and_canonical_wait_cannot_create_positive_action(self) -> None:
         goal = self._goal()

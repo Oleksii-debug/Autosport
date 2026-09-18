@@ -1106,6 +1106,124 @@ class RunRegistry:
             raise KeyError(key)
         return dict(item)
 
+    def verified_completed_summary_for_run(self, run_id: str) -> tuple[dict, str]:
+        """Return transaction-bound summary payload and SHA-256 for one completed run.
+
+        This is a read-only historical evidence boundary. It does not require the
+        current PaperBook to still equal the run's terminal snapshot, because later
+        completed runs may legitimately have advanced the canonical workspace.
+        Instead the exact run-summary bytes must still match the terminal
+        RunTransaction manifest and the completed RunRegistry identity/hash evidence.
+        """
+
+        _require_nonempty_string("run_id", run_id)
+        state = self._read()
+        matches = [
+            (key, item)
+            for key, item in state["runs"].items()
+            if item.get("run_id") == run_id
+        ]
+        if not matches:
+            raise KeyError(run_id)
+        if len(matches) != 1:
+            raise ReconciliationError("run_id is not unique in the run registry")
+        key, item = matches[0]
+        if item.get("status") != "completed":
+            raise ReconciliationError("run is not completed")
+
+        expected_name = f"run-{run_id}.json"
+        result_path = item.get("result_path")
+        if (
+            not isinstance(result_path, str)
+            or not result_path
+            or result_path.replace("\\", "/").rsplit("/", 1)[-1] != expected_name
+        ):
+            raise ReconciliationError("completed run result_path is not canonical")
+
+        summary_path = self.path.parent / expected_name
+        try:
+            summary_bytes = _read_stable_regular_file_bytes(
+                summary_path,
+                label="completed run summary",
+            )
+            manifest_bytes = _read_nested_regular_file_bytes(
+                self.path.parent,
+                (".run-transactions", run_id, "manifest.json"),
+                label="completed run transaction manifest",
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            raise ReconciliationError(
+                "completed run lacks stable transaction-bound summary evidence"
+            ) from exc
+
+        try:
+            summary = json.loads(
+                summary_bytes.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
+            manifest = json.loads(
+                manifest_bytes.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
+        except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            raise ReconciliationError(
+                "completed run summary or transaction manifest is invalid"
+            ) from exc
+        if not isinstance(summary, dict) or not isinstance(manifest, dict):
+            raise ReconciliationError("completed run evidence must be JSON objects")
+        if summary.get("schema_version") != 2:
+            raise ReconciliationError("completed run summary schema_version is unsupported")
+        if manifest.get("phase") not in {"canonical_committed", "completed"}:
+            raise ReconciliationError("run transaction is not terminal")
+
+        expected_identity = {
+            "experiment_key": key,
+            "run_id": run_id,
+            "market_sha256": item.get("market_sha256"),
+            "sealed_results_sha256": item.get("results_sha256"),
+            "strategy_id": item.get("strategy_id"),
+        }
+        for field, expected_value in expected_identity.items():
+            if summary.get(field) != expected_value or manifest.get(field) != expected_value:
+                raise ReconciliationError(
+                    f"completed run {field} does not match durable authorities"
+                )
+        if summary.get("real_money_execution") is not False:
+            raise ReconciliationError("completed run truth boundary is invalid")
+        if summary.get("transaction_run_id") != run_id:
+            raise ReconciliationError("completed run transaction_run_id mismatch")
+        if summary.get("transaction_schema_version") != manifest.get("schema_version"):
+            raise ReconciliationError("completed run transaction schema mismatch")
+
+        targets = manifest.get("targets")
+        new_state = manifest.get("new")
+        if not isinstance(targets, dict) or targets.get("summary") != expected_name:
+            raise ReconciliationError("run transaction summary target is invalid")
+        if not isinstance(new_state, dict):
+            raise ReconciliationError("run transaction terminal evidence is incomplete")
+        expected_summary_sha = new_state.get("summary_sha256")
+        if not _is_canonical_sha256(expected_summary_sha):
+            raise ReconciliationError("run transaction lacks summary SHA-256")
+        actual_summary_sha = hashlib.sha256(summary_bytes).hexdigest()
+        if actual_summary_sha != expected_summary_sha:
+            raise ReconciliationError("completed run summary SHA-256 mismatch")
+
+        for field in ("paper_book_sha256", "decision_ledger_sha256"):
+            summary_hash = summary.get(field)
+            registry_hash = item.get(field)
+            manifest_hash = new_state.get(field)
+            if (
+                not _is_canonical_sha256(summary_hash)
+                or summary_hash != registry_hash
+                or summary_hash != manifest_hash
+            ):
+                raise ReconciliationError(
+                    f"completed run {field} does not match durable authorities"
+                )
+        return dict(summary), actual_summary_sha
+
     def reconcile_completed_summary(
         self,
         key: str,

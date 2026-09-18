@@ -46,6 +46,7 @@ from autosport.supervised_execution import (
     reconcile_account_snapshot,
     reconcile_provider_readback,
     reserve_supervised_plan,
+    supervised_execution_terms_sha256,
 )
 
 
@@ -189,20 +190,21 @@ def _bound():
         parent_plan_id=portfolio.plan_sha256,
         stake_quantum=Decimal("0.01"),
     )
-    approval = SupervisedApproval(
-        approval_id="approval-1",
-        portfolio_plan_sha256=portfolio.plan_sha256,
-        intent_id=intent.intent_id,
-        routing_request_id=route.routing_request_id,
-        approved_at=APPROVED_AT,
-        expires_at=APPROVAL_EXPIRES_AT,
-        evidence_sha256="c" * 64,
-    )
     constraint = ExecutionLegConstraint(
         leg_id=route.legs[0].leg_id,
         side="BACK",
         quote_expires_at=QUOTE_EXPIRES_AT,
         max_slippage_fraction=Decimal("0.05"),
+    )
+    approval = SupervisedApproval(
+        approval_id="approval-1",
+        portfolio_plan_sha256=portfolio.plan_sha256,
+        intent_id=intent.intent_id,
+        routing_request_id=route.routing_request_id,
+        execution_terms_sha256=supervised_execution_terms_sha256(route, (constraint,)),
+        approved_at=APPROVED_AT,
+        expires_at=APPROVAL_EXPIRES_AT,
+        evidence_sha256="c" * 64,
     )
     bound = build_supervised_execution_plan(
         portfolio,
@@ -295,6 +297,50 @@ def test_build_binds_portfolio_intent_approval_profiles_and_quote_constraints() 
     assert action.requested_stake == portfolio.stakes[0]
     assert action.expires_at == QUOTE_EXPIRES_AT
     assert len(action.quote_id) == 64
+
+
+def test_approval_binds_exact_route_and_slippage_terms() -> None:
+    intent, policy, book = _intent()
+    graph = PortfolioDependencyGraph.for_inputs(book, (intent,))
+    portfolio = build_portfolio_plan(
+        book, (intent,), policy, DECISION_TS, dependency_graph=graph
+    )
+    venue = VenueQuote("betfair", "acct-1", intent.opportunity.quotes[0], Decimal("1000"))
+    route = plan_equal_split_residual(
+        portfolio.stakes[0],
+        (venue,),
+        routing_request_id="route-terms-1",
+        parent_plan_id=portfolio.plan_sha256,
+        stake_quantum=Decimal("0.01"),
+    )
+    approved_constraint = ExecutionLegConstraint(
+        route.legs[0].leg_id, "BACK", QUOTE_EXPIRES_AT, Decimal("0.01")
+    )
+    approval = SupervisedApproval(
+        approval_id="approval-terms",
+        portfolio_plan_sha256=portfolio.plan_sha256,
+        intent_id=intent.intent_id,
+        routing_request_id=route.routing_request_id,
+        execution_terms_sha256=supervised_execution_terms_sha256(
+            route, (approved_constraint,)
+        ),
+        approved_at=APPROVED_AT,
+        expires_at=APPROVAL_EXPIRES_AT,
+        evidence_sha256="7" * 64,
+    )
+    changed_constraint = replace(
+        approved_constraint, max_slippage_fraction=Decimal("0.05")
+    )
+    with pytest.raises(SupervisedExecutionError, match="exact execution terms"):
+        build_supervised_execution_plan(
+            portfolio,
+            (intent,),
+            route,
+            (_profile(),),
+            approval,
+            (changed_constraint,),
+            created_at=CREATED_AT,
+        )
 
 
 def test_revoked_approval_cannot_begin_attempt_after_plan_reservation() -> None:

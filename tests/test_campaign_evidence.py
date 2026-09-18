@@ -95,6 +95,23 @@ class PaperCampaignTests(unittest.TestCase):
             )
             campaign.add_session(self.session(session_id="session-2"))
 
+    def test_model_identity_build_and_restart_roundtrip(self):
+        session = self.session(model_version_id="model-1")
+        self.assertEqual(session.model_version_id, "model-1")
+        campaign = self.campaign()
+        campaign.add_session(session)
+        campaign.finalize(
+            outcome=CampaignOutcome.POSITIVE,
+            readiness=CampaignReadiness.ELIGIBLE,
+            finalized_at="2026-09-11T00:00:00Z",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "campaign.json"
+            campaign.save(path)
+            loaded = PaperCampaign.load(path)
+        self.assertEqual(loaded.sessions[0].model_version_id, "model-1")
+        self.assertEqual(loaded.campaign_sha256, campaign.campaign_sha256)
+
     def test_available_after_as_of_is_rejected(self):
         with self.assertRaises(ValueError):
             self.session(

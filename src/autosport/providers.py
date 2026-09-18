@@ -191,6 +191,15 @@ class ProviderBatch:
             raise ValueError("duplicate provider batch quality flag")
 
 
+class ProviderUnavailableError(RuntimeError):
+    """Typed recoverable provider transport/unavailability boundary.
+
+    Provider adapters may raise this only when observation is unavailable before local
+    canonical persistence. Validation, SQLite, subscriber-delivery, source-health and
+    integrity failures must retain their original exception type and propagate.
+    """
+
+
 class MarketProvider(Protocol):
     source_id: str
 

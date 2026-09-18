@@ -274,6 +274,73 @@ class MarketMirror:
                 eligible.append(event)
         return MirrorSnapshot(revision=captured.revision, events=tuple(eligible))
 
+    def event_for_quote_key(
+        self,
+        source_id: str,
+        quote_key: str,
+    ) -> MarketEvent | None:
+        """Return one exact source-local quote identity without scanning the mirror."""
+        if type(source_id) is not str or not source_id or source_id.strip() != source_id:
+            raise ValueError("source_id must be a non-empty trimmed string")
+        if type(quote_key) is not str or not quote_key or quote_key.strip() != quote_key:
+            raise ValueError("quote_key must be a non-empty trimmed string")
+        with self._lock:
+            event = self._latest.get((source_id, quote_key))
+            return None if event is None else self._snapshot_event(event)
+
+    def active_view_for_keys(
+        self,
+        keys: Iterable[tuple[str, str]],
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+    ) -> MirrorSnapshot:
+        """Read decision-visible events for an explicit source/quote-key set.
+
+        This is a focused read projection over the canonical latest-event map, not a
+        second market-state authority. Incremental consumers can therefore avoid a
+        whole-mirror snapshot when only bounded dirty quote identities changed.
+        """
+        if isinstance(keys, (str, bytes)):
+            raise TypeError("keys must be an iterable of (source_id, quote_key) tuples")
+        try:
+            values = tuple(keys)
+        except TypeError as exc:
+            raise TypeError(
+                "keys must be an iterable of (source_id, quote_key) tuples"
+            ) from exc
+        normalized: set[tuple[str, str]] = set()
+        for value in values:
+            if type(value) is not tuple or len(value) != 2:
+                raise ValueError("mirror key must be a (source_id, quote_key) tuple")
+            source_id, quote_key = value
+            if type(source_id) is not str or not source_id or source_id.strip() != source_id:
+                raise ValueError("mirror key source_id must be a non-empty trimmed string")
+            if type(quote_key) is not str or not quote_key or quote_key.strip() != quote_key:
+                raise ValueError("mirror key quote_key must be a non-empty trimmed string")
+            normalized.add((source_id, quote_key))
+
+        boundary, age_limit = self._decision_boundary(as_of=as_of, max_age=max_age)
+        with self._lock:
+            revision = self._revision
+            events = tuple(
+                self._snapshot_event(self._latest[key])
+                for key in sorted(normalized)
+                if key in self._latest
+            )
+
+        eligible: list[MarketEvent] = []
+        for event in events:
+            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
+                continue
+            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
+            if timestamp is None:
+                continue
+            age = boundary - timestamp
+            if timedelta(0) <= age <= age_limit:
+                eligible.append(event)
+        return MirrorSnapshot(revision=revision, events=tuple(eligible))
+
     def snapshot(self) -> tuple[MarketEvent, ...]:
         """Return a deterministic, ownership-isolated snapshot by source and quote."""
         return self.view().events

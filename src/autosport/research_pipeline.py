@@ -686,6 +686,7 @@ class ResearchDecisionPipeline:
         stake: Decimal | str | None,
         decision_ts: str,
         market_quotes: Iterable[MarketEvent] | None = None,
+        risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
         decision_ledger: JsonlDecisionLedger,
         replay_run_id: str,
         material_action_id: str | None = None,

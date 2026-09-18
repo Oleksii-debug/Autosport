@@ -227,7 +227,13 @@ class RecoveryReconciliationTests(unittest.TestCase):
                 reconcile_late_crashes(root)
 
             self.assertTrue(manifest_path.is_symlink())
-            self.assertEqual(RunRegistry(root / "run_registry.json").get(key)["status"], "in_progress")
+            raw_registry = json.loads((root / "run_registry.json").read_text(encoding="utf-8"))
+            self.assertEqual(raw_registry["runs"][key]["status"], "in_progress")
+            with self.assertRaisesRegex(
+                ValueError,
+                "transaction manifest path is not a regular file",
+            ):
+                RunRegistry(root / "run_registry.json")
 
     def test_tampered_paper_book_prevents_reconciliation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -246,7 +252,14 @@ class RecoveryReconciliationTests(unittest.TestCase):
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
             with self.assertRaisesRegex(ReconciliationError, "identity mismatch"):
                 reconcile_late_crashes(tmp)
-            self.assertEqual(RunRegistry(Path(tmp) / "run_registry.json").get(key)["status"], "in_progress")
+            registry_path = Path(tmp) / "run_registry.json"
+            raw_registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            self.assertEqual(raw_registry["runs"][key]["status"], "in_progress")
+            with self.assertRaisesRegex(
+                ValueError,
+                "identity mismatch.*run summary SHA-256 mismatch",
+            ):
+                RunRegistry(registry_path)
 
     def test_missing_summary_remains_unresolved_and_cli_returns_nonzero(self):
         with tempfile.TemporaryDirectory() as tmp:

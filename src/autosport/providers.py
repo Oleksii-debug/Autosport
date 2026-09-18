@@ -59,6 +59,16 @@ def _validate_provider_text(value: object, name: str) -> str:
     return value
 
 
+def _validate_sport(value: object) -> str:
+    sport = _validate_provider_text(value, "sport")
+    if sport != sport.lower() or "|" in sport or any(
+        character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
+        for character in sport
+    ):
+        raise ValueError("sport must be a lowercase canonical sport identity")
+    return sport
+
+
 def _validate_provider_timestamp(value: object, name: str) -> str:
     timestamp = _validate_provider_text(value, name)
     try:
@@ -141,12 +151,15 @@ class ProviderQuote:
     source_ts: str | None = None
     score_state: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    sport: str | None = None
 
     def __post_init__(self) -> None:
         _validate_provider_event_id(self.provider_event_id)
         _validate_provider_component(self.provider_market_id, "provider_market_id")
         _validate_provider_component(self.provider_selection_id, "provider_selection_id")
         _validate_sequence(self.sequence)
+        if self.sport is not None:
+            _validate_sport(self.sport)
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +235,7 @@ class CanonicalNormalizer:
             ingest_ts=observed_ts,
             score_state=score_state,
             metadata=metadata,
+            sport=quote.sport,
         )
 
 

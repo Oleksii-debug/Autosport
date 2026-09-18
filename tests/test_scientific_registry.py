@@ -514,6 +514,8 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
         "2026-01-04T01:30:00+02:00",
         candidate_model_version_id="model-1",
     )
+    registry.append(_promotion_evidence(evidence_id="promotion-evidence-offset-1", experiment_id="experiment-1", strategy_id="strategy-1", model_id="model-1", bundle_id="eval-1", dataset=foundation["dataset"], created_at=T2, access_id="offset-access-1"))
+    first = replace(first, promotion_evidence_id="promotion-evidence-offset-1")
     registry.record_promotion(first)
 
     strategy2 = StrategyVersion(
@@ -560,6 +562,8 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
         predecessor_strategy_version_id="strategy-1",
         candidate_model_version_id="model-1",
     )
+    registry.append(_promotion_evidence(evidence_id="promotion-evidence-offset-2", experiment_id="experiment-offset-2", strategy_id="strategy-offset-2", model_id="model-1", bundle_id="eval-offset-2", dataset=foundation["dataset"], metric="roi", direction="HIGHER_IS_BETTER", cohort_id="offset-cohort-2", access_id="offset-access-2", rollback_target="strategy-1"))
+    later = replace(later, promotion_evidence_id="promotion-evidence-offset-2")
     registry.record_promotion(later)
 
     assert registry.champion_strategy(as_of="2026-01-04T01:00:00+00:00") == "strategy-offset-2"

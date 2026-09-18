@@ -460,6 +460,58 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_observer.calls, 1)
             self.assertEqual(len(ledger.verified_records()), 2)
 
+    def test_pending_restart_rejects_replayed_market_state_mismatch_before_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+
+            store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                store.append(
+                    self._event(
+                        selection="selection-a",
+                        sequence=2,
+                        odds="2.10",
+                        observed=self.START + timedelta(milliseconds=500),
+                    )
+                )
+            finally:
+                store.close()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed_factory = _EmptyIntentFactory()
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=resumed_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "replayed market state changed",
+            ):
+                resumed.run_cycle()
+
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertEqual(resumed_factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
     def test_pending_restart_rejects_changed_intent_context_before_poll(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

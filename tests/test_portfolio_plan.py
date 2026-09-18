@@ -392,6 +392,27 @@ class PortfolioPlanTests(unittest.TestCase):
                 dependency_graph="f" * 64,  # type: ignore[arg-type]
             )
 
+    def test_correlated_positive_candidates_fail_closed_without_joint_risk_authority(self) -> None:
+        goal = self._goal()
+        first = self._intent(goal, suffix="corr-a", signal=Decimal("0.05"))
+        second = self._intent(goal, suffix="corr-b", signal=Decimal("0.04"))
+        intents = (first, second)
+        book = PaperBook("1000")
+        edge = tuple(sorted((first.candidate_sha256, second.candidate_sha256)))
+        graph = self._graph(book, intents, dependency_edges=(edge,))
+
+        plan = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+        )
+
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"), Decimal("0")))
+        self.assertIn("canonical joint-risk evidence", plan.reason)
+
     def test_outcome_independent_positive_requires_complete_exact_terminal_evidence(self) -> None:
         goal = self._goal()
         approximate = self._intent(

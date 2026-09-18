@@ -17,6 +17,7 @@ from .decision_ledger import (
     DecisionRecord,
     EconomicDecisionAuthority,
     JsonlDecisionLedger,
+    verify_economic_goal_binding,
 )
 from .ingestion_health import IngestionPolicy
 from .integrity import atomic_write_json
@@ -25,6 +26,7 @@ from .live_observation import observe_workspace_once
 from .market_mirror import MarketMirror, MirrorSnapshot
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
+    FocusedMirrorDependency,
     FocusedMirrorDependencyIndex,
 )
 from .paper import PaperBook
@@ -33,7 +35,7 @@ from .portfolio_plan import (
     PortfolioPlan,
     build_portfolio_plan,
 )
-from .providers import MarketProvider
+from .providers import MarketProvider, ProviderUnavailableError
 from .storage import SQLiteMarketStore
 from .workspace_lock import WorkspaceEconomicLock
 
@@ -77,12 +79,14 @@ class LiveLoopBounds:
     observation_max_items: int = 250
     max_dirty_keys: int = 4096
     max_dirty_per_cycle: int = 250
+    max_registered_inputs: int = 4096
 
     def __post_init__(self) -> None:
         for name in (
             "observation_max_items",
             "max_dirty_keys",
             "max_dirty_per_cycle",
+            "max_registered_inputs",
         ):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
@@ -116,10 +120,12 @@ _PROGRESS_KEYS = frozenset(
         "registered_input_ids",
         "decision_id",
         "plan_sha256",
+        "ledger_offset",
         "gate",
     }
 )
 _PHASE_PENDING = "pending"
+_PHASE_APPEND_PENDING = "append_pending"
 _PHASE_COMMITTED = "committed"
 _GATE_NORMAL = "normal"
 _GATE_PROVIDER_GAP = "provider_gap"
@@ -127,6 +133,12 @@ _SHA256_HEX = frozenset("0123456789abcdef")
 _CONTROL_SCHEMA = "autosport.live_decision_control"
 _CONTROL_VERSION = 1
 _CONTROL_KEYS = frozenset({"schema", "schema_version", "loop_id", "state"})
+_INPUTS_SCHEMA = "autosport.live_decision_inputs"
+_INPUTS_VERSION = 1
+_INPUTS_KEYS = frozenset({"schema", "schema_version", "loop_id", "inputs"})
+_INPUT_SPEC_KEYS = frozenset(
+    {"input_id", "source_ids", "event_ids", "market_ids", "selection_ids"}
+)
 
 
 def _canonical_text(name: str, value: object) -> str:
@@ -235,6 +247,103 @@ class _Control:
             raise LiveDecisionProgressError("live decision control is invalid") from exc
 
 
+def _selector_tuple(
+    values: str | tuple[str, ...] | None,
+    *,
+    name: str,
+) -> tuple[str, ...] | None:
+    normalized = FocusedMirrorDependencyIndex._selector(values, name=name)
+    return None if normalized is None else tuple(sorted(normalized))
+
+
+@dataclass(frozen=True, slots=True)
+class _InputSpec:
+    input_id: str
+    source_ids: tuple[str, ...] | None
+    event_ids: tuple[str, ...] | None
+    market_ids: tuple[str, ...] | None
+    selection_ids: tuple[str, ...] | None
+
+    def __post_init__(self) -> None:
+        FocusedMirrorDependencyIndex._input_id(self.input_id)
+        for name in ("source_ids", "event_ids", "market_ids", "selection_ids"):
+            values = getattr(self, name)
+            if values is None:
+                continue
+            if type(values) is not tuple or values != tuple(sorted(set(values))):
+                raise LiveDecisionProgressError(
+                    f"{name} must be a sorted unique selector tuple"
+                )
+            FocusedMirrorDependencyIndex._selector(values, name=name)
+
+    @classmethod
+    def from_dependency(cls, dependency: FocusedMirrorDependency) -> "_InputSpec":
+        return cls(
+            input_id=dependency.input_id,
+            source_ids=(
+                None
+                if dependency.source_ids is None
+                else tuple(sorted(dependency.source_ids))
+            ),
+            event_ids=(
+                None
+                if dependency.event_ids is None
+                else tuple(sorted(dependency.event_ids))
+            ),
+            market_ids=(
+                None
+                if dependency.market_ids is None
+                else tuple(sorted(dependency.market_ids))
+            ),
+            selection_ids=(
+                None
+                if dependency.selection_ids is None
+                else tuple(sorted(dependency.selection_ids))
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "input_id": self.input_id,
+            "source_ids": None if self.source_ids is None else list(self.source_ids),
+            "event_ids": None if self.event_ids is None else list(self.event_ids),
+            "market_ids": None if self.market_ids is None else list(self.market_ids),
+            "selection_ids": (
+                None if self.selection_ids is None else list(self.selection_ids)
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "_InputSpec":
+        if type(raw) is not dict or set(raw) != _INPUT_SPEC_KEYS:
+            raise LiveDecisionProgressError(
+                "live dependency input must contain canonical fields"
+            )
+
+        def selector(name: str) -> tuple[str, ...] | None:
+            value = raw[name]
+            if value is None:
+                return None
+            if type(value) is not list or any(type(item) is not str for item in value):
+                raise LiveDecisionProgressError(
+                    f"live dependency {name} must be null or a string array"
+                )
+            return tuple(value)
+
+        try:
+            return cls(
+                input_id=raw["input_id"],
+                source_ids=selector("source_ids"),
+                event_ids=selector("event_ids"),
+                market_ids=selector("market_ids"),
+                selection_ids=selector("selection_ids"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise LiveDecisionProgressError(
+                "live dependency input is invalid"
+            ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class _Progress:
     loop_id: str
@@ -245,13 +354,18 @@ class _Progress:
     registered_input_ids: tuple[str, ...]
     decision_id: str | None
     plan_sha256: str | None
+    ledger_offset: int | None
     gate: str
 
     def __post_init__(self) -> None:
         _canonical_text("loop_id", self.loop_id)
         _canonical_timestamp("decision_ts", self.decision_ts)
         _canonical_sha256("market_state_sha256", self.market_state_sha256)
-        if self.phase not in {_PHASE_PENDING, _PHASE_COMMITTED}:
+        if self.phase not in {
+            _PHASE_PENDING,
+            _PHASE_APPEND_PENDING,
+            _PHASE_COMMITTED,
+        }:
             raise LiveDecisionProgressError("unsupported live progress phase")
         if self.gate not in {_GATE_NORMAL, _GATE_PROVIDER_GAP}:
             raise LiveDecisionProgressError("unsupported live progress gate")
@@ -272,17 +386,29 @@ class _Progress:
                 "affected_input_ids must be a subset of registered_input_ids"
             )
         if self.phase == _PHASE_PENDING:
-            if self.decision_id is not None or self.plan_sha256 is not None:
+            if (
+                self.decision_id is not None
+                or self.plan_sha256 is not None
+                or self.ledger_offset is not None
+            ):
                 raise LiveDecisionProgressError(
-                    "pending live progress cannot claim a durable decision"
+                    "pending live progress cannot claim append identity"
                 )
         else:
             if self.decision_id is None or self.plan_sha256 is None:
                 raise LiveDecisionProgressError(
-                    "committed live progress requires decision and plan identity"
+                    "append/committed progress requires decision and plan identity"
                 )
             _canonical_text("decision_id", self.decision_id)
             _canonical_sha256("plan_sha256", self.plan_sha256)
+            if (
+                isinstance(self.ledger_offset, bool)
+                or not isinstance(self.ledger_offset, int)
+                or self.ledger_offset < 0
+            ):
+                raise LiveDecisionProgressError(
+                    "append/committed progress requires non-negative ledger_offset"
+                )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -296,6 +422,7 @@ class _Progress:
             "registered_input_ids": list(self.registered_input_ids),
             "decision_id": self.decision_id,
             "plan_sha256": self.plan_sha256,
+            "ledger_offset": self.ledger_offset,
             "gate": self.gate,
         }
 
@@ -329,6 +456,7 @@ class _Progress:
                 registered_input_ids=tuple(registered_ids),
                 decision_id=raw["decision_id"],
                 plan_sha256=raw["plan_sha256"],
+                ledger_offset=raw["ledger_offset"],
                 gate=raw["gate"],
             )
         except (TypeError, ValueError) as exc:
@@ -350,6 +478,7 @@ class PersistentLiveDecisionLoop:
 
     PROGRESS_FILE_NAME = "live_decision_progress.json"
     CONTROL_FILE_NAME = "live_decision_control.json"
+    INPUTS_FILE_NAME = "live_decision_inputs.json"
     AGENT_ID = "persistent-live-decision-loop"
 
     def __init__(
@@ -417,6 +546,28 @@ class PersistentLiveDecisionLoop:
             max_dirty_keys=self.bounds.max_dirty_keys,
         )
         self.dependencies = FocusedMirrorDependencyIndex(mirror)
+        self.inputs_path = self.workspace / self.INPUTS_FILE_NAME
+        durable_input_specs = self._load_input_registry() or ()
+        if len(durable_input_specs) > self.bounds.max_registered_inputs:
+            raise LiveDecisionProgressError(
+                "durable live dependency registry exceeds max_registered_inputs"
+            )
+        self._input_specs: dict[str, _InputSpec] = {}
+        for spec in durable_input_specs:
+            dependency = self.dependencies.register(
+                spec.input_id,
+                source_ids=spec.source_ids,
+                event_ids=spec.event_ids,
+                market_ids=spec.market_ids,
+                selection_ids=spec.selection_ids,
+            )
+            restored = _InputSpec.from_dependency(dependency)
+            if restored != spec:
+                raise LiveDecisionProgressError(
+                    "durable live dependency registry changed during restoration"
+                )
+            self._input_specs[spec.input_id] = spec
+
         if observation_runner is None:
             assert provider is not None
 
@@ -472,13 +623,39 @@ class PersistentLiveDecisionLoop:
         market_ids: str | tuple[str, ...] | None = None,
         selection_ids: str | tuple[str, ...] | None = None,
     ) -> None:
-        dependency = self.dependencies.register(
-            input_id,
-            source_ids=source_ids,
-            event_ids=event_ids,
-            market_ids=market_ids,
-            selection_ids=selection_ids,
+        normalized_id = FocusedMirrorDependencyIndex._input_id(input_id)
+        candidate = _InputSpec(
+            input_id=normalized_id,
+            source_ids=_selector_tuple(source_ids, name="source_ids"),
+            event_ids=_selector_tuple(event_ids, name="event_ids"),
+            market_ids=_selector_tuple(market_ids, name="market_ids"),
+            selection_ids=_selector_tuple(selection_ids, name="selection_ids"),
         )
+        existing = self._input_specs.get(normalized_id)
+        if existing is not None:
+            if existing != candidate:
+                raise ValueError(
+                    f"input_id {normalized_id!r} conflicts with durable registration"
+                )
+            return
+        if len(self._input_specs) >= self.bounds.max_registered_inputs:
+            raise ValueError("max_registered_inputs would be exceeded")
+
+        previous_specs = tuple(self._input_specs.values())
+        dependency = self.dependencies.register(
+            candidate.input_id,
+            source_ids=candidate.source_ids,
+            event_ids=candidate.event_ids,
+            market_ids=candidate.market_ids,
+            selection_ids=candidate.selection_ids,
+        )
+        self._input_specs[candidate.input_id] = candidate
+        try:
+            self._persist_input_registry(expected_previous=previous_specs)
+        except BaseException:
+            self._input_specs.pop(candidate.input_id, None)
+            self.dependencies.unregister(candidate.input_id)
+            raise
         self._pending_affected[dependency.input_id] = None
         self._needs_cache_rebuild = True
 
@@ -536,7 +713,7 @@ class PersistentLiveDecisionLoop:
         now = _require_utc_clock(self.clock)
         try:
             self._observe(self.mirror_updates)
-        except Exception as exc:
+        except ProviderUnavailableError as exc:
             self._needs_cache_rebuild = True
             return self._persist_provider_gap(now, exc)
 
@@ -573,7 +750,7 @@ class PersistentLiveDecisionLoop:
         current_market_sha = self._market_state_sha256()
         recovering_pending = (
             self._progress is not None
-            and self._progress.phase == _PHASE_PENDING
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
             and self._progress.gate == _GATE_NORMAL
             and self._progress.market_state_sha256 == current_market_sha
             and self._progress.registered_input_ids == registered_input_ids
@@ -635,12 +812,18 @@ class PersistentLiveDecisionLoop:
             decision_time = now
             decision_ts = now.isoformat()
 
-        self._write_pending(
-            decision_ts=decision_ts,
-            market_state_sha256=current_market_sha,
-            affected_input_ids=affected,
-            gate=_GATE_NORMAL,
+        preserve_append_reservation = (
+            recovering_pending
+            and self._progress is not None
+            and self._progress.phase == _PHASE_APPEND_PENDING
         )
+        if not preserve_append_reservation:
+            self._write_pending(
+                decision_ts=decision_ts,
+                market_state_sha256=current_market_sha,
+                affected_input_ids=affected,
+                gate=_GATE_NORMAL,
+            )
         self._refresh_intents(refresh_input_ids, decision_time)
 
         intents = self._all_cached_intents()
@@ -826,7 +1009,8 @@ class PersistentLiveDecisionLoop:
             durable_progress = self._load_progress()
             if (
                 durable_progress is None
-                or durable_progress.phase != _PHASE_PENDING
+                or durable_progress.phase
+                not in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
                 or durable_progress.loop_id != self.loop_id
                 or durable_progress.decision_ts != plan.decision_ts
                 or durable_progress.market_state_sha256 != market_state_sha256
@@ -837,33 +1021,74 @@ class PersistentLiveDecisionLoop:
                 raise LiveDecisionProgressError(
                     "live decision progress changed before durable ledger publication"
                 )
-            existing = None
-            records = (
-                self.decision_ledger.verified_records()
-                if self.decision_ledger.path.exists()
-                else ()
-            )
-            for item in records:
-                if item.decision_id == decision_id:
-                    existing = item
-                    break
+
+            if durable_progress.phase == _PHASE_APPEND_PENDING:
+                if (
+                    durable_progress.decision_id != decision_id
+                    or durable_progress.plan_sha256 != plan.plan_sha256
+                    or durable_progress.ledger_offset is None
+                ):
+                    raise LiveDecisionProgressError(
+                        "reserved ledger append identity conflicts with recomputed plan"
+                    )
+                ledger_offset = durable_progress.ledger_offset
+            else:
+                ledger_offset = self._ledger_end_offset()
+                durable_progress = _Progress(
+                    loop_id=self.loop_id,
+                    phase=_PHASE_APPEND_PENDING,
+                    decision_ts=plan.decision_ts,
+                    market_state_sha256=market_state_sha256,
+                    affected_input_ids=affected_input_ids,
+                    registered_input_ids=self.dependencies.input_ids,
+                    decision_id=decision_id,
+                    plan_sha256=plan.plan_sha256,
+                    ledger_offset=ledger_offset,
+                    gate=gate,
+                )
+                atomic_write_json(self.progress_path, durable_progress.to_dict())
+                self._progress = durable_progress
+
+            existing = self._verified_ledger_record_at_offset(ledger_offset)
+            if existing is not None and existing.decision_id != decision_id:
+                ledger_offset = self._ledger_end_offset()
+                durable_progress = _Progress(
+                    loop_id=self.loop_id,
+                    phase=_PHASE_APPEND_PENDING,
+                    decision_ts=plan.decision_ts,
+                    market_state_sha256=market_state_sha256,
+                    affected_input_ids=affected_input_ids,
+                    registered_input_ids=self.dependencies.input_ids,
+                    decision_id=decision_id,
+                    plan_sha256=plan.plan_sha256,
+                    ledger_offset=ledger_offset,
+                    gate=gate,
+                )
+                atomic_write_json(self.progress_path, durable_progress.to_dict())
+                self._progress = durable_progress
+                existing = self._verified_ledger_record_at_offset(ledger_offset)
+
             if existing is not None:
+                verify_economic_goal_binding(
+                    existing,
+                    self.authority.contract,
+                    self.authority.risk_policy,
+                )
                 if (
                     existing.context_hash != context_hash
                     or existing.payload.get("plan_sha256") != plan.plan_sha256
                     or existing.payload.get("market_state_sha256")
                     != market_state_sha256
                     or existing.payload.get("gate") != gate
+                    or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
+                    != decision_id
                 ):
                     raise DecisionLedgerIntegrityError(
-                        "existing live decision identity conflicts with recomputed evidence"
+                        "reserved live decision identity conflicts with durable evidence"
                     )
                 duplicate = True
             else:
-                self.decision_ledger.append_economic(
-                    record,
-                    self.authority,
-                )
+                self.decision_ledger.append_economic(record, self.authority)
                 if self.post_append_hook is not None:
                     self.post_append_hook()
 
@@ -876,6 +1101,7 @@ class PersistentLiveDecisionLoop:
                 registered_input_ids=self.dependencies.input_ids,
                 decision_id=decision_id,
                 plan_sha256=plan.plan_sha256,
+                ledger_offset=ledger_offset,
                 gate=gate,
             )
             atomic_write_json(self.progress_path, committed.to_dict())
@@ -906,11 +1132,116 @@ class PersistentLiveDecisionLoop:
             registered_input_ids=self.dependencies.input_ids,
             decision_id=None,
             plan_sha256=None,
+            ledger_offset=None,
             gate=gate,
         )
         with WorkspaceEconomicLock(self.workspace):
             atomic_write_json(self.progress_path, pending.to_dict())
         self._progress = pending
+
+    def _load_input_registry(self) -> tuple[_InputSpec, ...] | None:
+        if not self.inputs_path.exists():
+            return None
+        try:
+            raw = strict_json_loads(self.inputs_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise LiveDecisionProgressError(
+                "cannot verify persisted live dependency registry"
+            ) from exc
+        if type(raw) is not dict or set(raw) != _INPUTS_KEYS:
+            raise LiveDecisionProgressError(
+                "live dependency registry must contain canonical fields"
+            )
+        if raw["schema"] != _INPUTS_SCHEMA or raw["schema_version"] != _INPUTS_VERSION:
+            raise LiveDecisionProgressError("unsupported live dependency registry schema")
+        if raw["loop_id"] != self.loop_id:
+            raise LiveDecisionProgressError(
+                "persisted live dependency registry belongs to a different loop_id"
+            )
+        values = raw["inputs"]
+        if type(values) is not list:
+            raise LiveDecisionProgressError("live dependency inputs must be a JSON array")
+        specs = tuple(_InputSpec.from_dict(value) for value in values)
+        if len({spec.input_id for spec in specs}) != len(specs):
+            raise LiveDecisionProgressError(
+                "live dependency registry contains duplicate input_id"
+            )
+        return specs
+
+    def _persist_input_registry(
+        self,
+        *,
+        expected_previous: tuple[_InputSpec, ...],
+    ) -> None:
+        candidate = tuple(self._input_specs.values())
+        payload = {
+            "schema": _INPUTS_SCHEMA,
+            "schema_version": _INPUTS_VERSION,
+            "loop_id": self.loop_id,
+            "inputs": [spec.to_dict() for spec in candidate],
+        }
+        with WorkspaceEconomicLock(self.workspace):
+            durable = self._load_input_registry() or ()
+            if durable != expected_previous:
+                raise LiveDecisionProgressError(
+                    "live dependency registry changed concurrently"
+                )
+            atomic_write_json(self.inputs_path, payload)
+
+    def _ledger_end_offset(self) -> int:
+        path = self.decision_ledger.path
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, 2)
+                size = handle.tell()
+                if size:
+                    handle.seek(-1, 2)
+                    if handle.read(1) != b"\n":
+                        raise DecisionLedgerIntegrityError(
+                            "Decision Ledger has an unterminated final record"
+                        )
+                return size
+        except FileNotFoundError:
+            return 0
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger end offset is unreadable"
+            ) from exc
+
+    def _verified_ledger_record_at_offset(
+        self,
+        offset: int,
+    ) -> DecisionRecord | None:
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise LiveDecisionProgressError("ledger_offset must be a non-negative integer")
+        path = self.decision_ledger.path
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, 2)
+                size = handle.tell()
+                if offset > size:
+                    raise DecisionLedgerIntegrityError(
+                        "reserved Decision Ledger offset is beyond durable bytes"
+                    )
+                if offset == size:
+                    return None
+                handle.seek(offset)
+                line = handle.readline()
+        except FileNotFoundError:
+            if offset == 0:
+                return None
+            raise DecisionLedgerIntegrityError(
+                "reserved Decision Ledger offset refers to a missing ledger"
+            )
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "reserved Decision Ledger record is unreadable"
+            ) from exc
+
+        JsonlDecisionLedger._verify_bytes(line)
+        envelope = json.loads(line.decode("utf-8"))
+        record = JsonlDecisionLedger._validate_record(envelope["record"])
+        return DecisionRecord(**record)
 
     def _persist_control(self, state: LiveControlState) -> None:
         candidate = _Control(self.loop_id, state)

@@ -1117,6 +1117,8 @@ class ScientificRegistry:
                 if evidence_entry is None:
                     raise PromotionEvidenceError("promotion evidence record is missing")
                 evidence_payload = evidence_entry["payload"]
+                if _instant(evidence_entry["available_at"], "PromotionEvidence.available_at") > decision_at:
+                    raise PromotionEvidenceError("promotion evidence was not available at decision time")
                 try:
                     frozen_rule = json.loads(binding.get("promotion_rule", ""))
                 except (TypeError, json.JSONDecodeError) as exc:
@@ -1146,6 +1148,12 @@ class ScientificRegistry:
                 for key, expected, message in checks:
                     if evidence_payload.get(key) != expected:
                         raise PromotionEvidenceError(message)
+                stopping_rule = binding.get("stopping_rule")
+                if type(stopping_rule) is not str:
+                    raise PromotionEvidenceError("frozen protocol lacks stopping rule")
+                expected_stopping_rule_sha = hashlib.sha256(stopping_rule.encode("utf-8")).hexdigest()
+                if evidence_payload.get("stopping_rule_sha256") != expected_stopping_rule_sha:
+                    raise PromotionEvidenceError("promotion evidence stopping rule is not bound to frozen protocol")
                 if evidence_payload.get("validity") != "VALID" or evidence_payload.get("guardrails_passed") is not True:
                     raise PromotionEvidenceError("promotion evidence is not valid and guardrail-clean")
                 try:

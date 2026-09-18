@@ -185,7 +185,7 @@ def _promotion_evidence(
     evidence_id: str,
     created_at: str = T3,
     holdout_access_id: str | None = None,
-    practical: str = "0.10",
+    practical: str = "0.1",
     interval_low: str = "0.05",
     interval_high: str = "0.15",
     effective_n: int = 5,
@@ -308,10 +308,23 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
     with pytest.raises(PromotionEvidenceError):
         registry.record_promotion(missing)
 
+    evidence1 = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="promotion-1-evidence",
+        rollback_identity="NONE",
+    )
+    registry.append(evidence1)
     promote = replace(
         missing,
         promotion_decision_id="promotion-1",
         evaluation_bundle_id="eval-1",
+        promotion_evidence_id=evidence1.promotion_evidence_id,
     )
     registry.record_promotion(promote)
     assert registry.champion_strategy(as_of=T3) == "strategy-1"

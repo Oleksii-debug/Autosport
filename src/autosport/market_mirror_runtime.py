@@ -69,6 +69,7 @@ class FocusedMirrorDependencyIndex:
             raise TypeError("mirror must be a MarketMirror")
         self._mirror = mirror
         self._dependencies: dict[str, FocusedMirrorDependency] = {}
+        self._matched_keys: dict[str, set[MirrorQuoteKey]] = {}
         self._lock = RLock()
 
     @staticmethod
@@ -105,16 +106,24 @@ class FocusedMirrorDependencyIndex:
             market_ids=self._selector(market_ids, name="market_ids"),
             selection_ids=self._selector(selection_ids, name="selection_ids"),
         )
+        initial_keys = {
+            (event.source_id, event.quote_key)
+            for event in self._mirror.snapshot()
+            if dependency.matches(event)
+        }
         with self._lock:
             if normalized_id in self._dependencies:
                 raise ValueError(f"input_id {normalized_id!r} is already registered")
             self._dependencies[normalized_id] = dependency
+            self._matched_keys[normalized_id] = initial_keys
         return dependency
 
     def unregister(self, input_id: str) -> bool:
         normalized_id = self._input_id(input_id)
         with self._lock:
-            return self._dependencies.pop(normalized_id, None) is not None
+            removed = self._dependencies.pop(normalized_id, None)
+            self._matched_keys.pop(normalized_id, None)
+            return removed is not None
 
     @property
     def input_ids(self) -> tuple[str, ...]:
@@ -138,26 +147,50 @@ class FocusedMirrorDependencyIndex:
             dependencies = tuple(self._dependencies.values())
 
         if batch.full_refresh_required:
+            snapshot = self._mirror.snapshot()
+            rebuilt = {
+                dependency.input_id: {
+                    (event.source_id, event.quote_key)
+                    for event in snapshot
+                    if dependency.matches(event)
+                }
+                for dependency in dependencies
+            }
+            with self._lock:
+                for dependency in dependencies:
+                    if self._dependencies.get(dependency.input_id) == dependency:
+                        self._matched_keys[dependency.input_id] = rebuilt[
+                            dependency.input_id
+                        ]
             return tuple(dependency.input_id for dependency in dependencies)
         if not batch.changed_keys or not dependencies:
             return ()
 
-        changed = frozenset(batch.changed_keys)
-        # Resolve dirty identities against one coherent canonical mirror snapshot. This
-        # deliberately avoids parsing quote_key delimiters or caching a second quote map.
         changed_events = tuple(
             event
-            for event in self._mirror.snapshot()
-            if (event.source_id, event.quote_key) in changed
+            for source_id, quote_key in batch.changed_keys
+            if (
+                event := self._mirror.event_for_quote_key(source_id, quote_key)
+            ) is not None
         )
         if not changed_events:
             return ()
 
-        return tuple(
-            dependency.input_id
-            for dependency in dependencies
-            if any(dependency.matches(event) for event in changed_events)
-        )
+        affected: list[str] = []
+        with self._lock:
+            for dependency in dependencies:
+                if self._dependencies.get(dependency.input_id) != dependency:
+                    continue
+                matched = self._matched_keys.setdefault(dependency.input_id, set())
+                dependency_affected = False
+                for event in changed_events:
+                    if not dependency.matches(event):
+                        continue
+                    matched.add((event.source_id, event.quote_key))
+                    dependency_affected = True
+                if dependency_affected:
+                    affected.append(dependency.input_id)
+        return tuple(affected)
 
     @staticmethod
     def _selectors(dependency: FocusedMirrorDependency) -> dict[str, frozenset[str] | None]:
@@ -168,6 +201,22 @@ class FocusedMirrorDependencyIndex:
             "selection_ids": dependency.selection_ids,
         }
 
+    def matching_keys(self, input_id: str) -> tuple[MirrorQuoteKey, ...]:
+        """Return immutable quote identities known to match one registered input."""
+        normalized_id = self._input_id(input_id)
+        with self._lock:
+            if normalized_id not in self._dependencies:
+                raise KeyError(f"unknown focused mirror input {normalized_id!r}")
+            return tuple(sorted(self._matched_keys.get(normalized_id, set())))
+
+    def all_matching_keys(self) -> tuple[MirrorQuoteKey, ...]:
+        """Return the union of registered dependency identities, never quote values."""
+        with self._lock:
+            keys: set[MirrorQuoteKey] = set()
+            for input_id in self._dependencies:
+                keys.update(self._matched_keys.get(input_id, set()))
+        return tuple(sorted(keys))
+
     def decision_view(
         self,
         input_id: str,
@@ -176,11 +225,11 @@ class FocusedMirrorDependencyIndex:
         max_age: timedelta,
     ) -> MirrorSnapshot:
         """Read one freshness-fenced focused input from the canonical live mirror."""
-        dependency = self._dependency(input_id)
-        return self._mirror.active_view(
+        keys = self.matching_keys(input_id)
+        return self._mirror.active_view_for_keys(
+            keys,
             as_of=as_of,
             max_age=max_age,
-            **self._selectors(dependency),
         )
 
     def replay_view(

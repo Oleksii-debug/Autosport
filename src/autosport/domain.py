@@ -258,6 +258,7 @@ class PaperTicket:
     placed_at: str
     status: TicketStatus = TicketStatus.OPEN
     payout: Decimal = Decimal("0")
+    settled_at: str | None = None
     strategy_reason: str = ""
     provider_source_ids: tuple[str, ...] = ()
     # Bookmaker account identity is source-scoped; bare account_id is not global.

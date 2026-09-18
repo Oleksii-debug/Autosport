@@ -474,6 +474,39 @@ class ResearchSupervisor:
             updated_at=run["updated_at"],
         )
 
+    @classmethod
+    def _acceptance_run(cls, trigger: ResearchTrigger) -> dict[str, Any]:
+        """Reconstruct the immutable checkpoint created when a trigger is accepted."""
+
+        if not isinstance(trigger, ResearchTrigger):
+            raise TypeError("trigger must be ResearchTrigger")
+        payload = trigger.canonical_payload()
+        requested_at = payload["requested_at"]
+        return cls._seal_run(
+            {
+                "run_id": trigger.run_id,
+                "trigger_id": trigger.trigger_id,
+                "trigger_sha256": trigger.trigger_sha256,
+                "question_id": trigger.question_id,
+                "phase": ResearchPhase.QUESTION.value,
+                "status": SupervisorStatus.ACTIVE.value,
+                "created_at": requested_at,
+                "updated_at": requested_at,
+                "deadline_at": payload["deadline_at"],
+                "budget_units": trigger.budget_units,
+                "consumed_budget_units": 0,
+                "checkpoint_index": 0,
+                "bindings": {},
+                "stop_reason": None,
+            }
+        )
+
+    @classmethod
+    def acceptance_checkpoint_sha256(cls, trigger: ResearchTrigger) -> str:
+        """Return the immutable checkpoint digest for first acceptance of trigger."""
+
+        return cls._acceptance_run(trigger)["run_sha256"]
+
     def _validate_bindings(
         self,
         bindings: tuple[tuple[str, str], ...],
@@ -590,24 +623,7 @@ class ResearchSupervisor:
                     )
                 return self._snapshot(existing)
 
-            run = self._seal_run(
-                {
-                    "run_id": trigger.run_id,
-                    "trigger_id": trigger.trigger_id,
-                    "trigger_sha256": trigger.trigger_sha256,
-                    "question_id": trigger.question_id,
-                    "phase": ResearchPhase.QUESTION.value,
-                    "status": SupervisorStatus.ACTIVE.value,
-                    "created_at": requested_at,
-                    "updated_at": requested_at,
-                    "deadline_at": payload["deadline_at"],
-                    "budget_units": trigger.budget_units,
-                    "consumed_budget_units": 0,
-                    "checkpoint_index": 0,
-                    "bindings": {},
-                    "stop_reason": None,
-                }
-            )
+            run = self._acceptance_run(trigger)
             state["runs"].append(run)
             state["runs"].sort(key=lambda item: item["run_id"])
             self._write_state(self.path, self._state_without_digest(state))

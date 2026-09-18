@@ -1328,8 +1328,8 @@ class ExperimentRunner:
             "candidate_metrics_source": "causal-walk-forward-v1",
             "champion_evaluation_bundle_id": champion_evaluation_bundle_id,
             "champion_metrics": champion_metrics,
-            "promotion_verdict": promotion.verdict.value,
-            "promotion_reasons": list(promotion.reasons),
+            "promotion_verdict": provisional_promotion.verdict.value,
+            "promotion_reasons": list(provisional_promotion.reasons),
             "completed_at": spec.completed_at,
             "decided_at": spec.decided_at,
             "truth": {

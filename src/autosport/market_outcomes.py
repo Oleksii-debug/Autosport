@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 
 from .domain import MarketType, _canonical_sport_value, _quote_identity
 
 
 _SHA256_HEX = frozenset("0123456789abcdef")
+_VERIFIED_AUTHORITY_TOKEN = object()
+_BETFAIR_SOURCE_ID = "betfair_exchange_historical"
+_BETFAIR_TABLE_TENNIS_EVENT_TYPE_ID = "2593174"
+_BETFAIR_MATCH_ODDS_TYPE = "MATCH_ODDS"
+_BETFAIR_SETTLEMENT_STATUS_MAP = {"WINNER": "win", "LOSER": "loss", "REMOVED": "void"}
 
 
 class OutcomeRosterBasis(str, Enum):
@@ -29,6 +35,7 @@ class SettlementSemantics(str, Enum):
 
     EXCLUSIVE_SINGLE_WINNER = "exclusive_single_winner"
     EXCLUSIVE_SINGLE_WINNER_OR_ALL_VOID = "exclusive_single_winner_or_all_void"
+    CANONICAL_WIN_LOSS_VOID_SUPERSET = "canonical_win_loss_void_superset"
 
 
 class SettlementResult(str, Enum):
@@ -221,8 +228,13 @@ class MarketSettlementOutcomeAuthority:
     roster_provenance_sha256: str
     settlement_rules_sha256: str
     verification_protocol_sha256: str
+    _verification_token: object = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self._verification_token is not _VERIFIED_AUTHORITY_TOKEN:
+            raise TypeError(
+                "MarketSettlementOutcomeAuthority must come from verified evidence"
+            )
         if not isinstance(self.identity, MarketOutcomeIdentity):
             raise TypeError("identity must be MarketOutcomeIdentity")
         if self.identity.market_type is not MarketType.WINNER:
@@ -272,7 +284,51 @@ class MarketSettlementOutcomeAuthority:
         )
 
     @property
+    def terminal_state_count(self) -> int:
+        if (
+            self.settlement_semantics
+            is SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
+        ):
+            return 3 ** len(self.selection_ids)
+        if (
+            self.settlement_semantics
+            is SettlementSemantics.EXCLUSIVE_SINGLE_WINNER_OR_ALL_VOID
+        ):
+            return len(self.selection_ids) + 1
+        return len(self.selection_ids)
+
+    @property
+    def terminal_space_exact(self) -> bool:
+        return (
+            self.settlement_semantics
+            is not SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
+        )
+
+    @property
     def terminal_states(self) -> tuple[MarketTerminalState, ...]:
+        if (
+            self.settlement_semantics
+            is SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
+        ):
+            states: list[MarketTerminalState] = []
+            results = tuple(SettlementResult)
+            for combination in itertools.product(
+                results,
+                repeat=len(self.selection_ids),
+            ):
+                state_id = "canonical:" + ",".join(
+                    result.value for result in combination
+                )
+                states.append(
+                    MarketTerminalState(
+                        state_id=state_id,
+                        settlements=tuple(
+                            zip(self.selection_ids, combination)
+                        ),
+                    )
+                )
+            return tuple(states)
+
         states = [
             MarketTerminalState(
                 state_id=f"winner:{winner}",
@@ -305,6 +361,25 @@ class MarketSettlementOutcomeAuthority:
             )
         return tuple(states)
 
+    def assert_available_as_of(self, decision_as_of: datetime) -> None:
+        if not isinstance(decision_as_of, datetime):
+            raise TypeError("decision_as_of must be a datetime")
+        if (
+            decision_as_of.tzinfo is None
+            or decision_as_of.utcoffset() is None
+        ):
+            raise ValueError("decision_as_of must be timezone-aware")
+        boundary = decision_as_of.astimezone(timezone.utc)
+        _, cutoff = _canonical_timestamp("causal_cutoff", self.causal_cutoff)
+        _, observed = _canonical_timestamp("observed_at", self.observed_at)
+        if (
+            cutoff.astimezone(timezone.utc) > boundary
+            or observed.astimezone(timezone.utc) > boundary
+        ):
+            raise ValueError(
+                "market outcome authority is not causally available at decision_as_of"
+            )
+
     def settlement_by_quote(
         self, state: MarketTerminalState
     ) -> dict[str, str]:
@@ -333,6 +408,7 @@ class MarketSettlementOutcomeAuthority:
             "roster_provenance_sha256": self.roster_provenance_sha256,
             "settlement_rules_sha256": self.settlement_rules_sha256,
             "verification_protocol_sha256": self.verification_protocol_sha256,
+            "terminal_space_exact": self.terminal_space_exact,
             "terminal_states": [
                 state.to_dict() for state in self.terminal_states
             ],
@@ -363,6 +439,7 @@ class MarketSettlementOutcomeAuthority:
             "roster_provenance_sha256",
             "settlement_rules_sha256",
             "verification_protocol_sha256",
+            "terminal_space_exact",
             "terminal_states",
             "authority_sha256",
         }
@@ -395,9 +472,14 @@ class MarketSettlementOutcomeAuthority:
                 roster_provenance_sha256=raw["roster_provenance_sha256"],
                 settlement_rules_sha256=raw["settlement_rules_sha256"],
                 verification_protocol_sha256=raw["verification_protocol_sha256"],
+                _verification_token=_VERIFIED_AUTHORITY_TOKEN,
             )
         except (TypeError, ValueError) as exc:
             raise ValueError("serialized market outcome authority is invalid") from exc
+        if raw["terminal_space_exact"] is not authority.terminal_space_exact:
+            raise ValueError(
+                "serialized terminal-space exactness does not match semantics"
+            )
         if terminal_states != [
             state.to_dict() for state in authority.terminal_states
         ]:
@@ -448,47 +530,172 @@ def assess_market_outcome_authority(
     settlement_rules_sha256: str,
     verification_protocol_sha256: str,
 ) -> MarketOutcomeAuthorityAssessment:
-    """Prove supported completeness or return an explicit fail-closed refusal."""
+    """Refuse raw caller assertions; exhaustive authority needs verified source evidence."""
 
     if not isinstance(identity, MarketOutcomeIdentity):
         raise TypeError("identity must be MarketOutcomeIdentity")
     if not isinstance(roster_basis, OutcomeRosterBasis):
         raise ValueError("roster_basis must be OutcomeRosterBasis")
     if roster_basis is OutcomeRosterBasis.OBSERVED_ROWS_ONLY:
+        reason = "observed_rows_do_not_prove_exhaustive_selection_roster"
+    elif identity.market_type is not MarketType.WINNER:
+        reason = "market_type_has_no_supported_terminal_settlement_semantics"
+    elif settlement_semantics is None:
+        reason = "settlement_semantics_not_proven"
+    else:
+        reason = "caller_supplied_roster_has_no_verified_revision_evidence"
+    return MarketOutcomeAuthorityAssessment(
+        identity=identity,
+        status=OutcomeAuthorityStatus.REFUSED,
+        authority=None,
+        refusal_reason=reason,
+    )
+
+
+def assess_betfair_historical_market_definition_authority(
+    *,
+    market_id: str,
+    market_definition: dict[str, object],
+    provider_publish_at: str,
+    observed_at: str,
+) -> MarketOutcomeAuthorityAssessment:
+    """Derive conservative exhaustive authority from Betfair marketDefinition evidence.
+
+    The adapter does not invent Betfair terminal combinations. It derives the exact
+    runner roster from marketDefinition.runners and evaluates the conservative Cartesian
+    superset of the canonical WINNER/LOSER/REMOVED -> win/loss/void result alphabet.
+    Thus every provider terminal assignment representable by the governed importer is
+    covered, while impossible combinations may remain as conservative states.
+    """
+
+    market = _canonical_text("market_id", market_id)
+    publish_raw, publish_dt = _canonical_timestamp(
+        "provider_publish_at",
+        provider_publish_at,
+    )
+    observed_raw, observed_dt = _canonical_timestamp("observed_at", observed_at)
+    if publish_dt > observed_dt:
+        raise ValueError("provider_publish_at must not be after observed_at")
+    if type(market_definition) is not dict:
+        raise ValueError("market_definition must be a JSON object")
+
+    event_id = _canonical_text(
+        "marketDefinition.eventId",
+        market_definition.get("eventId"),
+    )
+    event_type_id = _canonical_text(
+        "marketDefinition.eventTypeId",
+        market_definition.get("eventTypeId"),
+    )
+    provider_market_type = _canonical_text(
+        "marketDefinition.marketType",
+        market_definition.get("marketType"),
+    )
+    status = _canonical_text(
+        "marketDefinition.status",
+        market_definition.get("status"),
+    ).upper()
+
+    identity = MarketOutcomeIdentity(
+        sport="table_tennis",
+        event_id=event_id,
+        market_id=market,
+        source_id=_BETFAIR_SOURCE_ID,
+        market_type=(
+            MarketType.WINNER
+            if provider_market_type == _BETFAIR_MATCH_ODDS_TYPE
+            else MarketType.OTHER
+        ),
+    )
+    if event_type_id != _BETFAIR_TABLE_TENNIS_EVENT_TYPE_ID:
         return MarketOutcomeAuthorityAssessment(
             identity=identity,
             status=OutcomeAuthorityStatus.REFUSED,
             authority=None,
-            refusal_reason="observed_rows_do_not_prove_exhaustive_selection_roster",
+            refusal_reason="betfair_event_type_has_no_verified_roster_protocol",
         )
-    if identity.market_type is not MarketType.WINNER:
+    if provider_market_type != _BETFAIR_MATCH_ODDS_TYPE:
         return MarketOutcomeAuthorityAssessment(
             identity=identity,
             status=OutcomeAuthorityStatus.REFUSED,
             authority=None,
             refusal_reason="market_type_has_no_supported_terminal_settlement_semantics",
         )
-    if settlement_semantics is None:
+    if status != "OPEN":
         return MarketOutcomeAuthorityAssessment(
             identity=identity,
             status=OutcomeAuthorityStatus.REFUSED,
             authority=None,
-            refusal_reason="settlement_semantics_not_proven",
+            refusal_reason="betfair_market_definition_is_not_open_at_roster_revision",
         )
-    if not isinstance(settlement_semantics, SettlementSemantics):
-        raise ValueError("settlement_semantics must be SettlementSemantics or None")
 
+    runners = market_definition.get("runners")
+    if type(runners) is not list or len(runners) < 2:
+        return MarketOutcomeAuthorityAssessment(
+            identity=identity,
+            status=OutcomeAuthorityStatus.REFUSED,
+            authority=None,
+            refusal_reason="betfair_market_definition_lacks_authoritative_runner_roster",
+        )
+    selection_ids: list[str] = []
+    for index, runner in enumerate(runners):
+        if type(runner) is not dict or runner.get("id") is None:
+            raise ValueError(
+                f"marketDefinition.runners[{index}] requires id"
+            )
+        selection_ids.append(
+            _canonical_text(
+                f"marketDefinition.runners[{index}].id",
+                str(runner["id"]),
+            )
+        )
+    if len(selection_ids) != len(set(selection_ids)):
+        raise ValueError("marketDefinition.runners contains duplicate selection id")
+    canonical_selections = tuple(sorted(selection_ids))
+
+    definition_payload = {
+        "provider": _BETFAIR_SOURCE_ID,
+        "provider_publish_at": publish_raw,
+        "market_id": market,
+        "market_definition": market_definition,
+    }
+    roster_provenance_sha256 = _sha256_payload(definition_payload)
+    settlement_protocol = {
+        "provider": _BETFAIR_SOURCE_ID,
+        "provider_market_type": _BETFAIR_MATCH_ODDS_TYPE,
+        "canonical_status_map": dict(sorted(_BETFAIR_SETTLEMENT_STATUS_MAP.items())),
+        "terminal_family": SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET.value,
+        "terminal_space_exact": False,
+    }
+    settlement_rules_sha256 = _sha256_payload(settlement_protocol)
+    verification_protocol_sha256 = _sha256_payload(
+        {
+            "protocol": "autosport.betfair_historical.market_definition_roster.v1",
+            "event_type_id": _BETFAIR_TABLE_TENNIS_EVENT_TYPE_ID,
+            "market_type": _BETFAIR_MATCH_ODDS_TYPE,
+            "requires_open_status": True,
+            "runner_ids_derived_from": "marketDefinition.runners",
+            "settlement_protocol_sha256": settlement_rules_sha256,
+        }
+    )
+    source_revision = (
+        "betfair-market-definition:"
+        + publish_raw
+        + ":"
+        + roster_provenance_sha256[:16]
+    )
     authority = MarketSettlementOutcomeAuthority(
         identity=identity,
-        selection_ids=selection_ids,
-        roster_basis=roster_basis,
-        settlement_semantics=settlement_semantics,
+        selection_ids=canonical_selections,
+        roster_basis=OutcomeRosterBasis.PROVIDER_MARKET_DEFINITION,
+        settlement_semantics=SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET,
         source_revision=source_revision,
-        causal_cutoff=causal_cutoff,
-        observed_at=observed_at,
+        causal_cutoff=publish_raw,
+        observed_at=observed_raw,
         roster_provenance_sha256=roster_provenance_sha256,
         settlement_rules_sha256=settlement_rules_sha256,
         verification_protocol_sha256=verification_protocol_sha256,
+        _verification_token=_VERIFIED_AUTHORITY_TOKEN,
     )
     return MarketOutcomeAuthorityAssessment(
         identity=identity,

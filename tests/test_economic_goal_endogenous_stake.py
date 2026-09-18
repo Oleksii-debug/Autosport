@@ -237,6 +237,77 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         self.assertEqual(book.tickets, {})
         self.assertEqual(book.committed_stake, Decimal("0"))
 
+    def test_multi_candidate_vector_waits_on_duplicate_candidate_identity(self) -> None:
+        event = self._event(
+            event_id="event-duplicate",
+            market_id="market-duplicate",
+            selection_id="selection-duplicate",
+            sequence=19,
+        )
+        goal = self._goal(
+            max_stake_fraction=Decimal("0.20"),
+            max_capital_at_risk_fraction=Decimal("0.30"),
+            max_concurrent_positions=3,
+        )
+        policy = self._policy(goal)
+        book = PaperBook("100")
+        context = self._risk_context(event, goal)
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("1"), Decimal("1")),
+            contexts=(context, context),
+        )
+
+        self.assertEqual(decision.action, "WAIT")
+        self.assertEqual(decision.stakes, (Decimal("0"), Decimal("0")))
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+        self.assertEqual(book.committed_stake, Decimal("0"))
+
+    def test_multi_candidate_vector_waits_without_vector_bound_ruin_evidence(self) -> None:
+        first = self._event(
+            event_id="event-ruin-vector-1",
+            market_id="market-ruin-vector-1",
+            selection_id="selection-ruin-vector-1",
+            sequence=20,
+        )
+        second = self._event(
+            event_id="event-ruin-vector-2",
+            market_id="market-ruin-vector-2",
+            selection_id="selection-ruin-vector-2",
+            sequence=21,
+        )
+        goal = self._goal(
+            max_risk_of_ruin=Decimal("0.10"),
+            max_concurrent_positions=3,
+        )
+        policy = self._policy(goal)
+        book = PaperBook("100")
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("1"), Decimal("1")),
+            contexts=(
+                self._risk_context(
+                    first,
+                    goal,
+                    risk_of_ruin_upper_bound=Decimal("0.05"),
+                ),
+                self._risk_context(
+                    second,
+                    goal,
+                    risk_of_ruin_upper_bound=Decimal("0.05"),
+                ),
+            ),
+        )
+
+        self.assertEqual(decision.action, "WAIT")
+        self.assertEqual(decision.stakes, (Decimal("0"), Decimal("0")))
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+        self.assertEqual(book.committed_stake, Decimal("0"))
+
     def test_multi_candidate_vector_waits_on_incomplete_candidate_evidence(self) -> None:
         event = self._event(event_id="event-wait", market_id="market-wait", sequence=13)
         goal = self._goal()

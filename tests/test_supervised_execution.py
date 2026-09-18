@@ -314,11 +314,11 @@ def test_revoked_approval_cannot_begin_attempt_after_plan_reservation() -> None:
             )
 
 
-def test_account_snapshot_partial_readback_is_durable_and_blocks_blind_retry() -> None:
+def test_generic_snapshot_cannot_authorize_positive_effect_but_exact_readback_can() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "execution.jsonl"
         ledger, bound, _, action, _, _ = _ledger_with_unknown(path)
-        result = reconcile_account_snapshot(
+        generic = reconcile_account_snapshot(
             ledger,
             bound,
             attempt_id="attempt-1",
@@ -330,12 +330,34 @@ def test_account_snapshot_partial_readback_is_durable_and_blocks_blind_retry() -
             external_receipt_id="bet-1",
         )
 
-        assert result.outcome is ReadbackOutcome.PARTIAL
-        assert result.attempt_state is AttemptState.PARTIAL
+        assert generic.outcome is ReadbackOutcome.UNKNOWN
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
         assert ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         ) is False
+
+        exact = reconcile_provider_readback(
+            ledger,
+            bound,
+            attempt_id="attempt-1",
+            readback=ProviderReadback(
+                bookmaker_id=action.bookmaker_id,
+                account_id=action.account_id,
+                action_id=action.action_id,
+                event_id=action.event_id,
+                market_id=action.market_id,
+                selection_id=action.selection_id,
+                external_receipt_id="bet-1",
+                observed_at=READBACK_AT,
+                source_payload_sha256="d" * 64,
+                status=AcknowledgementStatus.PARTIAL,
+                accepted_odds=Decimal("1.99"),
+                accepted_stake=action.requested_stake / Decimal("2"),
+            ),
+        )
+        assert exact.outcome is ReadbackOutcome.PARTIAL
+        assert exact.attempt_state is AttemptState.PARTIAL
 
         restarted = RealExecutionLedger(path)
         assert restarted.verify_integrity() > 0
@@ -394,6 +416,9 @@ def test_provider_readback_rejects_adverse_slippage_and_identity_mismatch() -> N
             bookmaker_id="betfair",
             account_id="acct-1",
             action_id=action.action_id,
+            event_id=action.event_id,
+            market_id=action.market_id,
+            selection_id=action.selection_id,
             external_receipt_id="bet-slip",
             observed_at=READBACK_AT,
             source_payload_sha256="f" * 64,
@@ -422,6 +447,19 @@ def test_provider_readback_rejects_adverse_slippage_and_identity_mismatch() -> N
                 readback=wrong_account,
             )
 
+        wrong_market = replace(
+            bad_slippage,
+            accepted_odds=Decimal("2.00"),
+            market_id="different-market",
+        )
+        with pytest.raises(SupervisedExecutionError, match="identity mismatches"):
+            reconcile_provider_readback(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=wrong_market,
+            )
+
 
 def test_explicit_rejected_readback_is_recorded_without_provider_write_surface() -> None:
     bound, approval, _, _ = _bound()
@@ -442,6 +480,9 @@ def test_explicit_rejected_readback_is_recorded_without_provider_write_surface()
             bookmaker_id=action.bookmaker_id,
             account_id=action.account_id,
             action_id=action.action_id,
+            event_id=action.event_id,
+            market_id=action.market_id,
+            selection_id=action.selection_id,
             external_receipt_id="provider-rejection-1",
             observed_at=READBACK_AT,
             source_payload_sha256="1" * 64,
@@ -464,6 +505,9 @@ def test_bridge_rejects_caller_asserted_terminal_settlement_exactness() -> None:
             bookmaker_id=action.bookmaker_id,
             account_id=action.account_id,
             action_id=action.action_id,
+            event_id=action.event_id,
+            market_id=action.market_id,
+            selection_id=action.selection_id,
             external_receipt_id="bet-settled-1",
             observed_at=READBACK_AT,
             source_payload_sha256="2" * 64,

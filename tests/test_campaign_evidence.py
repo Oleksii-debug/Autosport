@@ -135,7 +135,46 @@ class PaperCampaignTests(unittest.TestCase):
         ):
             self.scientific_registry.append(record)
 
+    @staticmethod
+    def _observation_membership_sha256(
+        observation_timestamps,
+        identities=None,
+    ) -> str:
+        timestamps = tuple(observation_timestamps)
+        if identities is None:
+            identities = tuple(
+                f"fixture-source|event-{index}" for index in range(len(timestamps))
+            )
+        else:
+            identities = tuple(identities)
+        if len(identities) != len(timestamps):
+            raise AssertionError("fixture observation identities must match timestamps")
+        payload = [
+            {"observed_ts": observed_ts, "dedupe_key": dedupe_key}
+            for observed_ts, dedupe_key in zip(timestamps, identities, strict=True)
+        ]
+        payload.sort(key=lambda item: (item["observed_ts"], item["dedupe_key"]))
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+
     def session(self, **overrides) -> SessionEvidence:
+        observation_timestamps = tuple(
+            overrides.get(
+                "observation_timestamps",
+                (
+                    "2026-09-01T10:00:00Z",
+                    "2026-09-02T10:00:00Z",
+                    "2026-09-03T10:00:00Z",
+                ),
+            )
+        )
         values = {
             "session_id": "session-1",
             "run_id": "run-1",
@@ -153,10 +192,9 @@ class PaperCampaignTests(unittest.TestCase):
             "as_of": "2026-09-04T00:00:00Z",
             "available_at": "2026-09-04T00:00:00Z",
             "outcome_reveal_after": "2026-09-04T00:00:00Z",
-            "observation_timestamps": (
-                "2026-09-01T10:00:00Z",
-                "2026-09-02T10:00:00Z",
-                "2026-09-03T10:00:00Z",
+            "observation_timestamps": observation_timestamps,
+            "observation_membership_sha256": self._observation_membership_sha256(
+                observation_timestamps
             ),
             "starting_bankroll": Decimal("1000"),
             "ending_bankroll": Decimal("1060"),
@@ -226,7 +264,7 @@ class PaperCampaignTests(unittest.TestCase):
                     ).encode("utf-8")
                 ).hexdigest(),
                 "campaign_causal_membership": {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "replay_dataset_hash": hashlib.sha256(
                         (
                             "replay:"
@@ -239,6 +277,9 @@ class PaperCampaignTests(unittest.TestCase):
                     "evaluation_window_start": session.observation_timestamps[0],
                     "evaluation_window_end": session.observation_timestamps[-1],
                     "observation_timestamps": list(session.observation_timestamps),
+                    "observation_membership_sha256": (
+                        session.observation_membership_sha256
+                    ),
                 },
                 "evaluation": {
                     "initial_bankroll": str(session.starting_bankroll),
@@ -680,6 +721,41 @@ class PaperCampaignTests(unittest.TestCase):
                         mutated,
                         establish_authority=False,
                     )
+
+    def test_authoritative_admission_rejects_same_timestamp_identity_collapse(self):
+        observation_timestamps = (
+            "2026-09-01T10:00:00Z",
+            "2026-09-01T10:00:00Z",
+            "2026-09-03T10:00:00Z",
+        )
+        authoritative = self.session(
+            observation_timestamps=observation_timestamps,
+        )
+        self._ensure_run_authority(authoritative)
+        self.add_session(
+            self.campaign(),
+            authoritative,
+            establish_authority=False,
+        )
+
+        altered_membership = self._observation_membership_sha256(
+            observation_timestamps,
+            identities=(
+                "fixture-source|event-0",
+                "fixture-source|event-0",
+                "fixture-source|event-2",
+            ),
+        )
+        mutated = self.session(
+            observation_timestamps=observation_timestamps,
+            observation_membership_sha256=altered_membership,
+        )
+        with self.assertRaises(CampaignIntegrityError):
+            self.add_session(
+                self.campaign(),
+                mutated,
+                establish_authority=False,
+            )
 
     def test_authoritative_admission_rejects_mutated_economic_metrics(self):
         authoritative = self.session()

@@ -95,9 +95,21 @@ class PaperCampaignTests(unittest.TestCase):
             )
             campaign.add_session(self.session(session_id="session-2"))
 
-    def test_future_dated_session_is_rejected(self):
+    def test_available_after_as_of_is_rejected(self):
         with self.assertRaises(ValueError):
-            self.session(as_of="2026-09-12T00:00:00Z", evaluation_window_end="2026-09-12T00:00:00Z")
+            self.session(
+                as_of="2026-09-12T00:00:00Z",
+                available_at="2026-09-13T00:00:00Z",
+            )
+
+    def test_campaign_rejects_evidence_after_evaluation_as_of(self):
+        campaign = self.campaign()
+        session = self.session(
+            as_of="2026-09-12T00:00:00Z",
+            available_at="2026-09-12T00:00:00Z",
+        )
+        with self.assertRaises(ValueError):
+            campaign.add_session(session)
 
     def test_sample_membership_is_mechanically_checked(self):
         with self.assertRaises(ValueError):
@@ -153,13 +165,21 @@ class PaperCampaignTests(unittest.TestCase):
                 prediction_count=20,
             )
         )
+        original_context = getcontext().copy()
         getcontext().prec = 6
         first = campaign_a.finalize(
             outcome=CampaignOutcome.POSITIVE,
             readiness=CampaignReadiness.ELIGIBLE,
             finalized_at="2026-09-11T00:00:00Z",
-        ).__dict__ if hasattr(campaign_a.finalize, "__dict__") else None
-        # Rebuild instead of relying on mutated state.
+        )
+        getcontext().clear_flags()
+        getcontext().prec = original_context.prec
+        getcontext().rounding = original_context.rounding
+        getcontext().Emin = original_context.Emin
+        getcontext().Emax = original_context.Emax
+        getcontext().capitals = original_context.capitals
+        getcontext().clamp = original_context.clamp
+        getcontext().traps = original_context.traps.copy()
         campaign_b = self.campaign()
         campaign_b.add_session(self.session())
         campaign_b.add_session(
@@ -185,7 +205,7 @@ class PaperCampaignTests(unittest.TestCase):
             finalized_at="2026-09-11T00:00:00Z",
         )
         self.assertEqual(campaign_a.campaign_sha256, campaign_b.campaign_sha256)
-        self.assertEqual(first.campaign_sha256 if first else None, second.campaign_sha256)
+        self.assertEqual(first.campaign_sha256, second.campaign_sha256)
 
     def test_finalize_freezes_membership_and_fork_creates_new_version(self):
         campaign = self.campaign()

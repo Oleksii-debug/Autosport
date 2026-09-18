@@ -364,6 +364,116 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "run summary is invalid"):
                 RunRegistry(registry.path)
 
+    def test_summary_leaf_replacement_during_stable_read_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            accepted = self._binding("accepted-root")
+            self._accept(registry, accepted)
+            summary_path = self._write_bound_summary(root, accepted)
+            replacement = summary_path.with_name("replacement-summary.json")
+            replacement.write_bytes(summary_path.read_bytes())
+
+            original_stable_read = run_registry_module._read_stable_regular_file_bytes
+            original_os_read = os.read
+            reading_summary = False
+            replaced = False
+
+            def tracked_stable_read(path: Path, *, label: str) -> bytes:
+                nonlocal reading_summary
+                if path != summary_path:
+                    return original_stable_read(path, label=label)
+                reading_summary = True
+                try:
+                    return original_stable_read(path, label=label)
+                finally:
+                    reading_summary = False
+
+            def swapping_read(descriptor: int, size: int) -> bytes:
+                nonlocal replaced
+                chunk = original_os_read(descriptor, size)
+                if reading_summary and chunk and not replaced:
+                    replaced = True
+                    try:
+                        replacement.replace(summary_path)
+                    except OSError as exc:
+                        raise unittest.SkipTest(
+                            f"open-file replacement unavailable: {exc}"
+                        ) from exc
+                return chunk
+
+            with (
+                patch.object(
+                    run_registry_module,
+                    "_read_stable_regular_file_bytes",
+                    new=tracked_stable_read,
+                ),
+                patch.object(os, "read", new=swapping_read),
+                self.assertRaisesRegex(ValueError, "run summary changed while validating"),
+            ):
+                RunRegistry(registry.path)
+            self.assertTrue(replaced)
+
+    @unittest.skipIf(os.name == "nt", "POSIX dir_fd replacement regression")
+    def test_transaction_parent_replacement_during_manifest_read_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            accepted = self._binding("accepted-root")
+            self._accept(registry, accepted)
+            self._write_bound_summary(root, accepted)
+
+            transaction_root = root / ".run-transactions"
+            held_root = root / ".run-transactions-held"
+            replacement_root = root / ".run-transactions-replacement"
+            replacement_manifest = replacement_root / "accepted-run" / "manifest.json"
+            replacement_manifest.parent.mkdir(parents=True)
+            replacement_manifest.write_bytes(
+                (transaction_root / "accepted-run" / "manifest.json").read_bytes()
+            )
+
+            original_nested = run_registry_module._read_posix_nested_regular_file_bytes
+            original_os_read = os.read
+            reading_manifest = False
+            replaced = False
+
+            def tracked_nested(
+                workspace: Path,
+                components: tuple[str, ...],
+                *,
+                label: str,
+            ) -> bytes:
+                nonlocal reading_manifest
+                reading_manifest = True
+                try:
+                    return original_nested(workspace, components, label=label)
+                finally:
+                    reading_manifest = False
+
+            def swapping_read(descriptor: int, size: int) -> bytes:
+                nonlocal replaced
+                chunk = original_os_read(descriptor, size)
+                if reading_manifest and chunk and not replaced:
+                    replaced = True
+                    transaction_root.rename(held_root)
+                    replacement_root.rename(transaction_root)
+                return chunk
+
+            with (
+                patch.object(
+                    run_registry_module,
+                    "_read_posix_nested_regular_file_bytes",
+                    new=tracked_nested,
+                ),
+                patch.object(os, "read", new=swapping_read),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "transaction manifest path is not a regular file|canonical namespace",
+                ),
+            ):
+                RunRegistry(registry.path)
+            self.assertTrue(replaced)
+
     def test_transaction_parent_alias_is_rejected_before_manifest_trust(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

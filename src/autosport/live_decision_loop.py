@@ -530,6 +530,8 @@ class PersistentLiveDecisionLoop:
         self.decision_ledger = decision_ledger or JsonlDecisionLedger(
             self.workspace / "decisions.jsonl"
         )
+        if self.decision_ledger.path.exists():
+            self.decision_ledger.verify_integrity()
         self.ingestion_policy = ingestion_policy
         self.max_quote_age = max_quote_age
         self.bounds = bounds or LiveLoopBounds()

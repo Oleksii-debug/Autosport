@@ -416,13 +416,23 @@ class AutosportSession:
         dataset: ReplayDataset,
         result: SessionResult,
         *,
-        market_events: list[MarketEvent],
-        verified_sports: tuple[str, ...],
+        market_events: list[MarketEvent] | None = None,
+        verified_sports: tuple[str, ...] | None = None,
         outcome_lineage: OutcomeLineageBinding | None = None,
         economic_goal: EconomicGoalContract | None = None,
         risk_policy: PaperRiskPolicy | None = None,
         runtime_strategy_id: str | None = None,
     ) -> dict:
+        # Runtime callers pass the already-verified snapshot to preserve the run-level
+        # TOCTOU boundary. Direct/reporting callers retain backward compatibility and
+        # may load once here when no snapshot was supplied.
+        if market_events is None:
+            market_events = dataset.load_market_events()
+        if verified_sports is None:
+            if dataset.schema_version >= 3 and hasattr(dataset, "_assert_sport_scope"):
+                verified_sports = dataset._assert_sport_scope(market_events)
+            else:
+                verified_sports = ()
         market_price_truth = market_price_truth_from_events(market_events)
         sport_identity_proven = dataset.schema_version >= 3 and bool(verified_sports)
         if risk_policy is None:
@@ -438,7 +448,7 @@ class AutosportSession:
         payload = {
             "schema_version": 2,
             "dataset_name": dataset.name,
-            "sport": dataset.sport if sport_identity_proven else "unknown",
+            "sport": dataset.sport,
             "sport_scope": list(verified_sports),
             "sport_identity_proven": sport_identity_proven,
             "dataset_schema_version": dataset.schema_version,

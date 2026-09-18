@@ -33,7 +33,7 @@ class ProviderAccountPaperProvenanceTests(unittest.TestCase):
             payload = json.loads(path.read_text(encoding="utf-8"))
             restarted = PaperBook.load(path)
 
-        self.assertEqual(payload["schema_version"], 5)
+        self.assertEqual(payload["schema_version"], 6)
         self.assertEqual(
             payload["tickets"][0]["provider_accounts"],
             [{"source_id": "provider-1", "account_id": "account-A"}],

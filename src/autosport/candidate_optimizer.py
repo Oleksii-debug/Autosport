@@ -267,8 +267,8 @@ def _candidate_ticket(
         event_identity = (leg.sport, leg.event_id)
         if event_identity in used_event_ids:
             raise ValueError(
-                "candidate contains multiple legs from one sport-qualified event; "
-                "canonical research candidates require event isolation"
+                "candidate contains multiple legs from one event within the same "
+                "sport-qualified identity; canonical research candidates require event isolation"
             )
         touched_groups.add(group_index)
         used_event_ids.add(event_identity)

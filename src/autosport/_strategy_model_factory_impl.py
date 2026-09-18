@@ -1185,6 +1185,8 @@ class ExperimentRunner:
         outcome = (
             ResearchOutcome.POSITIVE
             if promotion.verdict is PromotionVerdict.PROMOTE
+            else ResearchOutcome.INCONCLUSIVE
+            if promotion.verdict is PromotionVerdict.INCONCLUSIVE
             else ResearchOutcome.NEGATIVE
         )
         experiment = ExperimentRecord(
@@ -1335,6 +1337,11 @@ class ExperimentRunner:
             "champion_metrics": champion_metrics,
             "promotion_verdict": promotion.verdict.value,
             "promotion_reasons": list(promotion.reasons),
+            "promotion_evidence_id": (
+                promotion_evidence.promotion_evidence_id
+                if promotion_evidence is not None
+                else None
+            ),
             "completed_at": spec.completed_at,
             "decided_at": spec.decided_at,
             "truth": {
@@ -1362,6 +1369,9 @@ class ExperimentRunner:
 
         self.registry.append(experiment)
 
+        if promotion_evidence is not None:
+            self.registry.append(promotion_evidence)
+
         self.registry.record_promotion(
             PromotionDecision(
                 spec.promotion_decision_id,
@@ -1375,6 +1385,11 @@ class ExperimentRunner:
                 predecessor_strategy_version_id=spec.predecessor_strategy_version_id,
                 candidate_model_version_id=spec.model_version_id,
                 reason="; ".join(promotion.reasons),
+                promotion_evidence_id=(
+                    promotion_evidence.promotion_evidence_id
+                    if promotion_evidence is not None
+                    else None
+                ),
             )
         )
 

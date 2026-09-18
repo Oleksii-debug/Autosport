@@ -847,13 +847,17 @@ def _mean_optional(values: list[Decimal]) -> Decimal | None:
 def _session_from_payload(raw: object) -> SessionEvidence:
     if type(raw) is not dict:
         raise CampaignIntegrityError("session payload must be an object")
-    required = set(SessionEvidence.__dataclass_fields__)
+    envelope_fields = {"schema", "schema_version"}
+    required = set(SessionEvidence.__dataclass_fields__) | envelope_fields
     if set(raw) != required:
         raise CampaignIntegrityError("session payload fields mismatch")
+    if raw["schema"] != SCHEMA or raw["schema_version"] != SCHEMA_VERSION:
+        raise CampaignIntegrityError("session payload schema mismatch")
+    session_raw = {key: value for key, value in raw.items() if key not in envelope_fields}
     try:
         return SessionEvidence(
             **{
-                **raw,
+                **session_raw,
                 "model_version_id": raw["model_version_id"],
                 "observation_timestamps": tuple(raw["observation_timestamps"]),
                 "starting_bankroll": _decimal(raw["starting_bankroll"], "starting_bankroll"),

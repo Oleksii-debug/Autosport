@@ -183,26 +183,56 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             "market_type_has_no_supported_terminal_settlement_semantics",
         )
 
-    def test_durable_roundtrip_rederives_terminal_cover_and_rejects_tamper(self):
+    def test_durable_roundtrip_requires_source_reverification_and_rejects_tamper(self):
         authority = self._authority()
         raw = authority.to_dict()
-        restored = MarketSettlementOutcomeAuthority.from_dict(raw)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires separately verified source authority",
+        ):
+            MarketSettlementOutcomeAuthority.from_dict(raw)
+
+        # Simulate restart by independently deriving the provider authority again.
+        reverified = self._authority()
+        restored = MarketSettlementOutcomeAuthority.from_dict(
+            raw,
+            verified_authority=reverified,
+        )
         self.assertEqual(restored, authority)
         self.assertEqual(restored.authority_sha256, authority.authority_sha256)
         self.assertFalse(restored.terminal_space_exact)
 
-        tampered = copy.deepcopy(raw)
-        tampered["terminal_states"].pop()
+        tampered_count = copy.deepcopy(raw)
+        tampered_count["terminal_state_count"] += 1
         with self.assertRaisesRegex(
             ValueError,
-            "serialized terminal states do not match",
+            "terminal-state count does not match verified source authority",
         ):
-            MarketSettlementOutcomeAuthority.from_dict(tampered)
+            MarketSettlementOutcomeAuthority.from_dict(
+                tampered_count,
+                verified_authority=reverified,
+            )
 
         tampered_hash = copy.deepcopy(raw)
         tampered_hash["authority_sha256"] = "d" * 64
         with self.assertRaisesRegex(ValueError, "authority hash mismatch"):
-            MarketSettlementOutcomeAuthority.from_dict(tampered_hash)
+            MarketSettlementOutcomeAuthority.from_dict(
+                tampered_hash,
+                verified_authority=reverified,
+            )
+
+        # A different but internally self-consistent durable authority cannot be
+        # substituted for the provider evidence re-verified for this readback.
+        other = self._authority(("away", "home"))
+        with self.assertRaisesRegex(
+            ValueError,
+            "does not match separately verified source evidence",
+        ):
+            MarketSettlementOutcomeAuthority.from_dict(
+                other.to_dict(),
+                verified_authority=reverified,
+            )
 
     def test_authority_rejects_future_evidence_at_decision_boundary(self):
         authority = self._authority()

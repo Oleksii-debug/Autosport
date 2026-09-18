@@ -469,24 +469,26 @@ class MarketSettlementOutcomeAuthority:
         }
 
     @classmethod
-    def from_dict(cls, raw: object) -> "MarketSettlementOutcomeAuthority":
-        expected = {
-            "schema",
-            "schema_version",
-            "identity",
-            "selection_ids",
-            "roster_basis",
-            "settlement_semantics",
-            "source_revision",
-            "causal_cutoff",
-            "observed_at",
-            "roster_provenance_sha256",
-            "settlement_rules_sha256",
-            "verification_protocol_sha256",
-            "terminal_space_exact",
-            "terminal_state_count",
-            "authority_sha256",
-        }
+    def from_dict(
+        cls,
+        raw: object,
+        *,
+        verified_authority: MarketSettlementOutcomeAuthority | None = None,
+    ) -> "MarketSettlementOutcomeAuthority":
+        """Read durable identity only against separately re-verified source evidence.
+
+        A self-consistent JSON payload is not allowed to mint provider authority after
+        restart. Callers must first re-run the canonical provider/dataset verifier and
+        supply that independently derived authority here; durable data then proves
+        identity/equality only.
+        """
+        if not isinstance(verified_authority, cls):
+            raise ValueError(
+                "durable market outcome authority readback requires separately "
+                "verified source authority"
+            )
+        canonical = verified_authority.to_dict()
+        expected = set(canonical)
         if type(raw) is not dict or set(raw) != expected:
             raise ValueError(
                 "serialized market outcome authority must contain canonical fields"
@@ -496,43 +498,29 @@ class MarketSettlementOutcomeAuthority:
             or raw["schema_version"] != 1
         ):
             raise ValueError("unsupported market outcome authority schema")
-        selection_ids = raw["selection_ids"]
-        if type(selection_ids) is not list:
+        if type(raw["selection_ids"]) is not list:
             raise ValueError(
                 "serialized market outcome selection_ids must be a list"
             )
-        try:
-            authority = cls(
-                identity=MarketOutcomeIdentity.from_dict(raw["identity"]),
-                selection_ids=tuple(selection_ids),
-                roster_basis=OutcomeRosterBasis(raw["roster_basis"]),
-                settlement_semantics=SettlementSemantics(
-                    raw["settlement_semantics"]
-                ),
-                source_revision=raw["source_revision"],
-                causal_cutoff=raw["causal_cutoff"],
-                observed_at=raw["observed_at"],
-                roster_provenance_sha256=raw["roster_provenance_sha256"],
-                settlement_rules_sha256=raw["settlement_rules_sha256"],
-                verification_protocol_sha256=raw["verification_protocol_sha256"],
-                _verification_token=_VERIFIED_AUTHORITY_TOKEN,
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError("serialized market outcome authority is invalid") from exc
-        if raw["terminal_space_exact"] is not authority.terminal_space_exact:
-            raise ValueError(
-                "serialized terminal-space exactness does not match semantics"
-            )
         if (
             type(raw["terminal_state_count"]) is not int
-            or raw["terminal_state_count"] != authority.terminal_state_count
+            or raw["terminal_state_count"] != canonical["terminal_state_count"]
         ):
             raise ValueError(
-                "serialized terminal-state count does not match roster semantics"
+                "serialized terminal-state count does not match verified source authority"
             )
-        if raw["authority_sha256"] != authority.authority_sha256:
+        if raw["terminal_space_exact"] is not canonical["terminal_space_exact"]:
+            raise ValueError(
+                "serialized terminal-space exactness does not match verified source authority"
+            )
+        if raw["authority_sha256"] != canonical["authority_sha256"]:
             raise ValueError("market outcome authority hash mismatch")
-        return authority
+        if raw != canonical:
+            raise ValueError(
+                "serialized market outcome authority does not match separately "
+                "verified source evidence"
+            )
+        return verified_authority
 
 
 @dataclass(frozen=True, slots=True)

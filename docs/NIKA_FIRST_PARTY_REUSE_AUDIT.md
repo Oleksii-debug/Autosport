@@ -99,9 +99,29 @@ Potential donor areas:
 
 Use as design/conformance donors for `ExecutionPlan/Attempt/Acknowledgement/Reconciliation/ExecutionSaga`, especially UNKNOWN external acknowledgement and no-blind-retry behavior. Do not create Nika Runtime #2 inside Autosport.
 
-### Nika scheduler adapter -> 24/7 research trigger
+### NIKA-REUSE-03 — Nika scheduler contracts -> causal ResearchSupervisor trigger adapter
 
-Nika's `SchedulerPort`/APScheduler adapter is a useful implementation donor when Autosport reaches its persistent Research Supervisor. APScheduler may trigger Autosport Runs; it must not become the durable truth or create a second run/recovery authority.
+Donor reviewed:
+- `src/nika_core/scheduler/contracts.py`
+- `src/nika_core/scheduler/store.py`
+
+Autosport adaptation:
+- `src/autosport/research_trigger_adapter.py`
+- `tests/test_research_trigger_adapter.py`
+
+Adapted semantics:
+- an external source event has a stable identity distinct from mutable delivery fields;
+- exact redelivery collapses to the existing durable ResearchSupervisor run;
+- changed immutable content for the same source event fails closed;
+- source observation time, request time, scientific-question availability and deadline are explicit causal fences;
+- a receipt binds source-event, ResearchTrigger and Supervisor checkpoint identities.
+
+Deliberate exclusions:
+- no APScheduler/background loop/dependency;
+- no Nika SQLite scheduled-job store or second Autosport trigger/run store;
+- no scheduler becomes economic, scientific-memory or recovery authority.
+
+Nika's `SchedulerPort` remains a possible future execution adapter only after Autosport has a separately approved, external scheduling dependency. The existing Autosport ResearchSupervisor remains the sole durable run/checkpoint authority.
 
 ### Nika Capability Registry / Tool Broker pattern
 

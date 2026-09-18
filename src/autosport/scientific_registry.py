@@ -1134,10 +1134,17 @@ class ScientificRegistry:
                 if model["payload"].get("seed") != matching_experiment.get("seed"):
                     raise PromotionEvidenceError("candidate model/experiment seed lineage mismatch")
             if decision.action is PromotionAction.PROMOTE:
+                frozen_rule = binding.get("promotion_rule")
+                promotion_evidence_required = (
+                    isinstance(frozen_rule, str)
+                    and frozen_rule.startswith('{"kind":"autosport-promotion-rule-v1"')
+                )
                 if strategy["payload"].get("predecessor_strategy_version_id") != decision.predecessor_strategy_version_id:
                     raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
                 if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:
                     raise PromotionEvidenceError("PROMOTE requires a positive durable experiment outcome")
+                if not promotion_evidence_required:
+                    return self._append_entry_locked(state, entry)
                 evidence_id = decision.promotion_evidence_id
                 if not isinstance(evidence_id, str) or not evidence_id:
                     raise PromotionEvidenceError("PROMOTE requires typed PromotionEvidence")

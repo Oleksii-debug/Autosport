@@ -173,6 +173,65 @@ def _experiment(*, experiment_id: str = "experiment-1", outcome=ResearchOutcome.
     )
 
 
+def _promotion_evidence(
+    *,
+    experiment_id: str,
+    strategy_id: str,
+    model_id: str,
+    bundle_id: str,
+    dataset_id: str,
+    protocol_id: str,
+    bundle_sha: str,
+    evidence_id: str,
+    created_at: str = T3,
+    holdout_access_id: str | None = None,
+    practical: str = "0.10",
+    interval_low: str = "0.05",
+    interval_high: str = "0.15",
+    effective_n: int = 5,
+    minimum_n: int = 2,
+    validity=PromotionEvidenceValidity.ELIGIBLE,
+    consumed: bool = False,
+    guardrails: bool = True,
+    rollback_identity: str = "strategy-previous",
+) -> PromotionEvidence:
+    import hashlib
+    payload = {
+        "schema_version": 1,
+        "experiment_id": experiment_id,
+        "research_protocol_id": protocol_id,
+        "research_question_id": "question-1",
+        "hypothesis_id": "hypothesis-1",
+        "candidate_strategy_version_id": strategy_id,
+        "candidate_model_version_id": model_id,
+        "evaluation_bundle_id": bundle_id,
+        "evaluation_bundle_sha256": bundle_sha,
+        "dataset_snapshot_id": dataset_id,
+        "holdout_access_id": holdout_access_id or f"{protocol_id}:holdout:{bundle_id}:{evidence_id}",
+        "confirmation_trial_family_id": f"{protocol_id}:trial-family",
+        "estimand": "roi",
+        "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+        "cohort_id": dataset_id,
+        "effective_sample_size": effective_n,
+        "minimum_effective_sample_size": minimum_n,
+        "effect_interval_low": interval_low,
+        "effect_interval_high": interval_high,
+        "practical_improvement": practical,
+        "guardrails_passed": guardrails,
+        "validity": validity.value,
+        "holdout_consumed": consumed,
+        "stopping_rule_sha256": hashlib.sha256(b"one final evaluation").hexdigest(),
+        "multiple_comparison_control_sha256": hashlib.sha256(b"single frozen primary metric").hexdigest(),
+        "rollback_identity": rollback_identity,
+        "uncertainty_method": "bootstrap intervals",
+        "created_at": created_at,
+    }
+    canonical_id = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    ).hexdigest()
+    return PromotionEvidence(canonical_id, **payload)
+
+
 def test_restart_preserves_negative_memory_and_blocks_duplicate_fingerprint(tmp_path):
     path = tmp_path / "scientific_registry.json"
     registry = ScientificRegistry.initialize_pristine(path)

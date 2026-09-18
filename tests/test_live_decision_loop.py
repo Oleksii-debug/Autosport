@@ -274,6 +274,79 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(second.affected_input_ids, ("input-a",))
             self.assertEqual([item[0] for item in factory.calls], ["input-a"])
 
+    def test_steady_state_does_not_scan_unrelated_mirror_or_all_registered_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            unrelated = tuple(
+                self._event(selection=f"unrelated-{index}", sequence=1)
+                for index in range(80)
+            )
+            observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(selection="selection-a", sequence=1),
+                        *unrelated,
+                    ),
+                    (),
+                    (
+                        self._event(
+                            selection="selection-a",
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(seconds=2),
+                        ),
+                    ),
+                ],
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-target", selection_ids="selection-a")
+            for index in range(24):
+                loop.register_input(
+                    f"input-{index:02d}",
+                    selection_ids=f"registered-{index}",
+                )
+
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(len(factory.calls), 25)
+            factory.calls.clear()
+
+            with (
+                patch.object(
+                    loop.mirror_updates.mirror,
+                    "snapshot",
+                    side_effect=AssertionError(
+                        "steady-state must not snapshot the unrelated mirror"
+                    ),
+                ),
+                patch.object(
+                    loop.dependencies,
+                    "all_matching_keys",
+                    side_effect=AssertionError(
+                        "steady-state must not traverse all registered quote keys"
+                    ),
+                ),
+            ):
+                clock.value = self.START + timedelta(seconds=2)
+                unchanged = loop.run_cycle()
+                self.assertEqual(unchanged.status, LiveCycleStatus.NO_CHANGE)
+                self.assertEqual(factory.calls, [])
+
+                clock.value = self.START + timedelta(seconds=3)
+                changed = loop.run_cycle()
+
+            self.assertEqual(changed.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(changed.affected_input_ids, ("input-target",))
+            self.assertEqual([item[0] for item in factory.calls], ["input-target"])
+
     def test_decision_timestamp_follows_observation_receipt_clock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

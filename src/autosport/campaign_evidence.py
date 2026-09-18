@@ -446,6 +446,10 @@ class PaperCampaign:
         if end < start or as_of < end:
             raise CampaignError("campaign evaluation boundaries are invalid")
         _instant(self.created_at, "created_at")
+        if self.finalized:
+            raise CampaignIntegrityError(
+                "finalized campaign state can only be restored through load()"
+            )
         if self.finalized_at is not None:
             _instant(self.finalized_at, "finalized_at")
         if self.finalized and self.finalized_at is None:
@@ -797,6 +801,20 @@ class PaperCampaign:
         if set(state) != required:
             raise CampaignIntegrityError("campaign state fields mismatch")
         sessions = [_session_from_payload(item) for item in state["sessions"]]
+        if type(state["finalized"]) is not bool:
+            raise CampaignIntegrityError("campaign finalized flag must be boolean")
+        is_finalized = state["finalized"]
+        if (scientific_registry is None) != (run_registry is None):
+            raise CampaignError(
+                "scientific_registry and run_registry must be supplied together for authority revalidation"
+            )
+        if is_finalized and (
+            scientific_registry is None or run_registry is None
+        ):
+            raise CampaignIntegrityError(
+                "finalized campaign load requires canonical ScientificRegistry and RunRegistry authority"
+            )
+
         campaign = cls(
             campaign_id=state["campaign_id"],
             campaign_version=state["campaign_version"],
@@ -814,25 +832,34 @@ class PaperCampaign:
             strategy_version_id=state["strategy_version_id"],
             model_version_id=state["model_version_id"],
             sessions=sessions,
-            finalized=state["finalized"],
-            finalized_at=state["finalized_at"],
-            outcome=None if state["outcome"] is None else CampaignOutcome(state["outcome"]),
-            readiness=None if state["readiness"] is None else CampaignReadiness(state["readiness"]),
-            campaign_sha256=state["campaign_sha256"],
         )
-        if (scientific_registry is None) != (run_registry is None):
-            raise CampaignError(
-                "scientific_registry and run_registry must be supplied together for authority revalidation"
+
+        if is_finalized:
+            if (
+                state["finalized_at"] is None
+                or state["outcome"] is None
+                or state["readiness"] is None
+                or state["campaign_sha256"] is None
+            ):
+                raise CampaignIntegrityError(
+                    "finalized campaign state is incomplete"
+                )
+            finalized_at = _instant(
+                state["finalized_at"], "finalized_at"
+            ).isoformat().replace("+00:00", "Z")
+            outcome = CampaignOutcome(state["outcome"])
+            readiness = CampaignReadiness(state["readiness"])
+            campaign_sha256 = _sha256(
+                state["campaign_sha256"], "campaign_sha256"
             )
-        if campaign.finalized and (
-            scientific_registry is None or run_registry is None
-        ):
-            raise CampaignIntegrityError(
-                "finalized campaign load requires canonical ScientificRegistry and RunRegistry authority"
-            )
-        if scientific_registry is not None and run_registry is not None:
-            campaign._scientific_registry = scientific_registry
-            campaign._run_registry = run_registry
+
+            object.__setattr__(campaign, "_scientific_registry", scientific_registry)
+            object.__setattr__(campaign, "_run_registry", run_registry)
+            object.__setattr__(campaign, "finalized_at", finalized_at)
+            object.__setattr__(campaign, "outcome", outcome)
+            object.__setattr__(campaign, "readiness", readiness)
+            object.__setattr__(campaign, "campaign_sha256", campaign_sha256)
+
             _validate_registry_bindings(campaign, scientific_registry)
             for session in campaign.sessions:
                 _validate_authoritative_session(
@@ -841,6 +868,39 @@ class PaperCampaign:
                     scientific_registry=scientific_registry,
                     run_registry=run_registry,
                 )
+            if campaign.campaign_sha256 != campaign._computed_campaign_sha256():
+                raise CampaignIntegrityError(
+                    "campaign_sha256 does not match finalized campaign"
+                )
+            object.__setattr__(campaign, "sessions", tuple(campaign.sessions))
+            object.__setattr__(campaign, "finalized", True)
+            object.__setattr__(campaign, "_sealed", True)
+        else:
+            if any(
+                value is not None
+                for value in (
+                    state["finalized_at"],
+                    state["outcome"],
+                    state["readiness"],
+                    state["campaign_sha256"],
+                )
+            ):
+                raise CampaignIntegrityError(
+                    "draft campaign state contains finalized fields"
+                )
+            if scientific_registry is not None and run_registry is not None:
+                object.__setattr__(
+                    campaign, "_scientific_registry", scientific_registry
+                )
+                object.__setattr__(campaign, "_run_registry", run_registry)
+                _validate_registry_bindings(campaign, scientific_registry)
+                for session in campaign.sessions:
+                    _validate_authoritative_session(
+                        campaign,
+                        session,
+                        scientific_registry=scientific_registry,
+                        run_registry=run_registry,
+                    )
         return campaign
 
     def evidence_summary(self) -> str:

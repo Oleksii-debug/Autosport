@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import (
@@ -41,6 +43,114 @@ def _canonical_context_timestamp(name: str, value: object) -> tuple[str, datetim
     return timestamp, parsed
 
 
+def _canonical_sha256(name: str, value: object) -> str:
+    digest = _canonical_context_text(name, value)
+    if (
+        len(digest) != 64
+        or digest != digest.lower()
+        or any(ch not in "0123456789abcdef" for ch in digest)
+    ):
+        raise ValueError(f"{name} must be a lowercase 64-character SHA-256 hex digest")
+    return digest
+
+
+def _sha256_payload(payload: object) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class RiskOfRuinEvidence:
+    """Immutable provenance binding for an externally produced ruin upper bound.
+
+    This object does not estimate risk of ruin.  It only binds a research-produced
+    bound to the exact causal evidence, paper portfolio, candidate and stake that
+    the bound evaluated.  Producing the bound remains governed by the scientific
+    protocol in #367.
+    """
+
+    evidence_id: str
+    research_protocol_sha256: str
+    reproducibility_bundle_sha256: str
+    producer_identity: str
+    causal_cutoff: str
+    evaluated_at: str
+    bankroll_id: str
+    currency: str
+    base_portfolio_sha256: str
+    candidate_sha256: str
+    evaluated_stake: Decimal
+    upper_bound: Decimal
+
+    def __post_init__(self) -> None:
+        _canonical_context_text("risk-of-ruin evidence_id", self.evidence_id)
+        _canonical_context_text(
+            "risk-of-ruin producer_identity", self.producer_identity
+        )
+        _canonical_sha256(
+            "risk-of-ruin research_protocol_sha256",
+            self.research_protocol_sha256,
+        )
+        _canonical_sha256(
+            "risk-of-ruin reproducibility_bundle_sha256",
+            self.reproducibility_bundle_sha256,
+        )
+        _canonical_sha256(
+            "risk-of-ruin base_portfolio_sha256",
+            self.base_portfolio_sha256,
+        )
+        _canonical_sha256(
+            "risk-of-ruin candidate_sha256",
+            self.candidate_sha256,
+        )
+        _canonical_context_text("risk-of-ruin bankroll_id", self.bankroll_id)
+        currency = _canonical_context_text("risk-of-ruin currency", self.currency)
+        if (
+            len(currency) != 3
+            or not currency.isascii()
+            or not currency.isalpha()
+            or currency != currency.upper()
+        ):
+            raise ValueError(
+                "risk-of-ruin currency must be a three-letter uppercase ASCII code"
+            )
+
+        _, cutoff = _canonical_context_timestamp(
+            "risk-of-ruin causal_cutoff", self.causal_cutoff
+        )
+        _, evaluated = _canonical_context_timestamp(
+            "risk-of-ruin evaluated_at", self.evaluated_at
+        )
+        if cutoff > evaluated:
+            raise ValueError(
+                "risk-of-ruin causal cutoff must not be after evaluation time"
+            )
+
+        if (
+            not isinstance(self.evaluated_stake, Decimal)
+            or not self.evaluated_stake.is_finite()
+            or self.evaluated_stake <= 0
+        ):
+            raise ValueError(
+                "risk-of-ruin evaluated_stake must be a positive finite exact Decimal"
+            )
+        if (
+            not isinstance(self.upper_bound, Decimal)
+            or not self.upper_bound.is_finite()
+            or self.upper_bound < Decimal("0")
+            or self.upper_bound > Decimal("1")
+        ):
+            raise ValueError(
+                "risk-of-ruin upper_bound must be an exact Decimal between 0 and 1"
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class ProposedTicketRiskContext:
     """Typed, non-persistent facts about one proposed paper ticket.
@@ -74,7 +184,10 @@ class ProposedTicketRiskContext:
     measurement_window_start: str | None = None
     measurement_window_end: str | None = None
     proposal_ts: str | None = None
+    # Backward-compatible ingress only.  A bare scalar is never authority for a
+    # nontrivial ruin ceiling; use risk_of_ruin_evidence for executable evidence.
     risk_of_ruin_upper_bound: Decimal | None = None
+    risk_of_ruin_evidence: RiskOfRuinEvidence | None = None
 
     def __post_init__(self) -> None:
         if type(self.legs) is not tuple or not self.legs:
@@ -158,6 +271,12 @@ class ProposedTicketRiskContext:
                 raise ValueError(
                     "risk_of_ruin_upper_bound must be an exact Decimal between 0 and 1"
                 )
+        if self.risk_of_ruin_evidence is not None and not isinstance(
+            self.risk_of_ruin_evidence, RiskOfRuinEvidence
+        ):
+            raise ValueError(
+                "risk_of_ruin_evidence must be canonical RiskOfRuinEvidence"
+            )
 
     @property
     def parlay_leg_count(self) -> int:
@@ -358,6 +477,170 @@ class PaperRiskPolicy:
         if initial_bankroll <= 0 or balance < 0 or committed_stake < 0:
             return None
         return initial_bankroll, balance, committed_stake, open_position_count
+
+    @classmethod
+    def risk_of_ruin_portfolio_sha256(cls, book: PaperBook) -> str | None:
+        """Hash the exact validated PaperBook state used by ruin evidence."""
+
+        try:
+            PaperBook._validate_loaded_state(book)
+            tickets: list[dict[str, object]] = []
+            for ticket_id in sorted(book.tickets):
+                ticket = book.tickets[ticket_id]
+                tickets.append(
+                    {
+                        "ticket_id": ticket.ticket_id,
+                        "stake": str(ticket.stake),
+                        "placed_at": ticket.placed_at,
+                        "status": ticket.status.value,
+                        "payout": str(ticket.payout),
+                        "strategy_reason": ticket.strategy_reason,
+                        "provider_source_ids": list(ticket.provider_source_ids),
+                        "bankroll_id": ticket.bankroll_id,
+                        "currency": ticket.currency,
+                        "legs": [
+                            {
+                                "event_id": leg.event_id,
+                                "market_id": leg.market_id,
+                                "selection_id": leg.selection_id,
+                                "locked_odds": str(leg.locked_odds),
+                            }
+                            for leg in ticket.legs
+                        ],
+                    }
+                )
+            lifecycle = []
+            for raw_entry in book._lifecycle:
+                action, ticket_id, winners, voids = PaperBook._validate_lifecycle_entry(
+                    raw_entry
+                )
+                lifecycle.append(
+                    {
+                        "action": action,
+                        "ticket_id": ticket_id,
+                        "winning_quote_keys": list(winners),
+                        "void_quote_keys": list(voids),
+                    }
+                )
+            return _sha256_payload(
+                {
+                    "schema": "autosport.paper-risk-state.v1",
+                    "initial_bankroll": str(book.initial_bankroll),
+                    "balance": str(book.balance),
+                    "tickets": tickets,
+                    "lifecycle": lifecycle,
+                }
+            )
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def risk_of_ruin_candidate_sha256(
+        context: ProposedTicketRiskContext,
+    ) -> str | None:
+        """Hash causal candidate evidence while deliberately excluding ruin evidence."""
+
+        if not isinstance(context, ProposedTicketRiskContext):
+            return None
+        try:
+            quotes = [
+                quote.to_dict()
+                for quote in sorted(context.quotes, key=lambda item: item.quote_key)
+            ]
+            legs = [
+                {
+                    "event_id": leg.event_id,
+                    "market_id": leg.market_id,
+                    "selection_id": leg.selection_id,
+                    "locked_odds": str(leg.locked_odds),
+                }
+                for leg in sorted(context.legs, key=lambda item: item.quote_key)
+            ]
+            return _sha256_payload(
+                {
+                    "schema": "autosport.risk-candidate.v1",
+                    "legs": legs,
+                    "quotes": quotes,
+                    "bankroll_id": context.bankroll_id,
+                    "currency": context.currency,
+                    "measurement_window_start": context.measurement_window_start,
+                    "measurement_window_end": context.measurement_window_end,
+                    "proposal_ts": context.proposal_ts,
+                }
+            )
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _risk_of_ruin_evidence_decision(
+        cls,
+        book: PaperBook,
+        amount: Decimal,
+        goal: EconomicGoalContract,
+        context: ProposedTicketRiskContext,
+    ) -> RiskDecision | None:
+        if goal.max_risk_of_ruin >= Decimal("1"):
+            return None
+
+        evidence = context.risk_of_ruin_evidence
+        if evidence is None:
+            return RiskDecision(
+                False,
+                "portfolio risk-of-ruin provenance-bound evidence is required by economic goal",
+            )
+        if evidence.upper_bound > goal.max_risk_of_ruin:
+            return RiskDecision(
+                False,
+                "portfolio risk-of-ruin upper bound exceeds economic goal limit",
+            )
+
+        portfolio_sha256 = cls.risk_of_ruin_portfolio_sha256(book)
+        candidate_sha256 = cls.risk_of_ruin_candidate_sha256(context)
+        if portfolio_sha256 is None or candidate_sha256 is None:
+            return RiskDecision(
+                False,
+                "portfolio risk-of-ruin evidence cannot be verified against canonical state",
+            )
+        if (
+            evidence.bankroll_id != goal.bankroll_id
+            or evidence.currency != goal.currency
+            or evidence.bankroll_id != context.bankroll_id
+            or evidence.currency != context.currency
+            or evidence.base_portfolio_sha256 != portfolio_sha256
+            or evidence.candidate_sha256 != candidate_sha256
+            or evidence.evaluated_stake != amount
+        ):
+            return RiskDecision(
+                False,
+                "portfolio risk-of-ruin evidence does not match exact proposal state",
+            )
+
+        if context.proposal_ts is None:
+            return RiskDecision(
+                False,
+                "portfolio risk-of-ruin evidence cannot be verified without proposal time",
+            )
+        try:
+            _, proposal_time = _canonical_context_timestamp(
+                "proposal_ts", context.proposal_ts
+            )
+            _, cutoff = _canonical_context_timestamp(
+                "risk-of-ruin causal_cutoff", evidence.causal_cutoff
+            )
+            _, evaluated = _canonical_context_timestamp(
+                "risk-of-ruin evaluated_at", evidence.evaluated_at
+            )
+        except (TypeError, ValueError):
+            return RiskDecision(
+                False,
+                "portfolio risk-of-ruin evidence time provenance is invalid",
+            )
+        if cutoff > proposal_time or evaluated > proposal_time:
+            return RiskDecision(
+                False,
+                "portfolio risk-of-ruin evidence uses future information",
+            )
+        return None
 
     @classmethod
     def _historical_risk_metrics(
@@ -785,16 +1068,10 @@ class PaperRiskPolicy:
         initial_bankroll, balance, committed_stake, open_position_count = state
         if goal.emergency_stop or open_position_count >= goal.max_concurrent_positions:
             return None
-        # A nontrivial ruin ceiling is executable only when the caller supplies
-        # canonical proposal evidence. The single-candidate compatibility path
-        # without context therefore remains fail-closed.
-        if goal.max_risk_of_ruin < Decimal("1"):
-            if (
-                context is None
-                or context.risk_of_ruin_upper_bound is None
-                or context.risk_of_ruin_upper_bound > goal.max_risk_of_ruin
-            ):
-                return None
+        # A nontrivial ruin ceiling is executable only with evidence bound to the
+        # exact amount derived below, so a bare caller scalar can never authorize.
+        if goal.max_risk_of_ruin < Decimal("1") and context is None:
+            return None
 
         history_rooms = self._goal_history_rooms(book, goal)
         if history_rooms is None:
@@ -826,6 +1103,12 @@ class PaperRiskPolicy:
 
         if not isinstance(amount, Decimal) or not amount.is_finite() or amount <= 0:
             return None
+        if goal.max_risk_of_ruin < Decimal("1"):
+            assert context is not None
+            if self._risk_of_ruin_evidence_decision(
+                book, amount, goal, context
+            ) is not None:
+                return None
         return amount
 
     @staticmethod
@@ -976,12 +1259,12 @@ class PaperRiskPolicy:
                 )
             if (
                 goal.max_risk_of_ruin < Decimal("1")
-                and context.risk_of_ruin_upper_bound is None
+                and context.risk_of_ruin_evidence is None
             ):
                 return StakeVectorDecision(
                     "WAIT",
                     zero_vector,
-                    "candidate set lacks portfolio risk-of-ruin evidence",
+                    "candidate set lacks provenance-bound portfolio risk-of-ruin evidence",
                 )
 
         shadow = self._shadow_book_for_allocation(book)
@@ -1164,16 +1447,11 @@ class PaperRiskPolicy:
                     return RiskDecision(False, reason)
 
             if goal.max_risk_of_ruin < Decimal("1"):
-                if context.risk_of_ruin_upper_bound is None:
-                    return RiskDecision(
-                        False,
-                        "portfolio risk-of-ruin evidence is required by economic goal",
-                    )
-                if context.risk_of_ruin_upper_bound > goal.max_risk_of_ruin:
-                    return RiskDecision(
-                        False,
-                        "portfolio risk-of-ruin upper bound exceeds economic goal limit",
-                    )
+                ruin_decision = self._risk_of_ruin_evidence_decision(
+                    book, amount, goal, context
+                )
+                if ruin_decision is not None:
+                    return ruin_decision
 
         derived = self._derived_risk_values(initial_bankroll, balance, committed_stake, amount)
         if derived is None:

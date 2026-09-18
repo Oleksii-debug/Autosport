@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.domain import MarketEvent
 from autosport.market_bus import MarketEventBus
@@ -242,6 +243,53 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         runtime.accept_persisted(self.event(sequence=2, odds="2.10"))
 
         self.assertEqual(dependencies.affected_inputs(runtime.drain()), ())
+
+    def test_focused_incremental_reads_do_not_snapshot_unrelated_mirror(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        runtime.accept_persisted(
+            self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        )
+        runtime.accept_persisted(
+            self.event(source_id="provider-a", selection="selection-z", sequence=1)
+        )
+        runtime.drain()
+
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register(
+            "decision-a",
+            source_ids="provider-a",
+            selection_ids="selection-a",
+        )
+
+        runtime.accept_persisted(
+            self.event(
+                source_id="provider-a",
+                selection="selection-a",
+                sequence=2,
+                odds="2.10",
+            )
+        )
+        with patch.object(
+            mirror,
+            "snapshot",
+            side_effect=AssertionError("whole mirror snapshot is forbidden"),
+        ):
+            affected = dependencies.affected_inputs(runtime.drain())
+            view = dependencies.decision_view(
+                "decision-a",
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+            )
+
+        self.assertEqual(affected, ("decision-a",))
+        self.assertEqual(len(view.events), 1)
+        self.assertEqual(view.events[0].selection_id, "selection-a")
+        self.assertEqual(view.events[0].sequence, 2)
+        self.assertNotIn(
+            ("provider-a", "event-1|market-1|selection-z"),
+            dependencies.all_matching_keys(),
+        )
 
     def test_focused_dependency_overflow_fails_safe_to_all_registered_inputs(self) -> None:
         mirror = MarketMirror()

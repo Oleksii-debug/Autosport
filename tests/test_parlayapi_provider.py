@@ -11,6 +11,7 @@ from autosport.parlayapi_provider import (
     ProviderPayloadError,
     ProviderTransportError,
 )
+from autosport.providers import ProviderUnavailableError
 from autosport.storage import SQLiteMarketStore
 
 
@@ -86,6 +87,11 @@ COVERAGE_HEADERS = {
 
 
 class ParlayApiProviderTests(unittest.TestCase):
+    def test_transport_error_is_typed_live_provider_unavailability(self):
+        error = ProviderTransportError("provider transport unavailable")
+        self.assertIsInstance(error, ProviderUnavailableError)
+        self.assertIsInstance(error, RuntimeError)
+
     def test_authenticated_snapshot_maps_to_typed_provider_quotes_without_key_in_url(self):
         calls = []
 

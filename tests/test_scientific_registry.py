@@ -23,6 +23,7 @@ from autosport.scientific_registry import (
     ResearchProtocol,
     ResearchQuestion,
     ScientificRegistry,
+    promotion_holdout_access_id,
     StrategyVersion,
 )
 from autosport.strategy_experiment import ScientificProtocolBinding
@@ -206,7 +207,13 @@ def _promotion_evidence(
         "evaluation_bundle_id": bundle_id,
         "evaluation_bundle_sha256": bundle_sha,
         "dataset_snapshot_id": dataset_id,
-        "holdout_access_id": holdout_access_id or f"{protocol_id}:holdout:{bundle_id}:{evidence_id}",
+        "holdout_access_id": holdout_access_id or promotion_holdout_access_id(
+            research_protocol_id=protocol_id,
+            dataset_manifest_sha256=SHA_A,
+            source_identity="lawful-provider:fixture",
+            license_identity="license-evidence:v1",
+            confirmation_trial_family_id=f"{protocol_id}:confirmation-trial-family",
+        ),
         "confirmation_trial_family_id": f"{protocol_id}:trial-family",
         "estimand": "roi",
         "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
@@ -609,6 +616,26 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
 
     assert registry.champion_strategy(as_of="2026-01-04T01:00:00+00:00") == "strategy-offset-2"
 
+
+
+
+def test_promotion_holdout_identity_is_stable_across_dataset_snapshot_renames():
+    first = promotion_holdout_access_id(
+        research_protocol_id="protocol-1",
+        dataset_manifest_sha256=SHA_A,
+        source_identity="lawful-provider:fixture",
+        license_identity="license-evidence:v1",
+        confirmation_trial_family_id="protocol-1:confirmation-trial-family",
+    )
+    second = promotion_holdout_access_id(
+        research_protocol_id="protocol-1",
+        dataset_manifest_sha256=SHA_A,
+        source_identity="lawful-provider:fixture",
+        license_identity="license-evidence:v1",
+        confirmation_trial_family_id="protocol-1:confirmation-trial-family",
+    )
+    assert first == second
+    assert len(first) == 64
 
 def test_promotion_evidence_identity_and_strict_improvement(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")

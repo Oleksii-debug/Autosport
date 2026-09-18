@@ -343,6 +343,33 @@ class CampaignSummary:
     campaign_sha256: str | None
 
 
+_FINALIZED_IMMUTABLE_FIELDS = frozenset(
+    {
+        "campaign_id",
+        "campaign_version",
+        "research_protocol_id",
+        "protocol_sha256",
+        "hypothesis_id",
+        "primary_metric",
+        "protective_metrics",
+        "evaluation_window_start",
+        "evaluation_window_end",
+        "evaluation_as_of",
+        "readiness_rule",
+        "source_sha256",
+        "created_at",
+        "strategy_version_id",
+        "model_version_id",
+        "sessions",
+        "finalized",
+        "finalized_at",
+        "outcome",
+        "readiness",
+        "campaign_sha256",
+    }
+)
+
+
 @dataclass(slots=True)
 class PaperCampaign:
     campaign_id: str
@@ -360,7 +387,7 @@ class PaperCampaign:
     created_at: str
     strategy_version_id: str
     model_version_id: str | None = None
-    sessions: list[SessionEvidence] = field(default_factory=list)
+    sessions: list[SessionEvidence] | tuple[SessionEvidence, ...] = field(default_factory=list)
     finalized: bool = False
     finalized_at: str | None = None
     outcome: CampaignOutcome | None = None
@@ -368,6 +395,33 @@ class PaperCampaign:
     campaign_sha256: str | None = None
     _scientific_registry: ScientificRegistry | None = field(default=None, init=False, repr=False, compare=False)
     _run_registry: RunRegistry | None = field(default=None, init=False, repr=False, compare=False)
+    _sealed: bool = field(default=False, init=False, repr=False, compare=False)
+    _initialized: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        try:
+            initialized = object.__getattribute__(self, "_initialized")
+        except AttributeError:
+            initialized = False
+        try:
+            sealed = object.__getattribute__(self, "_sealed")
+        except AttributeError:
+            sealed = False
+
+        if initialized and name == "finalized" and value is True:
+            try:
+                already_finalized = object.__getattribute__(self, "finalized")
+            except AttributeError:
+                already_finalized = False
+            if not already_finalized:
+                raise CampaignFinalizedError(
+                    "finalized state can only be entered through finalize()"
+                )
+        if sealed and name in _FINALIZED_IMMUTABLE_FIELDS:
+            raise CampaignFinalizedError(
+                f"finalized campaign field {name!r} is immutable"
+            )
+        object.__setattr__(self, name, value)
 
     def __post_init__(self) -> None:
         for name in (
@@ -400,15 +454,21 @@ class PaperCampaign:
             raise CampaignError("outcome is required for a finalized campaign")
         if self.finalized and self.readiness is None:
             raise CampaignError("readiness is required for a finalized campaign")
-        if not isinstance(self.sessions, list):
-            raise CampaignError("sessions must be a list")
+        if self.finalized:
+            if not isinstance(self.sessions, (list, tuple)):
+                raise CampaignError("finalized sessions must be a sequence")
+        elif not isinstance(self.sessions, list):
+            raise CampaignError("draft sessions must be a list")
         self._validate_sessions()
         if self.finalized:
             expected = self._computed_campaign_sha256()
             if self.campaign_sha256 != expected:
                 raise CampaignIntegrityError("campaign_sha256 does not match finalized campaign")
+            object.__setattr__(self, "sessions", tuple(self.sessions))
+            object.__setattr__(self, "_sealed", True)
         elif self.campaign_sha256 is not None:
             raise CampaignError("draft campaign must not have campaign_sha256")
+        object.__setattr__(self, "_initialized", True)
 
     def _validate_sessions(self) -> None:
         seen_session_ids: set[str] = set()
@@ -523,11 +583,13 @@ class PaperCampaign:
                 run_registry=self._run_registry,
             )
         self._validate_sessions()
-        self.finalized = True
         self.finalized_at = when.isoformat().replace("+00:00", "Z")
         self.outcome = outcome
         self.readiness = readiness
         self.campaign_sha256 = self._computed_campaign_sha256()
+        self.sessions = tuple(self.sessions)
+        object.__setattr__(self, "finalized", True)
+        object.__setattr__(self, "_sealed", True)
         return self.summary()
 
     def fork_new_version(self, new_version: int) -> "PaperCampaign":
@@ -661,6 +723,19 @@ class PaperCampaign:
             raise CampaignIntegrityError(
                 "finalized campaign requires canonical authority bindings before save"
             )
+        if self.finalized:
+            _validate_registry_bindings(self, self._scientific_registry)
+            for session in self.sessions:
+                _validate_authoritative_session(
+                    self,
+                    session,
+                    scientific_registry=self._scientific_registry,
+                    run_registry=self._run_registry,
+                )
+            if self.campaign_sha256 != self._computed_campaign_sha256():
+                raise CampaignIntegrityError(
+                    "finalized campaign state no longer matches campaign_sha256"
+                )
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         payload = self.to_payload()

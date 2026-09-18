@@ -240,12 +240,12 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertEqual(len(intent.intent_sha256), 64)
         self.assertEqual(len(plan.plan_sha256), 64)
 
-    def test_nonforecast_arbitrage_uses_same_portfolio_risk_path(self) -> None:
+    def test_nonforecast_live_price_movement_uses_same_portfolio_risk_path(self) -> None:
         goal = self._goal()
         book = PaperBook("1000")
         intent = self._intent(
             goal,
-            strategy_class=StrategyClass.ARBITRAGE,
+            strategy_class=StrategyClass.LIVE_PRICE_MOVEMENT,
             signal=Decimal("0.04"),
         )
 
@@ -262,7 +262,7 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertFalse(intent.opportunity.forecasts)
         self.assertIsNone(intent.model_id)
 
-    def test_hedge_rebalance_is_labeled_without_bypassing_risk_policy(self) -> None:
+    def test_hash_only_hedge_rebalance_fails_closed_without_terminal_economics(self) -> None:
         goal = self._goal()
         book = PaperBook("1000")
         intent = self._intent(
@@ -279,9 +279,9 @@ class PortfolioPlanTests(unittest.TestCase):
             dependency_graph=self._graph(book, (intent,)),
         )
 
-        self.assertEqual(plan.action, PortfolioAction.HEDGE_REBALANCE)
-        self.assertEqual(plan.stakes, (Decimal("30.00"),))
-        self.assertEqual(plan.reason, "endogenous whole-portfolio stake vector derived")
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"),))
+        self.assertIn("verified terminal-state economics", plan.reason)
 
     def test_intent_rejects_quote_or_sport_identity_drift(self) -> None:
         goal = self._goal()
@@ -453,6 +453,73 @@ class PortfolioPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan.action, PortfolioAction.WAIT)
         self.assertIn("terminal-state", plan.reason)
+
+    def test_complete_hash_only_arbitrage_cannot_create_positive_plan(self) -> None:
+        goal = self._goal()
+        intent = self._intent(
+            goal,
+            suffix="hash-only-arb",
+            strategy_class=StrategyClass.ARBITRAGE,
+            signal=Decimal("0.04"),
+        )
+        book = PaperBook("1000")
+
+        plan = build_portfolio_plan(
+            book,
+            (intent,),
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=self._graph(book, (intent,)),
+        )
+
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"),))
+        self.assertIn("verified terminal-state economics", plan.reason)
+
+    def test_omitted_dependency_edges_cannot_authorize_joint_positive_vector(self) -> None:
+        goal = self._goal()
+        first = self._intent(goal, suffix="omitted-a", signal=Decimal("0.05"))
+        second = self._intent(goal, suffix="omitted-b", signal=Decimal("0.04"))
+        intents = (first, second)
+        book = PaperBook("1000")
+        graph = self._graph(book, intents)
+
+        self.assertEqual(graph.dependency_edges, ())
+        plan = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+        )
+
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"), Decimal("0")))
+        self.assertIn("omitted correlations", plan.reason)
+
+    def test_positive_candidate_with_open_position_fails_closed_without_complete_graph(self) -> None:
+        goal = self._goal()
+        intent = self._intent(goal, suffix="open-dependent", signal=Decimal("0.05"))
+        book = PaperBook("1000")
+        book.open_ticket(
+            intent.risk_context.legs,
+            Decimal("10"),
+            reason="existing paper position",
+            placed_at="2026-09-18T13:00:00+00:00",
+        )
+        graph = self._graph(book, (intent,))
+
+        plan = build_portfolio_plan(
+            book,
+            (intent,),
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+        )
+
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"),))
+        self.assertIn("existing open positions", plan.reason)
 
     def test_future_infeasible_and_canonical_wait_cannot_create_positive_action(self) -> None:
         goal = self._goal()

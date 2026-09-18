@@ -8,6 +8,10 @@ from pathlib import Path
 from autosport.decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
+from autosport.market_outcomes import (
+    MarketSettlementOutcomeAuthority,
+    assess_betfair_historical_market_definition_authority,
+)
 from autosport.opportunity import (
     ForecastRef,
     Opportunity,
@@ -81,11 +85,15 @@ class PortfolioPlanTests(unittest.TestCase):
         suffix: str = "1",
         sport: str = "soccer",
         odds: Decimal = Decimal("2"),
+        event_id: str | None = None,
+        market_id: str | None = None,
+        selection_id: str | None = None,
+        source_id: str | None = None,
     ) -> ProposedTicketRiskContext:
         leg = TicketLeg(
-            f"event-{suffix}",
-            f"market-{suffix}",
-            f"selection-{suffix}",
+            event_id or f"event-{suffix}",
+            market_id or f"market-{suffix}",
+            selection_id or f"selection-{suffix}",
             odds,
             sport=sport,
         )
@@ -95,7 +103,7 @@ class PortfolioPlanTests(unittest.TestCase):
             selection_id=leg.selection_id,
             decimal_odds=odds,
             observed_ts="2026-09-18T13:19:59+00:00",
-            source_id=f"provider-{suffix}",
+            source_id=source_id or f"provider-{suffix}",
             sequence=1,
             source_ts="2026-09-18T13:19:59+00:00",
             ingest_ts="2026-09-18T13:19:59+00:00",
@@ -188,12 +196,20 @@ class PortfolioPlanTests(unittest.TestCase):
         evidence: OpportunityEvidence | None = None,
         sport: str = "soccer",
         odds: Decimal = Decimal("2"),
+        event_id: str | None = None,
+        market_id: str | None = None,
+        selection_id: str | None = None,
+        source_id: str | None = None,
     ) -> OpportunityIntent:
         context = cls._context(
             goal,
             suffix=suffix,
             sport=sport,
             odds=odds,
+            event_id=event_id,
+            market_id=market_id,
+            selection_id=selection_id,
+            source_id=source_id,
         )
         requires_complete = strategy_class in {
             StrategyClass.ARBITRAGE,
@@ -223,6 +239,32 @@ class PortfolioPlanTests(unittest.TestCase):
             ),
             config_sha256="e" * 64,
         )
+
+    @classmethod
+    def _betfair_authority(
+        cls,
+        selection_ids: tuple[str, ...] = ("101", "202"),
+    ) -> MarketSettlementOutcomeAuthority:
+        assessment = assess_betfair_historical_market_definition_authority(
+            market_id="1.23456789",
+            market_definition={
+                "eventId": "event-betfair-1",
+                "eventTypeId": "2593174",
+                "marketType": "MATCH_ODDS",
+                "status": "OPEN",
+                "runners": [
+                    {"id": selection_id}
+                    for selection_id in selection_ids
+                ],
+            },
+            provider_publish_at="2026-09-18T13:19:57+00:00",
+            observed_at="2026-09-18T13:19:58+00:00",
+        )
+        if assessment.authority is None:
+            raise AssertionError(
+                f"expected verified Betfair authority: {assessment.refusal_reason}"
+            )
+        return assessment.authority
 
     @staticmethod
     def _graph(
@@ -675,7 +717,7 @@ class PortfolioPlanTests(unittest.TestCase):
 
         # A self-consistent external terminal proof remains diagnostic only.  It must
         # not recover positive outcome-independent authority through direct object
-        # construction or through a hash-consistent schema-v3 durable payload when the
+        # construction or through a hash-consistent schema-v4 durable payload when the
         # canonical builder itself must fail closed for missing exhaustive market truth.
         policy = self._policy(goal)
         portfolio_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
@@ -700,7 +742,7 @@ class PortfolioPlanTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(
             ValueError,
-            "authoritative exhaustive market-outcome semantics",
+            "authoritative .*exhaustive market-outcome semantics",
         ):
             PortfolioPlan(**unsafe_fields)
 
@@ -743,6 +785,143 @@ class PortfolioPlanTests(unittest.TestCase):
             "execution assumptions do not match verified completeness",
             tampered.reason,
         )
+
+    def test_authoritative_betfair_conservative_cover_cannot_authorize_arbitrage(self) -> None:
+        goal = self._goal()
+        authority = self._betfair_authority()
+        base_intents = tuple(
+            self._intent(
+                goal,
+                suffix=f"betfair-arb-{selection_id}",
+                strategy_class=StrategyClass.ARBITRAGE,
+                signal=Decimal("0.05"),
+                odds=Decimal("3"),
+                sport="table_tennis",
+                event_id="event-betfair-1",
+                market_id="1.23456789",
+                selection_id=selection_id,
+                source_id="betfair_exchange_historical",
+            )
+            for selection_id in ("101", "202")
+        )
+        groups = (
+            ScenarioGroup(
+                "betfair-control-witness",
+                tuple(
+                    ScenarioOutcome(
+                        quote_key=intent.risk_context.legs[0].quote_key
+                    )
+                    for intent in base_intents
+                ),
+            ),
+        )
+        intents = self._bind_terminal_state(base_intents, groups)
+        book = PaperBook("1000")
+        edge = tuple(
+            sorted((intents[0].candidate_sha256, intents[1].candidate_sha256))
+        )
+        graph = self._graph(book, intents, dependency_edges=(edge,))
+        witness = self._terminal_witness(book, intents, graph, groups)
+
+        plan = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            terminal_state_evidence=witness,
+            market_outcome_authorities=(authority,),
+        )
+
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"), Decimal("0")))
+        self.assertIsNone(plan.terminal_economics)
+        self.assertFalse(authority.terminal_space_exact)
+        self.assertIn("exhaustive but not exact", plan.reason)
+
+    def test_authoritative_terminal_proof_requires_reverified_authority_on_readback(self) -> None:
+        goal = self._goal()
+        authority = self._betfair_authority()
+        base_intents = tuple(
+            self._intent(
+                goal,
+                suffix=f"betfair-predictive-{selection_id}",
+                strategy_class=StrategyClass.PREDICTIVE_EDGE,
+                signal=Decimal("0.03"),
+                odds=Decimal("3"),
+                sport="table_tennis",
+                event_id="event-betfair-1",
+                market_id="1.23456789",
+                selection_id=selection_id,
+                source_id="betfair_exchange_historical",
+            )
+            for selection_id in ("101", "202")
+        )
+        groups = (
+            ScenarioGroup(
+                "betfair-control-witness-predictive",
+                tuple(
+                    ScenarioOutcome(
+                        quote_key=intent.risk_context.legs[0].quote_key
+                    )
+                    for intent in base_intents
+                ),
+            ),
+        )
+        intents = self._bind_terminal_state(base_intents, groups)
+        book = PaperBook("1000")
+        edge = tuple(
+            sorted((intents[0].candidate_sha256, intents[1].candidate_sha256))
+        )
+        graph = self._graph(book, intents, dependency_edges=(edge,))
+        witness = self._terminal_witness(book, intents, graph, groups)
+
+        plan = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            terminal_state_evidence=witness,
+            market_outcome_authorities=(authority,),
+        )
+
+        self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
+        self.assertIsNotNone(plan.terminal_economics)
+        assert plan.terminal_economics is not None
+        self.assertTrue(plan.terminal_economics.outcome_space_exhaustive)
+        self.assertFalse(plan.terminal_economics.outcome_space_exact)
+        self.assertEqual(
+            plan.terminal_economics.outcome_authority_sha256s,
+            (authority.authority_sha256,),
+        )
+
+        payload = plan.to_dict()
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized portfolio plan is invalid",
+        ):
+            PortfolioPlan.from_dict(payload)
+        self.assertEqual(
+            PortfolioPlan.from_dict(
+                payload,
+                verified_outcome_authorities=(authority,),
+            ),
+            plan,
+        )
+
+        tampered = json.loads(json.dumps(payload))
+        terminal = tampered["terminal_economics"]
+        assert isinstance(terminal, dict)
+        terminal["outcome_space_exact"] = True
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized portfolio plan is invalid",
+        ):
+            PortfolioPlan.from_dict(
+                tampered,
+                verified_outcome_authorities=(authority,),
+            )
 
     def test_verified_terminal_model_with_nonpositive_minimum_fails_closed(self) -> None:
         goal = self._goal()

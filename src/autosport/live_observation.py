@@ -292,7 +292,6 @@ def poll_open_market_store_once(
 
 
 def observe_workspace_once(
-def observe_workspace_once(
     workspace: str | Path,
     provider: MarketProvider,
     *,

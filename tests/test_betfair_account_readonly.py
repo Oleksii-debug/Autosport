@@ -10,6 +10,7 @@ import pytest
 from autosport.betfair_account_readonly import (
     ACCOUNT_JSON_RPC_ENDPOINT,
     BETTING_JSON_RPC_ENDPOINT,
+    BetfairExecutionReadbackEnvelope,
     BetfairReadOnlyClient,
     BetfairReadOnlyError,
     BetfairSessionCredentials,
@@ -392,6 +393,65 @@ def test_execution_readback_binds_action_market_account_and_all_cleared_statuses
         assert params["marketIds"] == ["1.234"]
         assert params["groupBy"] == "BET"
         assert "settledDateRange" not in params
+
+
+def test_execution_readback_factory_cannot_be_called_with_fabricated_evidence():
+    client, _ = client_for(
+        response(
+            [{"marketId": "1.234", "event": {"id": "event-1"}}],
+            1,
+        ),
+        response({"currentOrders": [], "moreAvailable": False}, 2),
+        response({"clearedOrders": [], "moreAvailable": False}, 3),
+        response({"clearedOrders": [], "moreAvailable": False}, 4),
+        response({"clearedOrders": [], "moreAvailable": False}, 5),
+        response({"clearedOrders": [], "moreAvailable": False}, 6),
+    )
+    capture = client.read_execution_readback(
+        action_id="action-1",
+        market_id="1.234",
+    )
+
+    assert not hasattr(BetfairExecutionReadbackEnvelope, "_from_client")
+    with pytest.raises(BetfairReadOnlyError, match="canonical BetfairReadOnlyClient"):
+        BetfairExecutionReadbackEnvelope(
+            capture.venue_id,
+            capture.account_id,
+            capture.adapter_id,
+            capture.adapter_version,
+            capture.action_id,
+            capture.market_id,
+            capture.market_event,
+            capture.current_pages,
+            capture.cleared_pages_by_status,
+            capture.observed_at,
+            capture.page_size,
+            capture.request_scope_sha256,
+            capture.evidence_sha256,
+            object(),
+        )
+
+
+def test_execution_readback_detects_post_capture_scope_tampering():
+    client, _ = client_for(
+        response(
+            [{"marketId": "1.234", "event": {"id": "event-1"}}],
+            1,
+        ),
+        response({"currentOrders": [], "moreAvailable": False}, 2),
+        response({"clearedOrders": [], "moreAvailable": False}, 3),
+        response({"clearedOrders": [], "moreAvailable": False}, 4),
+        response({"clearedOrders": [], "moreAvailable": False}, 5),
+        response({"clearedOrders": [], "moreAvailable": False}, 6),
+    )
+    capture = client.read_execution_readback(
+        action_id="action-1",
+        market_id="1.234",
+    )
+
+    object.__setattr__(capture, "account_id", "forged-account")
+    with pytest.raises(BetfairReadOnlyError, match="request scope digest mismatch"):
+        capture.assert_authoritative()
 
 
 def test_execution_readback_fails_closed_when_market_event_identity_is_unavailable():

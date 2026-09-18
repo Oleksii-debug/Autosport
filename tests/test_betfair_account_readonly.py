@@ -395,15 +395,22 @@ def test_execution_readback_binds_action_market_account_and_all_cleared_statuses
 
 
 def test_execution_readback_fails_closed_when_market_event_identity_is_unavailable():
-    client, transport = client_for(response([], 1))
+    client, transport = client_for(
+        response([], 1),
+        response({"currentOrders": [], "moreAvailable": False}, 2),
+        response({"clearedOrders": [], "moreAvailable": False}, 3),
+        response({"clearedOrders": [], "moreAvailable": False}, 4),
+        response({"clearedOrders": [], "moreAvailable": False}, 5),
+        response({"clearedOrders": [], "moreAvailable": False}, 6),
+    )
 
-    with pytest.raises(BetfairReadOnlyError, match="market-to-event identity"):
+    with pytest.raises(BetfairReadOnlyError, match="authoritative market-to-event identity"):
         client.read_execution_readback(
             action_id="action-1",
             market_id="1.234",
         )
 
-    assert len(transport.calls) == 1
+    assert len(transport.calls) == 6
 
 
 def test_bet_readback_capability_is_advertised_only_by_real_readonly_adapter():

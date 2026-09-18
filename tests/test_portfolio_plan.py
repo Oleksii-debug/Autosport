@@ -411,7 +411,7 @@ class PortfolioPlanTests(unittest.TestCase):
 
         self.assertEqual(plan.action, PortfolioAction.WAIT)
         self.assertEqual(plan.stakes, (Decimal("0"), Decimal("0")))
-        self.assertIn("canonical joint-risk evidence", plan.reason)
+        self.assertIn("complete canonical joint-dependency proof", plan.reason)
 
     def test_outcome_independent_positive_requires_complete_exact_terminal_evidence(self) -> None:
         goal = self._goal()

@@ -341,7 +341,11 @@ class PaperCampaignTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "campaign.json"
             campaign.save(path)
-            loaded = PaperCampaign.load(path)
+            loaded = PaperCampaign.load(
+                path,
+                scientific_registry=self.scientific_registry,
+                run_registry=self.run_registry,
+            )
         self.assertEqual(loaded.sessions[0].model_version_id, "model-1")
         self.assertEqual(loaded.campaign_sha256, campaign.campaign_sha256)
 
@@ -381,14 +385,24 @@ class PaperCampaignTests(unittest.TestCase):
 
     def test_negative_and_null_outcomes_are_preserved(self):
         campaign = self.campaign()
-        self.add_session(campaign, self.session(outcome=CampaignOutcome.NEGATIVE))
-        self.add_session(campaign, 
+        self.add_session(
+            campaign,
+            self.session(
+                ending_bankroll=Decimal("990"),
+                net_profit=Decimal("-10"),
+                outcome=CampaignOutcome.NEGATIVE,
+            ),
+        )
+        self.add_session(
+            campaign,
             self.session(
                 session_id="session-2",
                 run_id="run-2",
                 evidence_id="evidence-2",
+                ending_bankroll=Decimal("1000"),
+                net_profit=Decimal("0"),
                 outcome=CampaignOutcome.NULL,
-            )
+            ),
         )
         summary = campaign.finalize(
             outcome=CampaignOutcome.INCONCLUSIVE,
@@ -414,9 +428,6 @@ class PaperCampaignTests(unittest.TestCase):
                 bets=20,
                 wins=11,
                 losses=9,
-                brier_sum=Decimal("0.43"),
-                log_loss_sum=Decimal("3.2"),
-                prediction_count=20,
             )
         )
         original_context = getcontext().copy()
@@ -448,9 +459,6 @@ class PaperCampaignTests(unittest.TestCase):
                 bets=20,
                 wins=11,
                 losses=9,
-                brier_sum=Decimal("0.43"),
-                log_loss_sum=Decimal("3.2"),
-                prediction_count=20,
             )
         )
         second = campaign_b.finalize(
@@ -486,7 +494,11 @@ class PaperCampaignTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "campaign.json"
             campaign.save(path)
-            loaded = PaperCampaign.load(path)
+            loaded = PaperCampaign.load(
+                path,
+                scientific_registry=self.scientific_registry,
+                run_registry=self.run_registry,
+            )
         self.assertEqual(loaded.campaign_sha256, campaign.campaign_sha256)
         self.assertEqual(loaded.export_summary(), campaign.export_summary())
 
@@ -506,6 +518,62 @@ class PaperCampaignTests(unittest.TestCase):
             path.write_text(json.dumps(raw), encoding="utf-8")
             with self.assertRaises(CampaignIntegrityError):
                 PaperCampaign.load(path)
+
+    def test_authoritative_admission_rejects_mutated_dataset_manifest(self):
+        authoritative = self.session()
+        self._ensure_run_authority(authoritative)
+        mutated = self.session(dataset_manifest_sha256="cc" * 32)
+        with self.assertRaises(CampaignIntegrityError):
+            self.add_session(
+                self.campaign(),
+                mutated,
+                establish_authority=False,
+            )
+
+    def test_authoritative_admission_rejects_mutated_economic_metrics(self):
+        authoritative = self.session()
+        self._ensure_run_authority(authoritative)
+        mutated = self.session(
+            ending_bankroll=Decimal("1061"),
+            net_profit=Decimal("61"),
+        )
+        with self.assertRaises(CampaignIntegrityError):
+            self.add_session(
+                self.campaign(),
+                mutated,
+                establish_authority=False,
+            )
+
+    def test_authoritative_admission_rejects_summary_tamper(self):
+        session = self.session()
+        self._ensure_run_authority(session)
+        path = self.workspace / f"run-{session.run_id}.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["evaluation"]["net_profit"] = "999"
+        path.write_text(
+            json.dumps(raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(CampaignIntegrityError):
+            self.add_session(
+                self.campaign(),
+                session,
+                establish_authority=False,
+            )
+
+    def test_unbacked_optional_metrics_are_rejected_instead_of_minted(self):
+        authoritative = self.session()
+        self._ensure_run_authority(authoritative)
+        mutated = self.session(
+            brier_sum=Decimal("0.2"),
+            prediction_count=10,
+        )
+        with self.assertRaises(CampaignIntegrityError):
+            self.add_session(
+                self.campaign(),
+                mutated,
+                establish_authority=False,
+            )
 
     def test_export_summary_is_explicit_about_unsupported_metrics(self):
         campaign = self.campaign()

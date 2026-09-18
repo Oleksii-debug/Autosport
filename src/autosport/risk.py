@@ -536,6 +536,7 @@ class PaperRiskPolicy:
                         "ticket_id": ticket.ticket_id,
                         "stake": str(ticket.stake),
                         "placed_at": ticket.placed_at,
+                        "settled_at": ticket.settled_at,
                         "status": ticket.status.value,
                         "payout": str(ticket.payout),
                         "strategy_reason": ticket.strategy_reason,
@@ -568,11 +569,16 @@ class PaperRiskPolicy:
                         "ticket_id": ticket_id,
                         "winning_quote_keys": list(winners),
                         "void_quote_keys": list(voids),
+                        "settled_at": (
+                            book._settlement_times[ticket_id]
+                            if action == "settle"
+                            else None
+                        ),
                     }
                 )
             return _sha256_payload(
                 {
-                    "schema": "autosport.paper-risk-state.v2",
+                    "schema": "autosport.paper-risk-state.v3",
                     "initial_bankroll": str(book.initial_bankroll),
                     "balance": str(book.balance),
                     "tickets": tickets,
@@ -700,6 +706,7 @@ class PaperRiskPolicy:
         book: PaperBook,
         *,
         realized_loss_window: tuple[datetime, datetime] | None = None,
+        causal_cutoff: datetime | None = None,
     ) -> _HistoricalRiskMetrics | None:
         """Derive conservative durable risk facts from canonical PaperBook history.
 
@@ -724,6 +731,12 @@ class PaperRiskPolicy:
                     or window_start > window_end
                 ):
                     return None
+            if causal_cutoff is not None and (
+                not isinstance(causal_cutoff, datetime)
+                or causal_cutoff.tzinfo is None
+                or causal_cutoff.utcoffset() is None
+            ):
+                return None
             replay_balance = book.initial_bankroll
             replay_committed = Decimal("0")
             peak_equity = book.initial_bankroll
@@ -763,14 +776,20 @@ class PaperRiskPolicy:
                     if replay_committed < 0:
                         return None
 
-                    include_loss = True
-                    if (
-                        realized_loss_window is not None
-                        and ticket.settled_at is not None
-                    ):
+                    settlement_time: datetime | None = None
+                    settlement_witness = book._settlement_times.get(ticket_id)
+                    if settlement_witness is not None:
                         _, settlement_time = _canonical_context_timestamp(
-                            "settlement settled_at", ticket.settled_at
+                            "settlement settled_at", settlement_witness
                         )
+                        if (
+                            causal_cutoff is not None
+                            and settlement_time > causal_cutoff
+                        ):
+                            return None
+
+                    include_loss = True
+                    if realized_loss_window is not None and settlement_time is not None:
                         window_start, window_end = realized_loss_window
                         include_loss = window_start <= settlement_time <= window_end
                     if loss > 0 and include_loss:
@@ -836,13 +855,22 @@ class PaperRiskPolicy:
         """Return maximum additional losing stake allowed by durable history."""
 
         realized_loss_window: tuple[datetime, datetime] | None = None
+        causal_cutoff: datetime | None = None
+        if context is not None and context.proposal_ts is not None:
+            try:
+                _, causal_cutoff = _canonical_context_timestamp(
+                    "proposal_ts", context.proposal_ts
+                )
+            except (TypeError, ValueError):
+                return None
+
         if context is not None and context.measurement_window_start is not None:
             if context.measurement_window_end is None:
                 return None
             # A bounded loss window can narrow all-history loss only when it is
             # causally anchored to the proposal instant. Without proposal_ts the
             # safe interpretation is the legacy/all-history upper bound.
-            if context.proposal_ts is not None:
+            if causal_cutoff is not None:
                 try:
                     _, window_start = _canonical_context_timestamp(
                         "measurement_window_start", context.measurement_window_start
@@ -850,10 +878,7 @@ class PaperRiskPolicy:
                     _, window_end = _canonical_context_timestamp(
                         "measurement_window_end", context.measurement_window_end
                     )
-                    _, proposal_time = _canonical_context_timestamp(
-                        "proposal_ts", context.proposal_ts
-                    )
-                    if window_end > proposal_time:
+                    if window_end > causal_cutoff:
                         return None
                 except (TypeError, ValueError):
                     return None
@@ -862,6 +887,7 @@ class PaperRiskPolicy:
         metrics = cls._historical_risk_metrics(
             book,
             realized_loss_window=realized_loss_window,
+            causal_cutoff=causal_cutoff,
         )
         if metrics is None:
             return None
@@ -1230,6 +1256,7 @@ class PaperRiskPolicy:
             shadow.balance = book.balance
             shadow.tickets = dict(book.tickets)
             shadow._lifecycle = list(book._lifecycle)
+            shadow._settlement_times = dict(book._settlement_times)
             PaperBook._validate_loaded_state(shadow)
         except (ArithmeticError, AttributeError, TypeError, ValueError):
             return None

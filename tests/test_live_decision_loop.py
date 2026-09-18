@@ -280,6 +280,41 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(len(ledger.verified_records()), 1)
             self.assertEqual([item[0] for item in resumed_factory.calls], ["input-a"])
 
+    def test_clean_restart_rebuilds_cache_without_duplicate_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first_factory = _EmptyIntentFactory()
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=first_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+            first_id = ledger.verified_records()[0].decision_id
+            resumed_factory = _EmptyIntentFactory()
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=resumed_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+            )
+            resumed.register_input("input-a", selection_ids="selection-a")
+
+            result = resumed.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(len(ledger.verified_records()), 1)
+            self.assertEqual(ledger.verified_records()[0].decision_id, first_id)
+            self.assertEqual([item[0] for item in resumed_factory.calls], ["input-a"])
+
     def test_backpressure_never_emits_from_partial_dirty_set(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -405,7 +440,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(result.status, LiveCycleStatus.DECIDED)
             self.assertEqual(factory.calls, [("input-a", ())])
 
-    def test_pause_and_stop_do_not_poll_provider(self) -> None:
+    def test_pause_and_stop_are_durable_and_do_not_poll_provider(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             observer = _DurableObserver(workspace, [()])
@@ -421,12 +456,57 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(loop.run_cycle().status, LiveCycleStatus.PAUSED)
             self.assertEqual(observer.calls, 0)
 
-            loop.resume()
-            loop.stop()
-            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.STOPPED)
-            self.assertEqual(observer.calls, 0)
+            paused_observer = _DurableObserver(workspace, [()])
+            paused_restart = self._loop(
+                workspace,
+                observer=paused_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            paused_restart.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(
+                paused_restart.run_cycle().status,
+                LiveCycleStatus.PAUSED,
+            )
+            self.assertEqual(paused_observer.calls, 0)
+
+            paused_restart.resume()
+            paused_restart.stop()
+            self.assertEqual(
+                paused_restart.run_cycle().status,
+                LiveCycleStatus.STOPPED,
+            )
+            stopped_observer = _DurableObserver(workspace, [()])
+            stopped_restart = self._loop(
+                workspace,
+                observer=stopped_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            stopped_restart.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(
+                stopped_restart.run_cycle().status,
+                LiveCycleStatus.STOPPED,
+            )
+            self.assertEqual(stopped_observer.calls, 0)
             with self.assertRaises(RuntimeError):
-                loop.resume()
+                stopped_restart.resume()
+
+    def test_corrupted_control_fails_closed_on_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / PersistentLiveDecisionLoop.CONTROL_FILE_NAME).write_text(
+                '{"schema":"autosport.live_decision_control","schema":"duplicate"}\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(LiveDecisionProgressError):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START),
+                )
 
     def test_corrupted_progress_fails_closed_on_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

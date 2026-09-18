@@ -472,6 +472,7 @@ class WalkForwardRunner:
 class PromotionVerdict(StrEnum):
     PROMOTE = "PROMOTE"
     REJECT = "REJECT"
+    INCONCLUSIVE = "INCONCLUSIVE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -541,6 +542,7 @@ class PromotionController:
         challenger_metrics: Mapping[str, float],
         provenance_complete: bool,
         rollback_target: str | None,
+        promotion_evidence: PromotionEvidence | None = None,
     ) -> PromotionEvaluation:
         if provenance_complete is not True:
             return PromotionEvaluation(
@@ -586,11 +588,51 @@ class PromotionController:
                 improvement,
                 tuple(reasons),
             )
+        if promotion_evidence is None:
+            return PromotionEvaluation(
+                PromotionVerdict.INCONCLUSIVE,
+                PromotionAction.RETAIN,
+                improvement,
+                ("missing typed promotion evidence",),
+            )
+        evidence_reasons: list[str] = []
+        if promotion_evidence.validity is not PromotionEvidenceValidity.ELIGIBLE:
+            evidence_reasons.append("promotion evidence is not eligible")
+        if promotion_evidence.holdout_consumed:
+            evidence_reasons.append("confirmation holdout already consumed")
+        if promotion_evidence.effective_sample_size < promotion_evidence.minimum_effective_sample_size:
+            evidence_reasons.append("effective sample size below frozen minimum")
+        if promotion_evidence.guardrails_passed is not True:
+            evidence_reasons.append("promotion guardrails are not satisfied")
+        if promotion_evidence.estimand != rule.primary_metric:
+            evidence_reasons.append("promotion evidence estimand does not match primary metric")
+        if promotion_evidence.direction is not PromotionEvidenceDirection.LOWER_IS_BETTER:
+            evidence_reasons.append("promotion evidence direction does not match frozen metric direction")
+        if promotion_evidence.rollback_identity != rollback_target:
+            evidence_reasons.append("promotion evidence rollback identity does not match")
+        try:
+            practical = Decimal(promotion_evidence.practical_improvement)
+            interval_low = Decimal(promotion_evidence.effect_interval_low)
+        except Exception:
+            evidence_reasons.append("promotion evidence numeric payload is invalid")
+            practical = Decimal(0)
+            interval_low = Decimal(0)
+        if practical <= 0 or interval_low <= 0:
+            evidence_reasons.append("promotion evidence does not establish strictly positive improvement")
+        if practical < Decimal(str(rule.minimum_improvement)) or interval_low < Decimal(str(rule.minimum_improvement)):
+            evidence_reasons.append("promotion evidence does not clear the frozen minimum improvement")
+        if evidence_reasons:
+            return PromotionEvaluation(
+                PromotionVerdict.INCONCLUSIVE,
+                PromotionAction.RETAIN,
+                improvement,
+                tuple(evidence_reasons),
+            )
         return PromotionEvaluation(
             PromotionVerdict.PROMOTE,
             PromotionAction.PROMOTE,
             improvement,
-            ("frozen promotion rule satisfied",),
+            ("frozen promotion rule and typed evidence satisfied",),
         )
 
 
@@ -1132,18 +1174,14 @@ class ExperimentRunner:
         champion_metrics = {
             name: champion_metrics[name] for name in sorted(required_metrics)
         }
-        promotion = PromotionController.evaluate(
+        provisional_promotion = PromotionController.evaluate(
             rule,
             champion_metrics=champion_metrics,
             challenger_metrics=candidate_metrics,
             provenance_complete=True,
             rollback_target=current_champion,
         )
-        outcome = (
-            ResearchOutcome.POSITIVE
-            if promotion.verdict is PromotionVerdict.PROMOTE
-            else ResearchOutcome.NEGATIVE
-        )
+        outcome = ResearchOutcome.INCONCLUSIVE
         experiment = ExperimentRecord(
             spec.experiment_id,
             spec.research_protocol_id,
@@ -1317,6 +1355,107 @@ class ExperimentRunner:
             )
         )
 
+        champion_evaluation = self.artifact_store.read("evaluation", champion_evaluation_bundle_id)
+        champion_folds = {
+            fold["evaluation_at"]: fold
+            for fold in champion_evaluation.get("walk_forward", {}).get("folds", [])
+            if isinstance(fold, dict) and isinstance(fold.get("evaluation_at"), str)
+        }
+        paired_deltas: list[Decimal] = []
+        for fold in walk_forward.folds:
+            prior = champion_folds.get(fold.evaluation_at)
+            if prior is None:
+                continue
+            paired_deltas.append(
+                Decimal(str(prior["squared_error"])) - Decimal(str(fold.squared_error))
+            )
+        if not paired_deltas:
+            raise ValueError("promotion evidence requires at least one paired causal holdout fold")
+        practical = sum(paired_deltas, Decimal(0)) / Decimal(len(paired_deltas))
+        ordered = sorted(paired_deltas)
+        effect_low = ordered[0]
+        effect_high = ordered[-1]
+
+        def _canonical_decimal_text(value: Decimal) -> str:
+            text = format(value, "f")
+            if "." in text:
+                text = text.rstrip("0").rstrip(".")
+            return "0" if text in ("", "-0") else text
+
+        binding = protocol["payload"]["binding"]
+        stopping_sha = hashlib.sha256(str(binding["stopping_rule"]).encode("utf-8")).hexdigest()
+        comparison_sha = hashlib.sha256(
+            str(binding["multiple_comparison_control"]).encode("utf-8")
+        ).hexdigest()
+        guardrails_passed = all(
+            candidate_metrics[name] <= maximum
+            for name, maximum in rule.protective_metric_maxima
+        )
+        evidence_payload = {
+            "schema_version": 1,
+            "experiment_id": spec.experiment_id,
+            "research_protocol_id": spec.research_protocol_id,
+            "research_question_id": binding["research_question_id"],
+            "hypothesis_id": binding["hypothesis_id"],
+            "candidate_strategy_version_id": spec.strategy_version_id,
+            "candidate_model_version_id": spec.model_version_id,
+            "evaluation_bundle_id": spec.evaluation_bundle_id,
+            "evaluation_bundle_sha256": evaluation_bundle_sha256,
+            "dataset_snapshot_id": spec.dataset_snapshot_id,
+            "holdout_access_id": f"{spec.research_protocol_id}:holdout:{spec.evaluation_bundle_id}",
+            "confirmation_trial_family_id": f"{spec.research_protocol_id}:confirmation-trial-family",
+            "estimand": rule.primary_metric,
+            "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+            "cohort_id": spec.dataset_snapshot_id,
+            "effective_sample_size": len(paired_deltas),
+            "minimum_effective_sample_size": 2,
+            "effect_interval_low": _canonical_decimal_text(effect_low),
+            "effect_interval_high": _canonical_decimal_text(effect_high),
+            "practical_improvement": _canonical_decimal_text(practical),
+            "guardrails_passed": guardrails_passed,
+            "validity": (
+                PromotionEvidenceValidity.ELIGIBLE.value
+                if len(paired_deltas) >= 2
+                and effect_low > 0
+                and practical > 0
+                and guardrails_passed
+                else PromotionEvidenceValidity.INCONCLUSIVE.value
+            ),
+            "holdout_consumed": False,
+            "stopping_rule_sha256": stopping_sha,
+            "multiple_comparison_control_sha256": comparison_sha,
+            "rollback_identity": current_champion,
+            "uncertainty_method": binding["uncertainty_method"],
+            "created_at": spec.decided_at,
+        }
+        evidence_id = hashlib.sha256(
+            json.dumps(
+                evidence_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        promotion_evidence = PromotionEvidence(
+            promotion_evidence_id=evidence_id,
+            **evidence_payload,
+        )
+        self.registry.append(promotion_evidence)
+        promotion = PromotionController.evaluate(
+            rule,
+            champion_metrics=champion_metrics,
+            challenger_metrics=candidate_metrics,
+            provenance_complete=True,
+            rollback_target=current_champion,
+            promotion_evidence=promotion_evidence,
+        )
+        outcome = (
+            ResearchOutcome.POSITIVE
+            if promotion.verdict is PromotionVerdict.PROMOTE
+            else ResearchOutcome.INCONCLUSIVE
+        )
+        experiment = replace(experiment, outcome=outcome, notes="; ".join(promotion.reasons))
         self.registry.append(experiment)
 
         self.registry.record_promotion(
@@ -1331,6 +1470,7 @@ class ExperimentRunner:
                 spec.decided_at,
                 predecessor_strategy_version_id=spec.predecessor_strategy_version_id,
                 candidate_model_version_id=spec.model_version_id,
+                promotion_evidence_id=promotion_evidence.promotion_evidence_id,
                 reason="; ".join(promotion.reasons),
             )
         )

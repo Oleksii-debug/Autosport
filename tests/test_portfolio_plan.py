@@ -17,6 +17,7 @@ from autosport.portfolio_plan import (
     OpportunityEvidence,
     OpportunityIntent,
     PortfolioAction,
+    PortfolioDependencyGraph,
     PortfolioPlan,
     build_portfolio_plan,
 )
@@ -201,18 +202,32 @@ class PortfolioPlanTests(unittest.TestCase):
             config_sha256="e" * 64,
         )
 
+    @staticmethod
+    def _graph(
+        book: PaperBook,
+        intents: tuple[OpportunityIntent, ...],
+        *,
+        dependency_edges: tuple[tuple[str, str], ...] = (),
+    ) -> PortfolioDependencyGraph:
+        return PortfolioDependencyGraph.for_inputs(
+            book,
+            intents,
+            dependency_edges=dependency_edges,
+        )
+
     def test_predictive_intent_uses_canonical_opportunity_and_risk_policy(self) -> None:
         goal = self._goal()
         policy = self._policy(goal)
         book = PaperBook("1000")
         intent = self._intent(goal)
+        graph = self._graph(book, (intent,))
 
         plan = build_portfolio_plan(
             book,
             (intent,),
             policy,
             self.DECISION_TS,
-            dependency_graph_sha256="f" * 64,
+            dependency_graph=graph,
         )
 
         self.assertEqual(intent.opportunity_class, StrategyClass.PREDICTIVE_EDGE)
@@ -221,11 +236,13 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("1000"))
         self.assertEqual(book.tickets, {})
         self.assertEqual(plan.risk_policy_sha256, policy.provenance_sha256)
+        self.assertEqual(plan.dependency_graph_sha256, graph.graph_sha256)
         self.assertEqual(len(intent.intent_sha256), 64)
         self.assertEqual(len(plan.plan_sha256), 64)
 
     def test_nonforecast_arbitrage_uses_same_portfolio_risk_path(self) -> None:
         goal = self._goal()
+        book = PaperBook("1000")
         intent = self._intent(
             goal,
             strategy_class=StrategyClass.ARBITRAGE,
@@ -233,11 +250,11 @@ class PortfolioPlanTests(unittest.TestCase):
         )
 
         plan = build_portfolio_plan(
-            PaperBook("1000"),
+            book,
             (intent,),
             self._policy(goal),
             self.DECISION_TS,
-            dependency_graph_sha256="f" * 64,
+            dependency_graph=self._graph(book, (intent,)),
         )
 
         self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
@@ -247,6 +264,7 @@ class PortfolioPlanTests(unittest.TestCase):
 
     def test_hedge_rebalance_is_labeled_without_bypassing_risk_policy(self) -> None:
         goal = self._goal()
+        book = PaperBook("1000")
         intent = self._intent(
             goal,
             strategy_class=StrategyClass.HEDGE_REBALANCE,
@@ -254,11 +272,11 @@ class PortfolioPlanTests(unittest.TestCase):
         )
 
         plan = build_portfolio_plan(
-            PaperBook("1000"),
+            book,
             (intent,),
             self._policy(goal),
             self.DECISION_TS,
-            dependency_graph_sha256="7" * 64,
+            dependency_graph=self._graph(book, (intent,)),
         )
 
         self.assertEqual(plan.action, PortfolioAction.HEDGE_REBALANCE)
@@ -323,21 +341,23 @@ class PortfolioPlanTests(unittest.TestCase):
         goal = self._goal()
         policy = self._policy(goal)
         intent = self._intent(goal)
+        book = PaperBook("1000")
+        graph = self._graph(book, (intent,))
 
         approximate = build_portfolio_plan(
-            PaperBook("1000"),
+            book,
             (intent,),
             policy,
             self.DECISION_TS,
             portfolio_truth=EvidenceTruth.APPROXIMATE,
-            dependency_graph_sha256="f" * 64,
+            dependency_graph=graph,
         )
         missing_graph = build_portfolio_plan(
-            PaperBook("1000"),
+            book,
             (intent,),
             policy,
             self.DECISION_TS,
-            dependency_graph_sha256=None,
+            dependency_graph=None,
         )
 
         self.assertEqual(approximate.action, PortfolioAction.WAIT)
@@ -345,6 +365,32 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertIn("exact portfolio", approximate.reason)
         self.assertEqual(missing_graph.action, PortfolioAction.WAIT)
         self.assertIn("dependency-graph", missing_graph.reason)
+
+    def test_dependency_graph_is_bound_to_exact_portfolio_and_candidate_vector(self) -> None:
+        goal = self._goal()
+        book = PaperBook("1000")
+        first = self._intent(goal, suffix="1")
+        second = self._intent(goal, suffix="2")
+        first_graph = self._graph(book, (first,))
+
+        mismatch = build_portfolio_plan(
+            book,
+            (second,),
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=first_graph,
+        )
+        self.assertEqual(mismatch.action, PortfolioAction.WAIT)
+        self.assertIn("does not bind exact portfolio and candidate inputs", mismatch.reason)
+
+        with self.assertRaisesRegex(TypeError, "PortfolioDependencyGraph"):
+            build_portfolio_plan(
+                book,
+                (first,),
+                self._policy(goal),
+                self.DECISION_TS,
+                dependency_graph="f" * 64,  # type: ignore[arg-type]
+            )
 
     def test_outcome_independent_positive_requires_complete_exact_terminal_evidence(self) -> None:
         goal = self._goal()
@@ -356,12 +402,13 @@ class PortfolioPlanTests(unittest.TestCase):
                 outcome_space_complete=True,
             ),
         )
+        book = PaperBook("1000")
         plan = build_portfolio_plan(
-            PaperBook("1000"),
+            book,
             (approximate,),
             self._policy(goal),
             self.DECISION_TS,
-            dependency_graph_sha256="f" * 64,
+            dependency_graph=self._graph(book, (approximate,)),
         )
         self.assertEqual(plan.action, PortfolioAction.WAIT)
         self.assertIn("outcome-independent", plan.reason)
@@ -375,12 +422,13 @@ class PortfolioPlanTests(unittest.TestCase):
                 outcome_space_complete=False,
             ),
         )
+        book = PaperBook("1000")
         plan = build_portfolio_plan(
-            PaperBook("1000"),
+            book,
             (incomplete,),
             self._policy(goal),
             self.DECISION_TS,
-            dependency_graph_sha256="f" * 64,
+            dependency_graph=self._graph(book, (incomplete,)),
         )
         self.assertEqual(plan.action, PortfolioAction.WAIT)
         self.assertIn("terminal-state", plan.reason)
@@ -394,12 +442,13 @@ class PortfolioPlanTests(unittest.TestCase):
             causal_cutoff="2026-09-18T13:20:01+00:00",
         )
         future = self._intent(goal, evidence=future_evidence)
+        future_book = PaperBook("1000")
         future_plan = build_portfolio_plan(
-            PaperBook("1000"),
+            future_book,
             (future,),
             policy,
             self.DECISION_TS,
-            dependency_graph_sha256="f" * 64,
+            dependency_graph=self._graph(future_book, (future,)),
         )
         infeasible = self._intent(
             goal,
@@ -409,12 +458,13 @@ class PortfolioPlanTests(unittest.TestCase):
                 execution_feasible=False,
             ),
         )
+        infeasible_book = PaperBook("1000")
         infeasible_plan = build_portfolio_plan(
-            PaperBook("1000"),
+            infeasible_book,
             (infeasible,),
             policy,
             self.DECISION_TS,
-            dependency_graph_sha256="f" * 64,
+            dependency_graph=self._graph(infeasible_book, (infeasible,)),
         )
         canonical_wait = self._intent(
             goal,
@@ -426,7 +476,7 @@ class PortfolioPlanTests(unittest.TestCase):
             (canonical_wait,),
             policy,
             self.DECISION_TS,
-            dependency_graph_sha256="f" * 64,
+            dependency_graph=None,
         )
 
         self.assertEqual(future_plan.action, PortfolioAction.WAIT)
@@ -435,6 +485,36 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertIn("not proven feasible", infeasible_plan.reason)
         self.assertEqual(wait_plan.action, PortfolioAction.WAIT)
         self.assertIn("canonical opportunity decision", wait_plan.reason)
+
+    def test_mixed_candidate_preflight_selectively_zeros_unsafe_candidate(self) -> None:
+        goal = self._goal()
+        policy = self._policy(goal)
+        safe = self._intent(goal, suffix="safe", signal=Decimal("0.05"))
+        future = self._intent(
+            goal,
+            suffix="future",
+            signal=Decimal("0.04"),
+            evidence=replace(
+                self._evidence(evidence_id="future"),
+                observed_at="2026-09-18T13:20:01+00:00",
+                causal_cutoff="2026-09-18T13:20:01+00:00",
+            ),
+        )
+        intents = (safe, future)
+        book = PaperBook("1000")
+
+        plan = build_portfolio_plan(
+            book,
+            intents,
+            policy,
+            self.DECISION_TS,
+            dependency_graph=self._graph(book, intents),
+        )
+
+        self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
+        self.assertEqual(plan.stakes, (Decimal("50.00"), Decimal("0")))
+        self.assertIn("ineligible intents zeroed", plan.reason)
+        self.assertIn("future", plan.reason)
 
     def test_zero_decision_and_owner_emergency_stop_produce_zero_semantics(self) -> None:
         goal = self._goal()
@@ -449,22 +529,62 @@ class PortfolioPlanTests(unittest.TestCase):
             ),
             self._policy(goal),
             self.DECISION_TS,
-            dependency_graph_sha256=None,
+            dependency_graph=None,
         )
         self.assertEqual(canonical_zero.action, PortfolioAction.ZERO)
 
         stopped_goal = self._goal(emergency_stop=True)
+        stopped_intent = self._intent(stopped_goal)
+        stopped_book = PaperBook("1000")
         stopped = build_portfolio_plan(
-            PaperBook("1000"),
-            (self._intent(stopped_goal),),
+            stopped_book,
+            (stopped_intent,),
             self._policy(stopped_goal),
             self.DECISION_TS,
-            dependency_graph_sha256="f" * 64,
+            dependency_graph=self._graph(stopped_book, (stopped_intent,)),
         )
         self.assertEqual(stopped.action, PortfolioAction.ZERO)
         self.assertIn("emergency stop", stopped.reason)
 
-    def test_duplicate_intent_waits_and_plan_roundtrip_is_hash_stable(self) -> None:
+    def test_positive_plan_readback_preserves_authority_and_immutable_identity(self) -> None:
+        goal = self._goal()
+        intent = self._intent(goal)
+        policy = self._policy(goal)
+        book = PaperBook("1000")
+        plan = build_portfolio_plan(
+            book,
+            (intent,),
+            policy,
+            self.DECISION_TS,
+            dependency_graph=self._graph(book, (intent,)),
+        )
+        payload = plan.to_dict()
+        restored = PortfolioPlan.from_dict(payload)
+        self.assertEqual(restored, plan)
+        self.assertEqual(restored.plan_sha256, plan.plan_sha256)
+
+        numeric_stake = dict(payload)
+        numeric_stake["stakes"] = [0.1]
+        with self.assertRaisesRegex(ValueError, "serialized portfolio plan is invalid"):
+            PortfolioPlan.from_dict(numeric_stake)
+
+        missing_graph = dict(payload)
+        missing_graph["dependency_graph"] = None
+        missing_graph["dependency_graph_sha256"] = None
+        with self.assertRaisesRegex(ValueError, "serialized portfolio plan is invalid"):
+            PortfolioPlan.from_dict(missing_graph)
+
+        approximate = dict(payload)
+        approximate["portfolio_truth"] = EvidenceTruth.APPROXIMATE.value
+        with self.assertRaisesRegex(ValueError, "serialized portfolio plan is invalid"):
+            PortfolioPlan.from_dict(approximate)
+
+        tampered_reason = dict(payload)
+        tampered_reason["reason"] = "tampered durable plan"
+        with self.assertRaisesRegex(ValueError, "serialized portfolio plan is invalid"):
+            PortfolioPlan.from_dict(tampered_reason)
+
+    def test_duplicate_intent_waits_without_accepting_fake_dependency_hash(self) -> None:
         goal = self._goal()
         intent = self._intent(goal)
         policy = self._policy(goal)
@@ -473,21 +593,10 @@ class PortfolioPlanTests(unittest.TestCase):
             (intent, intent),
             policy,
             self.DECISION_TS,
-            dependency_graph_sha256="f" * 64,
+            dependency_graph=None,
         )
         self.assertEqual(duplicate.action, PortfolioAction.WAIT)
         self.assertIn("duplicate", duplicate.reason)
-
-        plan = build_portfolio_plan(
-            PaperBook("1000"),
-            (intent,),
-            policy,
-            self.DECISION_TS,
-            dependency_graph_sha256="f" * 64,
-        )
-        restored = PortfolioPlan.from_dict(plan.to_dict())
-        self.assertEqual(restored, plan)
-        self.assertEqual(restored.plan_sha256, plan.plan_sha256)
 
 
 if __name__ == "__main__":

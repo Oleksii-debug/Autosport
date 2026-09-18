@@ -729,10 +729,14 @@ def persist_portfolio_plan_decision(
         _PORTFOLIO_INTENT_EVIDENCE_JSON_PAYLOAD_KEY: intent_evidence_json,
     }
 
-    existing = ledger.verified_economic_decision_for_material_action(
-        material_action_id,
-        goal,
-        risk_policy=risk_policy,
+    existing = (
+        ledger.verified_economic_decision_for_material_action(
+            material_action_id,
+            goal,
+            risk_policy=risk_policy,
+        )
+        if ledger.path.exists()
+        else None
     )
     if existing is not None:
         if (

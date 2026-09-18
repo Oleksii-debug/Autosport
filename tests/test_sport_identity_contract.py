@@ -12,6 +12,7 @@ from autosport.domain import MarketEvent, TicketLeg
 from autosport.paper import PaperBook
 from autosport.parlayapi_provider import ParlayApiTableTennisProvider
 from autosport.session import AutosportSession
+from autosport.storage import SQLiteMarketStore
 
 
 class SportIdentityContractTests(unittest.TestCase):
@@ -179,6 +180,63 @@ class SportIdentityContractTests(unittest.TestCase):
             path.write_text(json.dumps(raw), encoding="utf-8")
             legacy = PaperBook.load(path)
             self.assertIsNone(legacy.tickets[ticket.ticket_id].legs[0].sport)
+
+    def test_sqlite_restart_preserves_cross_sport_identity_without_aliasing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "market.db"
+            table_tennis = self._event(sport="table_tennis", sequence=1)
+            soccer = self._event(sport="soccer", sequence=1)
+            store = SQLiteMarketStore(path)
+            try:
+                self.assertTrue(store.append(table_tennis))
+                self.assertTrue(store.append(soccer))
+                current = store.current_by_source()
+                self.assertEqual(len(current), 2)
+                self.assertEqual(
+                    {event.sport for event in current.values()},
+                    {"soccer", "table_tennis"},
+                )
+            finally:
+                store.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                restored = reopened.events()
+                self.assertEqual(len(restored), 2)
+                self.assertEqual(
+                    {event.quote_key for event in restored},
+                    {table_tennis.quote_key, soccer.quote_key},
+                )
+                self.assertEqual(
+                    {event.sport for event in restored},
+                    {"soccer", "table_tennis"},
+                )
+            finally:
+                reopened.close()
+
+    def test_sport_scope_and_identity_are_bounded_at_20k_events(self) -> None:
+        dataset = ReplayDataset(
+            root=Path("."),
+            name="bounded-20k",
+            sport="table_tennis",
+            market_path=Path("unused-market"),
+            results_path=Path("unused-results"),
+            market_sha256="0" * 64,
+            results_sha256="0" * 64,
+            schema_version=3,
+        )
+        events = [
+            self._event(
+                sport="table_tennis",
+                event_id=f"event-{index}",
+                sequence=index + 1,
+            )
+            for index in range(20_000)
+        ]
+
+        self.assertEqual(dataset._assert_sport_scope(events), ("table_tennis",))
+        self.assertEqual(len({event.quote_key for event in events}), 20_000)
+        self.assertEqual(len({event.dedupe_key for event in events}), 20_000)
 
     def test_parlayapi_adapter_declares_table_tennis_sport(self) -> None:
         self.assertEqual(ParlayApiTableTennisProvider.sport_key, "table_tennis")

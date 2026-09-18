@@ -328,6 +328,18 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
         notes="fixture champion",
     )
     registry.append(champion_experiment)
+    champion_evidence = _promotion_evidence(
+        experiment_id=champion_experiment.experiment_id,
+        strategy_id=champion_strategy.strategy_version_id,
+        model_id=champion_model.model_version_id,
+        bundle_id=champion_bundle.evaluation_bundle_id,
+        dataset_id=dataset.dataset_snapshot_id,
+        protocol_id=binding.research_protocol_id,
+        bundle_sha=champion_evaluation_sha256,
+        rollback_identity="NONE",
+        evidence_id_seed="promotion-v1",
+    )
+    registry.append(champion_evidence)
     registry.record_promotion(
         PromotionDecision(
             "promotion-v1",
@@ -339,6 +351,7 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
             champion_evaluation_sha256,
             T3,
             candidate_model_version_id=champion_model.model_version_id,
+            promotion_evidence_id=champion_evidence.promotion_evidence_id,
             reason="fixture baseline champion",
         )
     )

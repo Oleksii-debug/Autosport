@@ -7,6 +7,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 
+from .domain import TicketStatus
 from .economic_goal_provenance import provenance_for
 from .opportunity import Opportunity, OpportunityDecision, QuoteRef, StrategyClass
 from .paper import PaperBook
@@ -633,6 +634,10 @@ def _intent_preflight_reason(
             return (
                 "outcome-independent opportunity lacks execution-assumption evidence"
             )
+        return (
+            "outcome-independent positive action requires verified terminal-state "
+            "economics; hash-only completeness/execution digests are not executable authority"
+        )
     return None
 
 
@@ -798,16 +803,36 @@ def build_portfolio_plan(
         for intent, signal in zip(intents, allocation_signals, strict=True)
         if signal > 0
     }
-    if dependency_graph is not None and any(
-        left in positive_candidates and right in positive_candidates
-        for left, right in dependency_graph.dependency_edges
+    # The current canonical RiskPolicy has no authority that proves an exhaustive
+    # dependency/correlation graph.  A caller-supplied edge list therefore cannot
+    # prove *absence* of an omitted dependency.  Until the canonical scenario/dependency
+    # authority is bound here, fail closed for every joint-positive vector and for
+    # every new positive candidate evaluated alongside an already-open position.
+    # This makes omission non-authoritative rather than treating an empty edge list
+    # as evidence of independence.
+    if len(positive_candidates) > 1:
+        return _terminal_plan(
+            decision_ts=decision_ts,
+            action=PortfolioAction.WAIT,
+            reason=(
+                "multiple positive candidates require complete canonical joint-dependency "
+                "proof; caller-supplied dependency edges cannot prove omitted correlations absent"
+            ),
+            intents=intents,
+            portfolio_sha256=portfolio_sha256,
+            dependency_graph=dependency_graph,
+            policy=risk_policy,
+            portfolio_truth=portfolio_truth,
+        )
+    if positive_candidates and any(
+        ticket.status is TicketStatus.OPEN for ticket in book.tickets.values()
     ):
         return _terminal_plan(
             decision_ts=decision_ts,
             action=PortfolioAction.WAIT,
             reason=(
-                "correlated positive candidates require canonical joint-risk "
-                "evidence not provided by current RiskPolicy"
+                "positive candidate with existing open positions requires complete canonical "
+                "current+proposed dependency proof"
             ),
             intents=intents,
             portfolio_sha256=portfolio_sha256,

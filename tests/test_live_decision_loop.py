@@ -85,6 +85,8 @@ class _EmptyIntentFactory:
 
 class PersistentLiveDecisionLoopTests(unittest.TestCase):
     START = datetime(2026, 9, 18, 18, 0, 0, tzinfo=timezone.utc)
+    INTENT_CONTEXT_SHA256 = "11" * 32
+    ALT_INTENT_CONTEXT_SHA256 = "22" * 32
 
     @staticmethod
     def _event(
@@ -131,14 +133,22 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
         clock: _ManualClock,
         bounds: LiveLoopBounds | None = None,
         post_append_hook=None,
+        intent_context_sha256: str | None = None,
+        book: PaperBook | None = None,
+        authority: EconomicDecisionAuthority | None = None,
     ) -> PersistentLiveDecisionLoop:
         return PersistentLiveDecisionLoop(
             workspace,
             loop_id="live-test-loop",
             mode=LiveDecisionMode.PAPER,
-            book=PaperBook("1000"),
-            authority=self._authority(),
+            book=PaperBook("1000") if book is None else book,
+            authority=self._authority() if authority is None else authority,
             intent_factory=factory,
+            intent_context_sha256=(
+                self.INTENT_CONTEXT_SHA256
+                if intent_context_sha256 is None
+                else intent_context_sha256
+            ),
             observation_runner=observer,
             bounds=bounds,
             max_quote_age=timedelta(seconds=5),
@@ -450,6 +460,78 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_observer.calls, 1)
             self.assertEqual(len(ledger.verified_records()), 2)
 
+    def test_pending_restart_rejects_changed_intent_context_before_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+                intent_context_sha256=self.ALT_INTENT_CONTEXT_SHA256,
+            )
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "runtime context changed",
+            ):
+                resumed.run_cycle()
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+    def test_pending_restart_rejects_changed_paper_book_before_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+                book=PaperBook("900"),
+            )
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "runtime context changed",
+            ):
+                resumed.run_cycle()
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
     def test_multi_input_crash_rebuilds_all_but_preserves_affected_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -668,6 +750,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     book=PaperBook("1000"),
                     authority=authority,
                     intent_factory=_EmptyIntentFactory(),
+                    intent_context_sha256=self.INTENT_CONTEXT_SHA256,
                     observation_runner=_DurableObserver(workspace, [()]),
                     max_quote_age=timedelta(seconds=6),
                     clock=_ManualClock(self.START),

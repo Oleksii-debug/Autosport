@@ -45,7 +45,7 @@ class SessionEconomicGoalRuntimeTests(unittest.TestCase):
                     session.run_dataset(dataset)
 
                 self.assertEqual(session.registry.strategy_ids(), ())
-                self.assertEqual(session.registry.in_progress(), ())
+                self.assertFalse(session.registry.in_progress())
                 self.assertFalse((workspace / "paper_book.json").exists())
                 self.assertEqual(tuple(workspace.glob("run-*.json")), ())
             finally:

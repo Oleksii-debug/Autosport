@@ -166,6 +166,7 @@ class SessionEvidence:
     available_at: str
     outcome_reveal_after: str | None
     observation_timestamps: tuple[str, ...]
+    observation_membership_sha256: str
     starting_bankroll: Decimal
     ending_bankroll: Decimal
     net_profit: Decimal
@@ -199,6 +200,7 @@ class SessionEvidence:
             "protocol_sha256",
             "dataset_manifest_sha256",
             "config_sha256",
+            "observation_membership_sha256",
         ):
             _sha256(getattr(self, name), name)
         if self.model_version_id is not None:
@@ -220,8 +222,6 @@ class SessionEvidence:
         normalized_times = tuple(_timestamp(ts, "observation_timestamp") for ts in self.observation_timestamps)
         if normalized_times != tuple(sorted(normalized_times)):
             raise CampaignError("observation_timestamps must be sorted")
-        if len(normalized_times) != len(set(normalized_times)):
-            raise CampaignError("observation_timestamps must be unique")
         for ts in normalized_times:
             point = _instant(ts, "observation_timestamp")
             if point < start or point > end:
@@ -280,6 +280,7 @@ class SessionEvidence:
             "observation_timestamps": [
                 _timestamp(ts, "observation_timestamp") for ts in self.observation_timestamps
             ],
+            "observation_membership_sha256": self.observation_membership_sha256.lower(),
             "starting_bankroll": _canonical_decimal(self.starting_bankroll, "starting_bankroll", non_negative=True),
             "ending_bankroll": _canonical_decimal(self.ending_bankroll, "ending_bankroll", non_negative=True),
             "net_profit": _canonical_decimal(self.net_profit, "net_profit"),
@@ -1282,11 +1283,12 @@ def _validate_authoritative_session(
         "evaluation_window_start",
         "evaluation_window_end",
         "observation_timestamps",
+        "observation_membership_sha256",
     }
     if (
         not isinstance(causal_membership, dict)
         or set(causal_membership) != required_causal_fields
-        or causal_membership.get("schema_version") != 1
+        or causal_membership.get("schema_version") != 2
     ):
         raise CampaignIntegrityError(
             "completed run lacks canonical campaign causal-membership authority"
@@ -1339,17 +1341,37 @@ def _validate_authoritative_session(
         ) from exc
     if (
         authoritative_observations != tuple(sorted(authoritative_observations))
-        or len(authoritative_observations) != len(set(authoritative_observations))
+        or len(authoritative_observations) != event_count
         or authoritative_start != authoritative_observations[0]
         or authoritative_end != authoritative_observations[-1]
     ):
         raise CampaignIntegrityError(
             "campaign causal-membership window does not match authoritative observations"
         )
+    authoritative_membership_sha256 = causal_membership.get(
+        "observation_membership_sha256"
+    )
+    try:
+        authoritative_membership_sha256 = _sha256(
+            authoritative_membership_sha256,
+            "campaign_causal_membership.observation_membership_sha256",
+        )
+    except CampaignError as exc:
+        raise CampaignIntegrityError(
+            "campaign causal-membership observation identity digest is invalid"
+        ) from exc
+    if authoritative_membership_sha256 != session.observation_membership_sha256.lower():
+        raise CampaignIntegrityError(
+            "session observation membership identity mismatches completed run authority"
+        )
     session_observations = tuple(
         _timestamp(value, "session.observation_timestamp")
         for value in session.observation_timestamps
     )
+    if len(session_observations) != event_count:
+        raise CampaignIntegrityError(
+            "session observation count mismatches completed run authority"
+        )
     if session_observations != authoritative_observations:
         raise CampaignIntegrityError(
             "session observation_timestamps mismatch completed run authority"

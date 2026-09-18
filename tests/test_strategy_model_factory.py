@@ -15,6 +15,9 @@ from autosport.scientific_registry import (
     ModelVersion,
     PromotionAction,
     PromotionDecision,
+    PromotionEvidence,
+    PromotionEvidenceDirection,
+    PromotionEvidenceValidity,
     ResearchOutcome,
     ResearchProtocol,
     ResearchQuestion,
@@ -113,7 +116,7 @@ def _canonical_sha(payload) -> str:
 
 def _factory_rule() -> PromotionRule:
     return PromotionRule("mse", 0.05, (("max_squared_error", 0.50),))
-
+\n\ndef _promotion_evidence(\n    *,\n    experiment_id: str,\n    strategy_id: str,\n    model_id: str,\n    bundle_id: str,\n    dataset_id: str,\n    protocol_id: str,\n    bundle_sha: str,\n    rollback_identity: str,\n    evidence_id_seed: str,\n    created_at: str = T3,\n) -> PromotionEvidence:\n    payload = {\n        "schema_version": 1,\n        "experiment_id": experiment_id,\n        "research_protocol_id": protocol_id,\n        "research_question_id": "question-factory",\n        "hypothesis_id": "hypothesis-factory",\n        "candidate_strategy_version_id": strategy_id,\n        "candidate_model_version_id": model_id,\n        "evaluation_bundle_id": bundle_id,\n        "evaluation_bundle_sha256": bundle_sha,\n        "dataset_snapshot_id": dataset_id,\n        "holdout_access_id": f"{protocol_id}:holdout:{bundle_id}:{evidence_id_seed}",\n        "confirmation_trial_family_id": f"{protocol_id}:trial-family",\n        "estimand": "mse",\n        "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,\n        "cohort_id": dataset_id,\n        "effective_sample_size": 5,\n        "minimum_effective_sample_size": 2,\n        "effect_interval_low": "0.1",\n        "effect_interval_high": "0.2",\n        "practical_improvement": "0.15",\n        "guardrails_passed": True,\n        "validity": PromotionEvidenceValidity.ELIGIBLE.value,\n        "holdout_consumed": False,\n        "stopping_rule_sha256": hashlib.sha256(b"one final evaluation").hexdigest(),\n        "multiple_comparison_control_sha256": hashlib.sha256(b"single frozen primary metric").hexdigest(),\n        "rollback_identity": rollback_identity,\n        "uncertainty_method": "deterministic baseline checkpoint",\n        "created_at": created_at,\n    }\n    evidence_id = _canonical_sha(payload)\n    fields = {key: value for key, value in payload.items() if key != "schema_version"}\n    return PromotionEvidence(evidence_id, **fields)\n
 
 def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
     governed_points = _candidate_points() if points is None else tuple(points)

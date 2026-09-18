@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -9,7 +10,11 @@ from autosport.domain import MarketEvent, TicketLeg, TicketStatus
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
 from autosport.paper_strategy import Forecast, PaperValueAgent
-from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
+from autosport.risk import (
+    PaperRiskPolicy,
+    ProposedTicketRiskContext,
+    RiskOfRuinEvidence,
+)
 
 
 class EconomicGoalEndogenousStakeTests(unittest.TestCase):
@@ -105,6 +110,40 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             currency=goal.currency,
             proposal_ts=event.observed_ts,
             risk_of_ruin_upper_bound=risk_of_ruin_upper_bound,
+        )
+
+    @classmethod
+    def _bound_ruin_context(
+        cls,
+        event: MarketEvent,
+        goal: EconomicGoalContract,
+        policy: PaperRiskPolicy,
+        book: PaperBook,
+        *,
+        evaluated_stake: Decimal,
+        upper_bound: Decimal,
+    ) -> ProposedTicketRiskContext:
+        base = cls._risk_context(event, goal)
+        portfolio_sha256 = policy.risk_of_ruin_portfolio_sha256(book)
+        candidate_sha256 = policy.risk_of_ruin_candidate_sha256(base)
+        assert portfolio_sha256 is not None
+        assert candidate_sha256 is not None
+        return replace(
+            base,
+            risk_of_ruin_evidence=RiskOfRuinEvidence(
+                evidence_id="ror-evidence-1",
+                research_protocol_sha256="a" * 64,
+                reproducibility_bundle_sha256="b" * 64,
+                producer_identity="test-risk-model-source",
+                causal_cutoff="2026-09-17T14:59:58+00:00",
+                evaluated_at="2026-09-17T14:59:59+00:00",
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+                base_portfolio_sha256=portfolio_sha256,
+                candidate_sha256=candidate_sha256,
+                evaluated_stake=evaluated_stake,
+                upper_bound=upper_bound,
+            ),
         )
 
     def test_active_economic_goal_removes_fixed_caller_stake_authority(self) -> None:
@@ -361,6 +400,35 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             book,
             (Decimal("1"),),
             contexts=(
+                self._bound_ruin_context(
+                    event,
+                    goal,
+                    policy,
+                    book,
+                    evaluated_stake=Decimal("2.00"),
+                    upper_bound=Decimal("0.05"),
+                ),
+            ),
+        )
+
+        self.assertEqual(decision.action, "STAKE_VECTOR")
+        self.assertEqual(decision.stakes, (Decimal("2.00"),))
+        self.assertEqual(book.tickets, {})
+
+    def test_single_candidate_bare_ruin_scalar_cannot_authorize(self) -> None:
+        event = self._event(
+            event_id="event-ruin-bare",
+            market_id="market-ruin-bare",
+            sequence=22,
+        )
+        goal = self._goal(max_risk_of_ruin=Decimal("0.10"))
+        policy = self._policy(goal)
+        book = PaperBook("100")
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("1"),),
+            contexts=(
                 self._risk_context(
                     event,
                     goal,
@@ -369,8 +437,8 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(decision.action, "STAKE_VECTOR")
-        self.assertEqual(decision.stakes, (Decimal("2.00"),))
+        self.assertEqual(decision.action, "WAIT")
+        self.assertEqual(decision.stakes, (Decimal("0"),))
         self.assertEqual(book.tickets, {})
 
     def test_multi_candidate_vector_waits_on_stale_quote_evidence(self) -> None:
@@ -403,10 +471,13 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             book,
             (Decimal("1"),),
             contexts=(
-                self._risk_context(
+                self._bound_ruin_context(
                     event,
                     goal,
-                    risk_of_ruin_upper_bound=Decimal("0.20"),
+                    policy,
+                    book,
+                    evaluated_stake=Decimal("2.00"),
+                    upper_bound=Decimal("0.20"),
                 ),
             ),
         )

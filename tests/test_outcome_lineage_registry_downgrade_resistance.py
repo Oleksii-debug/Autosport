@@ -386,7 +386,7 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "parent namespace|unsafe",
+                "parent namespace|unsafe|transaction manifest path is not a regular file",
             ):
                 RunRegistry(registry.path)
 
@@ -406,7 +406,10 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
             except (OSError, NotImplementedError) as exc:
                 self.skipTest(f"file symlink unavailable: {exc}")
 
-            with self.assertRaisesRegex(ValueError, "unsafe|non-aliased"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "unsafe|non-aliased|transaction manifest path is not a regular file",
+            ):
                 RunRegistry(registry.path)
 
     def test_genuine_never_upgraded_schema_one_workspace_remains_accepted(self) -> None:

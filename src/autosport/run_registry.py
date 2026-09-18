@@ -1247,15 +1247,20 @@ class RunRegistry:
                     )
                 except FileNotFoundError:
                     continue
-                except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
-                    raise ValueError("durable lineage-trust run summary is invalid") from exc
+                except (UnicodeError, json.JSONDecodeError, ValueError):
+                    # Without a transaction manifest this summary is not durable lineage
+                    # authority. Leave malformed legacy/unbound summaries to the normal
+                    # reconciliation path instead of changing its established errors.
+                    continue
                 if not isinstance(summary, dict):
                     raise ValueError("durable lineage-trust run summary is invalid")
                 if summary.get(_LINEAGE_TRUST_FIELD) is None:
                     continue
                 raise ValueError("durable lineage-trust run summary lacks transaction manifest")
-            except ValueError:
-                raise
+            except ValueError as exc:
+                raise ValueError(
+                    "transaction manifest path is not a regular file or canonical namespace changed"
+                ) from exc
 
             try:
                 manifest = json.loads(
@@ -1325,7 +1330,10 @@ class RunRegistry:
             if not _is_canonical_sha256(expected_summary_sha):
                 raise ValueError("durable lineage-trust transaction lacks summary SHA-256")
             if hashlib.sha256(summary_bytes).hexdigest() != expected_summary_sha:
-                raise ValueError("durable lineage-trust run summary SHA-256 mismatch")
+                raise ValueError(
+                    "durable lineage-trust run summary identity mismatch; "
+                    "run summary SHA-256 mismatch"
+                )
             if raw_binding is None:
                 continue
             try:

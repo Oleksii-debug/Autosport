@@ -318,6 +318,7 @@ def _verified_decision_sha256(
     ledger: JsonlDecisionLedger,
     record: DecisionRecord,
     goal,
+    risk_policy: PaperRiskPolicy | None = None,
 ) -> str | None:
     try:
         if goal is None:
@@ -331,8 +332,12 @@ def _verified_decision_sha256(
             )
             expected = record
         else:
-            persisted = ledger.verified_economic_decision(record.decision_id, goal)
-            expected = bind_economic_goal(record, goal)
+            persisted = ledger.verified_economic_decision(
+                record.decision_id,
+                goal,
+                risk_policy=risk_policy,
+            )
+            expected = bind_economic_goal(record, goal, risk_policy)
         if persisted != expected:
             return None
         snapshot = ledger.verified_snapshot()
@@ -356,6 +361,7 @@ def _reconcile_existing_economic_action(
     book: PaperBook,
     ledger: JsonlDecisionLedger,
     goal,
+    risk_policy: PaperRiskPolicy,
     material_action_id: str,
     intent_sha256: str,
     replay_run_id: str,
@@ -370,6 +376,7 @@ def _reconcile_existing_economic_action(
         persisted = ledger.verified_economic_decision_for_material_action(
             material_action_id,
             goal,
+            risk_policy=risk_policy,
         )
     ticket = _research_material_action_ticket(book, material_action_id)
 
@@ -762,6 +769,7 @@ class ResearchDecisionPipeline:
                 book=book,
                 ledger=decision_ledger,
                 goal=goal,
+                risk_policy=self.risk_policy,
                 material_action_id=resolved_material_action_id,
                 intent_sha256=resolved_material_action_intent_sha256,
                 replay_run_id=replay_run_id,
@@ -950,10 +958,19 @@ class ResearchDecisionPipeline:
             if goal is None:
                 audit_sha = decision_ledger.append(record)
             else:
-                audit_sha = decision_ledger.append_economic(record, goal)
+                audit_sha = decision_ledger.append_economic(
+                    record,
+                    goal,
+                    risk_policy=self.risk_policy,
+                )
         except Exception:
             durable_sha = (
-                _verified_decision_sha256(decision_ledger, record, goal)
+                _verified_decision_sha256(
+                    decision_ledger,
+                    record,
+                    goal,
+                    self.risk_policy if goal is not None else None,
+                )
                 if record is not None
                 else None
             )

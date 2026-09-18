@@ -291,6 +291,9 @@ class ProviderReadback:
     bookmaker_id: str
     account_id: str
     action_id: str
+    adapter_id: str
+    adapter_version: str
+    profile_version: int
     event_id: str
     market_id: str
     selection_id: str
@@ -298,6 +301,7 @@ class ProviderReadback:
     observed_at: str
     source_payload_sha256: str
     status: AcknowledgementStatus
+    reconciliation_evidence_required: bool = False
     accepted_odds: Decimal | None = None
     accepted_stake: Decimal | None = None
     terminal_settlement_exact: bool = False
@@ -307,16 +311,26 @@ class ProviderReadback:
             "bookmaker_id",
             "account_id",
             "action_id",
+            "adapter_id",
+            "adapter_version",
             "event_id",
             "market_id",
             "selection_id",
             "external_receipt_id",
         ):
             _text(getattr(self, name), name)
+        if (
+            not isinstance(self.profile_version, int)
+            or isinstance(self.profile_version, bool)
+            or self.profile_version < 1
+        ):
+            raise SupervisedExecutionError("profile_version must be a positive integer")
         _time(self.observed_at, "observed_at")
         _sha(self.source_payload_sha256, "source_payload_sha256")
         if not isinstance(self.status, AcknowledgementStatus):
             raise SupervisedExecutionError("status must be AcknowledgementStatus")
+        if type(self.reconciliation_evidence_required) is not bool:
+            raise SupervisedExecutionError("reconciliation_evidence_required must be bool")
         if type(self.terminal_settlement_exact) is not bool:
             raise SupervisedExecutionError("terminal_settlement_exact must be bool")
         if self.status in {AcknowledgementStatus.ACCEPTED, AcknowledgementStatus.PARTIAL}:
@@ -341,6 +355,9 @@ class ProviderReadback:
                 "bookmaker_id": self.bookmaker_id,
                 "account_id": self.account_id,
                 "action_id": self.action_id,
+                "adapter_id": self.adapter_id,
+                "adapter_version": self.adapter_version,
+                "profile_version": self.profile_version,
                 "event_id": self.event_id,
                 "market_id": self.market_id,
                 "selection_id": self.selection_id,
@@ -348,6 +365,7 @@ class ProviderReadback:
                 "observed_at": self.observed_at,
                 "source_payload_sha256": self.source_payload_sha256,
                 "status": self.status.value,
+                "reconciliation_evidence_required": self.reconciliation_evidence_required,
                 "accepted_odds": None if self.accepted_odds is None else str(self.accepted_odds),
                 "accepted_stake": None if self.accepted_stake is None else str(self.accepted_stake),
                 "terminal_settlement_exact": self.terminal_settlement_exact,
@@ -360,6 +378,9 @@ class ProviderNotFoundReadback:
     bookmaker_id: str
     account_id: str
     action_id: str
+    adapter_id: str
+    adapter_version: str
+    profile_version: int
     event_id: str
     market_id: str
     selection_id: str
@@ -372,11 +393,19 @@ class ProviderNotFoundReadback:
             "bookmaker_id",
             "account_id",
             "action_id",
+            "adapter_id",
+            "adapter_version",
             "event_id",
             "market_id",
             "selection_id",
         ):
             _text(getattr(self, name), name)
+        if (
+            not isinstance(self.profile_version, int)
+            or isinstance(self.profile_version, bool)
+            or self.profile_version < 1
+        ):
+            raise SupervisedExecutionError("profile_version must be a positive integer")
         _time(self.observed_at, "observed_at")
         _sha(self.current_source_payload_sha256, "current_source_payload_sha256")
         _sha(self.cleared_source_payload_sha256, "cleared_source_payload_sha256")
@@ -390,6 +419,9 @@ class ProviderNotFoundReadback:
                 "bookmaker_id": self.bookmaker_id,
                 "account_id": self.account_id,
                 "action_id": self.action_id,
+                "adapter_id": self.adapter_id,
+                "adapter_version": self.adapter_version,
+                "profile_version": self.profile_version,
                 "event_id": self.event_id,
                 "market_id": self.market_id,
                 "selection_id": self.selection_id,
@@ -711,12 +743,35 @@ def reconcile_provider_readback(
             raise SupervisedExecutionError("provider status conflicts with accepted stake")
         _validate_slippage(action, bound.constraint_for(action.action_id), readback.accepted_odds)
 
-    if state not in {AttemptState.SUBMITTED, AttemptState.UNKNOWN}:
-        raise SupervisedExecutionError(
-            "readback requires SUBMITTED/UNKNOWN; reservation alone cannot prove an effect"
-        )
-    evidence_id = readback.evidence_id if state is AttemptState.UNKNOWN else None
-    if state is AttemptState.UNKNOWN:
+    planned_profile = bound.profile_for(action.bookmaker_id, action.account_id)
+    if (
+        readback.adapter_id != planned_profile.adapter_id
+        or readback.adapter_version != planned_profile.adapter_version
+        or readback.profile_version < planned_profile.profile_version
+    ):
+        raise SupervisedExecutionError("provider readback adapter/profile authority drifted")
+
+    evidence_id = (
+        readback.evidence_id if readback.reconciliation_evidence_required else None
+    )
+    acknowledgement = ExternalAcknowledgement(
+        attempt_id=attempt_id,
+        external_receipt_id=readback.external_receipt_id,
+        status=readback.status,
+        acknowledged_at=readback.observed_at,
+        accepted_odds=readback.accepted_odds,
+        accepted_stake=readback.accepted_stake,
+        reconciliation_evidence_id=evidence_id,
+    )
+    if state in {AttemptState.ACCEPTED, AttemptState.PARTIAL, AttemptState.REJECTED}:
+        # The canonical ledger compares the complete stored acknowledgement and
+        # makes an exact replay idempotent while rejecting any conflicting receipt.
+        ledger.acknowledge(acknowledgement)
+    elif state is AttemptState.UNKNOWN:
+        if not readback.reconciliation_evidence_required:
+            raise SupervisedExecutionError(
+                "UNKNOWN readback requires explicit reconciliation evidence mode"
+            )
         ledger.reconcile_found(
             ExternalEffectReconciliation(
                 attempt_id=attempt_id,
@@ -726,17 +781,17 @@ def reconcile_provider_readback(
                 source=f"read-only-provider:{readback.source_payload_sha256}",
             )
         )
-    ledger.acknowledge(
-        ExternalAcknowledgement(
-            attempt_id=attempt_id,
-            external_receipt_id=readback.external_receipt_id,
-            status=readback.status,
-            acknowledged_at=readback.observed_at,
-            accepted_odds=readback.accepted_odds,
-            accepted_stake=readback.accepted_stake,
-            reconciliation_evidence_id=evidence_id,
+        ledger.acknowledge(acknowledgement)
+    elif state is AttemptState.SUBMITTED:
+        if readback.reconciliation_evidence_required:
+            raise SupervisedExecutionError(
+                "SUBMITTED direct acknowledgement cannot claim UNKNOWN reconciliation"
+            )
+        ledger.acknowledge(acknowledgement)
+    else:
+        raise SupervisedExecutionError(
+            "readback requires SUBMITTED/UNKNOWN or exact terminal replay"
         )
-    )
     final = ledger.attempt_state(attempt_id)
     outcome = {
         AttemptState.ACCEPTED: ReadbackOutcome.ACCEPTED,
@@ -776,6 +831,13 @@ def reconcile_provider_not_found(
         action.selection_id,
     ):
         raise SupervisedExecutionError("not-found readback identity mismatches execution action")
+    planned_profile = bound.profile_for(action.bookmaker_id, action.account_id)
+    if (
+        readback.adapter_id != planned_profile.adapter_id
+        or readback.adapter_version != planned_profile.adapter_version
+        or readback.profile_version < planned_profile.profile_version
+    ):
+        raise SupervisedExecutionError("not-found readback adapter/profile authority drifted")
     ledger.reconcile_not_found(
         ReconciliationSnapshot(
             attempt_id=attempt_id,

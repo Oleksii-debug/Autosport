@@ -224,7 +224,28 @@ class FocusedMirrorDependencyIndex:
         as_of: datetime,
         max_age: timedelta,
     ) -> MirrorSnapshot:
-        """Read one freshness-fenced focused input from the canonical live mirror."""
+        """Read one canonical focused view without depending on invalidation drains."""
+        dependency = self._dependency(input_id)
+        return self._mirror.active_view(
+            as_of=as_of,
+            max_age=max_age,
+            **self._selectors(dependency),
+        )
+
+    def incremental_decision_view(
+        self,
+        input_id: str,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+    ) -> MirrorSnapshot:
+        """Read one focused view through quote keys maintained by invalidation routing.
+
+        This bounded projection is valid for consumers that first route every drained
+        invalidation batch through affected_inputs, or use the explicit full-refresh
+        path. General consumers must use decision_view so correctness does not depend
+        on participating in this index invalidation protocol.
+        """
         keys = self.matching_keys(input_id)
         return self._mirror.active_view_for_keys(
             keys,

@@ -642,7 +642,7 @@ class PortfolioPlanTests(unittest.TestCase):
             terminal_state_evidence=witness,
         )
 
-        self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
+        self.assertEqual(plan.action, PortfolioAction.PAPER_PLAN)
         self.assertTrue(all(stake > 0 for stake in plan.stakes))
         self.assertIsNotNone(plan.terminal_economics)
         assert plan.terminal_economics is not None
@@ -652,6 +652,30 @@ class PortfolioPlanTests(unittest.TestCase):
             Decimal("0"),
         )
         self.assertEqual(PortfolioPlan.from_dict(plan.to_dict()), plan)
+        tampered_checks = tuple(
+            (
+                name,
+                ("7" * 64 if name == "routing_feasibility" else digest),
+            )
+            for name, digest in witness.execution_check_sha256s
+        )
+        tampered_witness = replace(
+            witness,
+            execution_check_sha256s=tampered_checks,
+        )
+        tampered = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            terminal_state_evidence=tampered_witness,
+        )
+        self.assertEqual(tampered.action, PortfolioAction.WAIT)
+        self.assertIn(
+            "execution assumptions do not match verified completeness",
+            tampered.reason,
+        )
 
     def test_verified_terminal_model_with_nonpositive_minimum_fails_closed(self) -> None:
         goal = self._goal()

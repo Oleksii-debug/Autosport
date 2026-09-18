@@ -335,7 +335,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 workspace / "decisions.jsonl"
             ).verified_records()
             self.assertEqual(len(records), 2)
-            self.assertEqual(records[-1].payload["affected_input_ids"], ["input-a"])
+            self.assertEqual(records[-1].payload["affected_input_ids"], ("input-a",))
 
             resumed_factory = _EmptyIntentFactory()
             resumed = self._loop(

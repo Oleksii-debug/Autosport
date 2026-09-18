@@ -487,7 +487,8 @@ def test_promotion_requires_provenance_rollback_primary_and_protective_metrics()
         provenance_complete=True,
         rollback_target="strategy-v1",
     )
-    assert accepted.verdict is PromotionVerdict.PROMOTE
+    assert accepted.verdict is PromotionVerdict.INCONCLUSIVE
+    assert accepted.registry_action is PromotionAction.RETAIN
     degraded = PromotionController.evaluate(
         rule,
         champion_metrics={"mse": 0.40, "max_drawdown": 0.10},

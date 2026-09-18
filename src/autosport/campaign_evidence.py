@@ -110,11 +110,9 @@ def _canonical_decimal(value: object, name: str, *, non_negative: bool = False) 
         raise CampaignError(f"{name} must be finite")
     if non_negative and parsed < 0:
         raise CampaignError(f"{name} must be non-negative")
-    with localcontext(_DECIMAL_CONTEXT):
-        normalized = parsed.normalize()
-    # Fixed-point formatting eliminates ambient exponent/precision representation
-    # differences while preserving exact value. Zero is represented canonically.
-    text = format(normalized, "f")
+    # Do not normalize through a Decimal context: normalize() is arithmetic and can
+    # round a high-precision input. Canonicalization here must be representation-only.
+    text = format(parsed, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     if text in ("", "-0"):
@@ -131,11 +129,6 @@ def _decimal(value: str, name: str) -> Decimal:
         raise CampaignIntegrityError(f"{name} is non-finite")
     return parsed
 
-
-def _sha_or_none(value: object, name: str) -> str | None:
-    if value is None:
-        return None
-    return _sha256(value, name)
 
 
 def _ordered_unique(values: object, name: str, *, allow_empty: bool = False) -> tuple[str, ...]:
@@ -414,13 +407,21 @@ class PaperCampaign:
             raise CampaignError("draft campaign must not have campaign_sha256")
 
     def _validate_sessions(self) -> None:
-        seen: set[str] = set()
+        seen_session_ids: set[str] = set()
+        seen_run_ids: set[str] = set()
+        seen_evidence_ids: set[str] = set()
         for session in self.sessions:
             if not isinstance(session, SessionEvidence):
                 raise CampaignError("sessions must contain SessionEvidence values")
-            if session.session_id in seen:
+            if session.session_id in seen_session_ids:
                 raise CampaignError("duplicate session membership is forbidden")
-            seen.add(session.session_id)
+            if session.run_id in seen_run_ids:
+                raise CampaignError("duplicate run_id membership is forbidden")
+            if session.evidence_id in seen_evidence_ids:
+                raise CampaignError("duplicate evidence_id membership is forbidden")
+            seen_session_ids.add(session.session_id)
+            seen_run_ids.add(session.run_id)
+            seen_evidence_ids.add(session.evidence_id)
             if session.research_protocol_id != self.research_protocol_id:
                 raise CampaignError("session research_protocol_id mismatches campaign")
             if session.protocol_sha256.lower() != self.protocol_sha256.lower():
@@ -764,11 +765,62 @@ class PaperCampaign:
 
 def _sum_decimal(values: object) -> Decimal:
     values_tuple = tuple(values)  # type: ignore[arg-type]
-    total = Decimal("0")
-    with localcontext(_DECIMAL_CONTEXT):
-        for value in values_tuple:
-            total += value
-    return total
+    if not values_tuple:
+        return Decimal("0")
+    minimum_exponent: int | None = None
+    components: list[tuple[int, int]] = []
+    for value in values_tuple:
+        if not isinstance(value, Decimal) or not value.is_finite():
+            raise CampaignError("campaign aggregate contains non-finite Decimal")
+        parts = value.as_tuple()
+        if not parts.digits:
+            continue
+        significant_end = len(parts.digits)
+        while significant_end > 1 and parts.digits[significant_end - 1] == 0:
+            significant_end -= 1
+        significant_digits = parts.digits[:significant_end]
+        normalized_exponent = parts.exponent + (len(parts.digits) - significant_end)
+        adjusted_exponent = normalized_exponent + len(significant_digits) - 1
+        if normalized_exponent < _DECIMAL_CONTEXT.Etiny() or adjusted_exponent > _DECIMAL_CONTEXT.Emax:
+            raise CampaignError("campaign aggregate Decimal is outside the bounded envelope")
+        coefficient = 0
+        for digit in significant_digits:
+            coefficient = coefficient * 10 + digit
+        if parts.sign:
+            coefficient = -coefficient
+        components.append((coefficient, normalized_exponent))
+        minimum_exponent = (
+            normalized_exponent
+            if minimum_exponent is None
+            else min(minimum_exponent, normalized_exponent)
+        )
+    if minimum_exponent is None:
+        return Decimal("0")
+    total = 0
+    for coefficient, exponent in components:
+        total += coefficient * (10 ** (exponent - minimum_exponent))
+    if total == 0:
+        return Decimal("0")
+    sign = 1 if total < 0 else 0
+    digits = tuple(int(ch) for ch in str(abs(total)))
+    result = Decimal((sign, digits, minimum_exponent))
+    result_tuple = result.as_tuple()
+    if result_tuple.digits:
+        result_significant_end = len(result_tuple.digits)
+        while result_significant_end > 1 and result_tuple.digits[result_significant_end - 1] == 0:
+            result_significant_end -= 1
+        result_normalized_exponent = result_tuple.exponent + (
+            len(result_tuple.digits) - result_significant_end
+        )
+        result_adjusted_exponent = (
+            result_normalized_exponent + result_significant_end - 1
+        )
+        if (
+            result_normalized_exponent < _DECIMAL_CONTEXT.Etiny()
+            or result_adjusted_exponent > _DECIMAL_CONTEXT.Emax
+        ):
+            raise CampaignError("campaign aggregate Decimal result is outside the bounded envelope")
+    return result
 
 
 def _sum_optional(values: object) -> Decimal | None:

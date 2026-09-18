@@ -15,6 +15,7 @@ from autosport.scientific_registry import (
     ModelVersion,
     PromotionAction,
     PromotionDecision,
+    PromotionEvidence,
     ResearchOutcome,
     ResearchProtocol,
     ResearchQuestion,
@@ -325,6 +326,37 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
         notes="fixture champion",
     )
     registry.append(champion_experiment)
+    registry.append(
+        PromotionEvidence(
+            "promotion-evidence-v1",
+            "experiment-v1",
+            champion_strategy.strategy_version_id,
+            champion_model.model_version_id,
+            champion_bundle.evaluation_bundle_id,
+            "mse",
+            "LOWER_IS_BETTER",
+            "champion-holdout",
+            64,
+            "0.20",
+            "0.05",
+            "0.30",
+            "0.10",
+            True,
+            "confirm-holdout-v1",
+            "access-v1",
+            _canonical_sha({
+                "dataset_manifest_sha256": dataset.manifest_sha256,
+                "outcome_reveal_after": dataset.outcome_reveal_after,
+                "confirmation_holdout_id": "confirm-holdout-v1",
+                "cohort_id": "champion-holdout",
+            }),
+            "trial-family-v1",
+            hashlib.sha256(binding.stopping_rule.encode("utf-8")).hexdigest(),
+            "VALID",
+            None,
+            T3,
+        )
+    )
     registry.record_promotion(
         PromotionDecision(
             "promotion-v1",
@@ -337,6 +369,7 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
             T3,
             candidate_model_version_id=champion_model.model_version_id,
             reason="fixture baseline champion",
+            promotion_evidence_id="promotion-evidence-v1",
         )
     )
     return registry, registry_path, rule, store, evaluator_config, dataset_manifest_sha256
@@ -365,11 +398,12 @@ def _candidate_spec() -> FactoryCandidateSpec:
     )
 
 
-def _run_candidate(runner, points, rule, **kwargs):
+def _run_candidate(runner, points, rule, *, promotion_evidence=None, **kwargs):
     return runner.run_baseline_candidate(
         _candidate_spec(),
         points,
         rule=rule,
+        promotion_evidence=promotion_evidence,
         **kwargs,
     )
 
@@ -486,6 +520,30 @@ def test_promotion_requires_provenance_rollback_primary_and_protective_metrics()
         challenger_metrics={"mse": 0.30, "max_drawdown": 0.15},
         provenance_complete=True,
         rollback_target="strategy-v1",
+        evidence=PromotionEvidence(
+            "controller-evidence",
+            "experiment-controller",
+            "strategy-controller",
+            "model-controller",
+            "eval-controller",
+            "mse",
+            "LOWER_IS_BETTER",
+            "cohort-controller",
+            64,
+            "0.10",
+            "0.05",
+            "0.20",
+            "0.10",
+            True,
+            "holdout-controller",
+            "access-controller",
+            SHA_A,
+            "trial-controller",
+            hashlib.sha256("stopping-controller".encode("utf-8")).hexdigest(),
+            "VALID",
+            "strategy-v1",
+            T0,
+        ),
     )
     assert accepted.verdict is PromotionVerdict.PROMOTE
     degraded = PromotionController.evaluate(

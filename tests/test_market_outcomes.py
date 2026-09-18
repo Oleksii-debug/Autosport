@@ -225,10 +225,7 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
         # A different but internally self-consistent durable authority cannot be
         # substituted for the provider evidence re-verified for this readback.
         other = self._authority(("away", "home"))
-        with self.assertRaisesRegex(
-            ValueError,
-            "does not match separately verified source evidence",
-        ):
+        with self.assertRaisesRegex(ValueError, "terminal-state count does not match"):
             MarketSettlementOutcomeAuthority.from_dict(
                 other.to_dict(),
                 verified_authority=reverified,

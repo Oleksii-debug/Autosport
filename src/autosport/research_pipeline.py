@@ -8,11 +8,25 @@ from typing import Iterable
 
 from .candidate_optimizer import CandidatePortfolioImpact, PortfolioAwareCandidateOptimizer
 from .candidate_search import ParlayCandidate
-from .decision_ledger import DecisionRecord, JsonlDecisionLedger
-from .domain import PaperTicket, TicketLeg
+from .decision_ledger import (
+    ECONOMIC_DECISION_KIND,
+    GENERAL_DECISION_KIND,
+    MATERIAL_ACTION_ID_PAYLOAD_KEY,
+    DecisionRecord,
+    EconomicDecisionAuthority,
+    JsonlDecisionLedger,
+    bind_economic_goal,
+)
+from .domain import MarketEvent, PaperTicket, TicketLeg
 from .forecasting import ForecastRecord, parse_iso_timestamp
 from .paper import PaperBook
-from .risk import PaperRiskPolicy, RiskDecision
+from .price_truth import paper_quote_rejection_reason
+from .risk import (
+    PaperRiskPolicy,
+    ProposedTicketRiskContext,
+    RiskDecision,
+    RiskOfRuinEvidence,
+)
 from .scenario_search import ScenarioGroup
 
 
@@ -25,6 +39,29 @@ _DEFAULT_BLOCKED_QUALITY_FLAGS = frozenset(
         "GAP_DETECTED",
     }
 )
+
+_RESEARCH_MATERIAL_ACTION_SCHEMA = "autosport.research.open-ticket.v1"
+_RESEARCH_MATERIAL_ACTION_MARKER = "material_action_id="
+_RESEARCH_MATERIAL_ACTION_NAME = "OPEN_PAPER_RESEARCH_TICKET"
+_RESEARCH_MATERIAL_ACTION_INTENT_SCHEMA = "autosport.research.material-action-intent.v1"
+_RESEARCH_MATERIAL_ACTION_INTENT_PAYLOAD_KEY = "material_action_intent_sha256"
+_RESEARCH_DECISION_AGENT = "research-decision-pipeline"
+
+
+class ResearchDecisionReconciliationRequired(RuntimeError):
+    """Raised when durable paper and decision evidence disagree for one research action."""
+
+
+class ResearchDecisionAlreadyCommitted(RuntimeError):
+    """Signals an exact previously committed research material action on retry/restart."""
+
+    def __init__(self, material_action_id: str, ticket_id: str) -> None:
+        super().__init__(
+            "research material action is already durably committed: "
+            f"{material_action_id}"
+        )
+        self.material_action_id = material_action_id
+        self.ticket_id = ticket_id
 
 
 def _validate_sha256(value: str, label: str) -> str:
@@ -67,6 +104,324 @@ def _finite_decimal(value: object, label: str) -> Decimal:
     if not parsed.is_finite():
         raise ValueError(f"{label} must be a finite decimal")
     return parsed
+
+
+def _research_material_action_id(
+    *,
+    replay_run_id: str,
+    decision_ts: str,
+    candidate: ParlayCandidate,
+    supplied: str | None,
+) -> str:
+    if supplied is not None:
+        return _validate_canonical_string(supplied, "material_action_id")
+    identity = {
+        "schema": _RESEARCH_MATERIAL_ACTION_SCHEMA,
+        "replay_run_id": replay_run_id,
+        "agent": _RESEARCH_DECISION_AGENT,
+        "action": _RESEARCH_MATERIAL_ACTION_NAME,
+        "decision_ts": decision_ts,
+        "candidate": [
+            {
+                "quote_key": leg.quote_key,
+                "event_id": leg.ticket_identity()[0],
+                "market_id": leg.ticket_identity()[1],
+                "selection_id": leg.ticket_identity()[2],
+                "decimal_odds": str(leg.decimal_odds),
+                "probability": str(leg.probability),
+            }
+            for leg in candidate.legs
+        ],
+    }
+    canonical = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _risk_of_ruin_evidence_payload(
+    evidence: RiskOfRuinEvidence | None,
+) -> dict[str, str] | None:
+    if evidence is None:
+        return None
+    return {
+        "evidence_id": evidence.evidence_id,
+        "research_protocol_sha256": evidence.research_protocol_sha256,
+        "reproducibility_bundle_sha256": evidence.reproducibility_bundle_sha256,
+        "producer_identity": evidence.producer_identity,
+        "causal_cutoff": evidence.causal_cutoff,
+        "evaluated_at": evidence.evaluated_at,
+        "bankroll_id": evidence.bankroll_id,
+        "currency": evidence.currency,
+        "base_portfolio_sha256": evidence.base_portfolio_sha256,
+        "candidate_sha256": evidence.candidate_sha256,
+        "evaluated_stake": str(evidence.evaluated_stake),
+        "upper_bound": str(evidence.upper_bound),
+    }
+
+
+def _research_material_action_intent_sha256(
+    *,
+    replay_run_id: str,
+    material_action_id: str,
+    decision_ts: str,
+    candidate: ParlayCandidate,
+    groups: list[ScenarioGroup],
+    forecasts: dict[str, ForecastRecord],
+    evidence: tuple[ResearchEvidence, ...],
+    provider_accounts: tuple[tuple[str, str], ...] = (),
+    risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
+) -> str:
+    """Bind one caller idempotence key to the immutable research decision intent."""
+
+    candidate_keys = {leg.quote_key for leg in candidate.legs}
+    payload = {
+        "schema": _RESEARCH_MATERIAL_ACTION_INTENT_SCHEMA,
+        "replay_run_id": replay_run_id,
+        "material_action_id": material_action_id,
+        "decision_ts": decision_ts,
+        "candidate": [
+            {
+                **_candidate_identity_payload(leg),
+                "decimal_odds": str(leg.decimal_odds),
+                "probability": str(leg.probability),
+            }
+            for leg in candidate.legs
+        ],
+        "groups": [
+            {
+                "group_id": group.group_id,
+                "outcomes": [
+                    {
+                        "quote_key": outcome.quote_key,
+                        "probability": (
+                            str(outcome.probability)
+                            if outcome.probability is not None
+                            else None
+                        ),
+                    }
+                    for outcome in group.outcomes
+                ],
+            }
+            for group in groups
+        ],
+        "forecasts": [
+            {"quote_key": key, "forecast_hash": forecasts[key].canonical_hash}
+            for key in sorted(candidate_keys.intersection(forecasts))
+        ],
+        "provider_accounts": [
+            {"source_id": source_id, "account_id": account_id}
+            for source_id, account_id in provider_accounts
+        ],
+        "evidence": [
+            {
+                "evidence_id": item.evidence_id,
+                "quote_key": item.quote_key,
+                "source_id": item.source_id,
+                "observed_at": item.observed_at,
+                "available_at": item.available_at,
+                "decimal_odds": str(item.decimal_odds),
+                "content_sha256": item.content_sha256,
+                "market_snapshot_hash": item.market_snapshot_hash,
+                "quality_flags": list(item.quality_flags),
+            }
+            for item in sorted(
+                (item for item in evidence if item.quote_key in candidate_keys),
+                key=lambda item: (item.quote_key, item.available_at, item.evidence_id),
+            )
+        ],
+    }
+    if risk_of_ruin_evidence is not None:
+        payload["risk_of_ruin_evidence"] = _risk_of_ruin_evidence_payload(
+            risk_of_ruin_evidence
+        )
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _research_material_action_ticket(
+    book: PaperBook,
+    material_action_id: str,
+) -> PaperTicket | None:
+    marker = f"{_RESEARCH_MATERIAL_ACTION_MARKER}{material_action_id}"
+    matches = [
+        ticket
+        for ticket in book.tickets.values()
+        if ticket.strategy_reason.endswith(f"; {marker}")
+    ]
+    if len(matches) > 1:
+        raise ResearchDecisionReconciliationRequired(
+            "PaperBook contains duplicate tickets for one research material_action_id"
+        )
+    return matches[0] if matches else None
+
+
+def _ticket_matches_candidate(
+    ticket: PaperTicket,
+    candidate: ParlayCandidate,
+    *,
+    decision_ts: str,
+    provider_source_ids: tuple[str, ...],
+    provider_accounts: tuple[tuple[str, str], ...],
+    bankroll_id: str,
+    currency: str,
+) -> bool:
+    return (
+        isinstance(ticket.stake, Decimal)
+        and ticket.stake.is_finite()
+        and ticket.stake > 0
+        and ticket.placed_at == decision_ts
+        and tuple(ticket.legs) == tuple(_ticket_legs(candidate))
+        and ticket.provider_source_ids == provider_source_ids
+        and ticket.provider_accounts == provider_accounts
+        and ticket.bankroll_id == bankroll_id
+        and ticket.currency == currency
+    )
+
+
+def _rollback_uncommitted_ticket(
+    book: PaperBook,
+    ticket: PaperTicket,
+    *,
+    balance_before: Decimal,
+    lifecycle_len_before: int,
+) -> None:
+    if book.tickets.get(ticket.ticket_id) is not ticket:
+        raise ResearchDecisionReconciliationRequired(
+            "research decision rollback cannot prove ticket identity"
+        )
+    expected_lifecycle = ("open", ticket.ticket_id, (), ())
+    actual_lifecycle = book._lifecycle[-1] if book._lifecycle else None
+    if (
+        len(book._lifecycle) != lifecycle_len_before + 1
+        or not isinstance(actual_lifecycle, tuple)
+        or tuple(actual_lifecycle[:4]) != expected_lifecycle
+    ):
+        raise ResearchDecisionReconciliationRequired(
+            "research decision rollback cannot prove lifecycle boundary"
+        )
+    del book.tickets[ticket.ticket_id]
+    book.balance = balance_before
+    del book._lifecycle[lifecycle_len_before:]
+
+
+def _verified_decision_sha256(
+    ledger: JsonlDecisionLedger,
+    record: DecisionRecord,
+    goal,
+    risk_policy: PaperRiskPolicy | None = None,
+) -> str | None:
+    try:
+        if goal is None:
+            persisted = next(
+                (
+                    item
+                    for item in ledger.verified_records()
+                    if item.decision_id == record.decision_id
+                ),
+                None,
+            )
+            expected = record
+        else:
+            persisted = ledger.verified_economic_decision(
+                record.decision_id,
+                goal,
+                risk_policy=risk_policy,
+            )
+            expected = bind_economic_goal(record, goal, risk_policy)
+        if persisted != expected:
+            return None
+        snapshot = ledger.verified_snapshot()
+        for line in snapshot.payload.decode("utf-8").splitlines():
+            envelope = json.loads(line)
+            persisted_record = envelope.get("record")
+            if (
+                isinstance(persisted_record, dict)
+                and persisted_record.get("decision_id") == record.decision_id
+            ):
+                digest = envelope.get("sha256")
+                if isinstance(digest, str) and len(digest) == 64:
+                    return digest
+        return None
+    except Exception:
+        return None
+
+
+def _reconcile_existing_economic_action(
+    *,
+    book: PaperBook,
+    ledger: JsonlDecisionLedger,
+    goal,
+    risk_policy: PaperRiskPolicy,
+    material_action_id: str,
+    intent_sha256: str,
+    replay_run_id: str,
+    decision_ts: str,
+    candidate: ParlayCandidate,
+    provider_source_ids: tuple[str, ...],
+    provider_accounts: tuple[tuple[str, str], ...],
+) -> None:
+    if getattr(ledger, "path", None) is not None and not ledger.path.exists():
+        persisted = None
+    else:
+        persisted = ledger.verified_economic_decision_for_material_action(
+            material_action_id,
+            goal,
+            risk_policy=risk_policy,
+        )
+    ticket = _research_material_action_ticket(book, material_action_id)
+
+    if persisted is None and ticket is None:
+        return
+    if persisted is None:
+        raise ResearchDecisionReconciliationRequired(
+            "PaperBook research material action exists without a durable Decision Ledger record"
+        )
+    if ticket is None:
+        raise ResearchDecisionReconciliationRequired(
+            "Decision Ledger research material action exists without a durable PaperBook ticket"
+        )
+
+    payload = persisted.payload
+    if payload.get(_RESEARCH_MATERIAL_ACTION_INTENT_PAYLOAD_KEY) != intent_sha256:
+        raise ResearchDecisionReconciliationRequired(
+            "durable research material action does not match current decision intent"
+        )
+    expected_quote_keys = tuple(leg.quote_key for leg in candidate.legs)
+    if (
+        persisted.replay_run_id != replay_run_id
+        or persisted.agent != _RESEARCH_DECISION_AGENT
+        or persisted.action != _RESEARCH_MATERIAL_ACTION_NAME
+        or persisted.observed_ts != decision_ts
+        or payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY) != material_action_id
+        or payload.get("ticket_id") != ticket.ticket_id
+        or payload.get("stake") != str(ticket.stake)
+        or tuple(payload.get("candidate_quote_keys", ())) != expected_quote_keys
+        or not _ticket_matches_candidate(
+            ticket,
+            candidate,
+            decision_ts=decision_ts,
+            provider_source_ids=provider_source_ids,
+            provider_accounts=provider_accounts,
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
+    ):
+        raise ResearchDecisionReconciliationRequired(
+            "PaperBook and Decision Ledger research material-action evidence do not match exactly"
+        )
+
+    raise ResearchDecisionAlreadyCommitted(material_action_id, ticket.ticket_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,7 +571,7 @@ class ResearchDecision:
     reasons: tuple[str, ...]
     decision_ts: str
     critic: CriticVerdict
-    portfolio_impact: CandidatePortfolioImpact
+    portfolio_impact: CandidatePortfolioImpact | None
     risk: RiskDecision
     ticket_id: str | None
     audit_sha256: str
@@ -361,19 +716,86 @@ class ResearchDecisionPipeline:
         groups: list[ScenarioGroup],
         forecasts: dict[str, ForecastRecord],
         evidence: Iterable[ResearchEvidence],
-        stake: Decimal | str,
+        stake: Decimal | str | None,
         decision_ts: str,
+        market_quotes: Iterable[MarketEvent] | None = None,
+        provider_accounts: tuple[tuple[str, str], ...] = (),
+        risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
         decision_ledger: JsonlDecisionLedger,
         replay_run_id: str,
+        material_action_id: str | None = None,
     ) -> ResearchDecision:
         _validate_canonical_string(replay_run_id, "replay_run_id")
         _validate_canonical_string(decision_ts, "decision_ts")
         parse_iso_timestamp(decision_ts)
-        amount = _finite_decimal(stake, "stake")
-        if amount <= 0:
-            raise ValueError("stake must be positive")
-
         evidence_items = tuple(evidence)
+        goal = self.risk_policy.economic_goal
+        quote_items = tuple(market_quotes or ())
+        proposal_context: ProposedTicketRiskContext | None = None
+        if goal is not None:
+            proposal_context = ProposedTicketRiskContext(
+                legs=tuple(_ticket_legs(candidate)),
+                quotes=quote_items,
+                provider_accounts=provider_accounts,
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+                proposal_ts=decision_ts,
+                risk_of_ruin_evidence=risk_of_ruin_evidence,
+            )
+
+        resolved_material_action_id: str | None = None
+        resolved_material_action_intent_sha256: str | None = None
+        if goal is not None:
+            assert proposal_context is not None
+            resolved_material_action_id = _research_material_action_id(
+                replay_run_id=replay_run_id,
+                decision_ts=decision_ts,
+                candidate=candidate,
+                supplied=material_action_id,
+            )
+            resolved_material_action_intent_sha256 = (
+                _research_material_action_intent_sha256(
+                    replay_run_id=replay_run_id,
+                    material_action_id=resolved_material_action_id,
+                    decision_ts=decision_ts,
+                    candidate=candidate,
+                    groups=groups,
+                    forecasts=forecasts,
+                    evidence=evidence_items,
+                    provider_accounts=proposal_context.provider_accounts,
+                    risk_of_ruin_evidence=risk_of_ruin_evidence,
+                )
+            )
+            _reconcile_existing_economic_action(
+                book=book,
+                ledger=decision_ledger,
+                goal=goal,
+                risk_policy=self.risk_policy,
+                material_action_id=resolved_material_action_id,
+                intent_sha256=resolved_material_action_intent_sha256,
+                replay_run_id=replay_run_id,
+                decision_ts=decision_ts,
+                candidate=candidate,
+                provider_source_ids=tuple(sorted(proposal_context.source_ids)),
+                provider_accounts=proposal_context.provider_accounts,
+            )
+
+        if goal is None:
+            amount = _finite_decimal(stake, "stake")
+            if amount <= 0:
+                raise ValueError("stake must be positive")
+            stake_source = "legacy-caller-fixed"
+        else:
+            # Research-plan stake is compatibility metadata only under an active
+            # owner EconomicGoalContract; it has no monetary authority.
+            derived = self.risk_policy.derive_goal_stake(
+                book,
+                candidate.expected_profit_per_unit,
+                context=proposal_context,
+            )
+            amount = derived if derived is not None else Decimal("0")
+            stake_source = "economic-goal-derived"
+
         context_hash = _research_context_hash(
             book=book,
             candidate=candidate,
@@ -381,30 +803,68 @@ class ResearchDecisionPipeline:
             forecasts=forecasts,
             evidence=evidence_items,
             decision_ts=decision_ts,
+            provider_accounts=(
+                proposal_context.provider_accounts
+                if proposal_context is not None
+                else ()
+            ),
+            risk_of_ruin_evidence=risk_of_ruin_evidence,
         )
 
-        impact = self.optimizer.evaluate_candidates(
-            list(book.tickets.values()),
-            [candidate],
-            groups,
-            stake=amount,
-        )[0]
+        impact = (
+            self.optimizer.evaluate_candidates(
+                list(book.tickets.values()),
+                [candidate],
+                groups,
+                stake=amount,
+            )[0]
+            if amount > 0
+            else None
+        )
         critic_verdict = self.critic.review(
             candidate,
             forecasts,
             evidence_items,
             decision_ts=decision_ts,
         )
-        risk = self.risk_policy.evaluate(book, amount)
+
+        if amount <= 0:
+            risk = RiskDecision(
+                False,
+                "economic goal produced ZERO stake under the current authority envelope",
+            )
+        else:
+            quote_rejection: str | None = None
+            candidate_quote_keys = {leg.quote_key for leg in candidate.legs}
+            for quote in quote_items:
+                if quote.quote_key not in candidate_quote_keys:
+                    continue
+                rejection = paper_quote_rejection_reason(quote, amount)
+                if rejection is not None:
+                    quote_rejection = f"{quote.quote_key}: {rejection}"
+                    break
+
+            if quote_rejection is not None:
+                risk = RiskDecision(False, "paper quote: " + quote_rejection)
+            else:
+                risk = self.risk_policy.evaluate(
+                    book,
+                    amount,
+                    context=proposal_context,
+                )
 
         reasons: list[str] = list(critic_verdict.reasons)
         policy = self.critic.policy
         if not risk.allowed:
             reasons.append("risk policy: " + risk.reason)
-        if policy.require_worst_case_proof and not impact.worst_case_change_proven:
+        if (
+            policy.require_worst_case_proof
+            and (impact is None or not impact.worst_case_change_proven)
+        ):
             reasons.append("portfolio worst-case change is not proven exact")
         if (
-            policy.minimum_ranking_risk_change is not None
+            impact is not None
+            and policy.minimum_ranking_risk_change is not None
             and impact.ranking_risk_change < policy.minimum_ranking_risk_change
         ):
             reasons.append("portfolio ranking risk change is below policy minimum")
@@ -416,47 +876,124 @@ class ResearchDecisionPipeline:
             reasons.append("standalone expected profit per unit is below policy minimum")
 
         reasons = list(dict.fromkeys(reasons))
-        approved = not reasons
+        approved = not reasons and impact is not None
         ticket: PaperTicket | None = None
+        balance_before = book.balance
+        lifecycle_len_before = len(book._lifecycle)
         if approved:
+            assert impact is not None
+            strategy_reason = (
+                "paper research decision; "
+                f"portfolio_truth={impact.ranking_risk_truth}; "
+                f"critic={self.critic.name}"
+            )
+            if resolved_material_action_id is not None:
+                strategy_reason += (
+                    f"; {_RESEARCH_MATERIAL_ACTION_MARKER}"
+                    f"{resolved_material_action_id}"
+                )
             ticket = book.open_ticket(
                 _ticket_legs(candidate),
                 amount,
-                reason=(
-                    "paper research decision; "
-                    f"portfolio_truth={impact.ranking_risk_truth}; "
-                    f"critic={self.critic.name}"
-                ),
+                reason=strategy_reason,
                 placed_at=decision_ts,
+                provider_source_ids=(
+                    tuple(sorted(proposal_context.source_ids))
+                    if proposal_context is not None
+                    else ()
+                ),
+                provider_accounts=(
+                    proposal_context.provider_accounts
+                    if proposal_context is not None
+                    else ()
+                ),
+                bankroll_id=goal.bankroll_id if goal is not None else None,
+                currency=goal.currency if goal is not None else None,
             )
 
-        action = (
-            "OPEN_PAPER_RESEARCH_TICKET"
-            if approved
-            else "REJECT_PAPER_RESEARCH_CANDIDATE"
-        )
-        payload = _audit_payload(
-            candidate=candidate,
-            amount=amount,
-            critic=critic_verdict,
-            impact=impact,
-            risk=risk,
-            approved=approved,
-            reasons=tuple(reasons),
-            ticket_id=ticket.ticket_id if ticket else None,
-            forecasts=forecasts,
-            evidence=evidence_items,
-        )
-        audit_sha = decision_ledger.append(
-            DecisionRecord(
+        record: DecisionRecord | None = None
+        try:
+            action = (
+                _RESEARCH_MATERIAL_ACTION_NAME
+                if approved
+                else "REJECT_PAPER_RESEARCH_CANDIDATE"
+            )
+            payload = _audit_payload(
+                candidate=candidate,
+                amount=amount,
+                stake_source=stake_source,
+                critic=critic_verdict,
+                impact=impact,
+                risk=risk,
+                approved=approved,
+                reasons=tuple(reasons),
+                ticket_id=ticket.ticket_id if ticket else None,
+                forecasts=forecasts,
+                evidence=evidence_items,
+                provider_accounts=(
+                    proposal_context.provider_accounts
+                    if proposal_context is not None
+                    else ()
+                ),
+                risk_of_ruin_evidence=risk_of_ruin_evidence,
+            )
+            if approved and resolved_material_action_id is not None:
+                assert resolved_material_action_intent_sha256 is not None
+                payload[MATERIAL_ACTION_ID_PAYLOAD_KEY] = resolved_material_action_id
+                payload[_RESEARCH_MATERIAL_ACTION_INTENT_PAYLOAD_KEY] = (
+                    resolved_material_action_intent_sha256
+                )
+            record = DecisionRecord(
                 replay_run_id=replay_run_id,
-                agent="research-decision-pipeline",
+                agent=_RESEARCH_DECISION_AGENT,
                 observed_ts=decision_ts,
                 action=action,
                 payload=payload,
                 context_hash=context_hash,
+                decision_kind=(
+                    ECONOMIC_DECISION_KIND
+                    if goal is not None
+                    else GENERAL_DECISION_KIND
+                ),
             )
-        )
+            if goal is None:
+                audit_sha = decision_ledger.append(record)
+            else:
+                audit_sha = decision_ledger.append_economic(
+                    record,
+                    EconomicDecisionAuthority(goal, self.risk_policy),
+                )
+        except Exception:
+            durable_sha = (
+                _verified_decision_sha256(
+                    decision_ledger,
+                    record,
+                    goal,
+                    self.risk_policy if goal is not None else None,
+                )
+                if record is not None
+                else None
+            )
+            if durable_sha is not None:
+                return ResearchDecision(
+                    approved=approved,
+                    reasons=tuple(reasons),
+                    decision_ts=decision_ts,
+                    critic=critic_verdict,
+                    portfolio_impact=impact,
+                    risk=risk,
+                    ticket_id=ticket.ticket_id if ticket else None,
+                    audit_sha256=durable_sha,
+                )
+            if ticket is not None:
+                _rollback_uncommitted_ticket(
+                    book,
+                    ticket,
+                    balance_before=balance_before,
+                    lifecycle_len_before=lifecycle_len_before,
+                )
+            raise
+
         return ResearchDecision(
             approved=approved,
             reasons=tuple(reasons),
@@ -491,25 +1028,29 @@ def _audit_payload(
     *,
     candidate: ParlayCandidate,
     amount: Decimal,
+    stake_source: str,
     critic: CriticVerdict,
-    impact: CandidatePortfolioImpact,
+    impact: CandidatePortfolioImpact | None,
     risk: RiskDecision,
     approved: bool,
     reasons: tuple[str, ...],
     ticket_id: str | None,
     forecasts: dict[str, ForecastRecord],
     evidence: tuple[ResearchEvidence, ...],
+    provider_accounts: tuple[tuple[str, str], ...] = (),
+    risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
 ) -> dict:
     candidate_keys = {leg.quote_key for leg in candidate.legs}
     relevant_evidence = sorted(
         (item for item in evidence if item.quote_key in candidate_keys),
         key=lambda item: (item.quote_key, item.available_at, item.evidence_id),
     )
-    return {
+    payload = {
         "approved": approved,
         "reasons": list(reasons),
         "ticket_id": ticket_id,
         "stake": str(amount),
+        "stake_source": stake_source,
         "candidate_quote_keys": [leg.quote_key for leg in candidate.legs],
         "candidate_ticket_identities": [
             _candidate_identity_payload(leg) for leg in candidate.legs
@@ -533,24 +1074,32 @@ def _audit_payload(
                 for review in critic.leg_reviews
             ],
         },
-        "portfolio": {
-            "ranking_risk_change": str(impact.ranking_risk_change),
-            "ranking_risk_truth": impact.ranking_risk_truth,
-            "observed_worst_case_change": str(impact.observed_worst_case_change),
-            "conservative_floor_change": str(impact.conservative_floor_change),
-            "worst_case_change_proven": impact.worst_case_change_proven,
-            "observed_best_case_change": str(impact.observed_best_case_change),
-            "conservative_ceiling_change": str(impact.conservative_ceiling_change),
-            "best_case_change_proven": impact.best_case_change_proven,
-            "expected_case_change": (
-                str(impact.expected_case_change)
-                if impact.expected_case_change is not None
-                else None
-            ),
-            "expected_change_mode": impact.expected_change_mode,
-            "dependent_existing_ticket_ids": list(impact.dependent_existing_ticket_ids),
-        },
+        "portfolio": (
+            None
+            if impact is None
+            else {
+                "ranking_risk_change": str(impact.ranking_risk_change),
+                "ranking_risk_truth": impact.ranking_risk_truth,
+                "observed_worst_case_change": str(impact.observed_worst_case_change),
+                "conservative_floor_change": str(impact.conservative_floor_change),
+                "worst_case_change_proven": impact.worst_case_change_proven,
+                "observed_best_case_change": str(impact.observed_best_case_change),
+                "conservative_ceiling_change": str(impact.conservative_ceiling_change),
+                "best_case_change_proven": impact.best_case_change_proven,
+                "expected_case_change": (
+                    str(impact.expected_case_change)
+                    if impact.expected_case_change is not None
+                    else None
+                ),
+                "expected_change_mode": impact.expected_change_mode,
+                "dependent_existing_ticket_ids": list(impact.dependent_existing_ticket_ids),
+            }
+        ),
         "risk": {"allowed": risk.allowed, "reason": risk.reason},
+        "provider_accounts": [
+            {"source_id": source_id, "account_id": account_id}
+            for source_id, account_id in provider_accounts
+        ],
         "forecasts": [
             {
                 "quote_key": key,
@@ -581,6 +1130,11 @@ def _audit_payload(
         ],
         "real_money_execution": False,
     }
+    if risk_of_ruin_evidence is not None:
+        payload["risk_of_ruin_evidence"] = _risk_of_ruin_evidence_payload(
+            risk_of_ruin_evidence
+        )
+    return payload
 
 
 def _research_context_hash(
@@ -591,6 +1145,8 @@ def _research_context_hash(
     forecasts: dict[str, ForecastRecord],
     evidence: tuple[ResearchEvidence, ...],
     decision_ts: str,
+    provider_accounts: tuple[tuple[str, str], ...] = (),
+    risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
 ) -> str:
     candidate_keys = {leg.quote_key for leg in candidate.legs}
     payload = {
@@ -604,6 +1160,13 @@ def _research_context_hash(
                     "stake": str(ticket.stake),
                     "status": ticket.status.value,
                     "payout": str(ticket.payout),
+                    "provider_source_ids": list(ticket.provider_source_ids),
+                    "provider_accounts": [
+                        {"source_id": source_id, "account_id": account_id}
+                        for source_id, account_id in ticket.provider_accounts
+                    ],
+                    "bankroll_id": ticket.bankroll_id,
+                    "currency": ticket.currency,
                     "legs": [
                         {"quote_key": leg.quote_key, "locked_odds": str(leg.locked_odds)}
                         for leg in ticket.legs
@@ -612,6 +1175,10 @@ def _research_context_hash(
                 for ticket in sorted(book.tickets.values(), key=lambda item: item.ticket_id)
             ],
         },
+        "provider_accounts": [
+            {"source_id": source_id, "account_id": account_id}
+            for source_id, account_id in provider_accounts
+        ],
         "candidate": [
             {
                 **_candidate_identity_payload(leg),
@@ -652,5 +1219,9 @@ def _research_context_hash(
             )
         ],
     }
+    if risk_of_ruin_evidence is not None:
+        payload["risk_of_ruin_evidence"] = _risk_of_ruin_evidence_payload(
+            risk_of_ruin_evidence
+        )
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

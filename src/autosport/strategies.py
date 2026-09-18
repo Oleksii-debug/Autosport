@@ -10,11 +10,13 @@ from .agents import (
     agent_composition_sha256,
     validate_agent_names,
 )
+from .research_pipeline import ResearchDecisionPipeline
 from .research_strategy import (
     RESEARCH_STRATEGY_ID,
     ResearchReplayAgent,
     ResearchStrategyPlan,
 )
+from .risk import PaperRiskPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,9 +129,27 @@ def build_strategy_agents(
     strategy_id: str,
     *,
     research_plan: ResearchStrategyPlan | None = None,
+    risk_policy: PaperRiskPolicy | None = None,
 ) -> list[Agent]:
     spec = validate_strategy_configuration(strategy_id, research_plan)
-    agents = _STRATEGIES[spec.strategy_id][1](research_plan)
+    if risk_policy is not None and not isinstance(risk_policy, PaperRiskPolicy):
+        raise TypeError("risk_policy must be a PaperRiskPolicy or None")
+    goal_active = risk_policy is not None and risk_policy.economic_goal is not None
+    if goal_active and spec.strategy_id == "baseline-v1":
+        raise ValueError(
+            "baseline-v1 does not have proven EconomicGoal-aware sizing semantics"
+        )
+    if spec.strategy_id == RESEARCH_STRATEGY_ID and risk_policy is not None:
+        assert research_plan is not None
+        agents = [
+            MarketMirrorAgent(),
+            ResearchReplayAgent(
+                research_plan,
+                ResearchDecisionPipeline(risk_policy=risk_policy),
+            ),
+        ]
+    else:
+        agents = _STRATEGIES[spec.strategy_id][1](research_plan)
     actual_names = validate_agent_names(getattr(agent, "name", None) for agent in agents)
     if actual_names != spec.agent_names:
         raise RuntimeError(

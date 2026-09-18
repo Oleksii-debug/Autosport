@@ -12,8 +12,12 @@ from .agents import AgentContext
 from .candidate_search import CandidateLeg, ParlayCandidate
 from .domain import MarketEvent
 from .forecasting import ForecastRecord, parse_iso_timestamp
-from .price_truth import paper_quote_rejection_reason
-from .research_pipeline import ResearchDecisionPipeline, ResearchEvidence
+from .research_pipeline import (
+    ResearchDecisionAlreadyCommitted,
+    ResearchDecisionPipeline,
+    ResearchEvidence,
+)
+from .risk import RiskOfRuinEvidence
 from .scenario_search import ScenarioGroup, ScenarioOutcome
 
 
@@ -144,6 +148,7 @@ class ResearchReplayInstruction:
     groups: tuple[ScenarioGroup, ...]
     forecasts: tuple[ForecastRecord, ...]
     evidence: tuple[ResearchEvidence, ...]
+    risk_of_ruin_evidence: RiskOfRuinEvidence | None = None
 
     def __post_init__(self) -> None:
         if not self.decision_id or not self.trigger_quote_key:
@@ -169,6 +174,18 @@ class ResearchReplayInstruction:
             )
         if not self.groups:
             raise ValueError("research decision scenario groups are required")
+        if self.risk_of_ruin_evidence is not None:
+            if not isinstance(self.risk_of_ruin_evidence, RiskOfRuinEvidence):
+                raise TypeError(
+                    "research decision risk_of_ruin_evidence must be RiskOfRuinEvidence or None"
+                )
+            decision_time = parse_iso_timestamp(self.decision_ts)
+            causal_cutoff = parse_iso_timestamp(self.risk_of_ruin_evidence.causal_cutoff)
+            evaluated_at = parse_iso_timestamp(self.risk_of_ruin_evidence.evaluated_at)
+            if causal_cutoff > decision_time or evaluated_at > decision_time:
+                raise ValueError(
+                    "research decision risk-of-ruin evidence uses future information"
+                )
 
     @property
     def forecasts_by_quote(self) -> dict[str, ForecastRecord]:
@@ -320,17 +337,28 @@ class ResearchReplayAgent:
         if context.decision_ledger is None:
             raise RuntimeError("research replay strategy requires a decision ledger")
         _validate_market_binding(instruction, context.latest_quotes)
-        self.pipeline.decide_and_open(
-            book=context.paper_book,
-            candidate=instruction.candidate,
-            groups=list(instruction.groups),
-            forecasts=instruction.forecasts_by_quote,
-            evidence=instruction.evidence,
-            stake=instruction.stake,
-            decision_ts=instruction.decision_ts,
-            decision_ledger=context.decision_ledger,
-            replay_run_id=context.replay_run_id,
-        )
+        try:
+            self.pipeline.decide_and_open(
+                book=context.paper_book,
+                candidate=instruction.candidate,
+                groups=list(instruction.groups),
+                forecasts=instruction.forecasts_by_quote,
+                evidence=instruction.evidence,
+                # Compatibility input only; active EconomicGoal makes it non-authoritative.
+                stake=instruction.stake,
+                decision_ts=instruction.decision_ts,
+                market_quotes=tuple(
+                    context.latest_quotes[leg.quote_key]
+                    for leg in instruction.candidate.legs
+                ),
+                risk_of_ruin_evidence=instruction.risk_of_ruin_evidence,
+                decision_ledger=context.decision_ledger,
+                replay_run_id=context.replay_run_id,
+                material_action_id=instruction.decision_id,
+            )
+        except ResearchDecisionAlreadyCommitted:
+            self._processed.add(instruction.decision_id)
+            return
         self._processed.add(instruction.decision_id)
 
     def finalize_replay(self, _context: AgentContext) -> None:
@@ -371,11 +399,6 @@ def _validate_market_binding(
         if event.metadata.get("execution_quote_verified") is False:
             raise ValueError(
                 f"research candidate quote is not verified executable price evidence: {leg.quote_key}"
-            )
-        rejection = paper_quote_rejection_reason(event, instruction.stake)
-        if rejection is not None:
-            raise ValueError(
-                f"research candidate quote cannot support paper fill: {leg.quote_key}: {rejection}"
             )
         if parse_iso_timestamp(event.observed_ts) > decision_time:
             raise ValueError(f"research candidate quote is from the future: {leg.quote_key}")
@@ -612,6 +635,12 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
     if not isinstance(evidence_raw, list) or not evidence_raw:
         raise ValueError("research decision evidence must be a non-empty list")
     evidence = tuple(_evidence_from_dict(item) for item in evidence_raw)
+    risk_of_ruin_raw = raw.get("risk_of_ruin_evidence")
+    risk_of_ruin_evidence = (
+        None
+        if risk_of_ruin_raw is None
+        else _risk_of_ruin_evidence_from_dict(risk_of_ruin_raw)
+    )
     return ResearchReplayInstruction(
         decision_id=str(raw["decision_id"]),
         trigger_quote_key=str(raw["trigger_quote_key"]),
@@ -621,7 +650,33 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
         groups=tuple(groups),
         forecasts=forecasts,
         evidence=evidence,
+        risk_of_ruin_evidence=risk_of_ruin_evidence,
     )
+
+
+def _risk_of_ruin_evidence_from_dict(raw: Any) -> RiskOfRuinEvidence:
+    if not isinstance(raw, dict):
+        raise ValueError("research risk_of_ruin_evidence must be an object")
+    try:
+        return RiskOfRuinEvidence(
+            evidence_id=str(raw["evidence_id"]),
+            research_protocol_sha256=str(raw["research_protocol_sha256"]),
+            reproducibility_bundle_sha256=str(raw["reproducibility_bundle_sha256"]),
+            producer_identity=str(raw["producer_identity"]),
+            causal_cutoff=str(raw["causal_cutoff"]),
+            evaluated_at=str(raw["evaluated_at"]),
+            bankroll_id=str(raw["bankroll_id"]),
+            currency=str(raw["currency"]),
+            base_portfolio_sha256=str(raw["base_portfolio_sha256"]),
+            candidate_sha256=str(raw["candidate_sha256"]),
+            evaluated_stake=Decimal(str(raw["evaluated_stake"])),
+            upper_bound=Decimal(str(raw["upper_bound"])),
+        )
+    except KeyError as exc:
+        raise ValueError(
+            "research risk_of_ruin_evidence is missing required field "
+            + str(exc.args[0])
+        ) from exc
 
 
 def _forecast_from_dict(raw: Any) -> ForecastRecord:

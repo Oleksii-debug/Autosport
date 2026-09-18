@@ -259,6 +259,12 @@ class PaperTicket:
     status: TicketStatus = TicketStatus.OPEN
     payout: Decimal = Decimal("0")
     strategy_reason: str = ""
+    provider_source_ids: tuple[str, ...] = ()
+    # Bookmaker account identity is source-scoped; bare account_id is not global.
+    provider_accounts: tuple[tuple[str, str], ...] = ()
+    bankroll_id: str | None = None
+    currency: str | None = None
+    settled_at: str | None = None
 
     @property
     def combined_odds(self) -> Decimal:

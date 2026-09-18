@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.run_registry as run_registry_module
 from autosport.outcome_trust import (
     OutcomeLineageBinding,
     TrustedOutcomeRevision,
@@ -218,6 +220,33 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "lineage-trust schema was downgraded"):
                 RunRegistry(registry.path)
 
+    def test_schema_downgrade_cannot_reuse_lineage_run_id_as_in_progress_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            accepted = self._binding("accepted-root")
+            self._accept(registry, accepted)
+            self._write_bound_summary(root, accepted)
+
+            state = json.loads(registry.path.read_text(encoding="utf-8"))
+            state["schema_version"] = 1
+            state.pop("outcome_lineage_trust")
+            for entry in state["runs"].values():
+                entry.pop("outcome_lineage", None)
+                entry["status"] = "in_progress"
+                for field in (
+                    "result_path",
+                    "paper_book_sha256",
+                    "decision_ledger_sha256",
+                    "abort_reason",
+                    "reconciled_from_summary",
+                ):
+                    entry.pop(field, None)
+            registry.path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "lineage-trust schema was downgraded"):
+                RunRegistry(registry.path)
+
     def test_marker_removal_cannot_reuse_lineage_run_id_as_completed_legacy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -303,21 +332,82 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
             accepted = self._binding("accepted-root")
             self._accept(registry, accepted)
             summary_path = self._write_bound_summary(root, accepted)
-            original_read_bytes = Path.read_bytes
+            original_stable_read = run_registry_module._read_stable_regular_file_bytes
             summary_reads = 0
 
-            def tracked_read_bytes(path: Path) -> bytes:
+            def tracked_stable_read(path: Path, *, label: str) -> bytes:
                 nonlocal summary_reads
                 if path == summary_path:
                     summary_reads += 1
                     if summary_reads > 1:
                         raise AssertionError("transaction-bound run summary path was reopened")
-                return original_read_bytes(path)
+                return original_stable_read(path, label=label)
 
-            with patch.object(Path, "read_bytes", new=tracked_read_bytes):
+            with patch.object(
+                run_registry_module,
+                "_read_stable_regular_file_bytes",
+                new=tracked_stable_read,
+            ):
                 RunRegistry(registry.path)
 
             self.assertEqual(summary_reads, 1)
+
+    def test_terminal_manifest_invalid_utf8_summary_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            accepted = self._binding("accepted-root")
+            self._accept(registry, accepted)
+            summary_path = self._write_bound_summary(root, accepted)
+            summary_path.write_bytes(b"\xff\xfe\x00")
+
+            with self.assertRaisesRegex(ValueError, "run summary is invalid"):
+                RunRegistry(registry.path)
+
+    def test_transaction_parent_alias_is_rejected_before_manifest_trust(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            accepted = self._binding("accepted-root")
+            self._accept(registry, accepted)
+            self._write_bound_summary(root, accepted)
+
+            transaction_root = root / ".run-transactions"
+            real_transaction_root = root / ".run-transactions-real"
+            transaction_root.rename(real_transaction_root)
+            try:
+                os.symlink(
+                    real_transaction_root,
+                    transaction_root,
+                    target_is_directory=True,
+                )
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"directory symlink unavailable: {exc}")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "parent namespace|unsafe",
+            ):
+                RunRegistry(registry.path)
+
+    def test_manifest_leaf_alias_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            accepted = self._binding("accepted-root")
+            self._accept(registry, accepted)
+            self._write_bound_summary(root, accepted)
+
+            manifest = root / ".run-transactions" / "accepted-run" / "manifest.json"
+            real_manifest = manifest.with_name("manifest.real.json")
+            manifest.rename(real_manifest)
+            try:
+                os.symlink(real_manifest, manifest)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"file symlink unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "unsafe|non-aliased"):
+                RunRegistry(registry.path)
 
     def test_genuine_never_upgraded_schema_one_workspace_remains_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

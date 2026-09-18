@@ -733,6 +733,12 @@ class PersistentLiveDecisionLoop:
             )
 
         now = _require_utc_clock(self.clock)
+        if (
+            self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+        ):
+            return self._recover_unfinished_progress()
+
         try:
             self._observe(self.mirror_updates)
         except ProviderUnavailableError as exc:
@@ -872,6 +878,110 @@ class PersistentLiveDecisionLoop:
         self._needs_cache_rebuild = False
         self._update_freshness_deadline(decision_time)
         return result
+
+    def _recover_unfinished_progress(self) -> LiveCycleResult:
+        progress = self._progress
+        if progress is None or progress.phase not in {
+            _PHASE_PENDING,
+            _PHASE_APPEND_PENDING,
+        }:
+            raise LiveDecisionProgressError(
+                "unfinished live decision recovery requires pending progress"
+            )
+        if progress.registered_input_ids != self.dependencies.input_ids:
+            raise LiveDecisionProgressError(
+                "unfinished live decision requires exact durable dependency registry"
+            )
+
+        decision_ts, decision_time = _canonical_timestamp(
+            "pending decision_ts",
+            progress.decision_ts,
+        )
+        if progress.gate == _GATE_NORMAL:
+            self._refresh_intents_from_replay(
+                progress.registered_input_ids,
+                decision_time,
+            )
+            intents = self._all_cached_intents()
+            graph = (
+                None
+                if not intents
+                else PortfolioDependencyGraph.for_inputs(self.book, intents)
+            )
+        else:
+            intents = ()
+            graph = None
+
+        plan = build_portfolio_plan(
+            self.book,
+            intents,
+            self.authority.risk_policy,
+            decision_ts,
+            dependency_graph=graph,
+            market_outcome_authorities=(),
+        )
+        result = self._persist_plan(
+            plan=plan,
+            market_state_sha256=progress.market_state_sha256,
+            affected_input_ids=progress.affected_input_ids,
+            gate=progress.gate,
+            detail=(
+                "recovered unfinished durable live decision before provider polling"
+            ),
+        )
+        self._pending_affected.clear()
+        self._needs_cache_rebuild = True
+        self._next_freshness_deadline = None
+        return result
+
+    def _refresh_intents_from_replay(
+        self,
+        input_ids: tuple[str, ...],
+        as_of: datetime,
+    ) -> None:
+        from .portfolio_plan import OpportunityIntent
+
+        store = SQLiteMarketStore(self.workspace / "market.db")
+        try:
+            snapshot = MarketMirror.replay_view_from_store(
+                store,
+                as_of=as_of,
+                max_age=self.max_quote_age,
+            )
+        finally:
+            store.close()
+
+        for input_id in input_ids:
+            try:
+                spec = self._input_specs[input_id]
+            except KeyError as exc:
+                raise LiveDecisionProgressError(
+                    "unfinished live decision references missing durable input"
+                ) from exc
+            focused = MirrorSnapshot(
+                revision=snapshot.revision,
+                events=tuple(
+                    event
+                    for event in snapshot.events
+                    if (
+                        (spec.source_ids is None or event.source_id in spec.source_ids)
+                        and (spec.event_ids is None or event.event_id in spec.event_ids)
+                        and (spec.market_ids is None or event.market_id in spec.market_ids)
+                        and (
+                            spec.selection_ids is None
+                            or event.selection_id in spec.selection_ids
+                        )
+                    )
+                ),
+            )
+            produced = self.intent_factory(input_id, focused)
+            if type(produced) is not tuple:
+                raise TypeError("intent_factory must return a tuple")
+            if any(not isinstance(intent, OpportunityIntent) for intent in produced):
+                raise TypeError(
+                    "intent_factory must return only canonical OpportunityIntent values"
+                )
+            self._intent_cache[input_id] = produced
 
     def _active_views_equal(
         self,

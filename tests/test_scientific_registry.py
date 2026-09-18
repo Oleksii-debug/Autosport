@@ -15,6 +15,7 @@ from autosport.scientific_registry import (
     Postmortem,
     PromotionAction,
     PromotionDecision,
+    PromotionEvidence,
     PromotionEvidenceError,
     ResearchOutcome,
     ResearchProtocol,
@@ -170,6 +171,44 @@ def _experiment(*, experiment_id: str = "experiment-1", outcome=ResearchOutcome.
     )
 
 
+def _dict_sha(payload: dict[str, object]) -> str:
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _promotion_evidence(*, evidence_id, experiment_id, strategy_id, model_id, bundle_id, dataset, metric="roi", direction="HIGHER_IS_BETTER", cohort_id="cohort-1", access_id="access-1", created_at=T3):
+    scope_sha = _dict_sha({
+        "dataset_manifest_sha256": dataset.manifest_sha256,
+        "outcome_reveal_after": dataset.outcome_reveal_after,
+        "confirmation_holdout_id": "confirm-holdout-1",
+        "cohort_id": cohort_id,
+    })
+    stopping_sha = hashlib.sha256(_binding().stopping_rule.encode("utf-8")).hexdigest()
+    return PromotionEvidence(
+        evidence_id,
+        experiment_id,
+        strategy_id,
+        model_id,
+        bundle_id,
+        metric,
+        direction,
+        cohort_id,
+        64,
+        "0.20",
+        "0.05",
+        "0.30",
+        "0.10",
+        True,
+        "confirm-holdout-1",
+        access_id,
+        scope_sha,
+        "trial-family-1",
+        stopping_sha,
+        "VALID",
+        "strategy-0",
+        created_at,
+    )
+
+
 def test_restart_preserves_negative_memory_and_blocks_duplicate_fingerprint(tmp_path):
     path = tmp_path / "scientific_registry.json"
     registry = ScientificRegistry.initialize_pristine(path)
@@ -251,6 +290,8 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
         promotion_decision_id="promotion-1",
         evaluation_bundle_id="eval-1",
     )
+    registry.append(_promotion_evidence(evidence_id="promotion-evidence-1", experiment_id="experiment-1", strategy_id="strategy-1", model_id="model-1", bundle_id="eval-1", dataset=foundation["dataset"], metric="roi", direction="HIGHER_IS_BETTER", access_id="access-1"))
+    promote = replace(promote, promotion_evidence_id="promotion-evidence-1")
     registry.record_promotion(promote)
     assert registry.champion_strategy(as_of=T3) == "strategy-1"
 
@@ -298,6 +339,8 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
         predecessor_strategy_version_id="strategy-1",
         candidate_model_version_id="model-1",
     )
+    registry.append(_promotion_evidence(evidence_id="promotion-evidence-2", experiment_id="experiment-2", strategy_id="strategy-2", model_id="model-1", bundle_id="eval-2", dataset=foundation["dataset"], metric="roi", direction="HIGHER_IS_BETTER", cohort_id="cohort-2", access_id="access-2"))
+    promote2 = replace(promote2, promotion_evidence_id="promotion-evidence-2")
     registry.record_promotion(promote2)
     assert registry.champion_strategy(as_of=T3) == "strategy-2"
 

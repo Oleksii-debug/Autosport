@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -7,6 +8,7 @@ import json
 
 import pytest
 
+import autosport.betfair_account_readonly as betfair_readonly
 from autosport.betfair_account_readonly import (
     ACCOUNT_JSON_RPC_ENDPOINT,
     BETTING_JSON_RPC_ENDPOINT,
@@ -395,7 +397,52 @@ def test_execution_readback_binds_action_market_account_and_all_cleared_statuses
         assert "settledDateRange" not in params
 
 
-def test_execution_readback_factory_cannot_be_called_with_fabricated_evidence():
+def test_execution_readback_authority_cannot_be_imported_or_forged():
+    client, _ = client_for(
+        response(
+            [{"marketId": "1.234", "event": {"id": "event-1"}}],
+            1,
+        ),
+        response({"currentOrders": [], "moreAvailable": False}, 2),
+        response({"clearedOrders": [], "moreAvailable": False}, 3),
+        response({"clearedOrders": [], "moreAvailable": False}, 4),
+        response({"clearedOrders": [], "moreAvailable": False}, 5),
+        response({"clearedOrders": [], "moreAvailable": False}, 6),
+    )
+    capture = client.read_execution_readback(
+        action_id="action-1",
+        market_id="1.234",
+    )
+    capture.assert_authoritative()
+
+    assert not hasattr(BetfairExecutionReadbackEnvelope, "_from_client")
+    assert not hasattr(betfair_readonly, "_EXECUTION_READBACK_SEAL")
+    assert not hasattr(betfair_readonly, "_install_execution_readback_authority")
+
+    forged = BetfairExecutionReadbackEnvelope(
+        capture.venue_id,
+        capture.account_id,
+        capture.adapter_id,
+        capture.adapter_version,
+        capture.action_id,
+        capture.market_id,
+        capture.market_event,
+        capture.current_pages,
+        capture.cleared_pages_by_status,
+        capture.observed_at,
+        capture.page_size,
+        capture.request_scope_sha256,
+        capture.evidence_sha256,
+    )
+    with pytest.raises(BetfairReadOnlyError, match="not issued"):
+        forged.assert_authoritative()
+
+    copied = replace(capture)
+    with pytest.raises(BetfairReadOnlyError, match="not issued"):
+        copied.assert_authoritative()
+
+
+def test_execution_readback_detects_post_capture_origin_tampering():
     client, _ = client_for(
         response(
             [{"marketId": "1.234", "event": {"id": "event-1"}}],
@@ -412,24 +459,9 @@ def test_execution_readback_factory_cannot_be_called_with_fabricated_evidence():
         market_id="1.234",
     )
 
-    assert not hasattr(BetfairExecutionReadbackEnvelope, "_from_client")
-    with pytest.raises(BetfairReadOnlyError, match="canonical BetfairReadOnlyClient"):
-        BetfairExecutionReadbackEnvelope(
-            capture.venue_id,
-            capture.account_id,
-            capture.adapter_id,
-            capture.adapter_version,
-            capture.action_id,
-            capture.market_id,
-            capture.market_event,
-            capture.current_pages,
-            capture.cleared_pages_by_status,
-            capture.observed_at,
-            capture.page_size,
-            capture.request_scope_sha256,
-            capture.evidence_sha256,
-            object(),
-        )
+    object.__setattr__(capture, "observed_at", "2026-09-17T17:31:00+00:00")
+    with pytest.raises(BetfairReadOnlyError, match="changed after canonical adapter capture"):
+        capture.assert_authoritative()
 
 
 def test_execution_readback_detects_post_capture_scope_tampering():

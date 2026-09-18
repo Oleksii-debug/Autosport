@@ -16,6 +16,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from weakref import ref
 
 ACCOUNT_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/account/json-rpc/v1"
 BETTING_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/betting/json-rpc/v1"
@@ -236,10 +237,7 @@ class BetfairClearedOrderPage:
         _positive_int(self.record_count, "record_count")
 
 
-_EXECUTION_READBACK_SEAL = object()
-
-
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class BetfairExecutionReadbackEnvelope:
     venue_id: str
     account_id: str
@@ -254,15 +252,9 @@ class BetfairExecutionReadbackEnvelope:
     page_size: int
     request_scope_sha256: str
     evidence_sha256: str
-    _seal: object
 
     def __post_init__(self) -> None:
-        if self._seal is not _EXECUTION_READBACK_SEAL:
-            raise BetfairReadOnlyError(
-                "execution readback must come from canonical BetfairReadOnlyClient"
-            )
         self._validate()
-        self.assert_authoritative()
 
     def _validate(self) -> None:
         _required_text(self.venue_id, "venue_id")
@@ -299,10 +291,7 @@ class BetfairExecutionReadbackEnvelope:
         _sha256_hex(self.evidence_sha256, "evidence_sha256")
 
     def assert_authoritative(self) -> None:
-        if self._seal is not _EXECUTION_READBACK_SEAL:
-            raise BetfairReadOnlyError(
-                "execution readback authority seal is invalid"
-            )
+        """Validate immutable capture digests; adapter issuance is layered below."""
         expected_scope = _canonical_sha256(
             _execution_request_scope(
                 venue_id=self.venue_id,
@@ -328,6 +317,25 @@ class BetfairExecutionReadbackEnvelope:
             raise BetfairReadOnlyError(
                 "execution readback capture digest mismatch"
             )
+
+    def _authority_fingerprint(self) -> str:
+        """Bind every in-memory capture field to the adapter-issued object identity."""
+        payload = (
+            self.venue_id,
+            self.account_id,
+            self.adapter_id,
+            self.adapter_version,
+            self.action_id,
+            self.market_id,
+            self.market_event,
+            self.current_pages,
+            self.cleared_pages_by_status,
+            self.observed_at,
+            self.page_size,
+            self.request_scope_sha256,
+            self.evidence_sha256,
+        )
+        return sha256(repr(payload).encode("utf-8")).hexdigest()
 
 
 def _execution_request_scope(
@@ -684,7 +692,6 @@ class BetfairReadOnlyClient:
             page_size,
             request_scope_sha256,
             evidence_sha256,
-            _EXECUTION_READBACK_SEAL,
         )
 
     def _read_all_current_orders_with_evidence(self, *, page_size: int = 1000, max_pages: int = 100) -> tuple[tuple[BetfairCurrentOrderObservation, ...], tuple[BetfairEvidence, ...]]:
@@ -1070,3 +1077,60 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
             raise BetfairReadOnlyError(f"{field} pagination returned duplicate bet_id")
         seen.add(bet_id)
         target.append(order)
+
+# Bind execution-readback authority to captures actually emitted by the canonical
+# adapter.  The registration closure is deliberately not exported: importing this
+# module exposes neither a seal token nor a registration function that can mint
+# authority for caller-constructed DTOs.
+def _install_execution_readback_authority() -> None:
+    issued: dict[int, tuple[object, str]] = {}
+    raw_read = BetfairReadOnlyClient.read_execution_readback
+    validate_integrity = BetfairExecutionReadbackEnvelope.assert_authoritative
+
+    def authoritative_read(
+        self: BetfairReadOnlyClient,
+        *,
+        action_id: str,
+        market_id: str,
+        page_size: int = 1000,
+        max_pages: int = 100,
+    ) -> BetfairExecutionReadbackEnvelope:
+        capture = raw_read(
+            self,
+            action_id=action_id,
+            market_id=market_id,
+            page_size=page_size,
+            max_pages=max_pages,
+        )
+        capture_id = id(capture)
+
+        def forget(_weakref: object, *, key: int = capture_id) -> None:
+            issued.pop(key, None)
+
+        issued[capture_id] = (
+            ref(capture, forget),
+            capture._authority_fingerprint(),
+        )
+        return capture
+
+    def assert_authoritative(self: BetfairExecutionReadbackEnvelope) -> None:
+        # Preserve the canonical scope/evidence checks first so any ordinary
+        # tamper is rejected for its exact invariant before origin is considered.
+        validate_integrity(self)
+        record = issued.get(id(self))
+        if record is None or record[0]() is not self:
+            raise BetfairReadOnlyError(
+                "execution readback was not issued by canonical BetfairReadOnlyClient"
+            )
+        if record[1] != self._authority_fingerprint():
+            raise BetfairReadOnlyError(
+                "execution readback changed after canonical adapter capture"
+            )
+
+    BetfairReadOnlyClient.read_execution_readback = authoritative_read
+    BetfairExecutionReadbackEnvelope.assert_authoritative = assert_authoritative
+
+
+_install_execution_readback_authority()
+del _install_execution_readback_authority
+

@@ -24,12 +24,13 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
     def _identity(
         self,
         market_type: MarketType = MarketType.WINNER,
+        source_id: str = "provider-a",
     ) -> MarketOutcomeIdentity:
         return MarketOutcomeIdentity(
             sport="table_tennis",
             event_id="event-1",
             market_id="match_odds",
-            source_id="provider-a",
+            source_id=source_id,
             market_type=market_type,
         )
 
@@ -41,9 +42,10 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
         settlement_semantics: SettlementSemantics
         | None = SettlementSemantics.EXCLUSIVE_SINGLE_WINNER,
         market_type: MarketType = MarketType.WINNER,
+        source_id: str = "provider-a",
     ):
         return assess_market_outcome_authority(
-            identity=self._identity(market_type),
+            identity=self._identity(market_type, source_id),
             selection_ids=selection_ids,
             roster_basis=roster_basis,
             settlement_semantics=settlement_semantics,
@@ -60,10 +62,12 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
         *,
         selection_ids: tuple[str, ...] = ("away", "draw", "home"),
         semantics: SettlementSemantics = SettlementSemantics.EXCLUSIVE_SINGLE_WINNER,
+        source_id: str = "provider-a",
     ) -> MarketSettlementOutcomeAuthority:
         assessment = self._assessment(
             selection_ids=selection_ids,
             settlement_semantics=semantics,
+            source_id=source_id,
         )
         self.assertEqual(
             assessment.status,
@@ -157,8 +161,12 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             Decimal("2.2"),
             sport="table_tennis",
         )
-        ticket_home = book.open_ticket([home], "10")
-        ticket_away = book.open_ticket([away], "10")
+        ticket_home = book.open_ticket(
+            [home], "10", provider_source_ids=("provider-a",)
+        )
+        ticket_away = book.open_ticket(
+            [away], "10", provider_source_ids=("provider-a",)
+        )
 
         report = ScenarioSearchEngine().analyse_authoritative(
             [ticket_home, ticket_away],
@@ -218,8 +226,12 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             Decimal("2"),
             sport="table_tennis",
         )
-        ticket_home = book.open_ticket([home], "10")
-        ticket_away = book.open_ticket([away], "10")
+        ticket_home = book.open_ticket(
+            [home], "10", provider_source_ids=("provider-a",)
+        )
+        ticket_away = book.open_ticket(
+            [away], "10", provider_source_ids=("provider-a",)
+        )
 
         report = ScenarioSearchEngine().analyse_authoritative(
             [ticket_home, ticket_away],
@@ -239,7 +251,9 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             Decimal("2"),
             sport="table_tennis",
         )
-        ticket = book.open_ticket([home], "10")
+        ticket = book.open_ticket(
+            [home], "10", provider_source_ids=("provider-a",)
+        )
         with self.assertRaisesRegex(
             ValueError,
             "authoritative terminal outcome space exceeds exact_state_limit",
@@ -259,12 +273,71 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             Decimal("2"),
             sport="table_tennis",
         )
-        ticket = book.open_ticket([other], "10")
+        ticket = book.open_ticket(
+            [other], "10", provider_source_ids=("provider-a",)
+        )
         with self.assertRaisesRegex(
             ValueError,
             "ticket leg missing from authoritative outcome universe",
         ):
             ScenarioSearchEngine().analyse_authoritative([ticket], [authority])
+
+
+    def test_provider_source_mismatch_fails_closed(self):
+        authority = self._authority(selection_ids=("away", "home"))
+        book = PaperBook("100")
+        home = TicketLeg(
+            "event-1",
+            "match_odds",
+            "home",
+            Decimal("2"),
+            sport="table_tennis",
+        )
+        ticket = book.open_ticket(
+            [home], "10", provider_source_ids=("provider-b",)
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "ticket provider source does not match authoritative",
+        ):
+            ScenarioSearchEngine().analyse_authoritative([ticket], [authority])
+
+    def test_aligned_provider_authorities_share_one_real_market_state_axis(self):
+        authority_a = self._authority(source_id="provider-a")
+        authority_b = self._authority(source_id="provider-b")
+        book = PaperBook("100")
+        home = TicketLeg(
+            "event-1",
+            "match_odds",
+            "home",
+            Decimal("2.2"),
+            sport="table_tennis",
+        )
+        away = TicketLeg(
+            "event-1",
+            "match_odds",
+            "away",
+            Decimal("2.2"),
+            sport="table_tennis",
+        )
+        ticket_home = book.open_ticket(
+            [home], "10", provider_source_ids=("provider-a",)
+        )
+        ticket_away = book.open_ticket(
+            [away], "10", provider_source_ids=("provider-b",)
+        )
+
+        report = ScenarioSearchEngine().analyse_authoritative(
+            [ticket_home, ticket_away],
+            [authority_b, authority_a],
+        )
+        self.assertEqual(report.total_states, 3)
+        self.assertEqual(report.observed_worst, Decimal("-20"))
+        self.assertEqual(report.observed_best, Decimal("2.0"))
+        self.assertEqual(
+            report.outcome_authority_sha256s,
+            (authority_a.authority_sha256, authority_b.authority_sha256),
+        )
 
 
 if __name__ == "__main__":

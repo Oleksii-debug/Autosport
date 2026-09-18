@@ -793,6 +793,29 @@ def build_portfolio_plan(
                 portfolio_truth=portfolio_truth,
             )
 
+    positive_candidates = {
+        intent.candidate_sha256
+        for intent, signal in zip(intents, allocation_signals, strict=True)
+        if signal > 0
+    }
+    if dependency_graph is not None and any(
+        left in positive_candidates and right in positive_candidates
+        for left, right in dependency_graph.dependency_edges
+    ):
+        return _terminal_plan(
+            decision_ts=decision_ts,
+            action=PortfolioAction.WAIT,
+            reason=(
+                "correlated positive candidates require canonical joint-risk "
+                "evidence not provided by current RiskPolicy"
+            ),
+            intents=intents,
+            portfolio_sha256=portfolio_sha256,
+            dependency_graph=dependency_graph,
+            policy=risk_policy,
+            portfolio_truth=portfolio_truth,
+        )
+
     allocation = risk_policy.derive_goal_stake_vector(
         book,
         tuple(allocation_signals),

@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -507,6 +508,7 @@ class PromotionDecision:
                 "evaluation_bundle_sha256": self.evaluation_bundle_sha256.lower(),
                 "predecessor_strategy_version_id": self.predecessor_strategy_version_id,
                 "rollback_to_strategy_version_id": self.rollback_to_strategy_version_id,
+                "promotion_evidence_id": self.promotion_evidence_id,
                 "reason": self.reason, "decided_at": self.decided_at}
 
 
@@ -1159,6 +1161,8 @@ class ScientificRegistry:
                     raise PromotionEvidenceError("promotion evidence stopping rule is not frozen")
                 if ep.get("multiple_comparison_control_sha256") != comparison_sha:
                     raise PromotionEvidenceError("promotion evidence multiple-comparison control is not frozen")
+                if ep.get("uncertainty_method") != binding.get("uncertainty_method"):
+                    raise PromotionEvidenceError("promotion evidence uncertainty method is not frozen")
                 low = Decimal(ep.get("effect_interval_low"))
                 practical = Decimal(ep.get("practical_improvement"))
                 if low <= 0 or practical <= 0:

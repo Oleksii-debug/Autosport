@@ -700,7 +700,12 @@ class RunRegistry:
         self._validate_entry(key, item)
         self._write(state)
 
-    def _durable_summary_lineage_bindings(self) -> tuple[OutcomeLineageBinding, ...]:
+    def _durable_summary_lineage_bindings(
+        self,
+        *,
+        registry_run_ids: frozenset[str] = frozenset(),
+        skip_known_legacy_runs: bool = False,
+    ) -> tuple[OutcomeLineageBinding, ...]:
         """Recover lineage trust duplicated into checksum-bound completed summaries.
 
         Legacy summaries carry no such field and remain outside this check. A summary
@@ -710,6 +715,12 @@ class RunRegistry:
         bindings: list[OutcomeLineageBinding] = []
         for summary_path in sorted(self.path.parent.glob("run-*.json")):
             if not summary_path.is_file():
+                continue
+            filename_run_id = summary_path.name.removeprefix("run-").removesuffix(".json")
+            if skip_known_legacy_runs and filename_run_id in registry_run_ids:
+                # Existing schema-one runs retain their established recovery error
+                # boundaries.  The downgrade scan targets transaction-bound summaries
+                # whose lineage-bearing run history disappeared from the registry.
                 continue
             try:
                 summary_bytes = summary_path.read_bytes()
@@ -1014,13 +1025,21 @@ class RunRegistry:
         if not isinstance(raw.get("runs"), dict):
             raise ValueError("invalid run registry")
 
-        # Scan transaction-bound summaries when validating a trust-bearing registry,
-        # or when a downgraded/empty registry has no run entries left to validate.
-        # Active legacy transactions are reconciled by the recovery path itself.
-        durable_summary_bindings = (
-            self._durable_summary_lineage_bindings()
-            if schema_version == _LINEAGE_TRUST_SCHEMA_VERSION or not raw["runs"]
-            else ()
+        # Always scan transaction-bound summaries.  A downgraded schema-one file may
+        # retain unrelated legacy run entries specifically to avoid an empty-registry
+        # check; durable hash-bound lineage evidence must still make that downgrade
+        # impossible.  Active legacy summaries without lineage evidence remain outside
+        # this trust check and are reconciled by the recovery path itself.
+        registry_run_ids = frozenset(
+            item.get("run_id")
+            for item in raw["runs"].values()
+            if isinstance(item, dict)
+            and isinstance(item.get("run_id"), str)
+            and item.get("run_id")
+        )
+        durable_summary_bindings = self._durable_summary_lineage_bindings(
+            registry_run_ids=registry_run_ids,
+            skip_known_legacy_runs=schema_version == _LEGACY_SCHEMA_VERSION,
         )
         if schema_version == _LEGACY_SCHEMA_VERSION and durable_summary_bindings:
             raise ValueError(

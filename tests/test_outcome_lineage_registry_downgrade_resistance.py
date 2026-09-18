@@ -137,6 +137,69 @@ class OutcomeLineageRegistryDowngradeResistanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "lineage-trust schema was downgraded"):
                 RunRegistry(registry.path)
 
+    def test_schema_downgrade_cannot_hide_behind_retained_legacy_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            accepted = self._binding("accepted-root")
+            self._accept(registry, accepted)
+            self._write_bound_summary(root, accepted)
+
+            legacy_key = registry.experiment_identity("c" * 64, "d" * 64, "legacy-v1")
+            legacy_entry = {
+                "base_identity": legacy_key,
+                "run_id": "retained-legacy-run",
+                "market_sha256": "c" * 64,
+                "results_sha256": "d" * 64,
+                "strategy_id": "legacy-v1",
+                "status": "in_progress",
+            }
+            registry.path.write_text(
+                json.dumps(
+                    {"schema_version": 1, "runs": {legacy_key: legacy_entry}},
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "lineage-trust schema was downgraded"):
+                RunRegistry(registry.path)
+
+    def test_marker_removal_cannot_hide_behind_retained_legacy_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            accepted = self._binding("accepted-root")
+            self._accept(registry, accepted)
+            summary_path = self._write_bound_summary(root, accepted)
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary.pop("outcome_lineage_trust")
+            summary_path.write_text(json.dumps(summary, sort_keys=True), encoding="utf-8")
+
+            legacy_key = registry.experiment_identity("c" * 64, "d" * 64, "legacy-v1")
+            registry.path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "runs": {
+                            legacy_key: {
+                                "base_identity": legacy_key,
+                                "run_id": "retained-legacy-run",
+                                "market_sha256": "c" * 64,
+                                "results_sha256": "d" * 64,
+                                "strategy_id": "legacy-v1",
+                                "status": "in_progress",
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "run summary SHA-256 mismatch"):
+                RunRegistry(registry.path)
+
     def test_schema_two_registry_must_cover_hash_bound_durable_summary_trust(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

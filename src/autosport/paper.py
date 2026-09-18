@@ -72,6 +72,11 @@ class PaperBook:
         # PaperBook owns the minimum lifecycle witness required to replay bankroll
         # chronology and settlement economics without changing the domain model.
         self._lifecycle: list[_LifecycleEntry] = []
+        # Settlement timestamps are causal lifecycle evidence, not mutable ticket
+        # decoration. Keeping them in a sidecar preserves the canonical four-field
+        # lifecycle tuple used by rollback/state hashes while making timestamp
+        # mutation mechanically detectable.
+        self._settlement_times: dict[str, str | None] = {}
 
     @property
     def committed_stake(self) -> Decimal:
@@ -223,9 +228,10 @@ class PaperBook:
             if void_quote_keys is None
             else self._normalize_resolution_keys(void_quote_keys, "void_quote_keys")
         )
-        settlement_time = self._validate_settled_at(
-            settled_at if settled_at is not None else utc_now_iso(),
-            ticket.placed_at,
+        settlement_time = (
+            None
+            if settled_at is None
+            else self._validate_settled_at(settled_at, ticket.placed_at)
         )
         status, payout, new_balance = self._settlement_result(
             ticket,
@@ -246,6 +252,7 @@ class PaperBook:
                 tuple(sorted(voids)),
             )
         )
+        self._settlement_times[ticket.ticket_id] = settlement_time
         return ticket
 
     def _lifecycle_to_json(self) -> list[dict[str, object]]:
@@ -260,7 +267,7 @@ class PaperBook:
                         "ticket_id": ticket_id,
                         "winning_quote_keys": list(winners),
                         "void_quote_keys": list(voids),
-                        "settled_at": self.tickets[ticket_id].settled_at,
+                        "settled_at": self._settlement_times[ticket_id],
                     }
                 )
         return payload
@@ -514,6 +521,8 @@ class PaperBook:
     def _validate_lifecycle_reachability(cls, book: "PaperBook") -> None:
         if type(book._lifecycle) is not list:
             raise ValueError("PaperBook lifecycle must be a canonical list")
+        if type(book._settlement_times) is not dict:
+            raise ValueError("PaperBook settlement-time witness must be a canonical mapping")
 
         replay_balance = book.initial_bankroll
         opened: set[str] = set()
@@ -545,9 +554,18 @@ class PaperBook:
                 raise ValueError("PaperBook lifecycle settles a ticket before opening it")
             if ticket_id in settled:
                 raise ValueError("PaperBook lifecycle settles a ticket more than once")
-            if ticket.settled_at is not None:
+            if ticket_id not in book._settlement_times:
+                raise ValueError(
+                    f"PaperBook ticket {ticket_id} settlement is missing timestamp provenance witness"
+                )
+            settlement_time = book._settlement_times[ticket_id]
+            if ticket.settled_at != settlement_time:
+                raise ValueError(
+                    f"PaperBook ticket {ticket_id} settled_at is inconsistent with lifecycle provenance"
+                )
+            if settlement_time is not None:
                 cls._validate_settled_at(
-                    ticket.settled_at,
+                    settlement_time,
                     ticket.placed_at,
                     snapshot=True,
                 )
@@ -578,6 +596,10 @@ class PaperBook:
                 raise ValueError(
                     f"PaperBook ticket {ticket_id} open state conflicts with lifecycle settlement witness"
                 )
+        if set(book._settlement_times) != settled:
+            raise ValueError(
+                "PaperBook settlement-time witness must match settled lifecycle tickets exactly"
+            )
         if replay_balance != book.balance:
             raise ValueError(
                 "PaperBook snapshot balance is inconsistent with lifecycle-replayed ticket economics"
@@ -660,10 +682,11 @@ class PaperBook:
         cls,
         value: object,
         schema_version: int,
-    ) -> list[_LifecycleEntry]:
+    ) -> tuple[list[_LifecycleEntry], dict[str, str | None]]:
         if type(value) is not list:
             raise ValueError("PaperBook snapshot lifecycle must be a list")
         entries: list[_LifecycleEntry] = []
+        settlement_times: dict[str, str | None] = {}
         for item in value:
             if type(item) is not dict:
                 raise ValueError("PaperBook snapshot lifecycle entry must be an object")
@@ -684,9 +707,10 @@ class PaperBook:
                     expected_fields.add("settled_at")
                 if set(item) != expected_fields:
                     raise ValueError("PaperBook snapshot settle lifecycle entry has unexpected fields")
-                if schema_version >= 5 and item.get("settled_at") is not None:
+                settled_at = item.get("settled_at") if schema_version >= 5 else None
+                if settled_at is not None:
                     cls._validate_timestamp(
-                        item["settled_at"],
+                        settled_at,
                         "snapshot lifecycle settled_at",
                     )
                 entry = (
@@ -701,8 +725,11 @@ class PaperBook:
                 )
             else:
                 raise ValueError("PaperBook snapshot lifecycle action must be open or settle")
-            entries.append(cls._validate_lifecycle_entry(entry))
-        return entries
+            canonical_entry = cls._validate_lifecycle_entry(entry)
+            entries.append(canonical_entry)
+            if action == "settle":
+                settlement_times[canonical_entry[1]] = settled_at
+        return entries, settlement_times
 
     @classmethod
     def _parse_snapshot_decimal(cls, value: object, label: str) -> Decimal:
@@ -903,19 +930,14 @@ class PaperBook:
                 ("open", ticket_id, (), ())
                 for ticket_id in book.tickets
             ]
+            book._settlement_times = {}
         else:
             if "lifecycle" not in raw:
                 raise ValueError("PaperBook snapshot schema 2 requires lifecycle provenance")
-            book._lifecycle = cls._parse_lifecycle(raw["lifecycle"], schema_version)
-            if schema_version == 5:
-                for item in raw["lifecycle"]:
-                    if item.get("action") != "settle":
-                        continue
-                    ticket = book.tickets.get(item.get("ticket_id"))
-                    if ticket is None or ticket.settled_at != item.get("settled_at"):
-                        raise ValueError(
-                            "PaperBook snapshot settled_at is inconsistent with lifecycle provenance"
-                        )
+            book._lifecycle, book._settlement_times = cls._parse_lifecycle(
+                raw["lifecycle"],
+                schema_version,
+            )
 
         cls._validate_loaded_state(book)
         return book

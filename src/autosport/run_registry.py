@@ -157,6 +157,461 @@ def _path_matches_open_descriptor(
     return matched
 
 
+
+def _require_single_path_component(value: str, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or "\x00" in value
+    ):
+        raise ValueError(f"{label} is not a safe path component")
+    return value
+
+
+def _read_stable_regular_file_bytes(path: Path, *, label: str) -> bytes:
+    """Capture one exact regular-file snapshot without following the final alias.
+
+    The descriptor/path identity must remain stable for the duration of the captured
+    read. Later pathname mutation is observed by the next reopen; downstream callers
+    consume only these captured bytes and never re-read the path for the same decision.
+    """
+
+    path_before = _lstat_or_none(path)
+    if path_before is None:
+        raise FileNotFoundError(path)
+    if not stat.S_ISREG(path_before.st_mode) or path_before.st_nlink != 1:
+        raise ValueError(f"{label} is not a regular non-aliased file")
+
+    try:
+        descriptor = _open_read_only_descriptor(path)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"{label} is unreadable") from exc
+
+    primary_error: BaseException | None = None
+    try:
+        try:
+            opened_before = os.fstat(descriptor)
+        except OSError as exc:
+            raise ValueError(f"{label} changed while validating") from exc
+        if (
+            not stat.S_ISREG(opened_before.st_mode)
+            or opened_before.st_nlink != 1
+            or not _path_matches_open_descriptor(path, descriptor, path_before)
+        ):
+            raise ValueError(f"{label} changed while validating")
+
+        chunks: list[bytes] = []
+        try:
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            opened_after = os.fstat(descriptor)
+        except OSError as exc:
+            raise ValueError(f"{label} changed or became unreadable while validating") from exc
+
+        if (
+            not stat.S_ISREG(opened_after.st_mode)
+            or opened_after.st_nlink != 1
+            or not _stable_stat_metadata(opened_before, opened_after)
+            or not _path_matches_open_descriptor(path, descriptor, path_before)
+        ):
+            raise ValueError(f"{label} changed while validating")
+        return b"".join(chunks)
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError as close_error:
+            if primary_error is None:
+                raise ValueError(f"{label} descriptor cleanup failed") from close_error
+            try:
+                primary_error.add_note(
+                    f"{label} descriptor cleanup also failed: "
+                    f"{type(close_error).__name__}: {close_error}"
+                )
+            except BaseException:
+                pass
+
+
+def _read_posix_nested_regular_file_bytes(
+    root: Path,
+    components: tuple[str, ...],
+    *,
+    label: str,
+) -> bytes:
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    if not no_follow or not directory_flag:
+        raise ValueError(f"{label} cannot be verified on this platform")
+
+    directory_descriptors: list[int] = []
+    leaf_descriptor: int | None = None
+    try:
+        try:
+            current = os.open(root, os.O_RDONLY | directory_flag | no_follow)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise ValueError(f"{label} parent namespace is unsafe or unreadable") from exc
+        directory_descriptors.append(current)
+
+        for component in components[:-1]:
+            try:
+                child = os.open(
+                    component,
+                    os.O_RDONLY | directory_flag | no_follow,
+                    dir_fd=current,
+                )
+            except FileNotFoundError:
+                raise
+            except OSError as exc:
+                raise ValueError(f"{label} parent namespace is unsafe or unreadable") from exc
+            try:
+                child_stat = os.fstat(child)
+            except OSError as exc:
+                os.close(child)
+                raise ValueError(f"{label} parent namespace changed while validating") from exc
+            if not stat.S_ISDIR(child_stat.st_mode):
+                os.close(child)
+                raise ValueError(f"{label} parent namespace is not a directory")
+            directory_descriptors.append(child)
+            current = child
+
+        try:
+            leaf_descriptor = os.open(
+                components[-1],
+                os.O_RDONLY | getattr(os, "O_BINARY", 0) | no_follow,
+                dir_fd=current,
+            )
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise ValueError(f"{label} is unsafe or unreadable") from exc
+
+        try:
+            opened_before = os.fstat(leaf_descriptor)
+        except OSError as exc:
+            raise ValueError(f"{label} changed while validating") from exc
+        if not stat.S_ISREG(opened_before.st_mode) or opened_before.st_nlink != 1:
+            raise ValueError(f"{label} is not a regular non-aliased file")
+
+        chunks: list[bytes] = []
+        try:
+            while True:
+                chunk = os.read(leaf_descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            opened_after = os.fstat(leaf_descriptor)
+        except OSError as exc:
+            raise ValueError(f"{label} changed or became unreadable while validating") from exc
+        if (
+            not stat.S_ISREG(opened_after.st_mode)
+            or opened_after.st_nlink != 1
+            or not _stable_stat_metadata(opened_before, opened_after)
+        ):
+            raise ValueError(f"{label} changed while validating")
+        return b"".join(chunks)
+    finally:
+        if leaf_descriptor is not None:
+            try:
+                os.close(leaf_descriptor)
+            except OSError:
+                pass
+        for descriptor in reversed(directory_descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _read_windows_nested_regular_file_bytes(
+    root: Path,
+    components: tuple[str, ...],
+    *,
+    label: str,
+) -> bytes:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        ]
+
+    class _ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.POINTER(_UnicodeString)),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", ctypes.c_void_p),
+            ("SecurityQualityOfService", ctypes.c_void_p),
+        ]
+
+    class _IoStatusBlockUnion(ctypes.Union):
+        _fields_ = [("Status", wintypes.LONG), ("Pointer", ctypes.c_void_p)]
+
+    class _IoStatusBlock(ctypes.Structure):
+        _anonymous_ = ("u",)
+        _fields_ = [("u", _IoStatusBlockUnion), ("Information", ctypes.c_size_t)]
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    get_file_information = kernel32.GetFileInformationByHandle
+    get_file_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_ByHandleFileInformation),
+    )
+    get_file_information.restype = wintypes.BOOL
+
+    nt_open_file = ntdll.NtOpenFile
+    nt_open_file.argtypes = (
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.ULONG,
+        ctypes.POINTER(_ObjectAttributes),
+        ctypes.POINTER(_IoStatusBlock),
+        wintypes.ULONG,
+        wintypes.ULONG,
+    )
+    nt_open_file.restype = wintypes.LONG
+
+    rtl_status_to_dos_error = ntdll.RtlNtStatusToDosError
+    rtl_status_to_dos_error.argtypes = (wintypes.LONG,)
+    rtl_status_to_dos_error.restype = wintypes.ULONG
+
+    generic_read = 0x80000000
+    file_list_directory = 0x0001
+    file_read_data = 0x0001
+    file_read_attributes = 0x0080
+    synchronize = 0x00100000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    open_existing = 3
+    file_flag_backup_semantics = 0x02000000
+    file_flag_open_reparse_point = 0x00200000
+    file_attribute_directory = 0x00000010
+    file_attribute_reparse_point = 0x00000400
+    file_directory_file = 0x00000001
+    file_non_directory_file = 0x00000040
+    file_synchronous_io_nonalert = 0x00000020
+    file_open_reparse_point = 0x00200000
+    obj_case_insensitive = 0x00000040
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    def _information(handle: int) -> _ByHandleFileInformation:
+        info = _ByHandleFileInformation()
+        if not get_file_information(wintypes.HANDLE(handle), ctypes.byref(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return info
+
+    def _open_relative(parent_handle: int, component: str, *, directory: bool) -> int:
+        encoded = component.encode("utf-16-le")
+        buffer = ctypes.create_unicode_buffer(component)
+        unicode_name = _UnicodeString(
+            len(encoded),
+            len(encoded) + 2,
+            ctypes.cast(buffer, wintypes.LPWSTR),
+        )
+        attributes = _ObjectAttributes(
+            ctypes.sizeof(_ObjectAttributes),
+            wintypes.HANDLE(parent_handle),
+            ctypes.pointer(unicode_name),
+            obj_case_insensitive,
+            None,
+            None,
+        )
+        io_status = _IoStatusBlock()
+        output = wintypes.HANDLE()
+        desired_access = (
+            (file_list_directory if directory else file_read_data)
+            | file_read_attributes
+            | synchronize
+        )
+        open_options = (
+            (file_directory_file if directory else file_non_directory_file)
+            | file_open_reparse_point
+            | file_synchronous_io_nonalert
+        )
+        status = nt_open_file(
+            ctypes.byref(output),
+            desired_access,
+            ctypes.byref(attributes),
+            ctypes.byref(io_status),
+            file_share_read | file_share_write | file_share_delete,
+            open_options,
+        )
+        if status < 0:
+            error = int(rtl_status_to_dos_error(status))
+            raise ctypes.WinError(error)
+        if output.value is None:
+            raise ValueError(f"{label} relative open returned no handle")
+        return int(output.value)
+
+    directory_handles: list[int] = []
+    leaf_handle: int | None = None
+    leaf_descriptor: int | None = None
+    try:
+        root_handle = create_file(
+            str(root),
+            generic_read,
+            file_share_read | file_share_write | file_share_delete,
+            None,
+            open_existing,
+            file_flag_backup_semantics | file_flag_open_reparse_point,
+            None,
+        )
+        if root_handle == invalid_handle_value:
+            error = ctypes.get_last_error()
+            if error in {2, 3}:
+                raise FileNotFoundError(root)
+            raise ctypes.WinError(error)
+        directory_handles.append(int(root_handle))
+        root_info = _information(int(root_handle))
+        if (
+            not (root_info.dwFileAttributes & file_attribute_directory)
+            or root_info.dwFileAttributes & file_attribute_reparse_point
+        ):
+            raise ValueError(f"{label} parent namespace is aliased")
+
+        current = int(root_handle)
+        for component in components[:-1]:
+            try:
+                child = _open_relative(current, component, directory=True)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) in {2, 3}:
+                    raise FileNotFoundError(component) from exc
+                raise ValueError(f"{label} parent namespace is unsafe or unreadable") from exc
+            directory_handles.append(child)
+            info = _information(child)
+            if (
+                not (info.dwFileAttributes & file_attribute_directory)
+                or info.dwFileAttributes & file_attribute_reparse_point
+            ):
+                raise ValueError(f"{label} parent namespace is aliased")
+            current = child
+
+        try:
+            leaf_handle = _open_relative(current, components[-1], directory=False)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) in {2, 3}:
+                raise FileNotFoundError(components[-1]) from exc
+            raise ValueError(f"{label} is unsafe or unreadable") from exc
+        leaf_info = _information(leaf_handle)
+        if (
+            leaf_info.dwFileAttributes & file_attribute_directory
+            or leaf_info.dwFileAttributes & file_attribute_reparse_point
+            or leaf_info.nNumberOfLinks != 1
+        ):
+            raise ValueError(f"{label} is not a regular non-aliased file")
+
+        try:
+            leaf_descriptor = msvcrt.open_osfhandle(
+                leaf_handle,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+        except BaseException:
+            close_handle(wintypes.HANDLE(leaf_handle))
+            leaf_handle = None
+            raise
+        leaf_handle = None
+
+        opened_before = os.fstat(leaf_descriptor)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(leaf_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        opened_after = os.fstat(leaf_descriptor)
+        if (
+            not stat.S_ISREG(opened_before.st_mode)
+            or not stat.S_ISREG(opened_after.st_mode)
+            or opened_before.st_nlink != 1
+            or opened_after.st_nlink != 1
+            or not _stable_stat_metadata(opened_before, opened_after)
+        ):
+            raise ValueError(f"{label} changed while validating")
+        return b"".join(chunks)
+    except FileNotFoundError:
+        raise
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"{label} is unsafe or unreadable") from exc
+    finally:
+        if leaf_descriptor is not None:
+            try:
+                os.close(leaf_descriptor)
+            except OSError:
+                pass
+        if leaf_handle is not None:
+            close_handle(wintypes.HANDLE(leaf_handle))
+        for handle in reversed(directory_handles):
+            close_handle(wintypes.HANDLE(handle))
+
+
+def _read_nested_regular_file_bytes(
+    root: Path,
+    components: tuple[str, ...],
+    *,
+    label: str,
+) -> bytes:
+    if not components:
+        raise ValueError(f"{label} path is empty")
+    safe_components = tuple(
+        _require_single_path_component(component, label=label)
+        for component in components
+    )
+    if os.name == "nt":
+        return _read_windows_nested_regular_file_bytes(root, safe_components, label=label)
+    return _read_posix_nested_regular_file_bytes(root, safe_components, label=label)
+
+
 def has_durable_workspace_history(workspace: str | Path) -> bool:
     """Return whether a missing registry would discard surviving economic/run evidence.
 
@@ -283,67 +738,7 @@ class RunRegistry:
     def _read_existing_bytes(self) -> bytes:
         """Read bytes only from the exact stable regular object named by the registry path."""
 
-        path_before = _lstat_or_none(self.path)
-        if path_before is None:
-            raise FileNotFoundError(self.path)
-        if not stat.S_ISREG(path_before.st_mode) or path_before.st_nlink != 1:
-            raise ValueError("run registry path is not a regular non-aliased file")
-
-        try:
-            descriptor = _open_read_only_descriptor(self.path)
-        except FileNotFoundError:
-            raise
-        except OSError as exc:
-            raise ValueError("run registry path is unreadable") from exc
-
-        primary_error: BaseException | None = None
-        try:
-            try:
-                opened_before = os.fstat(descriptor)
-            except OSError as exc:
-                raise ValueError("run registry path changed while validating") from exc
-            if (
-                not stat.S_ISREG(opened_before.st_mode)
-                or opened_before.st_nlink != 1
-                or not _path_matches_open_descriptor(self.path, descriptor, path_before)
-            ):
-                raise ValueError("run registry path changed while validating")
-
-            chunks: list[bytes] = []
-            try:
-                while True:
-                    chunk = os.read(descriptor, 1024 * 1024)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                opened_after = os.fstat(descriptor)
-            except OSError as exc:
-                raise ValueError("run registry path changed or became unreadable while validating") from exc
-
-            if (
-                not stat.S_ISREG(opened_after.st_mode)
-                or opened_after.st_nlink != 1
-                or not _stable_stat_metadata(opened_before, opened_after)
-                or not _path_matches_open_descriptor(self.path, descriptor, path_before)
-            ):
-                raise ValueError("run registry path changed while validating")
-            return b"".join(chunks)
-        except BaseException as exc:
-            primary_error = exc
-            raise
-        finally:
-            try:
-                os.close(descriptor)
-            except OSError as close_error:
-                if primary_error is None:
-                    raise ValueError("run registry descriptor cleanup failed") from close_error
-                try:
-                    primary_error.add_note(
-                        "run registry descriptor cleanup also failed: "
-                        f"{type(close_error).__name__}: {close_error}"
-                    )
-                except BaseException:
-                    pass
+        return _read_stable_regular_file_bytes(self.path, label="run registry path")
 
     def _read_existing(self) -> dict:
         """Read and validate only bytes bound to the current canonical registry object."""
@@ -705,61 +1100,116 @@ class RunRegistry:
         *,
         active_legacy_run_ids: frozenset[str] = frozenset(),
     ) -> tuple[OutcomeLineageBinding, ...]:
-        """Recover lineage trust duplicated into checksum-bound completed summaries.
+        """Recover lineage trust from transaction-bound run summaries.
 
-        Legacy summaries carry no such field and remain outside this check. A summary
-        that does carry the field must still be bound to its existing transaction
-        manifest SHA-256 so registry downgrade detection cannot trust an unbound copy.
+        Mutable registry status is never allowed to decide whether terminal transaction
+        evidence is inspected. The nested manifest is read through a held component
+        namespace first; only genuinely nonterminal transactions remain owned by the
+        existing recovery path. Summary bytes are then captured once from the canonical
+        direct workspace leaf and verified against the terminal manifest hash.
         """
         bindings: list[OutcomeLineageBinding] = []
         for summary_path in sorted(self.path.parent.glob("run-*.json")):
-            if not summary_path.is_file():
-                continue
             filename_run_id = summary_path.name.removeprefix("run-").removesuffix(".json")
-            if filename_run_id in active_legacy_run_ids:
-                # Active schema-one runs retain their established recovery error
-                # boundaries.  They cannot authorize a new run until recovery succeeds,
-                # so skipping them here does not turn an unresolved run into authority.
-                continue
             try:
-                summary_bytes = summary_path.read_bytes()
-                text = summary_bytes.decode("utf-8")
-            except (OSError, UnicodeError):
+                run_id = _require_single_path_component(
+                    filename_run_id,
+                    label="durable lineage-trust run id",
+                )
+            except ValueError:
+                # A nonportable run-* filename is never allowed to become durable trust.
                 continue
+
             try:
-                summary = json.loads(
-                    summary_bytes,
+                manifest_bytes = _read_nested_regular_file_bytes(
+                    self.path.parent,
+                    (".run-transactions", run_id, "manifest.json"),
+                    label="durable lineage-trust transaction manifest",
+                )
+            except FileNotFoundError:
+                # Genuine historical schema-one summaries may predate RunTransaction.
+                # They remain acceptable only when they do not themselves claim lineage
+                # trust; inspect the exact direct leaf once to distinguish that case.
+                try:
+                    summary_bytes = _read_stable_regular_file_bytes(
+                        summary_path,
+                        label="durable lineage-trust run summary",
+                    )
+                    summary = json.loads(
+                        summary_bytes,
+                        object_pairs_hook=_reject_duplicate_json_keys,
+                        parse_constant=_reject_nonfinite_json_constant,
+                    )
+                except FileNotFoundError:
+                    continue
+                except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+                    raise ValueError("durable lineage-trust run summary is invalid") from exc
+                if not isinstance(summary, dict):
+                    raise ValueError("durable lineage-trust run summary is invalid")
+                if summary.get(_LINEAGE_TRUST_FIELD) is None:
+                    continue
+                raise ValueError("durable lineage-trust run summary lacks transaction manifest")
+            except ValueError:
+                raise
+
+            try:
+                manifest = json.loads(
+                    manifest_bytes.decode("utf-8"),
                     object_pairs_hook=_reject_duplicate_json_keys,
                     parse_constant=_reject_nonfinite_json_constant,
                 )
-            except (json.JSONDecodeError, ValueError) as exc:
+            except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+                raise ValueError("durable lineage-trust transaction manifest is invalid") from exc
+            if not isinstance(manifest, dict) or manifest.get("run_id") != run_id:
+                raise ValueError("durable lineage-trust transaction manifest identity is invalid")
+
+            phase = manifest.get("phase")
+            terminal = phase in {"canonical_committed", "completed"}
+            if not terminal and run_id in active_legacy_run_ids:
+                # Recovery remains authoritative only after manifest evidence proves this
+                # transaction is genuinely nonterminal. Mutable registry status alone
+                # can no longer suppress a terminal durable witness.
+                continue
+
+            try:
+                summary_bytes = _read_stable_regular_file_bytes(
+                    summary_path,
+                    label="durable lineage-trust run summary",
+                )
+            except FileNotFoundError as exc:
+                if terminal:
+                    raise ValueError(
+                        "durable lineage-trust terminal transaction lacks run summary"
+                    ) from exc
+                continue
+            try:
+                summary = json.loads(
+                    summary_bytes.decode("utf-8"),
+                    object_pairs_hook=_reject_duplicate_json_keys,
+                    parse_constant=_reject_nonfinite_json_constant,
+                )
+            except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
                 raise ValueError("durable lineage-trust run summary is invalid") from exc
             if not isinstance(summary, dict):
                 raise ValueError("durable lineage-trust run summary is invalid")
             raw_binding = summary.get(_LINEAGE_TRUST_FIELD)
-            run_id = summary.get("run_id")
-            if not isinstance(run_id, str) or not run_id or summary_path.name != f"run-{run_id}.json":
-                if raw_binding is None:
+            summary_run_id = summary.get("run_id")
+            if (
+                not isinstance(summary_run_id, str)
+                or summary_run_id != run_id
+                or summary_path.name != f"run-{run_id}.json"
+            ):
+                if raw_binding is None and not terminal:
                     continue
                 raise ValueError("durable lineage-trust run summary identity is invalid")
 
-            manifest_path = self.path.parent / ".run-transactions" / run_id / "manifest.json"
-            if not manifest_path.is_file():
+            if not terminal:
                 if raw_binding is None:
                     continue
-                raise ValueError("durable lineage-trust run summary lacks transaction manifest")
-            try:
-                manifest = json.loads(
-                    manifest_path.read_text(encoding="utf-8"),
-                    object_pairs_hook=_reject_duplicate_json_keys,
-                    parse_constant=_reject_nonfinite_json_constant,
+                raise ValueError(
+                    "durable lineage-trust run summary lacks terminal transaction authority"
                 )
-            except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-                raise ValueError("durable lineage-trust transaction manifest is invalid") from exc
-            if not isinstance(manifest, dict) or manifest.get("run_id") != run_id:
-                raise ValueError("durable lineage-trust transaction manifest identity is invalid")
-            if raw_binding is None and manifest.get("phase") not in {"canonical_committed", "completed"}:
-                continue
+
             targets = manifest.get("targets")
             if not isinstance(targets, dict) or targets.get("summary") != summary_path.name:
                 raise ValueError("durable lineage-trust transaction summary target is invalid")

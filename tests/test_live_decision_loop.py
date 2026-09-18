@@ -409,6 +409,51 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(ledger.verified_records()[0].decision_id, first_id)
             self.assertEqual([item[0] for item in resumed_factory.calls], ["input-a"])
 
+    def test_clean_restart_ignores_unrelated_persisted_market_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                store.append(
+                    self._event(
+                        selection="selection-b",
+                        sequence=1,
+                        odds="3.00",
+                        observed=self.START + timedelta(seconds=2),
+                    )
+                )
+            finally:
+                store.close()
+
+            ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+            first_id = ledger.verified_records()[0].decision_id
+            resumed_factory = _EmptyIntentFactory()
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=resumed_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+            )
+
+            result = resumed.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(len(ledger.verified_records()), 1)
+            self.assertEqual(ledger.verified_records()[0].decision_id, first_id)
+            self.assertEqual([item[0] for item in resumed_factory.calls], ["input-a"])
+
     def test_backpressure_never_emits_from_partial_dirty_set(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

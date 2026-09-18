@@ -282,8 +282,11 @@ class ProposedTicketRiskContext:
             raise ValueError(
                 "measurement window start and end must be supplied together"
             )
+        proposal_time: datetime | None = None
         if self.proposal_ts is not None:
-            _canonical_context_timestamp("proposal_ts", self.proposal_ts)
+            _, proposal_time = _canonical_context_timestamp(
+                "proposal_ts", self.proposal_ts
+            )
 
         if self.measurement_window_start is not None:
             _, start = _canonical_context_timestamp(
@@ -294,6 +297,8 @@ class ProposedTicketRiskContext:
             )
             if start > end:
                 raise ValueError("measurement window start must not be after end")
+            if proposal_time is not None and end > proposal_time:
+                raise ValueError("measurement window end must not be after proposal time")
 
         if self.risk_of_ruin_upper_bound is not None:
             bound = self.risk_of_ruin_upper_bound
@@ -691,19 +696,34 @@ class PaperRiskPolicy:
 
     @classmethod
     def _historical_risk_metrics(
-        cls, book: PaperBook
+        cls,
+        book: PaperBook,
+        *,
+        realized_loss_window: tuple[datetime, datetime] | None = None,
     ) -> _HistoricalRiskMetrics | None:
         """Derive conservative durable risk facts from canonical PaperBook history.
 
-        Gross realized loss deliberately ignores wins, so it upper-bounds the loss
-        accumulated in any unknown session/day sub-window. Stake-basis equity is
-        cash plus open stake at cost: opening a ticket cannot manufacture drawdown,
-        while settlement changes equity by exactly payout minus stake. This is a
-        derived view only; PaperBook remains the sole bankroll/lifecycle authority.
+        When a causal realized-loss window is supplied, losses with proven
+        settlement-time provenance are counted only inside that inclusive window.
+        Legacy settlements without time provenance are still counted, because
+        excluding an unknown-time loss could understate risk. Drawdown, turnover
+        and current committed exposure remain whole-history/whole-portfolio facts.
         """
 
         try:
             PaperBook._validate_loaded_state(book)
+            if realized_loss_window is not None:
+                window_start, window_end = realized_loss_window
+                if (
+                    not isinstance(window_start, datetime)
+                    or not isinstance(window_end, datetime)
+                    or window_start.tzinfo is None
+                    or window_start.utcoffset() is None
+                    or window_end.tzinfo is None
+                    or window_end.utcoffset() is None
+                    or window_start > window_end
+                ):
+                    return None
             replay_balance = book.initial_bankroll
             replay_committed = Decimal("0")
             peak_equity = book.initial_bankroll
@@ -711,7 +731,7 @@ class PaperRiskPolicy:
             turnover = Decimal("0")
 
             for raw_entry in book._lifecycle:
-                action, ticket_id, winners_raw, voids_raw = (
+                action, ticket_id, winners_raw, voids_raw, settled_at = (
                     PaperBook._validate_lifecycle_entry(raw_entry)
                 )
                 ticket = book.tickets.get(ticket_id)
@@ -742,7 +762,15 @@ class PaperRiskPolicy:
                         )
                     if replay_committed < 0:
                         return None
-                    if loss > 0:
+
+                    include_loss = True
+                    if realized_loss_window is not None and settled_at is not None:
+                        _, settlement_time = _canonical_context_timestamp(
+                            "settlement settled_at", settled_at
+                        )
+                        window_start, window_end = realized_loss_window
+                        include_loss = window_start <= settlement_time <= window_end
+                    if loss > 0 and include_loss:
                         realized_gross_loss = cls._exact_positive_sum(
                             (realized_gross_loss, loss)
                         )
@@ -799,10 +827,36 @@ class PaperRiskPolicy:
         cls,
         book: PaperBook,
         goal: EconomicGoalContract,
+        *,
+        context: ProposedTicketRiskContext | None = None,
     ) -> tuple[Decimal, Decimal, Decimal, Decimal] | None:
         """Return maximum additional losing stake allowed by durable history."""
 
-        metrics = cls._historical_risk_metrics(book)
+        realized_loss_window: tuple[datetime, datetime] | None = None
+        if context is not None and context.measurement_window_start is not None:
+            if context.measurement_window_end is None:
+                return None
+            try:
+                _, window_start = _canonical_context_timestamp(
+                    "measurement_window_start", context.measurement_window_start
+                )
+                _, window_end = _canonical_context_timestamp(
+                    "measurement_window_end", context.measurement_window_end
+                )
+                if context.proposal_ts is not None:
+                    _, proposal_time = _canonical_context_timestamp(
+                        "proposal_ts", context.proposal_ts
+                    )
+                    if window_end > proposal_time:
+                        return None
+            except (TypeError, ValueError):
+                return None
+            realized_loss_window = (window_start, window_end)
+
+        metrics = cls._historical_risk_metrics(
+            book,
+            realized_loss_window=realized_loss_window,
+        )
         if metrics is None:
             return None
         try:
@@ -817,9 +871,6 @@ class PaperRiskPolicy:
                 turnover_limit = (
                     metrics.initial_bankroll * goal.max_turnover_fraction
                 )
-                # Existing open stake is part of the whole-portfolio worst-case
-                # loss envelope. A new proposal may consume only the room left
-                # after every current open ticket is treated as a full loss.
                 session_room = (
                     session_limit
                     - metrics.realized_gross_loss
@@ -1126,7 +1177,7 @@ class PaperRiskPolicy:
         if goal.max_risk_of_ruin < Decimal("1") and context is None:
             return None
 
-        history_rooms = self._goal_history_rooms(book, goal)
+        history_rooms = self._goal_history_rooms(book, goal, context=context)
         if history_rooms is None:
             return None
 
@@ -1480,7 +1531,7 @@ class PaperRiskPolicy:
             if open_position_count >= goal.max_concurrent_positions:
                 return RiskDecision(False, "economic goal concurrent position limit exceeded")
 
-            history_rooms = self._goal_history_rooms(book, goal)
+            history_rooms = self._goal_history_rooms(book, goal, context=context)
             if history_rooms is None:
                 return RiskDecision(False, "virtual bankroll risk history is invalid")
             session_room, day_room, drawdown_room, turnover_room = history_rooms

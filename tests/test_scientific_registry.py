@@ -235,7 +235,8 @@ def _promotion_evidence(
     canonical_id = hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     ).hexdigest()
-    return PromotionEvidence(canonical_id, **payload)
+    fields = {key: value for key, value in payload.items() if key != "schema_version"}
+    return PromotionEvidence(canonical_id, **fields)
 
 
 def test_restart_preserves_negative_memory_and_blocks_duplicate_fingerprint(tmp_path):

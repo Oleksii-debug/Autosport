@@ -10,6 +10,7 @@ from enum import Enum
 from .decision_ledger import (
     ECONOMIC_DECISION_KIND,
     MATERIAL_ACTION_ID_PAYLOAD_KEY,
+    DecisionLedgerIntegrityError,
     DecisionRecord,
     EconomicDecisionAuthority,
     JsonlDecisionLedger,
@@ -689,6 +690,7 @@ def persist_portfolio_plan_decision(
     intents: tuple[OpportunityIntent, ...],
     risk_policy: PaperRiskPolicy,
     *,
+    initialize_ledger: bool,
     replay_run_id: str,
     material_action_id: str,
 ) -> DecisionRecord:
@@ -700,6 +702,8 @@ def persist_portfolio_plan_decision(
         raise TypeError("plan must be PortfolioPlan")
     if not isinstance(risk_policy, PaperRiskPolicy):
         raise TypeError("risk_policy must be PaperRiskPolicy")
+    if type(initialize_ledger) is not bool:
+        raise TypeError("initialize_ledger must be a bool")
     replay_run_id = _canonical_text("replay_run_id", replay_run_id)
     material_action_id = _canonical_text("material_action_id", material_action_id)
 
@@ -730,15 +734,23 @@ def persist_portfolio_plan_decision(
         _PORTFOLIO_INTENT_EVIDENCE_JSON_PAYLOAD_KEY: intent_evidence_json,
     }
 
-    existing = (
-        ledger.verified_economic_decision_for_material_action(
+    ledger_exists = ledger.path.exists()
+    if initialize_ledger:
+        if ledger_exists:
+            raise DecisionLedgerIntegrityError(
+                "PortfolioPlan ledger initialization requires a genuinely absent ledger"
+            )
+        existing = None
+    else:
+        if not ledger_exists:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file is missing or unreadable"
+            )
+        existing = ledger.verified_economic_decision_for_material_action(
             material_action_id,
             goal,
             risk_policy=risk_policy,
         )
-        if ledger.path.exists()
-        else None
-    )
     if existing is not None:
         if (
             existing.replay_run_id != replay_run_id

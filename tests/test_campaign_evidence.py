@@ -320,19 +320,19 @@ class PaperCampaignTests(unittest.TestCase):
         self.assertEqual(session.evidence_sha256, session.computed_evidence_sha256)
         with self.assertRaises(CampaignFinalizedError):
             campaign = self.campaign()
-            campaign.add_session(session)
+            self.add_session(campaign, session)
             campaign.finalize(
                 outcome=CampaignOutcome.POSITIVE,
                 readiness=CampaignReadiness.ELIGIBLE,
                 finalized_at="2026-09-11T00:00:00Z",
             )
-            campaign.add_session(self.session(session_id="session-2"))
+            self.add_session(campaign, self.session(session_id="session-2"))
 
     def test_model_identity_build_and_restart_roundtrip(self):
         session = self.session(model_version_id="model-1")
         self.assertEqual(session.model_version_id, "model-1")
         campaign = self.campaign()
-        campaign.add_session(session)
+        self.add_session(campaign, session)
         campaign.finalize(
             outcome=CampaignOutcome.POSITIVE,
             readiness=CampaignReadiness.ELIGIBLE,
@@ -359,26 +359,30 @@ class PaperCampaignTests(unittest.TestCase):
             available_at="2026-09-12T00:00:00Z",
         )
         with self.assertRaises(ValueError):
-            campaign.add_session(session)
+            self.add_session(campaign, session)
 
     def test_sample_membership_is_mechanically_checked(self):
         with self.assertRaises(ValueError):
             self.session(observation_timestamps=("2026-08-31T23:59:59Z",) * 1)
 
     def test_mismatched_strategy_is_rejected_by_campaign(self):
+        campaign = self.campaign()
         with self.assertRaises(ValueError):
-            self.campaign().add_session(self.session(strategy_version_id="strategy-2"))
+            self.add_session(
+                campaign,
+                self.session(strategy_version_id="strategy-2"),
+            )
 
     def test_duplicate_session_membership_is_rejected(self):
         campaign = self.campaign()
-        campaign.add_session(self.session())
+        self.add_session(campaign, self.session())
         with self.assertRaises(ValueError):
-            campaign.add_session(self.session(session_id="session-1", run_id="run-2", evidence_id="evidence-2"))
+            self.add_session(campaign, self.session(session_id="session-1", run_id="run-2", evidence_id="evidence-2"))
 
     def test_negative_and_null_outcomes_are_preserved(self):
         campaign = self.campaign()
-        campaign.add_session(self.session(outcome=CampaignOutcome.NEGATIVE))
-        campaign.add_session(
+        self.add_session(campaign, self.session(outcome=CampaignOutcome.NEGATIVE))
+        self.add_session(campaign, 
             self.session(
                 session_id="session-2",
                 run_id="run-2",
@@ -397,8 +401,8 @@ class PaperCampaignTests(unittest.TestCase):
 
     def test_aggregate_metrics_are_deterministic_across_decimal_contexts(self):
         campaign_a = self.campaign()
-        campaign_a.add_session(self.session())
-        campaign_a.add_session(
+        self.add_session(campaign_a, self.session())
+        self.add_session(campaign_a, 
             self.session(
                 session_id="session-2",
                 run_id="run-2",
@@ -431,8 +435,8 @@ class PaperCampaignTests(unittest.TestCase):
         getcontext().clamp = original_context.clamp
         getcontext().traps = original_context.traps.copy()
         campaign_b = self.campaign()
-        campaign_b.add_session(self.session())
-        campaign_b.add_session(
+        self.add_session(campaign_b, self.session())
+        self.add_session(campaign_b, 
             self.session(
                 session_id="session-2",
                 run_id="run-2",
@@ -459,7 +463,7 @@ class PaperCampaignTests(unittest.TestCase):
 
     def test_finalize_freezes_membership_and_fork_creates_new_version(self):
         campaign = self.campaign()
-        campaign.add_session(self.session())
+        self.add_session(campaign, self.session())
         campaign.finalize(
             outcome=CampaignOutcome.HARMFUL,
             readiness=CampaignReadiness.NOT_ELIGIBLE,
@@ -473,7 +477,7 @@ class PaperCampaignTests(unittest.TestCase):
 
     def test_restart_roundtrip_preserves_final_identity_and_summary(self):
         campaign = self.campaign()
-        campaign.add_session(self.session())
+        self.add_session(campaign, self.session())
         campaign.finalize(
             outcome=CampaignOutcome.POSITIVE,
             readiness=CampaignReadiness.ELIGIBLE,
@@ -488,7 +492,7 @@ class PaperCampaignTests(unittest.TestCase):
 
     def test_tampered_state_is_rejected(self):
         campaign = self.campaign()
-        campaign.add_session(self.session())
+        self.add_session(campaign, self.session())
         campaign.finalize(
             outcome=CampaignOutcome.POSITIVE,
             readiness=CampaignReadiness.ELIGIBLE,
@@ -505,7 +509,7 @@ class PaperCampaignTests(unittest.TestCase):
 
     def test_export_summary_is_explicit_about_unsupported_metrics(self):
         campaign = self.campaign()
-        campaign.add_session(
+        self.add_session(campaign, 
             self.session(
                 brier_sum=None,
                 log_loss_sum=None,

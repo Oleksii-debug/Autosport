@@ -21,10 +21,10 @@ from .decision_ledger import (
     verify_economic_goal_binding,
 )
 from .economic_goal_provenance import provenance_for
-from .ingestion_health import IngestionPolicy
+from .ingestion_health import IngestionPolicy, SourceHealthStore
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
-from .live_observation import observe_workspace_once
+from .live_observation import poll_open_market_store_once
 from .market_mirror import MarketMirror, MirrorSnapshot
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
@@ -548,6 +548,8 @@ class PersistentLiveDecisionLoop:
         self.bounds = bounds or LiveLoopBounds()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.post_append_hook = post_append_hook
+        self._default_market_store: SQLiteMarketStore | None = None
+        self._default_health_store: SourceHealthStore | None = None
 
         store = SQLiteMarketStore(self.workspace / "market.db")
         try:
@@ -587,12 +589,32 @@ class PersistentLiveDecisionLoop:
             def _default_observer(
                 updates: BoundedMirrorInvalidationBuffer,
             ) -> object:
-                return observe_workspace_once(
-                    self.workspace,
+                store = self._default_market_store
+                health_store = self._default_health_store
+                if store is None:
+                    store = SQLiteMarketStore(self.workspace / "market.db")
+                    try:
+                        health_store = SourceHealthStore(
+                            self.workspace / "source_health.json"
+                        )
+                        # One bounded-current reconciliation covers durable changes
+                        # between construction and the first live poll. Subsequent
+                        # cycles reuse this exact canonical store and rely on the bus.
+                        for persisted_event in store.current_by_source().values():
+                            updates.accept_persisted(persisted_event)
+                    except BaseException:
+                        store.close()
+                        raise
+                    self._default_market_store = store
+                    self._default_health_store = health_store
+                assert health_store is not None
+                return poll_open_market_store_once(
+                    store,
+                    health_store,
                     provider,
+                    mirror_updates=updates,
                     max_items=self.bounds.observation_max_items,
                     policy=self.ingestion_policy,
-                    mirror_updates=updates,
                 )
 
             self._observe = _default_observer
@@ -650,6 +672,20 @@ class PersistentLiveDecisionLoop:
         self._freshness_deadlines: dict[str, datetime | None] = {}
         self._freshness_generations: dict[str, int] = {}
         self._freshness_heap: list[tuple[datetime, str, int]] = []
+
+    def close(self) -> None:
+        """Release the optional long-lived default market-store connection."""
+        store = self._default_market_store
+        self._default_market_store = None
+        self._default_health_store = None
+        if store is not None:
+            store.close()
+
+    def __enter__(self) -> "PersistentLiveDecisionLoop":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
 
     @property
     def paused(self) -> bool:

@@ -1215,7 +1215,7 @@ class ExperimentRunner:
             spec.created_at,
             model_version_id=spec.model_version_id,
             completed_at=spec.completed_at,
-            notes="; ".join(promotion.reasons),
+            notes="; ".join(provisional_promotion.reasons),
         )
         existing_experiment = self.registry.get("Experiment", spec.experiment_id)
         if existing_experiment is None:

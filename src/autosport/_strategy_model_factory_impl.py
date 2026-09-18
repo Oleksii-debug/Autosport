@@ -540,6 +540,7 @@ class PromotionController:
         challenger_metrics: Mapping[str, float],
         provenance_complete: bool,
         rollback_target: str | None,
+        evidence: PromotionEvidence | None = None,
     ) -> PromotionEvaluation:
         if provenance_complete is not True:
             return PromotionEvaluation(
@@ -1075,6 +1076,7 @@ class ExperimentRunner:
         *,
         rule: PromotionRule,
         minimum_train_size: int | None = None,
+        promotion_evidence: PromotionEvidence | None = None,
     ) -> FactoryRunResult:
         (
             binding,
@@ -1178,6 +1180,7 @@ class ExperimentRunner:
             challenger_metrics=candidate_metrics,
             provenance_complete=True,
             rollback_target=current_champion,
+            evidence=promotion_evidence,
         )
         outcome = (
             ResearchOutcome.POSITIVE

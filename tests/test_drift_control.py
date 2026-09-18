@@ -216,6 +216,29 @@ def test_detected_drift_is_durable_restart_safe_and_diagnostic_only(tmp_path):
     assert len(DriftMonitor(reopened).list_findings(as_of=EVALUATED_AT)) == 1
 
 
+def test_timezone_equivalent_reference_collapses_to_one_identity(tmp_path):
+    registry = _registry(tmp_path)
+    monitor = DriftMonitor(registry)
+    first = _reference(monitor)
+    second = _reference(
+        monitor,
+        baseline=_baseline_window(
+            window_start="2026-02-01T02:00:00+02:00",
+            window_end="2026-02-02T02:00:00+02:00",
+            as_of="2026-02-04T02:00:00+02:00",
+            value_available_at=(
+                "2026-02-03T02:00:00+02:00",
+                "2026-02-03T02:00:00+02:00",
+            ),
+        ),
+    )
+
+    assert second.reference_id == first.reference_id
+    assert len(
+        registry.causal_records("DriftReference", as_of=BASELINE_AS_OF)
+    ) == 1
+
+
 def test_equal_threshold_is_no_drift_not_a_noisy_false_positive(tmp_path):
     monitor = DriftMonitor(_registry(tmp_path))
     reference = _reference(monitor)

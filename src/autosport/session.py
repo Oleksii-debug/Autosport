@@ -9,6 +9,9 @@ from .agents import AgentContext, AgentOrchestrator
 from .dataset import ReplayDataset
 from .decision_ledger import JsonlDecisionLedger, VerifiedDecisionLedgerSnapshot
 from .domain import MarketEvent
+from .economic_goal import EconomicGoalContract
+from .economic_goal_provenance import EconomicGoalProvenance, provenance_for
+from .economic_goal_store import EconomicGoalStore
 from .evaluation import EvaluationSummary, evaluate
 from .ingestion import IngestionEngine, IngestionStats
 from .ingestion_health import IngestionPolicy, SourceHealthState, SourceHealthStore
@@ -26,6 +29,7 @@ from .providers import MarketProvider
 from .recovery import transaction_history_requires_recovery
 from .replay import ReplayEngine, ReplayRun
 from .research_strategy import ResearchStrategyPlan
+from .risk import PaperRiskPolicy
 from .run_registry import MixedStrategyWorkspaceError, RunRegistry, UnresolvedExperimentError
 from .run_transaction import RunTransaction
 from .settlement import SettlementEngine
@@ -102,6 +106,7 @@ class AutosportSession:
         *,
         book: PaperBook | None = None,
         ledger: JsonlDecisionLedger | None = None,
+        risk_policy: PaperRiskPolicy | None = None,
     ) -> AgentOrchestrator:
         context = AgentContext(
             book or self.book,
@@ -112,6 +117,7 @@ class AutosportSession:
             build_strategy_agents(
                 self.strategy.strategy_id,
                 research_plan=self.research_plan,
+                risk_policy=risk_policy,
             ),
             context,
         )
@@ -139,8 +145,51 @@ class AutosportSession:
         )
         return ObservationResult(stats, self.source_health.get(source_id), current)
 
+    def _capture_economic_authority(
+        self,
+    ) -> tuple[EconomicGoalContract | None, PaperRiskPolicy]:
+        store = EconomicGoalStore(self.workspace)
+        goal = store.load() if store.path.exists() else None
+        policy = PaperRiskPolicy(economic_goal=goal)
+        return goal, policy
+
+    def _runtime_strategy_identity(
+        self,
+        goal: EconomicGoalContract | None,
+        policy: PaperRiskPolicy,
+    ) -> str:
+        if goal is None:
+            return self.strategy_id
+        goal_provenance = provenance_for(goal)
+        return (
+            f"{self.strategy_id}::economic:"
+            f"{goal_provenance.contract_sha256}:{policy.provenance_sha256}"
+        )
+
+    @staticmethod
+    def _economic_runtime_provenance(
+        goal: EconomicGoalContract | None,
+        policy: PaperRiskPolicy,
+    ) -> tuple[EconomicGoalProvenance | None, dict[str, object] | None]:
+        if goal is None:
+            return None, None
+        goal_provenance = provenance_for(goal)
+        return (
+            goal_provenance,
+            {**policy.provenance_payload(), "sha256": policy.provenance_sha256},
+        )
+
     def run_dataset(self, dataset: ReplayDataset, speed: float = 0.0, allow_repeat: bool = False) -> SessionResult:
         with WorkspaceEconomicLock(self.workspace):
+            economic_goal, risk_policy = self._capture_economic_authority()
+            if economic_goal is not None and self.strategy.strategy_id == "baseline-v1":
+                raise ValueError(
+                    "baseline-v1 does not have proven EconomicGoal-aware sizing semantics"
+                )
+            runtime_strategy_id = self._runtime_strategy_identity(
+                economic_goal,
+                risk_policy,
+            )
             # Recover the exact checksum-bound schema-v2 outcome chain and reject a
             # previously accepted restart/fork before PaperBook/ledger mutation.
             # The same binding is then persisted on the canonical RunRegistry item.
@@ -156,6 +205,9 @@ class AutosportSession:
                 speed=speed,
                 allow_repeat=allow_repeat,
                 outcome_lineage=outcome_lineage,
+                economic_goal=economic_goal,
+                risk_policy=risk_policy,
+                runtime_strategy_id=runtime_strategy_id,
             )
 
     def _run_dataset_locked(
@@ -165,8 +217,19 @@ class AutosportSession:
         speed: float = 0.0,
         allow_repeat: bool = False,
         outcome_lineage: OutcomeLineageBinding | None = None,
+        economic_goal: EconomicGoalContract | None = None,
+        risk_policy: PaperRiskPolicy | None = None,
+        runtime_strategy_id: str | None = None,
     ) -> SessionResult:
-        base_ledger_snapshot = self._ensure_canonical_economic_base()
+        if risk_policy is None:
+            risk_policy = PaperRiskPolicy(economic_goal=economic_goal)
+        runtime_strategy_id = runtime_strategy_id or self._runtime_strategy_identity(
+            economic_goal,
+            risk_policy,
+        )
+        base_ledger_snapshot = self._ensure_canonical_economic_base(
+            runtime_strategy_id
+        )
         base_book_hash = sha256_file(self.book_path)
         base_ledger_hash = base_ledger_snapshot.sha256
 
@@ -174,7 +237,7 @@ class AutosportSession:
         experiment_key = self.registry.begin(
             dataset.market_sha256,
             dataset.results_sha256,
-            self.strategy_id,
+            runtime_strategy_id,
             run_id,
             allow_repeat=allow_repeat,
             base_paper_book_sha256=base_book_hash,
@@ -188,7 +251,7 @@ class AutosportSession:
                 experiment_key=experiment_key,
                 market_sha256=dataset.market_sha256,
                 results_sha256=dataset.results_sha256,
-                strategy_id=self.strategy_id,
+                strategy_id=runtime_strategy_id,
                 base_paper_book_sha256=base_book_hash,
                 base_decision_ledger_sha256=base_ledger_hash,
             )
@@ -207,7 +270,12 @@ class AutosportSession:
         try:
             working_book = PaperBook.load(self.book_path)
             staged_ledger = JsonlDecisionLedger(transaction.run_ledger_path)
-            orchestrator = self._runtime(run_id, book=working_book, ledger=staged_ledger)
+            orchestrator = self._runtime(
+                run_id,
+                book=working_book,
+                ledger=staged_ledger,
+                risk_policy=risk_policy,
+            )
             engine = ReplayEngine(dataset.load_market_events())
 
             def consume(event) -> None:
@@ -269,6 +337,9 @@ class AutosportSession:
                 dataset,
                 result,
                 outcome_lineage=outcome_lineage,
+                economic_goal=economic_goal,
+                risk_policy=risk_policy,
+                runtime_strategy_id=runtime_strategy_id,
             )
         )
         transaction.commit()
@@ -285,7 +356,10 @@ class AutosportSession:
         transaction.mark_registry_completed()
         return result
 
-    def _ensure_canonical_economic_base(self) -> VerifiedDecisionLedgerSnapshot:
+    def _ensure_canonical_economic_base(
+        self,
+        runtime_strategy_id: str,
+    ) -> VerifiedDecisionLedgerSnapshot:
         if self.registry.in_progress():
             raise UnresolvedExperimentError(
                 "Workspace has an unresolved economic run; repair it before starting another paper experiment."
@@ -295,8 +369,11 @@ class AutosportSession:
                 "Workspace has unresolved transaction history; repair it before starting another paper experiment."
             )
         prior_strategy_ids = self.registry.strategy_ids()
+        economic_prefix = self.strategy_id + "::economic:"
         foreign_strategy_ids = tuple(
-            value for value in prior_strategy_ids if value != self.strategy_id
+            value
+            for value in prior_strategy_ids
+            if value != self.strategy_id and not value.startswith(economic_prefix)
         )
         if foreign_strategy_ids:
             raise MixedStrategyWorkspaceError(
@@ -324,8 +401,21 @@ class AutosportSession:
         result: SessionResult,
         *,
         outcome_lineage: OutcomeLineageBinding | None = None,
+        economic_goal: EconomicGoalContract | None = None,
+        risk_policy: PaperRiskPolicy | None = None,
+        runtime_strategy_id: str | None = None,
     ) -> dict:
         market_price_truth = market_price_truth_from_events(dataset.load_market_events())
+        if risk_policy is None:
+            risk_policy = PaperRiskPolicy(economic_goal=economic_goal)
+        runtime_strategy_id = runtime_strategy_id or self._runtime_strategy_identity(
+            economic_goal,
+            risk_policy,
+        )
+        goal_provenance, policy_provenance = self._economic_runtime_provenance(
+            economic_goal,
+            risk_policy,
+        )
         payload = {
             "schema_version": 2,
             "dataset_name": dataset.name,
@@ -334,9 +424,9 @@ class AutosportSession:
             "historical_import_identity": dataset.import_identity,
             "dataset_governance": asdict(dataset.governance) if dataset.governance is not None else None,
             "market_price_truth": market_price_truth.to_dict(),
-            "strategy_id": self.strategy_id,
+            "strategy_id": runtime_strategy_id,
             "strategy_runtime": {
-                "strategy_id": self.strategy_id,
+                "strategy_id": runtime_strategy_id,
                 "canonical_strategy_id": self.strategy.strategy_id,
                 "label": self.strategy.label,
                 "agent_names": list(self.strategy.agent_names),
@@ -344,6 +434,19 @@ class AutosportSession:
                 "research_plan_sha256": (
                     self.research_plan.source_sha256 if self.research_plan is not None else None
                 ),
+                "economic_goal_provenance": (
+                    None
+                    if goal_provenance is None
+                    else {
+                        "schema": goal_provenance.schema,
+                        "schema_version": goal_provenance.schema_version,
+                        "goal_id": goal_provenance.goal_id,
+                        "revision": goal_provenance.revision,
+                        "bankroll_id": goal_provenance.bankroll_id,
+                        "contract_sha256": goal_provenance.contract_sha256,
+                    }
+                ),
+                "risk_policy_provenance": policy_provenance,
             },
             "experiment_key": result.experiment_key,
             "market_sha256": dataset.market_sha256,

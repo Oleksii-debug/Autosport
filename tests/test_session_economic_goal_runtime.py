@@ -85,6 +85,16 @@ class SessionEconomicGoalRuntimeTests(unittest.TestCase):
                     expected_goal.contract_sha256,
                 )
                 self.assertEqual(session.registry.strategy_ids(), (summary["strategy_id"],))
+
+                # Once this workspace has goal-bound economic history, disappearance
+                # of the durable owner contract must not silently restore legacy mode.
+                (workspace / EconomicGoalStore.FILE_NAME).unlink()
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "persisted EconomicGoal authority is missing",
+                ):
+                    session.run_dataset(dataset, allow_repeat=True)
+                self.assertEqual(session.registry.strategy_ids(), (summary["strategy_id"],))
             finally:
                 session.close()
 

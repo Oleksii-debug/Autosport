@@ -184,7 +184,7 @@ def bind_economic_goal(
         or RISK_POLICY_PROVENANCE_PAYLOAD_KEY in payload
     ):
         raise DecisionLedgerIntegrityError(
-            "Decision Ledger economic provenance must be derived, not caller supplied"
+            "Decision Ledger economic-goal provenance must be derived, not caller supplied"
         )
 
     provenance = provenance_for(contract)

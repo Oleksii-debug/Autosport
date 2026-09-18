@@ -182,6 +182,15 @@ class AutosportSession:
     def run_dataset(self, dataset: ReplayDataset, speed: float = 0.0, allow_repeat: bool = False) -> SessionResult:
         with WorkspaceEconomicLock(self.workspace):
             economic_goal, risk_policy = self._capture_economic_authority()
+            prior_strategy_ids = self.registry.strategy_ids()
+            if economic_goal is None and any(
+                value.startswith(self.strategy_id + "::economic:")
+                for value in prior_strategy_ids
+            ):
+                raise ValueError(
+                    "persisted EconomicGoal authority is missing for a workspace "
+                    "with economic-goal runtime history"
+                )
             if economic_goal is not None and self.strategy.strategy_id == "baseline-v1":
                 raise ValueError(
                     "baseline-v1 does not have proven EconomicGoal-aware sizing semantics"

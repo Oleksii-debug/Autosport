@@ -66,6 +66,24 @@ MATERIAL_ACTION_ID_PAYLOAD_KEY = "material_action_id"
 
 
 @dataclass(frozen=True, slots=True)
+class EconomicDecisionAuthority:
+    """Exact goal + executable paper-risk authority for one economic append."""
+
+    contract: EconomicGoalContract
+    risk_policy: PaperRiskPolicy
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.contract, EconomicGoalContract):
+            raise TypeError("contract must be an EconomicGoalContract")
+        if not isinstance(self.risk_policy, PaperRiskPolicy):
+            raise TypeError("risk_policy must be a PaperRiskPolicy")
+        if self.risk_policy.economic_goal != self.contract:
+            raise DecisionLedgerIntegrityError(
+                "risk policy is not bound to the supplied EconomicGoalContract"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class DecisionRecord:
     replay_run_id: str
     agent: str
@@ -454,14 +472,24 @@ class JsonlDecisionLedger:
     def append_economic(
         self,
         record: DecisionRecord,
-        contract: EconomicGoalContract,
+        contract: EconomicGoalContract | EconomicDecisionAuthority,
         *,
         risk_policy: PaperRiskPolicy | None = None,
     ) -> str:
         """Persist a material economic decision with derived goal and policy provenance."""
 
+        if isinstance(contract, EconomicDecisionAuthority):
+            if risk_policy is not None and risk_policy != contract.risk_policy:
+                raise DecisionLedgerIntegrityError(
+                    "conflicting risk-policy authority supplied for economic append"
+                )
+            economic_goal = contract.contract
+            effective_policy = contract.risk_policy
+        else:
+            economic_goal = contract
+            effective_policy = risk_policy
         return self._append_validated(
-            bind_economic_goal(record, contract, risk_policy)
+            bind_economic_goal(record, economic_goal, effective_policy)
         )
 
     @classmethod

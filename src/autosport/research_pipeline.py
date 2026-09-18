@@ -13,6 +13,7 @@ from .decision_ledger import (
     GENERAL_DECISION_KIND,
     MATERIAL_ACTION_ID_PAYLOAD_KEY,
     DecisionRecord,
+    EconomicDecisionAuthority,
     JsonlDecisionLedger,
     bind_economic_goal,
 )
@@ -960,8 +961,7 @@ class ResearchDecisionPipeline:
             else:
                 audit_sha = decision_ledger.append_economic(
                     record,
-                    goal,
-                    risk_policy=self.risk_policy,
+                    EconomicDecisionAuthority(goal, self.risk_policy),
                 )
         except Exception:
             durable_sha = (

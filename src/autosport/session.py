@@ -236,9 +236,7 @@ class AutosportSession:
             economic_goal,
             risk_policy,
         )
-        base_ledger_snapshot = self._ensure_canonical_economic_base(
-            runtime_strategy_id
-        )
+        base_ledger_snapshot = self._ensure_canonical_economic_base()
         base_book_hash = sha256_file(self.book_path)
         base_ledger_hash = base_ledger_snapshot.sha256
 
@@ -365,10 +363,7 @@ class AutosportSession:
         transaction.mark_registry_completed()
         return result
 
-    def _ensure_canonical_economic_base(
-        self,
-        runtime_strategy_id: str,
-    ) -> VerifiedDecisionLedgerSnapshot:
+    def _ensure_canonical_economic_base(self) -> VerifiedDecisionLedgerSnapshot:
         if self.registry.in_progress():
             raise UnresolvedExperimentError(
                 "Workspace has an unresolved economic run; repair it before starting another paper experiment."

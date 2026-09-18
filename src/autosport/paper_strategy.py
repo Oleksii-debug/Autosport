@@ -9,6 +9,7 @@ from .agents import AgentContext
 from .decision_ledger import (
     ECONOMIC_DECISION_KIND,
     DecisionRecord,
+    EconomicDecisionAuthority,
     bind_economic_goal,
 )
 from .domain import MarketEvent, PaperTicket, TicketLeg
@@ -363,8 +364,7 @@ class PaperValueAgent:
                 else:
                     context.decision_ledger.append_economic(
                         record,
-                        goal,
-                        risk_policy=self.risk_policy,
+                        EconomicDecisionAuthority(goal, self.risk_policy),
                     )
         except Exception:
             if record is not None and self._decision_is_durable(context, record, goal):

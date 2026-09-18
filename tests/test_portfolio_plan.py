@@ -599,7 +599,7 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertEqual(plan.stakes, (Decimal("0"),))
         self.assertIn("existing open positions", plan.reason)
 
-    def test_verified_complete_arbitrage_requires_positive_exact_terminal_minimum(self) -> None:
+    def test_external_terminal_witness_cannot_authorize_positive_without_market_outcome_authority(self) -> None:
         goal = self._goal()
         base_intents = (
             self._intent(
@@ -617,6 +617,11 @@ class PortfolioPlanTests(unittest.TestCase):
                 odds=Decimal("3"),
             ),
         )
+        # This group contains every proposed ticket leg, but that fact cannot prove
+        # that the real market lacks an additional non-ticket terminal outcome
+        # (for example DRAW in a three-way market).  Until canonical market metadata
+        # supplies an exhaustive outcome roster, an external ScenarioGroup must not
+        # grant positive arbitrage/dutching/hedge authority.
         outcomes = tuple(
             ScenarioOutcome(quote_key=key)
             for key in sorted(
@@ -624,7 +629,7 @@ class PortfolioPlanTests(unittest.TestCase):
                 for intent in base_intents
             )
         )
-        groups = (ScenarioGroup("complete-terminal-market", outcomes),)
+        groups = (ScenarioGroup("externally-claimed-complete-market", outcomes),)
         intents = self._bind_terminal_state(base_intents, groups)
         book = PaperBook("1000")
         edge = tuple(
@@ -632,6 +637,13 @@ class PortfolioPlanTests(unittest.TestCase):
         )
         graph = self._graph(book, intents, dependency_edges=(edge,))
         witness = self._terminal_witness(book, intents, graph, groups)
+
+        # Serializer symmetry is part of the restart/provenance boundary even while
+        # this witness is deliberately insufficient for positive authority.
+        self.assertEqual(
+            TerminalStateCompletenessEvidence.from_dict(witness.to_dict()),
+            witness,
+        )
 
         plan = build_portfolio_plan(
             book,
@@ -642,40 +654,10 @@ class PortfolioPlanTests(unittest.TestCase):
             terminal_state_evidence=witness,
         )
 
-        self.assertEqual(plan.action, PortfolioAction.PAPER_PLAN)
-        self.assertTrue(all(stake > 0 for stake in plan.stakes))
-        self.assertIsNotNone(plan.terminal_economics)
-        assert plan.terminal_economics is not None
-        self.assertTrue(plan.terminal_economics.worst_proven)
-        self.assertGreater(
-            plan.terminal_economics.worst_terminal_profit,
-            Decimal("0"),
-        )
-        self.assertEqual(PortfolioPlan.from_dict(plan.to_dict()), plan)
-        tampered_checks = tuple(
-            (
-                name,
-                ("7" * 64 if name == "routing_feasibility" else digest),
-            )
-            for name, digest in witness.execution_check_sha256s
-        )
-        tampered_witness = replace(
-            witness,
-            execution_check_sha256s=tampered_checks,
-        )
-        tampered = build_portfolio_plan(
-            book,
-            intents,
-            self._policy(goal),
-            self.DECISION_TS,
-            dependency_graph=graph,
-            terminal_state_evidence=tampered_witness,
-        )
-        self.assertEqual(tampered.action, PortfolioAction.WAIT)
-        self.assertIn(
-            "execution assumptions do not match verified completeness",
-            tampered.reason,
-        )
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"), Decimal("0")))
+        self.assertIsNone(plan.terminal_economics)
+        self.assertIn("authoritative exhaustive market-outcome semantics", plan.reason)
 
     def test_verified_terminal_model_with_nonpositive_minimum_fails_closed(self) -> None:
         goal = self._goal()

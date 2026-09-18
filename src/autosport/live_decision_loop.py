@@ -745,13 +745,16 @@ class PersistentLiveDecisionLoop:
         ):
             return self._recover_unfinished_progress()
 
-        now = _require_utc_clock(self.clock)
         try:
             self._observe(self.mirror_updates)
         except ProviderUnavailableError as exc:
             self._needs_cache_rebuild = True
-            return self._persist_provider_gap(now, exc)
+            return self._persist_provider_gap(
+                _require_utc_clock(self.clock),
+                exc,
+            )
 
+        now = _require_utc_clock(self.clock)
         batch = self.mirror_updates.drain(
             max_items=self.bounds.max_dirty_per_cycle
         )

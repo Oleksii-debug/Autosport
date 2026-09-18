@@ -28,9 +28,10 @@ class MarketQuoteEvidence:
     source_ts: str | None
     ingest_ts: str
     quote_evidence_sha256: str
+    sport: str | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "event_id": self.event_id,
             "market_id": self.market_id,
             "selection_id": self.selection_id,
@@ -43,6 +44,9 @@ class MarketQuoteEvidence:
             "ingest_ts": self.ingest_ts,
             "quote_evidence_sha256": self.quote_evidence_sha256,
         }
+        if self.sport is not None:
+            payload["sport"] = self.sport
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,10 +178,22 @@ class CalculationService:
             for event in events
         )
         first = snapshots[0]
-        market_identity = (first.event_id, first.market_id, first.source_id, first.market_type)
+        market_identity = (
+            first.sport,
+            first.event_id,
+            first.market_id,
+            first.source_id,
+            first.market_type,
+        )
         seen_selections: set[str] = set()
         for source in snapshots:
-            if (source.event_id, source.market_id, source.source_id, source.market_type) != market_identity:
+            if (
+                source.sport,
+                source.event_id,
+                source.market_id,
+                source.source_id,
+                source.market_type,
+            ) != market_identity:
                 raise ValueError(
                     "market de-vig quotes must belong to the same event, market, source, and market type"
                 )
@@ -245,6 +261,8 @@ def _snapshot_quote_at_cutoff(
         "source_ts": event.source_ts,
         "ingest_ts": event.ingest_ts,
     }
+    if event.sport is not None:
+        raw["sport"] = event.sport
     try:
         canonical = MarketEvent.from_dict(raw)
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -265,6 +283,8 @@ def _snapshot_quote_at_cutoff(
         "source_ts": canonical.source_ts,
         "ingest_ts": canonical.ingest_ts,
     }
+    if canonical.sport is not None:
+        payload["sport"] = canonical.sport
     digest = _sha256(payload)
     return MarketQuoteEvidence(
         **payload,
@@ -287,7 +307,13 @@ def _timestamp(value: object, *, field: str) -> datetime:
 
 
 def _validate_quote_identity_utf8(event: MarketEvent) -> None:
-    for value in (event.event_id, event.market_id, event.selection_id, event.source_id):
+    for value in (
+        event.event_id,
+        event.market_id,
+        event.selection_id,
+        event.source_id,
+        event.sport,
+    ):
         if type(value) is not str:
             continue
         try:
@@ -323,6 +349,7 @@ def _bind(
 
 def _quote_sort_key(source: MarketQuoteEvidence) -> tuple[object, ...]:
     return (
+        source.sport or "",
         source.event_id,
         source.market_id,
         source.selection_id,

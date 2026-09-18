@@ -254,6 +254,19 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
     registry.record_promotion(promote)
     assert registry.champion_strategy(as_of=T3) == "strategy-1"
 
+    evidence2 = _promotion_evidence(
+        experiment_id="experiment-2",
+        strategy_id="strategy-2",
+        model_id="model-1",
+        bundle_id="eval-2",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=SHA_A,
+        evidence_id="placeholder-2",
+        rollback_identity="strategy-1",
+    )
+    registry.append(evidence2)
+
     strategy2 = StrategyVersion(
         "strategy-2",
         "canonical-strategy",
@@ -297,6 +310,7 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
         T3,
         predecessor_strategy_version_id="strategy-1",
         candidate_model_version_id="model-1",
+        promotion_evidence_id=evidence2.promotion_evidence_id,
     )
     registry.record_promotion(promote2)
     assert registry.champion_strategy(as_of=T3) == "strategy-2"

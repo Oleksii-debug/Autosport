@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 
 from .decision_ledger import (
+    ECONOMIC_DECISION_KIND,
     MATERIAL_ACTION_ID_PAYLOAD_KEY,
     DecisionRecord,
     EconomicDecisionAuthority,
@@ -775,6 +776,7 @@ def persist_portfolio_plan_decision(
         action=_PORTFOLIO_PLAN_DECISION_ACTION,
         payload=payload,
         context_hash=context_hash,
+        decision_kind=ECONOMIC_DECISION_KIND,
     )
     ledger.append_economic(
         record,

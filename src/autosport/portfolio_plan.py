@@ -1777,8 +1777,8 @@ def build_portfolio_plan(
                     decision_ts=decision_ts,
                     action=PortfolioAction.WAIT,
                     reason=(
-                        "positive portfolio vector requires typed verified terminal-state "
-                        "completeness for current+proposed positions"
+                        "positive portfolio vector requires typed verified terminal-state economics "
+                        "and completeness for current+proposed positions"
                     ),
                     intents=intents,
                     portfolio_sha256=portfolio_sha256,

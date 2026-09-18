@@ -5,7 +5,7 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
-from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.opportunity import (
@@ -729,6 +729,7 @@ class PortfolioPlanTests(unittest.TestCase):
                     plan,
                     (intent,),
                     policy,
+                    initialize_ledger=(index == 1),
                     replay_run_id="replay-portfolio-plan",
                     material_action_id=material_action_id,
                 )
@@ -739,6 +740,7 @@ class PortfolioPlanTests(unittest.TestCase):
                     plan,
                     (intent,),
                     policy,
+                    initialize_ledger=False,
                     replay_run_id="replay-portfolio-plan",
                     material_action_id=material_action_id,
                 )
@@ -775,6 +777,50 @@ class PortfolioPlanTests(unittest.TestCase):
                 2,
             )
 
+    def test_durable_plan_missing_ledger_after_restart_fails_closed(self) -> None:
+        goal = self._goal()
+        policy = self._policy(goal)
+        intent = self._intent(goal, suffix="durable-loss")
+        book = PaperBook("1000")
+        plan = build_portfolio_plan(
+            book,
+            (intent,),
+            policy,
+            self.DECISION_TS,
+            dependency_graph=self._graph(book, (intent,)),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "decisions.jsonl"
+            persist_portfolio_plan_decision(
+                JsonlDecisionLedger(ledger_path),
+                plan,
+                (intent,),
+                policy,
+                initialize_ledger=True,
+                replay_run_id="replay-portfolio-plan-loss",
+                material_action_id="portfolio-plan-loss",
+            )
+            self.assertTrue(ledger_path.exists())
+
+            restarted = JsonlDecisionLedger(ledger_path)
+            ledger_path.unlink()
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "missing or unreadable",
+            ):
+                persist_portfolio_plan_decision(
+                    restarted,
+                    plan,
+                    (intent,),
+                    policy,
+                    initialize_ledger=False,
+                    replay_run_id="replay-portfolio-plan-loss",
+                    material_action_id="portfolio-plan-loss",
+                )
+            self.assertFalse(ledger_path.exists())
+
     def test_durable_plan_conflicting_retry_fails_before_duplicate_append(self) -> None:
         goal = self._goal()
         policy = self._policy(goal)
@@ -795,6 +841,7 @@ class PortfolioPlanTests(unittest.TestCase):
                 first_plan,
                 (first_intent,),
                 policy,
+                initialize_ledger=True,
                 replay_run_id="replay-portfolio-plan-conflict",
                 material_action_id="portfolio-plan-conflict",
             )
@@ -821,6 +868,7 @@ class PortfolioPlanTests(unittest.TestCase):
                     second_plan,
                     (second_intent,),
                     policy,
+                    initialize_ledger=False,
                     replay_run_id="replay-portfolio-plan-conflict",
                     material_action_id="portfolio-plan-conflict",
                 )

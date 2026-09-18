@@ -200,7 +200,8 @@ class SessionEvidence:
             "config_sha256",
         ):
             _sha256(getattr(self, name), name)
-        _sha256_or_none(self.model_version_id, "model_version_id")
+        if self.model_version_id is not None:
+            _text(self.model_version_id, "model_version_id")
         start = _instant(self.evaluation_window_start, "evaluation_window_start")
         end = _instant(self.evaluation_window_end, "evaluation_window_end")
         as_of = _instant(self.as_of, "as_of")

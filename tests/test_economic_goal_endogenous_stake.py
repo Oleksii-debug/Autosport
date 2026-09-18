@@ -290,12 +290,12 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             market_id="market-provider-2",
             selection_id="selection-provider-2",
             sequence=24,
-            source_id="provider-2",
+            source_id="provider-1",
         )
         goal = self._goal(
             max_stake_fraction=Decimal("0.20"),
             max_capital_at_risk_fraction=Decimal("0.60"),
-            max_provider_concentration_fraction=Decimal("0.50"),
+            max_provider_concentration_fraction=Decimal("0.75"),
             max_concurrent_positions=4,
         )
         policy = self._policy(goal)
@@ -323,7 +323,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             ),
             replace(
                 self._risk_context(second, goal),
-                provider_accounts=(("provider-2", "account-2"),),
+                provider_accounts=(("provider-1", "account-1"),),
             ),
         )
 

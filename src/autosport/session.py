@@ -454,7 +454,7 @@ class AutosportSession:
         # same market_events snapshot already drives ReplayEngine and
         # replay_dataset_hash. Campaign evidence may later consume this compact
         # projection, but cannot mint or rewrite it.
-        normalized_observations: list[tuple[str, str]] = []
+        normalized_observations: list[tuple[str, int, str]] = []
         for event in market_events:
             try:
                 observed = datetime.fromisoformat(
@@ -469,14 +469,19 @@ class AutosportSession:
             normalized_observations.append(
                 (
                     observed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    event.sequence,
                     event.dedupe_key,
                 )
             )
-        normalized_observations.sort(key=lambda item: (item[0], item[1]))
+        normalized_observations.sort(key=lambda item: (item[0], item[1], item[2]))
         observation_timestamps = tuple(item[0] for item in normalized_observations)
         observation_identity_payload = [
-            {"observed_ts": observed_ts, "dedupe_key": dedupe_key}
-            for observed_ts, dedupe_key in normalized_observations
+            {
+                "observed_ts": observed_ts,
+                "sequence": sequence,
+                "dedupe_key": dedupe_key,
+            }
+            for observed_ts, sequence, dedupe_key in normalized_observations
         ]
         observation_membership_payload = {
             "schema_version": 1,

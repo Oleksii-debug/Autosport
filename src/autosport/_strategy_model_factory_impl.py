@@ -585,11 +585,52 @@ class PromotionController:
                 improvement,
                 tuple(reasons),
             )
+        if evidence is None:
+            return PromotionEvaluation(
+                PromotionVerdict.INCONCLUSIVE,
+                PromotionAction.RETAIN,
+                improvement,
+                ("missing immutable statistical/holdout promotion evidence",),
+            )
+        if evidence.estimand != rule.primary_metric:
+            return PromotionEvaluation(
+                PromotionVerdict.INCONCLUSIVE,
+                PromotionAction.RETAIN,
+                improvement,
+                ("promotion evidence estimand does not match frozen primary metric",),
+            )
+        expected_direction = rule.canonical_payload()["metric_direction"]
+        evidence_direction = (
+            "LOWER_IS_BETTER"
+            if expected_direction == "lower_is_better"
+            else "HIGHER_IS_BETTER"
+            if expected_direction == "higher_is_better"
+            else None
+        )
+        if evidence.direction != evidence_direction:
+            return PromotionEvaluation(
+                PromotionVerdict.INCONCLUSIVE,
+                PromotionAction.RETAIN,
+                improvement,
+                ("promotion evidence direction does not match frozen rule",),
+            )
+        try:
+            practical_improvement = Decimal(evidence.practical_improvement)
+            minimum_improvement = Decimal(str(rule.minimum_improvement))
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError("promotion evidence practical improvement is invalid") from exc
+        if not evidence.eligible_for_promotion() or practical_improvement < minimum_improvement:
+            return PromotionEvaluation(
+                PromotionVerdict.INCONCLUSIVE,
+                PromotionAction.RETAIN,
+                improvement,
+                ("promotion evidence is not promotion-eligible",),
+            )
         return PromotionEvaluation(
             PromotionVerdict.PROMOTE,
             PromotionAction.PROMOTE,
             improvement,
-            ("frozen promotion rule satisfied",),
+            ("frozen promotion rule satisfied with independent statistical/holdout evidence",),
         )
 
 

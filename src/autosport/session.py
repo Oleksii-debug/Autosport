@@ -476,7 +476,6 @@ class AutosportSession:
             else {
                 "schema_version": 1,
                 "replay_dataset_hash": result.replay.dataset_hash,
-            "campaign_causal_membership": campaign_causal_membership,
                 "event_count": result.replay.event_count,
                 "evaluation_window_start": observation_timestamps[0],
                 "evaluation_window_end": observation_timestamps[-1],
@@ -523,6 +522,7 @@ class AutosportSession:
             "run_id": result.replay.run_id,
             "event_count": result.replay.event_count,
             "replay_dataset_hash": result.replay.dataset_hash,
+            "campaign_causal_membership": campaign_causal_membership,
             "settled_ticket_ids": list(result.settled_ticket_ids),
             "balance": str(result.balance),
             "evaluation": {

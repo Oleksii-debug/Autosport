@@ -939,14 +939,11 @@ class VerifiedTerminalEconomics:
             )
         for digest in self.outcome_authority_sha256s:
             _canonical_sha256("terminal outcome authority sha256", digest)
-        if (
-            self.outcome_authority_sha256s
-            != tuple(sorted(self.outcome_authority_sha256s))
-            or len(self.outcome_authority_sha256s)
-            != len(set(self.outcome_authority_sha256s))
+        if len(self.outcome_authority_sha256s) != len(
+            set(self.outcome_authority_sha256s)
         ):
             raise ValueError(
-                "terminal outcome authority identities must be sorted and unique"
+                "terminal outcome authority identities must be unique"
             )
         if self.outcome_space_exact and not self.outcome_space_exhaustive:
             raise ValueError(

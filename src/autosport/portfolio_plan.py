@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -16,6 +16,7 @@ from .decision_ledger import (
     JsonlDecisionLedger,
 )
 from .domain import PaperTicket, TicketStatus
+from .market_outcomes import MarketSettlementOutcomeAuthority
 from .economic_goal_provenance import provenance_for
 from .opportunity import Opportunity, OpportunityDecision, QuoteRef, StrategyClass
 from .paper import PaperBook
@@ -846,9 +847,46 @@ class TerminalStateCompletenessEvidence:
             ) from exc
 
 
+_VERIFIED_TERMINAL_AUTHORITY_TOKEN = object()
+
+
+def _canonical_verified_outcome_authorities(
+    authorities: tuple[MarketSettlementOutcomeAuthority, ...],
+    *,
+    decision_as_of: datetime | None = None,
+) -> tuple[MarketSettlementOutcomeAuthority, ...]:
+    if type(authorities) is not tuple:
+        raise TypeError("verified_outcome_authorities must be a tuple")
+    if any(
+        not isinstance(authority, MarketSettlementOutcomeAuthority)
+        for authority in authorities
+    ):
+        raise TypeError(
+            "verified_outcome_authorities must contain MarketSettlementOutcomeAuthority values"
+        )
+    ordered = tuple(
+        sorted(
+            authorities,
+            key=lambda authority: (
+                authority.identity.identity_key,
+                authority.authority_sha256,
+            ),
+        )
+    )
+    authority_sha256s = tuple(
+        authority.authority_sha256 for authority in ordered
+    )
+    if len(authority_sha256s) != len(set(authority_sha256s)):
+        raise ValueError("verified outcome authorities must be unique")
+    if decision_as_of is not None:
+        for authority in ordered:
+            authority.assert_available_as_of(decision_as_of)
+    return ordered
+
+
 @dataclass(frozen=True, slots=True)
 class VerifiedTerminalEconomics:
-    """Canonical ScenarioSearch result bound to one completeness witness."""
+    """Canonical terminal-economics result bound to completeness/control evidence."""
 
     completeness_evidence: TerminalStateCompletenessEvidence
     report_mode: str
@@ -857,6 +895,14 @@ class VerifiedTerminalEconomics:
     best_terminal_profit: Decimal
     worst_proven: bool
     best_proven: bool
+    outcome_space_exhaustive: bool = False
+    outcome_space_exact: bool = False
+    outcome_authority_sha256s: tuple[str, ...] = ()
+    _authority_verification_token: object | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(
@@ -879,17 +925,57 @@ class VerifiedTerminalEconomics:
         if (
             type(self.worst_proven) is not bool
             or type(self.best_proven) is not bool
+            or type(self.outcome_space_exhaustive) is not bool
+            or type(self.outcome_space_exact) is not bool
         ):
             raise ValueError("terminal economics proof flags must be bools")
         if self.worst_terminal_profit > self.best_terminal_profit:
             raise ValueError(
                 "terminal economics worst profit cannot exceed best profit"
             )
+        if type(self.outcome_authority_sha256s) is not tuple:
+            raise ValueError(
+                "terminal economics outcome_authority_sha256s must be a tuple"
+            )
+        for digest in self.outcome_authority_sha256s:
+            _canonical_sha256("terminal outcome authority sha256", digest)
+        if (
+            self.outcome_authority_sha256s
+            != tuple(sorted(self.outcome_authority_sha256s))
+            or len(self.outcome_authority_sha256s)
+            != len(set(self.outcome_authority_sha256s))
+        ):
+            raise ValueError(
+                "terminal outcome authority identities must be sorted and unique"
+            )
+        if self.outcome_space_exact and not self.outcome_space_exhaustive:
+            raise ValueError(
+                "exact terminal outcome space must also be exhaustive"
+            )
+        if self.outcome_authority_sha256s:
+            if self._authority_verification_token is not _VERIFIED_TERMINAL_AUTHORITY_TOKEN:
+                raise TypeError(
+                    "authoritative terminal economics requires separately verified market authority"
+                )
+            if not self.outcome_space_exhaustive:
+                raise ValueError(
+                    "authoritative terminal economics must prove exhaustive outcome coverage"
+                )
+        elif self.outcome_space_exhaustive or self.outcome_space_exact:
+            raise ValueError(
+                "terminal outcome truth cannot be authoritative without verified authority identities"
+            )
+        if self.outcome_space_exact and (
+            not self.worst_proven or not self.best_proven
+        ):
+            raise ValueError(
+                "exact authoritative terminal space requires exact extrema proofs"
+            )
 
     def _identity_payload(self) -> dict[str, object]:
         return {
             "schema": "autosport.verified_terminal_economics",
-            "schema_version": 1,
+            "schema_version": 2,
             "completeness_evidence": self.completeness_evidence.to_dict(),
             "report_mode": self.report_mode,
             "total_states": self.total_states,
@@ -897,6 +983,9 @@ class VerifiedTerminalEconomics:
             "best_terminal_profit": str(self.best_terminal_profit),
             "worst_proven": self.worst_proven,
             "best_proven": self.best_proven,
+            "outcome_space_exhaustive": self.outcome_space_exhaustive,
+            "outcome_space_exact": self.outcome_space_exact,
+            "outcome_authority_sha256s": list(self.outcome_authority_sha256s),
         }
 
     @property
@@ -910,7 +999,15 @@ class VerifiedTerminalEconomics:
         }
 
     @classmethod
-    def from_dict(cls, raw: object) -> "VerifiedTerminalEconomics":
+    def from_dict(
+        cls,
+        raw: object,
+        *,
+        verified_outcome_authorities: tuple[
+            MarketSettlementOutcomeAuthority, ...
+        ] = (),
+        decision_as_of: datetime | None = None,
+    ) -> "VerifiedTerminalEconomics":
         expected = {
             "schema",
             "schema_version",
@@ -921,6 +1018,9 @@ class VerifiedTerminalEconomics:
             "best_terminal_profit",
             "worst_proven",
             "best_proven",
+            "outcome_space_exhaustive",
+            "outcome_space_exact",
+            "outcome_authority_sha256s",
             "proof_sha256",
         }
         if type(raw) is not dict or set(raw) != expected:
@@ -929,10 +1029,37 @@ class VerifiedTerminalEconomics:
             )
         if (
             raw["schema"] != "autosport.verified_terminal_economics"
-            or raw["schema_version"] != 1
+            or raw["schema_version"] != 2
         ):
             raise ValueError("unsupported terminal economics schema")
         try:
+            authority_sha256s_raw = raw["outcome_authority_sha256s"]
+            if type(authority_sha256s_raw) is not list:
+                raise ValueError(
+                    "serialized outcome authority identities must be a list"
+                )
+            authority_sha256s = tuple(authority_sha256s_raw)
+            token: object | None = None
+            if authority_sha256s:
+                ordered = _canonical_verified_outcome_authorities(
+                    verified_outcome_authorities,
+                    decision_as_of=decision_as_of,
+                )
+                verified_sha256s = tuple(
+                    authority.authority_sha256 for authority in ordered
+                )
+                if verified_sha256s != authority_sha256s:
+                    raise ValueError(
+                        "serialized terminal economics authority identities do not match separately verified source evidence"
+                    )
+                expected_exact = all(
+                    authority.terminal_space_exact for authority in ordered
+                )
+                if raw["outcome_space_exact"] is not expected_exact:
+                    raise ValueError(
+                        "serialized terminal exactness does not match verified authorities"
+                    )
+                token = _VERIFIED_TERMINAL_AUTHORITY_TOKEN
             proof = cls(
                 completeness_evidence=TerminalStateCompletenessEvidence.from_dict(
                     raw["completeness_evidence"]
@@ -949,6 +1076,10 @@ class VerifiedTerminalEconomics:
                 ),
                 worst_proven=raw["worst_proven"],
                 best_proven=raw["best_proven"],
+                outcome_space_exhaustive=raw["outcome_space_exhaustive"],
+                outcome_space_exact=raw["outcome_space_exact"],
+                outcome_authority_sha256s=authority_sha256s,
+                _authority_verification_token=token,
             )
             serialized_proof_sha256 = _canonical_sha256(
                 "serialized terminal economics proof_sha256",
@@ -1087,16 +1218,20 @@ class PortfolioPlan:
                 )
             )
             if outcome_independent_positive:
-                # The canonical builder already fails closed here because the current
-                # market/settlement model cannot prove that externally supplied
-                # ScenarioGroups exhaust every real terminal outcome.  Direct
-                # construction and durable readback must enforce the same authority
-                # boundary; an internally consistent terminal-economics object is
-                # diagnostic evidence, not proof of market-outcome exhaustiveness.
-                raise ValueError(
-                    "positive outcome-independent action requires authoritative "
-                    "exhaustive market-outcome semantics"
-                )
+                proof = self.terminal_economics
+                if (
+                    proof is None
+                    or not proof.outcome_authority_sha256s
+                    or not proof.outcome_space_exhaustive
+                    or not proof.outcome_space_exact
+                    or not proof.worst_proven
+                    or proof.worst_terminal_profit <= Decimal("0")
+                ):
+                    raise ValueError(
+                        "positive outcome-independent action requires authoritative "
+                        "exact exhaustive market-outcome semantics with positive "
+                        "minimum terminal net P&L"
+                    )
 
     @property
     def dependency_graph_sha256(self) -> str | None:
@@ -1109,7 +1244,7 @@ class PortfolioPlan:
     def _identity_payload(self) -> dict[str, object]:
         return {
             "schema": "autosport.portfolio_plan",
-            "schema_version": 3,
+            "schema_version": 4,
             "decision_ts": self.decision_ts,
             "action": self.action.value,
             "stakes": [str(value) for value in self.stakes],
@@ -1140,7 +1275,14 @@ class PortfolioPlan:
         return {**self._identity_payload(), "plan_sha256": self.plan_sha256}
 
     @classmethod
-    def from_dict(cls, raw: object) -> "PortfolioPlan":
+    def from_dict(
+        cls,
+        raw: object,
+        *,
+        verified_outcome_authorities: tuple[
+            MarketSettlementOutcomeAuthority, ...
+        ] = (),
+    ) -> "PortfolioPlan":
         expected = {
             "schema",
             "schema_version",
@@ -1164,7 +1306,7 @@ class PortfolioPlan:
             raise ValueError("serialized portfolio plan must contain canonical fields")
         if raw["schema"] != "autosport.portfolio_plan":
             raise ValueError("unsupported portfolio plan schema")
-        if raw["schema_version"] != 3:
+        if raw["schema_version"] != 4:
             raise ValueError("unsupported portfolio plan schema_version")
         try:
             stakes_raw = raw["stakes"]
@@ -1188,10 +1330,18 @@ class PortfolioPlan:
                 else PortfolioDependencyGraph.from_dict(graph_raw)
             )
             terminal_raw = raw["terminal_economics"]
+            _, decision_time = _canonical_timestamp(
+                "serialized portfolio decision_ts",
+                raw["decision_ts"],
+            )
             terminal_economics = (
                 None
                 if terminal_raw is None
-                else VerifiedTerminalEconomics.from_dict(terminal_raw)
+                else VerifiedTerminalEconomics.from_dict(
+                    terminal_raw,
+                    verified_outcome_authorities=verified_outcome_authorities,
+                    decision_as_of=decision_time,
+                )
             )
             plan = cls(
                 decision_ts=raw["decision_ts"],
@@ -1267,6 +1417,9 @@ def persist_portfolio_plan_decision(
     initialize_ledger: bool,
     replay_run_id: str,
     material_action_id: str,
+    verified_outcome_authorities: tuple[
+        MarketSettlementOutcomeAuthority, ...
+    ] = (),
 ) -> DecisionRecord:
     """Fsync one exact plan to the canonical Decision Ledger, idempotently across restart."""
 
@@ -1343,7 +1496,8 @@ def persist_portfolio_plan_decision(
             )
         try:
             restored = PortfolioPlan.from_dict(
-                json.loads(existing.payload[_PORTFOLIO_PLAN_JSON_PAYLOAD_KEY])
+                json.loads(existing.payload[_PORTFOLIO_PLAN_JSON_PAYLOAD_KEY]),
+                verified_outcome_authorities=verified_outcome_authorities,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise PortfolioPlanReconciliationRequired(
@@ -1415,6 +1569,8 @@ def _terminal_plan(
 def _intent_preflight_reason(
     intent: OpportunityIntent,
     decision_time: datetime,
+    *,
+    authoritative_terminal_model: bool = False,
 ) -> str | None:
     evidence = intent.evidence
     if intent.opportunity.decision is OpportunityDecision.WAIT:
@@ -1441,17 +1597,18 @@ def _intent_preflight_reason(
     }:
         if evidence.truth is not EvidenceTruth.EXACT:
             return "outcome-independent opportunity evidence is not exact"
-        if (
-            not evidence.outcome_space_complete
-            or evidence.terminal_state_space_sha256 is None
-        ):
-            return (
-                "outcome-independent opportunity lacks complete terminal-state evidence"
-            )
-        if evidence.execution_assumptions_sha256 is None:
-            return (
-                "outcome-independent opportunity lacks execution-assumption evidence"
-            )
+        if not authoritative_terminal_model:
+            if (
+                not evidence.outcome_space_complete
+                or evidence.terminal_state_space_sha256 is None
+            ):
+                return (
+                    "outcome-independent opportunity lacks complete terminal-state evidence"
+                )
+            if evidence.execution_assumptions_sha256 is None:
+                return (
+                    "outcome-independent opportunity lacks execution-assumption evidence"
+                )
     return None
 
 
@@ -1519,6 +1676,9 @@ def _verify_terminal_economics(
     portfolio_sha256: str,
     decision_ts: str,
     decision_time: datetime,
+    market_outcome_authorities: tuple[
+        MarketSettlementOutcomeAuthority, ...
+    ] = (),
 ) -> tuple[VerifiedTerminalEconomics | None, str | None]:
     binding_reason = _terminal_state_bindings_reason(
         evidence,
@@ -1551,23 +1711,24 @@ def _verify_terminal_economics(
             StrategyClass.HEDGE_REBALANCE,
         }
     )
-    for intent in outcome_independent:
-        if (
-            intent.evidence.terminal_state_space_sha256
-            != evidence.terminal_state_space_sha256
-        ):
-            return (
-                None,
-                "outcome-independent evidence terminal-state identity does not match verified completeness",
-            )
-        if (
-            intent.evidence.execution_assumptions_sha256
-            != evidence.execution_assumptions_sha256
-        ):
-            return (
-                None,
-                "outcome-independent execution assumptions do not match verified completeness",
-            )
+    if not market_outcome_authorities:
+        for intent in outcome_independent:
+            if (
+                intent.evidence.terminal_state_space_sha256
+                != evidence.terminal_state_space_sha256
+            ):
+                return (
+                    None,
+                    "outcome-independent evidence terminal-state identity does not match verified completeness",
+                )
+            if (
+                intent.evidence.execution_assumptions_sha256
+                != evidence.execution_assumptions_sha256
+            ):
+                return (
+                    None,
+                    "outcome-independent execution assumptions do not match verified completeness",
+                )
 
     tickets = [
         ticket
@@ -1578,6 +1739,59 @@ def _verify_terminal_economics(
         _proposed_terminal_ticket(intent, stake, decision_ts)
         for intent, stake in positive_pairs
     )
+
+    if market_outcome_authorities:
+        try:
+            ordered_authorities = _canonical_verified_outcome_authorities(
+                market_outcome_authorities,
+                decision_as_of=decision_time,
+            )
+            report = ScenarioSearchEngine().analyse_authoritative(
+                tickets,
+                ordered_authorities,
+                decision_as_of=decision_time,
+            )
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            return (
+                None,
+                f"authoritative terminal-state model is not executable: {exc}",
+            )
+        proof = VerifiedTerminalEconomics(
+            completeness_evidence=evidence,
+            report_mode=report.mode,
+            total_states=report.total_states,
+            worst_terminal_profit=report.observed_worst,
+            best_terminal_profit=report.observed_best,
+            worst_proven=report.worst_proven,
+            best_proven=report.best_proven,
+            outcome_space_exhaustive=report.outcome_space_exhaustive,
+            outcome_space_exact=report.outcome_space_exact,
+            outcome_authority_sha256s=report.outcome_authority_sha256s,
+            _authority_verification_token=_VERIFIED_TERMINAL_AUTHORITY_TOKEN,
+        )
+        if not proof.outcome_space_exhaustive:
+            return (
+                None,
+                "authoritative terminal outcome space is not exhaustive",
+            )
+        if outcome_independent:
+            if not proof.outcome_space_exact:
+                return (
+                    None,
+                    "authoritative terminal outcome space is exhaustive but not exact",
+                )
+            if not proof.worst_proven:
+                return (
+                    None,
+                    "outcome-independent terminal minimum is not exactly proven",
+                )
+            if proof.worst_terminal_profit <= Decimal("0"):
+                return (
+                    None,
+                    "outcome-independent exact minimum terminal net P&L is not positive",
+                )
+        return proof, None
+
     try:
         report = ScenarioSearchEngine().analyse(
             tickets,
@@ -1622,6 +1836,9 @@ def build_portfolio_plan(
     dependency_graph: PortfolioDependencyGraph | None,
     risk_of_ruin_vector_evidence: RiskOfRuinVectorEvidence | None = None,
     terminal_state_evidence: TerminalStateCompletenessEvidence | None = None,
+    market_outcome_authorities: tuple[
+        MarketSettlementOutcomeAuthority, ...
+    ] = (),
 ) -> PortfolioPlan:
     """Build one pure whole-portfolio paper plan under canonical RiskPolicy authority."""
 
@@ -1644,6 +1861,15 @@ def build_portfolio_plan(
     ):
         raise TypeError(
             "terminal_state_evidence must be TerminalStateCompletenessEvidence"
+        )
+    if type(market_outcome_authorities) is not tuple:
+        raise TypeError("market_outcome_authorities must be a tuple")
+    if any(
+        not isinstance(authority, MarketSettlementOutcomeAuthority)
+        for authority in market_outcome_authorities
+    ):
+        raise TypeError(
+            "market_outcome_authorities must contain MarketSettlementOutcomeAuthority values"
         )
     decision_ts, decision_time = _canonical_timestamp("decision_ts", decision_ts)
 
@@ -1740,7 +1966,11 @@ def build_portfolio_plan(
             allocation_signals.append(Decimal("0"))
             rejected.append((intent.intent_id, "canonical opportunity decision is ZERO"))
             continue
-        reason = _intent_preflight_reason(intent, decision_time)
+        reason = _intent_preflight_reason(
+            intent,
+            decision_time,
+            authoritative_terminal_model=bool(market_outcome_authorities),
+        )
         if reason is not None:
             allocation_signals.append(Decimal("0"))
             rejected.append((intent.intent_id, reason))
@@ -1897,6 +2127,7 @@ def build_portfolio_plan(
                 portfolio_sha256=portfolio_sha256,
                 decision_ts=decision_ts,
                 decision_time=decision_time,
+                market_outcome_authorities=market_outcome_authorities,
             )
             if terminal_reason is not None:
                 return _terminal_plan(
@@ -1909,27 +2140,24 @@ def build_portfolio_plan(
                     policy=risk_policy,
                     portfolio_truth=portfolio_truth,
                 )
-            # ScenarioSearch proves extrema only inside the supplied ScenarioGroups.
-            # The current canonical market/settlement model has no authoritative
-            # exhaustive roster proving that a real terminal outcome was not omitted.
-            # Therefore even a hash-bound external witness is diagnostic evidence,
-            # not positive-action authority.  Keep the richer proof for future
-            # reconciliation, but fail closed until canonical market-outcome
-            # exhaustiveness exists.
-            return _terminal_plan(
-                decision_ts=decision_ts,
-                action=PortfolioAction.WAIT,
-                reason=(
-                    "positive whole-position or outcome-independent action requires "
-                    "authoritative exhaustive market-outcome semantics; external "
-                    "scenario groups cannot prove omitted real outcomes absent"
-                ),
-                intents=intents,
-                portfolio_sha256=portfolio_sha256,
-                dependency_graph=dependency_graph,
-                policy=risk_policy,
-                portfolio_truth=portfolio_truth,
-            )
+            if not market_outcome_authorities:
+                # External ScenarioGroups remain diagnostic only.  Positive
+                # current+proposed decisions require canonical provider-scoped
+                # market/settlement authority from market_outcomes.py.
+                return _terminal_plan(
+                    decision_ts=decision_ts,
+                    action=PortfolioAction.WAIT,
+                    reason=(
+                        "positive whole-position or outcome-independent action requires "
+                        "authoritative exhaustive market-outcome semantics; external "
+                        "scenario groups cannot prove omitted real outcomes absent"
+                    ),
+                    intents=intents,
+                    portfolio_sha256=portfolio_sha256,
+                    dependency_graph=dependency_graph,
+                    policy=risk_policy,
+                    portfolio_truth=portfolio_truth,
+                )
         positive_strategy_classes = {
             intent.opportunity.strategy_class
             for intent, stake in zip(intents, allocation.stakes, strict=True)
@@ -1984,9 +2212,18 @@ def build_portfolio_plan(
                 ""
                 if terminal_economics is None
                 else (
-                    "; typed terminal-state completeness verified with canonical "
+                    "; canonical terminal economics verified with "
                     f"{terminal_economics.report_mode} worst-case P&L="
                     f"{terminal_economics.worst_terminal_profit}"
+                    + (
+                        ""
+                        if not terminal_economics.outcome_authority_sha256s
+                        else (
+                            "; provider outcome space exhaustive="
+                            f"{terminal_economics.outcome_space_exhaustive}, exact="
+                            f"{terminal_economics.outcome_space_exact}"
+                        )
+                    )
                 )
             )
             + (

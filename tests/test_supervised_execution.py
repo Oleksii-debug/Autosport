@@ -814,6 +814,39 @@ def test_future_profile_version_cannot_rebind_approved_plan() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "matched_stake",
+    (None, Decimal("5.00")),
+    ids=("absence", "positive"),
+)
+def test_unissued_capture_copy_cannot_mint_provider_state(
+    matched_stake: Decimal | None,
+) -> None:
+    bound, _, _, _ = _bound()
+    action = bound.execution_plan.actions[0]
+    capture, _ = _provider_capture(
+        action,
+        matched_stake=(
+            action.requested_stake
+            if matched_stake is not None
+            else None
+        ),
+    )
+    forged = replace(capture)
+    binding = bound.profile_for(action.bookmaker_id, action.account_id)
+
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="authoritative canonical readback capture",
+    ):
+        verify_betfair_provider_state(
+            action,
+            _profile(),
+            expected_profile_sha256=binding.profile_sha256,
+            readback=forged,
+        )
+
+
 def test_provider_order_identity_conflict_fails_closed() -> None:
     bound, _, _, _ = _bound()
     action = bound.execution_plan.actions[0]

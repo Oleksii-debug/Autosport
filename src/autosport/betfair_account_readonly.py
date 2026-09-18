@@ -181,7 +181,7 @@ class BetfairClearedOrderObservation:
         _iso_timestamp(self.placed_date, "placed_date")
         _iso_timestamp(self.settled_date, "settled_date")
         _positive_decimal(self.price_requested, "price_requested")
-        _positive_decimal(self.price_matched, "price_matched")
+        _nonnegative_decimal(self.price_matched, "price_matched")
         _nonnegative_decimal(self.size_settled, "size_settled")
         _decimal(self.profit, "profit")
         _optional_text(self.customer_order_ref, "customer_order_ref")
@@ -194,10 +194,14 @@ class BetfairMarketEventObservation:
     market_id: str
     event_id: str
     evidence: BetfairEvidence
+    source: str = "market_catalogue"
 
     def __post_init__(self) -> None:
         _required_text(self.market_id, "market_id")
         _required_text(self.event_id, "event_id")
+        source = _required_text(self.source, "market_event_source")
+        if source != "market_catalogue" and not source.startswith("cleared:"):
+            raise BetfairReadOnlyError("market event source is not canonical")
         if not isinstance(self.evidence, BetfairEvidence):
             raise BetfairReadOnlyError("market event evidence must be canonical BetfairEvidence")
 
@@ -459,7 +463,18 @@ class BetfairReadOnlyClient:
         market = _required_text(market_id, "market_id")
         _page_bounds(0, page_size)
         _positive_int(max_pages, "max_pages")
-        market_event = self.read_market_event(market)
+        market_event: BetfairMarketEventObservation | None
+        try:
+            market_event = self.read_market_event(market)
+        except BetfairReadOnlyError as exc:
+            if str(exc) != (
+                "exact market-to-event identity is unavailable from listMarketCatalogue"
+            ):
+                raise
+            # CLOSED markets are intentionally absent from listMarketCatalogue.
+            # A matching BET-level cleared row may still provide provider-native
+            # eventId. Empty evidence remains fail-closed.
+            market_event = None
 
         current_pages: list[BetfairCurrentOrderPage] = []
         offset = 0
@@ -509,6 +524,28 @@ class BetfairReadOnlyClient:
                 )
             cleared_groups.append((status, tuple(pages)))
 
+        if market_event is None:
+            event_sources = [
+                (order.event_id, order.evidence, status)
+                for status, pages in cleared_groups
+                for page in pages
+                for order in page.orders
+                if order.event_id is not None
+            ]
+            event_ids = {event_id for event_id, _, _ in event_sources}
+            if len(event_ids) != 1 or not event_sources:
+                raise BetfairReadOnlyError(
+                    "authoritative market-to-event identity is unavailable for execution readback"
+                )
+            event_id, event_evidence, event_status = event_sources[0]
+            assert event_id is not None
+            market_event = BetfairMarketEventObservation(
+                market,
+                event_id,
+                event_evidence,
+                f"cleared:{event_status}",
+            )
+
         all_evidence = [market_event.evidence]
         all_evidence.extend(page.evidence for page in current_pages)
         for _, pages in cleared_groups:
@@ -555,6 +592,7 @@ class BetfairReadOnlyClient:
             "market_event": {
                 "market_id": market_event.market_id,
                 "event_id": market_event.event_id,
+                "source": market_event.source,
                 "response_sha256": market_event.evidence.source_payload_sha256,
             },
             "current_pages": [

@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -477,6 +478,52 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                 record.decision_id,
                 goal,
             )
+
+    def test_ruin_witness_is_bound_to_material_action_intent(self):
+        goal = self._economic_goal(max_risk_of_ruin=Decimal("0.01"))
+        pipeline = self._goal_pipeline(goal)
+        book = self._book()
+        candidate = self._candidate(probability="0.60")
+        witness = self._bound_ruin_evidence(
+            book=book,
+            candidate=candidate,
+            pipeline=pipeline,
+            goal=goal,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, first = self._decide(
+                tmp,
+                book=book,
+                candidate=candidate,
+                forecast=self._forecast(probability="0.60"),
+                pipeline=pipeline,
+                stake="NaN",
+                market_quotes=[self._market_event()],
+                risk_of_ruin_evidence=witness,
+                material_action_id="research-ror-intent",
+            )
+            self.assertTrue(first.approved)
+
+            changed_witness = replace(
+                witness,
+                evidence_id="research-pipeline-ror-changed",
+            )
+            with self.assertRaisesRegex(
+                ResearchDecisionReconciliationRequired,
+                "decision intent",
+            ):
+                self._decide(
+                    tmp,
+                    book=book,
+                    candidate=candidate,
+                    forecast=self._forecast(probability="0.60"),
+                    pipeline=pipeline,
+                    stake="NaN",
+                    market_quotes=[self._market_event()],
+                    risk_of_ruin_evidence=changed_witness,
+                    decision_ledger=ledger,
+                    material_action_id="research-ror-intent",
+                )
 
     def test_active_economic_goal_exhaustion_records_zero_without_ticket(self):
         goal = self._economic_goal(max_stake_fraction=Decimal("0"))

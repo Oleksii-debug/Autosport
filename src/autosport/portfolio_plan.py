@@ -8,17 +8,9 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 
 from .economic_goal_provenance import provenance_for
+from .opportunity import Opportunity, OpportunityDecision, QuoteRef, StrategyClass
 from .paper import PaperBook
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskOfRuinVectorEvidence
-
-
-class OpportunityClass(str, Enum):
-    PREDICTIVE_EDGE = "predictive_edge"
-    LIVE_PRICE_MOVEMENT = "live_price_movement"
-    ARBITRAGE = "arbitrage"
-    DUTCHING = "dutching"
-    HEDGE_REBALANCE = "hedge_rebalance"
-    HYBRID = "hybrid"
 
 
 class EvidenceTruth(str, Enum):
@@ -92,7 +84,6 @@ class OpportunityEvidence:
     causal_cutoff: str
     reproducibility_sha256: str
     truth: EvidenceTruth = EvidenceTruth.EXACT
-    forecast_sha256: str | None = None
     outcome_space_complete: bool = False
     terminal_state_space_sha256: str | None = None
     execution_assumptions_sha256: str | None = None
@@ -105,7 +96,6 @@ class OpportunityEvidence:
         if cutoff > observed:
             raise ValueError("causal_cutoff must not be after observed_at")
         _canonical_sha256("reproducibility_sha256", self.reproducibility_sha256)
-        _optional_sha256("forecast_sha256", self.forecast_sha256)
         _optional_sha256(
             "terminal_state_space_sha256", self.terminal_state_space_sha256
         )
@@ -134,7 +124,6 @@ class OpportunityEvidence:
                 "causal_cutoff": self.causal_cutoff,
                 "reproducibility_sha256": self.reproducibility_sha256,
                 "truth": self.truth.value,
-                "forecast_sha256": self.forecast_sha256,
                 "outcome_space_complete": self.outcome_space_complete,
                 "terminal_state_space_sha256": self.terminal_state_space_sha256,
                 "execution_assumptions_sha256": self.execution_assumptions_sha256,
@@ -145,8 +134,10 @@ class OpportunityEvidence:
 
 @dataclass(frozen=True, slots=True)
 class OpportunityIntent:
+    """Executable intent that consumes, but never redefines, canonical Opportunity truth."""
+
     intent_id: str
-    opportunity_class: OpportunityClass
+    opportunity: Opportunity
     evidence: OpportunityEvidence
     risk_context: ProposedTicketRiskContext
     signal_strength: Decimal
@@ -156,8 +147,8 @@ class OpportunityIntent:
 
     def __post_init__(self) -> None:
         _canonical_text("intent_id", self.intent_id)
-        if not isinstance(self.opportunity_class, OpportunityClass):
-            raise ValueError("opportunity_class must be an OpportunityClass")
+        if not isinstance(self.opportunity, Opportunity):
+            raise TypeError("opportunity must be canonical Opportunity")
         if not isinstance(self.evidence, OpportunityEvidence):
             raise TypeError("evidence must be OpportunityEvidence")
         if not isinstance(self.risk_context, ProposedTicketRiskContext):
@@ -171,20 +162,50 @@ class OpportunityIntent:
         _canonical_sha256("config_sha256", self.config_sha256)
         if self.model_id is not None:
             _canonical_text("model_id", self.model_id)
+
         if PaperRiskPolicy.risk_of_ruin_candidate_sha256(self.risk_context) is None:
             raise ValueError("risk_context cannot produce canonical candidate identity")
-        if self.opportunity_class in {
-            OpportunityClass.PREDICTIVE_EDGE,
-            OpportunityClass.HYBRID,
-        }:
-            if self.evidence.forecast_sha256 is None:
+
+        opportunity_quotes = {quote.quote_key: quote for quote in self.opportunity.quotes}
+        context_quotes = {quote.quote_key: quote for quote in self.risk_context.quotes}
+        if set(opportunity_quotes) != set(context_quotes):
+            raise ValueError(
+                "risk_context quote identity must exactly match canonical opportunity quotes"
+            )
+        for quote_key, event in context_quotes.items():
+            reference = opportunity_quotes[quote_key]
+            rebound = QuoteRef.from_market_event(
+                event,
+                market_snapshot_hash=reference.market_snapshot_hash,
+            )
+            if rebound != reference:
                 raise ValueError(
-                    f"{self.opportunity_class.value} requires forecast_sha256 evidence"
+                    "risk_context quote snapshot must exactly match canonical opportunity evidence"
                 )
-            if self.model_id is None:
-                raise ValueError(
-                    f"{self.opportunity_class.value} requires model_id identity"
-                )
+
+        strategy_class = self.opportunity.strategy_class
+        if strategy_class in {
+            StrategyClass.PREDICTIVE_EDGE,
+            StrategyClass.HYBRID,
+        } and self.model_id is None:
+            raise ValueError(
+                f"{strategy_class.value} requires model_id identity"
+            )
+        if (
+            strategy_class not in {
+                StrategyClass.PREDICTIVE_EDGE,
+                StrategyClass.HYBRID,
+            }
+            and self.model_id is not None
+        ):
+            raise ValueError(
+                "model_id is valid only for forecast-dependent strategy classes"
+            )
+
+    @property
+    def opportunity_class(self) -> StrategyClass:
+        """Compatibility name backed by the single canonical StrategyClass authority."""
+        return self.opportunity.strategy_class
 
     @property
     def candidate_sha256(self) -> str:
@@ -198,9 +219,11 @@ class OpportunityIntent:
         return _sha256_payload(
             {
                 "schema": "autosport.opportunity_intent",
-                "schema_version": 1,
+                "schema_version": 2,
                 "intent_id": self.intent_id,
-                "opportunity_class": self.opportunity_class.value,
+                "opportunity_id": self.opportunity.opportunity_id,
+                "opportunity_class": self.opportunity.strategy_class.value,
+                "opportunity_decision": self.opportunity.decision.value,
                 "evidence_sha256": self.evidence.evidence_sha256,
                 "candidate_sha256": self.candidate_sha256,
                 "signal_strength": str(self.signal_strength),
@@ -260,7 +283,7 @@ class PortfolioPlan:
         ) != len(self.intent_ids):
             raise ValueError("opportunity_classes must match intent cardinality")
         for opportunity_class in self.opportunity_classes:
-            OpportunityClass(opportunity_class)
+            StrategyClass(opportunity_class)
         _optional_sha256("portfolio_sha256", self.portfolio_sha256)
         _optional_sha256("dependency_graph_sha256", self.dependency_graph_sha256)
         _optional_sha256(
@@ -271,8 +294,12 @@ class PortfolioPlan:
             raise ValueError("portfolio_truth must be an EvidenceTruth")
         _canonical_text("reason", self.reason)
         positive = any(stake > 0 for stake in self.stakes)
-        if self.action is PortfolioAction.STAKE_VECTOR and not positive:
-            raise ValueError("STAKE_VECTOR requires at least one positive stake")
+        if self.action in {
+            PortfolioAction.STAKE_VECTOR,
+            PortfolioAction.HEDGE_REBALANCE,
+            PortfolioAction.PAPER_PLAN,
+        } and not positive:
+            raise ValueError("positive portfolio action requires at least one positive stake")
         if self.action in {PortfolioAction.WAIT, PortfolioAction.ZERO} and positive:
             raise ValueError("WAIT/ZERO plans must not carry positive stakes")
 
@@ -378,6 +405,8 @@ def _intent_preflight_reason(
     decision_time: datetime,
 ) -> str | None:
     evidence = intent.evidence
+    if intent.opportunity.decision is OpportunityDecision.WAIT:
+        return "canonical opportunity decision is WAIT"
     _, observed = _canonical_timestamp("observed_at", evidence.observed_at)
     _, cutoff = _canonical_timestamp("causal_cutoff", evidence.causal_cutoff)
     if cutoff > decision_time or observed > decision_time:
@@ -394,8 +423,9 @@ def _intent_preflight_reason(
     if not evidence.execution_feasible:
         return "opportunity execution is not proven feasible"
     if intent.opportunity_class in {
-        OpportunityClass.ARBITRAGE,
-        OpportunityClass.DUTCHING,
+        StrategyClass.ARBITRAGE,
+        StrategyClass.DUTCHING,
+        StrategyClass.HEDGE_REBALANCE,
     }:
         if evidence.truth is not EvidenceTruth.EXACT:
             return "outcome-independent opportunity evidence is not exact"
@@ -476,7 +506,12 @@ def build_portfolio_plan(
             portfolio_truth=portfolio_truth,
         )
 
-    positive = tuple(intent for intent in intents if intent.signal_strength > 0)
+    positive = tuple(
+        intent
+        for intent in intents
+        if intent.signal_strength > 0
+        and intent.opportunity.decision is OpportunityDecision.ACTIONABLE
+    )
     if positive and portfolio_truth is not EvidenceTruth.EXACT:
         return _terminal_plan(
             decision_ts=decision_ts,
@@ -514,17 +549,33 @@ def build_portfolio_plan(
                 portfolio_truth=portfolio_truth,
             )
 
+    allocation_signals = tuple(
+        intent.signal_strength
+        if intent.opportunity.decision is OpportunityDecision.ACTIONABLE
+        else Decimal("0")
+        for intent in intents
+    )
     allocation = risk_policy.derive_goal_stake_vector(
         book,
-        tuple(intent.signal_strength for intent in intents),
+        allocation_signals,
         contexts=tuple(intent.risk_context for intent in intents),
         risk_of_ruin_vector_evidence=risk_of_ruin_vector_evidence,
     )
-    action = {
-        "STAKE_VECTOR": PortfolioAction.STAKE_VECTOR,
-        "WAIT": PortfolioAction.WAIT,
-        "ZERO": PortfolioAction.ZERO,
-    }[allocation.action]
+    if allocation.action == "STAKE_VECTOR":
+        action = (
+            PortfolioAction.HEDGE_REBALANCE
+            if any(
+                stake > 0
+                and intent.opportunity.strategy_class is StrategyClass.HEDGE_REBALANCE
+                for intent, stake in zip(intents, allocation.stakes, strict=True)
+            )
+            else PortfolioAction.STAKE_VECTOR
+        )
+    else:
+        action = {
+            "WAIT": PortfolioAction.WAIT,
+            "ZERO": PortfolioAction.ZERO,
+        }[allocation.action]
     goal = risk_policy.economic_goal
     return PortfolioPlan(
         decision_ts=decision_ts,

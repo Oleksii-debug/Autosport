@@ -448,7 +448,7 @@ class AutosportSession:
         payload = {
             "schema_version": 2,
             "dataset_name": dataset.name,
-            "sport": dataset.sport,
+            "sport": dataset.sport if sport_identity_proven else "unknown",
             "sport_scope": list(verified_sports),
             "sport_identity_proven": sport_identity_proven,
             "dataset_schema_version": dataset.schema_version,

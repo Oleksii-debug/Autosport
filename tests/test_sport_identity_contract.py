@@ -94,6 +94,18 @@ class SportIdentityContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "lowercase canonical sport identity"):
             MarketEvent.from_dict(raw)
 
+    def test_direct_event_and_ticket_sport_must_be_canonical(self) -> None:
+        with self.assertRaises(ValueError):
+            self._event(sport="Table_Tennis")
+        with self.assertRaises(ValueError):
+            TicketLeg(
+                "event-1",
+                "market-1",
+                "selection-1",
+                Decimal("2"),
+                sport="table|tennis",
+            )
+
     def test_schema_v3_single_and_mixed_sport_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -203,6 +203,10 @@ class MarketEvent:
     metadata: dict[str, Any] = field(default_factory=dict)
     sport: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.sport is not None:
+            _canonical_sport_value(self.sport)
+
     @property
     def quote_key(self) -> str:
         return _quote_identity(
@@ -296,6 +300,10 @@ class TicketLeg:
     selection_id: str
     locked_odds: Decimal
     sport: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.sport is not None:
+            _canonical_sport_value(self.sport)
 
     @property
     def quote_key(self) -> str:

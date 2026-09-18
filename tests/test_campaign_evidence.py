@@ -360,15 +360,30 @@ class PaperCampaignTests(unittest.TestCase):
                 finalized_at="2026-09-11T00:00:00Z",
             )
         self.assertFalse(campaign.finalized)
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "campaign.json"
+        with self.assertRaises(CampaignFinalizedError):
             campaign.finalized = True
-            campaign.finalized_at = "2026-09-11T00:00:00Z"
-            campaign.outcome = CampaignOutcome.POSITIVE
-            campaign.readiness = CampaignReadiness.ELIGIBLE
-            campaign.campaign_sha256 = campaign._computed_campaign_sha256()
-            with self.assertRaises(CampaignIntegrityError):
-                campaign.save(path)
+
+    def test_direct_finalized_constructor_cannot_mint_authority(self):
+        session = self.session()
+        provisional = self.campaign()
+        provisional.sessions = [session]
+        provisional.finalized_at = "2026-09-11T00:00:00Z"
+        provisional.outcome = CampaignOutcome.POSITIVE
+        provisional.readiness = CampaignReadiness.ELIGIBLE
+        digest = provisional._computed_campaign_sha256()
+
+        values = dict(self.BASE)
+        values["protocol_sha256"] = self.protocol_sha256
+        with self.assertRaises(CampaignIntegrityError):
+            PaperCampaign(
+                **values,
+                sessions=[session],
+                finalized=True,
+                finalized_at="2026-09-11T00:00:00Z",
+                outcome=CampaignOutcome.POSITIVE,
+                readiness=CampaignReadiness.ELIGIBLE,
+                campaign_sha256=digest,
+            )
 
     def test_finalized_load_requires_canonical_authority(self):
         campaign = self.campaign()
@@ -574,6 +589,9 @@ class PaperCampaignTests(unittest.TestCase):
             )
         self.assertEqual(loaded.campaign_sha256, campaign.campaign_sha256)
         self.assertEqual(loaded.export_summary(), campaign.export_summary())
+        self.assertTrue(loaded.finalized)
+        with self.assertRaises(CampaignFinalizedError):
+            loaded.readiness = CampaignReadiness.NOT_ELIGIBLE
 
     def test_tampered_state_is_rejected(self):
         campaign = self.campaign()

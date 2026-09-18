@@ -380,15 +380,61 @@ class MarketSettlementOutcomeAuthority:
                 "market outcome authority is not causally available at decision_as_of"
             )
 
+    def _state_is_derived(self, state: MarketTerminalState) -> bool:
+        if not isinstance(state, MarketTerminalState):
+            return False
+        actual_ids = tuple(
+            selection_id for selection_id, _ in state.settlements
+        )
+        if actual_ids != self.selection_ids:
+            return False
+        actual = dict(state.settlements)
+
+        if (
+            self.settlement_semantics
+            is SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
+        ):
+            expected_state_id = "canonical:" + ",".join(
+                actual[selection_id].value
+                for selection_id in self.selection_ids
+            )
+            return state.state_id == expected_state_id
+
+        if (
+            self.settlement_semantics
+            is SettlementSemantics.EXCLUSIVE_SINGLE_WINNER_OR_ALL_VOID
+            and state.state_id == "all_void"
+        ):
+            return all(
+                result is SettlementResult.VOID
+                for result in actual.values()
+            )
+
+        prefix = "winner:"
+        if not state.state_id.startswith(prefix):
+            return False
+        winner = state.state_id[len(prefix):]
+        if winner not in self.selection_ids:
+            return False
+        return all(
+            result
+            is (
+                SettlementResult.WIN
+                if selection_id == winner
+                else SettlementResult.LOSS
+            )
+            for selection_id, result in state.settlements
+        )
+
     def settlement_by_quote(
         self, state: MarketTerminalState
     ) -> dict[str, str]:
         if not isinstance(state, MarketTerminalState):
             raise TypeError("state must be MarketTerminalState")
-        expected_ids = self.selection_ids
-        actual_ids = tuple(selection_id for selection_id, _ in state.settlements)
-        if actual_ids != expected_ids or state not in self.terminal_states:
-            raise ValueError("terminal state is not derived from this outcome authority")
+        if not self._state_is_derived(state):
+            raise ValueError(
+                "terminal state is not derived from this outcome authority"
+            )
         return {
             self.identity.quote_key(selection_id): result.value
             for selection_id, result in state.settlements
@@ -409,9 +455,7 @@ class MarketSettlementOutcomeAuthority:
             "settlement_rules_sha256": self.settlement_rules_sha256,
             "verification_protocol_sha256": self.verification_protocol_sha256,
             "terminal_space_exact": self.terminal_space_exact,
-            "terminal_states": [
-                state.to_dict() for state in self.terminal_states
-            ],
+            "terminal_state_count": self.terminal_state_count,
         }
 
     @property
@@ -440,7 +484,7 @@ class MarketSettlementOutcomeAuthority:
             "settlement_rules_sha256",
             "verification_protocol_sha256",
             "terminal_space_exact",
-            "terminal_states",
+            "terminal_state_count",
             "authority_sha256",
         }
         if type(raw) is not dict or set(raw) != expected:
@@ -453,10 +497,9 @@ class MarketSettlementOutcomeAuthority:
         ):
             raise ValueError("unsupported market outcome authority schema")
         selection_ids = raw["selection_ids"]
-        terminal_states = raw["terminal_states"]
-        if type(selection_ids) is not list or type(terminal_states) is not list:
+        if type(selection_ids) is not list:
             raise ValueError(
-                "serialized market outcome authority vectors must be lists"
+                "serialized market outcome selection_ids must be a list"
             )
         try:
             authority = cls(
@@ -480,11 +523,12 @@ class MarketSettlementOutcomeAuthority:
             raise ValueError(
                 "serialized terminal-space exactness does not match semantics"
             )
-        if terminal_states != [
-            state.to_dict() for state in authority.terminal_states
-        ]:
+        if (
+            type(raw["terminal_state_count"]) is not int
+            or raw["terminal_state_count"] != authority.terminal_state_count
+        ):
             raise ValueError(
-                "serialized terminal states do not match the authoritative roster semantics"
+                "serialized terminal-state count does not match roster semantics"
             )
         if raw["authority_sha256"] != authority.authority_sha256:
             raise ValueError("market outcome authority hash mismatch")

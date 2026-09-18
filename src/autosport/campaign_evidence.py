@@ -1125,6 +1125,17 @@ def _validate_registry_bindings(campaign: PaperCampaign, registry: ScientificReg
             raise CampaignIntegrityError(
                 "ResearchProtocol dataset manifest does not match campaign session"
             )
+        dataset_cutoff = dataset.payload.get("causal_cutoff")
+        if not isinstance(dataset_cutoff, str):
+            raise CampaignIntegrityError(
+                f"DatasetSnapshot:{session.dataset_snapshot_id} lacks causal_cutoff authority"
+            )
+        if _instant(
+            session.evaluation_window_end, "session.evaluation_window_end"
+        ) > _instant(dataset_cutoff, "DatasetSnapshot.causal_cutoff"):
+            raise CampaignIntegrityError(
+                "session evaluation window exceeds DatasetSnapshot causal cutoff"
+            )
 
         strategy = _required_registry_entry(
             registry, "StrategyVersion", session.strategy_version_id
@@ -1171,6 +1182,17 @@ def _validate_registry_bindings(campaign: PaperCampaign, registry: ScientificReg
         if bundle.payload.get("evaluated_model_version_id") != session.model_version_id:
             raise CampaignIntegrityError(
                 f"EvaluationBundle:{session.evidence_id} model binding mismatch"
+            )
+        bundle_available = _timestamp(
+            bundle.available_at, "EvaluationBundle.available_at"
+        )
+        if _timestamp(session.available_at, "session.available_at") != bundle_available:
+            raise CampaignIntegrityError(
+                "session available_at must equal authoritative EvaluationBundle availability"
+            )
+        if _timestamp(session.as_of, "session.as_of") != bundle_available:
+            raise CampaignIntegrityError(
+                "session as_of must equal authoritative EvaluationBundle availability"
             )
 
         authority_times = (
@@ -1251,6 +1273,96 @@ def _validate_authoritative_session(
         raise CampaignIntegrityError(
             f"run {session.run_id} lacks verified completed summary authority"
         ) from exc
+
+    causal_membership = summary.get("campaign_causal_membership")
+    required_causal_fields = {
+        "schema_version",
+        "replay_dataset_hash",
+        "event_count",
+        "evaluation_window_start",
+        "evaluation_window_end",
+        "observation_timestamps",
+    }
+    if (
+        not isinstance(causal_membership, dict)
+        or set(causal_membership) != required_causal_fields
+        or causal_membership.get("schema_version") != 1
+    ):
+        raise CampaignIntegrityError(
+            "completed run lacks canonical campaign causal-membership authority"
+        )
+    replay_dataset_hash = causal_membership.get("replay_dataset_hash")
+    if (
+        not isinstance(replay_dataset_hash, str)
+        or replay_dataset_hash != summary.get("replay_dataset_hash")
+        or _sha256(replay_dataset_hash, "campaign_causal_membership.replay_dataset_hash")
+        != replay_dataset_hash
+    ):
+        raise CampaignIntegrityError(
+            "campaign causal-membership replay dataset identity mismatch"
+        )
+    event_count = causal_membership.get("event_count")
+    if (
+        type(event_count) is not int
+        or isinstance(event_count, bool)
+        or event_count <= 0
+        or event_count != summary.get("event_count")
+    ):
+        raise CampaignIntegrityError(
+            "campaign causal-membership event count mismatch"
+        )
+    raw_observations = causal_membership.get("observation_timestamps")
+    if (
+        not isinstance(raw_observations, list)
+        or not raw_observations
+        or any(not isinstance(value, str) for value in raw_observations)
+    ):
+        raise CampaignIntegrityError(
+            "campaign causal-membership observations are invalid"
+        )
+    try:
+        authoritative_observations = tuple(
+            _timestamp(value, "campaign_causal_membership.observation_timestamp")
+            for value in raw_observations
+        )
+        authoritative_start = _timestamp(
+            causal_membership.get("evaluation_window_start"),
+            "campaign_causal_membership.evaluation_window_start",
+        )
+        authoritative_end = _timestamp(
+            causal_membership.get("evaluation_window_end"),
+            "campaign_causal_membership.evaluation_window_end",
+        )
+    except CampaignError as exc:
+        raise CampaignIntegrityError(
+            "campaign causal-membership timestamps are invalid"
+        ) from exc
+    if (
+        authoritative_observations != tuple(sorted(authoritative_observations))
+        or len(authoritative_observations) != len(set(authoritative_observations))
+        or authoritative_start != authoritative_observations[0]
+        or authoritative_end != authoritative_observations[-1]
+    ):
+        raise CampaignIntegrityError(
+            "campaign causal-membership window does not match authoritative observations"
+        )
+    session_observations = tuple(
+        _timestamp(value, "session.observation_timestamp")
+        for value in session.observation_timestamps
+    )
+    if session_observations != authoritative_observations:
+        raise CampaignIntegrityError(
+            "session observation_timestamps mismatch completed run authority"
+        )
+    if (
+        _timestamp(session.evaluation_window_start, "session.evaluation_window_start")
+        != authoritative_start
+        or _timestamp(session.evaluation_window_end, "session.evaluation_window_end")
+        != authoritative_end
+    ):
+        raise CampaignIntegrityError(
+            "session evaluation window mismatches completed run authority"
+        )
 
     strategy = _required_registry_entry(
         scientific_registry, "StrategyVersion", session.strategy_version_id

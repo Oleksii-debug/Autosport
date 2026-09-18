@@ -584,10 +584,27 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertEqual(restored, plan)
         self.assertEqual(restored.plan_sha256, plan.plan_sha256)
 
-        numeric_stake = dict(payload)
+        decimal_tenth = replace(plan, stakes=(Decimal("0.1"),))
+        decimal_tenth_payload = decimal_tenth.to_dict()
+        self.assertEqual(decimal_tenth_payload["stakes"], ["0.1"])
+        self.assertEqual(
+            PortfolioPlan.from_dict(decimal_tenth_payload),
+            decimal_tenth,
+        )
+        numeric_stake = dict(decimal_tenth_payload)
         numeric_stake["stakes"] = [0.1]
         with self.assertRaisesRegex(ValueError, "serialized portfolio plan is invalid"):
             PortfolioPlan.from_dict(numeric_stake)
+
+        missing_portfolio = dict(payload)
+        missing_portfolio["portfolio_sha256"] = None
+        with self.assertRaisesRegex(ValueError, "serialized portfolio plan is invalid"):
+            PortfolioPlan.from_dict(missing_portfolio)
+
+        missing_goal = dict(payload)
+        missing_goal["economic_goal_contract_sha256"] = None
+        with self.assertRaisesRegex(ValueError, "serialized portfolio plan is invalid"):
+            PortfolioPlan.from_dict(missing_goal)
 
         missing_graph = dict(payload)
         missing_graph["dependency_graph"] = None

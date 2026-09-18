@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_FLOOR
 from enum import Enum
 from pathlib import Path
 from time import monotonic
@@ -182,6 +183,23 @@ def _require_utc_clock(clock: Clock) -> datetime:
     return now.astimezone(timezone.utc)
 
 
+def _timedelta_decimal_seconds(value: timedelta) -> Decimal:
+    return (
+        Decimal(value.days * 86400 + value.seconds)
+        + (Decimal(value.microseconds) / Decimal(1_000_000))
+    )
+
+
+def _conservative_timedelta(seconds: Decimal) -> timedelta:
+    max_seconds = _timedelta_decimal_seconds(timedelta.max)
+    if seconds >= max_seconds:
+        return timedelta.max
+    microseconds = int(
+        (seconds * Decimal(1_000_000)).to_integral_value(rounding=ROUND_FLOOR)
+    )
+    return timedelta(microseconds=microseconds)
+
+
 @dataclass(frozen=True, slots=True)
 class _Control:
     loop_id: str
@@ -249,6 +267,10 @@ class _Progress:
             _canonical_text("registered input id", input_id)
         if len(self.registered_input_ids) != len(set(self.registered_input_ids)):
             raise LiveDecisionProgressError("registered_input_ids must be unique")
+        if not set(self.affected_input_ids).issubset(self.registered_input_ids):
+            raise LiveDecisionProgressError(
+                "affected_input_ids must be a subset of registered_input_ids"
+            )
         if self.phase == _PHASE_PENDING:
             if self.decision_id is not None or self.plan_sha256 is not None:
                 raise LiveDecisionProgressError(
@@ -342,7 +364,7 @@ class PersistentLiveDecisionLoop:
         provider: MarketProvider | None = None,
         decision_ledger: JsonlDecisionLedger | None = None,
         ingestion_policy: IngestionPolicy | None = None,
-        max_quote_age: timedelta = timedelta(seconds=30),
+        max_quote_age: timedelta | None = None,
         bounds: LiveLoopBounds | None = None,
         clock: Clock | None = None,
         observation_runner: ObservationRunner | None = None,
@@ -359,8 +381,15 @@ class PersistentLiveDecisionLoop:
             raise TypeError("authority must be EconomicDecisionAuthority")
         if not callable(intent_factory):
             raise TypeError("intent_factory must be callable")
-        if not isinstance(max_quote_age, timedelta) or max_quote_age < timedelta(0):
-            raise ValueError("max_quote_age must be a non-negative timedelta")
+        goal_quote_age = authority.contract.max_quote_age_seconds
+        if max_quote_age is None:
+            max_quote_age = _conservative_timedelta(goal_quote_age)
+        elif not isinstance(max_quote_age, timedelta) or max_quote_age < timedelta(0):
+            raise ValueError("max_quote_age must be a non-negative timedelta or None")
+        elif _timedelta_decimal_seconds(max_quote_age) > goal_quote_age:
+            raise ValueError(
+                "max_quote_age cannot exceed EconomicGoalContract.max_quote_age_seconds"
+            )
         if observation_runner is None and provider is None:
             raise ValueError("provider is required when observation_runner is omitted")
 
@@ -585,8 +614,13 @@ class PersistentLiveDecisionLoop:
             for input_id in registered_input_ids:
                 self._pending_affected[input_id] = None
 
-        affected = tuple(self._pending_affected)
-        if not affected:
+        refresh_input_ids = tuple(self._pending_affected)
+        if recovering_pending:
+            assert self._progress is not None
+            affected = self._progress.affected_input_ids
+        else:
+            affected = refresh_input_ids
+        if not affected and not refresh_input_ids:
             return LiveCycleResult(
                 LiveCycleStatus.NO_CHANGE,
                 detail="no material quote, status, dependency, or freshness invalidation",
@@ -607,7 +641,7 @@ class PersistentLiveDecisionLoop:
             affected_input_ids=affected,
             gate=_GATE_NORMAL,
         )
-        self._refresh_intents(affected, decision_time)
+        self._refresh_intents(refresh_input_ids, decision_time)
 
         intents = self._all_cached_intents()
         graph = (

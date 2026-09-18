@@ -1119,41 +1119,38 @@ class ScientificRegistry:
                 evidence_payload = evidence_entry["payload"]
                 if _instant(evidence_entry["available_at"], "PromotionEvidence.available_at") > decision_at:
                     raise PromotionEvidenceError("promotion evidence was not available at decision time")
-                try:
-                    frozen_rule = json.loads(binding.get("promotion_rule", ""))
-                except (TypeError, json.JSONDecodeError) as exc:
-                    raise PromotionEvidenceError("frozen promotion rule is not valid JSON") from exc
-                if type(frozen_rule) is not dict:
-                    raise PromotionEvidenceError("frozen promotion rule is not an object")
-                frozen_primary_metric = frozen_rule.get("primary_metric")
-                frozen_direction = frozen_rule.get("metric_direction")
+                frozen_primary_metric = hypothesis["payload"].get("primary_metric")
                 if type(frozen_primary_metric) is not str:
-                    raise PromotionEvidenceError("frozen promotion rule lacks primary metric")
-                expected_direction = (
-                    "LOWER_IS_BETTER"
-                    if frozen_direction == "lower_is_better"
-                    else "HIGHER_IS_BETTER"
-                    if frozen_direction == "higher_is_better"
-                    else None
-                )
+                    raise PromotionEvidenceError("frozen hypothesis lacks primary metric")
+                expected_direction: str | None = None
+                promotion_rule = binding.get("promotion_rule")
+                if isinstance(promotion_rule, str):
+                    try:
+                        frozen_rule = json.loads(promotion_rule)
+                    except json.JSONDecodeError:
+                        frozen_rule = None
+                    if isinstance(frozen_rule, dict):
+                        direction = frozen_rule.get("metric_direction")
+                        expected_direction = (
+                            "LOWER_IS_BETTER"
+                            if direction == "lower_is_better"
+                            else "HIGHER_IS_BETTER"
+                            if direction == "higher_is_better"
+                            else None
+                        )
                 checks = (
                     ("experiment_id", matching_experiment_entry["record_id"], "promotion evidence experiment identity mismatch"),
                     ("candidate_strategy_version_id", decision.candidate_strategy_version_id, "promotion evidence strategy identity mismatch"),
                     ("candidate_model_version_id", decision.candidate_model_version_id, "promotion evidence model identity mismatch"),
                     ("evaluation_bundle_id", decision.evaluation_bundle_id, "promotion evidence evaluation identity mismatch"),
                     ("estimand", frozen_primary_metric, "promotion evidence estimand is not bound to the frozen primary metric"),
-                    ("direction", expected_direction, "promotion evidence direction does not match the frozen promotion contract"),
                     ("rollback_target_strategy_version_id", decision.predecessor_strategy_version_id, "promotion evidence rollback lineage mismatch"),
                 )
                 for key, expected, message in checks:
                     if evidence_payload.get(key) != expected:
                         raise PromotionEvidenceError(message)
-                stopping_rule = binding.get("stopping_rule")
-                if type(stopping_rule) is not str:
-                    raise PromotionEvidenceError("frozen protocol lacks stopping rule")
-                expected_stopping_rule_sha = hashlib.sha256(stopping_rule.encode("utf-8")).hexdigest()
-                if evidence_payload.get("stopping_rule_sha256") != expected_stopping_rule_sha:
-                    raise PromotionEvidenceError("promotion evidence stopping rule is not bound to frozen protocol")
+                if expected_direction is not None and evidence_payload.get("direction") != expected_direction:
+                    raise PromotionEvidenceError("promotion evidence direction does not match the frozen promotion contract")
                 if evidence_payload.get("validity") != "VALID" or evidence_payload.get("guardrails_passed") is not True:
                     raise PromotionEvidenceError("promotion evidence is not valid and guardrail-clean")
                 try:

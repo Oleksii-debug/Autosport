@@ -200,9 +200,11 @@ class PaperValueAgent:
         if book.tickets.get(ticket.ticket_id) is not ticket:
             raise RuntimeError("paper decision rollback cannot prove ticket identity")
         expected_lifecycle = ("open", ticket.ticket_id, (), ())
+        actual_lifecycle = book._lifecycle[-1] if book._lifecycle else None
         if (
             len(book._lifecycle) != lifecycle_len_before + 1
-            or book._lifecycle[-1] != expected_lifecycle
+            or not isinstance(actual_lifecycle, tuple)
+            or tuple(actual_lifecycle[:4]) != expected_lifecycle
         ):
             raise RuntimeError("paper decision rollback cannot prove lifecycle boundary")
         del book.tickets[ticket.ticket_id]

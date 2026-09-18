@@ -1556,9 +1556,6 @@ class PaperRiskPolicy:
             )
             if restriction_decision is not None:
                 return restriction_decision
-            quote_decision = self._quote_risk_decision(goal, context)
-            if quote_decision is not None:
-                return quote_decision
             if goal.max_stake_amount is not None and amount > goal.max_stake_amount:
                 return RiskDecision(False, "ticket exceeds economic goal absolute stake limit")
             if open_position_count >= goal.max_concurrent_positions:
@@ -1583,6 +1580,10 @@ class PaperRiskPolicy:
             for room, reason in history_limits:
                 if amount > room:
                     return RiskDecision(False, reason)
+
+            quote_decision = self._quote_risk_decision(goal, context)
+            if quote_decision is not None:
+                return quote_decision
 
             if goal.max_risk_of_ruin < Decimal("1"):
                 ruin_decision = self._risk_of_ruin_evidence_decision(

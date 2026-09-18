@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from .integrity import atomic_write_json, sha256_file
+from .run_transaction import RunTransactionError, _require_portable_run_id
 from .workspace_lock import (
     WorkspaceEconomicLock,
     WorkspaceEconomicLockBusyError,
@@ -320,6 +321,61 @@ def _read_posix_nested_regular_file_bytes(
             or not _stable_stat_metadata(opened_before, opened_after)
         ):
             raise ValueError(f"{label} changed while validating")
+
+        verification_descriptors: list[int] = []
+        verification_leaf: int | None = None
+        try:
+            verification_parent = directory_descriptors[0]
+            for index, component in enumerate(components[:-1], start=1):
+                try:
+                    verification = os.open(
+                        component,
+                        os.O_RDONLY | directory_flag | no_follow,
+                        dir_fd=verification_parent,
+                    )
+                except OSError as exc:
+                    raise ValueError(
+                        f"{label} canonical parent namespace changed while validating"
+                    ) from exc
+                verification_descriptors.append(verification)
+                try:
+                    verification_stat = os.fstat(verification)
+                    same_directory = os.path.sameopenfile(
+                        directory_descriptors[index],
+                        verification,
+                    )
+                except OSError as exc:
+                    raise ValueError(
+                        f"{label} canonical parent namespace changed while validating"
+                    ) from exc
+                if not stat.S_ISDIR(verification_stat.st_mode) or not same_directory:
+                    raise ValueError(
+                        f"{label} canonical parent namespace changed while validating"
+                    )
+                verification_parent = verification
+
+            try:
+                verification_leaf = os.open(
+                    components[-1],
+                    os.O_RDONLY | getattr(os, "O_BINARY", 0) | no_follow,
+                    dir_fd=verification_parent,
+                )
+                same_leaf = os.path.sameopenfile(leaf_descriptor, verification_leaf)
+            except OSError as exc:
+                raise ValueError(f"{label} canonical leaf changed while validating") from exc
+            if not same_leaf:
+                raise ValueError(f"{label} canonical leaf changed while validating")
+        finally:
+            if verification_leaf is not None:
+                try:
+                    os.close(verification_leaf)
+                except OSError:
+                    pass
+            for verification in reversed(verification_descriptors):
+                try:
+                    os.close(verification)
+                except OSError:
+                    pass
         return b"".join(chunks)
     finally:
         if leaf_descriptor is not None:
@@ -449,6 +505,14 @@ def _read_windows_nested_regular_file_bytes(
             raise ctypes.WinError(ctypes.get_last_error())
         return info
 
+    def _file_identity(handle: int) -> tuple[int, int, int]:
+        info = _information(handle)
+        return (
+            int(info.dwVolumeSerialNumber),
+            int(info.nFileIndexHigh),
+            int(info.nFileIndexLow),
+        )
+
     def _open_relative(parent_handle: int, component: str, *, directory: bool) -> int:
         encoded = component.encode("utf-16-le")
         buffer = ctypes.create_unicode_buffer(component)
@@ -576,6 +640,50 @@ def _read_windows_nested_regular_file_bytes(
             or not _stable_stat_metadata(opened_before, opened_after)
         ):
             raise ValueError(f"{label} changed while validating")
+
+        verification_handles: list[int] = []
+        verification_leaf: int | None = None
+        try:
+            verification_parent = directory_handles[0]
+            for index, component in enumerate(components[:-1], start=1):
+                try:
+                    verification = _open_relative(
+                        verification_parent,
+                        component,
+                        directory=True,
+                    )
+                except OSError as exc:
+                    raise ValueError(
+                        f"{label} canonical parent namespace changed while validating"
+                    ) from exc
+                verification_handles.append(verification)
+                info = _information(verification)
+                if (
+                    not (info.dwFileAttributes & file_attribute_directory)
+                    or info.dwFileAttributes & file_attribute_reparse_point
+                    or _file_identity(verification) != _file_identity(directory_handles[index])
+                ):
+                    raise ValueError(
+                        f"{label} canonical parent namespace changed while validating"
+                    )
+                verification_parent = verification
+
+            try:
+                verification_leaf = _open_relative(
+                    verification_parent,
+                    components[-1],
+                    directory=False,
+                )
+            except OSError as exc:
+                raise ValueError(f"{label} canonical leaf changed while validating") from exc
+            current_leaf_handle = int(msvcrt.get_osfhandle(leaf_descriptor))
+            if _file_identity(verification_leaf) != _file_identity(current_leaf_handle):
+                raise ValueError(f"{label} canonical leaf changed while validating")
+        finally:
+            if verification_leaf is not None:
+                close_handle(wintypes.HANDLE(verification_leaf))
+            for verification in reversed(verification_handles):
+                close_handle(wintypes.HANDLE(verification))
         return b"".join(chunks)
     except FileNotFoundError:
         raise
@@ -1112,11 +1220,8 @@ class RunRegistry:
         for summary_path in sorted(self.path.parent.glob("run-*.json")):
             filename_run_id = summary_path.name.removeprefix("run-").removesuffix(".json")
             try:
-                run_id = _require_single_path_component(
-                    filename_run_id,
-                    label="durable lineage-trust run id",
-                )
-            except ValueError:
+                run_id = _require_portable_run_id(filename_run_id)
+            except RunTransactionError:
                 # A nonportable run-* filename is never allowed to become durable trust.
                 continue
 

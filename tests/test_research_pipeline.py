@@ -386,7 +386,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                 pipeline=self._goal_pipeline(goal),
                 stake="NaN",
                 market_quotes=[self._market_event()],
-                provider_accounts=(("provider-1", "account-paper-1"),),
+                provider_accounts=(("provider", "account-paper-1"),),
             )
 
             self.assertTrue(decision.approved)
@@ -396,7 +396,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             self.assertEqual(ticket.stake, Decimal("20.00"))
             self.assertEqual(
                 ticket.provider_accounts,
-                (("provider-1", "account-paper-1"),),
+                (("provider", "account-paper-1"),),
             )
             records = ledger.verified_records()
             self.assertEqual(len(records), 1)
@@ -405,7 +405,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             self.assertEqual(records[0].payload["stake_source"], "economic-goal-derived")
             self.assertEqual(
                 records[0].payload["provider_accounts"],
-                [{"source_id": "provider-1", "account_id": "account-paper-1"}],
+                [{"source_id": "provider", "account_id": "account-paper-1"}],
             )
             rebound = JsonlDecisionLedger(ledger.path).verified_economic_decision(
                 records[0].decision_id,

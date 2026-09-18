@@ -313,7 +313,10 @@ class QuoteRef:
             "market_event_hash",
             "market_snapshot_hash",
         }
-        if type(raw) is not dict or set(raw) not in {frozenset(expected), frozenset(expected | {"sport"})}:
+        if type(raw) is not dict or frozenset(raw) not in {
+            frozenset(expected),
+            frozenset(expected | {"sport"}),
+        }:
             raise OpportunityContractError(
                 "quote reference must contain canonical fields"
             )

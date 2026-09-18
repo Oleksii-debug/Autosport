@@ -839,22 +839,25 @@ class PaperRiskPolicy:
         if context is not None and context.measurement_window_start is not None:
             if context.measurement_window_end is None:
                 return None
-            try:
-                _, window_start = _canonical_context_timestamp(
-                    "measurement_window_start", context.measurement_window_start
-                )
-                _, window_end = _canonical_context_timestamp(
-                    "measurement_window_end", context.measurement_window_end
-                )
-                if context.proposal_ts is not None:
+            # A bounded loss window can narrow all-history loss only when it is
+            # causally anchored to the proposal instant. Without proposal_ts the
+            # safe interpretation is the legacy/all-history upper bound.
+            if context.proposal_ts is not None:
+                try:
+                    _, window_start = _canonical_context_timestamp(
+                        "measurement_window_start", context.measurement_window_start
+                    )
+                    _, window_end = _canonical_context_timestamp(
+                        "measurement_window_end", context.measurement_window_end
+                    )
                     _, proposal_time = _canonical_context_timestamp(
                         "proposal_ts", context.proposal_ts
                     )
                     if window_end > proposal_time:
                         return None
-            except (TypeError, ValueError):
-                return None
-            realized_loss_window = (window_start, window_end)
+                except (TypeError, ValueError):
+                    return None
+                realized_loss_window = (window_start, window_end)
 
         metrics = cls._historical_risk_metrics(
             book,

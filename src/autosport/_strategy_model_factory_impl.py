@@ -77,6 +77,25 @@ def _canonical_instant(value: object, name: str) -> str:
     return _instant(value, name).isoformat()
 
 
+def _promotion_effect_interval(
+    paired_deltas: Sequence[Decimal],
+    declared_uncertainty_method: object,
+) -> tuple[str, Decimal, Decimal]:
+    """Return an interval only when the frozen protocol names this exact procedure."""
+    method = _text(declared_uncertainty_method, "uncertainty_method")
+    if method != "paired min/max interval":
+        raise ValueError(
+            "unsupported frozen uncertainty_method for deterministic paired-fold "
+            "interval; protocol must explicitly declare 'paired min/max interval'"
+        )
+    if not paired_deltas:
+        raise ValueError("promotion evidence requires at least one paired causal holdout fold")
+    if any(not isinstance(delta, Decimal) or not delta.is_finite() for delta in paired_deltas):
+        raise ValueError("paired deltas must be finite Decimal values")
+    ordered = sorted(paired_deltas)
+    return method, ordered[0], ordered[-1]
+
+
 def _metric_map(value: object, name: str) -> dict[str, float]:
     if type(value) is not dict or not value:
         raise ValueError(f"{name} must be a non-empty metric object")
@@ -1373,9 +1392,10 @@ class ExperimentRunner:
         if not paired_deltas:
             raise ValueError("promotion evidence requires at least one paired causal holdout fold")
         practical = sum(paired_deltas, Decimal(0)) / Decimal(len(paired_deltas))
-        ordered = sorted(paired_deltas)
-        effect_low = ordered[0]
-        effect_high = ordered[-1]
+        uncertainty_method, effect_low, effect_high = _promotion_effect_interval(
+            paired_deltas,
+            binding["uncertainty_method"],
+        )
 
         def _canonical_decimal_text(value: Decimal) -> str:
             text = format(value, "f")
@@ -1432,7 +1452,7 @@ class ExperimentRunner:
             "stopping_rule_sha256": stopping_sha,
             "multiple_comparison_control_sha256": comparison_sha,
             "rollback_identity": current_champion,
-            "uncertainty_method": binding["uncertainty_method"],
+            "uncertainty_method": uncertainty_method,
             "created_at": spec.decided_at,
         }
         evidence_id = hashlib.sha256(

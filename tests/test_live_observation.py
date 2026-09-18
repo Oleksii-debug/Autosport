@@ -6,8 +6,16 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from autosport.live_observation import OneShotObservationWorker, observe_workspace_once
+from autosport.ingestion_health import SourceHealthStore
+from autosport.live_observation import (
+    OneShotObservationWorker,
+    observe_workspace_once,
+    poll_open_market_store_once,
+)
+from autosport.market_mirror import MarketMirror
+from autosport.market_mirror_runtime import BoundedMirrorInvalidationBuffer
 from autosport.providers import InMemoryProvider, ProviderQuote
+from autosport.storage import SQLiteMarketStore
 from autosport.ui_model import observation_quote_lines, observation_summary
 
 
@@ -86,6 +94,35 @@ class LiveObservationTests(unittest.TestCase):
                         )
 
             store_type.return_value.close.assert_called_once_with()
+
+    def test_open_store_poll_does_not_rescan_append_only_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                mirror = MarketMirror.from_store(store)
+                updates = BoundedMirrorInvalidationBuffer(mirror)
+                health_store = SourceHealthStore(root / "source_health.json")
+
+                with patch.object(
+                    store,
+                    "events",
+                    side_effect=AssertionError("history rescan is forbidden"),
+                ):
+                    stats = poll_open_market_store_once(
+                        store,
+                        health_store,
+                        self._provider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: _RECEIVE_TIME,
+                    )
+
+                self.assertEqual(stats.accepted, 2)
+                self.assertEqual(len(mirror.snapshot()), 2)
+                self.assertEqual(updates.pending_count, 2)
+            finally:
+                store.close()
 
     def test_worker_refuses_second_start_until_terminal_message_is_consumed(self):
         # Build the real observation result outside the worker timing window. This

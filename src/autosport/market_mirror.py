@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from threading import RLock
 
-from .domain import MarketEvent
+from .domain import MarketEvent, _quote_identity
 from .storage import SQLiteMarketStore
 
 
@@ -284,12 +284,23 @@ class MarketMirror:
         event_id: str,
         market_id: str,
         selection_id: str,
+        *,
+        sport: str | None = None,
     ) -> MarketEvent | None:
-        """Return an isolated copy of the latest source-specific quote, if present."""
+        """Return one exact canonical quote without inferring a missing sport.
+
+        Omitting sport preserves the deployed legacy sport=None lookup byte-for-byte.
+        Explicit-sport callers must provide the canonical sport dimension so same
+        provider-local IDs across sports cannot alias or be guessed.
+        """
+        quote_key = _quote_identity(
+            event_id,
+            market_id,
+            selection_id,
+            sport,
+        )
         with self._lock:
-            event = self._latest.get(
-                (source_id, f"{event_id}|{market_id}|{selection_id}")
-            )
+            event = self._latest.get((source_id, quote_key))
             return None if event is None else self._snapshot_event(event)
 
     def active_snapshot(

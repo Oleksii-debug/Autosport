@@ -23,6 +23,7 @@ class MarketMirrorTests(unittest.TestCase):
         observed_ts: str = "2026-09-16T19:00:00+00:00",
         source_ts: str | None = None,
         ingest_ts: str | None = None,
+        sport: str | None = None,
     ) -> MarketEvent:
         return MarketEvent(
             event_id=event,
@@ -35,6 +36,7 @@ class MarketMirrorTests(unittest.TestCase):
             status=status,
             source_ts=source_ts,
             ingest_ts=ingest_ts or observed_ts,
+            sport=sport,
         )
 
     def test_new_and_forward_updates_are_applied(self) -> None:
@@ -53,6 +55,132 @@ class MarketMirrorTests(unittest.TestCase):
             ).decimal_odds,
             Decimal("2.10"),
         )
+
+    def test_get_preserves_legacy_lookup_and_requires_explicit_sport_dimension(self) -> None:
+        mirror = MarketMirror()
+        legacy = self.event(sequence=1, odds="1.90")
+        table_tennis = self.event(sequence=1, odds="2.10", sport="table_tennis")
+
+        self.assertEqual(mirror.apply(legacy).status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.apply(table_tennis).status, MirrorUpdate.APPLIED)
+
+        legacy_restored = mirror.get(
+            "provider-a", "event-1", "market-1", "selection-1"
+        )
+        self.assertIsNotNone(legacy_restored)
+        self.assertIsNone(legacy_restored.sport)
+        self.assertEqual(legacy_restored.decimal_odds, Decimal("1.90"))
+
+        sport_restored = mirror.get(
+            "provider-a",
+            "event-1",
+            "market-1",
+            "selection-1",
+            sport="table_tennis",
+        )
+        self.assertIsNotNone(sport_restored)
+        self.assertEqual(sport_restored.sport, "table_tennis")
+        self.assertEqual(sport_restored.decimal_odds, Decimal("2.10"))
+        self.assertIsNone(
+            mirror.get(
+                "provider-a",
+                "event-1",
+                "market-1",
+                "selection-1",
+                sport="soccer",
+            )
+        )
+
+    def test_same_provider_local_ids_are_sport_disambiguated(self) -> None:
+        mirror = MarketMirror()
+        table_tennis = self.event(
+            sequence=1, odds="2.10", sport="table_tennis"
+        )
+        soccer = self.event(sequence=1, odds="1.80", sport="soccer")
+
+        self.assertEqual(mirror.apply(table_tennis).status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.apply(soccer).status, MirrorUpdate.APPLIED)
+        self.assertEqual(len(mirror), 2)
+
+        self.assertEqual(
+            mirror.get(
+                "provider-a",
+                "event-1",
+                "market-1",
+                "selection-1",
+                sport="table_tennis",
+            ).decimal_odds,
+            Decimal("2.10"),
+        )
+        self.assertEqual(
+            mirror.get(
+                "provider-a",
+                "event-1",
+                "market-1",
+                "selection-1",
+                sport="soccer",
+            ).decimal_odds,
+            Decimal("1.80"),
+        )
+
+    def test_sport_aware_lookup_survives_store_restore_and_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                self.assertEqual(
+                    store.append_many(
+                        [
+                            self.event(
+                                sequence=1,
+                                odds="2.10",
+                                sport="table_tennis",
+                                observed_ts="2026-09-16T18:59:00+00:00",
+                            ),
+                            self.event(
+                                sequence=1,
+                                odds="1.80",
+                                sport="soccer",
+                                observed_ts="2026-09-16T18:59:01+00:00",
+                            ),
+                        ]
+                    ),
+                    2,
+                )
+                restored = MarketMirror.from_store(store)
+                self.assertEqual(
+                    restored.get(
+                        "provider-a",
+                        "event-1",
+                        "market-1",
+                        "selection-1",
+                        sport="table_tennis",
+                    ).sport,
+                    "table_tennis",
+                )
+                self.assertEqual(
+                    restored.get(
+                        "provider-a",
+                        "event-1",
+                        "market-1",
+                        "selection-1",
+                        sport="soccer",
+                    ).sport,
+                    "soccer",
+                )
+
+                replay = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
+                    max_age=timedelta(minutes=5),
+                )
+                self.assertEqual(len(replay.events), 2)
+                self.assertEqual(
+                    {event.sport for event in replay.events},
+                    {"soccer", "table_tennis"},
+                )
+            finally:
+                store.close()
 
     def test_duplicate_sequence_is_idempotent(self) -> None:
         mirror = MarketMirror()

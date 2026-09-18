@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -26,6 +27,7 @@ _RECORD_TYPES = frozenset(
         "EvaluationBundle",
         "Experiment",
         "PromotionDecision",
+        "PromotionEvidence",
         "Postmortem",
         "DriftReference",
         "DriftObservation",
@@ -466,6 +468,7 @@ class PromotionDecision:
     rollback_to_strategy_version_id: str | None = None
     candidate_model_version_id: str | None = None
     reason: str = ""
+    promotion_evidence_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("promotion_decision_id", "candidate_strategy_version_id",
@@ -484,6 +487,8 @@ class PromotionDecision:
             raise ValueError("ROLLBACK requires rollback_to_strategy_version_id")
         if type(self.reason) is not str:
             raise ValueError("reason must be a string")
+        if self.promotion_evidence_id is not None:
+            _text(self.promotion_evidence_id, "promotion_evidence_id")
 
     @property
     def record_type(self) -> str: return "PromotionDecision"
@@ -501,7 +506,131 @@ class PromotionDecision:
                 "evaluation_bundle_sha256": self.evaluation_bundle_sha256.lower(),
                 "predecessor_strategy_version_id": self.predecessor_strategy_version_id,
                 "rollback_to_strategy_version_id": self.rollback_to_strategy_version_id,
-                "reason": self.reason, "decided_at": self.decided_at}
+                "reason": self.reason, "promotion_evidence_id": self.promotion_evidence_id,
+                "decided_at": self.decided_at}
+
+
+@dataclass(frozen=True, slots=True)
+class PromotionEvidence:
+    """Immutable statistical and confirmation-holdout evidence for promotion."""
+
+    promotion_evidence_id: str
+    experiment_id: str
+    candidate_strategy_version_id: str
+    candidate_model_version_id: str | None
+    evaluation_bundle_id: str
+    estimand: str
+    direction: str
+    cohort_id: str
+    effective_sample_size: int
+    effect_estimate: str
+    effect_interval_lower: str
+    effect_interval_upper: str
+    practical_improvement: str
+    guardrails_passed: bool
+    confirmation_holdout_id: str
+    holdout_access_id: str
+    holdout_scope_sha256: str
+    trial_family_id: str
+    stopping_rule_sha256: str
+    validity: str
+    rollback_target_strategy_version_id: str
+    created_at: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "promotion_evidence_id",
+            "experiment_id",
+            "candidate_strategy_version_id",
+            "evaluation_bundle_id",
+            "estimand",
+            "direction",
+            "cohort_id",
+            "confirmation_holdout_id",
+            "holdout_access_id",
+            "trial_family_id",
+            "validity",
+            "rollback_target_strategy_version_id",
+        ):
+            _text(getattr(self, name), name)
+        if self.candidate_model_version_id is not None:
+            _text(self.candidate_model_version_id, "candidate_model_version_id")
+        if self.direction not in {"HIGHER_IS_BETTER", "LOWER_IS_BETTER"}:
+            raise ValueError("direction must be HIGHER_IS_BETTER or LOWER_IS_BETTER")
+        if self.validity not in {"VALID", "INCONCLUSIVE", "INVALID"}:
+            raise ValueError("validity must be VALID, INCONCLUSIVE, or INVALID")
+        if type(self.effective_sample_size) is not int or self.effective_sample_size < 1:
+            raise ValueError("effective_sample_size must be a positive integer")
+        values: list[Decimal] = []
+        for name in (
+            "effect_estimate",
+            "effect_interval_lower",
+            "effect_interval_upper",
+            "practical_improvement",
+        ):
+            value_text = _text(getattr(self, name), name)
+            try:
+                value = Decimal(value_text)
+            except (InvalidOperation, ValueError) as exc:
+                raise ValueError(f"{name} must be a finite decimal") from exc
+            if not value.is_finite():
+                raise ValueError(f"{name} must be a finite decimal")
+            values.append(value)
+        if values[1] >= values[2]:
+            raise ValueError("effect interval lower must be less than upper")
+        if type(self.guardrails_passed) is not bool:
+            raise ValueError("guardrails_passed must be boolean")
+        _sha256(self.holdout_scope_sha256, "holdout_scope_sha256")
+        _sha256(self.stopping_rule_sha256, "stopping_rule_sha256")
+        _iso(self.created_at, "created_at")
+
+    @property
+    def record_type(self) -> str:
+        return "PromotionEvidence"
+
+    @property
+    def record_id(self) -> str:
+        return self.promotion_evidence_id
+
+    @property
+    def available_at(self) -> str:
+        return self.created_at
+
+    def eligible_for_promotion(self) -> bool:
+        if self.validity != "VALID" or not self.guardrails_passed:
+            return False
+        if self.effective_sample_size < 30:
+            return False
+        estimate = Decimal(self.effect_estimate)
+        lower = Decimal(self.effect_interval_lower)
+        practical = Decimal(self.practical_improvement)
+        return estimate > 0 and lower > 0 and practical > 0
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "promotion_evidence_id": self.promotion_evidence_id,
+            "experiment_id": self.experiment_id,
+            "candidate_strategy_version_id": self.candidate_strategy_version_id,
+            "candidate_model_version_id": self.candidate_model_version_id,
+            "evaluation_bundle_id": self.evaluation_bundle_id,
+            "estimand": self.estimand,
+            "direction": self.direction,
+            "cohort_id": self.cohort_id,
+            "effective_sample_size": self.effective_sample_size,
+            "effect_estimate": str(Decimal(self.effect_estimate)),
+            "effect_interval_lower": str(Decimal(self.effect_interval_lower)),
+            "effect_interval_upper": str(Decimal(self.effect_interval_upper)),
+            "practical_improvement": str(Decimal(self.practical_improvement)),
+            "guardrails_passed": self.guardrails_passed,
+            "confirmation_holdout_id": self.confirmation_holdout_id,
+            "holdout_access_id": self.holdout_access_id,
+            "holdout_scope_sha256": self.holdout_scope_sha256.lower(),
+            "trial_family_id": self.trial_family_id,
+            "stopping_rule_sha256": self.stopping_rule_sha256.lower(),
+            "validity": self.validity,
+            "rollback_target_strategy_version_id": self.rollback_target_strategy_version_id,
+            "created_at": self.created_at,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -864,6 +993,8 @@ class ScientificRegistry:
                     raise PromotionEvidenceError(
                         "promotion predecessor does not match current context champion"
                     )
+                if decision.promotion_evidence_id is None:
+                    raise PromotionEvidenceError("PROMOTE requires immutable PromotionEvidence")
             elif decision.action is PromotionAction.ROLLBACK:
                 if decision.candidate_strategy_version_id != current_champion:
                     raise PromotionEvidenceError(
@@ -982,6 +1113,49 @@ class ScientificRegistry:
                     raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
                 if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:
                     raise PromotionEvidenceError("PROMOTE requires a positive durable experiment outcome")
+                evidence_entry = entries.get(("PromotionEvidence", decision.promotion_evidence_id or ""))
+                if evidence_entry is None:
+                    raise PromotionEvidenceError("promotion evidence record is missing")
+                evidence_payload = evidence_entry["payload"]
+                checks = (
+                    ("experiment_id", matching_experiment_entry["record_id"], "promotion evidence experiment identity mismatch"),
+                    ("candidate_strategy_version_id", decision.candidate_strategy_version_id, "promotion evidence strategy identity mismatch"),
+                    ("candidate_model_version_id", decision.candidate_model_version_id, "promotion evidence model identity mismatch"),
+                    ("evaluation_bundle_id", decision.evaluation_bundle_id, "promotion evidence evaluation identity mismatch"),
+                    ("estimand", binding.get("promotion_primary_metric"), "promotion evidence estimand is not bound to the frozen primary metric"),
+                    ("direction", "LOWER_IS_BETTER", "promotion evidence direction does not match the frozen promotion contract"),
+                    ("rollback_target_strategy_version_id", decision.predecessor_strategy_version_id, "promotion evidence rollback lineage mismatch"),
+                )
+                for key, expected, message in checks:
+                    if evidence_payload.get(key) != expected:
+                        raise PromotionEvidenceError(message)
+                if evidence_payload.get("validity") != "VALID" or evidence_payload.get("guardrails_passed") is not True:
+                    raise PromotionEvidenceError("promotion evidence is not valid and guardrail-clean")
+                try:
+                    sample_size = int(evidence_payload.get("effective_sample_size"))
+                    effect_lower = Decimal(evidence_payload.get("effect_interval_lower"))
+                    practical = Decimal(evidence_payload.get("practical_improvement"))
+                except (TypeError, ValueError, InvalidOperation) as exc:
+                    raise PromotionEvidenceError("promotion evidence statistics are invalid") from exc
+                if sample_size < 30 or effect_lower <= 0 or practical <= 0:
+                    raise PromotionEvidenceError("promotion evidence is not statistically promotion-eligible")
+                expected_scope = _digest({
+                    "dataset_manifest_sha256": dataset["payload"].get("manifest_sha256"),
+                    "outcome_reveal_after": dataset["payload"].get("outcome_reveal_after"),
+                    "confirmation_holdout_id": evidence_payload.get("confirmation_holdout_id"),
+                    "cohort_id": evidence_payload.get("cohort_id"),
+                })
+                if evidence_payload.get("holdout_scope_sha256") != expected_scope:
+                    raise PromotionEvidenceError("promotion holdout scope is not bound to the exact dataset disclosure")
+                for prior in state["records"]:
+                    if prior["record_type"] != "PromotionEvidence":
+                        continue
+                    prior_payload = prior["payload"]
+                    if prior["record_id"] != evidence_entry["record_id"] and (
+                        prior_payload.get("holdout_access_id") == evidence_payload.get("holdout_access_id")
+                        or prior_payload.get("holdout_scope_sha256") == evidence_payload.get("holdout_scope_sha256")
+                    ):
+                        raise PromotionEvidenceError("confirmation holdout evidence has already been consumed")
             return self._append_entry_locked(state, entry)
 
     def champion_strategy(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -18,6 +19,7 @@ from .scientific_registry import (
     Postmortem,
     PromotionAction,
     PromotionDecision,
+    PromotionEvidence,
     ResearchOutcome,
     ScientificRegistry,
     StrategyVersion,
@@ -468,6 +470,7 @@ class WalkForwardRunner:
 class PromotionVerdict(StrEnum):
     PROMOTE = "PROMOTE"
     REJECT = "REJECT"
+    INCONCLUSIVE = "INCONCLUSIVE"
 
 
 @dataclass(frozen=True, slots=True)

@@ -147,12 +147,20 @@ class AutosportSession:
             outcome_lineage = outcome_lineage_binding_from_dataset(dataset)
             if outcome_lineage is not None:
                 self.registry.assert_outcome_lineage_compatible(outcome_lineage)
+            # Load and validate the exact causal market bytes, including schema-v3
+            # event-level sport scope, before registry/PaperBook/economic mutation.
+            # Reuse this verified snapshot for the whole run so a later path swap
+            # cannot change sport/quote identity after preflight.
+            market_events = dataset.load_market_events()
+            verified_sports = dataset._assert_sport_scope(market_events)
             # Research-plan market binding is deterministic from the sealed causal
             # stream, so reject a stale/forged plan before registry/PaperBook mutation.
             if self.research_plan is not None:
-                self.research_plan.preflight(dataset.load_market_events())
+                self.research_plan.preflight(market_events)
             return self._run_dataset_locked(
                 dataset,
+                market_events=market_events,
+                verified_sports=verified_sports,
                 speed=speed,
                 allow_repeat=allow_repeat,
                 outcome_lineage=outcome_lineage,
@@ -162,6 +170,8 @@ class AutosportSession:
         self,
         dataset: ReplayDataset,
         *,
+        market_events: list[MarketEvent],
+        verified_sports: tuple[str, ...],
         speed: float = 0.0,
         allow_repeat: bool = False,
         outcome_lineage: OutcomeLineageBinding | None = None,
@@ -208,7 +218,7 @@ class AutosportSession:
             working_book = PaperBook.load(self.book_path)
             staged_ledger = JsonlDecisionLedger(transaction.run_ledger_path)
             orchestrator = self._runtime(run_id, book=working_book, ledger=staged_ledger)
-            engine = ReplayEngine(dataset.load_market_events())
+            engine = ReplayEngine(market_events)
 
             def consume(event) -> None:
                 self.store.append(event)
@@ -268,6 +278,8 @@ class AutosportSession:
             self._run_summary_payload(
                 dataset,
                 result,
+                market_events=market_events,
+                verified_sports=verified_sports,
                 outcome_lineage=outcome_lineage,
             )
         )
@@ -323,13 +335,18 @@ class AutosportSession:
         dataset: ReplayDataset,
         result: SessionResult,
         *,
+        market_events: list[MarketEvent],
+        verified_sports: tuple[str, ...],
         outcome_lineage: OutcomeLineageBinding | None = None,
     ) -> dict:
-        market_price_truth = market_price_truth_from_events(dataset.load_market_events())
+        market_price_truth = market_price_truth_from_events(market_events)
+        sport_identity_proven = dataset.schema_version >= 3 and bool(verified_sports)
         payload = {
             "schema_version": 2,
             "dataset_name": dataset.name,
-            "sport": dataset.sport,
+            "sport": dataset.sport if sport_identity_proven else "unknown",
+            "sport_scope": list(verified_sports),
+            "sport_identity_proven": sport_identity_proven,
             "dataset_schema_version": dataset.schema_version,
             "historical_import_identity": dataset.import_identity,
             "dataset_governance": asdict(dataset.governance) if dataset.governance is not None else None,

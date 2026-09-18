@@ -1416,8 +1416,8 @@ class ExperimentRunner:
             "validity": (
                 PromotionEvidenceValidity.ELIGIBLE.value
                 if len(paired_deltas) >= 2
-                and effect_low > 0
-                and practical > 0
+                and effect_low >= Decimal(str(rule.minimum_improvement))
+                and practical >= Decimal(str(rule.minimum_improvement))
                 and guardrails_passed
                 else PromotionEvidenceValidity.INCONCLUSIVE.value
             ),

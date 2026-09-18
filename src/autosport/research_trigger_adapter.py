@@ -268,5 +268,5 @@ class ResearchTriggerAdapter:
             supervisor_trigger_id=trigger.trigger_id,
             supervisor_trigger_sha256=trigger.trigger_sha256,
             run_id=snapshot.run_id,
-            checkpoint_sha256=snapshot.checkpoint_sha256,
+            checkpoint_sha256=self.supervisor.acceptance_checkpoint_sha256(trigger),
         )

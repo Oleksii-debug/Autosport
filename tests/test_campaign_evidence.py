@@ -370,6 +370,27 @@ class PaperCampaignTests(unittest.TestCase):
             with self.assertRaises(CampaignIntegrityError):
                 campaign.save(path)
 
+    def test_finalized_load_requires_canonical_authority(self):
+        campaign = self.campaign()
+        self.add_session(campaign, self.session())
+        campaign.finalize(
+            outcome=CampaignOutcome.POSITIVE,
+            readiness=CampaignReadiness.ELIGIBLE,
+            finalized_at="2026-09-11T00:00:00Z",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "campaign.json"
+            campaign.save(path)
+            with self.assertRaises(CampaignIntegrityError):
+                PaperCampaign.load(path)
+            loaded = PaperCampaign.load(
+                path,
+                scientific_registry=self.scientific_registry,
+                run_registry=self.run_registry,
+            )
+        self.assertEqual(loaded.campaign_sha256, campaign.campaign_sha256)
+        self.assertTrue(loaded.finalized)
+
     def test_available_after_as_of_is_rejected(self):
         with self.assertRaises(ValueError):
             self.session(

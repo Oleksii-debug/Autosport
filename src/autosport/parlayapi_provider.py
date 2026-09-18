@@ -488,6 +488,7 @@ class ParlayApiTableTennisProvider:
                                 "public_preview": self.public_preview,
                                 "http_status": http_status,
                             },
+                            sport=self.sport_key,
                         )
                     )
         return output

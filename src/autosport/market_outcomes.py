@@ -118,6 +118,16 @@ class MarketOutcomeIdentity:
             self.market_type.value,
         )
 
+    @property
+    def market_key(self) -> tuple[str, str, str, str]:
+        """Provider-independent key only when canonical market IDs already align."""
+        return (
+            self.sport,
+            self.event_id,
+            self.market_id,
+            self.market_type.value,
+        )
+
     def quote_key(self, selection_id: str) -> str:
         selection = _canonical_text("market outcome selection_id", selection_id)
         return _quote_identity(

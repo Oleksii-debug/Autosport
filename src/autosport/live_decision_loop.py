@@ -1024,10 +1024,17 @@ class PersistentLiveDecisionLoop:
         self,
         input_ids: tuple[str, ...],
         as_of: datetime,
+        *,
+        incremental: bool = True,
     ) -> dict[str, MirrorSnapshot]:
         snapshots: dict[str, MirrorSnapshot] = {}
+        reader = (
+            self.dependencies.incremental_decision_view
+            if incremental
+            else self.dependencies.decision_view
+        )
         for input_id in input_ids:
-            snapshot = self.dependencies.decision_view(
+            snapshot = reader(
                 input_id,
                 as_of=as_of,
                 max_age=self.max_quote_age,
@@ -1118,7 +1125,7 @@ class PersistentLiveDecisionLoop:
     ) -> LiveCycleResult:
         decision_ts = now.isoformat()
         affected = self.dependencies.input_ids
-        self._capture_input_views(affected, now)
+        self._capture_input_views(affected, now, incremental=False)
         market_sha = self._market_state_sha256()
         self._write_pending(
             decision_ts=decision_ts,

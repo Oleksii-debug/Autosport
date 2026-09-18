@@ -25,6 +25,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         market_id: str = "market-1",
         selection_id: str = "selection-1",
         sequence: int = 1,
+        source_id: str = "provider-1",
     ) -> MarketEvent:
         return MarketEvent(
             event_id=event_id,
@@ -32,7 +33,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             selection_id=selection_id,
             decimal_odds=Decimal("2"),
             observed_ts="2026-09-17T15:00:00+00:00",
-            source_id="provider-1",
+            source_id=source_id,
             sequence=sequence,
             source_ts="2026-09-17T14:59:59+00:00",
             ingest_ts="2026-09-17T15:00:00+00:00",
@@ -275,6 +276,68 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
         self.assertEqual(book.committed_stake, Decimal("0"))
+
+    def test_multi_candidate_vector_preserves_provider_accounts_in_shadow(self) -> None:
+        first = self._event(
+            event_id="event-provider-1",
+            market_id="market-provider-1",
+            selection_id="selection-provider-1",
+            sequence=23,
+            source_id="provider-1",
+        )
+        second = self._event(
+            event_id="event-provider-2",
+            market_id="market-provider-2",
+            selection_id="selection-provider-2",
+            sequence=24,
+            source_id="provider-2",
+        )
+        goal = self._goal(
+            max_stake_fraction=Decimal("0.20"),
+            max_capital_at_risk_fraction=Decimal("0.60"),
+            max_provider_concentration_fraction=Decimal("0.50"),
+            max_concurrent_positions=4,
+        )
+        policy = self._policy(goal)
+        book = PaperBook("100")
+        book.open_ticket(
+            [
+                TicketLeg(
+                    "existing-provider-event",
+                    "existing-provider-market",
+                    "existing-provider-selection",
+                    Decimal("2"),
+                )
+            ],
+            Decimal("20"),
+            placed_at="2026-09-17T14:58:00+00:00",
+            provider_source_ids=("provider-0",),
+            provider_accounts=(("provider-0", "account-0"),),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
+        contexts = (
+            replace(
+                self._risk_context(first, goal),
+                provider_accounts=(("provider-1", "account-1"),),
+            ),
+            replace(
+                self._risk_context(second, goal),
+                provider_accounts=(("provider-2", "account-2"),),
+            ),
+        )
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("1"), Decimal("1")),
+            contexts=contexts,
+        )
+
+        self.assertEqual(decision.action, "STAKE_VECTOR")
+        self.assertEqual(decision.stakes, (Decimal("20.00"), Decimal("20.00")))
+        self.assertEqual(book.balance, Decimal("80"))
+        self.assertEqual(book.committed_stake, Decimal("20"))
+        self.assertEqual(len(book.tickets), 1)
 
     def test_multi_candidate_vector_waits_on_duplicate_candidate_identity(self) -> None:
         event = self._event(

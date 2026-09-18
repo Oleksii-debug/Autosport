@@ -25,11 +25,14 @@ _GET_ACCOUNT_FUNDS = "AccountAPING/v1.0/getAccountFunds"
 _GET_ACCOUNT_DETAILS = "AccountAPING/v1.0/getAccountDetails"
 _LIST_CURRENT_ORDERS = "SportsAPING/v1.0/listCurrentOrders"
 _LIST_CLEARED_ORDERS = "SportsAPING/v1.0/listClearedOrders"
+_LIST_MARKET_CATALOGUE = "SportsAPING/v1.0/listMarketCatalogue"
+_EXECUTION_CLEARED_STATUSES = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
 _READ_METHOD_ENDPOINT = MappingProxyType({
     _GET_ACCOUNT_FUNDS: ACCOUNT_JSON_RPC_ENDPOINT,
     _GET_ACCOUNT_DETAILS: ACCOUNT_JSON_RPC_ENDPOINT,
     _LIST_CURRENT_ORDERS: BETTING_JSON_RPC_ENDPOINT,
     _LIST_CLEARED_ORDERS: BETTING_JSON_RPC_ENDPOINT,
+    _LIST_MARKET_CATALOGUE: BETTING_JSON_RPC_ENDPOINT,
 })
 
 
@@ -167,6 +170,7 @@ class BetfairClearedOrderObservation:
     customer_order_ref: str | None
     customer_strategy_ref: str | None
     evidence: BetfairEvidence
+    event_id: str | None = None
 
     def __post_init__(self) -> None:
         _required_text(self.bet_id, "bet_id")
@@ -182,6 +186,20 @@ class BetfairClearedOrderObservation:
         _decimal(self.profit, "profit")
         _optional_text(self.customer_order_ref, "customer_order_ref")
         _optional_text(self.customer_strategy_ref, "customer_strategy_ref")
+        _optional_text(self.event_id, "event_id")
+
+
+@dataclass(frozen=True, slots=True)
+class BetfairMarketEventObservation:
+    market_id: str
+    event_id: str
+    evidence: BetfairEvidence
+
+    def __post_init__(self) -> None:
+        _required_text(self.market_id, "market_id")
+        _required_text(self.event_id, "event_id")
+        if not isinstance(self.evidence, BetfairEvidence):
+            raise BetfairReadOnlyError("market event evidence must be canonical BetfairEvidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +230,88 @@ class BetfairClearedOrderPage:
             raise BetfairReadOnlyError("invalid cleared order page")
         _nonnegative_int(self.from_record, "from_record")
         _positive_int(self.record_count, "record_count")
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class BetfairExecutionReadbackEnvelope:
+    venue_id: str
+    account_id: str
+    adapter_id: str
+    adapter_version: str
+    action_id: str
+    market_id: str
+    market_event: BetfairMarketEventObservation
+    current_pages: tuple[BetfairCurrentOrderPage, ...]
+    cleared_pages_by_status: tuple[tuple[str, tuple[BetfairClearedOrderPage, ...]], ...]
+    observed_at: str
+    request_scope_sha256: str
+    evidence_sha256: str
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise BetfairReadOnlyError(
+            "execution readback envelope must come from BetfairReadOnlyClient"
+        )
+
+    @classmethod
+    def _from_client(
+        cls,
+        *,
+        venue_id: str,
+        account_id: str,
+        action_id: str,
+        market_id: str,
+        market_event: BetfairMarketEventObservation,
+        current_pages: tuple[BetfairCurrentOrderPage, ...],
+        cleared_pages_by_status: tuple[tuple[str, tuple[BetfairClearedOrderPage, ...]], ...],
+        observed_at: str,
+        request_scope_sha256: str,
+        evidence_sha256: str,
+    ) -> "BetfairExecutionReadbackEnvelope":
+        self = object.__new__(cls)
+        for name, value in {
+            "venue_id": venue_id,
+            "account_id": account_id,
+            "adapter_id": ADAPTER_ID,
+            "adapter_version": ADAPTER_VERSION,
+            "action_id": action_id,
+            "market_id": market_id,
+            "market_event": market_event,
+            "current_pages": current_pages,
+            "cleared_pages_by_status": cleared_pages_by_status,
+            "observed_at": observed_at,
+            "request_scope_sha256": request_scope_sha256,
+            "evidence_sha256": evidence_sha256,
+        }.items():
+            object.__setattr__(self, name, value)
+        self._validate()
+        return self
+
+    def _validate(self) -> None:
+        _required_text(self.venue_id, "venue_id")
+        _required_text(self.account_id, "account_id")
+        _required_text(self.action_id, "action_id")
+        _required_text(self.market_id, "market_id")
+        if self.adapter_id != ADAPTER_ID or self.adapter_version != ADAPTER_VERSION:
+            raise BetfairReadOnlyError("execution readback adapter identity mismatch")
+        if not isinstance(self.market_event, BetfairMarketEventObservation):
+            raise BetfairReadOnlyError("execution readback requires market-event evidence")
+        if self.market_event.market_id != self.market_id:
+            raise BetfairReadOnlyError("market-event evidence is for a different market")
+        if not isinstance(self.current_pages, tuple) or not self.current_pages:
+            raise BetfairReadOnlyError("execution readback requires current-order pages")
+        if any(not isinstance(page, BetfairCurrentOrderPage) for page in self.current_pages):
+            raise BetfairReadOnlyError("execution readback current pages are not canonical")
+        statuses = tuple(item[0] for item in self.cleared_pages_by_status)
+        if statuses != _EXECUTION_CLEARED_STATUSES:
+            raise BetfairReadOnlyError("execution readback cleared-status coverage is incomplete")
+        for status, pages in self.cleared_pages_by_status:
+            if status not in _EXECUTION_CLEARED_STATUSES or not pages:
+                raise BetfairReadOnlyError("invalid execution cleared-status evidence")
+            if any(not isinstance(page, BetfairClearedOrderPage) for page in pages):
+                raise BetfairReadOnlyError("execution cleared pages are not canonical")
+        _iso_timestamp(self.observed_at, "observed_at")
+        _sha256_hex(self.request_scope_sha256, "request_scope_sha256")
+        _sha256_hex(self.evidence_sha256, "evidence_sha256")
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,27 +360,240 @@ class BetfairReadOnlyClient:
             response.evidence,
         )
 
-    def read_current_orders_page(self, *, from_record: int = 0, record_count: int = 1000) -> BetfairCurrentOrderPage:
+    def read_current_orders_page(
+        self,
+        *,
+        from_record: int = 0,
+        record_count: int = 1000,
+        customer_order_refs: tuple[str, ...] | None = None,
+        market_ids: tuple[str, ...] | None = None,
+    ) -> BetfairCurrentOrderPage:
         _page_bounds(from_record, record_count)
-        response = self._rpc(_LIST_CURRENT_ORDERS, {"orderProjection": "ALL", "fromRecord": from_record, "recordCount": record_count})
+        params: dict[str, object] = {
+            "orderProjection": "ALL",
+            "fromRecord": from_record,
+            "recordCount": record_count,
+        }
+        if customer_order_refs is not None:
+            params["customerOrderRefs"] = list(
+                _canonical_text_tuple(customer_order_refs, "customer_order_refs")
+            )
+        if market_ids is not None:
+            params["marketIds"] = list(_canonical_text_tuple(market_ids, "market_ids"))
+        response = self._rpc(_LIST_CURRENT_ORDERS, params)
         report = _mapping(response.result, "listCurrentOrders result")
         raw_orders = _sequence(report.get("currentOrders"), "currentOrders")
         orders = tuple(_parse_current_order(raw, response.evidence, i) for i, raw in enumerate(raw_orders))
         _unique_bet_ids(orders, "currentOrders")
         return BetfairCurrentOrderPage(orders, _provider_bool(report, "moreAvailable"), from_record, record_count, response.evidence)
 
-    def read_cleared_orders_page(self, *, from_record: int = 0, record_count: int = 1000, settled_from: str | None = None) -> BetfairClearedOrderPage:
+    def read_cleared_orders_page(
+        self,
+        *,
+        from_record: int = 0,
+        record_count: int = 1000,
+        settled_from: str | None = None,
+        bet_status: str = "SETTLED",
+        customer_order_refs: tuple[str, ...] | None = None,
+        market_ids: tuple[str, ...] | None = None,
+    ) -> BetfairClearedOrderPage:
         _page_bounds(from_record, record_count)
-        params: dict[str, object] = {"betStatus": "SETTLED", "groupBy": "BET", "fromRecord": from_record, "recordCount": record_count}
+        status = _enum_text(bet_status, "bet_status", set(_EXECUTION_CLEARED_STATUSES))
+        params: dict[str, object] = {
+            "betStatus": status,
+            "groupBy": "BET",
+            "fromRecord": from_record,
+            "recordCount": record_count,
+        }
+        if customer_order_refs is not None:
+            params["customerOrderRefs"] = list(
+                _canonical_text_tuple(customer_order_refs, "customer_order_refs")
+            )
+        if market_ids is not None:
+            params["marketIds"] = list(_canonical_text_tuple(market_ids, "market_ids"))
         if settled_from is not None:
             _iso_timestamp(settled_from, "settled_from")
             params["settledDateRange"] = {"from": settled_from}
         response = self._rpc(_LIST_CLEARED_ORDERS, params)
         report = _mapping(response.result, "listClearedOrders result")
         raw_orders = _sequence(report.get("clearedOrders"), "clearedOrders")
-        orders = tuple(_parse_cleared_order(raw, response.evidence, i) for i, raw in enumerate(raw_orders))
+        orders = tuple(
+            _parse_cleared_order(raw, response.evidence, i, status)
+            for i, raw in enumerate(raw_orders)
+        )
         _unique_bet_ids(orders, "clearedOrders")
         return BetfairClearedOrderPage(orders, _provider_bool(report, "moreAvailable"), from_record, record_count, response.evidence)
+
+    def read_market_event(self, market_id: str) -> BetfairMarketEventObservation:
+        market = _required_text(market_id, "market_id")
+        response = self._rpc(
+            _LIST_MARKET_CATALOGUE,
+            {
+                "filter": {"marketIds": [market]},
+                "marketProjection": ["EVENT"],
+                "maxResults": 1,
+            },
+        )
+        rows = _sequence(response.result, "listMarketCatalogue result")
+        if len(rows) != 1:
+            raise BetfairReadOnlyError(
+                "exact market-to-event identity is unavailable from listMarketCatalogue"
+            )
+        row = _mapping(rows[0], "marketCatalogue[0]")
+        returned_market = _provider_text(row, "marketId", "market_id")
+        if returned_market != market:
+            raise BetfairReadOnlyError("marketCatalogue returned a different market")
+        event = _mapping(row.get("event"), "marketCatalogue[0].event")
+        event_id = _provider_text(event, "id", "event_id")
+        return BetfairMarketEventObservation(returned_market, event_id, response.evidence)
+
+    def read_execution_readback(
+        self,
+        *,
+        action_id: str,
+        market_id: str,
+        page_size: int = 1000,
+        max_pages: int = 100,
+    ) -> BetfairExecutionReadbackEnvelope:
+        action = _required_text(action_id, "action_id")
+        market = _required_text(market_id, "market_id")
+        _page_bounds(0, page_size)
+        _positive_int(max_pages, "max_pages")
+        market_event = self.read_market_event(market)
+
+        current_pages: list[BetfairCurrentOrderPage] = []
+        offset = 0
+        for _ in range(max_pages):
+            page = self.read_current_orders_page(
+                from_record=offset,
+                record_count=page_size,
+                customer_order_refs=(action,),
+                market_ids=(market,),
+            )
+            current_pages.append(page)
+            if not page.more_available:
+                break
+            if not page.orders:
+                raise BetfairReadOnlyError(
+                    "execution currentOrders cannot advance from an empty page"
+                )
+            offset += len(page.orders)
+        else:
+            raise BetfairReadOnlyError(
+                "execution currentOrders pagination exceeded max_pages"
+            )
+
+        cleared_groups: list[tuple[str, tuple[BetfairClearedOrderPage, ...]]] = []
+        for status in _EXECUTION_CLEARED_STATUSES:
+            pages: list[BetfairClearedOrderPage] = []
+            offset = 0
+            for _ in range(max_pages):
+                page = self.read_cleared_orders_page(
+                    from_record=offset,
+                    record_count=page_size,
+                    bet_status=status,
+                    customer_order_refs=(action,),
+                    market_ids=(market,),
+                )
+                pages.append(page)
+                if not page.more_available:
+                    break
+                if not page.orders:
+                    raise BetfairReadOnlyError(
+                        f"execution {status} pagination cannot advance from an empty page"
+                    )
+                offset += len(page.orders)
+            else:
+                raise BetfairReadOnlyError(
+                    f"execution {status} pagination exceeded max_pages"
+                )
+            cleared_groups.append((status, tuple(pages)))
+
+        all_evidence = [market_event.evidence]
+        all_evidence.extend(page.evidence for page in current_pages)
+        for _, pages in cleared_groups:
+            all_evidence.extend(page.evidence for page in pages)
+        observed_at = max(
+            all_evidence,
+            key=lambda evidence: _iso_timestamp(evidence.observed_at, "observed_at"),
+        ).observed_at
+        request_scope = {
+            "schema": "autosport.betfair_execution_readback_scope",
+            "schema_version": 1,
+            "venue_id": self._venue_id,
+            "account_id": self._account_id,
+            "adapter_id": ADAPTER_ID,
+            "adapter_version": ADAPTER_VERSION,
+            "action_id": action,
+            "market_id": market,
+            "market_catalogue": {
+                "method": _LIST_MARKET_CATALOGUE,
+                "filter": {"marketIds": [market]},
+                "marketProjection": ["EVENT"],
+                "maxResults": 1,
+            },
+            "current": {
+                "method": _LIST_CURRENT_ORDERS,
+                "orderProjection": "ALL",
+                "customerOrderRefs": [action],
+                "marketIds": [market],
+                "page_size": page_size,
+            },
+            "cleared": {
+                "method": _LIST_CLEARED_ORDERS,
+                "statuses": list(_EXECUTION_CLEARED_STATUSES),
+                "groupBy": "BET",
+                "customerOrderRefs": [action],
+                "marketIds": [market],
+                "settledDateRange": None,
+                "page_size": page_size,
+            },
+        }
+        request_scope_sha256 = _canonical_sha256(request_scope)
+        evidence_payload = {
+            "request_scope_sha256": request_scope_sha256,
+            "market_event": {
+                "market_id": market_event.market_id,
+                "event_id": market_event.event_id,
+                "response_sha256": market_event.evidence.source_payload_sha256,
+            },
+            "current_pages": [
+                {
+                    "from_record": page.from_record,
+                    "record_count": page.record_count,
+                    "more_available": page.more_available,
+                    "response_sha256": page.evidence.source_payload_sha256,
+                }
+                for page in current_pages
+            ],
+            "cleared_pages": [
+                {
+                    "status": status,
+                    "pages": [
+                        {
+                            "from_record": page.from_record,
+                            "record_count": page.record_count,
+                            "more_available": page.more_available,
+                            "response_sha256": page.evidence.source_payload_sha256,
+                        }
+                        for page in pages
+                    ],
+                }
+                for status, pages in cleared_groups
+            ],
+        }
+        return BetfairExecutionReadbackEnvelope._from_client(
+            venue_id=self._venue_id,
+            account_id=self._account_id,
+            action_id=action,
+            market_id=market,
+            market_event=market_event,
+            current_pages=tuple(current_pages),
+            cleared_pages_by_status=tuple(cleared_groups),
+            observed_at=observed_at,
+            request_scope_sha256=request_scope_sha256,
+            evidence_sha256=_canonical_sha256(evidence_payload),
+        )
 
     def _read_all_current_orders_with_evidence(self, *, page_size: int = 1000, max_pages: int = 100) -> tuple[tuple[BetfairCurrentOrderObservation, ...], tuple[BetfairEvidence, ...]]:
         _positive_int(max_pages, "max_pages")
@@ -333,7 +646,12 @@ class BetfairReadOnlyClient:
         )
         if not isinstance(requested_capabilities, frozenset):
             raise TypeError("requested_capabilities must be a frozenset")
-        supported = {BookmakerCapability.BALANCE_READ, BookmakerCapability.OPEN_POSITIONS_READ, BookmakerCapability.SETTLED_POSITIONS_READ}
+        supported = {
+            BookmakerCapability.BALANCE_READ,
+            BookmakerCapability.OPEN_POSITIONS_READ,
+            BookmakerCapability.SETTLED_POSITIONS_READ,
+            BookmakerCapability.BET_READBACK,
+        }
         if any(c not in supported for c in requested_capabilities):
             raise BetfairReadOnlyError("requested capability is not implemented by the Betfair account adapter")
         details = self.read_account_details()
@@ -465,9 +783,30 @@ def _parse_current_order(value: object, evidence: BetfairEvidence, index: int) -
     return BetfairCurrentOrderObservation(_provider_text(raw, "betId", "bet_id"), _provider_text(raw, "marketId", "market_id"), _provider_int(raw, "selectionId", "selection_id"), _provider_text(raw, "side", "side"), _provider_text(raw, "status", "status"), _provider_text(raw, "placedDate", "placed_date"), price, requested_size, _number(raw, "averagePriceMatched", "average_price_matched"), _number(raw, "sizeMatched", "size_matched"), _number(raw, "sizeRemaining", "size_remaining"), _provider_optional_text(raw, "customerOrderRef", "customer_order_ref"), _provider_optional_text(raw, "customerStrategyRef", "customer_strategy_ref"), evidence)
 
 
-def _parse_cleared_order(value: object, evidence: BetfairEvidence, index: int) -> BetfairClearedOrderObservation:
+def _parse_cleared_order(
+    value: object,
+    evidence: BetfairEvidence,
+    index: int,
+    bet_status: str,
+) -> BetfairClearedOrderObservation:
     raw = _mapping(value, f"clearedOrders[{index}]")
-    return BetfairClearedOrderObservation(_provider_text(raw, "betId", "bet_id"), _provider_text(raw, "marketId", "market_id"), _provider_int(raw, "selectionId", "selection_id"), _provider_text(raw, "side", "side"), "SETTLED", _provider_text(raw, "placedDate", "placed_date"), _provider_text(raw, "settledDate", "settled_date"), _number(raw, "priceRequested", "price_requested"), _number(raw, "priceMatched", "price_matched"), _number(raw, "sizeSettled", "size_settled"), _number(raw, "profit", "profit"), _provider_optional_text(raw, "customerOrderRef", "customer_order_ref"), _provider_optional_text(raw, "customerStrategyRef", "customer_strategy_ref"), evidence)
+    return BetfairClearedOrderObservation(
+        _provider_text(raw, "betId", "bet_id"),
+        _provider_text(raw, "marketId", "market_id"),
+        _provider_int(raw, "selectionId", "selection_id"),
+        _provider_text(raw, "side", "side"),
+        bet_status,
+        _provider_text(raw, "placedDate", "placed_date"),
+        _provider_text(raw, "settledDate", "settled_date"),
+        _number(raw, "priceRequested", "price_requested"),
+        _number(raw, "priceMatched", "price_matched"),
+        _number(raw, "sizeSettled", "size_settled"),
+        _number(raw, "profit", "profit"),
+        _provider_optional_text(raw, "customerOrderRef", "customer_order_ref"),
+        _provider_optional_text(raw, "customerStrategyRef", "customer_strategy_ref"),
+        evidence,
+        _provider_optional_text(raw, "eventId", "event_id"),
+    )
 
 
 def _mapping(value: object, field: str) -> Mapping[str, object]:
@@ -520,6 +859,29 @@ def _number(value: Mapping[str, object], key: str, field: str) -> Decimal:
     else:
         raise BetfairReadOnlyError(f"{field} must be a JSON number decoded without binary float")
     return _decimal(result, field)
+
+
+def _canonical_sha256(value: object) -> str:
+    try:
+        raw = json.dumps(
+            value,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise BetfairReadOnlyError("readback evidence is not canonical JSON") from exc
+    return sha256(raw).hexdigest()
+
+
+def _canonical_text_tuple(value: object, field: str) -> tuple[str, ...]:
+    if not isinstance(value, tuple) or not value:
+        raise BetfairReadOnlyError(f"{field} must be a non-empty tuple")
+    result = tuple(_required_text(item, field) for item in value)
+    if len(set(result)) != len(result):
+        raise BetfairReadOnlyError(f"{field} must not contain duplicates")
+    return result
 
 
 def _required_text(value: object, field: str) -> str:

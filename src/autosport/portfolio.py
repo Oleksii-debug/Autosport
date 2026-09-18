@@ -16,6 +16,7 @@ from decimal import (
 )
 
 from .domain import PaperTicket, TicketStatus
+from .paper import PaperBook
 
 
 # Portfolio reports are persisted as run evidence, so their values cannot depend
@@ -119,6 +120,79 @@ class PortfolioEngine:
         try:
             with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
                 return _scenario_profit_in_context(tickets, winning_quote_keys)
+        except DecimalException as exc:
+            raise _portfolio_arithmetic_error(exc) from exc
+
+    @staticmethod
+    def scenario_profit_settlements(
+        tickets: list[PaperTicket],
+        settlement_by_quote: dict[str, str],
+    ) -> Decimal:
+        """Evaluate one fully specified settlement state using PaperBook economics.
+
+        The mapping is scenario evidence only; it grants no exhaustiveness authority.
+        Callers that need complete-state truth must obtain the mapping from the
+        authoritative market-outcome contract.
+        """
+        if type(settlement_by_quote) is not dict:
+            raise ValueError("settlement_by_quote must be an exact dict")
+        snapshot = settlement_by_quote.copy()
+        allowed = frozenset({"win", "loss", "void"})
+        for quote_key, result in snapshot.items():
+            if (
+                type(quote_key) is not str
+                or not quote_key
+                or quote_key != quote_key.strip()
+            ):
+                raise ValueError(
+                    "settlement_by_quote keys must be non-empty canonical strings"
+                )
+            if type(result) is not str or result not in allowed:
+                raise ValueError(
+                    "settlement_by_quote values must be win, loss, or void"
+                )
+
+        try:
+            with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
+                total = Decimal("0")
+                for ticket in tickets:
+                    if ticket.status is not TicketStatus.OPEN:
+                        continue
+                    stake = _require_finite_decimal(
+                        ticket.stake,
+                        f"portfolio ticket {ticket.ticket_id} stake",
+                    )
+                    leg_keys = {leg.quote_key for leg in ticket.legs}
+                    missing = leg_keys.difference(snapshot)
+                    if missing:
+                        raise ValueError(
+                            "portfolio ticket is missing terminal settlement evidence"
+                        )
+                    winners = {
+                        quote_key
+                        for quote_key in leg_keys
+                        if snapshot[quote_key] == "win"
+                    }
+                    voids = {
+                        quote_key
+                        for quote_key in leg_keys
+                        if snapshot[quote_key] == "void"
+                    }
+                    _status, payout, _balance = PaperBook._settlement_result(
+                        ticket,
+                        Decimal("0"),
+                        winners,
+                        voids,
+                    )
+                    scenario_value = payout - stake
+                    if not scenario_value.is_finite():
+                        raise ValueError(
+                            f"portfolio ticket {ticket.ticket_id} scenario profit must be finite"
+                        )
+                    total += scenario_value
+                if not total.is_finite():
+                    raise ValueError("portfolio scenario profit must be finite")
+                return total
         except DecimalException as exc:
             raise _portfolio_arithmetic_error(exc) from exc
 

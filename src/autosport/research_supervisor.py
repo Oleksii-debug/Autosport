@@ -84,6 +84,7 @@ _SCIENTIFIC_BINDINGS = {
     "experiment_id": "Experiment",
     "promotion_decision_id": "PromotionDecision",
     "postmortem_id": "Postmortem",
+    "drift_finding_id": "DriftFinding",
     "next_question_id": "ResearchQuestion",
 }
 _SHA_BINDINGS = frozenset(

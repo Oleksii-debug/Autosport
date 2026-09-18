@@ -404,8 +404,11 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             self.assertEqual(records[0].payload["stake"], "20.00")
             self.assertEqual(records[0].payload["stake_source"], "economic-goal-derived")
             self.assertEqual(
-                records[0].payload["provider_accounts"],
-                [{"source_id": "provider", "account_id": "account-paper-1"}],
+                tuple(
+                    dict(item)
+                    for item in records[0].payload["provider_accounts"]
+                ),
+                ({"source_id": "provider", "account_id": "account-paper-1"},),
             )
             rebound = JsonlDecisionLedger(ledger.path).verified_economic_decision(
                 records[0].decision_id,

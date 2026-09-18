@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import (
     Context,
@@ -148,6 +148,105 @@ class RiskOfRuinEvidence:
         ):
             raise ValueError(
                 "risk-of-ruin upper_bound must be an exact Decimal between 0 and 1"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class RiskOfRuinVectorEvidence:
+    """Immutable provenance binding for one complete multi-candidate stake vector.
+
+    The witness carries no permission to estimate risk. It binds an externally
+    produced research upper bound to the exact base portfolio, ordered candidate
+    vector and complete evaluated stake vector. The producer remains governed by
+    the scientific/research protocol; this object only verifies executable use.
+    """
+
+    evidence_id: str
+    research_protocol_sha256: str
+    reproducibility_bundle_sha256: str
+    producer_identity: str
+    causal_cutoff: str
+    evaluated_at: str
+    bankroll_id: str
+    currency: str
+    base_portfolio_sha256: str
+    candidate_vector_sha256: str
+    evaluated_stakes: tuple[Decimal, ...]
+    upper_bound: Decimal
+
+    def __post_init__(self) -> None:
+        _canonical_context_text("vector risk-of-ruin evidence_id", self.evidence_id)
+        _canonical_context_text(
+            "vector risk-of-ruin producer_identity", self.producer_identity
+        )
+        _canonical_sha256(
+            "vector risk-of-ruin research_protocol_sha256",
+            self.research_protocol_sha256,
+        )
+        _canonical_sha256(
+            "vector risk-of-ruin reproducibility_bundle_sha256",
+            self.reproducibility_bundle_sha256,
+        )
+        _canonical_sha256(
+            "vector risk-of-ruin base_portfolio_sha256",
+            self.base_portfolio_sha256,
+        )
+        _canonical_sha256(
+            "vector risk-of-ruin candidate_vector_sha256",
+            self.candidate_vector_sha256,
+        )
+        _canonical_context_text("vector risk-of-ruin bankroll_id", self.bankroll_id)
+        currency = _canonical_context_text(
+            "vector risk-of-ruin currency", self.currency
+        )
+        if (
+            len(currency) != 3
+            or not currency.isascii()
+            or not currency.isalpha()
+            or currency != currency.upper()
+        ):
+            raise ValueError(
+                "vector risk-of-ruin currency must be a three-letter uppercase ASCII code"
+            )
+
+        _, cutoff = _canonical_context_timestamp(
+            "vector risk-of-ruin causal_cutoff", self.causal_cutoff
+        )
+        _, evaluated = _canonical_context_timestamp(
+            "vector risk-of-ruin evaluated_at", self.evaluated_at
+        )
+        if cutoff > evaluated:
+            raise ValueError(
+                "vector risk-of-ruin causal cutoff must not be after evaluation time"
+            )
+
+        if type(self.evaluated_stakes) is not tuple or not self.evaluated_stakes:
+            raise ValueError(
+                "vector risk-of-ruin evaluated_stakes must be a non-empty tuple"
+            )
+        has_positive = False
+        for stake in self.evaluated_stakes:
+            if (
+                not isinstance(stake, Decimal)
+                or not stake.is_finite()
+                or stake < Decimal("0")
+            ):
+                raise ValueError(
+                    "vector risk-of-ruin evaluated_stakes must contain non-negative finite exact Decimals"
+                )
+            has_positive = has_positive or stake > 0
+        if not has_positive:
+            raise ValueError(
+                "vector risk-of-ruin evaluated_stakes must contain a positive stake"
+            )
+        if (
+            not isinstance(self.upper_bound, Decimal)
+            or not self.upper_bound.is_finite()
+            or self.upper_bound < Decimal("0")
+            or self.upper_bound > Decimal("1")
+        ):
+            raise ValueError(
+                "vector risk-of-ruin upper_bound must be an exact Decimal between 0 and 1"
             )
 
 
@@ -630,6 +729,31 @@ class PaperRiskPolicy:
             return None
 
     @classmethod
+    def risk_of_ruin_candidate_vector_sha256(
+        cls,
+        contexts: tuple[ProposedTicketRiskContext, ...],
+    ) -> str | None:
+        """Hash the complete ordered candidate vector, excluding ruin evidence."""
+
+        if type(contexts) is not tuple or not contexts:
+            return None
+        candidate_hashes: list[str] = []
+        for context in contexts:
+            candidate_sha256 = cls.risk_of_ruin_candidate_sha256(context)
+            if candidate_sha256 is None:
+                return None
+            candidate_hashes.append(candidate_sha256)
+        try:
+            return _sha256_payload(
+                {
+                    "schema": "autosport.risk-candidate-vector.v1",
+                    "candidate_sha256": candidate_hashes,
+                }
+            )
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+
+    @classmethod
     def _risk_of_ruin_evidence_decision(
         cls,
         book: PaperBook,
@@ -697,6 +821,99 @@ class PaperRiskPolicy:
             return RiskDecision(
                 False,
                 "portfolio risk-of-ruin evidence uses future information",
+            )
+        return None
+
+    @classmethod
+    def _risk_of_ruin_vector_evidence_decision(
+        cls,
+        book: PaperBook,
+        goal: EconomicGoalContract,
+        contexts: tuple[ProposedTicketRiskContext, ...],
+        stakes: tuple[Decimal, ...],
+        evidence: RiskOfRuinVectorEvidence | None,
+    ) -> RiskDecision | None:
+        if goal.max_risk_of_ruin >= Decimal("1"):
+            return None
+        if evidence is None:
+            return RiskDecision(
+                False,
+                "multi-candidate portfolio risk-of-ruin requires vector-bound evidence",
+            )
+        if not isinstance(evidence, RiskOfRuinVectorEvidence):
+            return RiskDecision(
+                False,
+                "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
+            )
+        if evidence.upper_bound > goal.max_risk_of_ruin:
+            return RiskDecision(
+                False,
+                "portfolio vector risk-of-ruin upper bound exceeds economic goal limit",
+            )
+        if type(contexts) is not tuple or type(stakes) is not tuple:
+            return RiskDecision(
+                False,
+                "portfolio vector risk-of-ruin evidence cannot be verified against canonical state",
+            )
+
+        portfolio_sha256 = cls.risk_of_ruin_portfolio_sha256(book)
+        candidate_vector_sha256 = cls.risk_of_ruin_candidate_vector_sha256(contexts)
+        if portfolio_sha256 is None or candidate_vector_sha256 is None:
+            return RiskDecision(
+                False,
+                "portfolio vector risk-of-ruin evidence cannot be verified against canonical state",
+            )
+        if (
+            evidence.bankroll_id != goal.bankroll_id
+            or evidence.currency != goal.currency
+            or evidence.base_portfolio_sha256 != portfolio_sha256
+            or evidence.candidate_vector_sha256 != candidate_vector_sha256
+            or evidence.evaluated_stakes != stakes
+        ):
+            return RiskDecision(
+                False,
+                "portfolio vector risk-of-ruin evidence does not match exact vector state",
+            )
+
+        proposal_times: list[datetime] = []
+        for context in contexts:
+            if (
+                context.bankroll_id != goal.bankroll_id
+                or context.currency != goal.currency
+                or context.proposal_ts is None
+            ):
+                return RiskDecision(
+                    False,
+                    "portfolio vector risk-of-ruin evidence cannot be verified without canonical bankroll/currency/proposal time",
+                )
+            try:
+                _, proposal_time = _canonical_context_timestamp(
+                    "proposal_ts", context.proposal_ts
+                )
+            except (TypeError, ValueError):
+                return RiskDecision(
+                    False,
+                    "portfolio vector risk-of-ruin evidence time provenance is invalid",
+                )
+            proposal_times.append(proposal_time)
+
+        try:
+            _, cutoff = _canonical_context_timestamp(
+                "vector risk-of-ruin causal_cutoff", evidence.causal_cutoff
+            )
+            _, evaluated = _canonical_context_timestamp(
+                "vector risk-of-ruin evaluated_at", evidence.evaluated_at
+            )
+        except (TypeError, ValueError):
+            return RiskDecision(
+                False,
+                "portfolio vector risk-of-ruin evidence time provenance is invalid",
+            )
+        causal_limit = min(proposal_times)
+        if cutoff > causal_limit or evaluated > causal_limit:
+            return RiskDecision(
+                False,
+                "portfolio vector risk-of-ruin evidence uses future information",
             )
         return None
 
@@ -1283,6 +1500,7 @@ class PaperRiskPolicy:
         signal_strengths: tuple[Decimal | str, ...],
         *,
         contexts: tuple[ProposedTicketRiskContext, ...],
+        risk_of_ruin_vector_evidence: RiskOfRuinVectorEvidence | None = None,
     ) -> StakeVectorDecision:
         """Derive a pure, whole-portfolio stake vector under one EconomicGoal.
 
@@ -1372,11 +1590,25 @@ class PaperRiskPolicy:
                 zero_vector,
                 "candidate set contains no positive signal",
             )
-        if goal.max_risk_of_ruin < Decimal("1") and len(positive_indices) > 1:
+        vector_ruin_required = (
+            goal.max_risk_of_ruin < Decimal("1") and len(positive_indices) > 1
+        )
+        if vector_ruin_required and risk_of_ruin_vector_evidence is None:
             return StakeVectorDecision(
                 "WAIT",
                 zero_vector,
                 "multi-candidate portfolio risk-of-ruin requires vector-bound evidence",
+            )
+        if (
+            risk_of_ruin_vector_evidence is not None
+            and not isinstance(
+                risk_of_ruin_vector_evidence, RiskOfRuinVectorEvidence
+            )
+        ):
+            return StakeVectorDecision(
+                "WAIT",
+                zero_vector,
+                "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
             )
 
         for index in positive_indices:
@@ -1396,6 +1628,7 @@ class PaperRiskPolicy:
                 )
             if (
                 goal.max_risk_of_ruin < Decimal("1")
+                and not vector_ruin_required
                 and context.risk_of_ruin_evidence is None
             ):
                 return StakeVectorDecision(
@@ -1404,7 +1637,14 @@ class PaperRiskPolicy:
                     "candidate set lacks provenance-bound portfolio risk-of-ruin evidence",
                 )
 
-        shadow = self._shadow_book_for_allocation(book)
+        allocation_policy = self
+        if vector_ruin_required:
+            allocation_policy = replace(
+                self,
+                economic_goal=replace(goal, max_risk_of_ruin=Decimal("1")),
+            )
+
+        shadow = allocation_policy._shadow_book_for_allocation(book)
         if shadow is None:
             return StakeVectorDecision(
                 "WAIT",
@@ -1419,14 +1659,14 @@ class PaperRiskPolicy:
         stakes = [Decimal("0") for _ in contexts]
         for index in sorted(positive_indices, key=candidate_key):
             context = contexts[index]
-            amount = self.derive_goal_stake(
+            amount = allocation_policy.derive_goal_stake(
                 shadow,
                 parsed_signals[index],
                 context=context,
             )
             if amount is None:
                 continue
-            decision = self.evaluate(shadow, amount, context=context)
+            decision = allocation_policy.evaluate(shadow, amount, context=context)
             if not decision.allowed:
                 if self._risk_rejection_requires_wait(decision.reason):
                     return StakeVectorDecision(
@@ -1457,6 +1697,26 @@ class PaperRiskPolicy:
 
         result = tuple(stakes)
         if any(stake > 0 for stake in result):
+            if vector_ruin_required:
+                vector_ruin_decision = self._risk_of_ruin_vector_evidence_decision(
+                    book,
+                    goal,
+                    contexts,
+                    result,
+                    risk_of_ruin_vector_evidence,
+                )
+                if vector_ruin_decision is not None:
+                    action = (
+                        "ZERO"
+                        if vector_ruin_decision.reason
+                        == "portfolio vector risk-of-ruin upper bound exceeds economic goal limit"
+                        else "WAIT"
+                    )
+                    return StakeVectorDecision(
+                        action,
+                        zero_vector,
+                        vector_ruin_decision.reason,
+                    )
             return StakeVectorDecision(
                 "STAKE_VECTOR",
                 result,

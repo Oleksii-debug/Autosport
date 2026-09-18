@@ -20,7 +20,7 @@ from .domain import MarketEvent, PaperTicket, TicketLeg
 from .forecasting import ForecastRecord, parse_iso_timestamp
 from .paper import PaperBook
 from .price_truth import paper_quote_rejection_reason
-from .risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskDecision
+from .risk import (\n    PaperRiskPolicy,\n    ProposedTicketRiskContext,\n    RiskDecision,\n    RiskOfRuinEvidence,\n)
 from .scenario_search import ScenarioGroup
 
 
@@ -694,6 +694,19 @@ class ResearchDecisionPipeline:
                 decision_ts=decision_ts,
                 candidate=candidate,
             )
+
+        quote_items = tuple(market_quotes or ())
+        proposal_context: ProposedTicketRiskContext | None = None
+        if goal is not None:
+            proposal_context = ProposedTicketRiskContext(
+                legs=tuple(_ticket_legs(candidate)),
+                quotes=quote_items,
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+                proposal_ts=decision_ts,
+                risk_of_ruin_evidence=risk_of_ruin_evidence,
+            )
+
         if goal is None:
             amount = _finite_decimal(stake, "stake")
             if amount <= 0:
@@ -705,6 +718,7 @@ class ResearchDecisionPipeline:
             derived = self.risk_policy.derive_goal_stake(
                 book,
                 candidate.expected_profit_per_unit,
+                context=proposal_context,
             )
             amount = derived if derived is not None else Decimal("0")
             stake_source = "economic-goal-derived"
@@ -755,15 +769,6 @@ class ResearchDecisionPipeline:
             if quote_rejection is not None:
                 risk = RiskDecision(False, "paper quote: " + quote_rejection)
             else:
-                proposal_context = None
-                if goal is not None:
-                    proposal_context = ProposedTicketRiskContext(
-                        legs=tuple(_ticket_legs(candidate)),
-                        quotes=quote_items,
-                        bankroll_id=goal.bankroll_id,
-                        currency=goal.currency,
-                        proposal_ts=decision_ts,
-                    )
                 risk = self.risk_policy.evaluate(
                     book,
                     amount,

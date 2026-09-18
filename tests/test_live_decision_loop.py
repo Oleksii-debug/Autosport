@@ -220,6 +220,60 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 2,
             )
 
+    def test_single_dirty_cycle_avoids_whole_mirror_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            unrelated = tuple(
+                self._event(
+                    selection=f"unrelated-{index}",
+                    sequence=1,
+                    odds="3.00",
+                )
+                for index in range(64)
+            )
+            observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(selection="selection-a", sequence=1),
+                        self._event(selection="selection-b", sequence=1),
+                        *unrelated,
+                    ),
+                    (
+                        self._event(
+                            selection="selection-a",
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(seconds=2),
+                        ),
+                    ),
+                ],
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            self._register_two(loop)
+
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=3)
+
+            with patch.object(
+                loop.mirror_updates.mirror,
+                "snapshot",
+                side_effect=AssertionError("whole mirror snapshot is forbidden"),
+            ):
+                second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(second.affected_input_ids, ("input-a",))
+            self.assertEqual([item[0] for item in factory.calls], ["input-a"])
+
     def test_decision_timestamp_follows_observation_receipt_clock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

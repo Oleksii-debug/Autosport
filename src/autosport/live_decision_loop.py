@@ -530,8 +530,6 @@ class PersistentLiveDecisionLoop:
         self.decision_ledger = decision_ledger or JsonlDecisionLedger(
             self.workspace / "decisions.jsonl"
         )
-        if self.decision_ledger.path.exists():
-            self.decision_ledger.verify_integrity()
         self.ingestion_policy = ingestion_policy
         self.max_quote_age = max_quote_age
         self.bounds = bounds or LiveLoopBounds()
@@ -595,6 +593,9 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "persisted live progress belongs to a different loop_id"
             )
+        if self.decision_ledger.path.exists() or self._progress is not None:
+            with WorkspaceEconomicLock(self.workspace):
+                self.decision_ledger.verify_integrity()
         if self._progress is not None:
             durable_input_ids = set(self.dependencies.input_ids)
             progress_input_ids = set(self._progress.registered_input_ids)

@@ -5,11 +5,13 @@ from pathlib import Path
 
 from autosport.causal_collector import (
     AckConflictError,
+    ApplicationReceiptError,
     CausalView,
     CollectorDelta,
     CollectorDeltaStore,
     CursorRegressionError,
     DeltaConflictError,
+    DesktopApplicationReceipt,
     DesktopDeltaCheckpointStore,
     DesktopDeltaConsumer,
     GapState,
@@ -239,7 +241,16 @@ class CollectorDeltaTests(unittest.TestCase):
                 collector,
                 checkpoint,
                 resolve_event=lambda _: payload,
-                apply_event=applied.append,
+                apply_event=lambda delta, event: (
+                    applied.append(event)
+                    or DesktopApplicationReceipt(
+                        delta_id=delta.delta_id,
+                        canonical_event_digest=canonical_event_digest(event),
+                        receipt_id=f"receipt-{delta.delta_id}",
+                        applied_at="2026-01-01T00:00:04+00:00",
+                    )
+                ),
+                lookup_application_receipt=lambda delta: None,
                 apply_health=lambda d, e: health.append((d.delta_id, e["event_id"])),
             )
             self.assertEqual(
@@ -260,11 +271,64 @@ class CollectorDeltaTests(unittest.TestCase):
                 collector,
                 checkpoint,
                 resolve_event=lambda _: event_payload(odds="2.10"),
-                apply_event=lambda _: None,
+                apply_event=lambda delta, event: DesktopApplicationReceipt(
+                    delta_id=delta.delta_id,
+                    canonical_event_digest=canonical_event_digest(event),
+                    receipt_id=f"receipt-{delta.delta_id}",
+                    applied_at="2026-01-01T00:00:04+00:00",
+                ),
+                lookup_application_receipt=lambda delta: None,
             )
             with self.assertRaises(DeltaConflictError):
                 consumer.drain(as_of="2026-01-01T00:00:05+00:00")
             self.assertFalse(checkpoint.has_ack("d1"))
+
+    def test_revision_rejects_cross_source_even_with_same_cursor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            store.append(self.make_delta(delta_id="d1", cursor_position=1))
+            cross_source = replace(
+                self.make_delta(
+                    delta_id="d1r",
+                    cursor_position=1,
+                    revision_of="d1",
+                    revision_number=1,
+                ),
+                source_id="source-evil",
+            )
+            with self.assertRaises(CursorRegressionError):
+                store.append(cross_source)
+
+    def test_revision_rejects_cross_epoch_even_with_same_cursor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            store.append(self.make_delta(delta_id="d1", cursor_position=1))
+            cross_epoch = self.make_delta(
+                delta_id="d1r",
+                cursor_position=1,
+                epoch="epoch-2",
+                revision_of="d1",
+                revision_number=1,
+                gap_state=GapState.CURSOR_RESET,
+            )
+            with self.assertRaises(CursorRegressionError):
+                store.append(cross_epoch)
+
+    def test_gap_recovery_rejects_cross_event_lineage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            detected = self.make_delta(delta_id="gap", cursor_position=1, gap_state=GapState.DETECTED)
+            store.append(detected)
+            wrong_event = self.make_delta(
+                delta_id="gap-recovered",
+                cursor_position=1,
+                revision_of="gap",
+                revision_number=1,
+                gap_state=GapState.RECOVERED,
+                payload=event_payload(event_id="different"),
+            )
+            with self.assertRaises(CursorRegressionError):
+                store.append(wrong_event)
 
     def test_unresolved_gap_blocks_application(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -300,7 +364,16 @@ class CollectorDeltaTests(unittest.TestCase):
                 collector,
                 checkpoint,
                 resolve_event=lambda _: event_payload(),
-                apply_event=applied.append,
+                apply_event=lambda delta, event: (
+                    applied.append(event)
+                    or DesktopApplicationReceipt(
+                        delta_id=delta.delta_id,
+                        canonical_event_digest=canonical_event_digest(event),
+                        receipt_id=f"receipt-{delta.delta_id}",
+                        applied_at="2026-01-01T00:00:04+00:00",
+                    )
+                ),
+                lookup_application_receipt=lambda delta: None,
             )
             self.assertEqual(
                 consumer.drain(as_of="2026-01-01T00:00:05+00:00"),
@@ -317,7 +390,12 @@ class CollectorDeltaTests(unittest.TestCase):
             with self.assertRaises(AckConflictError):
                 checkpoint.ack(
                     delta,
-                    applied_event_digest="0" * 64,
+                    application_receipt=DesktopApplicationReceipt(
+                        delta_id=delta.delta_id,
+                        canonical_event_digest="0" * 64,
+                        receipt_id="receipt-1",
+                        applied_at="2026-01-01T00:00:04+00:00",
+                    ),
                     acknowledged_at="2026-01-01T00:00:05+00:00",
                 )
 
@@ -330,11 +408,73 @@ class CollectorDeltaTests(unittest.TestCase):
                 collector,
                 checkpoint,
                 resolve_event=lambda _: event_payload(),
-                apply_event=lambda _: (_ for _ in ()).throw(RuntimeError("apply failed")),
+                apply_event=lambda delta, event: (_ for _ in ()).throw(RuntimeError("apply failed")),
+                lookup_application_receipt=lambda delta: None,
             )
             with self.assertRaises(RuntimeError):
                 consumer.drain(as_of="2026-01-01T00:00:05+00:00")
             self.assertFalse(checkpoint.has_ack("d1"))
+
+    def test_restart_uses_durable_application_receipt_without_reapplying_effect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = CollectorDeltaStore(Path(tmp) / "collector.json")
+            desktop = DesktopDeltaCheckpointStore(Path(tmp) / "desktop.json")
+            delta = self.make_delta()
+            collector.append(delta)
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:04+00:00",
+            )
+            # A real canonical application authority would persist this receipt
+            # atomically with the event/health effect before desktop acknowledgement.
+            raw = desktop._read()
+            raw["acks"].append({
+                "delta_id": delta.delta_id,
+                "canonical_event_digest": delta.canonical_event_digest,
+                "acknowledged_at": "2026-01-01T00:00:04+00:00",
+                "application_receipt_id": receipt.receipt_id,
+                "applied_at": receipt.applied_at,
+            })
+            desktop._write(raw)
+            reapplied = []
+            consumer = DesktopDeltaConsumer(
+                collector,
+                desktop,
+                resolve_event=lambda _: event_payload(),
+                apply_event=lambda delta, event: (
+                    reapplied.append(event)
+                    or receipt
+                ),
+                lookup_application_receipt=lambda current: receipt,
+            )
+            self.assertEqual(
+                consumer.drain(as_of="2026-01-01T00:00:05+00:00"),
+                ("d1",),
+            )
+            self.assertEqual(reapplied, [])
+
+    def test_apply_event_must_return_bound_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = CollectorDeltaStore(Path(tmp) / "collector.json")
+            desktop = DesktopDeltaCheckpointStore(Path(tmp) / "desktop.json")
+            delta = self.make_delta()
+            collector.append(delta)
+            consumer = DesktopDeltaConsumer(
+                collector,
+                desktop,
+                resolve_event=lambda _: event_payload(),
+                apply_event=lambda current, event: DesktopApplicationReceipt(
+                    delta_id="wrong",
+                    canonical_event_digest=canonical_event_digest(event),
+                    receipt_id="wrong",
+                    applied_at="2026-01-01T00:00:04+00:00",
+                ),
+                lookup_application_receipt=lambda current: None,
+            )
+            with self.assertRaises(ApplicationReceiptError):
+                consumer.drain(as_of="2026-01-01T00:00:05+00:00")
 
     def test_crash_before_atomic_replace_preserves_previous_durable_commit(self):
         with tempfile.TemporaryDirectory() as tmp:

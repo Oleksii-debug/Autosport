@@ -607,6 +607,272 @@ class ResearchScheduler:
         if receipt["source_event_sha256"] != event.source_event_sha256:
             raise ResearchSchedulerError("receipt/event identity mismatch")
 
+
+    @staticmethod
+    def _curriculum_population(candidates: Iterable[ReplayCandidate]) -> tuple[ReplayCandidate, ...]:
+        population = tuple(candidates)
+        if not population:
+            raise ResearchSchedulerError("curriculum population must not be empty")
+        for candidate in population:
+            if not isinstance(candidate, ReplayCandidate):
+                raise ResearchSchedulerError("curriculum population must contain ReplayCandidate values")
+        ids = [candidate.candidate_id for candidate in population]
+        if len(ids) != len(set(ids)):
+            raise ResearchSchedulerError("curriculum population contains duplicate candidate identity")
+        return tuple(sorted(population, key=lambda candidate: candidate.candidate_id))
+
+    @classmethod
+    def _curriculum_population_digest(
+        cls, candidates: Iterable[ReplayCandidate]
+    ) -> tuple[tuple[str, ...], str]:
+        population = cls._curriculum_population(candidates)
+        frozen = [
+            {"candidate_id": c.candidate_id, "candidate_payload": c.payload()}
+            for c in population
+        ]
+        return tuple(item["candidate_id"] for item in frozen), _digest(frozen)
+
+    @staticmethod
+    def _curriculum_wake_id(
+        *,
+        selector_policy_version: str,
+        purpose: CurriculumPurpose,
+        candidate_population_sha256: str,
+        as_of: str,
+        seed: int,
+        budget_units: int,
+        deadline_at: str | None,
+    ) -> str:
+        return _digest(
+            {
+                "schema": SCHEMA,
+                "schema_version": SCHEMA_VERSION,
+                "kind": "CurriculumWake",
+                "selector_policy_version": selector_policy_version,
+                "purpose": purpose.value,
+                "candidate_population_sha256": candidate_population_sha256,
+                "as_of": _timestamp(as_of, "as_of"),
+                "seed": seed,
+                "budget_units": budget_units,
+                "deadline_at": None if deadline_at is None else _timestamp(deadline_at, "deadline_at"),
+            }
+        )
+
+    @staticmethod
+    def _validate_curriculum_wake(wake_id: object, raw: object) -> None:
+        _sha(wake_id, "curriculum_wake_id")
+        if type(raw) is not dict or set(raw) != {
+            "wake_id", "status", "selector_policy_version", "purpose",
+            "candidate_ids", "candidate_population_sha256", "as_of", "seed",
+            "budget_units", "deadline_at", "selection_id", "run_id", "receipt_sha256",
+        }:
+            raise ResearchSchedulerError("curriculum wake fields mismatch")
+        if raw["wake_id"] != wake_id:
+            raise ResearchSchedulerError("curriculum wake identity mismatch")
+        _text(raw["selector_policy_version"], "curriculum selector_policy_version")
+        try:
+            CurriculumPurpose(raw["purpose"])
+        except (TypeError, ValueError) as exc:
+            raise ResearchSchedulerError("curriculum wake purpose is invalid") from exc
+        ids = raw["candidate_ids"]
+        if type(ids) is not list or ids != sorted(ids) or len(ids) != len(set(ids)):
+            raise ResearchSchedulerError("curriculum wake candidate_ids are invalid")
+        for candidate_id in ids:
+            _sha(candidate_id, "curriculum candidate_id")
+        _sha(raw["candidate_population_sha256"], "curriculum candidate_population_sha256")
+        _timestamp(raw["as_of"], "curriculum as_of")
+        _nonnegative_int(raw["seed"], "curriculum seed")
+        _positive_int(raw["budget_units"], "curriculum budget_units")
+        if raw["deadline_at"] is not None and _instant(raw["deadline_at"], "curriculum deadline_at") < _instant(raw["as_of"], "curriculum as_of"):
+            raise ResearchSchedulerError("curriculum deadline_at cannot precede as_of")
+        if raw["status"] == "PENDING":
+            if any(raw[k] is not None for k in ("selection_id", "run_id", "receipt_sha256")):
+                raise ResearchSchedulerError("pending curriculum wake carries acceptance evidence")
+        elif raw["status"] == "ACCEPTED":
+            _sha(raw["selection_id"], "curriculum selection_id")
+            _sha(raw["run_id"], "curriculum run_id")
+            _sha(raw["receipt_sha256"], "curriculum receipt_sha256")
+        else:
+            raise ResearchSchedulerError("curriculum wake status is invalid")
+
+    @staticmethod
+    def _oldest_pending_curriculum(state: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+        pending = [
+            (wake_id, raw)
+            for wake_id, raw in state["curriculum_wakes"].items()
+            if raw["status"] == "PENDING"
+        ]
+        if not pending:
+            return None
+        return min(
+            pending,
+            key=lambda item: (item[1]["as_of"], item[1]["selector_policy_version"], item[0]),
+        )
+
+    def queue_curriculum_wake(
+        self,
+        curriculum: NightResearchCurriculum,
+        candidates: Iterable[ReplayCandidate],
+        *,
+        purpose: CurriculumPurpose,
+        selector_policy_version: str,
+        as_of: str,
+        seed: int,
+        budget_units: int,
+        max_concurrency: int,
+        active_concurrency: int,
+        remaining_budget_units: int,
+        deadline_at: str | None = None,
+    ) -> str:
+        if not isinstance(curriculum, NightResearchCurriculum):
+            raise TypeError("curriculum must be NightResearchCurriculum")
+        if curriculum.path.parent.resolve() != self.path.parent.resolve():
+            raise ResearchSchedulerError("curriculum must share the scheduler research workspace")
+        if not isinstance(purpose, CurriculumPurpose):
+            raise ResearchSchedulerError("purpose must be CurriculumPurpose")
+        selector_policy_version = _text(selector_policy_version, "selector_policy_version")
+        as_of = _timestamp(as_of, "as_of")
+        if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+            raise ResearchSchedulerError("seed must be non-negative")
+        _positive_int(budget_units, "budget_units")
+        _positive_int(max_concurrency, "max_concurrency")
+        _nonnegative_int(active_concurrency, "active_concurrency")
+        _nonnegative_int(remaining_budget_units, "remaining_budget_units")
+        if active_concurrency >= max_concurrency:
+            raise ResearchSchedulerError("curriculum concurrency admission unavailable")
+        if budget_units > remaining_budget_units:
+            raise ResearchSchedulerError("curriculum external budget admission unavailable")
+        if budget_units > curriculum.max_budget_units:
+            raise ResearchSchedulerError("curriculum budget exceeds curriculum authority")
+        if curriculum.status is not curriculum.status.ACTIVE:
+            raise ResearchSchedulerError("curriculum is not active")
+        if deadline_at is not None:
+            deadline_at = _timestamp(deadline_at, "deadline_at")
+            if _instant(deadline_at, "deadline_at") < _instant(as_of, "as_of"):
+                raise ResearchSchedulerError("deadline_at cannot precede as_of")
+
+        candidate_ids, population_sha256 = self._curriculum_population_digest(candidates)
+        wake_id = self._curriculum_wake_id(
+            selector_policy_version=selector_policy_version,
+            purpose=purpose,
+            candidate_population_sha256=population_sha256,
+            as_of=as_of,
+            seed=seed,
+            budget_units=budget_units,
+            deadline_at=deadline_at,
+        )
+        entry = {
+            "wake_id": wake_id,
+            "status": "PENDING",
+            "selector_policy_version": selector_policy_version,
+            "purpose": purpose.value,
+            "candidate_ids": list(candidate_ids),
+            "candidate_population_sha256": population_sha256,
+            "as_of": as_of,
+            "seed": seed,
+            "budget_units": budget_units,
+            "deadline_at": deadline_at,
+            "selection_id": None,
+            "run_id": None,
+            "receipt_sha256": None,
+        }
+        with WorkspaceEconomicLock(self.path.parent):
+            state = self._read()
+            self._validate(state)
+            if SchedulerStatus(state["status"]) is SchedulerStatus.STOPPED:
+                raise ResearchSchedulerError("stopped scheduler cannot queue curriculum wake")
+            prior = state["curriculum_wakes"].get(wake_id)
+            if prior is not None:
+                if prior != entry:
+                    raise ResearchSchedulerError("curriculum wake identity conflict")
+                return wake_id
+            if self._oldest_pending_curriculum(state) is not None:
+                raise ResearchSchedulerError("another curriculum wake is already pending")
+            state["curriculum_wakes"][wake_id] = entry
+            state["curriculum_wakes"] = dict(sorted(state["curriculum_wakes"].items()))
+            state["state_version"] += 1
+            self._write(state)
+        return wake_id
+
+    def tick_curriculum(
+        self,
+        curriculum: NightResearchCurriculum,
+        candidates: Iterable[ReplayCandidate],
+        *,
+        max_concurrency: int,
+        active_concurrency: int,
+        remaining_budget_units: int,
+    ) -> TickResult:
+        if not isinstance(curriculum, NightResearchCurriculum):
+            raise TypeError("curriculum must be NightResearchCurriculum")
+        if curriculum.path.parent.resolve() != self.path.parent.resolve():
+            raise ResearchSchedulerError("curriculum must share the scheduler research workspace")
+        _positive_int(max_concurrency, "max_concurrency")
+        _nonnegative_int(active_concurrency, "active_concurrency")
+        _nonnegative_int(remaining_budget_units, "remaining_budget_units")
+        with WorkspaceEconomicLock(self.path.parent):
+            state = self._read()
+            self._validate(state)
+            pending = self._oldest_pending_curriculum(state)
+            status = SchedulerStatus(state["status"])
+            if pending is None:
+                if status is SchedulerStatus.PAUSED:
+                    return TickResult(TickAction.PAUSED)
+                if status is SchedulerStatus.STOPPED:
+                    return TickResult(TickAction.STOPPED)
+                return TickResult(TickAction.IDLE)
+            wake_id, wake = pending
+            if active_concurrency >= max_concurrency or remaining_budget_units < wake["budget_units"]:
+                return TickResult(TickAction.ADMISSION_BLOCKED, curriculum_wake_id=wake_id)
+            if curriculum.status is curriculum.status.STOPPED:
+                return TickResult(TickAction.STOPPED, curriculum_wake_id=wake_id)
+            population = self._curriculum_population(candidates)
+            actual_ids, actual_digest = self._curriculum_population_digest(population)
+            if actual_ids != tuple(wake["candidate_ids"]) or actual_digest != wake["candidate_population_sha256"]:
+                raise ResearchSchedulerError("curriculum wake population identity/cutoff evidence changed")
+            purpose = CurriculumPurpose(wake["purpose"])
+            selector_policy_version = wake["selector_policy_version"]
+            as_of = wake["as_of"]
+            budget_units = wake["budget_units"]
+            deadline_at = wake["deadline_at"]
+            seed = wake["seed"]
+
+        receipt = curriculum.select_and_dispatch(
+            population,
+            purpose=purpose,
+            selector_policy_version=selector_policy_version,
+            as_of=as_of,
+            seed=seed,
+            budget_units=budget_units,
+            deadline_at=deadline_at,
+        )
+        if not isinstance(receipt, CurriculumDispatchReceipt):
+            raise ResearchSchedulerError("curriculum selector must return CurriculumDispatchReceipt")
+
+        with WorkspaceEconomicLock(self.path.parent):
+            state = self._read()
+            self._validate(state)
+            prior = state["curriculum_wakes"].get(wake_id)
+            if prior is None:
+                raise ResearchSchedulerError("curriculum wake disappeared")
+            if prior["status"] == "ACCEPTED":
+                if prior["selection_id"] != receipt.selection_id or prior["run_id"] != receipt.run_id or prior["receipt_sha256"] != receipt.trigger_receipt.receipt_sha256:
+                    raise ResearchSchedulerError("curriculum acceptance identity conflict")
+            elif prior["status"] == "PENDING":
+                prior["status"] = "ACCEPTED"
+                prior["selection_id"] = receipt.selection_id
+                prior["run_id"] = receipt.run_id
+                prior["receipt_sha256"] = receipt.trigger_receipt.receipt_sha256
+                state["state_version"] += 1
+                self._write(state)
+            else:
+                raise ResearchSchedulerError("curriculum wake status changed unexpectedly")
+        return TickResult(
+            TickAction.DELIVERED,
+            curriculum_wake_id=wake_id,
+            curriculum_selection_id=receipt.selection_id,
+        )
+
     def add_schedule(self, schedule: ResearchSchedule) -> None:
         if not isinstance(schedule, ResearchSchedule):
             raise TypeError("schedule must be ResearchSchedule")

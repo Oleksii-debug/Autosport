@@ -1337,6 +1337,7 @@ class PersistentLiveDecisionLoop:
                     for event in snapshot.events
                     if (
                         (spec.source_ids is None or event.source_id in spec.source_ids)
+                        and (spec.sports is None or event.sport in spec.sports)
                         and (spec.event_ids is None or event.event_id in spec.event_ids)
                         and (spec.market_ids is None or event.market_id in spec.market_ids)
                         and (
@@ -1978,6 +1979,7 @@ class PersistentLiveDecisionLoop:
                 for event in event_tuple
                 if (
                     (spec.source_ids is None or event.source_id in spec.source_ids)
+                    and (spec.sports is None or event.sport in spec.sports)
                     and (spec.event_ids is None or event.event_id in spec.event_ids)
                     and (spec.market_ids is None or event.market_id in spec.market_ids)
                     and (

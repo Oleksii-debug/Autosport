@@ -18,6 +18,7 @@ from autosport.scientific_registry import (
     PromotionEvidence,
     PromotionEvidenceDirection,
     PromotionEvidenceValidity,
+    promotion_holdout_access_id,
     ResearchOutcome,
     ResearchProtocol,
     ResearchQuestion,

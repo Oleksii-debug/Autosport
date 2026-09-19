@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 from .integrity import atomic_write_json
 from .workspace_lock import WorkspaceEconomicLock
@@ -396,6 +396,7 @@ class PairedVOCEvaluation:
         return value
 
 
+@runtime_checkable
 class VOCCanonicalAuthorityResolver(Protocol):
     """Resolve a VOC record from canonical decision/outcome/protocol authorities.
 

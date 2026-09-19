@@ -1,10 +1,10 @@
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import json
 import unittest
 from unittest.mock import patch
 
+from autosport.learning_environment import EvidenceTruth
 from autosport.opponent_intelligence import (
     InvalidationReason,
     InvalidationTarget,
@@ -82,6 +82,7 @@ def observation(
     available: str = T1,
     recorded: str = T1,
     evidence: str = SHA_B,
+    truth: EvidenceTruth = EvidenceTruth.OBSERVED,
     supersedes: str | None = None,
     sport: str = "tennis",
     league: str = "Tour A",
@@ -100,6 +101,7 @@ def observation(
         available_at=available,
         recorded_at=recorded,
         evidence_sha256=evidence,
+        truth=truth,
         supersedes_performance_id=supersedes,
     )
 
@@ -145,6 +147,33 @@ class OpponentIntelligenceTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def test_simulated_performance_cannot_enter_historical_graph(self):
+        with self.assertRaisesRegex(
+            OpponentIntelligenceError,
+            "requires observed evidence",
+        ):
+            self.store.record_performance(
+                observation(truth=EvidenceTruth.SIMULATED)
+            )
+        self.assertEqual(self.store.graph_edges(as_of=T2), ())
+
+    def test_persisted_performance_without_truth_fails_closed(self):
+        self.store.record_performance(observation())
+        raw = json.loads(self.store_path.read_text(encoding="utf-8"))
+        del raw["performances"][0]["observation"]["truth"]
+        self.store_path.write_text(
+            json.dumps(raw, sort_keys=True),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            OpponentIntelligenceError,
+            "invalid opponent intelligence state",
+        ):
+            OpponentIntelligenceStore(
+                self.store_path,
+                ParticipantIdentityRegistry(self.identity_path),
+            )
 
     def test_decision_view_excludes_late_backfill_but_restatement_includes_it(
         self,
@@ -698,7 +727,7 @@ class OpponentIntelligenceTests(unittest.TestCase):
                 )
             )
 
-    def test_restart_rejects_snapshot_with_missing_durable_input(
+    def test_restart_rejects_snapshot_when_all_durable_inputs_removed(
         self,
     ):
         self.store.record_performance(observation())

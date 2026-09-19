@@ -4,6 +4,8 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
+from tests.test_research_curriculum import _candidate, _workspace
+
 import pytest
 
 from autosport.research_scheduler import (
@@ -360,3 +362,142 @@ def test_curriculum_wake_budget_fails_closed_before_selection():
             deadline_at=None,
         )
     assert calls == []
+
+
+def test_curriculum_wake_freezes_population_and_dispatches_once(tmp_path):
+    _, supervisor, curriculum = _workspace(tmp_path, max_budget_units=8)
+    candidates = (
+        _candidate(episode_id="c-wake-1"),
+        _candidate(episode_id="c-wake-2", priority=4),
+    )
+    scheduler = ResearchScheduler.initialize_pristine(
+        tmp_path / "research-scheduler.json",
+        curriculum.trigger_adapter,
+    )
+
+    wake_id = scheduler.queue_curriculum_wake(
+        curriculum,
+        candidates,
+        purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=17,
+        budget_units=2,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+    result = scheduler.tick_curriculum(
+        curriculum,
+        candidates,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+
+    assert result.action is TickAction.DELIVERED
+    assert result.curriculum_wake_id == wake_id
+    assert result.curriculum_selection_id
+    assert len(supervisor.list_runs()) == 1
+    assert scheduler.snapshot()["curriculum_wakes"][wake_id]["status"] == "ACCEPTED"
+
+    reopened = ResearchScheduler(scheduler.path, curriculum.trigger_adapter)
+    again = reopened.tick_curriculum(
+        curriculum,
+        candidates,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+    assert again.action is TickAction.IDLE
+    assert len(supervisor.list_runs()) == 1
+
+
+def test_curriculum_wake_rejects_changed_population_before_dispatch(tmp_path):
+    _, supervisor, curriculum = _workspace(tmp_path, max_budget_units=8)
+    original = (_candidate(episode_id="c-wake-3"),)
+    changed = (
+        _candidate(
+            episode_id="c-wake-3",
+            reasons=("changed-population",),
+        ),
+    )
+    scheduler = ResearchScheduler.initialize_pristine(
+        tmp_path / "research-scheduler.json",
+        curriculum.trigger_adapter,
+    )
+    scheduler.queue_curriculum_wake(
+        curriculum,
+        original,
+        purpose=__import__("autosport.research_curriculum", fromlist=["CurriculumPurpose"]).CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=18,
+        budget_units=1,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+
+    with pytest.raises(ResearchSchedulerError, match="population identity/cutoff evidence changed"):
+        scheduler.tick_curriculum(
+            curriculum,
+            changed,
+            max_concurrency=1,
+            active_concurrency=0,
+            remaining_budget_units=8,
+        )
+    assert not supervisor.list_runs()
+
+
+def test_curriculum_wake_honors_external_admission_and_pending_recovery(tmp_path):
+    _, supervisor, curriculum = _workspace(tmp_path, max_budget_units=8)
+    candidate = (_candidate(episode_id="c-wake-4"),)
+    scheduler = ResearchScheduler.initialize_pristine(
+        tmp_path / "research-scheduler.json",
+        curriculum.trigger_adapter,
+    )
+    with pytest.raises(ResearchSchedulerError, match="concurrency admission"):
+        scheduler.queue_curriculum_wake(
+            curriculum,
+            candidate,
+            purpose=__import__("autosport.research_curriculum", fromlist=["CurriculumPurpose"]).CurriculumPurpose.CURRICULUM,
+            selector_policy_version="night-v1",
+            as_of="2026-09-19T03:20:00Z",
+            seed=19,
+            budget_units=1,
+            max_concurrency=1,
+            active_concurrency=1,
+            remaining_budget_units=8,
+        )
+
+    scheduler.queue_curriculum_wake(
+        curriculum,
+        candidate,
+        purpose=__import__("autosport.research_curriculum", fromlist=["CurriculumPurpose"]).CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=19,
+        budget_units=1,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+    blocked = scheduler.tick_curriculum(
+        curriculum,
+        candidate,
+        max_concurrency=1,
+        active_concurrency=1,
+        remaining_budget_units=8,
+    )
+    assert blocked.action is TickAction.ADMISSION_BLOCKED
+    assert not supervisor.list_runs()
+    delivered = scheduler.tick_curriculum(
+        curriculum,
+        candidate,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+    assert delivered.action is TickAction.DELIVERED
+    assert len(supervisor.list_runs()) == 1

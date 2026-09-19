@@ -504,12 +504,12 @@ def evaluate_policy_pair(
         if predecessor_propensity <= 0 or challenger_propensity <= 0:
             raise ValueError("policy evaluation chosen action is outside supported behavior")
 
-        predecessor_net = rewards[predecessor_choice] - costs.get(
-            predecessor_choice, Decimal(0)
-        )
-        challenger_net = rewards[challenger_choice] - costs.get(
-            challenger_choice, Decimal(0)
-        )
+        predecessor_reward = rewards[predecessor_choice]
+        predecessor_cost = costs[predecessor_choice]
+        challenger_reward = rewards[challenger_choice]
+        challenger_cost = costs[challenger_choice]
+        predecessor_net = predecessor_reward - predecessor_cost
+        challenger_net = challenger_reward - challenger_cost
         delta = challenger_net - predecessor_net
         predecessor_rewards.append(predecessor_net)
         challenger_rewards.append(challenger_net)
@@ -532,8 +532,14 @@ def evaluate_policy_pair(
                 "reward_mode": case.reward_mode.value,
                 "source_evidence_sha256": case.source_evidence_sha256,
                 "regime_id": case.regime_id,
+                "admissible_actions": list(case.admissible_actions),
+                "historical_action": case.historical_action,
                 "predecessor_action": predecessor_choice,
                 "challenger_action": challenger_choice,
+                "predecessor_reward": _decimal_text(predecessor_reward),
+                "predecessor_cost": _decimal_text(predecessor_cost),
+                "challenger_reward": _decimal_text(challenger_reward),
+                "challenger_cost": _decimal_text(challenger_cost),
                 "predecessor_net_reward": _decimal_text(predecessor_net),
                 "challenger_net_reward": _decimal_text(challenger_net),
                 "paired_improvement": _decimal_text(delta),

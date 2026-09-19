@@ -882,18 +882,82 @@ class ModelComputeRouterTests(unittest.TestCase):
                 backend_id="local-cpu",
                 model_id="baseline-v1",
                 config_sha256=SHA_A,
-                actual_cost=Decimal("0"),
+                actual_cost=Decimal("0.75"),
                 actual_latency_seconds=Decimal("2"),
                 evidence_sha256=SHA_C,
                 as_of=T1,
             )
             self.assertEqual(
                 post_restart.disposition,
+                ExecutionDisposition.ACCEPTED,
+            )
+            self.assertEqual(
+                reopened.total_actual_cost(local_request.request_id),
+                Decimal("2.80"),
+            )
+            request_after_restart_overrun = reopened.record_execution(
+                execution_id="exec-cumulative-request-after-restart-overrun",
+                request_id=local_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("0.01"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                request_after_restart_overrun.disposition,
                 ExecutionDisposition.REJECTED_COST,
             )
             self.assertEqual(
                 reopened.total_actual_cost(local_request.request_id),
-                Decimal("2.05"),
+                Decimal("2.81"),
+            )
+
+            cloud_after_restart = reopened.record_execution(
+                execution_id="exec-cumulative-cloud-after-restart",
+                request_id=cloud_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="permitted-cloud",
+                model_id="challenger-v2",
+                config_sha256=SHA_B,
+                actual_cost=Decimal("4"),
+                actual_latency_seconds=Decimal("4"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                cloud_after_restart.disposition,
+                ExecutionDisposition.ACCEPTED,
+            )
+            self.assertEqual(
+                reopened.total_actual_cost(cloud_request.request_id),
+                Decimal("14.01"),
+            )
+            cloud_after_restart_overrun = reopened.record_execution(
+                execution_id="exec-cumulative-cloud-after-restart-overrun",
+                request_id=cloud_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="permitted-cloud",
+                model_id="challenger-v2",
+                config_sha256=SHA_B,
+                actual_cost=Decimal("0.01"),
+                actual_latency_seconds=Decimal("4"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                cloud_after_restart_overrun.disposition,
+                ExecutionDisposition.REJECTED_COST,
+            )
+            self.assertEqual(
+                reopened.total_actual_cost(cloud_request.request_id),
+                Decimal("14.02"),
             )
 
     def test_future_voc_is_not_causally_usable(self):

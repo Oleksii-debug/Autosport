@@ -1373,6 +1373,7 @@ class ModelComputeRouterStore:
                 in self._executions.items()
                 if existing_execution_id != execution_id
                 and evidence.decision_id == decision.decision_id
+                and evidence.disposition is ExecutionDisposition.ACCEPTED
             ),
             _ZERO,
         )

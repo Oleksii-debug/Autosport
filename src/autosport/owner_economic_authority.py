@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Final, Literal, Mapping
+from typing import Final, Literal, Mapping, cast
 
 from .economic_goal import AutomationLevel, EconomicGoalContract, EconomicGoalContractError
 from .economic_goal_store import EconomicGoalStore
@@ -229,6 +229,37 @@ def contract_readback_lines(contract: EconomicGoalContract) -> tuple[str, ...]:
         )
         for name, values in restrictions
     )
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerEconomicReviewSnapshot:
+    """The exact form and selectable readback the owner reviewed before creation."""
+
+    values: tuple[tuple[str, str], ...]
+    emergency_stop: bool
+    lines_uk: tuple[str, ...]
+
+    @classmethod
+    def from_form(
+        cls, values: Mapping[str, object], *, emergency_stop: bool
+    ) -> "OwnerEconomicReviewSnapshot":
+        contract = build_initial_owner_contract(values, emergency_stop=emergency_stop)
+        return cls(
+            values=tuple((field, cast(str, values[field])) for field in OWNER_ECONOMIC_FORM_FIELDS),
+            emergency_stop=emergency_stop,
+            lines_uk=contract_readback_lines(contract),
+        )
+
+    def still_matches(self, values: Mapping[str, object], *, emergency_stop: bool) -> bool:
+        return (
+            type(emergency_stop) is bool
+            and emergency_stop == self.emergency_stop
+            and set(values) == set(OWNER_ECONOMIC_FORM_FIELDS)
+            and all(values[field] == value for field, value in self.values)
+        )
+
+    def form_values(self) -> dict[str, str]:
+        return dict(self.values)
 
 
 class OwnerEconomicAuthorityService:

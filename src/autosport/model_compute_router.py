@@ -1241,7 +1241,7 @@ class ModelComputeRouterStore:
                 "execution backend/model/config identity "
                 "differs from routed decision"
             )
-        elif completed > _instant(
+        elif available > _instant(
             "decision_deadline",
             request.decision_deadline,
         ):
@@ -1249,7 +1249,7 @@ class ModelComputeRouterStore:
                 ExecutionDisposition.REJECTED_LATE
             )
             reason = (
-                "execution completed after decision deadline"
+                "execution became available after decision deadline"
             )
         elif (
             _seconds(now, completed)

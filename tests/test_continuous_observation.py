@@ -184,6 +184,41 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(result.successful_cycles, 1)
             self.assertEqual(provider.calls, 1)
 
+    def test_stop_requested_inside_provider_cycle_commits_that_cycle_then_stops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stop_event = threading.Event()
+
+            class StopDuringReadProvider(SequenceProvider):
+                def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                    batch = super().read_batch(max_items=max_items)
+                    stop_event.set()
+                    return batch
+
+            provider = StopDuringReadProvider(
+                [
+                    _batch(_quote(), cursor="durable-before-stop"),
+                    _batch(_quote(sequence=2), cursor="must-not-run"),
+                ]
+            )
+            result = run_continuous_observation(
+                provider,
+                self._config(Path(tmp), max_cycles=5),
+                stop_event=stop_event,
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                reporter=None,
+            )
+
+            self.assertEqual(result.stop_reason, "operator_stop")
+            self.assertEqual(result.successful_cycles, 1)
+            self.assertEqual(result.total_accepted, 1)
+            self.assertEqual(provider.calls, 1)
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+
     def test_restart_reopens_canonical_workspace_and_preserves_dedupe(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

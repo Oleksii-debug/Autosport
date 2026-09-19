@@ -112,6 +112,18 @@ def test_activation_rejects_expired_or_tampered_or_wider_evidence(tmp_path):
         reason="test-qualified",
     )
     persist_eligibility_decision(registry, decision)
+    validate_activation_eligibility(
+        registry,
+        decision,
+        as_of="2026-02-12T12:00:00Z",
+        canonical_strategy_id="strategy-context",
+        expected_strategy_version_id="strategy-1",
+        expected_model_version_id="model-1",
+        expected_environment_sha256=ENV,
+        expected_protocol_id="protocol-1",
+        expected_config_sha256=CONFIG,
+        admissible_actions=frozenset({"WAIT"}),
+    )
     with pytest.raises(ChampionEligibilityError, match="expired"):
         validate_activation_eligibility(
             registry,

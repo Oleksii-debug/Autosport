@@ -107,7 +107,7 @@ class QualifiedCounterfactualAuthority:
         _text(self.scope, "scope")
         status=_text(self.qualification_status, "qualification_status")
         if status != "QUALIFIED":
-            raise ValueError("counterfactual authority must be frozen as QUALIFIED")
+            raise ValueError("counterfactual authority is not qualified; it must be frozen as QUALIFIED")
 
     def canonical_payload(self) -> dict[str, object]:
         return {

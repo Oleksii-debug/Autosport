@@ -23,6 +23,7 @@ from autosport.learning_environment import (
     Observation,
     Outcome,
     RewardEvidence,
+    Transition,
 )
 from autosport.research_supervisor import ResearchSupervisor
 from autosport.scientific_registry import ScientificRegistry
@@ -667,3 +668,233 @@ def test_attribution_and_postmortem_identity_keys_are_causal_and_immutable():
     from autosport.agent_loop import CreditAssignment
 
     assert CreditAssignment is AttributionFinding
+
+def test_resolution_rejects_forged_environment_decision_and_time_evidence(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+
+    foreign_outcome = Outcome(
+        environment_id="f" * 64,
+        action_id=action.action_id,
+        revealed_at="2026-09-19T13:05:00Z",
+        truth=EvidenceTruth.OBSERVED,
+        evidence=(("settlement", "foreign"),),
+    )
+    foreign_reward = RewardEvidence(
+        environment_id="f" * 64,
+        action_id=action.action_id,
+        outcome_id=foreign_outcome.outcome_id,
+        reward=Decimal("0.25"),
+        available_at="2026-09-19T13:05:01Z",
+        truth=EvidenceTruth.OBSERVED,
+    )
+    foreign_transition = Transition(
+        environment_id=environment.environment_id,
+        episode_id=environment.episode.episode_id,
+        step_index=1,
+        observation_id=observation.observation_id,
+        action_id=action.action_id,
+        outcome_id=foreign_outcome.outcome_id,
+        reward_id=foreign_reward.reward_id,
+        decision_at=action.decided_at,
+        resolved_at="2026-09-19T13:05:02Z",
+    )
+    with pytest.raises(
+        AgentLoopError,
+        match="another AgentLoop environment",
+    ):
+        runtime.record_resolution(
+            foreign_transition,
+            outcome=foreign_outcome,
+            reward=foreign_reward,
+            at="2026-09-19T13:05:02Z",
+        )
+
+    outcome = Outcome(
+        environment_id=environment.environment_id,
+        action_id=action.action_id,
+        revealed_at="2026-09-19T13:05:00Z",
+        truth=EvidenceTruth.OBSERVED,
+        evidence=(("settlement", "paper-result"),),
+    )
+    reward = RewardEvidence(
+        environment_id=environment.environment_id,
+        action_id=action.action_id,
+        outcome_id=outcome.outcome_id,
+        reward=Decimal("0.25"),
+        available_at="2026-09-19T13:05:01Z",
+        truth=EvidenceTruth.OBSERVED,
+    )
+    wrong_observation = Transition(
+        environment_id=environment.environment_id,
+        episode_id=environment.episode.episode_id,
+        step_index=1,
+        observation_id="a" * 64,
+        action_id=action.action_id,
+        outcome_id=outcome.outcome_id,
+        reward_id=reward.reward_id,
+        decision_at=action.decided_at,
+        resolved_at="2026-09-19T13:05:02Z",
+    )
+    with pytest.raises(AgentLoopError, match="durable current observation"):
+        runtime.record_resolution(
+            wrong_observation,
+            outcome=outcome,
+            reward=reward,
+            at="2026-09-19T13:05:02Z",
+        )
+
+    wrong_decision = Transition(
+        environment_id=environment.environment_id,
+        episode_id=environment.episode.episode_id,
+        step_index=1,
+        observation_id=observation.observation_id,
+        action_id=action.action_id,
+        outcome_id=outcome.outcome_id,
+        reward_id=reward.reward_id,
+        decision_at="2026-09-19T13:00:06Z",
+        resolved_at="2026-09-19T13:05:02Z",
+    )
+    with pytest.raises(AgentLoopError, match="durable action decision"):
+        runtime.record_resolution(
+            wrong_decision,
+            outcome=outcome,
+            reward=reward,
+            at="2026-09-19T13:05:02Z",
+        )
+
+    early_outcome = Outcome(
+        environment_id=environment.environment_id,
+        action_id=action.action_id,
+        revealed_at="2026-09-19T13:00:04Z",
+        truth=EvidenceTruth.OBSERVED,
+        evidence=(("settlement", "too-early"),),
+    )
+    early_reward = RewardEvidence(
+        environment_id=environment.environment_id,
+        action_id=action.action_id,
+        outcome_id=early_outcome.outcome_id,
+        reward=Decimal("0.25"),
+        available_at="2026-09-19T13:00:04Z",
+        truth=EvidenceTruth.OBSERVED,
+    )
+    early_transition = Transition(
+        environment_id=environment.environment_id,
+        episode_id=environment.episode.episode_id,
+        step_index=1,
+        observation_id=observation.observation_id,
+        action_id=action.action_id,
+        outcome_id=early_outcome.outcome_id,
+        reward_id=early_reward.reward_id,
+        decision_at=action.decided_at,
+        resolved_at="2026-09-19T13:05:02Z",
+    )
+    with pytest.raises(AgentLoopError, match="predates action decision"):
+        runtime.record_resolution(
+            early_transition,
+            outcome=early_outcome,
+            reward=early_reward,
+            at="2026-09-19T13:05:02Z",
+        )
+
+    future_transition = Transition(
+        environment_id=environment.environment_id,
+        episode_id=environment.episode.episode_id,
+        step_index=1,
+        observation_id=observation.observation_id,
+        action_id=action.action_id,
+        outcome_id=outcome.outcome_id,
+        reward_id=reward.reward_id,
+        decision_at=action.decided_at,
+        resolved_at="2026-09-19T13:06:00Z",
+    )
+    with pytest.raises(AgentLoopError, match="future resolution evidence"):
+        runtime.record_resolution(
+            future_transition,
+            outcome=outcome,
+            reward=reward,
+            at="2026-09-19T13:05:02Z",
+        )
+
+    assert runtime.snapshot().phase is AgentLoopPhase.WAIT_OUTCOME
+    assert runtime.snapshot().transition_id is None
+
+
+def test_postmortem_cannot_relabel_supported_attribution_as_unresolved(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+    outcome, reward, transition = _resolve(environment, action)
+    runtime.record_resolution(
+        transition,
+        outcome=outcome,
+        reward=reward,
+        at="2026-09-19T13:05:02Z",
+    )
+    runtime.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:05:03Z",
+    )
+    attribution = _attribution(
+        environment,
+        transition,
+        outcome,
+        reward,
+    )
+    runtime.record_attribution(
+        attribution,
+        at="2026-09-19T13:05:04Z",
+    )
+
+    forged = ReflectionPostmortem(
+        attribution_id=attribution.attribution_id,
+        transition_id=transition.transition_id,
+        created_at="2026-09-19T13:05:05Z",
+        unresolved_components=(AttributionComponent.FORECAST,),
+        summary_code="SUPPORTED_COMPONENT_IS_NOT_UNRESOLVED",
+        research_question_statement=(
+            "Should a supported component be treated as unresolved?"
+        ),
+    )
+    with pytest.raises(AgentLoopError, match="UNKNOWN or MIXED"):
+        runtime.record_postmortem(
+            forged,
+            at="2026-09-19T13:05:05Z",
+        )
+
+    assert runtime.snapshot().phase is AgentLoopPhase.REFLECT
+    assert runtime.snapshot().postmortem_id is None
+

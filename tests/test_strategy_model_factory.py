@@ -142,8 +142,14 @@ def _promotion_evidence(
         "evaluation_bundle_id": bundle_id,
         "evaluation_bundle_sha256": bundle_sha,
         "dataset_snapshot_id": dataset_id,
-        "holdout_access_id": f"{protocol_id}:holdout:{bundle_id}:{evidence_id_seed}",
-        "confirmation_trial_family_id": f"{protocol_id}:trial-family",
+        "holdout_access_id": promotion_holdout_access_id(
+        research_protocol_id=protocol_id,
+        dataset_manifest_sha256=SHA_A,
+        source_identity="lawful-provider:fixture",
+        license_identity="license-evidence:v1",
+        confirmation_trial_family_id=f"{protocol_id}:confirmation-trial-family",
+    ),
+        "confirmation_trial_family_id": f"{protocol_id}:confirmation-trial-family",
         "estimand": "mse",
         "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
         "cohort_id": dataset_id,
@@ -158,7 +164,7 @@ def _promotion_evidence(
         "stopping_rule_sha256": hashlib.sha256(b"one final evaluation").hexdigest(),
         "multiple_comparison_control_sha256": hashlib.sha256(b"single frozen primary metric").hexdigest(),
         "rollback_identity": rollback_identity,
-        "uncertainty_method": "deterministic baseline checkpoint",
+        "uncertainty_method": "paired min/max interval",
         "created_at": created_at,
     }
     evidence_id = _canonical_sha(payload)

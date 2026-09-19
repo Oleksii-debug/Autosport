@@ -126,6 +126,12 @@ class CollectorCycleResult:
 
 
 @dataclass(frozen=True, slots=True)
+class CollectorRunResult:
+    cycles_executed: int
+    last_cycle: CollectorCycleResult | None
+
+
+@dataclass(frozen=True, slots=True)
 class DeltaFeedPage:
     source_id: str
     deltas: tuple[CollectorDelta, ...]
@@ -566,27 +572,33 @@ class HeadlessCollectorService:
     def stop(self, reason: str = "operator_stop") -> None:
         self._state.stop(at=self.clock(), reason=reason)
 
-    def run(self, *, max_cycles: int | None = None) -> tuple[CollectorCycleResult, ...]:
+    def run(self, *, max_cycles: int | None = None) -> CollectorRunResult:
+        """Run until STOP without retaining an unbounded in-memory cycle history."""
         if max_cycles is not None and (
             isinstance(max_cycles, bool)
             or not isinstance(max_cycles, int)
             or max_cycles <= 0
         ):
             raise ValueError("max_cycles must be a positive integer or None")
-        results: list[CollectorCycleResult] = []
-        while max_cycles is None or len(results) < max_cycles:
+        cycles_executed = 0
+        last_cycle: CollectorCycleResult | None = None
+        while max_cycles is None or cycles_executed < max_cycles:
             if self.stop_requested():
                 self.stop("stop_requested")
                 break
-            results.append(self.run_cycle())
-            if max_cycles is not None and len(results) >= max_cycles:
+            last_cycle = self.run_cycle()
+            cycles_executed += 1
+            if max_cycles is not None and cycles_executed >= max_cycles:
                 self.stop("max_cycles_reached")
                 break
             if self.stop_requested():
                 self.stop("stop_requested")
                 break
             self.sleep(self.config.poll_interval_seconds)
-        return tuple(results)
+        return CollectorRunResult(
+            cycles_executed=cycles_executed,
+            last_cycle=last_cycle,
+        )
 
 
 def _load_source_factory(spec: str) -> Callable[[], CollectorServiceSource]:

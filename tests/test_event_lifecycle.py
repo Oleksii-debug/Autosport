@@ -9,6 +9,7 @@ from pathlib import Path
 from autosport.domain import MarketEvent
 from autosport.event_lifecycle import (
     CatalogConflictError,
+    CatalogConflictError,
     CatalogCursorError,
     CatalogEvent,
     CatalogPage,
@@ -123,6 +124,52 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(table_tennis, "provider-a:event-1")
         self.assertEqual(soccer, table_tennis)
+
+    def test_completed_state_is_hidden_before_local_discovery_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = ContinuousEventLifecycle(Path(directory) / "catalog.json")
+            pre = self._event()
+            completed = self._event(
+                sequence=2,
+                status="closed",
+            )
+            identity = pre.source_id + ":" + pre.event_id
+            lifecycle.apply_page(
+                self._page(1, self._catalog_event()),
+                discovered_at=(self.START + timedelta(seconds=2)).isoformat(),
+            )
+            lifecycle.apply_page(
+                self._page(
+                    2,
+                    CatalogEvent(
+                        source_id="provider-a",
+                        sport="table_tennis",
+                        event_id="event-1",
+                        phase=EventPhase.COMPLETED,
+                        available_at=(self.START + timedelta(seconds=4)).isoformat(),
+                        completion_ref="provider-result:rev-1",
+                    ),
+                ),
+                discovered_at=(self.START + timedelta(seconds=6)).isoformat(),
+            )
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                before = lifecycle.assess_evidence(
+                    identity,
+                    store,
+                    as_of=(self.START + timedelta(seconds=5)).isoformat(),
+                    required_history=timedelta(0),
+                )
+                after = lifecycle.assess_evidence(
+                    identity,
+                    store,
+                    as_of=(self.START + timedelta(seconds=6)).isoformat(),
+                    required_history=timedelta(0),
+                )
+            finally:
+                store.close()
+            self.assertEqual(before.status, EvidenceEligibility.WAIT_EVIDENCE)
+            self.assertEqual(after.status, EvidenceEligibility.COMPLETED)
 
     def test_post_start_discovery_progresses_same_identity_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -26,6 +26,8 @@ from autosport.portfolio_plan import (
     OpportunityIntent,
     PortfolioAction,
     PortfolioDependencyGraph,
+    PortfolioDependencyEvidence,
+    RobustPortfolioProposal,
     PortfolioPlan,
     PortfolioPlanReconciliationRequired,
     TerminalStateCompletenessEvidence,
@@ -533,6 +535,146 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertEqual(plan.action, PortfolioAction.WAIT)
         self.assertEqual(plan.stakes, (Decimal("0"), Decimal("0")))
         self.assertIn("complete canonical joint-dependency proof", plan.reason)
+
+
+    def _dependency_evidence(
+        self,
+        book: PaperBook,
+        intents: tuple[OpportunityIntent, ...],
+        *,
+        dependency: Decimal = Decimal("0.25"),
+        uncertainty: Decimal = Decimal("0.10"),
+        fee: Decimal = Decimal("0.01"),
+        partial_fill: Decimal = Decimal("0.10"),
+        as_of: str = "2026-09-18T13:19:59+00:00",
+    ) -> PortfolioDependencyEvidence:
+        portfolio_sha = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        assert portfolio_sha is not None
+        candidates = tuple(intent.candidate_sha256 for intent in intents)
+        pairs = tuple(
+            (left, right, dependency)
+            for index, left in enumerate(candidates)
+            for right in candidates[index + 1:]
+        )
+        return PortfolioDependencyEvidence(
+            evidence_id="dependency-evidence-1",
+            portfolio_sha256=portfolio_sha,
+            intent_sha256s=tuple(intent.intent_sha256 for intent in intents),
+            candidate_sha256s=candidates,
+            population_id="historical-soccer-v1",
+            method="empirical-upper-bound",
+            sample_size=100,
+            causal_cutoff="2026-09-18T13:19:58+00:00",
+            as_of=as_of,
+            reproducibility_sha256="f" * 64,
+            pairwise_dependency_upper_bounds=pairs,
+            uncertainty_fraction=uncertainty,
+            fee_fraction=fee,
+            partial_fill_stress_fraction=partial_fill,
+        )
+
+    def test_dependency_evidence_requires_complete_pair_matrix_and_round_trips(self) -> None:
+        goal = self._goal()
+        first = self._intent(goal, suffix="dep-a", signal=Decimal("0.05"))
+        second = self._intent(goal, suffix="dep-b", signal=Decimal("0.04"))
+        book = PaperBook("1000")
+        evidence = self._dependency_evidence(book, (first, second))
+        self.assertEqual(
+            PortfolioDependencyEvidence.from_dict(evidence.to_dict()),
+            evidence,
+        )
+        incomplete = replace(evidence, pairwise_dependency_upper_bounds=())
+        with self.assertRaisesRegex(ValueError, "cover every candidate pair"):
+            PortfolioDependencyEvidence(
+                **{
+                    **incomplete.__dict__,
+                }
+            )
+
+    def test_dependency_evidence_stale_or_mismatched_inputs_fail_closed(self) -> None:
+        goal = self._goal()
+        first = self._intent(goal, suffix="stale-a", signal=Decimal("0.05"))
+        second = self._intent(goal, suffix="stale-b", signal=Decimal("0.04"))
+        book = PaperBook("1000")
+        policy = self._policy(goal)
+        graph = self._graph(book, (first, second), dependency_edges=(
+            tuple(sorted((first.candidate_sha256, second.candidate_sha256))),
+        ))
+        stale = self._dependency_evidence(
+            book,
+            (first, second),
+            as_of="2026-09-18T13:20:01+00:00",
+        )
+        stale_plan = build_portfolio_plan(
+            book,
+            (first, second),
+            policy,
+            self.DECISION_TS,
+            dependency_graph=graph,
+            dependency_evidence=stale,
+        )
+        self.assertEqual(stale_plan.action, PortfolioAction.WAIT)
+        self.assertIn("stale", stale_plan.reason)
+
+        other = self._intent(goal, suffix="mismatch")
+        mismatch = self._dependency_evidence(book, (first, second))
+        mismatch_plan = build_portfolio_plan(
+            book,
+            (first, other),
+            policy,
+            self.DECISION_TS,
+            dependency_graph=graph,
+            dependency_evidence=mismatch,
+        )
+        self.assertEqual(mismatch_plan.action, PortfolioAction.WAIT)
+        self.assertIn("does not bind exact portfolio/candidates", mismatch_plan.reason)
+
+    def test_correlated_positive_candidates_use_robust_haircut_and_remain_exact_decimal(self) -> None:
+        goal = self._goal()
+        first = self._intent(goal, suffix="robust-a", signal=Decimal("0.05"))
+        second = self._intent(goal, suffix="robust-b", signal=Decimal("0.04"))
+        intents = (first, second)
+        book = PaperBook("1000")
+        graph = self._graph(
+            book,
+            intents,
+            dependency_edges=(tuple(sorted((first.candidate_sha256, second.candidate_sha256))),),
+        )
+        evidence = self._dependency_evidence(
+            book,
+            intents,
+            dependency=Decimal("0.25"),
+            uncertainty=Decimal("0.10"),
+            fee=Decimal("0.01"),
+            partial_fill=Decimal("0.10"),
+        )
+        proposal = RobustPortfolioProposal.derive((Decimal("50"), Decimal("40")), evidence)
+        expected_scale = (
+            Decimal("0.75")
+            * Decimal("0.90")
+            * Decimal("0.99")
+            * Decimal("0.90")
+        )
+        self.assertEqual(proposal.robust_scale, expected_scale)
+        self.assertEqual(proposal.proposed_stakes, (
+            (Decimal("50") * expected_scale).quantize(Decimal("0.01")),
+            (Decimal("40") * expected_scale).quantize(Decimal("0.01")),
+        ))
+        restored = RobustPortfolioProposal.from_dict(proposal.to_dict())
+        self.assertEqual(restored, proposal)
+
+        plan = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            dependency_evidence=evidence,
+        )
+        self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
+        self.assertEqual(plan.stakes, proposal.proposed_stakes)
+        self.assertTrue(all(stake >= 0 for stake in plan.stakes))
+        self.assertTrue(all(isinstance(stake, Decimal) for stake in plan.stakes))
 
     def test_outcome_independent_positive_requires_complete_exact_terminal_evidence(self) -> None:
         goal = self._goal()

@@ -31,7 +31,6 @@ _WINDOWS_SHELL_UK_UA = MappingProxyType(
         "ui.windows.manual_calculation.status.ready": "Готово. Введіть значення для обраної операції.",
         "ui.windows.manual_calculation.status.success": "Готово: канонічний результат і evidence доступні лише для читання; real_money_execution=false.",
         "ui.windows.manual_calculation.status.error": "Розрахунок відхилено; частковий результат не показується.",
-        "ui.windows.manual_calculation.error.calculation_failed": "Розрахунок не виконано через недійсні або неприйнятні вхідні дані. Частковий результат не показується.",
         "ui.windows.manual_calculation.status.cleared": "Очищено. Скасування/очищення нічого не записує.",
         "ui.windows.manual_calculation.result.heading": "Результат ручного розрахунку",
         "ui.windows.manual_calculation.result.operation": "Операція",

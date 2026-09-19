@@ -537,8 +537,16 @@ class OpponentGraphStore:
             if existing != snapshot:
                 raise OpponentGraphError("conflicting immutable snapshot identity")
             return snapshot.snapshot_id
-        self._snapshots[snapshot.snapshot_id] = snapshot
-        self._persist()
+        candidate_snapshots = dict(self._snapshots)
+        candidate_snapshots[snapshot.snapshot_id] = snapshot
+        self._persist_snapshot(
+            observations=self._observations,
+            edges=self._edges,
+            snapshots=candidate_snapshots,
+            work=self._work,
+            invalidated_edge_ids=self._invalidated_edge_ids,
+        )
+        self._snapshots = candidate_snapshots
         return snapshot.snapshot_id
 
     def invalidate_for_correction(
@@ -649,44 +657,6 @@ class OpponentGraphStore:
             self._work = candidate_work
             self._invalidated_edge_ids = affected_edges
         return tuple(sorted(affected_snapshots))
-
-    def invalidate_for_identity(
-        self,
-        entity_id: str,
-        *,
-        reason_code: str = "IDENTITY_CORRECTION",
-    ) -> tuple[str, ...]:
-        self._require_entity(entity_id)
-        affected = []
-        for snapshot_id, snapshot in tuple(self._snapshots.items()):
-            if entity_id not in {feature.participant_id for feature in snapshot.features}:
-                continue
-            work = RecomputeWork.create(
-                target_snapshot_id=snapshot_id,
-                reason_code=reason_code,
-                created_from_observation_id=snapshot.input_observation_ids[0],
-                affected_entity_ids=tuple(sorted(feature.participant_id for feature in snapshot.features)),
-            )
-            self._work[work.work_id] = work
-            replacement = RatingSnapshot(
-                algorithm=snapshot.algorithm,
-                algorithm_version=snapshot.algorithm_version,
-                config_digest=snapshot.config_digest,
-                as_of=snapshot.as_of,
-                view=snapshot.view,
-                input_observation_ids=snapshot.input_observation_ids,
-                input_set_digest=snapshot.input_set_digest,
-                features=snapshot.features,
-                causal_cutoff=snapshot.causal_cutoff,
-                invalidated=True,
-                invalidation_work_id=work.work_id,
-            )
-            self._snapshots.pop(snapshot_id)
-            self._snapshots[replacement.snapshot_id] = replacement
-            affected.append(replacement.snapshot_id)
-        if affected:
-            self._persist()
-        return tuple(sorted(affected))
 
     def observations(self) -> tuple[PerformanceOutcome, ...]:
         return tuple(sorted(self._observations.values(), key=lambda row: row.observation_id))
@@ -816,7 +786,14 @@ class OpponentGraphStore:
                         raise OpponentGraphError("stored snapshot references missing observation")
                 self._snapshots[snapshot.snapshot_id] = snapshot
 
-            self._invalidated_edge_ids = set(raw.get("invalidated_edge_ids", []))
+            raw_invalidated_edges = raw.get("invalidated_edge_ids", [])
+            if type(raw_invalidated_edges) is not list or any(
+                type(item) is not str for item in raw_invalidated_edges
+            ):
+                raise OpponentGraphError("invalid invalidated_edge_ids state")
+            self._invalidated_edge_ids = set(raw_invalidated_edges)
+            if not self._invalidated_edge_ids.issubset(self._edges):
+                raise OpponentGraphError("invalidated edge state references missing edge")
             for item in raw.get("recompute_work", []):
                 work = RecomputeWork(
                     target_snapshot_id=item["target_snapshot_id"],

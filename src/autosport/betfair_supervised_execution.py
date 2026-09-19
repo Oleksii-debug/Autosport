@@ -7,12 +7,13 @@ RealExecutionLedger remains the sole execution-effect authority.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from hashlib import sha256
 import json
+from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from .betfair_account_readonly import (
@@ -192,6 +193,11 @@ class BetfairSupervisedExecutionGate:
     authority_ref: str | None = None
     authority_sha256: str | None = None
     economic_goal_store: EconomicGoalStore | None = None
+    economic_goal_workspace: Path | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
@@ -217,6 +223,14 @@ class BetfairSupervisedExecutionGate:
             raise BetfairSupervisedExecutionError(
                 "enabled gate requires canonical EconomicGoalStore authority"
             )
+        workspace = self.economic_goal_store.workspace.resolve()
+        if self.economic_goal_store.path.resolve() != (
+            workspace / EconomicGoalStore.FILE_NAME
+        ):
+            raise BetfairSupervisedExecutionError(
+                "enabled gate requires canonical EconomicGoalStore path"
+            )
+        object.__setattr__(self, "economic_goal_workspace", workspace)
 
     @classmethod
     def from_economic_goal_store(
@@ -257,12 +271,18 @@ class BetfairSupervisedExecutionGate:
         *,
         action: ExecutionAction,
         bound: BoundSupervisedExecutionPlan,
+        execution_workspace: Path,
     ) -> None:
-        store = self.economic_goal_store
-        if not isinstance(store, EconomicGoalStore):
+        if not isinstance(execution_workspace, Path):
             raise BetfairSupervisedExecutionError(
-                "enabled gate lacks canonical EconomicGoalStore authority"
+                "execution workspace must be a canonical Path"
             )
+        canonical_workspace = execution_workspace.resolve()
+        if self.economic_goal_workspace != canonical_workspace:
+            raise BetfairSupervisedExecutionError(
+                "owner authority is not bound to the trusted execution workspace"
+            )
+        store = EconomicGoalStore(canonical_workspace)
         try:
             goal = store.load()
         except EconomicGoalContractError as exc:
@@ -311,6 +331,7 @@ class BetfairSupervisedExecutionGate:
         action: ExecutionAction,
         profile: BookmakerCapabilityProfile,
         bound: BoundSupervisedExecutionPlan,
+        execution_workspace: Path,
     ) -> None:
         if not self.enabled:
             raise BetfairSupervisedExecutionError(
@@ -319,6 +340,7 @@ class BetfairSupervisedExecutionGate:
         self._require_current_owner_authority(
             action=action,
             bound=bound,
+            execution_workspace=execution_workspace,
         )
         if (
             action.bookmaker_id != self.bookmaker_id
@@ -540,6 +562,7 @@ class BetfairSupervisedPlaceOrdersClient:
         profile: BookmakerCapabilityProfile,
         bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
+        execution_workspace: Path,
     ) -> BetfairPlaceExecutionReport:
         if not isinstance(action, ExecutionAction):
             raise BetfairSupervisedExecutionError(
@@ -553,6 +576,7 @@ class BetfairSupervisedPlaceOrdersClient:
             action=action,
             profile=profile,
             bound=bound,
+            execution_workspace=execution_workspace,
         )
         provider_ref = _text(provider_order_ref, "provider_order_ref")
         if len(provider_ref) > 32 or any(
@@ -925,6 +949,7 @@ def execute_betfair_supervised_action(
         action=action,
         profile=profile,
         bound=bound,
+        execution_workspace=ledger.path.parent,
     )
 
     begin_supervised_attempt(
@@ -949,6 +974,7 @@ def execute_betfair_supervised_action(
             profile=profile,
             bound=bound,
             provider_order_ref=provider_order_ref,
+            execution_workspace=ledger.path.parent,
         )
     except (
         BetfairPlaceOrdersAmbiguous,

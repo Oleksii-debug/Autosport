@@ -553,6 +553,86 @@ def test_caller_minted_authority_cannot_enable_with_real_owner_store() -> None:
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
 
+def test_shadow_owner_store_cannot_bypass_canonical_emergency_stop() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        canonical_workspace = root / "canonical"
+        shadow_workspace = root / "shadow"
+        profile, bound, approval, ledger, action, canonical_store = _prepared(
+            str(canonical_workspace)
+        )
+        shadow_store = EconomicGoalStore(shadow_workspace)
+        shadow_store.initialize_owner(_goal())
+        canonical_store.persist_automatic_successor(
+            _goal(revision=2, emergency_stop=True)
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(
+            profile,
+            transport,
+            store=shadow_store,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="trusted execution workspace",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-shadow-owner",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_redirected_store_object_cannot_hide_canonical_emergency_stop() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        canonical_workspace = root / "canonical"
+        shadow_workspace = root / "shadow"
+        profile, bound, approval, ledger, action, goal_store = _prepared(
+            str(canonical_workspace)
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(
+            profile,
+            transport,
+            store=goal_store,
+        )
+        EconomicGoalStore(canonical_workspace).persist_automatic_successor(
+            _goal(revision=2, emergency_stop=True)
+        )
+        shadow_store = EconomicGoalStore(shadow_workspace)
+        shadow_store.initialize_owner(_goal())
+        goal_store.workspace = shadow_workspace
+        goal_store.path = shadow_store.path
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="emergency STOP",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-redirected-owner",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
 def test_bound_plan_preserves_exact_owner_goal_identity() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         goal = _goal()

@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from typing import Final
 
@@ -142,7 +142,11 @@ class BanditPolicyState:
     schema_version: int = POLICY_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.schema != POLICY_SCHEMA or self.schema_version != POLICY_SCHEMA_VERSION:
+        if (
+            self.schema != POLICY_SCHEMA
+            or type(self.schema_version) is not int
+            or self.schema_version != POLICY_SCHEMA_VERSION
+        ):
             raise LearningEnvironmentError("unsupported transparent policy schema")
         _sha256("environment_id", self.environment_id)
         _text("protocol_id", self.protocol_id)
@@ -206,20 +210,89 @@ class BanditPolicyState:
 
     @property
     def policy_id(self) -> str:
-        return _stable_hash(
-            {
-                "schema": self.schema,
-                "schema_version": self.schema_version,
-                "environment_id": self.environment_id,
-                "protocol_id": self.protocol_id,
-                "config_sha256": self.config_sha256,
-                "seed": self.seed,
-                "generation": self.generation,
-                "estimates": [item.to_payload() for item in self.estimates],
-                "applied_action_ids": list(self.applied_action_ids),
-                "applied_reward_ids": list(self.applied_reward_ids),
-                "predecessor_policy_id": self.predecessor_policy_id,
-            }
+        return _stable_hash(self.to_payload())
+
+    def to_payload(self) -> dict[str, object]:
+        """Return the exact immutable policy payload used by ``policy_id``."""
+
+        return {
+            "schema": self.schema,
+            "schema_version": self.schema_version,
+            "environment_id": self.environment_id,
+            "protocol_id": self.protocol_id,
+            "config_sha256": self.config_sha256,
+            "seed": self.seed,
+            "generation": self.generation,
+            "estimates": [item.to_payload() for item in self.estimates],
+            "applied_action_ids": list(self.applied_action_ids),
+            "applied_reward_ids": list(self.applied_reward_ids),
+            "predecessor_policy_id": self.predecessor_policy_id,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "BanditPolicyState":
+        """Reconstruct one policy without accepting aliases or lossy numerics."""
+
+        expected = {
+            "schema",
+            "schema_version",
+            "environment_id",
+            "protocol_id",
+            "config_sha256",
+            "seed",
+            "generation",
+            "estimates",
+            "applied_action_ids",
+            "applied_reward_ids",
+            "predecessor_policy_id",
+        }
+        if type(payload) is not dict or set(payload) != expected:
+            raise LearningEnvironmentError("policy payload fields mismatch")
+        if type(payload["estimates"]) is not list or not payload["estimates"]:
+            raise LearningEnvironmentError("policy estimates must be a non-empty list")
+        estimates: list[ActionEstimate] = []
+        for raw in payload["estimates"]:
+            if type(raw) is not dict or set(raw) != {
+                "action_type",
+                "observations",
+                "reward_sum",
+            }:
+                raise LearningEnvironmentError("policy estimate fields mismatch")
+            reward_text = raw["reward_sum"]
+            if type(reward_text) is not str:
+                raise LearningEnvironmentError("policy reward_sum must be Decimal text")
+            try:
+                reward_sum = Decimal(reward_text)
+            except InvalidOperation as exc:
+                raise LearningEnvironmentError(
+                    "policy reward_sum must be finite canonical Decimal text"
+                ) from exc
+            if not reward_sum.is_finite() or str(reward_sum) != reward_text:
+                raise LearningEnvironmentError(
+                    "policy reward_sum must be finite canonical Decimal text"
+                )
+            estimates.append(
+                ActionEstimate(
+                    action_type=raw["action_type"],
+                    observations=raw["observations"],
+                    reward_sum=reward_sum,
+                )
+            )
+        for name in ("applied_action_ids", "applied_reward_ids"):
+            if type(payload[name]) is not list:
+                raise LearningEnvironmentError(f"policy {name} must be a list")
+        return cls(
+            environment_id=payload["environment_id"],
+            protocol_id=payload["protocol_id"],
+            config_sha256=payload["config_sha256"],
+            seed=payload["seed"],
+            generation=payload["generation"],
+            estimates=tuple(estimates),
+            applied_action_ids=tuple(payload["applied_action_ids"]),
+            applied_reward_ids=tuple(payload["applied_reward_ids"]),
+            predecessor_policy_id=payload["predecessor_policy_id"],
+            schema=payload["schema"],
+            schema_version=payload["schema_version"],
         )
 
     def choose(self, *, admissible_actions: frozenset[str]) -> str:

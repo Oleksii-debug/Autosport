@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
+from .champion_policy import persist_policy_state
 from .strategy_model_factory import (
     ExperimentRunner,
     FactoryCandidateSpec,
@@ -197,6 +198,9 @@ def run_policy_retest(
     if factory_spec.seed != challenger_policy.seed:
         raise ValueError("factory candidate seed identity mismatch")
 
+    # The immutable artifact is evidence only.  Persisting it cannot activate the
+    # challenger; ScientificRegistry promotion history remains the sole authority.
+    persist_policy_state(runner.artifact_store, challenger_policy)
     return runner.run_baseline_candidate(
         factory_spec,
         points,

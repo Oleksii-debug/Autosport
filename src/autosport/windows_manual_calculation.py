@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Any, Callable
+from typing import Any
 
 import tk_uia
 
@@ -65,7 +65,7 @@ def _read_lines(widget: tk.Text, *, minimum: int = 1) -> list[str]:
     raw = widget.get("1.0", "end-1c")
     lines = [line.strip() for line in raw.replace(",", "\n").splitlines() if line.strip()]
     if len(lines) < minimum:
-        raise ValueError("Потрібно ввести всі обов'язкові значення.")
+        raise ValueError(text("ui.windows.manual_calculation.error.nonempty"))
     return lines
 
 
@@ -73,12 +73,12 @@ def _selection_odds(widget: tk.Text) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in _read_lines(widget):
         if "=" not in line:
-            raise ValueError("Для зняття маржі кожен рядок має бути у форматі selection_id=коефіцієнт.")
+            raise ValueError(text("ui.windows.manual_calculation.error.selection_format"))
         selection, odds = (part.strip() for part in line.split("=", 1))
         if not selection or not odds:
-            raise ValueError("Ідентифікатор вибору та коефіцієнт не можуть бути порожніми.")
+            raise ValueError(text("ui.windows.manual_calculation.error.selection_empty"))
         if selection in values:
-            raise ValueError(f"Повторний ідентифікатор вибору: {selection!r}.")
+            raise ValueError(text("ui.windows.manual_calculation.error.duplicate", selection=selection))
         values[selection] = odds
     return values
 
@@ -91,7 +91,7 @@ def _calculation_call(
     if operation in {"odds_conversion", "implied_probability"}:
         value = _read_lines(widget)
         if len(value) != 1:
-            raise ValueError("Ця операція приймає рівно одне числове значення.")
+            raise ValueError(text("ui.windows.manual_calculation.error.single"))
         return getattr(service, operation)(value[0])
 
     if operation == "multiplicative_devig":
@@ -100,19 +100,19 @@ def _calculation_call(
     values = _read_lines(widget)
     if operation == "expected_return":
         if len(values) != 3:
-            raise ValueError("Очікуваний результат потребує 3 значення: ймовірність, коефіцієнт, ставка.")
+            raise ValueError(text("ui.windows.manual_calculation.error.expected_return"))
         return service.expected_return(values[0], values[1], values[2])
     if operation == "paper_payout":
         if len(values) != 2:
-            raise ValueError("Паперова виплата потребує 2 значення: ставка, коефіцієнт.")
+            raise ValueError(text("ui.windows.manual_calculation.error.paper_payout"))
         return service.paper_payout(values[0], values[1])
     if operation == "fractional_kelly":
         if len(values) != 4:
-            raise ValueError("Kelly потребує 4 значення: ймовірність, коефіцієнт, fraction, cap.")
+            raise ValueError(text("ui.windows.manual_calculation.error.kelly"))
         return service.fractional_kelly(values[0], values[1], fraction=values[2], cap=values[3])
     if operation == "maximum_drawdown":
         return service.maximum_drawdown(values)
-    raise ValueError("Невідома ручна операція.")
+    raise ValueError(text("ui.windows.manual_calculation.error.unknown"))
 
 
 def _set_uia(widget: Any, *, name: str, description: str, automation_id: int) -> None:
@@ -139,7 +139,6 @@ def show_manual_calculation_workbench(app: Any) -> None:
     ).pack(anchor="w")
     ttk.Label(
         body,
-        text=(
         text=text("ui.windows.manual_calculation.dialog.description"),
         wraplength=1000,
     ).pack(anchor="w", pady=(2, 8))
@@ -180,7 +179,7 @@ def show_manual_calculation_workbench(app: Any) -> None:
         try:
             return operation_values[operation_var.get()]
         except KeyError as exc:
-            raise ValueError("Операція не вибрана.") from exc
+            raise ValueError(text("ui.windows.manual_calculation.error.operation_empty")) from exc
 
     def set_result(value: str | None) -> None:
         result_box.configure(state="normal")
@@ -247,8 +246,8 @@ def show_manual_calculation_workbench(app: Any) -> None:
 
     _set_uia(
         operation,
-        name="Операція ручного розрахунку",
-        description="Вибір канонічної ручної операції; формула залишається в сервісі.",
+        name=text("ui.windows.manual_calculation.uia.operation.name"),
+        description=text("ui.windows.manual_calculation.uia.operation.description"),
         automation_id=WORKBENCH_AUTOMATION_IDS["operation"],
     )
     _set_uia(
@@ -259,26 +258,26 @@ def show_manual_calculation_workbench(app: Any) -> None:
     )
     _set_uia(
         calculate_button,
-        name="Обчислити ручний результат",
-        description="Запускає лише канонічний ManualCalculationService; реальні ставки не створюються.",
+        name=text("ui.windows.manual_calculation.uia.calculate.name"),
+        description=text("ui.windows.manual_calculation.uia.calculate.description"),
         automation_id=WORKBENCH_AUTOMATION_IDS["calculate"],
     )
     _set_uia(
         clear_button,
-        name="Очистити ручні значення",
-        description="Очищає локальні поля без запису на диск.",
+        name=text("ui.windows.manual_calculation.uia.clear.name"),
+        description=text("ui.windows.manual_calculation.uia.clear.description"),
         automation_id=WORKBENCH_AUTOMATION_IDS["clear"],
     )
     _set_uia(
         close_button,
-        name="Закрити ручні розрахунки",
-        description="Закриває робочу поверхню без запису результату.",
+        name=text("ui.windows.manual_calculation.uia.close.name"),
+        description=text("ui.windows.manual_calculation.uia.close.description"),
         automation_id=WORKBENCH_AUTOMATION_IDS["close"],
     )
     _set_uia(
         result_box,
-        name="Результат і evidence ручного розрахунку",
-        description="Лише для читання: канонічний JSON результату, метод, одиниці, припущення, попередження та evidence hash.",
+        name=text("ui.windows.manual_calculation.uia.result.name"),
+        description=text("ui.windows.manual_calculation.uia.result.description"),
         automation_id=WORKBENCH_AUTOMATION_IDS["result"],
     )
 

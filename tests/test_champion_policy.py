@@ -298,6 +298,9 @@ def _write_minimal_promoted_registry(
     strategy_model_id: str = MODEL_ID,
     evaluated_model_id: str = MODEL_ID,
     model_seed: int | None = None,
+    model_created_at: str = "2026-09-19T13:06:00Z",
+    strategy_created_at: str = "2026-09-19T13:07:00Z",
+    evaluation_created_at: str = "2026-09-19T13:08:00Z",
 ):
     """Write structurally valid restart evidence, including deliberate rebind cases."""
 
@@ -319,7 +322,7 @@ def _write_minimal_promoted_registry(
                     research_protocol_id=policy.protocol_id,
                     seed=seed,
                     config_sha256=policy.config_sha256,
-                    created_at="2026-09-19T13:06:00Z",
+                    created_at=model_created_at,
                 )
             )
         )
@@ -331,7 +334,7 @@ def _write_minimal_promoted_registry(
                 source_sha256="5" * 64,
                 environment_sha256=policy.environment_id,
                 config_sha256=policy.config_sha256,
-                created_at="2026-09-19T13:07:00Z",
+                created_at=strategy_created_at,
                 model_version_id=strategy_model_id,
             )
         )
@@ -345,7 +348,7 @@ def _write_minimal_promoted_registry(
                 dataset_snapshot_id="dataset-champion-policy-v1",
                 protocol_sha256=PROTOCOL_SHA256,
                 artifact_hashes=("7" * 64,),
-                created_at="2026-09-19T13:08:00Z",
+                created_at=evaluation_created_at,
                 evaluated_strategy_version_id=policy.policy_id,
                 evaluated_model_version_id=evaluated_model_id,
             )
@@ -431,5 +434,40 @@ def test_champion_activation_rejects_model_policy_seed_mismatch(tmp_path):
     persist_policy_state(store, successor)
 
     with pytest.raises(ChampionPolicyError, match="seed lineage mismatch"):
+        _load_real_registry(registry, store)
+
+
+@pytest.mark.parametrize(
+    ("created_at_override", "message"),
+    [
+        (
+            {"strategy_created_at": "2026-09-19T13:11:00Z"},
+            "StrategyVersion was not causally available",
+        ),
+        (
+            {"model_created_at": "2026-09-19T13:11:00Z"},
+            "ModelVersion was not causally available",
+        ),
+        (
+            {"evaluation_created_at": "2026-09-19T13:11:00Z"},
+            "EvaluationBundle was not causally available",
+        ),
+    ],
+)
+def test_champion_activation_rejects_future_promotion_evidence(
+    tmp_path,
+    created_at_override,
+    message,
+):
+    _, successor, _ = _policy_successor()
+    registry = _write_minimal_promoted_registry(
+        tmp_path / "registry.json",
+        successor,
+        **created_at_override,
+    )
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, successor)
+
+    with pytest.raises(ChampionPolicyError, match=message):
         _load_real_registry(registry, store)
 

@@ -524,6 +524,7 @@ def test_resume_rejects_checkpoint_older_than_durable_agent_loop(tmp_path):
 def _deployment_authority(policy, training_identity, deployment_identity):
     strategy, model, promotion, evaluation = _activation_authority(policy)
     promotion.payload["promotion_evidence_id"] = "5" * 64
+    evaluation.payload["dataset_snapshot_id"] = training_identity.data_id
     training_snapshot = SimpleNamespace(
         record_type="DatasetSnapshot",
         record_id=training_identity.data_id,
@@ -565,6 +566,7 @@ def _deployment_authority(policy, training_identity, deployment_identity):
             "evaluation_bundle_id": evaluation.record_id,
             "evaluation_bundle_sha256": "f" * 64,
             "research_protocol_id": policy.protocol_id,
+            "dataset_snapshot_id": training_identity.data_id,
             "validity": "ELIGIBLE",
         },
     )

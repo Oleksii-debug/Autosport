@@ -454,10 +454,33 @@ def _run_policy_candidate_unstaged(
     causal_cutoff = binding.get("causal_cutoff")
     if type(causal_cutoff) is not str:
         raise ValueError("policy protocol lacks causal cutoff")
-    if _impl._instant(dataset.payload.get("causal_cutoff"), "dataset causal_cutoff") != _impl._instant(
-        causal_cutoff, "protocol causal_cutoff"
-    ):
+    causal_cutoff_at = _impl._instant(causal_cutoff, "protocol causal_cutoff")
+    if _impl._instant(dataset.payload.get("causal_cutoff"), "dataset causal_cutoff") != causal_cutoff_at:
         raise ValueError("policy dataset causal cutoff does not match protocol")
+    for sample in evaluation.samples:
+        if type(sample) is not dict:
+            raise ValueError("policy evaluation sample payload is invalid")
+        if _impl._instant(
+            sample.get("observed_at"), "policy sample observed_at"
+        ) > causal_cutoff_at:
+            raise ValueError("policy evaluation observation exceeds frozen causal cutoff")
+        if _impl._instant(
+            sample.get("reward_available_at"), "policy sample reward_available_at"
+        ) <= protocol_frozen:
+            raise ValueError(
+                "policy promotion holdout reward was already revealed by protocol freeze"
+            )
+    dataset_reveal = dataset.payload.get("outcome_reveal_after")
+    if dataset_reveal is not None:
+        reveal_at = _impl._instant(dataset_reveal, "dataset outcome_reveal_after")
+        if reveal_at <= protocol_frozen:
+            raise ValueError(
+                "policy promotion dataset outcome was already revealed by protocol freeze"
+            )
+        if reveal_at > _impl._instant(spec.completed_at, "experiment completed_at"):
+            raise ValueError(
+                "policy promotion dataset outcome was not revealed by experiment completion"
+            )
 
     evaluation_config = PolicyEvaluationConfig.from_frozen_text(
         binding.get("evaluation_design")

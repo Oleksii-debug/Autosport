@@ -19,6 +19,7 @@ from typing import Any, Final, Iterable
 from .integrity import atomic_write_json
 from .learning_environment import (
     EnvironmentCheckpoint,
+    EnvironmentIdentity,
     Episode,
     EvidenceTruth,
     Outcome,
@@ -37,6 +38,7 @@ from .workspace_lock import WorkspaceEconomicLock
 SCHEMA: Final = "autosport.research_curriculum"
 SCHEMA_VERSION: Final = 1
 _HEX: Final = frozenset("0123456789abcdef")
+_PROVENANCE_SOURCE_PREFIX: Final = "autosport.replay-provenance/"
 
 
 class ResearchCurriculumError(RuntimeError):
@@ -158,6 +160,37 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _derive_replay_provenance(identity: EnvironmentIdentity) -> ReplayProvenance:
+    """Derive exact replay provenance from immutable environment source identity."""
+
+    if not isinstance(identity, EnvironmentIdentity):
+        raise ResearchCurriculumError(
+            "identity must be canonical EnvironmentIdentity evidence"
+        )
+    source_id = _text(identity.source_id, "identity.source_id")
+    if not source_id.startswith(_PROVENANCE_SOURCE_PREFIX):
+        raise ResearchCurriculumError(
+            "environment source_id lacks source-owned replay provenance"
+        )
+    remainder = source_id[len(_PROVENANCE_SOURCE_PREFIX) :]
+    token, separator, authority = remainder.partition("/")
+    if not separator or not authority:
+        raise ResearchCurriculumError(
+            "environment source_id replay provenance is not canonical"
+        )
+    try:
+        provenance = ReplayProvenance(token)
+    except ValueError as exc:
+        raise ResearchCurriculumError(
+            "environment source_id replay provenance is unsupported"
+        ) from exc
+    if provenance is ReplayProvenance.REAL_EXECUTION:
+        raise ResearchCurriculumError(
+            "paper/shadow learning_environment cannot substantiate REAL_EXECUTION provenance"
+        )
+    return provenance
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class ReplayEvidenceBinding:
     """Scrubbed proof that replay identity/provenance came from canonical evidence.
@@ -176,18 +209,20 @@ class ReplayEvidenceBinding:
     reward_id: str
     evidence_truth: EvidenceTruth
     provenance: ReplayProvenance
+    provenance_source_id: str
     outcome_available_at: str
 
     def __init__(
         self,
         *,
+        identity: EnvironmentIdentity,
         episode: Episode,
         checkpoint: EnvironmentCheckpoint,
         transition: Transition,
         outcome: Outcome,
         reward: RewardEvidence,
-        provenance: ReplayProvenance,
     ) -> None:
+        provenance = _derive_replay_provenance(identity)
         if not isinstance(episode, Episode):
             raise ResearchCurriculumError("episode must be canonical Episode evidence")
         if not isinstance(checkpoint, EnvironmentCheckpoint):
@@ -202,8 +237,10 @@ class ReplayEvidenceBinding:
             raise ResearchCurriculumError(
                 "outcome/reward must be canonical learning-environment evidence"
             )
-        if not isinstance(provenance, ReplayProvenance):
-            raise ResearchCurriculumError("provenance must be ReplayProvenance")
+        if identity.environment_id != episode.environment_id:
+            raise ResearchCurriculumError(
+                "environment identity does not bind the exact canonical episode"
+            )
 
         if (
             checkpoint.environment_id != episode.environment_id
@@ -267,6 +304,7 @@ class ReplayEvidenceBinding:
         object.__setattr__(self, "reward_id", reward.reward_id)
         object.__setattr__(self, "evidence_truth", truth)
         object.__setattr__(self, "provenance", provenance)
+        object.__setattr__(self, "provenance_source_id", identity.source_id)
         object.__setattr__(
             self,
             "outcome_available_at",
@@ -283,6 +321,7 @@ class ReplayEvidenceBinding:
             "reward_id": self.reward_id,
             "evidence_truth": self.evidence_truth.value,
             "provenance": self.provenance.value,
+            "provenance_source_id": self.provenance_source_id,
             "outcome_available_at": _timestamp(
                 self.outcome_available_at,
                 "outcome_available_at",
@@ -373,9 +412,42 @@ class ReplayCandidate:
             ),
         }
 
+    def selection_identity_payload(self) -> dict[str, Any]:
+        """Identity inputs visible before outcome/reward reveal.
+
+        Full evidence remains in payload() for audit, but cannot affect population
+        deduplication, ranking, or the durable pre-reveal candidate identity.
+        """
+
+        return {
+            "question_id": self.question_id,
+            "episode_id": self.episode_id,
+            "environment_id": self.environment_id,
+            "available_at": _timestamp(self.available_at, "available_at"),
+            "reasons": list(self.reasons),
+            "selector_features": [list(item) for item in self.selector_features],
+            "priority": self.priority,
+            "expected_learning_value": str(self.expected_learning_value),
+            "sampling_probability": (
+                None
+                if self.sampling_probability is None
+                else str(self.sampling_probability)
+            ),
+            "sampling_weight": (
+                None if self.sampling_weight is None else str(self.sampling_weight)
+            ),
+        }
+
     @property
     def candidate_id(self) -> str:
-        return _digest({"schema": SCHEMA, "schema_version": SCHEMA_VERSION, "kind": "ReplayCandidate", **self.payload()})
+        return _digest(
+            {
+                "schema": SCHEMA,
+                "schema_version": SCHEMA_VERSION,
+                "kind": "ReplayCandidateSelectionIdentity",
+                **self.selection_identity_payload(),
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,9 +567,44 @@ class CurriculumSelectionRecord:
             "source_observed_at": _timestamp(self.source_observed_at, "source_observed_at"),
         }
 
+    def selection_identity_payload(self) -> dict[str, Any]:
+        """Durable selection identity that excludes unrevealed target evidence."""
+
+        return {
+            "schema": SCHEMA,
+            "schema_version": SCHEMA_VERSION,
+            "kind": "CurriculumSelectionIdentity",
+            "selector_policy_version": self.selector_policy_version,
+            "purpose": self.purpose.value,
+            "eligible_candidate_ids": list(self.eligible_candidate_ids),
+            "eligible_question_ids": list(self.eligible_question_ids),
+            "eligible_episode_ids": list(self.eligible_episode_ids),
+            "selected_question_id": self.selected_question_id,
+            "selected_candidate_id": self.selected_candidate_id,
+            "selected_episode_id": self.selected_episode_id,
+            "selected_reasons": list(self.selected_reasons),
+            "selected_features": [list(item) for item in self.selected_features],
+            "priority": self.priority,
+            "expected_learning_value": str(self.expected_learning_value),
+            "sampling_probability": (
+                None
+                if self.sampling_probability is None
+                else str(self.sampling_probability)
+            ),
+            "sampling_weight": (
+                None if self.sampling_weight is None else str(self.sampling_weight)
+            ),
+            "budget_units": self.budget_units,
+            "seed": self.seed,
+            "as_of": _timestamp(self.as_of, "as_of"),
+            "source_observed_at": _timestamp(
+                self.source_observed_at, "source_observed_at"
+            ),
+        }
+
     @property
     def selection_id(self) -> str:
-        return _digest(self.payload())
+        return _digest(self.selection_identity_payload())
 
 
 @dataclass(frozen=True, slots=True)

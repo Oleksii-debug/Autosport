@@ -17,6 +17,22 @@ CATALOG_VERSION = 5
 # UI text authorities.
 _WINDOWS_SHELL_UK_UA = MappingProxyType(
     {
+        "ui.windows.manual_calculation.frame.title": "Ручні розрахунки",
+        "ui.windows.manual_calculation.button.open": "Відкрити ручні розрахунки",
+        "ui.windows.manual_calculation.accessibility.open.name": "Відкрити робочу поверхню ручних розрахунків",
+        "ui.windows.manual_calculation.accessibility.open.description": "Українська клавіатурна поверхня для ручних паперових/дослідницьких розрахунків без запису на диск і без реального виконання.",
+        "ui.windows.manual_calculation.dialog.title": "Автоспорт — ручні розрахунки",
+        "ui.windows.manual_calculation.dialog.description": "Введіть значення вручну. Формули, арифметика, класифікація і хеші належать канонічному сервісу; результат не записується на диск.",
+        "ui.windows.manual_calculation.operation.label": "Операція:",
+        "ui.windows.manual_calculation.input.label": "Вхідні значення:",
+        "ui.windows.manual_calculation.calculate": "Обчислити",
+        "ui.windows.manual_calculation.clear": "Очистити",
+        "ui.windows.manual_calculation.close": "Закрити",
+        "ui.windows.manual_calculation.status.ready": "Готово. Введіть значення для обраної операції.",
+        "ui.windows.manual_calculation.status.success": "Готово: канонічний результат і evidence доступні лише для читання; real_money_execution=false.",
+        "ui.windows.manual_calculation.status.error": "Розрахунок відхилено; частковий результат не показується.",
+        "ui.windows.manual_calculation.status.cleared": "Очищено. Скасування/очищення нічого не записує.",
+        "ui.windows.manual_calculation.error.nonempty": "Потрібно ввести всі обов'язкові значення.",
         "ui.windows.shell.frame.title": "Навігація продукту",
         "ui.windows.shell.screen.label": "Екран:",
         "ui.windows.shell.button.open": "Перейти до робочої поверхні",

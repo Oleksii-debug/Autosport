@@ -44,7 +44,13 @@ T4 = "2026-01-01T00:00:40Z"
 def rewrite_store_with_valid_state_hash(path, raw):
     body = {
         key: raw[key]
-        for key in ("schema", "version", "routes", "executions")
+        for key in (
+            "schema",
+            "version",
+            "routes",
+            "executions",
+            "execution_heads",
+        )
     }
     raw["state_sha256"] = hashlib.sha256(
         json.dumps(
@@ -1603,6 +1609,138 @@ class ModelComputeRouterTests(unittest.TestCase):
                 reopened.total_actual_cost(cloud_request.request_id),
                 Decimal("14.02"),
             )
+
+    def test_restart_rejects_rehashed_execution_tail_truncation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+
+            local_request = request(
+                request_id="req-truncated-rejected-tail",
+                allow_cloud=False,
+                max_cost=Decimal("2"),
+            )
+            store.route(
+                local_request,
+                self.candidates,
+                policy(),
+                as_of=T1,
+            )
+            store.record_execution(
+                execution_id="exec-truncated-local-accepted",
+                request_id=local_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("1.25"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            rejected_tail = store.record_execution(
+                execution_id="exec-truncated-local-rejected",
+                request_id=local_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("0.80"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                rejected_tail.disposition,
+                ExecutionDisposition.REJECTED_COST,
+            )
+
+            cloud_request = request(
+                request_id="req-truncated-cloud-tail",
+                max_cost=Decimal("20"),
+            )
+            store.route(
+                cloud_request,
+                self.candidates,
+                policy(max_cloud_cost=Decimal("10")),
+                as_of=T1,
+                voc_evidence=voc(
+                    evidence_id="voc-truncated-cloud-tail"
+                ),
+                domain_observation=slow_observation(),
+            )
+            store.record_execution(
+                execution_id="exec-truncated-cloud-first",
+                request_id=cloud_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="permitted-cloud",
+                model_id="challenger-v2",
+                config_sha256=SHA_B,
+                actual_cost=Decimal("6"),
+                actual_latency_seconds=Decimal("4"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            accepted_cloud_tail = store.record_execution(
+                execution_id="exec-truncated-cloud-accepted-tail",
+                request_id=cloud_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="permitted-cloud",
+                model_id="challenger-v2",
+                config_sha256=SHA_B,
+                actual_cost=Decimal("2"),
+                actual_latency_seconds=Decimal("4"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                accepted_cloud_tail.disposition,
+                ExecutionDisposition.ACCEPTED,
+            )
+            original = path.read_text(encoding="utf-8")
+
+            for execution_id in (
+                "exec-truncated-local-rejected",
+                "exec-truncated-cloud-accepted-tail",
+            ):
+                raw = json.loads(original)
+                raw["executions"] = [
+                    item
+                    for item in raw["executions"]
+                    if item["execution_id"] != execution_id
+                ]
+                rewrite_store_with_valid_state_hash(path, raw)
+                with self.assertRaisesRegex(
+                    ModelComputeRouterError,
+                    "execution history does not match durable terminal head",
+                ):
+                    ModelComputeRouterStore(path)
+
+    def test_restart_rejects_malformed_execution_head_cost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+            store.route(
+                request(request_id="req-malformed-execution-head"),
+                self.candidates,
+                policy(),
+                as_of=T1,
+            )
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["execution_heads"][0][
+                "cumulative_incurred_cost"
+            ] = {"not": "a decimal"}
+            rewrite_store_with_valid_state_hash(path, raw)
+
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "cumulative_incurred_cost must be a non-negative Decimal",
+            ):
+                ModelComputeRouterStore(path)
 
     def test_future_voc_is_not_causally_usable(self):
         future = voc(

@@ -21,7 +21,7 @@ from .sport_domain_fitness import (
 )
 
 _SCHEMA = "autosport.model_compute_router"
-_VERSION = 2
+_VERSION = 3
 _ZERO = Decimal("0")
 
 
@@ -860,6 +860,107 @@ class ComputeExecutionEvidence:
             ) from exc
 
 
+def _execution_head_payload(
+    decision_id: str,
+    history: Sequence[ComputeExecutionEvidence],
+) -> dict[str, Any]:
+    ordered = sorted(
+        history,
+        key=lambda evidence: evidence.execution_sequence,
+    )
+    record_sha256s = [
+        evidence.execution_record_sha256
+        for evidence in ordered
+    ]
+    cumulative_incurred_cost = sum(
+        (evidence.actual_cost for evidence in ordered),
+        _ZERO,
+    )
+    unsigned = {
+        "decision_id": _text("decision_id", decision_id),
+        "terminal_sequence": len(ordered),
+        "cumulative_incurred_cost": str(
+            cumulative_incurred_cost
+        ),
+        "terminal_execution_record_sha256": (
+            None if not ordered else record_sha256s[-1]
+        ),
+        "history_sha256": _canonical_digest(
+            {
+                "decision_id": decision_id,
+                "execution_record_sha256s": record_sha256s,
+            }
+        ),
+    }
+    return {
+        **unsigned,
+        "head_sha256": _canonical_digest(unsigned),
+    }
+
+
+def _validate_execution_head_payload(
+    raw: object,
+) -> dict[str, Any]:
+    if type(raw) is not dict:
+        raise ModelComputeRouterError(
+            "execution history head must be an object"
+        )
+    expected_keys = {
+        "decision_id",
+        "terminal_sequence",
+        "cumulative_incurred_cost",
+        "terminal_execution_record_sha256",
+        "history_sha256",
+        "head_sha256",
+    }
+    if set(raw) != expected_keys:
+        raise ModelComputeRouterError(
+            "execution history head fields mismatch"
+        )
+    decision_id = _text("decision_id", raw["decision_id"])
+    terminal_sequence = raw["terminal_sequence"]
+    if type(terminal_sequence) is not int or terminal_sequence < 0:
+        raise ModelComputeRouterError(
+            "terminal_sequence must be a non-negative integer"
+        )
+    try:
+        cumulative = _nonnegative(
+            "cumulative_incurred_cost",
+            Decimal(raw["cumulative_incurred_cost"]),
+        )
+    except (TypeError, InvalidOperation, ValueError) as exc:
+        raise ModelComputeRouterError(
+            "cumulative_incurred_cost must be a non-negative Decimal"
+        ) from exc
+    terminal_record = raw["terminal_execution_record_sha256"]
+    if terminal_record is not None:
+        _sha256(
+            "terminal_execution_record_sha256",
+            terminal_record,
+        )
+    if (terminal_sequence == 0) != (terminal_record is None):
+        raise ModelComputeRouterError(
+            "execution history head terminal record is inconsistent"
+        )
+    history_sha256 = _sha256(
+        "history_sha256", raw["history_sha256"]
+    )
+    unsigned = {
+        "decision_id": decision_id,
+        "terminal_sequence": terminal_sequence,
+        "cumulative_incurred_cost": str(cumulative),
+        "terminal_execution_record_sha256": terminal_record,
+        "history_sha256": history_sha256,
+    }
+    if _sha256("head_sha256", raw["head_sha256"]) != (
+        _canonical_digest(unsigned)
+    ):
+        raise ModelComputeRouterError(
+            "execution history head SHA-256 mismatch"
+        )
+    return {**unsigned, "head_sha256": raw["head_sha256"]}
+
+
 def _classify_execution(
     *,
     request: ComputeRouteRequest,
@@ -1222,6 +1323,7 @@ class ModelComputeRouterStore:
         self._executions: dict[
             str, ComputeExecutionEvidence
         ] = {}
+        self._execution_heads: dict[str, dict[str, Any]] = {}
         if self.path.exists():
             self._load()
         else:
@@ -1231,6 +1333,7 @@ class ModelComputeRouterStore:
     def _body(
         routes: Mapping[str, Mapping[str, Any]],
         executions: Mapping[str, ComputeExecutionEvidence],
+        execution_heads: Mapping[str, Mapping[str, Any]],
     ) -> dict[str, Any]:
         return {
             "schema": _SCHEMA,
@@ -1242,6 +1345,10 @@ class ModelComputeRouterStore:
                 executions[key].payload()
                 for key in sorted(executions)
             ],
+            "execution_heads": [
+                execution_heads[key]
+                for key in sorted(execution_heads)
+            ],
         }
 
     def _persist(
@@ -1252,6 +1359,9 @@ class ModelComputeRouterStore:
         executions: Mapping[
             str, ComputeExecutionEvidence
         ] | None = None,
+        execution_heads: Mapping[
+            str, Mapping[str, Any]
+        ] | None = None,
     ) -> None:
         route_state = (
             self._routes if routes is None else routes
@@ -1261,7 +1371,16 @@ class ModelComputeRouterStore:
             if executions is None
             else executions
         )
-        body = self._body(route_state, execution_state)
+        execution_head_state = (
+            self._execution_heads
+            if execution_heads is None
+            else execution_heads
+        )
+        body = self._body(
+            route_state,
+            execution_state,
+            execution_head_state,
+        )
         atomic_write_json(
             self.path,
             {
@@ -1299,6 +1418,7 @@ class ModelComputeRouterStore:
                 "version",
                 "routes",
                 "executions",
+                "execution_heads",
             )
         }
         if (
@@ -1310,7 +1430,12 @@ class ModelComputeRouterStore:
             )
         routes = raw.get("routes")
         executions = raw.get("executions")
-        if type(routes) is not list or type(executions) is not list:
+        execution_heads = raw.get("execution_heads")
+        if (
+            type(routes) is not list
+            or type(executions) is not list
+            or type(execution_heads) is not list
+        ):
             raise ModelComputeRouterError(
                 "routing store collections are invalid"
             )
@@ -1580,6 +1705,20 @@ class ModelComputeRouterStore:
                 evidence.execution_id
             ] = evidence
 
+        loaded_execution_heads: dict[str, dict[str, Any]] = {}
+        for item in execution_heads:
+            head = _validate_execution_head_payload(item)
+            decision_id = head["decision_id"]
+            if decision_id in loaded_execution_heads:
+                raise ModelComputeRouterError(
+                    "duplicate execution history head"
+                )
+            if decision_id not in loaded_decision_authority:
+                raise ModelComputeRouterError(
+                    "execution history head references unknown decision"
+                )
+            loaded_execution_heads[decision_id] = head
+
         accepted_spend_by_decision: dict[str, Decimal] = {}
         for evidence in loaded_executions.values():
             if (
@@ -1621,7 +1760,8 @@ class ModelComputeRouterStore:
             history_by_decision.setdefault(
                 evidence.decision_id, []
             ).append(evidence)
-        for decision_id, history in history_by_decision.items():
+        for decision_id in loaded_decision_authority:
+            history = history_by_decision.get(decision_id, [])
             request, policy, decision = (
                 loaded_decision_authority[decision_id]
             )
@@ -1669,8 +1809,21 @@ class ModelComputeRouterStore:
                         "is not reproducible from durable authority"
                     )
                 prior_incurred_cost += evidence.actual_cost
+            persisted_head = loaded_execution_heads.get(decision_id)
+            if persisted_head is None:
+                raise ModelComputeRouterError(
+                    "route decision lacks execution history head"
+                )
+            if persisted_head != _execution_head_payload(
+                decision_id, history
+            ):
+                raise ModelComputeRouterError(
+                    "persisted execution history does not match "
+                    "durable terminal head"
+                )
         self._routes = loaded_routes
         self._executions = loaded_executions
+        self._execution_heads = loaded_execution_heads
 
     def route(
         self,
@@ -1734,8 +1887,18 @@ class ModelComputeRouterStore:
             return decision
         staged = dict(self._routes)
         staged[request.request_id] = record
-        self._persist(staged, self._executions)
+        staged_heads = dict(self._execution_heads)
+        staged_heads[decision.decision_id] = _execution_head_payload(
+            decision.decision_id,
+            (),
+        )
+        self._persist(
+            staged,
+            self._executions,
+            staged_heads,
+        )
         self._routes = staged
+        self._execution_heads = staged_heads
         return decision
 
     def get_decision(
@@ -1791,27 +1954,14 @@ class ModelComputeRouterStore:
         )
         existing = self._executions.get(execution_id)
         if existing is None:
-            decision_history = [
-                evidence
-                for evidence in self._executions.values()
-                if evidence.decision_id == decision.decision_id
-            ]
-            execution_sequence = (
-                max(
-                    (
-                        evidence.execution_sequence
-                        for evidence in decision_history
-                    ),
-                    default=0,
+            head = self._execution_heads.get(decision.decision_id)
+            if head is None:
+                raise ModelComputeRouterError(
+                    "route decision lacks execution history head"
                 )
-                + 1
-            )
-            prior_incurred_cost = sum(
-                (
-                    evidence.actual_cost
-                    for evidence in decision_history
-                ),
-                _ZERO,
+            execution_sequence = head["terminal_sequence"] + 1
+            prior_incurred_cost = Decimal(
+                head["cumulative_incurred_cost"]
             )
         else:
             execution_sequence = existing.execution_sequence
@@ -1857,8 +2007,23 @@ class ModelComputeRouterStore:
             return evidence
         staged = dict(self._executions)
         staged[execution_id] = evidence
-        self._persist(self._routes, staged)
+        decision_history = [
+            item
+            for item in staged.values()
+            if item.decision_id == decision.decision_id
+        ]
+        staged_heads = dict(self._execution_heads)
+        staged_heads[decision.decision_id] = _execution_head_payload(
+            decision.decision_id,
+            decision_history,
+        )
+        self._persist(
+            self._routes,
+            staged,
+            staged_heads,
+        )
         self._executions = staged
+        self._execution_heads = staged_heads
         return evidence
 
     def total_actual_cost(

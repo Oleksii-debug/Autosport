@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 import tk_uia
 
+from .localization import text
 from .calculation_manual import ManualCalculationService
 
 
@@ -27,8 +28,8 @@ WORKBENCH_AUTOMATION_IDS = {
 }
 
 WORKBENCH_OPERATIONS = (
-    ("odds_conversion", "Перетворення десяткового коефіцієнта"),
-    ("implied_probability", "Ймовірність із десяткового коефіцієнта"),
+    ("odds_conversion", "Перетворення коефіцієнта"),
+    ("implied_probability", "Ймовірність із коефіцієнта"),
     ("multiplicative_devig", "Мультиплікативне зняття маржі"),
     ("expected_return", "Очікуваний результат"),
     ("paper_payout", "Паперова виплата"),
@@ -36,15 +37,28 @@ WORKBENCH_OPERATIONS = (
     ("maximum_drawdown", "Максимальна просадка"),
 )
 
-_OPERATION_HINTS = {
-    "odds_conversion": "Введіть один скінченний десятковий коефіцієнт.",
-    "implied_probability": "Введіть один скінченний десятковий коефіцієнт.",
-    "multiplicative_devig": "Кожен рядок: selection_id=decimal_odds; ідентифікатори не повторюються.",
-    "expected_return": "Введіть: ймовірність, десятковий коефіцієнт, ставка — по одному значенню в рядку.",
-    "paper_payout": "Введіть: ставка, десятковий коефіцієнт — по одному значенню в рядку.",
-    "fractional_kelly": "Введіть: ймовірність, коефіцієнт, fraction, cap — по одному значенню в рядку.",
-    "maximum_drawdown": "Введіть послідовність балансів, по одному значенню в рядку.",
+_OPERATION_LABEL_KEYS = {
+    "odds_conversion": "ui.windows.manual_calculation.operation.odds_conversion",
+    "implied_probability": "ui.windows.manual_calculation.operation.implied_probability",
+    "multiplicative_devig": "ui.windows.manual_calculation.operation.multiplicative_devig",
+    "expected_return": "ui.windows.manual_calculation.operation.expected_return",
+    "paper_payout": "ui.windows.manual_calculation.operation.paper_payout",
+    "fractional_kelly": "ui.windows.manual_calculation.operation.fractional_kelly",
+    "maximum_drawdown": "ui.windows.manual_calculation.operation.maximum_drawdown",
 }
+_OPERATION_HINT_KEYS = {
+    "odds_conversion": "ui.windows.manual_calculation.hint.odds_conversion",
+    "implied_probability": "ui.windows.manual_calculation.hint.implied_probability",
+    "multiplicative_devig": "ui.windows.manual_calculation.hint.multiplicative_devig",
+    "expected_return": "ui.windows.manual_calculation.hint.expected_return",
+    "paper_payout": "ui.windows.manual_calculation.hint.paper_payout",
+    "fractional_kelly": "ui.windows.manual_calculation.hint.fractional_kelly",
+    "maximum_drawdown": "ui.windows.manual_calculation.hint.maximum_drawdown",
+}
+WORKBENCH_OPERATIONS = tuple(
+    (key, text(label_key)) for key, label_key in _OPERATION_LABEL_KEYS.items()
+)
+_OPERATION_HINTS = {key: text(hint_key) for key, hint_key in _OPERATION_HINT_KEYS.items()}
 
 
 def _read_lines(widget: tk.Text, *, minimum: int = 1) -> list[str]:
@@ -111,7 +125,7 @@ def show_manual_calculation_workbench(app: Any) -> None:
     """Open a non-persistent, keyboard-first manual calculation dialog."""
 
     dialog = tk.Toplevel(app)
-    dialog.title("Автоспорт — ручні розрахунки")
+    dialog.title(text("ui.windows.manual_calculation.dialog.title"))
     dialog.transient(app)
     dialog.geometry("1080x780")
     dialog.minsize(820, 640)
@@ -121,20 +135,18 @@ def show_manual_calculation_workbench(app: Any) -> None:
 
     ttk.Label(
         body,
-        text="Ручні розрахунки — лише дослідження / паперовий режим",
+        text=text("ui.windows.manual_calculation.dialog.title"),
     ).pack(anchor="w")
     ttk.Label(
         body,
         text=(
-            "Введіть значення вручну. Формули та хеші належать канонічному сервісу; "
-            "результат не записується на диск і не створює реальну ставку."
-        ),
+        text=text("ui.windows.manual_calculation.dialog.description"),
         wraplength=1000,
     ).pack(anchor="w", pady=(2, 8))
 
     row = ttk.Frame(body)
     row.pack(fill="x")
-    ttk.Label(row, text="Операція:").pack(side="left", padx=(0, 6))
+    ttk.Label(row, text=text("ui.windows.manual_calculation.operation.label")).pack(side="left", padx=(0, 6))
     operation_var = tk.StringVar(value=WORKBENCH_OPERATIONS[0][1])
     operation_values = {label: key for key, label in WORKBENCH_OPERATIONS}
     operation = ttk.Combobox(
@@ -150,7 +162,7 @@ def show_manual_calculation_workbench(app: Any) -> None:
     hint_var = tk.StringVar(value=_OPERATION_HINTS[WORKBENCH_OPERATIONS[0][0]])
     ttk.Label(body, textvariable=hint_var, wraplength=1000).pack(anchor="w", pady=(4, 4))
 
-    ttk.Label(body, text="Вхідні значення:").pack(anchor="w")
+    ttk.Label(body, text=text("ui.windows.manual_calculation.input.label")).pack(anchor="w")
     input_box = tk.Text(body, height=10, wrap="word", takefocus=True)
     input_box.pack(fill="x", pady=(2, 8))
 
@@ -158,7 +170,7 @@ def show_manual_calculation_workbench(app: Any) -> None:
     result_box.configure(state="disabled")
     result_box.pack(fill="both", expand=True)
 
-    status_var = tk.StringVar(value="Готово. Жодні дані ще не обчислено.")
+    status_var = tk.StringVar(value=text("ui.windows.manual_calculation.status.ready"))
     ttk.Label(body, textvariable=status_var, wraplength=1000).pack(anchor="w", pady=(4, 4))
 
     buttons = ttk.Frame(body)
@@ -181,7 +193,7 @@ def show_manual_calculation_workbench(app: Any) -> None:
         set_result(None)
         key = selected_operation()
         hint_var.set(_OPERATION_HINTS[key])
-        status_var.set("Готово. Введіть нові значення для обраної операції.")
+        status_var.set(text("ui.windows.manual_calculation.status.ready"))
 
     operation.bind("<<ComboboxSelected>>", on_operation_changed)
 
@@ -193,44 +205,41 @@ def show_manual_calculation_workbench(app: Any) -> None:
             evidence = _calculation_call(service, selected_operation(), input_box)
             rendered = evidence.to_text()
         except (TypeError, ValueError, ArithmeticError) as exc:
-            status_var.set("Розрахунок відхилено; частковий результат не показується.")
+            status_var.set(text("ui.windows.manual_calculation.status.error"))
             messagebox.showerror(
-                "Автоспорт — ручні розрахунки",
+                text("ui.windows.manual_calculation.dialog.title"),
                 f"Розрахунок не виконано: {exc}",
                 parent=dialog,
             )
             input_box.focus_set()
             return
         set_result(rendered)
-        status_var.set(
-            "Готово: канонічний результат і evidence доступні лише для читання; "
-            "real_money_execution=false."
-        )
+        status_var.set(text("ui.windows.manual_calculation.status.success"))
         result_box.focus_set()
 
     def clear() -> None:
         input_box.delete("1.0", "end")
         set_result(None)
-        status_var.set("Очищено. Скасування/очищення нічого не записує.")
+        status_var.set(text("ui.windows.manual_calculation.status.cleared"))
         input_box.focus_set()
 
     calculate_button = ttk.Button(
         buttons,
-        text="Обчислити",
+        text=text("ui.windows.manual_calculation.calculate"),
         command=calculate,
         takefocus=True,
     )
     calculate_button.pack(side="left", padx=(0, 6))
     clear_button = ttk.Button(
         buttons,
-        text="Очистити",
+        text=text("ui.windows.manual_calculation.clear"),
         command=clear,
         takefocus=True,
     )
     clear_button.pack(side="left", padx=(0, 6))
     close_button = ttk.Button(
         buttons,
-        text="Закрити",
+        text=text("ui.windows.manual_calculation.close"),
         command=dialog.destroy,
         takefocus=True,
     )

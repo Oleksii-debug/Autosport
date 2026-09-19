@@ -11,6 +11,7 @@ from typing import Callable, Iterable
 from .domain import _canonical_sport_value
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
+from .providers import _scoped_identity
 from .storage import SQLiteMarketStore
 
 
@@ -192,6 +193,17 @@ class CatalogCheckpoint:
     position: int
     page_sha256: str
 
+    def __post_init__(self) -> None:
+        _text(self.source_id, "source_id")
+        _text(self.stream_epoch, "stream_epoch")
+        _text(self.cursor, "cursor")
+        if type(self.position) is not int or self.position < 0:
+            raise ValueError("position must be a non-negative non-boolean int")
+        if type(self.page_sha256) is not str or len(self.page_sha256) != 64:
+            raise ValueError("page_sha256 must be a SHA-256 hex digest")
+        if any(character not in "0123456789abcdef" for character in self.page_sha256):
+            raise ValueError("page_sha256 must be lowercase SHA-256 hex")
+
 
 @dataclass(frozen=True, slots=True)
 class EventLifecycleRecord:
@@ -206,10 +218,54 @@ class EventLifecycleRecord:
     completion_ref: str | None
     settlement_ref: str | None
 
+    def __post_init__(self) -> None:
+        _text(self.identity, "identity")
+        _text(self.source_id, "source_id")
+        _canonical_sport_value(self.sport)
+        _text(self.event_id, "event_id")
+        if not isinstance(self.phase, EventPhase):
+            raise ValueError("phase must be EventPhase")
+        _instant(self.first_discovered_at, "first_discovered_at")
+        _instant(self.last_available_at, "last_available_at")
+        _optional_instant(self.scheduled_start_at, "scheduled_start_at")
+        if self.completion_ref is not None:
+            _text(self.completion_ref, "completion_ref")
+        if self.settlement_ref is not None:
+            _text(self.settlement_ref, "settlement_ref")
+        expected = canonical_event_identity(
+            source_id=self.source_id,
+            sport=self.sport,
+            event_id=self.event_id,
+        )
+        if self.identity != expected:
+            raise CatalogConflictError("durable lifecycle identity does not match canonical event identity")
+        if _instant(self.first_discovered_at, "first_discovered_at") > _instant(
+            self.last_available_at, "last_available_at"
+        ):
+            raise ValueError("first_discovered_at cannot be after last_available_at")
+        if self.phase is not EventPhase.COMPLETED and (
+            self.completion_ref is not None or self.settlement_ref is not None
+        ):
+            raise ValueError("completion/settlement evidence requires completed phase")
+
     @classmethod
     def from_dict(cls, raw: object) -> "EventLifecycleRecord":
         if type(raw) is not dict:
             raise ValueError("lifecycle record must be a JSON object")
+        expected = {
+            "identity",
+            "source_id",
+            "sport",
+            "event_id",
+            "phase",
+            "first_discovered_at",
+            "last_available_at",
+            "scheduled_start_at",
+            "completion_ref",
+            "settlement_ref",
+        }
+        if set(raw) != expected:
+            raise ValueError("lifecycle record fields mismatch")
         value = dict(raw)
         value["phase"] = EventPhase(value["phase"])
         return cls(**value)
@@ -280,6 +336,17 @@ class ContinuousEventLifecycle:
             or type(raw["events"]) is not dict
         ):
             raise CatalogLifecycleError("unsupported catalog lifecycle state")
+        try:
+            for source_key, checkpoint in raw["sources"].items():
+                if source_key != checkpoint.get("source_id"):
+                    raise ValueError("catalog checkpoint source key mismatch")
+                CatalogCheckpoint(**checkpoint)
+            for identity, record in raw["events"].items():
+                if identity != record.get("identity"):
+                    raise ValueError("catalog event identity key mismatch")
+                EventLifecycleRecord.from_dict(record)
+        except (AttributeError, KeyError, TypeError, ValueError, CatalogLifecycleError) as exc:
+            raise CatalogLifecycleError("catalog lifecycle state contains invalid nested evidence") from exc
         return raw
 
     def checkpoint(self, source_id: str) -> CatalogCheckpoint | None:
@@ -505,7 +572,8 @@ class ContinuousEventLifecycle:
             )
 
         availability: list[datetime] = []
-        for event in store.events(record.event_id):
+        canonical_event_id = _scoped_identity(record.source_id, record.event_id)
+        for event in store.events(canonical_event_id):
             if event.source_id != record.source_id or event.sport != record.sport:
                 continue
             try:
@@ -546,6 +614,7 @@ class ContinuousEventLifecycle:
         required_history: timedelta,
         register_input: Callable[..., None],
         identities: Iterable[str] | None = None,
+        retire_input: Callable[[str], object] | None = None,
     ) -> tuple[str, ...]:
         """Register evidence-sufficient events through the existing live-loop seam."""
         if not callable(register_input):
@@ -557,6 +626,14 @@ class ContinuousEventLifecycle:
         )
         registered: list[str] = []
         for identity in sorted(selected):
+            record = self.get(identity)
+            if record is None:
+                raise CatalogLifecycleError(f"unknown catalog event {identity!r}")
+            input_id = f"catalog:{record.identity}"
+            if record.phase is EventPhase.COMPLETED:
+                if retire_input is not None:
+                    retire_input(input_id)
+                continue
             assessment = self.assess_evidence(
                 identity,
                 store,

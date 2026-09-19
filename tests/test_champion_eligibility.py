@@ -344,14 +344,14 @@ def test_research_trigger_binding_is_idempotent(tmp_path):
         supervisor,
         decision,
         question_id="question-drift",
-        requested_at="2026-02-12T12:00:00Z",
+        requested_at="2026-02-14T12:00:00Z",
         budget_units=8,
     )
     second = bind_research_trigger(
         supervisor,
         decision,
         question_id="question-drift",
-        requested_at="2026-02-12T12:00:00Z",
+        requested_at="2026-02-14T12:00:00Z",
         budget_units=8,
     )
     assert first == second

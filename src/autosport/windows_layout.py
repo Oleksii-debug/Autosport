@@ -29,9 +29,13 @@ from .windows_surface_contract import (
 # wrapper removes excess vertical chrome so the final execution log remains
 # mapped after the product shell is inserted.
 _SURFACE_HEIGHTS = {
-    "live_quotes": 3,
-    "tickets": 4,
-    "evaluation": 3,
+    # #579 adds a compact three-control owner-authority panel above the
+    # existing product surfaces. Preserve the 1080x860 Windows UIA mapping
+    # budget by reclaiming one row from each scrollable summary surface while
+    # keeping the execution log at two rows.
+    "live_quotes": 2,
+    "tickets": 3,
+    "evaluation": 2,
     "log": 2,
 }
 _SECTION_LABEL_PADY = (6, 2)
@@ -184,7 +188,7 @@ def _owner_economic_workspace(app: Any) -> tuple[Any | None, str | None]:
     return workspace_for_strategy(app.workspace, strategy_id, research_plan), None
 
 
-def _owner_economic_write_blocker(app: Any) -> str | None:
+def _owner_economic_write_blocker(app: Any, workspace: Any | None = None) -> str | None:
     if bool(app.__dict__.get("_closing")):
         return text("ui.windows.owner_authority.error.busy")
     if bool(getattr(app, "_dataset_busy", False)):
@@ -193,6 +197,25 @@ def _owner_economic_write_blocker(app: Any) -> str | None:
         worker = app.__dict__.get(worker_name)
         if worker is not None and bool(getattr(worker, "busy", False)):
             return text("ui.windows.owner_authority.error.busy")
+    if workspace is not None:
+        # WindowsAutosportApp owns the canonical per-workspace quarantine
+        # authority. Call the class method directly so headless Tk fixtures do
+        # not fall through tkinter.Misc.__getattr__. The base-GUI set remains a
+        # compatibility fence for non-Windows/headless callers.
+        recovery_checker = getattr(type(app), "_workspace_requires_recovery", None)
+        if callable(recovery_checker):
+            try:
+                if bool(recovery_checker(app, workspace)):
+                    return text("ui.windows.owner_authority.error.busy")
+            except Exception:
+                return text("ui.windows.owner_authority.error.busy")
+        else:
+            required = app.__dict__.get("_recovery_required_workspaces", ())
+            try:
+                if workspace in required:
+                    return text("ui.windows.owner_authority.error.busy")
+            except Exception:
+                return text("ui.windows.owner_authority.error.busy")
     return None
 
 
@@ -237,8 +260,8 @@ def _show_owner_economic_dialog(app: Any) -> None:
         WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_dialog_readback"],
     )
 
-    service, blocked = _owner_economic_service(app)
-    if service is None:
+    bound_workspace, blocked = _owner_economic_workspace(app)
+    if bound_workspace is None:
         readback.insert("end", blocked or text("ui.windows.owner_authority.state.corrupt"))
         ttk.Button(body, text=text("ui.windows.owner_authority.button.close"), command=dialog.destroy).pack(
             anchor="e", pady=(8, 0)
@@ -246,6 +269,7 @@ def _show_owner_economic_dialog(app: Any) -> None:
         readback.focus_set()
         return
 
+    service = OwnerEconomicAuthorityService(bound_workspace)
     view = service.read_view()
     for line in view.lines_uk:
         readback.insert("end", line)
@@ -280,7 +304,10 @@ def _show_owner_economic_dialog(app: Any) -> None:
     ).grid(row=(len(OWNER_ECONOMIC_FORM_FIELDS) + 1) // 2, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
     def create_initial_contract() -> None:
-        blocker = _owner_economic_write_blocker(app)
+        current_workspace, _ = _owner_economic_workspace(app)
+        blocker = _owner_economic_write_blocker(app, bound_workspace)
+        if current_workspace != bound_workspace:
+            blocker = text("ui.windows.owner_authority.error.busy")
         if blocker is not None:
             messagebox.showerror(text("ui.windows.owner_authority.dialog.title"), blocker, parent=dialog)
             return
@@ -309,6 +336,15 @@ def _show_owner_economic_dialog(app: Any) -> None:
                     parent=dialog,
                 )
                 return
+            # Re-resolve both workspace identity and recovery quarantine at the
+            # irreversible boundary. A non-modal dialog must never persist into
+            # a workspace that was switched or quarantined after preview.
+            current_workspace, _ = _owner_economic_workspace(app)
+            blocker = _owner_economic_write_blocker(app, bound_workspace)
+            if current_workspace != bound_workspace or blocker is not None:
+                raise OwnerEconomicAuthorityError(
+                    blocker or text("ui.windows.owner_authority.error.busy")
+                )
             persisted = service.initialize_from_form(
                 values,
                 emergency_stop=emergency_stop.get(),

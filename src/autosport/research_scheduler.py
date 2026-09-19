@@ -23,10 +23,10 @@ from .integrity import atomic_write_json
 from .research_curriculum import (
     CurriculumDispatchReceipt,
     CurriculumPurpose,
+    CurriculumStatus,
     NightResearchCurriculum,
     ReplayCandidate,
 )
-from .research_curriculum import CurriculumPurpose
 from .research_trigger_adapter import (
     ExternalResearchTrigger,
     ResearchTriggerReceipt,

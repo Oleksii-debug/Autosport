@@ -445,6 +445,50 @@ def test_manual_calculation_workbench_uses_canonical_service_for_all_supported_o
     ]
 
 
+def test_manual_calculation_ukrainian_result_preserves_canonical_evidence():
+    from autosport.calculation_manual import ManualCalculationService
+    from autosport.windows_manual_calculation import _render_evidence_uk
+
+    service = ManualCalculationService()
+    evidence = service.paper_payout("25", "2.10")
+    rendered = _render_evidence_uk(evidence)
+    human = rendered.split("Канонічний evidence JSON (незмінений):", 1)[0]
+
+    assert rendered == _render_evidence_uk(evidence)
+    assert "Результат ручного розрахунку" in human
+    assert "Метод (канонічний ID): decimal_odds_payout" in human
+    assert "Статус точності: точний (exact)" in human
+    assert "Припущення:" in human
+    assert "Розрахунок лише паперовий; повноваження реального виконання відсутнє." in human
+    assert "одиниця: paper_currency" in human
+    assert f"Хеш evidence: {evidence.evidence_sha256}" in human
+    assert "Реальне виконання: ні (real_money_execution=false)" in human
+    assert evidence.to_text().rstrip("\n") in rendered
+
+
+def test_manual_calculation_ukrainian_renderer_covers_all_current_assumptions_and_warnings():
+    from autosport.calculation_manual import ManualCalculationService
+    from autosport.windows_manual_calculation import _render_evidence_uk
+
+    service = ManualCalculationService()
+    evidence = (
+        service.odds_conversion("2.10"),
+        service.odds_conversion("1.90"),
+        service.implied_probability("2.10"),
+        service.multiplicative_devig({"a": "2.10", "b": "1.90"}),
+        service.expected_return("0.60", "2.10", "25"),
+        service.paper_payout("25", "2.10"),
+        service.fractional_kelly("0.60", "2.10", fraction="0.5", cap="0.2"),
+        service.maximum_drawdown(("100", "120", "90")),
+    )
+    rendered = [_render_evidence_uk(item) for item in evidence]
+    assert all("Канонічний evidence JSON (незмінений):" in item for item in rendered)
+    assert "Ділення округлюється в детермінованому десятковому контексті." in rendered[2]
+    assert "Мультиплікативна нормалізація є методом моделювання" in rendered[3]
+    assert "Ділення у формулі Kelly округлюється" in rendered[6]
+    assert "Ділення частки просадки округлюється" in rendered[7]
+
+
 def test_manual_calculation_result_contract_is_read_only_and_nonpersistent():
     from autosport.windows_manual_calculation import show_manual_calculation_workbench
     source = inspect.getsource(show_manual_calculation_workbench)

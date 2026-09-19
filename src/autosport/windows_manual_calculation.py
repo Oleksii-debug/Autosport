@@ -14,7 +14,7 @@ from typing import Any
 import tk_uia
 
 from .localization import text
-from .calculation_manual import ManualCalculationService
+from .calculation_manual import ManualCalculationEvidence, ManualCalculationService
 
 
 WORKBENCH_AUTOMATION_IDS = {
@@ -59,6 +59,93 @@ WORKBENCH_OPERATIONS = tuple(
     (key, text(label_key)) for key, label_key in _OPERATION_LABEL_KEYS.items()
 )
 _OPERATION_HINTS = {key: text(hint_key) for key, hint_key in _OPERATION_HINT_KEYS.items()}
+
+
+_CANONICAL_MESSAGE_KEYS = {
+    "decimal odds are the supplied analysis input": "ui.windows.manual_calculation.message.decimal_odds_supplied",
+    "American output is the unrounded mathematical conversion; bookmaker display conventions may round it": "ui.windows.manual_calculation.message.american_unrounded",
+    "American output is the unrounded mathematical conversion in the deterministic decimal context": "ui.windows.manual_calculation.message.american_decimal_context",
+    "bookmaker display conventions may round American odds": "ui.windows.manual_calculation.message.american_display_rounding",
+    "division is rounded in the deterministic decimal context": "ui.windows.manual_calculation.message.division_rounding",
+    "all selections belong to one supplied market": "ui.windows.manual_calculation.message.one_market",
+    "multiplicative normalization is a modelling method, not objective fair value": "ui.windows.manual_calculation.message.devig_model",
+    "probability is supplied by the caller and is not inferred by this calculator": "ui.windows.manual_calculation.message.probability_caller",
+    "paper-only calculation; no real-money execution authority": "ui.windows.manual_calculation.message.paper_only",
+    "probability is a caller-supplied research assumption": "ui.windows.manual_calculation.message.probability_research",
+    "single-position Kelly formula; dependence with other positions is not modelled": "ui.windows.manual_calculation.message.kelly_single_position",
+    "paper research only; result is not execution authority": "ui.windows.manual_calculation.message.paper_research",
+    "Kelly division is rounded in the deterministic decimal context": "ui.windows.manual_calculation.message.kelly_rounding",
+    "balances are supplied in chronological order": "ui.windows.manual_calculation.message.balances_chronological",
+    "drawdown fraction division is rounded in the deterministic decimal context": "ui.windows.manual_calculation.message.drawdown_rounding",
+}
+
+
+def _localized_canonical_message(value: str) -> str:
+    try:
+        return text(_CANONICAL_MESSAGE_KEYS[value])
+    except KeyError as exc:
+        raise ValueError(
+            text("ui.windows.manual_calculation.error.unlocalized_evidence", value=value)
+        ) from exc
+
+
+def _render_evidence_uk(evidence: ManualCalculationEvidence) -> str:
+    """Render a Ukrainian human layer while preserving canonical evidence verbatim."""
+
+    result = evidence.result
+    operation_label = text(_OPERATION_LABEL_KEYS[result.calculation_id])
+    classification = text(
+        f"ui.windows.manual_calculation.result.classification.{result.classification}"
+    )
+    input_units = dict(result.input_units)
+    output_units = dict(result.output_units)
+    unit_label = text("ui.windows.manual_calculation.result.unit")
+    none_label = text("ui.windows.manual_calculation.result.none")
+    lines = [
+        text("ui.windows.manual_calculation.result.heading"),
+        f'{text("ui.windows.manual_calculation.result.operation")}: {operation_label}',
+        f'{text("ui.windows.manual_calculation.result.method")}: {result.method}',
+        f'{text("ui.windows.manual_calculation.result.classification")}: {classification} ({result.classification})',
+        text("ui.windows.manual_calculation.result.inputs") + ":",
+    ]
+    if result.inputs:
+        lines.extend(
+            f"- {name}: {value}; {unit_label}: {input_units[name]}"
+            for name, value in result.inputs
+        )
+    else:
+        lines.append(f"- {none_label}")
+    lines.append(text("ui.windows.manual_calculation.result.assumptions") + ":")
+    lines.extend(f"- {_localized_canonical_message(item)}" for item in result.assumptions)
+    if not result.assumptions:
+        lines.append(f"- {none_label}")
+    lines.append(text("ui.windows.manual_calculation.result.outputs") + ":")
+    if result.outputs:
+        lines.extend(
+            f"- {name}: {value}; {unit_label}: {output_units[name]}"
+            for name, value in result.outputs
+        )
+    else:
+        lines.append(f"- {none_label}")
+    lines.append(text("ui.windows.manual_calculation.result.warnings") + ":")
+    lines.extend(f"- {_localized_canonical_message(item)}" for item in result.warnings)
+    if not result.warnings:
+        lines.append(f"- {none_label}")
+    lines.extend(
+        [
+            f'{text("ui.windows.manual_calculation.result.input_hash")}: {result.input_hash}',
+            f'{text("ui.windows.manual_calculation.result.result_hash")}: {result.result_hash}',
+            f'{text("ui.windows.manual_calculation.result.evidence_hash")}: {evidence.evidence_sha256}',
+            f'{text("ui.windows.manual_calculation.result.service_version")}: {evidence.service_version}',
+            f'{text("ui.windows.manual_calculation.result.input_mode")}: {evidence.input_mode}',
+            f'{text("ui.windows.manual_calculation.result.real_money_execution")}: '
+            f'{text("ui.windows.manual_calculation.result.real_money_false")}',
+            "",
+            text("ui.windows.manual_calculation.result.canonical_json") + ":",
+            evidence.to_text().rstrip("\n"),
+        ]
+    )
+    return "\n".join(lines) + "\n"
 
 
 def _read_lines(widget: tk.Text, *, minimum: int = 1) -> list[str]:
@@ -202,7 +289,7 @@ def show_manual_calculation_workbench(app: Any) -> tk.Toplevel:
         set_result(None)
         try:
             evidence = _calculation_call(service, selected_operation(), input_box)
-            rendered = evidence.to_text()
+            rendered = _render_evidence_uk(evidence)
         except (TypeError, ValueError, ArithmeticError) as exc:
             status_var.set(text("ui.windows.manual_calculation.status.error"))
             messagebox.showerror(

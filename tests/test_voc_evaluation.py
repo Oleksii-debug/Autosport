@@ -323,7 +323,15 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             ).encode("utf-8")
         ).hexdigest()
 
+        dataset_snapshot_id = "voc-dataset-1"
+        evaluator_source_sha256 = SHA_C
+        cohort_id = "voc-cohort-1"
+        uncertainty_method = "bootstrap-v1"
         design = {
+            "task_class": paired.task_class,
+            "estimand": "incremental_net_voc",
+            "cohort_id": cohort_id,
+            "evaluator_source_sha256": evaluator_source_sha256,
             "scope": {
                 "sport_id": paired.sport_id,
                 "league_id": paired.league_id,
@@ -348,13 +356,13 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             "research_protocol_id": paired.research_protocol_id,
             "protocol_sha256": paired.research_protocol_sha256,
             "binding": {
-                "task_class": paired.task_class,
                 "evaluation_design": json.dumps(
                     design,
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
                 ),
+                "uncertainty_method": uncertainty_method,
                 "multiple_comparison_control": multiple_control,
             },
             "dataset_manifest_sha256": dataset_manifest,
@@ -366,6 +374,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         snapshot_entry = SimpleNamespace(
             available_at=T0,
             payload={
+                "dataset_snapshot_id": dataset_snapshot_id,
                 "manifest_sha256": dataset_manifest,
                 "source_identity": source_identity,
                 "license_identity": license_identity,
@@ -384,22 +393,92 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             assert_available_as_of=lambda _: None,
         )
         ledger = SimpleNamespace(verified_records=lambda: (decision_record,))
-        registry = SimpleNamespace(
-            get=lambda record_type, record_id: (
-                SimpleNamespace(
+
+        def registry_get(record_type, record_id):
+            if (
+                record_type == "PairedVOCEvaluation"
+                and record_id == paired.evaluation_id
+            ):
+                return SimpleNamespace(
                     available_at=paired.evaluated_at,
                     payload=paired.payload(),
                 )
-                if record_type == "PairedVOCEvaluation" and record_id == paired.evaluation_id
-                else (
-                    protocol_entry
-                    if record_type == "ResearchProtocol" and record_id == paired.research_protocol_id
-                    else None
+            if (
+                record_type == "ResearchProtocol"
+                and record_id == paired.research_protocol_id
+            ):
+                return protocol_entry
+            if (
+                record_type == "DatasetSnapshot"
+                and record_id == dataset_snapshot_id
+            ):
+                return snapshot_entry
+            if record_type == "EvaluationBundle" and record_id == "voc-bundle-1":
+                return SimpleNamespace(
+                    available_at=paired.evaluated_at,
+                    payload={
+                        "evaluation_bundle_id": "voc-bundle-1",
+                        "bundle_sha256": SHA_A,
+                        "evaluator_source_sha256": evaluator_source_sha256,
+                        "dataset_snapshot_id": dataset_snapshot_id,
+                        "protocol_sha256": paired.research_protocol_sha256,
+                        "artifact_hashes": [
+                            CanonicalVOCAuthorityResolver._scientific_score_artifact_sha256(
+                                paired
+                            )
+                        ],
+                        "effective_sample_size": paired.effective_sample_size,
+                        "effect_interval_low": str(
+                            paired.incremental_value_interval_low
+                        ),
+                        "effect_interval_high": str(
+                            paired.incremental_value_interval_high
+                        ),
+                        "practical_improvement": str(paired.net_value),
+                    },
                 )
-            ),
-            causal_records=lambda record_type, as_of: (snapshot_entry,)
-            if record_type == "DatasetSnapshot"
-            else (),
+            return None
+
+        def registry_causal_records(record_type, *, as_of):
+            if record_type == "DatasetSnapshot":
+                return (snapshot_entry,)
+            if record_type == "PromotionEvidence":
+                return (
+                    SimpleNamespace(
+                        available_at=paired.evaluated_at,
+                        payload={
+                            "research_protocol_id": paired.research_protocol_id,
+                            "holdout_access_id": paired.holdout_access_id,
+                            "multiple_comparison_control_sha256": (
+                                paired.multiple_comparison_control_sha256
+                            ),
+                            "confirmation_trial_family_id": trial_family,
+                            "estimand": "incremental_net_voc",
+                            "cohort_id": cohort_id,
+                            "uncertainty_method": uncertainty_method,
+                            "validity": "ELIGIBLE",
+                            "guardrails_passed": True,
+                            "holdout_consumed": True,
+                            "effective_sample_size": paired.effective_sample_size,
+                            "minimum_effective_sample_size": 8,
+                            "effect_interval_low": str(
+                                paired.incremental_value_interval_low
+                            ),
+                            "effect_interval_high": str(
+                                paired.incremental_value_interval_high
+                            ),
+                            "practical_improvement": str(paired.net_value),
+                            "evaluation_bundle_id": "voc-bundle-1",
+                            "evaluation_bundle_sha256": SHA_A,
+                            "dataset_snapshot_id": dataset_snapshot_id,
+                        },
+                    ),
+                )
+            return ()
+
+        registry = SimpleNamespace(
+            get=registry_get,
+            causal_records=registry_causal_records,
         )
         resolver = object.__new__(CanonicalVOCAuthorityResolver)
         resolver.decision_ledger = ledger
@@ -418,6 +497,35 @@ class PairedVOCEvaluationTests(unittest.TestCase):
     def test_production_resolver_binds_decision_protocol_and_outcome_scope(self):
         resolver, paired = self._production_resolver_fixture()
         self.assertEqual(resolver.resolve(paired, as_of=T2), paired)
+
+    def test_production_resolver_rejects_unbound_utility_statistics(self):
+        resolver, paired = self._production_resolver_fixture()
+        forged = replace(
+            paired,
+            baseline_utility=Decimal("1.1"),
+        )
+        canonical_registry = resolver.scientific_registry
+
+        def forged_get(record_type, record_id):
+            if (
+                record_type == "PairedVOCEvaluation"
+                and record_id == forged.evaluation_id
+            ):
+                return SimpleNamespace(
+                    available_at=forged.evaluated_at,
+                    payload=forged.payload(),
+                )
+            return canonical_registry.get(record_type, record_id)
+
+        resolver.scientific_registry = SimpleNamespace(
+            get=forged_get,
+            causal_records=canonical_registry.causal_records,
+        )
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "canonical scientific VOC statistics",
+        ):
+            resolver.resolve(forged, as_of=T2)
 
     def test_production_resolver_rejects_mismatched_decision_binding(self):
         resolver, paired = self._production_resolver_fixture()

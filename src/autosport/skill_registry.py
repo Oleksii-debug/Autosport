@@ -274,10 +274,16 @@ class SkillRegistry:
         if (d.skill_id,d.version,d.capability)!=(skill_id,version,capability): raise SkillRegistryError("skill identity/capability does not match exact definition")
         return d
     def bind_handler(self,d:SkillDefinition,h:SkillHandler)->None:
-        if d.implementation_kind is SkillImplementationKind.CANDIDATE_DYNAMIC_CODE: raise SkillPermissionError("dynamic-code candidates cannot bind executable handlers")
-        self.resolve(skill_id=d.skill_id,version=d.version,capability=d.capability,definition_id=d.definition_id)
+        """Reject runtime handler injection.
+
+        Executable handlers are source-owned entries in _BUILTIN_HANDLERS. A new
+        reviewed plugin therefore becomes executable only by changing reviewed
+        source, tests, and the normal PR lineage; registering metadata alone never
+        turns an arbitrary callable into production code.
+        """
+        if not isinstance(d,SkillDefinition): raise TypeError("definition must be SkillDefinition")
         if not callable(h): raise TypeError("handler must be callable")
-        self._handlers[d.version_key]=h
+        raise SkillPermissionError("runtime handler binding is forbidden; executable handlers must be source-reviewed")
     def _run(self,e)->SkillRun:
         return SkillRun(**{**{k:e[k] for k in ("run_id","call_id","caller_loop_id","caller_state_sha256","source_sha256","definition_id","skill_id","version","capability")},
             "status":SkillRunStatus(e["status"]),"requested_at":e["requested_at"],"completed_at":e["completed_at"],"input_sha256":e["input_sha256"],"output_sha256":e["output_sha256"],

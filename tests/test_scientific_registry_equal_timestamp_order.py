@@ -3,6 +3,8 @@ import json
 
 import pytest
 
+from test_scientific_registry import _frozen_promotion_rule_text, _promotion_evidence
+
 from autosport.scientific_registry import (
     DatasetSnapshot,
     EvaluationBundleRef,
@@ -13,6 +15,7 @@ from autosport.scientific_registry import (
     PromotionAction,
     PromotionDecision,
     PromotionEvidenceError,
+    promotion_holdout_access_id,
     ResearchOutcome,
     ResearchProtocol,
     ResearchQuestion,
@@ -64,12 +67,12 @@ def test_same_instant_lexically_earlier_promotion_is_rejected_before_publication
         causal_cutoff=T1,
         evaluation_design="sealed holdout",
         feature_set_version="v1",
-        uncertainty_method="bootstrap",
-        multiple_comparison_control="single metric",
+        uncertainty_method="bootstrap intervals",
+        multiple_comparison_control="single frozen primary metric",
         robustness_checks=("time split",),
         random_seed_policy="seed fixed before evaluation",
         stopping_rule="one final evaluation",
-        promotion_rule="positive outcome only",
+        promotion_rule=_frozen_promotion_rule_text(),
         expected_artifacts=("evaluation bundle",),
         code_config_sha256=SHA_B,
         frozen_at_utc=T0,
@@ -92,11 +95,15 @@ def test_same_instant_lexically_earlier_promotion_is_rejected_before_publication
     )
     bundle1 = EvaluationBundleRef(
         "eval-1", SHA_C, SHA_C, "dataset-1", protocol.protocol_sha256, (SHA_A,), T2,
-        evaluated_strategy_version_id="strategy-1", evaluated_model_version_id="model-1"
+        evaluated_strategy_version_id="strategy-1", evaluated_model_version_id="model-1",
+        effective_sample_size=5,
+        effect_interval_low="0.05", effect_interval_high="0.15", practical_improvement="0.1"
     )
     bundle2 = EvaluationBundleRef(
         "eval-2", SHA_D, SHA_C, "dataset-1", protocol.protocol_sha256, (SHA_B,), T2,
-        evaluated_strategy_version_id="strategy-2", evaluated_model_version_id="model-1"
+        evaluated_strategy_version_id="strategy-2", evaluated_model_version_id="model-1",
+        effective_sample_size=5,
+        effect_interval_low="0.05", effect_interval_high="0.15", practical_improvement="0.1"
     )
     experiment1 = ExperimentRecord(
         "experiment-1", "protocol-1", "dataset-1", "features-1", "strategy-1", "eval-1",
@@ -112,15 +119,30 @@ def test_same_instant_lexically_earlier_promotion_is_rejected_before_publication
     ):
         registry.append(record)
 
+    evidence1 = _promotion_evidence(
+        experiment_id="experiment-1", strategy_id="strategy-1", model_id="model-1",
+        bundle_id="eval-1", dataset_id="dataset-1", protocol_id="protocol-1",
+        bundle_sha=bundle1.bundle_sha256, evidence_id="promotion-1-evidence",
+        rollback_identity="NONE", minimum_n=3,
+        holdout_access_id=promotion_holdout_access_id(
+            research_protocol_id="protocol-1",
+            dataset_manifest_sha256=SHA_A,
+            source_identity="source",
+            license_identity="license",
+            confirmation_trial_family_id="protocol-1:confirmation-trial-family",
+        ),
+    )
+    registry.append(evidence1)
     first = PromotionDecision(
         "z-promotion", PromotionAction.PROMOTE, "strategy-1", "protocol-1",
         protocol.protocol_sha256, "eval-1", bundle1.bundle_sha256, T3,
-        candidate_model_version_id="model-1"
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=evidence1.promotion_evidence_id
     )
     registry.record_promotion(first)
 
     replay_inverting = PromotionDecision(
-        "a-promotion", PromotionAction.PROMOTE, "strategy-2", "protocol-1",
+        "a-promotion", PromotionAction.RETAIN, "strategy-2", "protocol-1",
         protocol.protocol_sha256, "eval-2", bundle2.bundle_sha256, T3,
         predecessor_strategy_version_id="strategy-1", candidate_model_version_id="model-1"
     )

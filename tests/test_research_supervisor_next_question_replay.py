@@ -58,7 +58,7 @@ def test_complete_redelivery_rejects_changed_next_question_before_registry_write
         robustness_evidence_sha256=SHA_A,
         forward_evidence_sha256=SHA_B,
         reason="resolved causal evidence supports the canonical factory decision",
-        retest_conditions=(),
+        retest_conditions=("new independent confirmation holdout",),
     )
 
     canonical_question = ResearchQuestion(

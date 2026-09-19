@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -26,6 +28,7 @@ _RECORD_TYPES = frozenset(
         "EvaluationBundle",
         "Experiment",
         "PromotionDecision",
+        "PromotionEvidence",
         "Postmortem",
         "DriftReference",
         "DriftObservation",
@@ -81,6 +84,70 @@ def _canonical_json(payload: Mapping[str, Any]) -> str:
 def _digest(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
+
+def _canonical_decimal(value: object, name: str) -> str:
+    text = _text(value, name)
+    if any(char in text for char in "eE"):
+        raise ValueError(f"{name} must use fixed-point decimal text")
+    try:
+        parsed = Decimal(text)
+    except Exception as exc:
+        raise ValueError(f"{name} must be a decimal string") from exc
+    if not parsed.is_finite():
+        raise ValueError(f"{name} must be finite")
+    normalized = format(parsed, "f")
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    if normalized in ("", "-0"):
+        normalized = "0"
+    return normalized
+
+
+
+def _sha256_text(value: object, name: str) -> str:
+    return hashlib.sha256(_text(value, name).encode("utf-8")).hexdigest()
+
+
+def promotion_holdout_access_id(
+    *,
+    research_protocol_id: str,
+    dataset_manifest_sha256: str,
+    source_identity: str,
+    license_identity: str,
+    confirmation_trial_family_id: str,
+) -> str:
+    """Derive one stable holdout identity across renamed dataset snapshots."""
+    return _digest(
+        {
+            "schema_version": 1,
+            "research_protocol_id": _text(research_protocol_id, "research_protocol_id"),
+            "dataset_manifest_sha256": _sha256(dataset_manifest_sha256, "dataset_manifest_sha256"),
+            "source_identity": _text(source_identity, "source_identity"),
+            "license_identity": _text(license_identity, "license_identity"),
+            "confirmation_trial_family_id": _text(
+                confirmation_trial_family_id, "confirmation_trial_family_id"
+            ),
+        }
+    )
+
+def _frozen_promotion_rule_payload(value: object) -> dict[str, Any]:
+    text = _text(value, "binding.promotion_rule")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise PromotionEvidenceError("frozen promotion rule is not canonical JSON") from exc
+    if type(payload) is not dict or payload.get("kind") != "autosport-promotion-rule-v1":
+        raise PromotionEvidenceError("frozen promotion rule kind is unsupported")
+    primary_metric = payload.get("primary_metric")
+    minimum_improvement = payload.get("minimum_improvement")
+    minimum_effective_sample_size = payload.get("minimum_effective_sample_size")
+    if type(primary_metric) is not str or not primary_metric:
+        raise PromotionEvidenceError("frozen promotion rule lacks primary metric")
+    if isinstance(minimum_improvement, bool) or not isinstance(minimum_improvement, (int, float)) or not math.isfinite(minimum_improvement):
+        raise PromotionEvidenceError("frozen promotion rule minimum improvement is invalid")
+    if isinstance(minimum_effective_sample_size, bool) or not isinstance(minimum_effective_sample_size, int) or minimum_effective_sample_size <= 0:
+        raise PromotionEvidenceError("frozen promotion rule minimum effective sample size is invalid")
+    return payload
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
@@ -358,6 +425,10 @@ class EvaluationBundleRef:
     created_at: str
     evaluated_strategy_version_id: str | None = None
     evaluated_model_version_id: str | None = None
+    effective_sample_size: int | None = None
+    effect_interval_low: str | None = None
+    effect_interval_high: str | None = None
+    practical_improvement: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.evaluation_bundle_id, "evaluation_bundle_id")
@@ -373,6 +444,38 @@ class EvaluationBundleRef:
             _text(self.evaluated_strategy_version_id, "evaluated_strategy_version_id")
         if self.evaluated_model_version_id is not None:
             _text(self.evaluated_model_version_id, "evaluated_model_version_id")
+        if self.effective_sample_size is not None:
+            if (
+                isinstance(self.effective_sample_size, bool)
+                or not isinstance(self.effective_sample_size, int)
+                or self.effective_sample_size <= 0
+            ):
+                raise ValueError("effective_sample_size must be a positive integer")
+        interval_values = (
+            self.effect_interval_low,
+            self.effect_interval_high,
+            self.practical_improvement,
+        )
+        if any(value is not None for value in interval_values):
+            if any(value is None for value in interval_values):
+                raise ValueError(
+                    "effect interval and practical improvement must be stored together"
+                )
+            for name in (
+                "effect_interval_low",
+                "effect_interval_high",
+                "practical_improvement",
+            ):
+                value = getattr(self, name)
+                if _canonical_decimal(value, name) != value:
+                    raise ValueError(f"{name} must be canonical decimal text")
+            low = Decimal(self.effect_interval_low)
+            high = Decimal(self.effect_interval_high)
+            practical = Decimal(self.practical_improvement)
+            if low > high:
+                raise ValueError("effect interval low must not exceed high")
+            if practical < low or practical > high:
+                raise ValueError("practical improvement must lie inside effect interval")
 
     @property
     def record_type(self) -> str: return "EvaluationBundle"
@@ -381,15 +484,24 @@ class EvaluationBundleRef:
     @property
     def available_at(self) -> str: return self.created_at
     def to_payload(self) -> dict[str, Any]:
-        return {"evaluation_bundle_id": self.evaluation_bundle_id,
-                "bundle_sha256": self.bundle_sha256.lower(),
-                "evaluator_source_sha256": self.evaluator_source_sha256.lower(),
-                "dataset_snapshot_id": self.dataset_snapshot_id,
-                "protocol_sha256": self.protocol_sha256.lower(),
-                "artifact_hashes": [value.lower() for value in self.artifact_hashes],
-                "created_at": self.created_at,
-                "evaluated_strategy_version_id": self.evaluated_strategy_version_id,
-                "evaluated_model_version_id": self.evaluated_model_version_id}
+        payload: dict[str, Any] = {
+            "evaluation_bundle_id": self.evaluation_bundle_id,
+            "bundle_sha256": self.bundle_sha256.lower(),
+            "evaluator_source_sha256": self.evaluator_source_sha256.lower(),
+            "dataset_snapshot_id": self.dataset_snapshot_id,
+            "protocol_sha256": self.protocol_sha256.lower(),
+            "artifact_hashes": [value.lower() for value in self.artifact_hashes],
+            "created_at": self.created_at,
+            "evaluated_strategy_version_id": self.evaluated_strategy_version_id,
+            "evaluated_model_version_id": self.evaluated_model_version_id,
+        }
+        if self.effective_sample_size is not None:
+            payload["effective_sample_size"] = self.effective_sample_size
+        if self.effect_interval_low is not None:
+            payload["effect_interval_low"] = self.effect_interval_low
+            payload["effect_interval_high"] = self.effect_interval_high
+            payload["practical_improvement"] = self.practical_improvement
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,6 +577,7 @@ class PromotionDecision:
     predecessor_strategy_version_id: str | None = None
     rollback_to_strategy_version_id: str | None = None
     candidate_model_version_id: str | None = None
+    promotion_evidence_id: str | None = None
     reason: str = ""
 
     def __post_init__(self) -> None:
@@ -477,7 +590,7 @@ class PromotionDecision:
         _sha256(self.evaluation_bundle_sha256, "evaluation_bundle_sha256")
         _iso(self.decided_at, "decided_at")
         for name in ("predecessor_strategy_version_id", "rollback_to_strategy_version_id",
-                     "candidate_model_version_id"):
+                     "candidate_model_version_id", "promotion_evidence_id"):
             if getattr(self, name) is not None:
                 _text(getattr(self, name), name)
         if self.action is PromotionAction.ROLLBACK and self.rollback_to_strategy_version_id is None:
@@ -501,7 +614,138 @@ class PromotionDecision:
                 "evaluation_bundle_sha256": self.evaluation_bundle_sha256.lower(),
                 "predecessor_strategy_version_id": self.predecessor_strategy_version_id,
                 "rollback_to_strategy_version_id": self.rollback_to_strategy_version_id,
+                "promotion_evidence_id": self.promotion_evidence_id,
                 "reason": self.reason, "decided_at": self.decided_at}
+
+
+class PromotionEvidenceValidity(StrEnum):
+    ELIGIBLE = "ELIGIBLE"
+    INCONCLUSIVE = "INCONCLUSIVE"
+    INVALID = "INVALID"
+
+
+class PromotionEvidenceDirection(StrEnum):
+    LOWER_IS_BETTER = "LOWER_IS_BETTER"
+    HIGHER_IS_BETTER = "HIGHER_IS_BETTER"
+
+
+@dataclass(frozen=True, slots=True)
+class PromotionEvidence:
+    promotion_evidence_id: str
+    experiment_id: str
+    research_protocol_id: str
+    research_question_id: str
+    hypothesis_id: str
+    candidate_strategy_version_id: str
+    candidate_model_version_id: str | None
+    evaluation_bundle_id: str
+    evaluation_bundle_sha256: str
+    dataset_snapshot_id: str
+    holdout_access_id: str
+    confirmation_trial_family_id: str
+    estimand: str
+    direction: PromotionEvidenceDirection
+    cohort_id: str
+    effective_sample_size: int
+    minimum_effective_sample_size: int
+    effect_interval_low: str
+    effect_interval_high: str
+    practical_improvement: str
+    guardrails_passed: bool
+    validity: PromotionEvidenceValidity
+    holdout_consumed: bool
+    stopping_rule_sha256: str
+    multiple_comparison_control_sha256: str
+    rollback_identity: str
+    uncertainty_method: str
+    created_at: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "promotion_evidence_id", "experiment_id", "research_protocol_id",
+            "research_question_id", "hypothesis_id", "candidate_strategy_version_id",
+            "evaluation_bundle_id", "dataset_snapshot_id", "holdout_access_id",
+            "confirmation_trial_family_id", "estimand", "cohort_id",
+            "rollback_identity", "uncertainty_method",
+        ):
+            _text(getattr(self, name), name)
+        if self.candidate_model_version_id is not None:
+            _text(self.candidate_model_version_id, "candidate_model_version_id")
+        if not isinstance(self.direction, PromotionEvidenceDirection):
+            raise ValueError("direction must be a PromotionEvidenceDirection")
+        if not isinstance(self.validity, PromotionEvidenceValidity):
+            raise ValueError("validity must be a PromotionEvidenceValidity")
+        for name in ("evaluation_bundle_sha256", "stopping_rule_sha256", "multiple_comparison_control_sha256"):
+            _sha256(getattr(self, name), name)
+        _iso(self.created_at, "created_at")
+        if not isinstance(self.guardrails_passed, bool):
+            raise ValueError("guardrails_passed must be boolean")
+        if not isinstance(self.holdout_consumed, bool):
+            raise ValueError("holdout_consumed must be boolean")
+        for name in ("effective_sample_size", "minimum_effective_sample_size"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        for name in ("effect_interval_low", "effect_interval_high", "practical_improvement"):
+            if _canonical_decimal(getattr(self, name), name) != getattr(self, name):
+                raise ValueError(f"{name} must be canonical decimal text")
+        low = Decimal(self.effect_interval_low)
+        high = Decimal(self.effect_interval_high)
+        practical = Decimal(self.practical_improvement)
+        if low > high:
+            raise ValueError("effect interval low must not exceed high")
+        if practical < low or practical > high:
+            raise ValueError("practical improvement must lie inside effect interval")
+        expected_id = _digest(self.to_payload(include_id=False))
+        if self.promotion_evidence_id != expected_id:
+            raise ValueError("promotion_evidence_id does not match canonical evidence identity")
+
+    @property
+    def record_type(self) -> str:
+        return "PromotionEvidence"
+
+    @property
+    def record_id(self) -> str:
+        return self.promotion_evidence_id
+
+    @property
+    def available_at(self) -> str:
+        return self.created_at
+
+    def to_payload(self, *, include_id: bool = True) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "schema_version": 1,
+            "experiment_id": self.experiment_id,
+            "research_protocol_id": self.research_protocol_id,
+            "research_question_id": self.research_question_id,
+            "hypothesis_id": self.hypothesis_id,
+            "candidate_strategy_version_id": self.candidate_strategy_version_id,
+            "candidate_model_version_id": self.candidate_model_version_id,
+            "evaluation_bundle_id": self.evaluation_bundle_id,
+            "evaluation_bundle_sha256": self.evaluation_bundle_sha256.lower(),
+            "dataset_snapshot_id": self.dataset_snapshot_id,
+            "holdout_access_id": self.holdout_access_id,
+            "confirmation_trial_family_id": self.confirmation_trial_family_id,
+            "estimand": self.estimand,
+            "direction": self.direction.value,
+            "cohort_id": self.cohort_id,
+            "effective_sample_size": self.effective_sample_size,
+            "minimum_effective_sample_size": self.minimum_effective_sample_size,
+            "effect_interval_low": self.effect_interval_low,
+            "effect_interval_high": self.effect_interval_high,
+            "practical_improvement": self.practical_improvement,
+            "guardrails_passed": self.guardrails_passed,
+            "validity": self.validity.value,
+            "holdout_consumed": self.holdout_consumed,
+            "stopping_rule_sha256": self.stopping_rule_sha256.lower(),
+            "multiple_comparison_control_sha256": self.multiple_comparison_control_sha256.lower(),
+            "rollback_identity": self.rollback_identity,
+            "uncertainty_method": self.uncertainty_method,
+            "created_at": self.created_at,
+        }
+        if include_id:
+            payload["promotion_evidence_id"] = self.promotion_evidence_id
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -978,10 +1222,169 @@ class ScientificRegistry:
                 if model["payload"].get("seed") != matching_experiment.get("seed"):
                     raise PromotionEvidenceError("candidate model/experiment seed lineage mismatch")
             if decision.action is PromotionAction.PROMOTE:
+                frozen_rule = binding.get("promotion_rule")
+                if not isinstance(frozen_rule, str):
+                    raise PromotionEvidenceError(
+                        "PROMOTE requires a frozen typed promotion rule"
+                    )
+                frozen_rule_payload = _frozen_promotion_rule_payload(frozen_rule)
                 if strategy["payload"].get("predecessor_strategy_version_id") != decision.predecessor_strategy_version_id:
                     raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
                 if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:
                     raise PromotionEvidenceError("PROMOTE requires a positive durable experiment outcome")
+                dataset = require("DatasetSnapshot", matching_experiment["dataset_snapshot_id"])
+                evidence_trial_family = f"{decision.research_protocol_id}:confirmation-trial-family"
+                expected_holdout_access_id = promotion_holdout_access_id(
+                    research_protocol_id=decision.research_protocol_id,
+                    dataset_manifest_sha256=dataset["payload"].get("manifest_sha256"),
+                    source_identity=dataset["payload"].get("source_identity"),
+                    license_identity=dataset["payload"].get("license_identity"),
+                    confirmation_trial_family_id=evidence_trial_family,
+                )
+                evidence_id = decision.promotion_evidence_id
+                if not isinstance(evidence_id, str) or not evidence_id:
+                    raise PromotionEvidenceError("PROMOTE requires typed PromotionEvidence")
+                evidence = require("PromotionEvidence", evidence_id)
+                ep = evidence["payload"]
+                for raw in state["records"]:
+                    if (
+                        raw["record_type"] != "PromotionEvidence"
+                        or raw["record_id"] == evidence_id
+                    ):
+                        continue
+                    if (
+                        _instant(
+                            raw["available_at"],
+                            "PromotionEvidence.available_at",
+                        )
+                        > decision_at
+                    ):
+                        continue
+                    if (
+                        raw["payload"].get("holdout_access_id")
+                        == ep.get("holdout_access_id")
+                    ):
+                        raise PromotionEvidenceError(
+                            "confirmation holdout access has already been consumed "
+                            "or disclosed by prior evidence"
+                        )
+                for raw in state["records"]:
+                    if raw["record_type"] != "PromotionDecision":
+                        continue
+                    prior_id = raw["payload"].get("promotion_evidence_id")
+                    if prior_id == evidence_id:
+                        raise PromotionEvidenceError("promotion evidence has already been consumed")
+                    if prior_id:
+                        prior = entries.get(("PromotionEvidence", prior_id))
+                        if (
+                            prior is not None
+                            and prior["payload"].get("holdout_access_id")
+                            == ep.get("holdout_access_id")
+                        ):
+                            raise PromotionEvidenceError(
+                                "confirmation holdout access has already been consumed by another promotion"
+                            )
+                expected = {
+                    "experiment_id": matching_experiment_entry["record_id"],
+                    "research_protocol_id": decision.research_protocol_id,
+                    "research_question_id": binding.get("research_question_id"),
+                    "hypothesis_id": binding.get("hypothesis_id"),
+                    "candidate_strategy_version_id": decision.candidate_strategy_version_id,
+                    "candidate_model_version_id": decision.candidate_model_version_id,
+                    "evaluation_bundle_id": decision.evaluation_bundle_id,
+                    "evaluation_bundle_sha256": decision.evaluation_bundle_sha256.lower(),
+                    "dataset_snapshot_id": matching_experiment.get("dataset_snapshot_id"),
+                    "estimand": hypothesis["payload"].get("primary_metric"),
+                    "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+                    "rollback_identity": decision.predecessor_strategy_version_id or "NONE",
+                    "confirmation_trial_family_id": evidence_trial_family,
+                    "holdout_access_id": expected_holdout_access_id,
+                }
+                for key, value in expected.items():
+                    if ep.get(key) != value:
+                        raise PromotionEvidenceError(f"promotion evidence {key} does not match frozen decision lineage")
+                if ep.get("validity") != PromotionEvidenceValidity.ELIGIBLE.value:
+                    raise PromotionEvidenceError("PROMOTE requires eligible PromotionEvidence")
+                if ep.get("holdout_consumed") is not False:
+                    raise PromotionEvidenceError("PROMOTE requires an unconsumed confirmation holdout")
+                effective_n = ep.get("effective_sample_size")
+                minimum_n = ep.get("minimum_effective_sample_size")
+                frozen_minimum_n = frozen_rule_payload.get("minimum_effective_sample_size")
+                if type(minimum_n) is not int or minimum_n != frozen_minimum_n:
+                    raise PromotionEvidenceError("promotion evidence minimum effective sample size is not frozen")
+                durable_effective_n = bundle["payload"].get("effective_sample_size")
+                if type(durable_effective_n) is not int or durable_effective_n <= 0:
+                    raise PromotionEvidenceError(
+                        "PROMOTE requires durable effective sample size from the evaluation bundle"
+                    )
+                if type(effective_n) is not int or effective_n != durable_effective_n:
+                    raise PromotionEvidenceError(
+                        "promotion evidence effective sample size does not match durable evaluation"
+                    )
+                if effective_n < frozen_minimum_n:
+                    raise PromotionEvidenceError("PROMOTE requires sufficient effective sample size")
+                durable_low = bundle["payload"].get("effect_interval_low")
+                durable_high = bundle["payload"].get("effect_interval_high")
+                durable_practical = bundle["payload"].get("practical_improvement")
+                if not all(
+                    isinstance(value, str)
+                    for value in (durable_low, durable_high, durable_practical)
+                ):
+                    raise PromotionEvidenceError(
+                        "PROMOTE requires durable effect interval evidence from the evaluation bundle"
+                    )
+                for name, value in (
+                    ("effect_interval_low", durable_low),
+                    ("effect_interval_high", durable_high),
+                    ("practical_improvement", durable_practical),
+                ):
+                    if _canonical_decimal(value, f"EvaluationBundle.{name}") != value:
+                        raise PromotionEvidenceError(
+                            f"durable evaluation {name} is not canonical decimal text"
+                        )
+                if ep.get("effect_interval_low") != durable_low:
+                    raise PromotionEvidenceError(
+                        "promotion evidence effect interval low does not match durable evaluation"
+                    )
+                if ep.get("effect_interval_high") != durable_high:
+                    raise PromotionEvidenceError(
+                        "promotion evidence effect interval high does not match durable evaluation"
+                    )
+                if ep.get("practical_improvement") != durable_practical:
+                    raise PromotionEvidenceError(
+                        "promotion evidence practical improvement does not match durable evaluation"
+                    )
+                if ep.get("guardrails_passed") is not True:
+                    raise PromotionEvidenceError("PROMOTE requires passing guardrails")
+                stopping_sha = _sha256_text(binding.get("stopping_rule"), "binding.stopping_rule")
+                comparison_sha = _sha256_text(
+                    binding.get("multiple_comparison_control"),
+                    "binding.multiple_comparison_control",
+                )
+                if ep.get("stopping_rule_sha256") != stopping_sha:
+                    raise PromotionEvidenceError("promotion evidence stopping rule is not frozen")
+                if ep.get("multiple_comparison_control_sha256") != comparison_sha:
+                    raise PromotionEvidenceError("promotion evidence multiple-comparison control is not frozen")
+                if ep.get("uncertainty_method") != binding.get("uncertainty_method"):
+                    raise PromotionEvidenceError("promotion evidence uncertainty method is not frozen")
+                try:
+                    low = Decimal(ep.get("effect_interval_low"))
+                    practical = Decimal(ep.get("practical_improvement"))
+                    frozen_minimum_improvement = Decimal(
+                        str(frozen_rule_payload.get("minimum_improvement"))
+                    )
+                except (InvalidOperation, TypeError, ValueError) as exc:
+                    raise PromotionEvidenceError(
+                        "promotion evidence effect/threshold values must be canonical decimal text"
+                    ) from exc
+                if not low.is_finite() or not practical.is_finite() or not frozen_minimum_improvement.is_finite():
+                    raise PromotionEvidenceError(
+                        "promotion evidence effect/threshold values must be finite"
+                    )
+                if low <= 0 or practical <= 0:
+                    raise PromotionEvidenceError("PROMOTE requires strictly positive observed improvement and effect interval")
+                if low < frozen_minimum_improvement or practical < frozen_minimum_improvement:
+                    raise PromotionEvidenceError("PROMOTE requires improvement clearing the frozen minimum")
             return self._append_entry_locked(state, entry)
 
     def champion_strategy(
@@ -1079,3 +1482,4 @@ class ScientificRegistry:
         bundle = self.reproducibility_bundle(experiment_id)
         atomic_write_json(path, bundle)
         return bundle["bundle_sha256"]
+

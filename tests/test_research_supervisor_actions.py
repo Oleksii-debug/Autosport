@@ -332,7 +332,7 @@ def test_continuous_supervisor_consumes_real_factory_environment_memory_and_rest
         robustness_evidence_sha256=SHA_A,
         forward_evidence_sha256=SHA_B,
         reason="resolved causal evidence supports the canonical factory decision",
-        retest_conditions=(),
+        retest_conditions=("new independent confirmation holdout",),
     )
     assert registry.get(
         "PromotionDecision", durable_before_checkpoint.promotion_decision_id
@@ -350,7 +350,7 @@ def test_continuous_supervisor_consumes_real_factory_environment_memory_and_rest
         robustness_evidence_sha256=SHA_A,
         forward_evidence_sha256=SHA_B,
         reason="resolved causal evidence supports the canonical factory decision",
-        retest_conditions=(),
+        retest_conditions=("new independent confirmation holdout",),
     )
     assert decision == durable_before_checkpoint
     assert postmortem_snapshot.phase is ResearchPhase.POSTMORTEM

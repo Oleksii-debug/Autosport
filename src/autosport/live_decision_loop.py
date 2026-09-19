@@ -1051,10 +1051,9 @@ class PersistentLiveDecisionLoop:
             return self._recover_unfinished_progress()
 
         catalog_now = _require_utc_clock(self.clock)
-        if self.catalog_lifecycle is not None:
-            self._refresh_catalog_lifecycle(catalog_now)
-
         try:
+            if self.catalog_lifecycle is not None:
+                self._refresh_catalog_lifecycle(catalog_now)
             self._observe(self.mirror_updates)
         except ProviderUnavailableError as exc:
             self._needs_cache_rebuild = True

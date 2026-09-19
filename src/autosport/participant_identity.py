@@ -113,12 +113,17 @@ class AliasRecord:
     available_at: str
     evidence_sha256: str
     relation: str = "CONFIRMED"
+    supersedes_record_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("source_id", "alias", "entity_id", "evidence_sha256", "relation"):
             _text(name, getattr(self, name))
         if len(self.evidence_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in self.evidence_sha256):
             raise ParticipantIdentityError("alias evidence_sha256 must be SHA-256 hex")
+        if self.supersedes_record_id is not None:
+            supersedes = _text("supersedes_record_id", self.supersedes_record_id)
+            if len(supersedes) != 64 or any(ch not in "0123456789abcdef" for ch in supersedes):
+                raise ParticipantIdentityError("supersedes_record_id must be SHA-256 hex")
         start = _instant("valid_from", self.valid_from)
         if self.valid_until is not None and _instant("valid_until", self.valid_until) <= start:
             raise ParticipantIdentityError("valid_until must be after valid_from")
@@ -134,7 +139,7 @@ class AliasRecord:
                 "valid_from": _time_text("valid_from", self.valid_from),
                 "valid_until": None if self.valid_until is None else _time_text("valid_until", self.valid_until),
                 "available_at": _time_text("available_at", self.available_at), "evidence_sha256": self.evidence_sha256,
-                "relation": self.relation}
+                "relation": self.relation, "supersedes_record_id": self.supersedes_record_id}
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,13 +248,53 @@ class ParticipantIdentityRegistry:
             raise ParticipantIdentityError("alias references unknown entity")
         if alias in self._aliases:
             return
+
+        records_by_id = {record.record_id: record for record in self._aliases}
+        correction_ancestors: set[str] = set()
+        if alias.supersedes_record_id is not None:
+            target = records_by_id.get(alias.supersedes_record_id)
+            if target is None:
+                raise ParticipantIdentityError("alias correction references unknown record")
+            if target.source_id != alias.source_id or target.alias != alias.alias:
+                raise ParticipantIdentityError("alias correction must preserve source and alias")
+            if target.entity_id == alias.entity_id:
+                raise ParticipantIdentityError("alias correction must change entity")
+            if not _overlap(target.valid_from, target.valid_until, alias.valid_from, alias.valid_until):
+                raise ParticipantIdentityError("alias correction must overlap superseded interval")
+            if _instant("available_at", alias.available_at) <= _instant("available_at", target.available_at):
+                raise ParticipantIdentityError("alias correction must become available after superseded record")
+            if any(record.supersedes_record_id == target.record_id for record in self._aliases):
+                raise ParticipantIdentityError("alias correction fork is not allowed")
+
+            cursor: AliasRecord | None = target
+            while cursor is not None:
+                if cursor.record_id in correction_ancestors:
+                    raise ParticipantIdentityError("alias correction cycle is not allowed")
+                correction_ancestors.add(cursor.record_id)
+                if cursor.supersedes_record_id is None:
+                    cursor = None
+                else:
+                    cursor = records_by_id.get(cursor.supersedes_record_id)
+                    if cursor is None:
+                        raise ParticipantIdentityError("alias correction ancestry is incomplete")
+
         for existing in self._aliases:
             if existing.source_id != alias.source_id or existing.alias != alias.alias or existing.entity_id == alias.entity_id:
                 continue
-            if _overlap(existing.valid_from, existing.valid_until, alias.valid_from, alias.valid_until):
-                raise ParticipantIdentityError("conflicting alias validity intervals")
+            if not _overlap(existing.valid_from, existing.valid_until, alias.valid_from, alias.valid_until):
+                continue
+            if existing.record_id in correction_ancestors:
+                continue
+            raise ParticipantIdentityError("conflicting alias validity intervals")
+
         self._aliases.append(alias)
-        self._aliases.sort(key=lambda value: (value.source_id, value.alias, _time_text("valid_from", value.valid_from), value.record_id))
+        self._aliases.sort(key=lambda value: (
+            value.source_id,
+            value.alias,
+            _time_text("available_at", value.available_at),
+            _time_text("valid_from", value.valid_from),
+            value.record_id,
+        ))
         self._persist()
 
     def add_roster_membership(self, membership: RosterMembership) -> None:
@@ -291,22 +336,39 @@ class ParticipantIdentityRegistry:
             and (view is IdentityView.RESTATED_RESEARCH or _instant("available_at", record.available_at) <= moment)
         )
 
-    def resolve_alias(self, source_id: str, alias: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> EntityIdentity:
+    def resolve_alias_record(self, source_id: str, alias: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> AliasRecord:
         if not isinstance(view, IdentityView):
             raise TypeError("view must be IdentityView")
         moment = _instant("as_of", as_of)
+        canonical_source = _text("source_id", source_id)
+        canonical_alias = _text("alias", alias)
         matches = []
         for record in self._aliases:
-            if record.source_id != _text("source_id", source_id) or record.alias != _text("alias", alias):
+            if record.source_id != canonical_source or record.alias != canonical_alias:
                 continue
             if not _contains(record.valid_from, record.valid_until, moment):
                 continue
             if view is IdentityView.AS_KNOWN_AT_DECISION and _instant("available_at", record.available_at) > moment:
                 continue
             matches.append(record)
-        if len(matches) != 1:
+
+        superseded_ids = {
+            record.supersedes_record_id
+            for record in matches
+            if record.supersedes_record_id is not None
+        }
+        tips = [record for record in matches if record.record_id not in superseded_ids]
+        if not tips or len({record.entity_id for record in tips}) != 1:
             raise ParticipantIdentityError("alias cannot be resolved unambiguously at requested causal view")
-        entity = self._entities[matches[0].entity_id]
+        return max(
+            tips,
+            key=lambda record: (_instant("available_at", record.available_at), record.record_id),
+        )
+
+    def resolve_alias(self, source_id: str, alias: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> EntityIdentity:
+        moment = _instant("as_of", as_of)
+        record = self.resolve_alias_record(source_id, alias, as_of=as_of, view=view)
+        entity = self._entities[record.entity_id]
         if view is IdentityView.AS_KNOWN_AT_DECISION and _instant("available_at", entity.available_at) > moment:
             raise ParticipantIdentityError("entity was not known at requested causal view")
         return entity
@@ -319,7 +381,10 @@ class ParticipantIdentityRegistry:
         for membership in self._rosters:
             if membership.event_id == _text("event_id", event_id) and membership.source_id == _text("source_id", source_id) and _contains(membership.member_from, membership.member_until, moment):
                 if view is IdentityView.RESTATED_RESEARCH or _instant("available_at", membership.available_at) <= moment:
-                    result.append(self._entities[membership.entity_id])
+                    entity = self._entities[membership.entity_id]
+                    if view is IdentityView.AS_KNOWN_AT_DECISION and _instant("available_at", entity.available_at) > moment:
+                        raise ParticipantIdentityError("roster references entity not known at requested causal view")
+                    result.append(entity)
         return tuple(sorted(result, key=lambda entity: entity.entity_id))
 
     def _persist(self) -> None:

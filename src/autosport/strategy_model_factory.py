@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 from typing import Sequence
 
 from . import _strategy_model_factory_impl as _impl
 from ._strategy_model_factory_impl import *  # noqa: F401,F403
 from .integrity import atomic_write_json
+from .policy_evaluation import PolicyEvaluationConfig, PolicyPairEvaluation
 from .run_transaction import RunTransaction, RunTransactionError
 from .scientific_registry import ScientificRegistry
 from .workspace_lock import WorkspaceEconomicLock
@@ -336,6 +339,556 @@ def _recover_interrupted_factory_publish(
     )
 
 
+def _canonical_decimal_text(value: Decimal) -> str:
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise ValueError("policy promotion decimal must be finite Decimal")
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def _run_policy_candidate_unstaged(
+    registry: ScientificRegistry,
+    artifact_store,
+    spec: _impl.FactoryCandidateSpec,
+    evaluation: PolicyPairEvaluation,
+    *,
+    rule: _impl.PromotionRule,
+    policy_artifact_sha256: str,
+) -> _impl.FactoryRunResult:
+    """Publish one policy-specific causal evaluation into canonical scientific memory."""
+
+    if not isinstance(spec, _impl.FactoryCandidateSpec):
+        raise TypeError("spec must be FactoryCandidateSpec")
+    if not isinstance(evaluation, PolicyPairEvaluation):
+        raise TypeError("evaluation must be PolicyPairEvaluation")
+    if not isinstance(rule, _impl.PromotionRule):
+        raise TypeError("rule must be PromotionRule")
+    policy_artifact_sha256 = _impl._sha256(
+        policy_artifact_sha256, "policy_artifact_sha256"
+    )
+    if rule.primary_metric != "policy_loss":
+        raise ValueError("policy-specific promotion primary metric must be policy_loss")
+
+    protocol = registry.get("ResearchProtocol", spec.research_protocol_id)
+    dataset = registry.get("DatasetSnapshot", spec.dataset_snapshot_id)
+    feature = registry.get("FeatureSet", spec.feature_set_id)
+    if protocol is None or dataset is None or feature is None:
+        raise ValueError("policy factory foundation is incomplete in ScientificRegistry")
+    binding = protocol.payload.get("binding")
+    if type(binding) is not dict:
+        raise ValueError("policy research protocol lacks frozen binding")
+    if binding.get("promotion_rule") != rule.frozen_text:
+        raise ValueError("policy promotion rule does not match frozen protocol")
+    question_id = binding.get("research_question_id")
+    hypothesis_id = binding.get("hypothesis_id")
+    if type(question_id) is not str or type(hypothesis_id) is not str:
+        raise ValueError("policy protocol lacks frozen question/hypothesis")
+    question = registry.get("ResearchQuestion", question_id)
+    hypothesis = registry.get("Hypothesis", hypothesis_id)
+    if question is None or hypothesis is None:
+        raise ValueError("policy frozen question/hypothesis is missing")
+    if hypothesis.payload.get("research_question_id") != question_id:
+        raise ValueError("policy hypothesis/question lineage mismatch")
+    if _impl._canonical_digest(question.payload) != _impl._sha256(
+        binding.get("research_question_sha256"), "research_question_sha256"
+    ):
+        raise ValueError("policy research question does not match frozen protocol")
+    if _impl._canonical_digest(hypothesis.payload) != _impl._sha256(
+        binding.get("hypothesis_sha256"), "hypothesis_sha256"
+    ):
+        raise ValueError("policy hypothesis does not match frozen protocol")
+
+    question_available = _impl._instant(
+        question.available_at, "research question available_at"
+    )
+    hypothesis_available = _impl._instant(
+        hypothesis.available_at, "hypothesis available_at"
+    )
+    feature_available = _impl._instant(feature.available_at, "feature set available_at")
+    protocol_frozen = _impl._instant(binding.get("frozen_at_utc"), "protocol frozen_at_utc")
+    protocol_available = _impl._instant(
+        protocol.available_at, "research protocol available_at"
+    )
+    dataset_available = _impl._instant(
+        dataset.available_at, "dataset snapshot available_at"
+    )
+    experiment_start = _impl._instant(spec.created_at, "experiment created_at")
+    if question_available > hypothesis_available:
+        raise ValueError("research question must precede policy hypothesis")
+    if hypothesis_available > protocol_frozen:
+        raise ValueError("policy hypothesis must precede protocol freeze")
+    if feature_available > protocol_frozen:
+        raise ValueError("policy feature set must be available by protocol freeze")
+    if protocol_frozen > protocol_available:
+        raise ValueError("policy protocol cannot be persisted before freeze")
+    if protocol_available > dataset_available:
+        raise ValueError("policy dataset snapshot must not precede protocol")
+    if dataset_available > experiment_start:
+        raise ValueError("policy scientific foundation was not available at experiment start")
+
+    if hypothesis.payload.get("primary_metric") != rule.primary_metric:
+        raise ValueError("policy primary metric does not match frozen hypothesis")
+    protective = hypothesis.payload.get("protective_metrics")
+    if type(protective) is not list:
+        raise ValueError("policy frozen protective metrics are invalid")
+    required_metrics = {rule.primary_metric} | {
+        name for name, _ in rule.protective_metric_maxima
+    }
+    if not {name for name, _ in rule.protective_metric_maxima}.issubset(
+        set(protective)
+    ):
+        raise ValueError("policy protective metrics are not frozen in hypothesis")
+
+    dataset_manifest_sha256 = _impl._sha256(
+        dataset.payload.get("manifest_sha256"), "dataset manifest_sha256"
+    )
+    if dataset_manifest_sha256 != _impl._sha256(
+        protocol.payload.get("dataset_manifest_sha256"),
+        "protocol dataset_manifest_sha256",
+    ):
+        raise ValueError("policy dataset manifest does not match frozen protocol")
+    if dataset_manifest_sha256 != evaluation.dataset_manifest_sha256:
+        raise ValueError("policy evaluation cases do not match frozen DatasetSnapshot manifest")
+    causal_cutoff = binding.get("causal_cutoff")
+    if type(causal_cutoff) is not str:
+        raise ValueError("policy protocol lacks causal cutoff")
+    if _impl._instant(dataset.payload.get("causal_cutoff"), "dataset causal_cutoff") != _impl._instant(
+        causal_cutoff, "protocol causal_cutoff"
+    ):
+        raise ValueError("policy dataset causal cutoff does not match protocol")
+
+    evaluation_config = PolicyEvaluationConfig.from_frozen_text(
+        binding.get("evaluation_design")
+    )
+    if feature.payload.get("version") != binding.get("feature_set_version"):
+        raise ValueError("policy feature version does not match frozen protocol")
+    if feature.payload.get("feature_set_id") != evaluation_config.feature_set_id:
+        raise ValueError("policy feature identity does not match evaluator config")
+    if _impl._sha256(
+        feature.payload.get("definition_sha256"), "feature definition_sha256"
+    ) != evaluation_config.feature_definition_sha256:
+        raise ValueError("policy feature definition does not match evaluator config")
+    if _impl._sha256(
+        feature.payload.get("source_sha256"), "feature source_sha256"
+    ) != evaluation_config.feature_source_sha256:
+        raise ValueError("policy feature source does not match evaluator config")
+
+    config_sha256 = _impl._sha256(
+        binding.get("code_config_sha256"), "code_config_sha256"
+    )
+    protocol_sha256 = _impl._sha256(
+        protocol.payload.get("protocol_sha256"), "protocol_sha256"
+    )
+    if evaluation.protocol_id != spec.research_protocol_id:
+        raise ValueError("policy evaluation protocol identity mismatch")
+    if evaluation.environment_id != spec.environment_sha256.lower():
+        raise ValueError("policy evaluation environment identity mismatch")
+    if evaluation.challenger_policy_id != spec.strategy_version_id:
+        raise ValueError("evaluated challenger policy does not match candidate strategy")
+    if evaluation.predecessor_policy_id != spec.predecessor_strategy_version_id:
+        raise ValueError("evaluated predecessor policy does not match rollback strategy")
+
+    current_champion = registry.champion_strategy(
+        as_of=spec.decided_at,
+        canonical_strategy_id=spec.canonical_strategy_id,
+    )
+    if current_champion != evaluation.predecessor_policy_id:
+        raise ValueError("policy evaluator predecessor is not the durable context champion")
+    if current_champion is None:
+        raise ValueError("policy promotion requires a durable rollback champion")
+    champion_strategy = registry.get("StrategyVersion", current_champion)
+    if champion_strategy is None:
+        raise ValueError("policy durable champion StrategyVersion is missing")
+    champion_model_version_id = champion_strategy.payload.get("model_version_id")
+    if type(champion_model_version_id) is not str or not champion_model_version_id:
+        raise ValueError("policy durable champion model identity is missing")
+    if spec.predecessor_model_version_id != champion_model_version_id:
+        raise ValueError("policy predecessor model identity does not match durable champion")
+
+    internal_runner = _impl.ExperimentRunner(registry, artifact_store)
+    internal_runner._preflight_promotion_history_order(spec)
+
+    predecessor_metrics_all = evaluation.metrics_as_float(challenger=False)
+    challenger_metrics_all = evaluation.metrics_as_float(challenger=True)
+    missing = sorted(required_metrics - set(challenger_metrics_all))
+    if missing:
+        raise ValueError(
+            "policy evaluator lacks frozen challenger metrics: " + ", ".join(missing)
+        )
+    predecessor_missing = sorted(required_metrics - set(predecessor_metrics_all))
+    if predecessor_missing:
+        raise ValueError(
+            "policy evaluator lacks frozen predecessor metrics: "
+            + ", ".join(predecessor_missing)
+        )
+    predecessor_metrics = {
+        name: predecessor_metrics_all[name] for name in sorted(required_metrics)
+    }
+    challenger_metrics = {
+        name: challenger_metrics_all[name] for name in sorted(required_metrics)
+    }
+
+    provisional = _impl.PromotionController.evaluate(
+        rule,
+        champion_metrics=predecessor_metrics,
+        challenger_metrics=challenger_metrics,
+        provenance_complete=True,
+        rollback_target=current_champion,
+    )
+    placeholder = _impl.ExperimentRecord(
+        spec.experiment_id,
+        spec.research_protocol_id,
+        spec.dataset_snapshot_id,
+        spec.feature_set_id,
+        spec.strategy_version_id,
+        spec.evaluation_bundle_id,
+        spec.seed,
+        config_sha256,
+        _impl.ResearchOutcome.INCONCLUSIVE,
+        spec.created_at,
+        model_version_id=spec.model_version_id,
+        completed_at=spec.completed_at,
+        notes="; ".join(provisional.reasons),
+    )
+    existing_experiment = registry.get("Experiment", spec.experiment_id)
+    if existing_experiment is None:
+        if registry.find_experiment_fingerprint(placeholder.fingerprint):
+            raise _impl.DuplicateExperimentFingerprintError(
+                "experiment fingerprint already has durable history; inspect negative/null results before repeating"
+            )
+        identities = [
+            ("ModelVersion", spec.model_version_id),
+            ("StrategyVersion", spec.strategy_version_id),
+            ("EvaluationBundle", spec.evaluation_bundle_id),
+            ("PromotionDecision", spec.promotion_decision_id),
+            ("Postmortem", f"{spec.experiment_id}:postmortem"),
+        ]
+        for record_type, record_id in identities:
+            if registry.get(record_type, record_id) is not None:
+                raise ValueError(
+                    "policy candidate immutable identity already exists: "
+                    f"{record_type}:{record_id}"
+                )
+        for kind, identity in (
+            ("model", spec.model_version_id),
+            ("metrics", spec.evaluation_bundle_id),
+            ("evaluation", spec.evaluation_bundle_id),
+        ):
+            if artifact_store.exists(kind, identity):
+                raise ValueError(
+                    f"policy candidate artifact identity already exists: {kind}:{identity}"
+                )
+    elif existing_experiment.payload != placeholder.to_payload():
+        raise ValueError("conflicting immutable policy experiment identity")
+
+    model_payload = {
+        "schema_version": 1,
+        "kind": "autosport-transparent-bandit-policy-model-v1",
+        "model_version_id": spec.model_version_id,
+        "policy_id": evaluation.challenger_policy_id,
+        "policy_artifact_sha256": policy_artifact_sha256,
+        "research_protocol_id": spec.research_protocol_id,
+        "dataset_snapshot_id": spec.dataset_snapshot_id,
+        "feature_set_id": spec.feature_set_id,
+        "config_sha256": config_sha256,
+        "evaluator_config_sha256": evaluation_config.config_sha256,
+        "policy_evaluation_sha256": evaluation.evaluation_sha256,
+        "dataset_manifest_sha256": dataset_manifest_sha256,
+        "seed": spec.seed,
+    }
+    model_artifact_sha256 = artifact_store.write(
+        "model", spec.model_version_id, model_payload
+    )
+    registry.append(
+        _impl.ModelVersion(
+            spec.model_version_id,
+            "transparent-bandit-policy-v1",
+            model_artifact_sha256,
+            spec.source_sha256,
+            spec.environment_sha256,
+            spec.dataset_snapshot_id,
+            spec.feature_set_id,
+            spec.research_protocol_id,
+            spec.seed,
+            config_sha256,
+            spec.created_at,
+            predecessor_model_version_id=spec.predecessor_model_version_id,
+        )
+    )
+    registry.append(
+        _impl.StrategyVersion(
+            spec.strategy_version_id,
+            spec.canonical_strategy_id,
+            spec.source_sha256,
+            spec.environment_sha256,
+            config_sha256,
+            spec.created_at,
+            model_version_id=spec.model_version_id,
+            predecessor_strategy_version_id=spec.predecessor_strategy_version_id,
+        )
+    )
+
+    metrics_payload = {
+        "schema_version": 1,
+        "kind": "autosport-factory-metrics-v1",
+        "evaluation_bundle_id": spec.evaluation_bundle_id,
+        "strategy_version_id": spec.strategy_version_id,
+        "model_version_id": spec.model_version_id,
+        "metrics": challenger_metrics,
+        "predecessor_policy_id": evaluation.predecessor_policy_id,
+        "predecessor_metrics": predecessor_metrics,
+        "source": "paired-policy-causal-v1",
+        "policy_evaluation_sha256": evaluation.evaluation_sha256,
+        "evaluator_config_sha256": evaluation_config.config_sha256,
+        "dataset_manifest_sha256": dataset_manifest_sha256,
+    }
+    metrics_sha256 = artifact_store.write(
+        "metrics", spec.evaluation_bundle_id, metrics_payload
+    )
+
+    paired = evaluation.paired_improvements
+    uncertainty_method, effect_low, effect_high = _impl._promotion_effect_interval(
+        paired, binding.get("uncertainty_method")
+    )
+    practical = evaluation.practical_improvement
+    conservative_ess = int(evaluation.effective_sample_size)
+    if conservative_ess < 1:
+        raise ValueError("policy evaluation effective sample size is below one")
+    conservative_ess = min(conservative_ess, len(evaluation.samples))
+    guardrails_passed = all(
+        challenger_metrics[name] <= maximum
+        for name, maximum in rule.protective_metric_maxima
+    )
+    dataset_source = dataset.payload.get("source_identity")
+    dataset_license = dataset.payload.get("license_identity")
+    confirmation_trial_family_id = (
+        f"{spec.research_protocol_id}:confirmation-trial-family"
+    )
+    holdout_access_id = _impl.promotion_holdout_access_id(
+        research_protocol_id=spec.research_protocol_id,
+        dataset_manifest_sha256=dataset_manifest_sha256,
+        source_identity=dataset_source,
+        license_identity=dataset_license,
+        confirmation_trial_family_id=confirmation_trial_family_id,
+    )
+    same_attempt_identity = {
+        "experiment_id": spec.experiment_id,
+        "research_protocol_id": spec.research_protocol_id,
+        "research_question_id": question_id,
+        "hypothesis_id": hypothesis_id,
+        "candidate_strategy_version_id": spec.strategy_version_id,
+        "candidate_model_version_id": spec.model_version_id,
+        "evaluation_bundle_id": spec.evaluation_bundle_id,
+        "dataset_snapshot_id": spec.dataset_snapshot_id,
+        "confirmation_trial_family_id": confirmation_trial_family_id,
+        "holdout_access_id": holdout_access_id,
+        "estimand": rule.primary_metric,
+        "direction": _impl.PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+        "rollback_identity": current_champion,
+        "created_at": spec.decided_at,
+    }
+    holdout_consumed = _impl._holdout_consumed_by_other_evidence(
+        (
+            prior.payload
+            for prior in registry.causal_records(
+                "PromotionEvidence", as_of=spec.decided_at
+            )
+        ),
+        same_attempt_identity=same_attempt_identity,
+    )
+    minimum = Decimal(str(rule.minimum_improvement))
+    validity = (
+        _impl.PromotionEvidenceValidity.ELIGIBLE
+        if conservative_ess >= rule.minimum_effective_sample_size
+        and effect_low >= minimum
+        and practical >= minimum
+        and guardrails_passed
+        else _impl.PromotionEvidenceValidity.INCONCLUSIVE
+    )
+    stopping_sha = hashlib.sha256(
+        str(binding.get("stopping_rule")).encode("utf-8")
+    ).hexdigest()
+    comparison_sha = hashlib.sha256(
+        str(binding.get("multiple_comparison_control")).encode("utf-8")
+    ).hexdigest()
+
+    evaluation_payload = {
+        "schema_version": 1,
+        "kind": "autosport-policy-specific-factory-evaluation-v1",
+        "evaluation_bundle_id": spec.evaluation_bundle_id,
+        "experiment_id": spec.experiment_id,
+        "research_protocol_id": spec.research_protocol_id,
+        "protocol_sha256": protocol_sha256,
+        "promotion_rule_sha256": rule.rule_sha256,
+        "dataset_snapshot_id": spec.dataset_snapshot_id,
+        "feature_set_id": spec.feature_set_id,
+        "model_version_id": spec.model_version_id,
+        "strategy_version_id": spec.strategy_version_id,
+        "predecessor_strategy_version_id": current_champion,
+        "predecessor_policy_id": evaluation.predecessor_policy_id,
+        "challenger_policy_id": evaluation.challenger_policy_id,
+        "evaluator_source_sha256": spec.evaluator_source_sha256.lower(),
+        "evaluator_config": evaluation_config.canonical_payload(),
+        "evaluator_config_sha256": evaluation_config.config_sha256,
+        "dataset_manifest_sha256": dataset_manifest_sha256,
+        "policy_evaluation": evaluation.canonical_payload(),
+        "policy_evaluation_sha256": evaluation.evaluation_sha256,
+        "candidate_metrics": challenger_metrics,
+        "predecessor_metrics": predecessor_metrics,
+        "candidate_metrics_artifact_sha256": metrics_sha256,
+        "candidate_metrics_source": "paired-policy-causal-v1",
+        "effective_sample_size_exact": _canonical_decimal_text(
+            evaluation.effective_sample_size
+        ),
+        "promotion_verdict": provisional.verdict.value,
+        "completed_at": spec.completed_at,
+        "decided_at": spec.decided_at,
+        "truth": {
+            "real_money_execution": False,
+            "auto_execution_authority": False,
+            "counterfactual_rewards_invented": False,
+            "llm_arithmetic_authority": False,
+        },
+    }
+    evaluation_bundle_sha256 = artifact_store.write(
+        "evaluation", spec.evaluation_bundle_id, evaluation_payload
+    )
+    registry.append(
+        _impl.EvaluationBundleRef(
+            spec.evaluation_bundle_id,
+            evaluation_bundle_sha256,
+            spec.evaluator_source_sha256,
+            spec.dataset_snapshot_id,
+            protocol_sha256,
+            (model_artifact_sha256, metrics_sha256),
+            spec.completed_at,
+            evaluated_strategy_version_id=spec.strategy_version_id,
+            evaluated_model_version_id=spec.model_version_id,
+            effective_sample_size=conservative_ess,
+            effect_interval_low=_canonical_decimal_text(effect_low),
+            effect_interval_high=_canonical_decimal_text(effect_high),
+            practical_improvement=_canonical_decimal_text(practical),
+        )
+    )
+
+    evidence_payload = {
+        "schema_version": 1,
+        "experiment_id": spec.experiment_id,
+        "research_protocol_id": spec.research_protocol_id,
+        "research_question_id": question_id,
+        "hypothesis_id": hypothesis_id,
+        "candidate_strategy_version_id": spec.strategy_version_id,
+        "candidate_model_version_id": spec.model_version_id,
+        "evaluation_bundle_id": spec.evaluation_bundle_id,
+        "evaluation_bundle_sha256": evaluation_bundle_sha256,
+        "dataset_snapshot_id": spec.dataset_snapshot_id,
+        "holdout_access_id": holdout_access_id,
+        "confirmation_trial_family_id": confirmation_trial_family_id,
+        "estimand": rule.primary_metric,
+        "direction": _impl.PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+        "cohort_id": spec.dataset_snapshot_id,
+        "effective_sample_size": conservative_ess,
+        "minimum_effective_sample_size": rule.minimum_effective_sample_size,
+        "effect_interval_low": _canonical_decimal_text(effect_low),
+        "effect_interval_high": _canonical_decimal_text(effect_high),
+        "practical_improvement": _canonical_decimal_text(practical),
+        "guardrails_passed": guardrails_passed,
+        "validity": validity.value,
+        "holdout_consumed": holdout_consumed,
+        "stopping_rule_sha256": stopping_sha,
+        "multiple_comparison_control_sha256": comparison_sha,
+        "rollback_identity": current_champion,
+        "uncertainty_method": uncertainty_method,
+        "created_at": spec.decided_at,
+    }
+    evidence_id = _impl._canonical_digest(evidence_payload)
+    typed = dict(evidence_payload)
+    typed.pop("schema_version")
+    typed["direction"] = _impl.PromotionEvidenceDirection(typed["direction"])
+    typed["validity"] = _impl.PromotionEvidenceValidity(typed["validity"])
+    promotion_evidence = _impl.PromotionEvidence(
+        promotion_evidence_id=evidence_id,
+        **typed,
+    )
+    promotion = _impl.PromotionController.evaluate(
+        rule,
+        champion_metrics=predecessor_metrics,
+        challenger_metrics=challenger_metrics,
+        provenance_complete=True,
+        rollback_target=current_champion,
+        promotion_evidence=promotion_evidence,
+    )
+    outcome = (
+        _impl.ResearchOutcome.POSITIVE
+        if promotion.verdict is _impl.PromotionVerdict.PROMOTE
+        else (
+            _impl.ResearchOutcome.NEGATIVE
+            if promotion.verdict is _impl.PromotionVerdict.REJECT
+            else _impl.ResearchOutcome.INCONCLUSIVE
+        )
+    )
+    experiment = _impl.ExperimentRecord(
+        spec.experiment_id,
+        spec.research_protocol_id,
+        spec.dataset_snapshot_id,
+        spec.feature_set_id,
+        spec.strategy_version_id,
+        spec.evaluation_bundle_id,
+        spec.seed,
+        config_sha256,
+        outcome,
+        spec.created_at,
+        model_version_id=spec.model_version_id,
+        completed_at=spec.completed_at,
+        notes="; ".join(promotion.reasons),
+    )
+    registry.append(experiment)
+    registry.append(promotion_evidence)
+    registry.record_promotion(
+        _impl.PromotionDecision(
+            spec.promotion_decision_id,
+            promotion.registry_action,
+            spec.strategy_version_id,
+            spec.research_protocol_id,
+            protocol_sha256,
+            spec.evaluation_bundle_id,
+            evaluation_bundle_sha256,
+            spec.decided_at,
+            predecessor_strategy_version_id=current_champion,
+            candidate_model_version_id=spec.model_version_id,
+            promotion_evidence_id=promotion_evidence.promotion_evidence_id,
+            reason="; ".join(promotion.reasons),
+        )
+    )
+    if outcome is not _impl.ResearchOutcome.POSITIVE:
+        registry.append(
+            _impl.Postmortem(
+                f"{spec.experiment_id}:postmortem",
+                spec.experiment_id,
+                outcome,
+                "; ".join(promotion.reasons)
+                or "policy-specific promotion evidence was insufficient",
+                ("new frozen protocol version or explicitly authorized retest",),
+                spec.decided_at,
+            )
+        )
+    reproducibility = registry.reproducibility_bundle(spec.experiment_id)
+    return _impl.FactoryRunResult(
+        spec.experiment_id,
+        spec.model_version_id,
+        spec.strategy_version_id,
+        spec.evaluation_bundle_id,
+        spec.promotion_decision_id,
+        evaluation_bundle_sha256,
+        reproducibility["bundle_sha256"],
+        promotion.verdict,
+        promotion.registry_action,
+        challenger_metrics,
+    )
+
+
 class ExperimentRunner(_impl.ExperimentRunner):
     """Factory runner with one fail-closed workspace transaction per candidate.
 
@@ -346,6 +899,77 @@ class ExperimentRunner(_impl.ExperimentRunner):
     accepted. Interrupted publication is recovered from a hash-bound transaction
     manifest before any later candidate may reuse an immutable identity.
     """
+
+
+    def run_policy_candidate(
+        self,
+        spec: _impl.FactoryCandidateSpec,
+        evaluation: PolicyPairEvaluation,
+        *,
+        rule: _impl.PromotionRule,
+        policy_artifact_sha256: str,
+    ) -> _impl.FactoryRunResult:
+        """Atomically publish a policy-specific causal candidate and promotion evidence."""
+
+        real_registry = self.registry
+        real_store = self.artifact_store
+        with WorkspaceEconomicLock(real_registry.path.parent):
+            _recover_interrupted_factory_publish(real_registry, real_store)
+            original_state = real_registry._read()
+            with tempfile.TemporaryDirectory(
+                prefix="autosport-policy-factory-transaction-"
+            ) as temporary_directory:
+                temporary_root = Path(temporary_directory)
+                staged_registry_path = temporary_root / "scientific_registry.json"
+                atomic_write_json(staged_registry_path, original_state)
+                staged_registry = ScientificRegistry(staged_registry_path)
+                staged_store = _StagedFactoryArtifactStore(
+                    real_store,
+                    temporary_root / "factory-artifacts",
+                )
+                result = _run_policy_candidate_unstaged(
+                    staged_registry,
+                    staged_store,
+                    spec,
+                    evaluation,
+                    rule=rule,
+                    policy_artifact_sha256=policy_artifact_sha256,
+                )
+                final_state = staged_registry._read()
+                transaction_path = _publish_transaction_path(real_registry)
+                transaction = {
+                    "schema_version": 1,
+                    "phase": "prepared",
+                    "original_registry_sha256": _registry_state_sha256(original_state),
+                    "final_registry_sha256": _registry_state_sha256(final_state),
+                    "artifacts": list(staged_store.transaction_artifacts()),
+                }
+                atomic_write_json(transaction_path, transaction)
+                try:
+                    created_artifacts = staged_store.publish()
+                except Exception as publish_error:
+                    _unlink_transaction_manifest(transaction_path, publish_error)
+                    raise
+                try:
+                    atomic_write_json(real_registry.path, final_state)
+                    real_registry._read()
+                except Exception as publish_error:
+                    try:
+                        atomic_write_json(real_registry.path, original_state)
+                        real_registry._read()
+                    except BaseException as restore_error:
+                        try:
+                            publish_error.add_note(
+                                "policy factory registry rollback also failed: "
+                                f"{type(restore_error).__name__}: {restore_error}"
+                            )
+                        except BaseException:
+                            pass
+                    staged_store._rollback(created_artifacts, publish_error)
+                    _unlink_transaction_manifest(transaction_path, publish_error)
+                    raise
+                _unlink_transaction_manifest(transaction_path)
+                return result
 
     def run_baseline_candidate(
         self,

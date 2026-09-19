@@ -101,6 +101,11 @@ class AttributionStatus(StrEnum):
     MIXED = "MIXED"
 
 
+# Factor-level immutable causal credit assignment record. Kept as an alias to avoid
+# creating a second ledger while giving callers an explicit CreditAssignment type.
+CreditAssignment = AttributionFinding
+
+
 _PRIMARY_NEXT: dict[AgentLoopPhase, AgentLoopPhase] = {
     AgentLoopPhase.OBSERVE: AgentLoopPhase.ASSESS,
     AgentLoopPhase.ASSESS: AgentLoopPhase.PLAN,
@@ -274,11 +279,18 @@ class OutcomeAttribution:
 
     @property
     def attribution_id(self) -> str:
+        """Stable immutable key for one causal transition attribution.
+
+        Payload changes (timestamps, evidence, findings) must collide on the same
+        transition/version so a retry can fail closed rather than create a second
+        attribution for the same causal event.
+        """
         return _digest(
             {
                 "schema": AGENT_LOOP_SCHEMA,
                 "kind": "OutcomeAttribution",
-                **self.payload(),
+                "transition_id": self.transition_id,
+                "reward_id": self.reward_id,
             }
         )
 
@@ -332,11 +344,12 @@ class ReflectionPostmortem:
 
     @property
     def postmortem_id(self) -> str:
+        """Stable immutable key for one attribution's reflection/postmortem."""
         return _digest(
             {
                 "schema": AGENT_LOOP_SCHEMA,
                 "kind": "ReflectionPostmortem",
-                **self.payload(),
+                "attribution_id": self.attribution_id,
             }
         )
 
@@ -1299,7 +1312,9 @@ class AgentLoopRuntime:
             source_scope=f"agent-loop:{loop_id}",
             source_event_id=postmortem["postmortem_id"],
             question_id=question.question_id,
-            question_record_sha256=_digest(question.to_payload()),
+            question_record_sha256=registry.get(
+                "ResearchQuestion", question.question_id
+            ).record_sha256,
             source_evidence_sha256=question.source_sha256,
             source_observed_at=requested_at,
             requested_at=requested_at,

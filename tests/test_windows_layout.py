@@ -6,6 +6,7 @@ from autosport.windows_layout import (
     compact_surface_heights,
     configure_windows_product_shell_accessibility,
     install_compact_windows_layout,
+    install_owner_economic_authority_surface,
     install_windows_product_shell,
     refresh_windows_shell_open_availability,
     _owner_economic_workspace,
@@ -80,6 +81,12 @@ def test_windows_product_shell_has_stable_uia_ids_and_keyboard_navigation():
 
     dialog_source = inspect.getsource(_show_owner_economic_dialog)
     assert 'WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_dialog_readback"]' in dialog_source
+
+    owner_surface_source = inspect.getsource(install_owner_economic_authority_surface)
+    assert 'owner_row = ttk.Frame(panel)' in owner_surface_source
+    assert 'owner_economic_authority_button.pack(side="left"' in owner_surface_source
+    assert 'owner_economic_authority_state.pack(side="left", fill="x", expand=True)' in owner_surface_source
+    assert 'owner_economic_authority_readback = tk.Listbox(panel, height=1' in owner_surface_source
 
     install_source = inspect.getsource(install_compact_windows_layout)
     assert "refresh_windows_shell_open_availability(self)" in install_source

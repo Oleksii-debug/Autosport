@@ -332,10 +332,10 @@ def recommend_route(
             observation.observation_id, observation.domain_profile,
         )
     if observation.domain_profile is DomainProfile.SLOW:
-        if duration + deadline <= slack:
+        if duration <= deadline and duration <= slack:
             return RouteRecommendation(
                 RouteStatus.ROUTE_SLOW_RESEARCH,
-                "measured reaction slack covers measured slow-analysis duration plus deadline",
+                "measured compute duration fits both the slow-analysis deadline and reaction slack",
                 observation.observation_id, observation.domain_profile,
             )
         return RouteRecommendation(

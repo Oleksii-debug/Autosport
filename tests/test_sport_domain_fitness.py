@@ -1,0 +1,168 @@
+import json
+import tempfile
+import unittest
+from dataclasses import replace
+from decimal import Decimal
+from pathlib import Path
+from unittest.mock import patch
+
+from autosport.sport_domain_fitness import (
+    CausalView, DomainProfile, EvidenceProvenance, EvidenceState,
+    MetricEvidence, RouteStatus, SportDomainFitnessError,
+    SportDomainFitnessObservation, SportDomainFitnessStore, recommend_route,
+)
+
+
+SHA = "a" * 64
+T0 = "2026-01-01T00:00:00Z"
+T1 = "2026-01-02T00:00:00Z"
+T2 = "2026-01-03T00:00:00Z"
+
+
+def met(value, unit, state=EvidenceState.MEASURED):
+    return MetricEvidence(state, None if value is None else Decimal(str(value)), unit)
+
+
+def make_observation(**overrides):
+    values = dict(
+        observation_id="obs-default", sport_id="table-tennis", league_id="league-1",
+        market_id="match", provider_id="provider-1",
+        measured_from=T0, measured_until=T1, available_at=T1,
+        evidence_sha256=SHA, provenance=EvidenceProvenance.OBSERVED,
+        domain_profile=DomainProfile.FAST,
+        catalogue_coverage=met("0.9", "fraction"),
+        quote_coverage=met("0.8", "fraction"),
+        recurrence_per_hour=met("12", "events/hour"),
+        freshness_seconds=met("1", "seconds"),
+        reaction_slack_seconds=met("5", "seconds"),
+        executable_liquidity=met("100", "units"),
+        fee_fraction=met("0.01", "fraction"),
+        slippage_fraction=met("0.01", "fraction"),
+        capital_time_hours=met("0.25", "hours"),
+        data_cost=met("0.10", "cost"),
+        compute_cost=met("2", "cost"),
+        slow_analysis_deadline_seconds=met("1", "seconds"),
+        freshness_ttl_seconds=met("10", "seconds"),
+    )
+    values.update(overrides)
+    return SportDomainFitnessObservation(**values)
+
+
+class SportDomainFitnessTests(unittest.TestCase):
+    def test_round_trip_restart_and_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fitness.json"
+            store = SportDomainFitnessStore(path)
+            obs = make_observation()
+            self.assertTrue(store.add(obs))
+            reopened = SportDomainFitnessStore(path)
+            self.assertEqual(reopened.get(obs.observation_id), obs)
+            self.assertEqual(
+                reopened.recommend(
+                    sport_id="table-tennis", league_id="league-1",
+                    market_id="match", provider_id="provider-1", as_of=T2,
+                )[0].status,
+                RouteStatus.ROUTE_BASELINE,
+            )
+
+    def test_failed_publication_does_not_expose_live_uncommitted_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fitness.json"
+            store = SportDomainFitnessStore(path)
+            obs = make_observation(observation_id="fault")
+            with patch.object(store, "_persist", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    store.add(obs)
+            self.assertIsNone(store.get("fault"))
+            self.assertIsNone(SportDomainFitnessStore(path).get("fault"))
+
+    def test_future_evidence_is_hidden_from_decision_view_but_research_can_inspect_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SportDomainFitnessStore(Path(tmp) / "fitness.json")
+            store.add(make_observation(observation_id="future", measured_until=T2, available_at=T2))
+            kwargs = dict(sport_id="table-tennis", league_id="league-1",
+                          market_id="match", provider_id="provider-1", as_of=T1)
+            self.assertEqual(store.lookup(**kwargs), ())
+            self.assertEqual(
+                len(store.lookup(**kwargs, view=CausalView.RESTATED_RESEARCH)), 0,
+            )
+            # Even retrospective route generation is blocked: live routing only
+            # accepts decision-time evidence.
+            kwargs["as_of"] = T2
+            self.assertEqual(
+                store.recommend(**kwargs, view=CausalView.RESTATED_RESEARCH)[0].status,
+                RouteStatus.DO_NOT_ROUTE,
+            )
+
+    def test_simulation_can_never_become_a_live_route(self):
+        obs = make_observation(observation_id="sim", provenance=EvidenceProvenance.SIMULATED)
+        self.assertEqual(recommend_route(obs, as_of=T2).status, RouteStatus.DO_NOT_ROUTE)
+
+    def test_metric_states_are_explicit_and_fail_closed(self):
+        for state in (EvidenceState.UNKNOWN, EvidenceState.UNAVAILABLE, EvidenceState.INSUFFICIENT):
+            with self.subTest(state=state):
+                obs = make_observation(
+                    observation_id=state.value,
+                    executable_liquidity=MetricEvidence(state, None, "units"),
+                )
+                self.assertEqual(
+                    recommend_route(obs, as_of=T2).status,
+                    RouteStatus.INSUFFICIENT_EVIDENCE,
+                )
+
+    def test_nonfinite_negative_fraction_and_impossible_time_are_rejected(self):
+        with self.assertRaises(SportDomainFitnessError):
+            MetricEvidence(EvidenceState.MEASURED, Decimal("-1"), "seconds")
+        with self.assertRaises(SportDomainFitnessError):
+            MetricEvidence(EvidenceState.MEASURED, Decimal("NaN"), "seconds")
+        with self.assertRaises(SportDomainFitnessError):
+            make_observation(catalogue_coverage=met("1.1", "fraction"))
+        with self.assertRaises(SportDomainFitnessError):
+            make_observation(freshness_ttl_seconds=met("0", "seconds"))
+
+    def test_stale_reaction_slack_and_zero_coverage_fail_closed(self):
+        stale = make_observation(observation_id="stale", freshness_seconds=met("11", "seconds"))
+        zero = make_observation(observation_id="zero", quote_coverage=met("0", "fraction"))
+        self.assertEqual(recommend_route(stale, as_of=T2).status, RouteStatus.DO_NOT_ROUTE)
+        self.assertEqual(recommend_route(zero, as_of=T2).status, RouteStatus.DO_NOT_ROUTE)
+
+    def test_slow_route_is_only_allowed_when_measured_budget_fits(self):
+        slow = make_observation(
+            observation_id="slow", domain_profile=DomainProfile.SLOW,
+            reaction_slack_seconds=met("5", "seconds"),
+            compute_cost=met("2", "cost"), slow_analysis_deadline_seconds=met("2", "seconds"),
+        )
+        self.assertEqual(recommend_route(slow, as_of=T2).status, RouteStatus.ROUTE_SLOW_RESEARCH)
+        too_slow = replace(
+            slow, observation_id="too-slow",
+            slow_analysis_deadline_seconds=met("4", "seconds"),
+        )
+        self.assertEqual(recommend_route(too_slow, as_of=T2).status, RouteStatus.ROUTE_BASELINE)
+
+    def test_conflicting_immutable_id_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SportDomainFitnessStore(Path(tmp) / "fitness.json")
+            obs = make_observation(observation_id="immutable")
+            store.add(obs)
+            conflicting = replace(obs, quote_coverage=met("0.6", "fraction"))
+            with self.assertRaises(SportDomainFitnessError):
+                store.add(conflicting)
+
+    def test_observed_vs_simulated_is_part_of_immutable_payload(self):
+        observed = make_observation(observation_id="prov")
+        simulated = replace(observed, provenance=EvidenceProvenance.SIMULATED)
+        self.assertNotEqual(observed.payload()["provenance"], simulated.payload()["provenance"])
+
+    def test_decision_boundary_rejects_pre_availability_evidence(self):
+        obs = make_observation(observation_id="future2", available_at=T2, measured_until=T1)
+        self.assertEqual(recommend_route(obs, as_of=T1).status, RouteStatus.DO_NOT_ROUTE)
+
+    def test_payload_is_json_safe_and_decimal_exact(self):
+        payload = make_observation().payload()
+        encoded = json.dumps(payload, sort_keys=True)
+        self.assertIn('"2"', encoded)
+        self.assertNotIn("2.0", encoded)
+
+
+if __name__ == "__main__":
+    unittest.main()

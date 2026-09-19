@@ -108,6 +108,35 @@ def _digest(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def _canonical_scope(
+    *,
+    sport: object | None,
+    league: object | None,
+    regime: object | None,
+) -> tuple[str, str, str] | None:
+    values = (sport, league, regime)
+    if all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise ValueError("sport, league and regime must be provided together")
+    return (
+        _text(sport, "sport"),
+        _text(league, "league"),
+        _text(regime, "regime"),
+    )
+
+
+def _scope_from_payload(payload: Mapping[str, Any]) -> tuple[str, str, str] | None:
+    try:
+        return _canonical_scope(
+            sport=payload.get("sport"),
+            league=payload.get("league"),
+            regime=payload.get("regime"),
+        )
+    except ValueError as exc:
+        raise DriftLineageError("drift scope payload is invalid") from exc
+
+
 def _canonical_decimal(value: object, name: str) -> str:
     text = _text(value, name)
     try:
@@ -140,30 +169,35 @@ def _window_evidence_sha256(
     values: tuple[str, ...],
     value_observed_at: tuple[str, ...],
     value_available_at: tuple[str, ...],
+    sport: object | None = None,
+    league: object | None = None,
+    regime: object | None = None,
 ) -> str:
-    return _digest(
-        {
-            "schema": "autosport.drift-window-evidence",
-            "schema_version": 1,
-            "dataset_snapshot_id": _text(dataset_snapshot_id, "dataset_snapshot_id"),
-            "source_identity": _text(source_identity, "source_identity"),
-            "window_start": _timestamp_identity(window_start, "window_start"),
-            "window_end": _timestamp_identity(window_end, "window_end"),
-            "as_of": _timestamp_identity(as_of, "as_of"),
-            "values": [
-                _canonical_decimal(value, f"values[{index}]")
-                for index, value in enumerate(values)
-            ],
-            "value_observed_at": [
-                _timestamp_identity(value, f"value_observed_at[{index}]")
-                for index, value in enumerate(value_observed_at)
-            ],
-            "value_available_at": [
-                _timestamp_identity(value, f"value_available_at[{index}]")
-                for index, value in enumerate(value_available_at)
-            ],
-        }
-    )
+    payload: dict[str, Any] = {
+        "schema": "autosport.drift-window-evidence",
+        "schema_version": 1,
+        "dataset_snapshot_id": _text(dataset_snapshot_id, "dataset_snapshot_id"),
+        "source_identity": _text(source_identity, "source_identity"),
+        "window_start": _timestamp_identity(window_start, "window_start"),
+        "window_end": _timestamp_identity(window_end, "window_end"),
+        "as_of": _timestamp_identity(as_of, "as_of"),
+        "values": [
+            _canonical_decimal(value, f"values[{index}]")
+            for index, value in enumerate(values)
+        ],
+        "value_observed_at": [
+            _timestamp_identity(value, f"value_observed_at[{index}]")
+            for index, value in enumerate(value_observed_at)
+        ],
+        "value_available_at": [
+            _timestamp_identity(value, f"value_available_at[{index}]")
+            for index, value in enumerate(value_available_at)
+        ],
+    }
+    scope = _canonical_scope(sport=sport, league=league, regime=regime)
+    if scope is not None:
+        payload["sport"], payload["league"], payload["regime"] = scope
+    return _digest(payload)
 
 
 def _fraction_from_decimal(value: str, name: str) -> Fraction:
@@ -211,11 +245,15 @@ class DriftWindow:
     value_observed_at: tuple[str, ...]
     value_available_at: tuple[str, ...]
     evidence_sha256: str
+    sport: str | None = None
+    league: str | None = None
+    regime: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("dataset_snapshot_id", "source_identity"):
             _text(getattr(self, name), name)
         revision = _sha256(self.revision_id, "revision_id")
+        _canonical_scope(sport=self.sport, league=self.league, regime=self.regime)
         start = _instant(self.window_start, "window_start")
         end = _instant(self.window_end, "window_end")
         cutoff = _instant(self.as_of, "as_of")
@@ -267,6 +305,9 @@ class DriftWindow:
             values=self.values,
             value_observed_at=self.value_observed_at,
             value_available_at=self.value_available_at,
+            sport=self.sport,
+            league=self.league,
+            regime=self.regime,
         )
         evidence = _sha256(self.evidence_sha256, "evidence_sha256")
         if evidence != expected_evidence:
@@ -290,6 +331,9 @@ class DriftWindow:
         values: tuple[str, ...],
         value_observed_at: tuple[str, ...],
         value_available_at: tuple[str, ...],
+        sport: str | None = None,
+        league: str | None = None,
+        regime: str | None = None,
     ) -> "DriftWindow":
         evidence = _window_evidence_sha256(
             dataset_snapshot_id=dataset_snapshot_id,
@@ -300,6 +344,9 @@ class DriftWindow:
             values=values,
             value_observed_at=value_observed_at,
             value_available_at=value_available_at,
+            sport=sport,
+            league=league,
+            regime=regime,
         )
         return cls(
             dataset_snapshot_id=dataset_snapshot_id,
@@ -312,6 +359,9 @@ class DriftWindow:
             value_observed_at=value_observed_at,
             value_available_at=value_available_at,
             evidence_sha256=evidence,
+            sport=sport,
+            league=league,
+            regime=regime,
         )
 
     @property
@@ -345,6 +395,9 @@ class DriftReference:
     evidence_sha256: str
     sample_count: int
     mean_fraction: str | None
+    sport: str | None = None
+    league: str | None = None
+    regime: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.drift_kind, DriftKind):
@@ -382,6 +435,7 @@ class DriftReference:
             raise ValueError("threshold must be non-negative")
         _sha256(self.metric_definition_sha256, "metric_definition_sha256")
         _sha256(self.evidence_sha256, "evidence_sha256")
+        _canonical_scope(sport=self.sport, league=self.league, regime=self.regime)
         if self.sample_count == 0:
             if self.mean_fraction is not None:
                 raise ValueError("empty baseline cannot carry a mean")
@@ -399,7 +453,7 @@ class DriftReference:
         return _timestamp_identity(self.baseline_as_of, "baseline_as_of")
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": DRIFT_SCHEMA_VERSION,
             "drift_kind": self.drift_kind.value,
             "metric": self.metric.value,
@@ -424,6 +478,10 @@ class DriftReference:
             "arithmetic_truth": "EXACT_RATIONAL_FROM_CANONICAL_DECIMALS",
             "interpretation_assumption": "THRESHOLD_DIAGNOSTIC_NOT_SIGNIFICANCE_TEST",
         }
+        scope = _canonical_scope(sport=self.sport, league=self.league, regime=self.regime)
+        if scope is not None:
+            payload["sport"], payload["league"], payload["regime"] = scope
+        return payload
 
     @property
     def reference_id(self) -> str:
@@ -446,6 +504,9 @@ class DriftObservation:
     evidence_sha256: str
     sample_count: int
     mean_fraction: str | None
+    sport: str | None = None
+    league: str | None = None
+    regime: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("reference_id", "dataset_snapshot_id", "source_identity", "revision_id"):
@@ -456,6 +517,7 @@ class DriftObservation:
         if end < start or as_of < end:
             raise ValueError("observation window timestamps are inconsistent")
         _sha256(self.evidence_sha256, "evidence_sha256")
+        _canonical_scope(sport=self.sport, league=self.league, regime=self.regime)
         if isinstance(self.sample_count, bool) or not isinstance(self.sample_count, int):
             raise ValueError("sample_count must be an integer")
         if self.sample_count < 0:
@@ -477,7 +539,7 @@ class DriftObservation:
         return _timestamp_identity(self.observation_as_of, "observation_as_of")
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": DRIFT_SCHEMA_VERSION,
             "reference_id": self.reference_id,
             "dataset_snapshot_id": self.dataset_snapshot_id,
@@ -492,6 +554,10 @@ class DriftObservation:
             "sample_count": self.sample_count,
             "mean_fraction": self.mean_fraction,
         }
+        scope = _canonical_scope(sport=self.sport, league=self.league, regime=self.regime)
+        if scope is not None:
+            payload["sport"], payload["league"], payload["regime"] = scope
+        return payload
 
     @property
     def observation_id(self) -> str:
@@ -781,6 +847,9 @@ class DriftMonitor:
             evidence_sha256=baseline.evidence_sha256,
             sample_count=baseline.sample_count,
             mean_fraction=baseline.mean_fraction,
+            sport=baseline.sport,
+            league=baseline.league,
+            regime=baseline.regime,
         )
         self.scientific_registry.append(reference)
         return reference
@@ -823,6 +892,9 @@ class DriftMonitor:
             evidence_sha256=current.evidence_sha256,
             sample_count=current.sample_count,
             mean_fraction=current.mean_fraction,
+            sport=current.sport,
+            league=current.league,
+            regime=current.regime,
         )
         observation_sha = self.scientific_registry.append(observation)
 
@@ -840,6 +912,12 @@ class DriftMonitor:
             insufficiency_reason = "CURRENT_SAMPLE_COUNT"
         elif current.source_identity != reference.get("source_identity"):
             insufficiency_reason = "SOURCE_IDENTITY_MISMATCH"
+        elif _canonical_scope(
+            sport=current.sport,
+            league=current.league,
+            regime=current.regime,
+        ) != _scope_from_payload(reference):
+            insufficiency_reason = "SCOPE_MISMATCH"
 
         delta_text: str | None
         if insufficiency_reason is not None:

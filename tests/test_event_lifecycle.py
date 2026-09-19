@@ -9,7 +9,6 @@ from pathlib import Path
 from autosport.domain import MarketEvent
 from autosport.event_lifecycle import (
     CatalogConflictError,
-    CatalogConflictError,
     CatalogCursorError,
     CatalogEvent,
     CatalogPage,
@@ -129,10 +128,6 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             lifecycle = ContinuousEventLifecycle(Path(directory) / "catalog.json")
             pre = self._event()
-            completed = self._event(
-                sequence=2,
-                status="closed",
-            )
             identity = pre.source_id + ":" + pre.event_id
             lifecycle.apply_page(
                 self._page(1, self._catalog_event()),

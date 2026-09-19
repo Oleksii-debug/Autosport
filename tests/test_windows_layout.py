@@ -9,6 +9,7 @@ from autosport.windows_layout import (
     install_windows_product_shell,
     refresh_windows_shell_open_availability,
     _owner_economic_workspace,
+    _owner_economic_write_blocker,
     _show_owner_economic_dialog,
     _surface_target_widget,
 )
@@ -42,9 +43,9 @@ def test_compact_surface_heights_keep_all_critical_scrolling_surfaces_visible():
 
     compact_surface_heights(app)
 
-    assert app.live_quotes.height == 3
-    assert app.tickets.height == 4
-    assert app.evaluation.height == 3
+    assert app.live_quotes.height == 2
+    assert app.tickets.height == 3
+    assert app.evaluation.height == 2
     assert app.log.height == 2
     assert app.tickets_label.pady == (6, 2)
     assert app.evaluation_label.pady == (6, 2)
@@ -133,3 +134,34 @@ def test_owner_economic_creation_is_closed_for_strategies_without_goal_aware_siz
         workspace, blocked = _owner_economic_workspace(App(strategy_id))
         assert workspace is None
         assert blocked is not None
+
+
+def test_owner_economic_write_blocker_fails_closed_for_exact_recovery_workspace(tmp_path):
+    blocked_workspace = tmp_path / "strategies" / "research-replay-v1-plan"
+    other_workspace = tmp_path / "strategies" / "research-replay-v1-other"
+
+    class App:
+        def __init__(self):
+            self._closing = False
+            self._recovery_blocked_workspaces = {blocked_workspace}
+
+        def _workspace_requires_recovery(self, workspace):
+            return workspace in self._recovery_blocked_workspaces
+
+    app = App()
+
+    assert _owner_economic_write_blocker(app, blocked_workspace) is not None
+    assert _owner_economic_write_blocker(app, other_workspace) is None
+
+
+def test_owner_economic_write_blocker_preserves_base_gui_recovery_quarantine(tmp_path):
+    blocked_workspace = tmp_path / "strategies" / "research-replay-v1-plan"
+
+    class App:
+        def __init__(self):
+            self._closing = False
+            self._recovery_required_workspaces = {blocked_workspace}
+
+    app = App()
+
+    assert _owner_economic_write_blocker(app, blocked_workspace) is not None

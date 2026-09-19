@@ -28,6 +28,10 @@ from .json_integrity import strict_json_loads
 from .providers import ProviderUnavailableError
 
 
+_MAX_DELTA_PAGE_ITEMS = 5000
+_MAX_PROVIDER_RETRY_ATTEMPTS = 10
+
+
 class CollectorServiceError(RuntimeError):
     """Base error for the bounded headless collector runtime."""
 
@@ -69,14 +73,20 @@ class CollectorServiceConfig:
             isinstance(self.max_items, bool)
             or not isinstance(self.max_items, int)
             or self.max_items <= 0
+            or self.max_items > _MAX_DELTA_PAGE_ITEMS
         ):
-            raise ValueError("max_items must be a positive integer")
+            raise ValueError(
+                f"max_items must be in 1..{_MAX_DELTA_PAGE_ITEMS}"
+            )
         if (
             isinstance(self.retry_attempts, bool)
             or not isinstance(self.retry_attempts, int)
             or self.retry_attempts <= 0
+            or self.retry_attempts > _MAX_PROVIDER_RETRY_ATTEMPTS
         ):
-            raise ValueError("retry_attempts must be a positive integer")
+            raise ValueError(
+                f"retry_attempts must be in 1..{_MAX_PROVIDER_RETRY_ATTEMPTS}"
+            )
         if (
             isinstance(self.max_store_bytes, bool)
             or not isinstance(self.max_store_bytes, int)
@@ -157,8 +167,11 @@ class ReadOnlyCollectorDeltaFeed:
             isinstance(max_items, bool)
             or not isinstance(max_items, int)
             or max_items <= 0
+            or max_items > _MAX_DELTA_PAGE_ITEMS
         ):
-            raise ValueError("max_items must be a positive integer")
+            raise ValueError(
+                f"max_items must be in 1..{_MAX_DELTA_PAGE_ITEMS}"
+            )
         candidates = self.store.deltas_after_commit(
             source_id=self.source_id,
             after_delta_id=after_delta_id,

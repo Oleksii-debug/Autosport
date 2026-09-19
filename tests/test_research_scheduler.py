@@ -502,3 +502,94 @@ def test_curriculum_wake_honors_external_admission_and_pending_recovery(tmp_path
     )
     assert delivered.action is TickAction.DELIVERED
     assert len(supervisor.list_runs()) == 1
+
+def test_curriculum_pending_wake_honors_scheduler_pause_before_dispatch(tmp_path):
+    _, supervisor, curriculum = _workspace(tmp_path, max_budget_units=8)
+    candidate = (_candidate(episode_id="c-wake-paused"),)
+    scheduler = ResearchScheduler.initialize_pristine(
+        tmp_path / "research-scheduler.json",
+        curriculum.trigger_adapter,
+    )
+    wake_id = scheduler.queue_curriculum_wake(
+        curriculum,
+        candidate,
+        purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=20,
+        budget_units=1,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+
+    scheduler.pause()
+    blocked = scheduler.tick_curriculum(
+        curriculum,
+        candidate,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+
+    assert blocked.action is TickAction.PAUSED
+    assert blocked.curriculum_wake_id == wake_id
+    assert not supervisor.list_runs()
+    assert scheduler.snapshot()["curriculum_wakes"][wake_id]["status"] == "PENDING"
+
+    scheduler.resume()
+    delivered = scheduler.tick_curriculum(
+        curriculum,
+        candidate,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+    assert delivered.action is TickAction.DELIVERED
+    assert len(supervisor.list_runs()) == 1
+
+
+def test_curriculum_pending_wake_honors_scheduler_stop_before_dispatch(tmp_path):
+    _, supervisor, curriculum = _workspace(tmp_path, max_budget_units=8)
+    candidate = (_candidate(episode_id="c-wake-stopped"),)
+    path = tmp_path / "research-scheduler.json"
+    scheduler = ResearchScheduler.initialize_pristine(path, curriculum.trigger_adapter)
+    wake_id = scheduler.queue_curriculum_wake(
+        curriculum,
+        candidate,
+        purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=21,
+        budget_units=1,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+
+    scheduler.stop("operator STOP")
+    blocked = scheduler.tick_curriculum(
+        curriculum,
+        candidate,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+
+    assert blocked.action is TickAction.STOPPED
+    assert blocked.curriculum_wake_id == wake_id
+    assert not supervisor.list_runs()
+    assert scheduler.snapshot()["curriculum_wakes"][wake_id]["status"] == "PENDING"
+
+    reopened = ResearchScheduler(path, curriculum.trigger_adapter)
+    again = reopened.tick_curriculum(
+        curriculum,
+        candidate,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+    assert again.action is TickAction.STOPPED
+    assert again.curriculum_wake_id == wake_id
+    assert not supervisor.list_runs()
+

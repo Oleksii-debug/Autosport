@@ -824,6 +824,10 @@ class ResearchScheduler:
                     return TickResult(TickAction.STOPPED)
                 return TickResult(TickAction.IDLE)
             wake_id, wake = pending
+            if status is SchedulerStatus.PAUSED:
+                return TickResult(TickAction.PAUSED, curriculum_wake_id=wake_id)
+            if status is SchedulerStatus.STOPPED:
+                return TickResult(TickAction.STOPPED, curriculum_wake_id=wake_id)
             if active_concurrency >= max_concurrency or remaining_budget_units < wake["budget_units"]:
                 return TickResult(TickAction.ADMISSION_BLOCKED, curriculum_wake_id=wake_id)
             if curriculum.status is CurriculumStatus.STOPPED:

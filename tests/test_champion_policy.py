@@ -84,28 +84,40 @@ def _policy_successor():
 
 def _registry_entries(policy: BanditPolicyState):
     strategy = SimpleNamespace(
+        record_type="StrategyVersion",
+        record_id=policy.policy_id,
+        available_at="2026-09-19T13:07:00Z",
+        record_sha256="8" * 64,
         payload={
             "strategy_version_id": policy.policy_id,
             "canonical_strategy_id": STRATEGY_ID,
             "environment_sha256": policy.environment_id,
             "config_sha256": policy.config_sha256,
             "model_version_id": MODEL_ID,
-        }
+        },
     )
     model = SimpleNamespace(
+        record_type="ModelVersion",
+        record_id=MODEL_ID,
+        available_at="2026-09-19T13:06:00Z",
+        record_sha256="9" * 64,
         payload={
             "model_version_id": MODEL_ID,
             "environment_sha256": policy.environment_id,
             "config_sha256": policy.config_sha256,
             "research_protocol_id": policy.protocol_id,
             "seed": policy.seed,
-        }
+        },
     )
     return strategy, model
 
 
 def _promotion_entries(policy: BanditPolicyState):
     promotion = SimpleNamespace(
+        record_type="PromotionDecision",
+        record_id="promotion-champion-policy-v1",
+        available_at=PROMOTED_AT,
+        record_sha256="a" * 64,
         payload={
             "action": "PROMOTE",
             "candidate_strategy_version_id": policy.policy_id,
@@ -115,15 +127,19 @@ def _promotion_entries(policy: BanditPolicyState):
             "evaluation_bundle_sha256": EVALUATION_BUNDLE_SHA256,
             "predecessor_strategy_version_id": None,
             "rollback_to_strategy_version_id": None,
-        }
+        },
     )
     bundle = SimpleNamespace(
+        record_type="EvaluationBundle",
+        record_id=EVALUATION_BUNDLE_ID,
+        available_at="2026-09-19T13:08:00Z",
+        record_sha256="b" * 64,
         payload={
             "evaluation_bundle_id": EVALUATION_BUNDLE_ID,
             "bundle_sha256": EVALUATION_BUNDLE_SHA256,
             "evaluated_strategy_version_id": policy.policy_id,
             "evaluated_model_version_id": MODEL_ID,
-        }
+        },
     )
     return promotion, bundle
 
@@ -140,6 +156,16 @@ def _load_with_authority(registry, store, policy, *, as_of=PROMOTED_AT, **overri
         if kind == "EvaluationBundle" and record_id == EVALUATION_BUNDLE_ID:
             return bundle
         return None
+
+    def causal_records(_self, kind, *, as_of):
+        records = {
+            "PromotionDecision": promotion,
+            "StrategyVersion": strategy,
+            "ModelVersion": model,
+            "EvaluationBundle": bundle,
+        }
+        record = records.get(kind)
+        return () if record is None else (record,)
 
     arguments = {
         "as_of": as_of,
@@ -161,7 +187,7 @@ def _load_with_authority(registry, store, policy, *, as_of=PROMOTED_AT, **overri
             ScientificRegistry,
             "causal_records",
             autospec=True,
-            return_value=(promotion,),
+            side_effect=causal_records,
         ),
         patch.object(ScientificRegistry, "get", autospec=True, side_effect=get),
     ):

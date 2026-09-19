@@ -385,9 +385,18 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         )
         ledger = SimpleNamespace(verified_records=lambda: (decision_record,))
         registry = SimpleNamespace(
-            get=lambda record_type, record_id: protocol_entry
-            if record_type == "ResearchProtocol" and record_id == paired.research_protocol_id
-            else None,
+            get=lambda record_type, record_id: (
+                SimpleNamespace(
+                    available_at=paired.evaluated_at,
+                    payload=paired.payload(),
+                )
+                if record_type == "PairedVOCEvaluation" and record_id == paired.evaluation_id
+                else (
+                    protocol_entry
+                    if record_type == "ResearchProtocol" and record_id == paired.research_protocol_id
+                    else None
+                )
+            ),
             causal_records=lambda record_type, as_of: (snapshot_entry,)
             if record_type == "DatasetSnapshot"
             else (),

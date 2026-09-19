@@ -8,7 +8,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from .causal_collector import CausalView, DesktopDeltaConsumer
+from .causal_collector import (
+    CollectorDelta,
+    CausalView,
+    DesktopDeltaConsumer,
+    GapState,
+    SyncState,
+)
 from .collector_service import HeadlessCollectorService
 from .event_lifecycle import ContinuousEventLifecycle, EventLifecycleRecord, EventPhase
 from .integrity import atomic_write_json
@@ -115,6 +121,12 @@ class ContinuousSessionStatus:
     source_provider_unavailable: bool = False
     source_last_success_at: str | None = None
     source_last_error_code: str | None = None
+    source_gap_state: str | None = None
+    source_sync_state: str | None = None
+    source_state_delta_id: str | None = None
+    source_unresolved_gap_delta_ids: tuple[str, ...] = ()
+    source_projection_stream_epoch: str | None = None
+    source_state_projection_backlog: bool = False
     invalidation_pending_count: int = 0
     invalidation_full_refresh_required: bool = False
 
@@ -146,7 +158,7 @@ def _sha256(value: object, field: str) -> str:
 
 class _ContinuousSessionState:
     _SCHEMA = "autosport.continuous_session"
-    _VERSION = 1
+    _VERSION = 2
     _FIELDS = {
         "schema",
         "schema_version",
@@ -159,6 +171,12 @@ class _ContinuousSessionState:
         "last_error_code",
         "last_full_refresh_at",
         "settlement_evidence",
+        "source_gap_state",
+        "source_sync_state",
+        "source_state_delta_id",
+        "source_unresolved_gap_delta_ids",
+        "source_projection_stream_epoch",
+        "source_state_projection_backlog",
     }
 
     def __init__(
@@ -208,6 +226,12 @@ class _ContinuousSessionState:
                     "last_error_code": None,
                     "last_full_refresh_at": None,
                     "settlement_evidence": [],
+                    "source_gap_state": None,
+                    "source_sync_state": None,
+                    "source_state_delta_id": None,
+                    "source_unresolved_gap_delta_ids": [],
+                    "source_projection_stream_epoch": None,
+                    "source_state_projection_backlog": False,
                 },
             )
             self._read()
@@ -278,6 +302,54 @@ class _ContinuousSessionState:
         if raw["last_error_code"] is not None:
             _text(raw["last_error_code"], "last_error_code")
         evidence = self._validate_settlement_evidence(raw["settlement_evidence"])
+        gap_state = raw["source_gap_state"]
+        sync_state = raw["source_sync_state"]
+        if (gap_state is None) != (sync_state is None):
+            raise ContinuousSessionError(
+                "source gap/sync projection must be present or absent together"
+            )
+        if gap_state is not None:
+            try:
+                GapState(gap_state)
+                SyncState(sync_state)
+            except ValueError as exc:
+                raise ContinuousSessionError(
+                    "source gap/sync projection contains an unsupported state"
+                ) from exc
+        if raw["source_state_delta_id"] is not None:
+            _text(raw["source_state_delta_id"], "source_state_delta_id")
+        if raw["source_projection_stream_epoch"] is not None:
+            _text(raw["source_projection_stream_epoch"], "source_projection_stream_epoch")
+        if (raw["source_state_delta_id"] is None) != (
+            raw["source_projection_stream_epoch"] is None
+        ):
+            raise ContinuousSessionError(
+                "source projection identity is incomplete"
+            )
+        if raw["source_state_delta_id"] is None and gap_state is not None:
+            raise ContinuousSessionError(
+                "source projection state requires a canonical delta identity"
+            )
+        unresolved = raw["source_unresolved_gap_delta_ids"]
+        if (
+            type(unresolved) is not list
+            or any(type(item) is not str or not item.strip() for item in unresolved)
+            or len(set(unresolved)) != len(unresolved)
+        ):
+            raise ContinuousSessionError(
+                "source_unresolved_gap_delta_ids must contain unique non-empty strings"
+            )
+        if type(raw["source_state_projection_backlog"]) is not bool:
+            raise ContinuousSessionError(
+                "source_state_projection_backlog must be boolean"
+            )
+        if unresolved and (
+            gap_state != GapState.DETECTED.value
+            or sync_state != SyncState.GAP_DETECTED.value
+        ):
+            raise ContinuousSessionError(
+                "unresolved source gaps require DETECTED/GAP_DETECTED projection"
+            )
         raw["state"] = state.value
         raw["settlement_evidence"] = [dict(item) for item in evidence]
         return raw
@@ -293,6 +365,16 @@ class _ContinuousSessionState:
             last_error_code=raw["last_error_code"],
             last_full_refresh_at=raw["last_full_refresh_at"],
             settlement_evidence=tuple(raw["settlement_evidence"]),
+            source_gap_state=raw["source_gap_state"],
+            source_sync_state=raw["source_sync_state"],
+            source_state_delta_id=raw["source_state_delta_id"],
+            source_unresolved_gap_delta_ids=tuple(
+                raw["source_unresolved_gap_delta_ids"]
+            ),
+            source_projection_stream_epoch=raw["source_projection_stream_epoch"],
+            source_state_projection_backlog=raw[
+                "source_state_projection_backlog"
+            ],
         )
 
     @property
@@ -349,6 +431,55 @@ class _ContinuousSessionState:
                     "settlement evidence id conflicts with durable evidence"
                 )
             known[evidence.evidence_id] = normalized
+
+    def record_source_projection(
+        self,
+        *,
+        deltas: tuple[CollectorDelta, ...],
+        backlog: bool,
+    ) -> None:
+        if type(backlog) is not bool:
+            raise TypeError("backlog must be boolean")
+        for delta in deltas:
+            if not isinstance(delta, CollectorDelta):
+                raise TypeError("deltas must contain CollectorDelta values")
+            delta.validate()
+            if delta.source_id != self.source_id:
+                raise ContinuousSessionError(
+                    "source-state projection delta belongs to another source"
+                )
+
+        def mutate(raw: dict[str, Any]) -> None:
+            unresolved = set(raw["source_unresolved_gap_delta_ids"])
+            projection_epoch = raw["source_projection_stream_epoch"]
+            for delta in deltas:
+                if projection_epoch != delta.stream_epoch:
+                    unresolved.clear()
+                    projection_epoch = delta.stream_epoch
+                if delta.gap_state is GapState.DETECTED:
+                    unresolved.add(delta.delta_id)
+                elif delta.gap_state is GapState.RECOVERED:
+                    if delta.revision_of is None:
+                        raise ContinuousSessionError(
+                            "recovered gap projection requires revision_of"
+                        )
+                    unresolved.discard(delta.revision_of)
+                elif delta.gap_state is GapState.CURSOR_RESET:
+                    unresolved.clear()
+
+                raw["source_state_delta_id"] = delta.delta_id
+                raw["source_projection_stream_epoch"] = projection_epoch
+                if unresolved:
+                    raw["source_gap_state"] = GapState.DETECTED.value
+                    raw["source_sync_state"] = SyncState.GAP_DETECTED.value
+                else:
+                    raw["source_gap_state"] = delta.gap_state.value
+                    raw["source_sync_state"] = delta.sync_state.value
+
+            raw["source_unresolved_gap_delta_ids"] = sorted(unresolved)
+            raw["source_state_projection_backlog"] = backlog
+
+        self._update(mutate)
 
     def record_success(
         self,
@@ -507,6 +638,12 @@ class ContinuousSessionCoordinator:
             source_provider_unavailable=source_last_error == "ProviderUnavailableError",
             source_last_success_at=source_last_success,
             source_last_error_code=source_last_error,
+            source_gap_state=snapshot.source_gap_state,
+            source_sync_state=snapshot.source_sync_state,
+            source_state_delta_id=snapshot.source_state_delta_id,
+            source_unresolved_gap_delta_ids=snapshot.source_unresolved_gap_delta_ids,
+            source_projection_stream_epoch=snapshot.source_projection_stream_epoch,
+            source_state_projection_backlog=snapshot.source_state_projection_backlog,
             invalidation_pending_count=self.invalidation_buffer.pending_count,
             invalidation_full_refresh_required=bool(
                 self.invalidation_buffer.full_refresh_required
@@ -568,25 +705,20 @@ class ContinuousSessionCoordinator:
             )
         return tuple(dict.fromkeys(affected)), full_refresh_required, backlog
 
-    def _cycle_source_states(
-        self,
-        committed_delta_ids: tuple[str, ...],
-    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        gap_states: list[str] = []
-        sync_states: list[str] = []
-        for delta_id in committed_delta_ids:
-            delta = self.collector.delta_store.get(delta_id)
-            if delta is None:
-                raise ContinuousSessionError(
-                    "collector committed delta is missing from durable store"
-                )
-            gap_state = delta.gap_state.value
-            sync_state = delta.sync_state.value
-            if gap_state not in gap_states:
-                gap_states.append(gap_state)
-            if sync_state not in sync_states:
-                sync_states.append(sync_state)
-        return tuple(gap_states), tuple(sync_states)
+    def _refresh_source_state_projection(self) -> ContinuousSessionStatus:
+        snapshot = self._state.snapshot()
+        deltas = self.collector.delta_store.deltas_after_commit(
+            source_id=self.collector.source_id,
+            after_delta_id=snapshot.source_state_delta_id,
+            max_items=self.collector.config.max_items + 1,
+        )
+        backlog = len(deltas) > self.collector.config.max_items
+        selected = deltas[: self.collector.config.max_items]
+        self._state.record_source_projection(
+            deltas=selected,
+            backlog=backlog,
+        )
+        return self._state.snapshot()
 
     def _settlement_resolutions(
         self,
@@ -674,6 +806,7 @@ class ContinuousSessionCoordinator:
         _instant(now, "now")
         try:
             cycle = self.collector.run_cycle()
+            source_snapshot = self._refresh_source_state_projection()
             if cycle.provider_unavailable:
                 self._state.record_failure(code="ProviderUnavailableError")
                 snapshot = self._state.snapshot()
@@ -682,8 +815,16 @@ class ContinuousSessionCoordinator:
                     cycle_index=snapshot.cycles_completed,
                     source_id=cycle.source_id,
                     source_provider_unavailable=True,
-                    source_gap_states=(),
-                    source_sync_states=(),
+                    source_gap_states=(
+                        ()
+                        if source_snapshot.source_gap_state is None
+                        else (source_snapshot.source_gap_state,)
+                    ),
+                    source_sync_states=(
+                        ()
+                        if source_snapshot.source_sync_state is None
+                        else (source_snapshot.source_sync_state,)
+                    ),
                     committed_delta_ids=cycle.committed_delta_ids,
                     delivered_delta_ids=(),
                     affected_input_ids=(),
@@ -701,8 +842,15 @@ class ContinuousSessionCoordinator:
                     last_success_at=snapshot.last_success_at,
                 )
 
-            source_gap_states, source_sync_states = self._cycle_source_states(
-                cycle.committed_delta_ids
+            source_gap_states = (
+                ()
+                if source_snapshot.source_gap_state is None
+                else (source_snapshot.source_gap_state,)
+            )
+            source_sync_states = (
+                ()
+                if source_snapshot.source_sync_state is None
+                else (source_snapshot.source_sync_state,)
             )
             delivered = self.desktop_consumer.drain(
                 as_of=now,

@@ -1414,6 +1414,11 @@ class ExperimentRunner:
         confirmation_trial_family_id = (
             f"{spec.research_protocol_id}:confirmation-trial-family"
         )
+        dataset = self.registry.get("DatasetSnapshot", spec.dataset_snapshot_id)
+        if dataset is None:
+            raise ValueError(
+                "promotion evidence requires the durable candidate dataset snapshot"
+            )
         holdout_access_id = promotion_holdout_access_id(
             research_protocol_id=spec.research_protocol_id,
             dataset_manifest_sha256=dataset.payload.get("manifest_sha256"),

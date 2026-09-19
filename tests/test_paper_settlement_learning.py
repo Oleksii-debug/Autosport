@@ -156,9 +156,14 @@ def _settle(
     if not settled:
         raise AssertionError("fixture settlement did not settle a ticket")
     book.save(root / "paper_book.json")
+    leg_by_key = {
+        leg.quote_key: leg
+        for ticket in book.tickets.values()
+        for leg in ticket.legs
+    }
     resolutions = tuple(
         SettlementResolution(
-            event_identity=f"provider-a:{index}",
+            event_identity=f"provider-a:{leg_by_key[quote_key].event_id}",
             settlement_ref=f"result:{index}",
             quote_outcomes={quote_key: outcome},
             evidence_id=f"evidence:{index}",

@@ -58,9 +58,9 @@ def test_compact_surface_heights_keep_all_critical_scrolling_surfaces_visible():
 
     compact_surface_heights(app)
 
-    assert app.live_quotes.height == 2
-    assert app.tickets.height == 3
-    assert app.evaluation.height == 2
+    assert app.live_quotes.height == 1
+    assert app.tickets.height == 2
+    assert app.evaluation.height == 1
     assert app.log.height == 2
     assert app.tickets_label.pady == (6, 2)
     assert app.evaluation_label.pady == (6, 2)

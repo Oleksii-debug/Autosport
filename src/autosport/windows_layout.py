@@ -33,13 +33,15 @@ from .windows_surface_contract import (
 # wrapper removes excess vertical chrome so the final execution log remains
 # mapped after the product shell is inserted.
 _SURFACE_HEIGHTS = {
-    # #579 adds a compact three-control owner-authority panel above the
-    # existing product surfaces. Preserve the 1080x860 Windows UIA mapping
-    # budget by reclaiming one row from each scrollable summary surface while
-    # keeping the execution log at two rows.
-    "live_quotes": 2,
-    "tickets": 3,
-    "evaluation": 2,
+    # #579 added the compact owner-authority panel and #585 added a dedicated
+    # readonly UIA log mirror. A Tk packer can keep later managed children
+    # logically packed but physically unmapped when the vertical cavity is
+    # exhausted; tk-uia reports that exact state as UNMAPPED_SINCE_ANNOTATED.
+    # Reclaim one additional row from each scrollable summary surface so the
+    # log mirror and two-row execution history both stay mapped at 1080x860.
+    "live_quotes": 1,
+    "tickets": 2,
+    "evaluation": 1,
     "log": 2,
 }
 _SECTION_LABEL_PADY = (6, 2)

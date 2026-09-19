@@ -29,6 +29,9 @@ from .bookmaker_capability import (
     BookmakerCapabilityError,
     BookmakerCapabilityProfile,
 )
+from .economic_goal import AutomationLevel, EconomicGoalContractError
+from .economic_goal_provenance import provenance_for
+from .economic_goal_store import EconomicGoalStore
 from .real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
@@ -188,6 +191,7 @@ class BetfairSupervisedExecutionGate:
     profile_sha256: str | None = None
     authority_ref: str | None = None
     authority_sha256: str | None = None
+    economic_goal_store: EconomicGoalStore | None = None
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
@@ -209,6 +213,97 @@ class BetfairSupervisedExecutionGate:
             )
         _text(self.authority_ref, "authority_ref")
         _sha(self.authority_sha256, "authority_sha256")
+        if not isinstance(self.economic_goal_store, EconomicGoalStore):
+            raise BetfairSupervisedExecutionError(
+                "enabled gate requires canonical EconomicGoalStore authority"
+            )
+
+    @classmethod
+    def from_economic_goal_store(
+        cls,
+        store: EconomicGoalStore,
+        *,
+        bookmaker_id: str,
+        account_id: str,
+        profile_sha256: str,
+    ) -> "BetfairSupervisedExecutionGate":
+        """Bind enablement to the exact current durable owner contract."""
+
+        if not isinstance(store, EconomicGoalStore):
+            raise BetfairSupervisedExecutionError(
+                "store must be canonical EconomicGoalStore"
+            )
+        try:
+            goal = store.load()
+        except EconomicGoalContractError as exc:
+            raise BetfairSupervisedExecutionError(
+                "cannot load durable owner execution authority"
+            ) from exc
+        goal_sha256 = provenance_for(goal).contract_sha256
+        return cls(
+            enabled=True,
+            bookmaker_id=bookmaker_id,
+            account_id=account_id,
+            profile_sha256=profile_sha256,
+            authority_ref=(
+                f"economic-goal:{goal.goal_id}:revision:{goal.revision}"
+            ),
+            authority_sha256=goal_sha256,
+            economic_goal_store=store,
+        )
+
+    def _require_current_owner_authority(
+        self,
+        *,
+        action: ExecutionAction,
+        bound: BoundSupervisedExecutionPlan,
+    ) -> None:
+        store = self.economic_goal_store
+        if not isinstance(store, EconomicGoalStore):
+            raise BetfairSupervisedExecutionError(
+                "enabled gate lacks canonical EconomicGoalStore authority"
+            )
+        try:
+            goal = store.load()
+        except EconomicGoalContractError as exc:
+            raise BetfairSupervisedExecutionError(
+                "cannot load durable owner execution authority"
+            ) from exc
+        goal_sha256 = provenance_for(goal).contract_sha256
+        expected_ref = (
+            f"economic-goal:{goal.goal_id}:revision:{goal.revision}"
+        )
+        if goal.automation_level < AutomationLevel.SUPERVISED_EXECUTION:
+            raise BetfairSupervisedExecutionError(
+                "owner authority does not permit supervised execution"
+            )
+        if goal.emergency_stop:
+            raise BetfairSupervisedExecutionError(
+                "owner emergency STOP is active"
+            )
+        if action.bookmaker_id in goal.blocked_providers:
+            raise BetfairSupervisedExecutionError(
+                "owner authority blocks this provider"
+            )
+        if action.market_id in goal.blocked_markets:
+            raise BetfairSupervisedExecutionError(
+                "owner authority blocks this market"
+            )
+        if (
+            bound.constraint_for(action.action_id).max_slippage_fraction
+            > goal.max_execution_slippage_fraction
+        ):
+            raise BetfairSupervisedExecutionError(
+                "execution slippage exceeds current owner authority"
+            )
+        if (
+            self.authority_ref != expected_ref
+            or self.authority_sha256 != goal_sha256
+            or bound.economic_goal_contract_sha256 != goal_sha256
+        ):
+            raise BetfairSupervisedExecutionError(
+                "durable owner authority does not match bound execution plan"
+            )
 
     def require(
         self,
@@ -221,6 +316,10 @@ class BetfairSupervisedExecutionGate:
             raise BetfairSupervisedExecutionError(
                 "supervised Betfair placeOrders gate is disabled"
             )
+        self._require_current_owner_authority(
+            action=action,
+            bound=bound,
+        )
         if (
             action.bookmaker_id != self.bookmaker_id
             or action.account_id != self.account_id

@@ -15,9 +15,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterable, Protocol
+
+from apscheduler.triggers.interval import IntervalTrigger
 
 from .integrity import atomic_write_json
+from .research_curriculum import CurriculumPurpose
 from .research_trigger_adapter import (
     ExternalResearchTrigger,
     ResearchTriggerReceipt,
@@ -58,6 +61,101 @@ class WakeSource(StrEnum):
 
 class TriggerSink(Protocol):
     def accept(self, event: ExternalResearchTrigger) -> ResearchTriggerReceipt: ...
+
+
+class CurriculumWakeRuntime(Protocol):
+    def select_and_dispatch(
+        self,
+        candidates: Iterable[object],
+        *,
+        purpose: CurriculumPurpose,
+        selector_policy_version: str,
+        as_of: str,
+        seed: int,
+        budget_units: int,
+        deadline_at: str | None = None,
+    ) -> object: ...
+
+
+class IntervalCadenceAdapter:
+    """Thin APScheduler boundary; Autosport durable state remains authoritative."""
+
+    @staticmethod
+    def validate(*, first_fire_at: str, interval_seconds: int) -> None:
+        try:
+            IntervalTrigger(
+                seconds=_positive_int(interval_seconds, "interval_seconds"),
+                start_date=_instant(first_fire_at, "first_fire_at"),
+                timezone=timezone.utc,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ResearchSchedulerError("invalid interval cadence") from exc
+
+    @staticmethod
+    def next_fire(*, previous_fire_at: str, first_fire_at: str, interval_seconds: int) -> datetime:
+        IntervalCadenceAdapter.validate(
+            first_fire_at=first_fire_at,
+            interval_seconds=interval_seconds,
+        )
+        previous = _instant(previous_fire_at, "previous_fire_at")
+        trigger = IntervalTrigger(
+            seconds=interval_seconds,
+            start_date=_instant(first_fire_at, "first_fire_at"),
+            timezone=timezone.utc,
+        )
+        next_fire = trigger.get_next_fire_time(previous, previous)
+        if next_fire is None:
+            raise ResearchSchedulerError("interval cadence produced no next fire")
+        return next_fire.astimezone(timezone.utc)
+
+
+class NightResearchCurriculumWake:
+    """Governed curriculum wake adapter; timing state stays in ResearchScheduler."""
+
+    def __init__(
+        self,
+        curriculum: CurriculumWakeRuntime,
+        *,
+        candidate_loader: Callable[[str], Iterable[object]],
+        selector_policy_version: str,
+        seed: int,
+        max_budget_units: int,
+        admit_budget: Callable[[int], None] | None = None,
+    ) -> None:
+        if not callable(getattr(curriculum, "select_and_dispatch", None)):
+            raise TypeError("curriculum must expose select_and_dispatch")
+        if not callable(candidate_loader):
+            raise TypeError("candidate_loader must be callable")
+        _text(selector_policy_version, "selector_policy_version")
+        if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+            raise ResearchSchedulerError("seed must be non-negative")
+        _positive_int(max_budget_units, "max_budget_units")
+        if admit_budget is not None and not callable(admit_budget):
+            raise TypeError("admit_budget must be callable")
+        self.curriculum = curriculum
+        self.candidate_loader = candidate_loader
+        self.selector_policy_version = selector_policy_version
+        self.seed = seed
+        self.max_budget_units = max_budget_units
+        self.admit_budget = admit_budget
+
+    def dispatch(self, *, scheduled_for: str, budget_units: int, deadline_at: str | None) -> object:
+        as_of = _timestamp(scheduled_for, "scheduled_for")
+        _positive_int(budget_units, "budget_units")
+        if budget_units > self.max_budget_units:
+            raise ResearchSchedulerError("curriculum wake budget exceeds external admission")
+        if self.admit_budget is not None:
+            self.admit_budget(budget_units)
+        candidates = tuple(self.candidate_loader(as_of))
+        return self.curriculum.select_and_dispatch(
+            candidates,
+            purpose=CurriculumPurpose.CURRICULUM,
+            selector_policy_version=self.selector_policy_version,
+            as_of=as_of,
+            seed=self.seed,
+            budget_units=budget_units,
+            deadline_at=deadline_at,
+        )
 
 
 def _text(value: object, name: str) -> str:
@@ -144,6 +242,10 @@ class ResearchSchedule:
         _positive_int(self.budget_units, "budget_units")
         if self.deadline_offset_seconds is not None:
             _nonnegative_int(self.deadline_offset_seconds, "deadline_offset_seconds")
+        IntervalCadenceAdapter.validate(
+            first_fire_at=self.first_fire_at,
+            interval_seconds=self.interval_seconds,
+        )
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -614,7 +716,11 @@ class ResearchScheduler:
             newest_due = first_due + timedelta(
                 seconds=additional * schedule.interval_seconds
             )
-            next_fire = newest_due + timedelta(seconds=schedule.interval_seconds)
+            next_fire = IntervalCadenceAdapter.next_fire(
+                previous_fire_at=newest_due.isoformat().replace("+00:00", "Z"),
+                first_fire_at=schedule.first_fire_at,
+                interval_seconds=schedule.interval_seconds,
+            )
             newest_age = (now_dt - newest_due).total_seconds()
             entry["next_fire_at"] = next_fire.isoformat().replace("+00:00", "Z")
 

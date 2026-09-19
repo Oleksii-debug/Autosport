@@ -16,6 +16,7 @@ from .owner_economic_authority import (
     INITIAL_OWNER_FORM_DEFAULTS,
     OWNER_ECONOMIC_FORM_FIELDS,
     OwnerEconomicAuthorityError,
+    OwnerEconomicReviewSnapshot,
     OwnerEconomicAuthorityService,
 )
 from .replay_worker import workspace_for_strategy
@@ -169,6 +170,11 @@ WINDOWS_SHELL_LOCALIZATION_KEYS = frozenset(
         "ui.windows.owner_authority.dialog.form.title",
         "ui.windows.owner_authority.dialog.review.title",
         "ui.windows.owner_authority.dialog.review.body",
+        "ui.windows.owner_authority.button.review",
+        "ui.windows.owner_authority.button.confirm",
+        "ui.windows.owner_authority.accessibility.confirm.description",
+        "ui.windows.owner_authority.review.prompt",
+        "ui.windows.owner_authority.error.review_stale",
         "ui.windows.owner_authority.accessibility.open.name",
         "ui.windows.owner_authority.accessibility.open.description",
         "ui.windows.owner_authority.accessibility.status.name",
@@ -457,50 +463,74 @@ def _show_owner_economic_dialog(app: Any) -> None:
         OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["emergency_stop"],
     )
 
+    reviewed: OwnerEconomicReviewSnapshot | None = None
+
+    def invalidate_review(*_args: object) -> None:
+        nonlocal reviewed
+        if reviewed is None:
+            return
+        reviewed = None
+        create_button.configure(text=text("ui.windows.owner_authority.button.review"))
+        tk_uia.set_acc_name(create_button, text("ui.windows.owner_authority.button.review"))
+        tk_uia.set_acc_description(
+            create_button, text("ui.windows.owner_authority.accessibility.create.description")
+        )
+        readback.delete(0, "end")
+        for line in service.read_view().lines_uk:
+            readback.insert("end", line)
+
     def create_initial_contract() -> None:
+        nonlocal reviewed
         current_workspace, _ = _owner_economic_workspace(app)
         blocker = _owner_economic_write_blocker(app, bound_workspace)
         if current_workspace != bound_workspace:
             blocker = text("ui.windows.owner_authority.error.busy")
         if blocker is not None:
+            # A temporary quarantine or context switch must consume the
+            # earlier review even if the owner later returns to this workspace.
+            invalidate_review()
             messagebox.showerror(text("ui.windows.owner_authority.dialog.title"), blocker, parent=dialog)
             return
         values = {field: variable.get() for field, variable in form_values.items()}
         try:
-            preview = service.read_view()
-            if not preview.can_initialize:
+            if not service.read_view().can_initialize:
                 raise OwnerEconomicAuthorityError(text("ui.windows.owner_authority.error.not_absent"))
-            # Parsing before asking makes the confirmation text a review of only
-            # typed, finite values. The service parses again immediately before
-            # durable creation, preserving the authority boundary under races.
-            from .owner_economic_authority import build_initial_owner_contract, contract_readback_lines
-
-            candidate = build_initial_owner_contract(values, emergency_stop=emergency_stop.get())
-            readback.delete(0, "end")
-            for line in contract_readback_lines(candidate):
-                readback.insert("end", line)
-            if not messagebox.askokcancel(
-                text("ui.windows.owner_authority.dialog.review.title"),
-                text("ui.windows.owner_authority.dialog.review.body"),
-                parent=dialog,
-            ):
-                messagebox.showinfo(
-                    text("ui.windows.owner_authority.dialog.title"),
-                    text("ui.windows.owner_authority.error.cancelled"),
-                    parent=dialog,
+            if reviewed is None:
+                # Return focus to the selectable list. A modal prompt here would
+                # prevent a keyboard/NVDA user from reading the reviewed limits.
+                reviewed = OwnerEconomicReviewSnapshot.from_form(
+                    values, emergency_stop=emergency_stop.get()
                 )
+                readback.delete(0, "end")
+                readback.insert("end", text("ui.windows.owner_authority.review.prompt"))
+                for line in reviewed.lines_uk:
+                    readback.insert("end", line)
+                create_button.configure(text=text("ui.windows.owner_authority.button.confirm"))
+                tk_uia.set_acc_name(create_button, text("ui.windows.owner_authority.button.confirm"))
+                tk_uia.set_acc_description(
+                    create_button,
+                    text("ui.windows.owner_authority.accessibility.confirm.description"),
+                )
+                readback.selection_set(0)
+                readback.activate(0)
+                readback.focus_set()
                 return
+            if not reviewed.still_matches(values, emergency_stop=emergency_stop.get()):
+                invalidate_review()
+                raise OwnerEconomicAuthorityError(text("ui.windows.owner_authority.error.review_stale"))
             # Re-resolve both workspace identity and recovery quarantine at the
-            # irreversible boundary. A non-modal dialog must never persist into
-            # a workspace that was switched or quarantined after preview.
+            # irreversible boundary, then persist only the exact reviewed form.
             persisted = _persist_initial_owner_economic_contract(
                 app,
                 bound_workspace=bound_workspace,
                 service=service,
-                values=values,
-                emergency_stop=emergency_stop.get(),
+                values=reviewed.form_values(),
+                emergency_stop=reviewed.emergency_stop,
             )
         except OwnerEconomicAuthorityError as exc:
+            # A concurrent change after review can reject persistence. Never
+            # reuse the previous approval once that boundary was crossed.
+            invalidate_review()
             messagebox.showerror(text("ui.windows.owner_authority.dialog.title"), str(exc), parent=dialog)
             refresh_owner_economic_authority_surface(app)
             return
@@ -508,6 +538,7 @@ def _show_owner_economic_dialog(app: Any) -> None:
         for line in persisted.lines_uk:
             readback.insert("end", line)
         refresh_owner_economic_authority_surface(app)
+        reviewed = None
         create_button.configure(state="disabled")
 
     button_row = ttk.Frame(body)
@@ -515,13 +546,13 @@ def _show_owner_economic_dialog(app: Any) -> None:
     initial_write_blocker = _owner_economic_write_blocker(app, bound_workspace)
     create_button = ttk.Button(
         button_row,
-        text=text("ui.windows.owner_authority.button.create"),
+        text=text("ui.windows.owner_authority.button.review"),
         command=create_initial_contract,
         takefocus=True,
         state=("disabled" if initial_write_blocker is not None else "normal"),
     )
     create_button.pack(side="left")
-    tk_uia.set_acc_name(create_button, text("ui.windows.owner_authority.accessibility.create.name"))
+    tk_uia.set_acc_name(create_button, text("ui.windows.owner_authority.button.review"))
     tk_uia.set_acc_description(create_button, text("ui.windows.owner_authority.accessibility.create.description"))
     tk_uia.set_automation_id(
         create_button,
@@ -538,6 +569,12 @@ def _show_owner_economic_dialog(app: Any) -> None:
     tk_uia.set_automation_id(
         close_button,
         OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["close"],
+    )
+    for variable in (*form_values.values(), emergency_stop):
+        variable.trace_add("write", invalidate_review)
+    dialog.bind(
+        "<Control-Return>",
+        lambda _event: create_button.focus_set() if reviewed is not None else None,
     )
     readback.focus_set()
 

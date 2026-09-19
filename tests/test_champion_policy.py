@@ -250,6 +250,22 @@ def test_policy_artifact_without_promotion_cannot_activate_rejected_challenger(t
     assert activated.policy_id != rejected.policy_id
 
 
+def test_external_risk_gate_may_safely_narrow_next_episode_actions(tmp_path):
+    _, successor, _ = _policy_successor()
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, successor)
+
+    activated = _load_with_authority(
+        registry,
+        store,
+        successor,
+        admissible_actions=frozenset({"WAIT"}),
+    )
+
+    assert activated.choose(admissible_actions=frozenset({"WAIT"})) == "WAIT"
+
+
 def test_future_or_missing_champion_fails_closed(tmp_path):
     _, successor, _ = _policy_successor()
     registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
@@ -299,8 +315,8 @@ def test_missing_or_tampered_champion_artifact_fails_closed(tmp_path):
         ({"config_sha256": "f" * 64}, "config mismatch"),
         ({"protocol_id": "protocol-other"}, "model lineage is incompatible"),
         (
-            {"admissible_actions": frozenset({"WAIT"})},
-            "action universe mismatch",
+            {"admissible_actions": frozenset({"WAIT", "UNSEEN_ACTION"})},
+            "widen the champion policy universe",
         ),
     ],
 )
@@ -496,4 +512,3 @@ def test_champion_activation_rejects_future_promotion_evidence(
 
     with pytest.raises(ChampionPolicyError, match=message):
         _load_real_registry(registry, store)
-

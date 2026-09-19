@@ -283,3 +283,80 @@ def test_bounded_run_loop_uses_fake_clock_without_busy_spin(tmp_path):
     assert ticks == 2
     assert sleeps == [2.0]
     assert len(sink.calls) == 1
+    
+def test_interval_cadence_adapter_delegates_fire_calculation():
+    from autosport.research_scheduler import IntervalCadenceAdapter
+
+    IntervalCadenceAdapter.validate(
+        first_fire_at="2026-09-19T10:00:00Z",
+        interval_seconds=60,
+    )
+    next_fire = IntervalCadenceAdapter.next_fire(
+        previous_fire_at="2026-09-19T10:00:00Z",
+        first_fire_at="2026-09-19T10:00:00Z",
+        interval_seconds=60,
+    )
+    assert next_fire.isoformat().replace("+00:00", "Z") == "2026-09-19T10:01:00Z"
+
+
+def test_curriculum_wake_freezes_scheduled_cutoff_and_external_budget():
+    from autosport.research_scheduler import NightResearchCurriculumWake
+    from autosport.research_curriculum import CurriculumPurpose
+
+    calls = []
+    admissions = []
+
+    class FakeCurriculum:
+        def select_and_dispatch(self, candidates, **kwargs):
+            calls.append((tuple(candidates), kwargs))
+            return "receipt"
+
+    wake = NightResearchCurriculumWake(
+        FakeCurriculum(),
+        candidate_loader=lambda as_of: [{"candidate_snapshot_as_of": as_of}],
+        selector_policy_version="night-v1",
+        seed=7,
+        max_budget_units=5,
+        admit_budget=admissions.append,
+    )
+    assert wake.dispatch(
+        scheduled_for="2026-09-19T10:00:00+00:00",
+        budget_units=3,
+        deadline_at="2026-09-19T10:02:00Z",
+    ) == "receipt"
+    assert admissions == [3]
+    assert calls[0][0] == ({"candidate_snapshot_as_of": "2026-09-19T10:00:00Z"},)
+    assert calls[0][1] == {
+        "purpose": CurriculumPurpose.CURRICULUM,
+        "selector_policy_version": "night-v1",
+        "as_of": "2026-09-19T10:00:00Z",
+        "seed": 7,
+        "budget_units": 3,
+        "deadline_at": "2026-09-19T10:02:00Z",
+    }
+
+
+def test_curriculum_wake_budget_fails_closed_before_selection():
+    from autosport.research_scheduler import NightResearchCurriculumWake
+
+    calls = []
+
+    class FakeCurriculum:
+        def select_and_dispatch(self, *args, **kwargs):
+            calls.append(1)
+            return "receipt"
+
+    wake = NightResearchCurriculumWake(
+        FakeCurriculum(),
+        candidate_loader=lambda as_of: [{"candidate_snapshot_as_of": as_of}],
+        selector_policy_version="night-v1",
+        seed=7,
+        max_budget_units=2,
+    )
+    with pytest.raises(ResearchSchedulerError, match="budget exceeds external admission"):
+        wake.dispatch(
+            scheduled_for="2026-09-19T10:00:00Z",
+            budget_units=3,
+            deadline_at=None,
+        )
+    assert calls == []

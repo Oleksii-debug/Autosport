@@ -461,7 +461,7 @@ def _retest_spec(*, experiment_id: str, model_version_id: str, evaluation_id: st
     )
 
 
-def test_learned_policy_rejection_is_durable_and_duplicate_retest_is_blocked(tmp_path):
+def test_legacy_baseline_policy_retest_fails_closed_without_registry_mutation(tmp_path):
     identity, predecessor, challenger, update = _resolved_policy_successor()
     registry, registry_path, artifact_root, store, rule, points = _real_factory_foundation(
         tmp_path, identity
@@ -474,54 +474,20 @@ def test_learned_policy_rejection_is_durable_and_duplicate_retest_is_blocked(tmp
         promotion_id="promotion-learned-reject",
     )
 
-    result = run_policy_retest(
-        runner,
-        predecessor_policy=predecessor,
-        challenger_policy=challenger,
-        update_evidence=update,
-        spec=spec,
-        points=points,
-        rule=rule,
-    )
-
-    assert result.strategy_version_id == challenger.policy_id
-    assert result.verdict is PromotionVerdict.REJECT
-
-    reopened = ScientificRegistry(registry_path)
-    experiment = reopened.get("Experiment", spec.experiment_id)
-    assert experiment is not None
-    assert experiment.payload["outcome"] == ResearchOutcome.NEGATIVE.value
-    assert reopened.get("Postmortem", f"{spec.experiment_id}:postmortem") is not None
-    assert reopened.get("PromotionDecision", spec.promotion_decision_id) is not None
-    assert reopened.champion_strategy(
-        as_of=T7,
-        canonical_strategy_id="canonical-factory-strategy",
-    ) == "strategy-v1"
-
-    restart = ExperimentRunner.verify_restart(
-        registry_path,
-        artifact_root,
-        spec.experiment_id,
-        as_of=T7,
-    )
-    assert restart.outcome is ResearchOutcome.NEGATIVE
-    assert restart.champion_strategy_version_id == "strategy-v1"
-    assert restart.reproducibility_bundle_sha256 == result.reproducibility_bundle_sha256
-
-    restarted_runner = ExperimentRunner(reopened, FactoryArtifactStore(artifact_root))
-    duplicate = _retest_spec(
-        experiment_id="experiment-learned-repeat",
-        model_version_id=spec.model_version_id,
-        evaluation_id="eval-learned-repeat",
-        promotion_id="promotion-learned-repeat",
-    )
-    with pytest.raises(DuplicateExperimentFingerprintError, match="durable history"):
+    with pytest.raises(
+        ValueError, match="baseline TrainingPoint evidence cannot authorize"
+    ):
         run_policy_retest(
-            restarted_runner,
+            runner,
             predecessor_policy=predecessor,
             challenger_policy=challenger,
             update_evidence=update,
-            spec=duplicate,
+            spec=spec,
             points=points,
             rule=rule,
         )
+
+    reopened = ScientificRegistry(registry_path)
+    assert reopened.get("Experiment", spec.experiment_id) is None
+    assert reopened.get("PromotionDecision", spec.promotion_decision_id) is None
+    assert not store.exists("transparent-bandit-policy", challenger.policy_id)

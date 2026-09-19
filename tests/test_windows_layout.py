@@ -350,6 +350,7 @@ def test_manual_calculation_workbench_has_no_persistent_or_execution_authority()
 
 
 def test_manual_calculation_service_exception_is_not_exposed_as_raw_english_ui_text():
+    from autosport.localization import text
     from autosport.windows_manual_calculation import _localized_calculation_error
 
     error = ValueError("boolean must not be accepted as a numeric value")

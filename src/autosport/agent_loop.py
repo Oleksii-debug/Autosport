@@ -707,6 +707,7 @@ class AgentLoopRuntime:
         identity = state["identity"]
         decisions_by_action: dict[str, dict[str, Any]] = {}
         observations: set[str] = set()
+        decisions_without_canonical_parameters: set[str] = set()
         decision_fields = {
             "observation_id",
             "action_id",
@@ -717,7 +718,9 @@ class AgentLoopRuntime:
             "may_execute",
         }
         if not legacy_v2:
-            decision_fields.update({"decision_intent_id", "decision_payload_id"})
+            decision_fields.update(
+                {"parameters", "decision_intent_id", "decision_payload_id"}
+            )
         for record in state["decisions"]:
             record = require_fields(
                 record,
@@ -745,6 +748,58 @@ class AgentLoopRuntime:
                 )
                 if record["decision_intent_id"] != expected_intent_id:
                     raise AgentLoopError("decision intent does not bind observation")
+                raw_parameters = record["parameters"]
+                if raw_parameters is None:
+                    decisions_without_canonical_parameters.add(record["action_id"])
+                else:
+                    if type(raw_parameters) is not list:
+                        raise AgentLoopError(
+                            "decision parameters must be a canonical list"
+                        )
+                    parameter_pairs: list[tuple[str, str]] = []
+                    for item in raw_parameters:
+                        if type(item) is not list or len(item) != 2:
+                            raise AgentLoopError(
+                                "decision parameters entry mismatch"
+                            )
+                        parameter_pairs.append((item[0], item[1]))
+                    try:
+                        canonical_action = Action(
+                            environment_id=identity["environment_id"],
+                            observation_id=record["observation_id"],
+                            action_type=record["action_type"],
+                            decided_at=record["decided_at"],
+                            parameters=tuple(parameter_pairs),
+                        )
+                    except LearningEnvironmentError as exc:
+                        raise AgentLoopError(
+                            "decision parameters are not canonical"
+                        ) from exc
+                    canonical_parameters = [
+                        [key, value] for key, value in canonical_action.parameters
+                    ]
+                    if raw_parameters != canonical_parameters:
+                        raise AgentLoopError(
+                            "decision parameters are not canonical"
+                        )
+                    if record["parameters_sha256"] != _digest(canonical_parameters):
+                        raise AgentLoopError(
+                            "decision parameters hash mismatch"
+                        )
+                    if record["action_id"] != canonical_action.action_id:
+                        raise AgentLoopError(
+                            "decision action identity mismatch"
+                        )
+                    expected_payload_id = _digest(
+                        {
+                            "action_type": canonical_action.action_type,
+                            "parameters": canonical_parameters,
+                        }
+                    )
+                    if record["decision_payload_id"] != expected_payload_id:
+                        raise AgentLoopError(
+                            "decision payload identity mismatch"
+                        )
             if type(record.get("may_execute")) is not bool:
                 raise AgentLoopError("decision may_execute must be boolean")
             ActionCommitReceipt(
@@ -1033,6 +1088,18 @@ class AgentLoopRuntime:
                     ):
                         raise AgentLoopError("checkpoint history moves backwards")
                 parsed_checkpoints.append((checkpoint, committed_at))
+            first_checkpoint, _ = parsed_checkpoints[0]
+            migration_baseline_actions = (
+                set(first_checkpoint.committed_action_ids)
+                if first_checkpoint.step_index > 0
+                else set()
+            )
+            if not decisions_without_canonical_parameters.issubset(
+                migration_baseline_actions
+            ):
+                raise AgentLoopError(
+                    "decision parameters are missing outside legacy migration baseline"
+                )
             latest_checkpoint, _ = parsed_checkpoints[-1]
             committed_resolution_count = latest_checkpoint.step_index
             if len(state["resolutions"]) - committed_resolution_count not in {0, 1}:
@@ -1744,6 +1811,9 @@ class AgentLoopRuntime:
             may_execute = (
                 effect_state is not ExternalEffectState.UNKNOWN_EXTERNAL_EFFECT
             )
+            canonical_parameters = [
+                [key, value] for key, value in action.parameters
+            ]
             record: dict[str, object] = {
                 "observation_id": action.observation_id,
                 "action_id": action.action_id,
@@ -1751,11 +1821,12 @@ class AgentLoopRuntime:
                 "decided_at": _timestamp_identity(
                     action.decided_at, "action.decided_at"
                 ),
-                "parameters_sha256": _digest(list(action.parameters)),
+                "parameters_sha256": _digest(canonical_parameters),
                 "external_effect_state": effect_state.value,
                 "may_execute": may_execute,
             }
             if state["schema_version"] == AGENT_LOOP_SCHEMA_VERSION:
+                record["parameters"] = canonical_parameters
                 record["decision_intent_id"] = _digest(
                     {
                         "environment_id": state["identity"]["environment_id"],
@@ -1766,7 +1837,7 @@ class AgentLoopRuntime:
                 record["decision_payload_id"] = _digest(
                     {
                         "action_type": action.action_type,
-                        "parameters": list(action.parameters),
+                        "parameters": canonical_parameters,
                     }
                 )
             state["decisions"].append(record)
@@ -2434,6 +2505,7 @@ class AgentLoopRuntime:
             seen_intents.add(intent_id)
             seen_actions.add(legacy["action_id"])
             upgraded = dict(legacy)
+            upgraded["parameters"] = None
             upgraded["decision_intent_id"] = intent_id
             upgraded["decision_payload_id"] = payload_id
             upgraded_decisions.append(upgraded)

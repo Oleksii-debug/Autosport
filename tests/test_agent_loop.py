@@ -43,16 +43,20 @@ def json_load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def rewrite_with_valid_state_digest(path, state):
-    unsigned = {key: value for key, value in state.items() if key != "state_sha256"}
+def canonical_sha256(value):
     canonical = json.dumps(
-        unsigned,
+        value,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     )
-    state["state_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def rewrite_with_valid_state_digest(path, state):
+    unsigned = {key: value for key, value in state.items() if key != "state_sha256"}
+    state["state_sha256"] = canonical_sha256(unsigned)
     path.write_text(
         json.dumps(state, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
@@ -310,6 +314,7 @@ def test_schema_v2_restart_upgrades_only_from_canonical_checkpoint(tmp_path):
     upgraded_decision = upgraded_state["decisions"][0]
     assert upgraded_decision["decision_intent_id"]
     assert upgraded_decision["decision_payload_id"]
+    assert upgraded_decision["parameters"] is None
     assert upgraded.phase is AgentLoopPhase.CHECKPOINT
 
     second_observation = _observation(environment, suffix="2")
@@ -1497,6 +1502,146 @@ def test_admissible_direct_action_cannot_predate_observation_availability(tmp_pa
     snapshot = runtime.snapshot()
     assert snapshot.phase is AgentLoopPhase.ACT_OR_ABSTAIN
     assert snapshot.action_id is None
+
+
+
+def test_schema_v3_restart_rejects_rehashed_action_payload_relabelling_before_checkpoint(
+    tmp_path,
+):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+        parameters=(("candidate_id", "candidate-1"),),
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+    original = json_load(runtime.path)
+    assert original["decisions"][0]["parameters"] == [
+        ["candidate_id", "candidate-1"]
+    ]
+
+    relabelled = json.loads(json.dumps(original))
+    relabelled["decisions"][0]["action_type"] = "PAPER_PROPOSAL"
+    rewrite_with_valid_state_digest(runtime.path, relabelled)
+    with pytest.raises(AgentLoopError, match="decision action identity mismatch"):
+        AgentLoopRuntime(runtime.path)
+
+    reparameterized = json.loads(json.dumps(original))
+    parameters = [["candidate_id", "candidate-2"]]
+    reparameterized["decisions"][0]["parameters"] = parameters
+    reparameterized["decisions"][0]["parameters_sha256"] = canonical_sha256(parameters)
+    reparameterized["decisions"][0]["decision_payload_id"] = canonical_sha256(
+        {
+            "action_type": reparameterized["decisions"][0]["action_type"],
+            "parameters": parameters,
+        }
+    )
+    rewrite_with_valid_state_digest(runtime.path, reparameterized)
+    with pytest.raises(AgentLoopError, match="decision action identity mismatch"):
+        AgentLoopRuntime(runtime.path)
+
+
+def test_schema_v3_checkpoint_cannot_downgrade_or_rebind_action_payload_evidence(
+    tmp_path,
+):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+        parameters=(("candidate_id", "candidate-1"),),
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+    outcome, reward, transition = _resolve(environment, action)
+    runtime.record_resolution(
+        transition,
+        outcome=outcome,
+        reward=reward,
+        at="2026-09-19T13:05:02Z",
+    )
+    runtime.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:05:03Z",
+    )
+    attribution = _attribution(environment, transition, outcome, reward)
+    runtime.record_attribution(
+        attribution,
+        at="2026-09-19T13:05:04Z",
+    )
+    postmortem = ReflectionPostmortem(
+        attribution_id=attribution.attribution_id,
+        transition_id=transition.transition_id,
+        created_at="2026-09-19T13:05:05Z",
+        unresolved_components=(AttributionComponent.RANDOMNESS,),
+        summary_code="V3_ACTION_PAYLOAD_BINDING",
+    )
+    runtime.record_postmortem(
+        postmortem,
+        at="2026-09-19T13:05:05Z",
+    )
+    runtime.commit_checkpoint(
+        environment.checkpoint(),
+        at="2026-09-19T13:05:06Z",
+    )
+    original = json_load(runtime.path)
+
+    downgraded = json.loads(json.dumps(original))
+    downgraded["decisions"][0]["parameters"] = None
+    rewrite_with_valid_state_digest(runtime.path, downgraded)
+    with pytest.raises(
+        AgentLoopError,
+        match="missing outside legacy migration baseline",
+    ):
+        AgentLoopRuntime(runtime.path)
+
+    relabelled = json.loads(json.dumps(original))
+    relabelled["decisions"][0]["action_type"] = "PAPER_PROPOSAL"
+    rewrite_with_valid_state_digest(runtime.path, relabelled)
+    with pytest.raises(AgentLoopError, match="decision action identity mismatch"):
+        AgentLoopRuntime(runtime.path)
+
+    reparameterized = json.loads(json.dumps(original))
+    parameters = [["candidate_id", "candidate-2"]]
+    reparameterized["decisions"][0]["parameters"] = parameters
+    reparameterized["decisions"][0]["parameters_sha256"] = canonical_sha256(parameters)
+    reparameterized["decisions"][0]["decision_payload_id"] = canonical_sha256(
+        {
+            "action_type": reparameterized["decisions"][0]["action_type"],
+            "parameters": parameters,
+        }
+    )
+    rewrite_with_valid_state_digest(runtime.path, reparameterized)
+    with pytest.raises(AgentLoopError, match="decision action identity mismatch"):
+        AgentLoopRuntime(runtime.path)
 
 
 def test_restart_rejects_self_consistent_cross_linked_agent_memory(tmp_path):

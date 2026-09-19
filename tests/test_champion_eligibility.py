@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 import pytest
 
 from autosport.champion_eligibility import (
@@ -21,6 +24,40 @@ from autosport.scientific_registry import DatasetSnapshot, ScientificRegistry
 
 ENV = "e" * 64
 CONFIG = "f" * 64
+
+
+def _canonical_digest(payload):
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+class _InjectedScientificRecord:
+    def __init__(self, record_type, record_id, available_at, payload):
+        self._record_type = record_type
+        self._record_id = record_id
+        self._available_at = available_at
+        self._payload = payload
+
+    @property
+    def record_type(self):
+        return self._record_type
+
+    @property
+    def record_id(self):
+        return self._record_id
+
+    @property
+    def available_at(self):
+        return self._available_at
+
+    def to_payload(self):
+        return dict(self._payload)
 
 
 def _decision_registry(tmp_path, *, threshold="0.5"):
@@ -213,6 +250,102 @@ def test_insufficient_evidence_is_wait_not_drift_claim(tmp_path):
         minimum_effective_sample_size=3,
     )
     assert decision.status is ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
+
+
+def test_self_authored_drift_records_cannot_mint_champion_authority(tmp_path):
+    from tests.test_drift_control import _current_window
+
+    registry, real_finding = _decision_registry(tmp_path)
+    current = _current_window(effective_sample_size=2)
+    reference = registry.get("DriftReference", real_finding.reference_id)
+    assert reference is not None
+
+    forged_observation_payload = {
+        "schema_version": 1,
+        "reference_id": reference.record_id,
+        "dataset_snapshot_id": current.dataset_snapshot_id,
+        "source_identity": current.source_identity,
+        "revision_id": current.revision_id,
+        "window_start": current.window_start,
+        "window_end": current.window_end,
+        "observation_as_of": current.as_of,
+        "evidence_sha256": current.evidence_sha256,
+        "sample_count": 999,
+        "mean_fraction": current.mean_fraction,
+        "effective_sample_size": 999,
+    }
+    forged_observation_id = _canonical_digest(forged_observation_payload)
+    registry.append(
+        _InjectedScientificRecord(
+            "DriftObservation",
+            forged_observation_id,
+            current.as_of,
+            forged_observation_payload,
+        )
+    )
+
+    forged_finding_id = _canonical_digest(
+        {
+            "schema_version": 1,
+            "algorithm_version": "autosport.drift.mean-absolute-shift.v1",
+            "reference_id": reference.record_id,
+            "observation_id": forged_observation_id,
+        }
+    )
+    forged_finding_payload = {
+        "schema_version": 1,
+        "algorithm_version": "autosport.drift.mean-absolute-shift.v1",
+        "finding_id": forged_finding_id,
+        "reference_id": reference.record_id,
+        "observation_id": forged_observation_id,
+        "drift_kind": real_finding.drift_kind.value,
+        "metric": real_finding.metric.value,
+        "model_version_id": real_finding.model_version_id,
+        "strategy_version_id": real_finding.strategy_version_id,
+        "feature_set_id": real_finding.feature_set_id,
+        "experiment_id": real_finding.experiment_id,
+        "state": "DRIFT_DETECTED",
+        "recommendation": "RESEARCH_RETRAIN_CHALLENGER",
+        "absolute_delta_fraction": "100/1",
+        "threshold": real_finding.threshold,
+        "insufficiency_reason": None,
+        "evaluated_at": current.as_of,
+        "evidence_sha256": "a" * 64,
+        "truth": "STATISTICAL_EVIDENCE_ONLY",
+        "automatic_promotion_authorized": False,
+        "financial_authority_change_authorized": False,
+        "real_money_execution_authorized": False,
+    }
+    registry.append(
+        _InjectedScientificRecord(
+            "DriftFinding",
+            forged_finding_id,
+            current.as_of,
+            forged_finding_payload,
+        )
+    )
+
+    with pytest.raises(ChampionEligibilityError, match="canonical provenance is invalid"):
+        ChampionEligibilityDecision.from_findings(
+            registry,
+            canonical_strategy_id="strategy-context",
+            strategy_version_id="strategy-1",
+            model_version_id="model-1",
+            environment_sha256=ENV,
+            protocol_id="protocol-1",
+            config_sha256=CONFIG,
+            sport="table_tennis",
+            league="league-a",
+            regime="pre_match",
+            finding_ids=(forged_finding_id,),
+            window_start=current.window_start,
+            window_end=current.window_end,
+            evaluated_at=current.as_of,
+            valid_until="2026-02-13T00:00:00Z",
+            minimum_samples=2,
+            minimum_effective_sample_size=2,
+            admissible_actions=("BET", "WAIT"),
+        )
 
 
 def test_effective_sample_size_is_not_raw_sample_count(tmp_path):

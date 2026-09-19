@@ -1599,6 +1599,33 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed.dependencies.input_ids, ())
             resumed.close()
 
+    def test_retired_input_tombstone_blocks_stale_freshness_after_reregister(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            old_deadline = self.START + timedelta(seconds=3)
+            loop._freshness_generations["input-a"] = 7
+            loop._freshness_deadlines["input-a"] = old_deadline
+            loop._freshness_heap.append((old_deadline, "input-a", 7))
+
+            self.assertTrue(loop.unregister_input("input-a"))
+            self.assertEqual(loop._freshness_generations["input-a"], 8)
+            self.assertIsNone(loop._freshness_deadlines["input-a"])
+
+            loop.register_input("input-a", selection_ids="selection-a")
+            expired = loop._expire_freshness_inputs(old_deadline + timedelta(seconds=1))
+            self.assertEqual(expired, ())
+            self.assertEqual(loop._freshness_generations["input-a"], 8)
+            self.assertIsNone(loop._freshness_deadlines["input-a"])
+            loop.close()
+
     def test_corrupted_dependency_registry_fails_closed_on_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

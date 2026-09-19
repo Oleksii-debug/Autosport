@@ -141,6 +141,11 @@ class SportDomainFitnessTests(unittest.TestCase):
             compute_duration_seconds=met("4", "seconds"),
         )
         self.assertEqual(recommend_route(too_slow, as_of=T2).status, RouteStatus.ROUTE_BASELINE)
+        too_tight = replace(
+            slow, observation_id="too-tight",
+            reaction_slack_seconds=met("1", "seconds"),
+        )
+        self.assertEqual(recommend_route(too_tight, as_of=T2).status, RouteStatus.ROUTE_BASELINE)
 
     def test_conflicting_immutable_id_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1171,14 +1171,62 @@ class ModelComputeRouterStore:
                     item["voc_evidence"]
                 )
             )
+            candidates_by_id = _candidate_map(candidates)
+            if decision.request_id != request.request_id:
+                raise ModelComputeRouterError(
+                    "decision request does not match persisted request"
+                )
+            if (
+                decision.policy_id != policy.policy_id
+                or decision.policy_version != policy.policy_version
+            ):
+                raise ModelComputeRouterError(
+                    "decision policy does not match persisted policy"
+                )
+            if decision.tier is not ComputeTier.WAIT:
+                selected_candidate = candidates_by_id.get(
+                    decision.candidate_id
+                )
+                expected_candidate_id = (
+                    request.cloud_candidate_id
+                    if decision.tier is ComputeTier.CLOUD
+                    else request.baseline_candidate_id
+                )
+                if (
+                    selected_candidate is None
+                    or decision.candidate_id
+                    != expected_candidate_id
+                    or selected_candidate.tier is not decision.tier
+                    or selected_candidate.backend_id
+                    != decision.backend_id
+                    or selected_candidate.model_id
+                    != decision.model_id
+                    or selected_candidate.config_sha256
+                    != decision.config_sha256
+                    or selected_candidate.estimated_cost
+                    != decision.estimated_cost
+                    or selected_candidate.estimated_latency_seconds
+                    != decision.estimated_latency_seconds
+                ):
+                    raise ModelComputeRouterError(
+                        "decision compute identity does not match "
+                        "persisted candidate"
+                    )
+            if (
+                decision.voc_evidence_id is not None
+                and (
+                    voc is None
+                    or decision.voc_evidence_id != voc.evidence_id
+                )
+            ):
+                raise ModelComputeRouterError(
+                    "decision VOC evidence does not match "
+                    "persisted evidence"
+                )
             if (
                 voc is not None
                 and decision.tier is ComputeTier.CLOUD
             ):
-                candidates_by_id = {
-                    candidate.candidate_id: candidate
-                    for candidate in candidates
-                }
                 voc_baseline = candidates_by_id.get(
                     voc.baseline_candidate_id
                 )

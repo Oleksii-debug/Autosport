@@ -57,6 +57,31 @@ def rewrite_store_with_valid_state_hash(path, raw):
     path.write_text(json.dumps(raw), encoding="utf-8")
 
 
+def rewrite_route_with_valid_hashes(path, raw, route):
+    unsigned = {
+        key: route[key]
+        for key in (
+            "request",
+            "policy",
+            "candidates",
+            "decision",
+            "voc_evidence",
+            "domain_observation",
+            "domain_route",
+        )
+    }
+    route["record_sha256"] = hashlib.sha256(
+        json.dumps(
+            unsigned,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    rewrite_store_with_valid_state_hash(path, raw)
+
+
 def candidate(
     candidate_id="local",
     *,
@@ -529,6 +554,100 @@ class ModelComputeRouterTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaises(ModelComputeRouterError):
+                ModelComputeRouterStore(path)
+
+    def test_restart_rejects_semantically_cross_linked_route_envelope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+
+            cloud_request = request(request_id="req-route-cloud")
+            cloud_decision = store.route(
+                cloud_request,
+                self.candidates,
+                policy(),
+                as_of=T1,
+                voc_evidence=voc(evidence_id="voc-route-cloud"),
+                domain_observation=slow_observation(),
+            )
+            self.assertEqual(cloud_decision.tier, ComputeTier.CLOUD)
+
+            local_request = request(
+                request_id="req-route-local",
+                allow_cloud=False,
+                cloud_candidate_id=None,
+            )
+            local_decision = store.route(
+                local_request,
+                self.candidates,
+                policy(),
+                as_of=T1,
+            )
+            self.assertEqual(local_decision.tier, ComputeTier.LOCAL)
+
+            original = path.read_text(encoding="utf-8")
+
+            def route_record(raw, request_id):
+                return next(
+                    item
+                    for item in raw["routes"]
+                    if item["request"]["request_id"] == request_id
+                )
+
+            raw = json.loads(original)
+            forged = route_record(raw, "req-route-cloud")
+            forged["request"]["request_id"] = "forged-request"
+            rewrite_route_with_valid_hashes(path, raw, forged)
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "decision request does not match persisted request",
+            ):
+                ModelComputeRouterStore(path)
+
+            raw = json.loads(original)
+            forged = route_record(raw, "req-route-cloud")
+            forged["policy"]["policy_version"] = 2
+            rewrite_route_with_valid_hashes(path, raw, forged)
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "decision policy does not match persisted policy",
+            ):
+                ModelComputeRouterStore(path)
+
+            raw = json.loads(original)
+            forged = route_record(raw, "req-route-local")
+            next(
+                item
+                for item in forged["candidates"]
+                if item["candidate_id"] == "local"
+            )["backend_id"] = "forged-local-backend"
+            rewrite_route_with_valid_hashes(path, raw, forged)
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "decision compute identity does not match persisted candidate",
+            ):
+                ModelComputeRouterStore(path)
+
+            raw = json.loads(original)
+            forged = route_record(raw, "req-route-cloud")
+            forged["voc_evidence"]["evidence_id"] = "voc-cross-linked"
+            rewrite_route_with_valid_hashes(path, raw, forged)
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "decision VOC evidence does not match persisted evidence",
+            ):
+                ModelComputeRouterStore(path)
+
+            raw = json.loads(original)
+            forged = route_record(raw, "req-route-cloud")
+            forged["domain_observation"]["observation_id"] = (
+                "fitness-cross-linked"
+            )
+            rewrite_route_with_valid_hashes(path, raw, forged)
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "decision domain observation does not match persisted evidence",
+            ):
                 ModelComputeRouterStore(path)
 
     def test_restart_rejects_semantically_forged_execution_state(self):

@@ -37,6 +37,14 @@ def _undeclared_mutation_handler(_payload):
     return SkillExecutionResult(output={}, applied_mutations=("LOCAL_WRITE",))
 
 
+def _undeclared_tool_and_evidence_handler(_payload):
+    return SkillExecutionResult(
+        output={},
+        used_tools=("FAKE_WRITE_TOOL",),
+        emitted_evidence=(("UNDECLARED_EVIDENCE", SHA_D),),
+    )
+
+
 def _budget_overrun_handler(payload):
     kind = payload["kind"]
     return SkillExecutionResult(
@@ -270,6 +278,17 @@ def test_handler_cannot_exceed_immutable_call_budget(tmp_path, kind):
     )
     assert run.status is SkillRunStatus.FAILED
     assert run.error_code == "HANDLER_ERROR_SKILLPERMISSIONERROR"
+    expected = {
+        "compute": (2, 0, 0),
+        "data": (0, 2, 0),
+        "ai": (0, 0, 2),
+    }[kind]
+    assert (
+        run.consumed_compute_units,
+        run.consumed_data_units,
+        run.consumed_ai_units,
+    ) == expected
+    assert SkillRegistry(registry.path).get_run(run.run_id) == run
 
 
 def test_durable_readback_rejects_consumption_above_requested_budget(tmp_path):
@@ -495,6 +514,32 @@ def test_handler_cannot_report_undeclared_mutation(tmp_path):
     run = _invoke(registry, definition, payload={})
     assert run.status is SkillRunStatus.FAILED
     assert run.error_code == "HANDLER_ERROR_SKILLPERMISSIONERROR"
+    assert run.applied_mutations == ("LOCAL_WRITE",)
+    assert SkillRegistry(registry.path).get_run(run.run_id) == run
+
+
+def test_failed_run_preserves_undeclared_tool_and_evidence_facts(tmp_path):
+    registry = SkillRegistry.initialize(tmp_path / "skills.json")
+    definition = SkillDefinition(
+        skill_id="read-only-tool-probe",
+        version="1.0.0",
+        capability="read_only_tool_probe",
+        purpose="Preserve violation evidence without granting tool authority",
+        input_schema_sha256=SHA_A,
+        output_schema_sha256=SHA_B,
+        implementation_sha256=SHA_D,
+        implementation_kind=SkillImplementationKind.REVIEWED_PLUGIN,
+        required_authorities=("READ_ONLY_ANALYSIS",),
+        required_provenance=("source_evidence",),
+    )
+    registry.register(definition)
+    registry._handlers[definition.version_key] = _undeclared_tool_and_evidence_handler
+    run = _invoke(registry, definition, call_id="undeclared-tool-evidence", payload={})
+    assert run.status is SkillRunStatus.FAILED
+    assert run.error_code == "HANDLER_ERROR_SKILLPERMISSIONERROR"
+    assert run.used_tools == ("FAKE_WRITE_TOOL",)
+    assert run.emitted_evidence == (("UNDECLARED_EVIDENCE", SHA_D),)
+    assert SkillRegistry(registry.path).get_run(run.run_id) == run
 
 
 def test_state_digest_and_internal_run_digests_are_verified(tmp_path):

@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from decimal import Decimal
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -18,6 +19,10 @@ from .scientific_registry import (
     Postmortem,
     PromotionAction,
     PromotionDecision,
+    PromotionEvidence,
+    PromotionEvidenceDirection,
+    PromotionEvidenceValidity,
+    promotion_holdout_access_id,
     ResearchOutcome,
     ScientificRegistry,
     StrategyVersion,
@@ -33,6 +38,22 @@ def _canonical_digest(payload: Mapping[str, object]) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _holdout_consumed_by_other_evidence(
+    prior_payloads: Iterable[Mapping[str, object]],
+    *,
+    same_attempt_identity: Mapping[str, object],
+) -> bool:
+    """Treat an identical frozen-attempt evidence record as resumable, not reusable."""
+    holdout_access_id = same_attempt_identity["holdout_access_id"]
+    for payload in prior_payloads:
+        if payload.get("holdout_access_id") != holdout_access_id:
+            continue
+        if all(payload.get(key) == value for key, value in same_attempt_identity.items()):
+            continue
+        return True
+    return False
 
 
 def _finite(value: object, name: str) -> float:
@@ -70,6 +91,25 @@ def _instant(value: object, name: str) -> datetime:
 
 def _canonical_instant(value: object, name: str) -> str:
     return _instant(value, name).isoformat()
+
+
+def _promotion_effect_interval(
+    paired_deltas: Sequence[Decimal],
+    declared_uncertainty_method: object,
+) -> tuple[str, Decimal, Decimal]:
+    """Return an interval only when the frozen protocol names this exact procedure."""
+    method = _text(declared_uncertainty_method, "uncertainty_method")
+    if method != "paired min/max interval":
+        raise ValueError(
+            "unsupported frozen uncertainty_method for deterministic paired-fold "
+            "interval; protocol must explicitly declare 'paired min/max interval'"
+        )
+    if not paired_deltas:
+        raise ValueError("promotion evidence requires at least one paired causal holdout fold")
+    if any(not isinstance(delta, Decimal) or not delta.is_finite() for delta in paired_deltas):
+        raise ValueError("paired deltas must be finite Decimal values")
+    ordered = sorted(paired_deltas)
+    return method, ordered[0], ordered[-1]
 
 
 def _metric_map(value: object, name: str) -> dict[str, float]:
@@ -468,6 +508,7 @@ class WalkForwardRunner:
 class PromotionVerdict(StrEnum):
     PROMOTE = "PROMOTE"
     REJECT = "REJECT"
+    INCONCLUSIVE = "INCONCLUSIVE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -475,12 +516,19 @@ class PromotionRule:
     primary_metric: str
     minimum_improvement: float
     protective_metric_maxima: tuple[tuple[str, float], ...] = ()
+    minimum_effective_sample_size: int = 2
 
     def __post_init__(self) -> None:
         _text(self.primary_metric, "primary_metric")
         improvement = _finite(self.minimum_improvement, "minimum_improvement")
         if improvement < 0:
             raise ValueError("minimum_improvement must be non-negative")
+        if (
+            isinstance(self.minimum_effective_sample_size, bool)
+            or not isinstance(self.minimum_effective_sample_size, int)
+            or self.minimum_effective_sample_size <= 0
+        ):
+            raise ValueError("minimum_effective_sample_size must be a positive integer")
         names: set[str] = set()
         for name, maximum in self.protective_metric_maxima:
             _text(name, "protective metric name")
@@ -496,6 +544,7 @@ class PromotionRule:
             "minimum_improvement": _finite(
                 self.minimum_improvement, "minimum_improvement"
             ),
+            "minimum_effective_sample_size": self.minimum_effective_sample_size,
             "protective_metric_maxima": [
                 [name, _finite(maximum, f"protective maximum {name}")]
                 for name, maximum in sorted(self.protective_metric_maxima)
@@ -537,6 +586,7 @@ class PromotionController:
         challenger_metrics: Mapping[str, float],
         provenance_complete: bool,
         rollback_target: str | None,
+        promotion_evidence: PromotionEvidence | None = None,
     ) -> PromotionEvaluation:
         if provenance_complete is not True:
             return PromotionEvaluation(
@@ -582,11 +632,58 @@ class PromotionController:
                 improvement,
                 tuple(reasons),
             )
+        if promotion_evidence is None:
+            return PromotionEvaluation(
+                PromotionVerdict.INCONCLUSIVE,
+                PromotionAction.RETAIN,
+                improvement,
+                ("missing typed promotion evidence",),
+            )
+        evidence_reasons: list[str] = []
+        if promotion_evidence.validity is not PromotionEvidenceValidity.ELIGIBLE:
+            evidence_reasons.append("promotion evidence is not eligible")
+        if promotion_evidence.holdout_consumed:
+            evidence_reasons.append("confirmation holdout already consumed")
+        if (
+            promotion_evidence.minimum_effective_sample_size
+            != rule.minimum_effective_sample_size
+        ):
+            evidence_reasons.append(
+                "promotion evidence minimum sample size does not match frozen rule"
+            )
+        if promotion_evidence.effective_sample_size < rule.minimum_effective_sample_size:
+            evidence_reasons.append("effective sample size below frozen minimum")
+        if promotion_evidence.guardrails_passed is not True:
+            evidence_reasons.append("promotion guardrails are not satisfied")
+        if promotion_evidence.estimand != rule.primary_metric:
+            evidence_reasons.append("promotion evidence estimand does not match primary metric")
+        if promotion_evidence.direction is not PromotionEvidenceDirection.LOWER_IS_BETTER:
+            evidence_reasons.append("promotion evidence direction does not match frozen metric direction")
+        if promotion_evidence.rollback_identity != rollback_target:
+            evidence_reasons.append("promotion evidence rollback identity does not match")
+        try:
+            practical = Decimal(promotion_evidence.practical_improvement)
+            interval_low = Decimal(promotion_evidence.effect_interval_low)
+        except Exception:
+            evidence_reasons.append("promotion evidence numeric payload is invalid")
+            practical = Decimal(0)
+            interval_low = Decimal(0)
+        if practical <= 0 or interval_low <= 0:
+            evidence_reasons.append("promotion evidence does not establish strictly positive improvement")
+        if practical < Decimal(str(rule.minimum_improvement)) or interval_low < Decimal(str(rule.minimum_improvement)):
+            evidence_reasons.append("promotion evidence does not clear the frozen minimum improvement")
+        if evidence_reasons:
+            return PromotionEvaluation(
+                PromotionVerdict.INCONCLUSIVE,
+                PromotionAction.RETAIN,
+                improvement,
+                tuple(evidence_reasons),
+            )
         return PromotionEvaluation(
             PromotionVerdict.PROMOTE,
             PromotionAction.PROMOTE,
             improvement,
-            ("frozen promotion rule satisfied",),
+            ("frozen promotion rule and typed evidence satisfied",),
         )
 
 
@@ -1128,18 +1225,14 @@ class ExperimentRunner:
         champion_metrics = {
             name: champion_metrics[name] for name in sorted(required_metrics)
         }
-        promotion = PromotionController.evaluate(
+        provisional_promotion = PromotionController.evaluate(
             rule,
             champion_metrics=champion_metrics,
             challenger_metrics=candidate_metrics,
             provenance_complete=True,
             rollback_target=current_champion,
         )
-        outcome = (
-            ResearchOutcome.POSITIVE
-            if promotion.verdict is PromotionVerdict.PROMOTE
-            else ResearchOutcome.NEGATIVE
-        )
+        outcome = ResearchOutcome.INCONCLUSIVE
         experiment = ExperimentRecord(
             spec.experiment_id,
             spec.research_protocol_id,
@@ -1153,7 +1246,7 @@ class ExperimentRunner:
             spec.created_at,
             model_version_id=spec.model_version_id,
             completed_at=spec.completed_at,
-            notes="; ".join(promotion.reasons),
+            notes="; ".join(provisional_promotion.reasons),
         )
         existing_experiment = self.registry.get("Experiment", spec.experiment_id)
         if existing_experiment is None:
@@ -1286,8 +1379,8 @@ class ExperimentRunner:
             "candidate_metrics_source": "causal-walk-forward-v1",
             "champion_evaluation_bundle_id": champion_evaluation_bundle_id,
             "champion_metrics": champion_metrics,
-            "promotion_verdict": promotion.verdict.value,
-            "promotion_reasons": list(promotion.reasons),
+            "promotion_verdict": provisional_promotion.verdict.value,
+            "promotion_reasons": list(provisional_promotion.reasons),
             "completed_at": spec.completed_at,
             "decided_at": spec.decided_at,
             "truth": {
@@ -1296,6 +1389,124 @@ class ExperimentRunner:
                 "llm_arithmetic_authority": False,
             },
         }
+        champion_evaluation = self.artifact_store.read("evaluation", champion_evaluation_bundle_id)
+        champion_folds = {
+            fold["evaluation_at"]: fold
+            for fold in champion_evaluation.get("walk_forward", {}).get("folds", [])
+            if isinstance(fold, dict) and isinstance(fold.get("evaluation_at"), str)
+        }
+        paired_deltas: list[Decimal] = []
+        for fold in walk_forward.folds:
+            prior = champion_folds.get(fold.evaluation_at)
+            if prior is None:
+                continue
+            paired_deltas.append(
+                Decimal(str(prior["squared_error"])) - Decimal(str(fold.squared_error))
+            )
+        if not paired_deltas:
+            raise ValueError("promotion evidence requires at least one paired causal holdout fold")
+        practical = sum(paired_deltas, Decimal(0)) / Decimal(len(paired_deltas))
+        uncertainty_method, effect_low, effect_high = _promotion_effect_interval(
+            paired_deltas,
+            binding["uncertainty_method"],
+        )
+
+        def _canonical_decimal_text(value: Decimal) -> str:
+            text = format(value, "f")
+            if "." in text:
+                text = text.rstrip("0").rstrip(".")
+            return "0" if text in ("", "-0") else text
+
+        stopping_sha = hashlib.sha256(
+            str(binding["stopping_rule"]).encode("utf-8")
+        ).hexdigest()
+        comparison_sha = hashlib.sha256(
+            str(binding["multiple_comparison_control"]).encode("utf-8")
+        ).hexdigest()
+        guardrails_passed = all(
+            candidate_metrics[name] <= maximum
+            for name, maximum in rule.protective_metric_maxima
+        )
+        confirmation_trial_family_id = (
+            f"{spec.research_protocol_id}:confirmation-trial-family"
+        )
+        dataset = self.registry.get("DatasetSnapshot", spec.dataset_snapshot_id)
+        if dataset is None:
+            raise ValueError(
+                "promotion evidence requires the durable candidate dataset snapshot"
+            )
+        holdout_access_id = promotion_holdout_access_id(
+            research_protocol_id=spec.research_protocol_id,
+            dataset_manifest_sha256=dataset.payload.get("manifest_sha256"),
+            source_identity=dataset.payload.get("source_identity"),
+            license_identity=dataset.payload.get("license_identity"),
+            confirmation_trial_family_id=confirmation_trial_family_id,
+        )
+        same_attempt_identity = {
+            "experiment_id": spec.experiment_id,
+            "research_protocol_id": spec.research_protocol_id,
+            "research_question_id": binding["research_question_id"],
+            "hypothesis_id": binding["hypothesis_id"],
+            "candidate_strategy_version_id": spec.strategy_version_id,
+            "candidate_model_version_id": spec.model_version_id,
+            "evaluation_bundle_id": spec.evaluation_bundle_id,
+            "dataset_snapshot_id": spec.dataset_snapshot_id,
+            "confirmation_trial_family_id": confirmation_trial_family_id,
+            "holdout_access_id": holdout_access_id,
+            "estimand": rule.primary_metric,
+            "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+            "rollback_identity": current_champion,
+            "created_at": spec.decided_at,
+        }
+        holdout_consumed = _holdout_consumed_by_other_evidence(
+            (
+                prior_evidence.payload
+                for prior_evidence in self.registry.causal_records(
+                    "PromotionEvidence", as_of=spec.decided_at
+                )
+            ),
+            same_attempt_identity=same_attempt_identity,
+        )
+        promotion_effect_evidence = {
+            "schema_version": 1,
+            "experiment_id": spec.experiment_id,
+            "research_protocol_id": spec.research_protocol_id,
+            "research_question_id": binding["research_question_id"],
+            "hypothesis_id": binding["hypothesis_id"],
+            "candidate_strategy_version_id": spec.strategy_version_id,
+            "candidate_model_version_id": spec.model_version_id,
+            "evaluation_bundle_id": spec.evaluation_bundle_id,
+            "dataset_snapshot_id": spec.dataset_snapshot_id,
+            "confirmation_trial_family_id": confirmation_trial_family_id,
+            "holdout_access_id": holdout_access_id,
+            "estimand": rule.primary_metric,
+            "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+            "cohort_id": spec.dataset_snapshot_id,
+            "effective_sample_size": len(paired_deltas),
+            "minimum_effective_sample_size": rule.minimum_effective_sample_size,
+            "effect_interval_low": _canonical_decimal_text(effect_low),
+            "effect_interval_high": _canonical_decimal_text(effect_high),
+            "practical_improvement": _canonical_decimal_text(practical),
+            "guardrails_passed": guardrails_passed,
+            "validity": (
+                PromotionEvidenceValidity.ELIGIBLE.value
+                if len(paired_deltas) >= rule.minimum_effective_sample_size
+                and effect_low >= Decimal(str(rule.minimum_improvement))
+                and practical >= Decimal(str(rule.minimum_improvement))
+                and guardrails_passed
+                else PromotionEvidenceValidity.INCONCLUSIVE.value
+            ),
+            "holdout_consumed": holdout_consumed,
+            "stopping_rule_sha256": stopping_sha,
+            "multiple_comparison_control_sha256": comparison_sha,
+            "rollback_identity": current_champion,
+            "uncertainty_method": uncertainty_method,
+            "created_at": spec.decided_at,
+        }
+        evaluation_payload["promotion_effect_evidence"] = dict(
+            promotion_effect_evidence
+        )
+
         evaluation_bundle_sha256 = self.artifact_store.write(
             "evaluation", spec.evaluation_bundle_id, evaluation_payload
         )
@@ -1310,10 +1521,67 @@ class ExperimentRunner:
                 spec.completed_at,
                 evaluated_strategy_version_id=spec.strategy_version_id,
                 evaluated_model_version_id=spec.model_version_id,
+                effective_sample_size=promotion_effect_evidence[
+                    "effective_sample_size"
+                ],
+                effect_interval_low=promotion_effect_evidence[
+                    "effect_interval_low"
+                ],
+                effect_interval_high=promotion_effect_evidence[
+                    "effect_interval_high"
+                ],
+                practical_improvement=promotion_effect_evidence[
+                    "practical_improvement"
+                ],
             )
         )
 
+        evidence_payload = dict(promotion_effect_evidence)
+        evidence_payload["evaluation_bundle_sha256"] = evaluation_bundle_sha256
+        evidence_id = hashlib.sha256(
+            json.dumps(
+                evidence_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        typed_evidence_payload = {
+            key: value
+            for key, value in evidence_payload.items()
+            if key != "schema_version"
+        }
+        typed_evidence_payload["direction"] = PromotionEvidenceDirection(
+            evidence_payload["direction"]
+        )
+        typed_evidence_payload["validity"] = PromotionEvidenceValidity(
+            evidence_payload["validity"]
+        )
+        promotion_evidence = PromotionEvidence(
+            promotion_evidence_id=evidence_id,
+            **typed_evidence_payload,
+        )
+        promotion = PromotionController.evaluate(
+            rule,
+            champion_metrics=champion_metrics,
+            challenger_metrics=candidate_metrics,
+            provenance_complete=True,
+            rollback_target=current_champion,
+            promotion_evidence=promotion_evidence,
+        )
+        outcome = (
+            ResearchOutcome.POSITIVE
+            if promotion.verdict is PromotionVerdict.PROMOTE
+            else (
+                ResearchOutcome.NEGATIVE
+                if promotion.verdict is PromotionVerdict.REJECT
+                else ResearchOutcome.INCONCLUSIVE
+            )
+        )
+        experiment = replace(experiment, outcome=outcome, notes="; ".join(promotion.reasons))
         self.registry.append(experiment)
+        self.registry.append(promotion_evidence)
 
         self.registry.record_promotion(
             PromotionDecision(
@@ -1327,6 +1595,7 @@ class ExperimentRunner:
                 spec.decided_at,
                 predecessor_strategy_version_id=spec.predecessor_strategy_version_id,
                 candidate_model_version_id=spec.model_version_id,
+                promotion_evidence_id=promotion_evidence.promotion_evidence_id,
                 reason="; ".join(promotion.reasons),
             )
         )

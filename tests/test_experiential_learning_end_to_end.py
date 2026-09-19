@@ -23,6 +23,10 @@ from autosport.scientific_registry import (
     ModelVersion,
     PromotionAction,
     PromotionDecision,
+    PromotionEvidence,
+    PromotionEvidenceDirection,
+    PromotionEvidenceValidity,
+    promotion_holdout_access_id,
     ResearchOutcome,
     ResearchProtocol,
     ResearchQuestion,
@@ -190,7 +194,7 @@ def _real_factory_foundation(tmp_path, identity: EnvironmentIdentity):
         causal_cutoff=T2,
         evaluation_design=evaluator_config.frozen_text,
         feature_set_version="v1",
-        uncertainty_method="deterministic baseline checkpoint",
+        uncertainty_method="paired min/max interval",
         multiple_comparison_control="single frozen primary metric",
         robustness_checks=("time order", "protective metric"),
         random_seed_policy="seed fixed before evaluation",
@@ -256,7 +260,37 @@ def _real_factory_foundation(tmp_path, identity: EnvironmentIdentity):
                 "prediction": 0.0,
                 "target": 1.0,
                 "squared_error": 1.0,
-            }
+            },
+            {
+                "fold_id": "champion-fold-2",
+                "training_cutoff": T2,
+                "evaluation_at": T3,
+                "target_available_at": T3,
+                "causal_training_count": 3,
+                "prediction": 0.0,
+                "target": 1.0,
+                "squared_error": 1.0,
+            },
+            {
+                "fold_id": "champion-fold-3",
+                "training_cutoff": T3,
+                "evaluation_at": T4,
+                "target_available_at": T4,
+                "causal_training_count": 4,
+                "prediction": 0.0,
+                "target": 1.0,
+                "squared_error": 1.0,
+            },
+            {
+                "fold_id": "champion-fold-4",
+                "training_cutoff": T4,
+                "evaluation_at": T5,
+                "target_available_at": T5,
+                "causal_training_count": 5,
+                "prediction": 0.0,
+                "target": 0.0,
+                "squared_error": 0.0,
+            },
         ],
     }
     champion_walk_forward_sha256 = _canonical_sha(champion_walk_forward)
@@ -307,26 +341,89 @@ def _real_factory_foundation(tmp_path, identity: EnvironmentIdentity):
         T3,
         evaluated_strategy_version_id=champion_strategy.strategy_version_id,
         evaluated_model_version_id=champion_model.model_version_id,
+        effective_sample_size=5,
+        effect_interval_low="0.1",
+        effect_interval_high="0.2",
+        practical_improvement="0.15",
     )
     for record in (champion_model, champion_strategy, champion_bundle):
         registry.append(record)
-    registry.append(
-        ExperimentRecord(
-            "experiment-v1",
-            binding.research_protocol_id,
-            dataset.dataset_snapshot_id,
-            features.feature_set_id,
-            champion_strategy.strategy_version_id,
-            champion_bundle.evaluation_bundle_id,
-            7,
-            SHA_B,
-            ResearchOutcome.POSITIVE,
-            T2,
-            model_version_id=champion_model.model_version_id,
-            completed_at=T3,
-            notes="fixture champion",
-        )
+    champion_experiment = ExperimentRecord(
+        "experiment-v1",
+        binding.research_protocol_id,
+        dataset.dataset_snapshot_id,
+        features.feature_set_id,
+        champion_strategy.strategy_version_id,
+        champion_bundle.evaluation_bundle_id,
+        7,
+        SHA_B,
+        ResearchOutcome.POSITIVE,
+        T2,
+        model_version_id=champion_model.model_version_id,
+        completed_at=T3,
+        notes="fixture champion",
     )
+    registry.append(champion_experiment)
+    confirmation_trial_family_id = (
+        f"{binding.research_protocol_id}:confirmation-trial-family"
+    )
+    champion_evidence_payload = {
+        "schema_version": 1,
+        "experiment_id": champion_experiment.experiment_id,
+        "research_protocol_id": binding.research_protocol_id,
+        "research_question_id": question.question_id,
+        "hypothesis_id": hypothesis.hypothesis_id,
+        "candidate_strategy_version_id": champion_strategy.strategy_version_id,
+        "candidate_model_version_id": champion_model.model_version_id,
+        "evaluation_bundle_id": champion_bundle.evaluation_bundle_id,
+        "evaluation_bundle_sha256": champion_evaluation_sha256,
+        "dataset_snapshot_id": dataset.dataset_snapshot_id,
+        "holdout_access_id": promotion_holdout_access_id(
+            research_protocol_id=binding.research_protocol_id,
+            dataset_manifest_sha256=manifest_sha256,
+            source_identity="lawful-provider:fixture",
+            license_identity="license-evidence:v1",
+            confirmation_trial_family_id=confirmation_trial_family_id,
+        ),
+        "confirmation_trial_family_id": confirmation_trial_family_id,
+        "estimand": "mse",
+        "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+        "cohort_id": dataset.dataset_snapshot_id,
+        "effective_sample_size": 5,
+        "minimum_effective_sample_size": 2,
+        "effect_interval_low": "0.1",
+        "effect_interval_high": "0.2",
+        "practical_improvement": "0.15",
+        "guardrails_passed": True,
+        "validity": PromotionEvidenceValidity.ELIGIBLE.value,
+        "holdout_consumed": False,
+        "stopping_rule_sha256": hashlib.sha256(
+            b"one final evaluation"
+        ).hexdigest(),
+        "multiple_comparison_control_sha256": hashlib.sha256(
+            b"single frozen primary metric"
+        ).hexdigest(),
+        "rollback_identity": "NONE",
+        "uncertainty_method": "paired min/max interval",
+        "created_at": T3,
+    }
+    champion_evidence_id = _canonical_sha(champion_evidence_payload)
+    champion_evidence_fields = {
+        key: value
+        for key, value in champion_evidence_payload.items()
+        if key != "schema_version"
+    }
+    champion_evidence_fields["direction"] = PromotionEvidenceDirection(
+        champion_evidence_fields["direction"]
+    )
+    champion_evidence_fields["validity"] = PromotionEvidenceValidity(
+        champion_evidence_fields["validity"]
+    )
+    champion_evidence = PromotionEvidence(
+        champion_evidence_id,
+        **champion_evidence_fields,
+    )
+    registry.append(champion_evidence)
     registry.record_promotion(
         PromotionDecision(
             "promotion-v1",
@@ -338,6 +435,7 @@ def _real_factory_foundation(tmp_path, identity: EnvironmentIdentity):
             champion_evaluation_sha256,
             T3,
             candidate_model_version_id=champion_model.model_version_id,
+            promotion_evidence_id=champion_evidence.promotion_evidence_id,
             reason="fixture baseline champion",
         )
     )

@@ -4,6 +4,8 @@ from dataclasses import replace
 
 import pytest
 
+from test_scientific_registry import _frozen_promotion_rule_text, _promotion_evidence
+
 from autosport.scientific_registry import (
     DatasetSnapshot,
     EvaluationBundleRef,
@@ -69,7 +71,7 @@ def _seed_foundation(registry: ScientificRegistry, *, dataset_cutoff: str = T1):
         robustness_checks=("time split", "source split"),
         random_seed_policy="seed fixed before evaluation",
         stopping_rule="one final evaluation",
-        promotion_rule="promote only if primary improves and guardrails pass",
+        promotion_rule=_frozen_promotion_rule_text(),
         expected_artifacts=("evaluation bundle", "decision"),
         code_config_sha256=SHA_B,
         frozen_at_utc=T0,
@@ -117,6 +119,10 @@ def _seed_foundation(registry: ScientificRegistry, *, dataset_cutoff: str = T1):
         T2,
         evaluated_strategy_version_id="strategy-1",
         evaluated_model_version_id="model-1",
+        effective_sample_size=5,
+        effect_interval_low="0.05",
+        effect_interval_high="0.15",
+        practical_improvement="0.1",
     )
     experiment = ExperimentRecord(
         "experiment-1",
@@ -134,10 +140,22 @@ def _seed_foundation(registry: ScientificRegistry, *, dataset_cutoff: str = T1):
     )
     for record in (question, hypothesis, protocol, dataset, features, model, strategy, bundle, experiment):
         registry.append(record)
-    return protocol, model, experiment
+    evidence = _promotion_evidence(
+        experiment_id="experiment-1", strategy_id="strategy-1", model_id="model-1",
+        bundle_id="eval-1", dataset_id="dataset-1", protocol_id="protocol-1",
+        bundle_sha=bundle.bundle_sha256, evidence_id="promotion-1-evidence",
+        rollback_identity="NONE", minimum_n=3,
+    )
+    registry.append(evidence)
+    return protocol, model, experiment, evidence.promotion_evidence_id
 
 
-def _promotion(protocol: ResearchProtocol, *, decision_id: str = "promotion-1") -> PromotionDecision:
+def _promotion(
+    protocol: ResearchProtocol,
+    promotion_evidence_id: str,
+    *,
+    decision_id: str = "promotion-1",
+) -> PromotionDecision:
     return PromotionDecision(
         decision_id,
         PromotionAction.PROMOTE,
@@ -148,23 +166,23 @@ def _promotion(protocol: ResearchProtocol, *, decision_id: str = "promotion-1") 
         SHA_D,
         T3,
         candidate_model_version_id="model-1",
+        promotion_evidence_id=promotion_evidence_id,
     )
-
 
 def test_promotion_rejects_dataset_cutoff_different_from_frozen_protocol(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, _, _ = _seed_foundation(registry, dataset_cutoff=T2)
+    protocol, _, _, evidence_id = _seed_foundation(registry, dataset_cutoff=T2)
 
     with pytest.raises(PromotionEvidenceError, match="causal cutoff"):
-        registry.record_promotion(_promotion(protocol))
+        registry.record_promotion(_promotion(protocol, evidence_id))
 
     assert registry.get("PromotionDecision", "promotion-1") is None
 
 
 def test_rollback_rejects_existing_strategy_that_was_never_a_champion(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, model, first_experiment = _seed_foundation(registry)
-    registry.record_promotion(_promotion(protocol))
+    protocol, model, first_experiment, evidence_id = _seed_foundation(registry)
+    registry.record_promotion(_promotion(protocol, evidence_id))
 
     strategy2 = StrategyVersion(
         "strategy-2",
@@ -206,28 +224,14 @@ def test_rollback_rejects_existing_strategy_that_was_never_a_champion(tmp_path):
     for record in (strategy2, bundle2, experiment2, unrelated):
         registry.append(record)
 
-    registry.record_promotion(
-        PromotionDecision(
-            "promotion-2",
-            PromotionAction.PROMOTE,
-            "strategy-2",
-            "protocol-1",
-            protocol.protocol_sha256,
-            "eval-2",
-            SHA_A,
-            T3,
-            predecessor_strategy_version_id="strategy-1",
-            candidate_model_version_id="model-1",
-        )
-    )
     rollback = PromotionDecision(
         "rollback-3",
         PromotionAction.ROLLBACK,
-        "strategy-2",
+        "strategy-1",
         "protocol-1",
         protocol.protocol_sha256,
-        "eval-2",
-        SHA_A,
+        "eval-1",
+        SHA_D,
         T3,
         rollback_to_strategy_version_id="strategy-unrelated",
         candidate_model_version_id="model-1",
@@ -236,5 +240,5 @@ def test_rollback_rejects_existing_strategy_that_was_never_a_champion(tmp_path):
     with pytest.raises(PromotionEvidenceError, match="prior durable champion"):
         registry.record_promotion(rollback)
 
-    assert registry.champion_strategy(as_of=T3) == "strategy-2"
+    assert registry.champion_strategy(as_of=T3) == "strategy-1"
     assert registry.get("PromotionDecision", "rollback-3") is None

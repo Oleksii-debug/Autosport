@@ -1,11 +1,15 @@
 import hashlib
 import json
+import time
+from dataclasses import replace
 
 import pytest
 
 from autosport.agent_loop import AgentLoopRuntime
 from autosport.learning_environment import CausalLearningEnvironment, EnvironmentIdentity
 from autosport.skill_registry import (
+    AGENT_LOOP_READ_ONLY_AUTHORITY_PROFILE,
+    ConflictingSkillDefinitionError,
     ConflictingSkillRunError,
     SkillDefinition,
     SkillExecutionResult,
@@ -24,6 +28,15 @@ SHA_C = "c" * 64
 SHA_D = "d" * 64
 
 
+def _slow_handler(_payload):
+    time.sleep(2)
+    return SkillExecutionResult(output={})
+
+
+def _undeclared_mutation_handler(_payload):
+    return SkillExecutionResult(output={}, applied_mutations=("LOCAL_WRITE",))
+
+
 def _registry(tmp_path):
     registry = SkillRegistry.initialize(tmp_path / "skills.json")
     registry.install_builtin_definitions()
@@ -40,7 +53,7 @@ def _invoke(
     *,
     call_id="call-1",
     payload=None,
-    authorities=("READ_ONLY_ANALYSIS",),
+    authority_profile_id=AGENT_LOOP_READ_ONLY_AUTHORITY_PROFILE,
     mutations=(),
     at="2026-09-19T04:00:00Z",
     compute=1,
@@ -55,8 +68,7 @@ def _invoke(
         caller_state_sha256=SHA_A,
         source_sha256=SHA_B,
         input_payload={} if payload is None else payload,
-        available_authorities=authorities,
-        available_tools=(),
+        authority_profile_id=authority_profile_id,
         requested_mutations=mutations,
         provenance=(("source_evidence", SHA_C),),
         requested_compute_units=compute,
@@ -129,26 +141,68 @@ def test_same_call_identity_cannot_change_input(tmp_path):
         _invoke(registry, definition, payload=changed, at="2026-09-19T04:05:00Z")
 
 
-def test_missing_authority_and_protected_mutation_are_denied(tmp_path):
-    registry = _registry(tmp_path)
-    definition = _definition("diagnose_provider_gap")
-    payload = {
-        "provider_id": "provider-a",
-        "as_of": "2026-09-19T03:59:00Z",
-        "expected_fields": [],
-        "observed_fields": [],
-    }
-    denied = _invoke(
-        registry, definition, call_id="no-auth", payload=payload, authorities=()
+def test_source_owned_authority_profile_blocks_forged_authority_and_tool(tmp_path):
+    registry = SkillRegistry.initialize(tmp_path / "skills.json")
+    needs_authority = SkillDefinition(
+        skill_id="needs-authority",
+        version="1.0.0",
+        capability="needs_authority",
+        purpose="Prove caller strings cannot mint authority",
+        input_schema_sha256=SHA_A,
+        output_schema_sha256=SHA_B,
+        implementation_sha256=SHA_C,
+        implementation_kind=SkillImplementationKind.REVIEWED_PLUGIN,
+        required_authorities=("FAKE_ADMIN",),
+        required_provenance=("source_evidence",),
     )
+    registry.register(needs_authority)
+    denied = _invoke(registry, needs_authority, call_id="forged-authority", payload={})
     assert denied.status is SkillRunStatus.DENIED
     assert denied.error_code == "MISSING_REQUIRED_AUTHORITY"
+    assert denied.available_authorities == ("READ_ONLY_ANALYSIS",)
+    assert denied.available_tools == ()
 
+    needs_tool = SkillDefinition(
+        skill_id="needs-tool",
+        version="1.0.0",
+        capability="needs_tool",
+        purpose="Prove caller strings cannot mint tool permission",
+        input_schema_sha256=SHA_A,
+        output_schema_sha256=SHA_B,
+        implementation_sha256=SHA_D,
+        implementation_kind=SkillImplementationKind.REVIEWED_PLUGIN,
+        required_authorities=("READ_ONLY_ANALYSIS",),
+        required_tools=("FAKE_WRITE_TOOL",),
+        required_provenance=("source_evidence",),
+    )
+    registry.register(needs_tool)
+    denied_tool = _invoke(registry, needs_tool, call_id="forged-tool", payload={})
+    assert denied_tool.status is SkillRunStatus.DENIED
+    assert denied_tool.error_code == "MISSING_REQUIRED_TOOL"
+
+    with pytest.raises(SkillPermissionError, match="unknown source-owned authority"):
+        _invoke(
+            registry,
+            needs_authority,
+            call_id="unknown-profile",
+            payload={},
+            authority_profile_id="caller-invented-admin",
+        )
+
+
+def test_protected_mutation_is_denied(tmp_path):
+    registry = _registry(tmp_path)
+    definition = _definition("diagnose_provider_gap")
     protected = _invoke(
         registry,
         definition,
         call_id="provider-write",
-        payload=payload,
+        payload={
+            "provider_id": "provider-a",
+            "as_of": "2026-09-19T03:59:00Z",
+            "expected_fields": [],
+            "observed_fields": [],
+        },
         mutations=("PROVIDER_WRITE",),
     )
     assert protected.status is SkillRunStatus.DENIED
@@ -237,6 +291,48 @@ def test_dynamic_code_candidate_can_be_registered_but_never_executed(tmp_path):
         )
 
 
+def test_executable_builtin_definition_cannot_be_pre_registered_with_weaker_policy(tmp_path):
+    registry = SkillRegistry.initialize(tmp_path / "skills.json")
+    canonical = _definition("diagnose_provider_gap")
+    forged = replace(
+        canonical,
+        required_authorities=(),
+        required_provenance=(),
+        compute_budget_units=99,
+    )
+    with pytest.raises(
+        ConflictingSkillDefinitionError,
+        match="exactly match source-owned contract",
+    ):
+        registry.register(forged)
+
+
+def test_handler_timeout_terminates_and_persists_terminal_failure(tmp_path):
+    registry = SkillRegistry.initialize(tmp_path / "skills.json")
+    definition = SkillDefinition(
+        skill_id="timeout-probe",
+        version="1.0.0",
+        capability="timeout_probe",
+        purpose="Adversarial bounded-execution test",
+        input_schema_sha256=SHA_A,
+        output_schema_sha256=SHA_B,
+        implementation_sha256=SHA_C,
+        implementation_kind=SkillImplementationKind.REVIEWED_PLUGIN,
+        required_authorities=("READ_ONLY_ANALYSIS",),
+        required_provenance=("source_evidence",),
+        timeout_seconds=1,
+    )
+    registry.register(definition)
+    registry._handlers[definition.version_key] = _slow_handler
+    started = time.monotonic()
+    run = _invoke(registry, definition, payload={})
+    elapsed = time.monotonic() - started
+    assert run.status is SkillRunStatus.FAILED
+    assert run.error_code == "HANDLER_TIMEOUT"
+    assert run.completed_at is not None
+    assert elapsed < 2
+
+
 def test_definition_cannot_delegate_real_money_or_promotion():
     with pytest.raises(SkillRegistryError, match="protected mutation"):
         SkillDefinition(
@@ -270,12 +366,12 @@ def test_restart_marks_inflight_run_interrupted_and_forbids_blind_replay(tmp_pat
         required_provenance=("source_evidence",),
     )
     registry.register(definition)
+    registry._handlers[definition.version_key] = _undeclared_mutation_handler
 
-    def crash(_payload):
+    def crash_after_running_is_durable(_handler, _payload, _timeout):
         raise SystemExit(7)
 
-    # Private injection is test harness only: production API rejects runtime handlers.
-    registry._handlers[definition.version_key] = crash
+    registry._execute_handler_bounded = crash_after_running_is_durable
     with pytest.raises(SystemExit):
         _invoke(registry, definition, payload={})
 
@@ -286,7 +382,6 @@ def test_restart_marks_inflight_run_interrupted_and_forbids_blind_replay(tmp_pat
     assert restarted.get_run(running).status is SkillRunStatus.RUNNING
     assert restarted.recover_incomplete(at="2026-09-19T04:10:00Z") == (running,)
     assert restarted.get_run(running).status is SkillRunStatus.INTERRUPTED
-    restarted._handlers[definition.version_key] = lambda payload: SkillExecutionResult(output={})
     with pytest.raises(SkillRecoveryRequiredError, match="blind replay"):
         _invoke(
             restarted,
@@ -311,9 +406,7 @@ def test_handler_cannot_report_undeclared_mutation(tmp_path):
         required_provenance=("source_evidence",),
     )
     registry.register(definition)
-    registry._handlers[definition.version_key] = lambda payload: SkillExecutionResult(
-        output={}, applied_mutations=("LOCAL_WRITE",)
-    )
+    registry._handlers[definition.version_key] = _undeclared_mutation_handler
     run = _invoke(registry, definition, payload={})
     assert run.status is SkillRunStatus.FAILED
     assert run.error_code == "HANDLER_ERROR_SKILLPERMISSIONERROR"
@@ -393,7 +486,6 @@ def test_agent_loop_skill_invocation_binds_exact_loop_snapshot(tmp_path):
             "expected_fields": ["price"],
             "observed_fields": ["price"],
         },
-        available_authorities=("READ_ONLY_ANALYSIS",),
         provenance=(("source_evidence", SHA_C),),
         at="2026-09-19T04:01:00Z",
     )

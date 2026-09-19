@@ -150,6 +150,43 @@ class ParticipantIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(ParticipantIdentityError, "lineage cannot be recorded before available_at"):
             EntityLineage("p-old", "p-new", LineageRelation.SUPERSEDES, T0, T2, T1, SHA)
 
+    def test_end_to_end_decision_then_restatement_survives_restart(self):
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        registry.add_entity(entity("p-old")); registry.add_entity(entity("p-canonical"))
+        original = alias("p-old")
+        registry.add_alias(original)
+        registry.add_roster_membership(RosterMembership("event-1", "provider-a", "p-old", T0, None, T0, SHA))
+
+        self.assertEqual(registry.resolve_alias("provider-a", "Alex", as_of=T1).entity_id, "p-old")
+        self.assertEqual(
+            [item.entity_id for item in registry.roster_at("event-1", "provider-a", as_of=T1)],
+            ["p-old"],
+        )
+
+        correction = alias("p-canonical", available=T2, recorded=T3, supersedes=original.record_id)
+        registry.add_alias(correction)
+        lineage = EntityLineage(
+            "p-old", "p-canonical", LineageRelation.SUPERSEDES, T1, T2, T3, SHA
+        )
+        registry.add_lineage(lineage)
+
+        reopened = ParticipantIdentityRegistry(self.path)
+        self.assertEqual(reopened.resolve_alias("provider-a", "Alex", as_of=T1).entity_id, "p-old")
+        self.assertEqual(
+            reopened.resolve_alias(
+                "provider-a", "Alex", as_of=T1, view=IdentityView.RESTATED_RESEARCH
+            ).entity_id,
+            "p-canonical",
+        )
+        self.assertEqual(
+            reopened.lineage_at("p-old", as_of=T1, view=IdentityView.RESTATED_RESEARCH),
+            (lineage,),
+        )
+        self.assertEqual(
+            [item.entity_id for item in reopened.roster_at("event-1", "provider-a", as_of=T1)],
+            ["p-old"],
+        )
+
     def test_late_merge_lineage_is_evidence_not_historical_rewrite(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
         registry.add_entity(entity("p-old")); registry.add_entity(entity("p-canonical"))

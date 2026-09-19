@@ -16,9 +16,10 @@ def entity(entity_id="p-1", available=T0):
     return EntityIdentity(entity_id, EntityKind.PARTICIPANT, "provider:p-1", SHA, T0, available)
 
 
-def alias(entity_id="p-1", available=T0, valid_from=T0, valid_until=None, supersedes=None):
+def alias(entity_id="p-1", available=T0, valid_from=T0, valid_until=None, supersedes=None, recorded=None):
+    recorded_at = available if recorded is None else recorded
     return AliasRecord(
-        "provider-a", "Alex", entity_id, valid_from, valid_until, available, SHA,
+        "provider-a", "Alex", entity_id, valid_from, valid_until, available, SHA, recorded_at,
         supersedes_record_id=supersedes,
     )
 
@@ -55,7 +56,7 @@ class ParticipantIdentityTests(unittest.TestCase):
         registry.add_entity(entity("p-old")); registry.add_entity(entity("p-new"))
         original = alias("p-old")
         registry.add_alias(original)
-        correction = alias("p-new", available=T3, supersedes=original.record_id)
+        correction = alias("p-new", available=T2, recorded=T3, supersedes=original.record_id)
         registry.add_alias(correction)
 
         self.assertEqual(registry.resolve_alias("provider-a", "Alex", as_of=T2).entity_id, "p-old")
@@ -89,8 +90,8 @@ class ParticipantIdentityTests(unittest.TestCase):
     def test_same_name_is_isolated_by_provider_source(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
         registry.add_entity(entity("p-provider-a")); registry.add_entity(entity("p-provider-b"))
-        registry.add_alias(AliasRecord("provider-a", "Alex", "p-provider-a", T0, None, T0, SHA))
-        registry.add_alias(AliasRecord("provider-b", "Alex", "p-provider-b", T0, None, T0, SHA))
+        registry.add_alias(AliasRecord("provider-a", "Alex", "p-provider-a", T0, None, T0, SHA, T0))
+        registry.add_alias(AliasRecord("provider-b", "Alex", "p-provider-b", T0, None, T0, SHA, T0))
         self.assertEqual(registry.resolve_alias("provider-a", "Alex", as_of=T1).entity_id, "p-provider-a")
         self.assertEqual(registry.resolve_alias("provider-b", "Alex", as_of=T1).entity_id, "p-provider-b")
 
@@ -143,21 +144,28 @@ class ParticipantIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(ParticipantIdentityError, "cannot be available before member_from"):
             RosterMembership("event-1", "provider-a", "p-1", T1, None, T0, SHA)
 
+    def test_recorded_at_cannot_precede_evidence_availability(self):
+        with self.assertRaisesRegex(ParticipantIdentityError, "alias cannot be recorded before available_at"):
+            alias(available=T2, recorded=T1)
+        with self.assertRaisesRegex(ParticipantIdentityError, "lineage cannot be recorded before available_at"):
+            EntityLineage("p-old", "p-new", LineageRelation.SUPERSEDES, T0, T2, T1, SHA)
+
     def test_late_merge_lineage_is_evidence_not_historical_rewrite(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
         registry.add_entity(entity("p-old")); registry.add_entity(entity("p-canonical"))
         registry.add_alias(alias("p-old"))
-        lineage = EntityLineage("p-old", "p-canonical", LineageRelation.MERGED_FROM, T1, T3, SHA)
+        lineage = EntityLineage("p-old", "p-canonical", LineageRelation.MERGED_FROM, T1, T2, T3, SHA)
         registry.add_lineage(lineage)
         self.assertEqual(registry.resolve_alias("provider-a", "Alex", as_of=T2).entity_id, "p-old")
         self.assertEqual(registry.lineage_at("p-old", as_of=T2), ())
         self.assertEqual(registry.lineage_at("p-old", as_of=T2, view=IdentityView.RESTATED_RESEARCH), (lineage,))
+        self.assertEqual(registry.lineage_at("p-old", as_of=T3), (lineage,))
         self.assertEqual(ParticipantIdentityRegistry(self.path).lineage_at("p-canonical", as_of=T2, view=IdentityView.RESTATED_RESEARCH), (lineage,))
 
     def test_split_lineage_is_persisted_as_causal_evidence(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
         registry.add_entity(entity("team-before")); registry.add_entity(entity("team-after"))
-        lineage = EntityLineage("team-before", "team-after", LineageRelation.SPLIT_FROM, T1, T2, SHA)
+        lineage = EntityLineage("team-before", "team-after", LineageRelation.SPLIT_FROM, T1, T2, T2, SHA)
         registry.add_lineage(lineage)
         self.assertEqual(registry.lineage_at("team-before", as_of=T1), ())
         self.assertEqual(registry.lineage_at("team-before", as_of=T2), (lineage,))

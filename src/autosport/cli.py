@@ -13,6 +13,7 @@ from typing import Callable
 from . import ingestion as ingestion_module
 from .agents import AgentContext, AgentOrchestrator, MarketMirrorAgent, PaperBaselineAgent
 from .dataset import load_dataset
+from .dataset_calculation_cli import add_parser as add_dataset_quote_parser
 from .domain import MarketEvent
 from .endurance import EnduranceConfig, run_endurance
 from .evaluation_bundle import WalkForwardBundle, evaluate_walk_forward_bundle
@@ -156,6 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     endurance.add_argument("--restart-cycles", type=int, default=3)
     endurance.add_argument("--tickets", type=int, default=50)
     endurance.add_argument("--output", type=Path, default=None)
+    add_dataset_quote_parser(sub)
     sub.add_parser("gui", help="launch Windows-oriented GUI")
     return parser
 
@@ -552,6 +554,9 @@ def main(argv: list[str] | None = None) -> int:
             tickets=args.tickets,
             output=args.output,
         )
+    if args.command == "calculate-dataset-quote":
+        from .dataset_calculation_cli import run as run_dataset_quote_calculation
+        return run_dataset_quote_calculation(args)
     if args.command == "gui":
         from .gui import main as gui_main
         return gui_main()

@@ -42,6 +42,15 @@ class GapState(StrEnum):
     CURSOR_RESET = "CURSOR_RESET"
 
 
+class SyncState(StrEnum):
+    READY = "READY"
+    GAP_DETECTED = "GAP_DETECTED"
+    RECOVERED = "RECOVERED"
+    CURSOR_RESET = "CURSOR_RESET"
+    EPOCH_CHANGED = "EPOCH_CHANGED"
+    RETRY_REQUIRED = "RETRY_REQUIRED"
+
+
 def _instant(value: str, field: str) -> datetime:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty ISO-8601 string")
@@ -92,6 +101,7 @@ class CollectorDelta:
     revision_number: int = 0
     quality_flags: tuple[str, ...] = ()
     gap_state: GapState = GapState.NONE
+    sync_state: SyncState = SyncState.READY
     gap_from_cursor: str | None = None
     gap_to_cursor: str | None = None
 
@@ -131,6 +141,19 @@ class CollectorDelta:
             not isinstance(flag, str) or not flag.strip() for flag in self.quality_flags
         ):
             raise ValueError("quality_flags must contain unique non-empty strings")
+        if not isinstance(self.sync_state, SyncState):
+            try:
+                SyncState(self.sync_state)
+            except ValueError as exc:
+                raise ValueError("unsupported sync_state") from exc
+        expected_sync_state = {
+            GapState.NONE: {SyncState.READY, SyncState.EPOCH_CHANGED, SyncState.RETRY_REQUIRED},
+            GapState.DETECTED: {SyncState.GAP_DETECTED},
+            GapState.RECOVERED: {SyncState.RECOVERED},
+            GapState.CURSOR_RESET: {SyncState.CURSOR_RESET, SyncState.EPOCH_CHANGED},
+        }[self.gap_state]
+        if self.sync_state not in expected_sync_state:
+            raise ValueError("sync_state does not match gap_state")
         if self.gap_state in {GapState.DETECTED, GapState.RECOVERED}:
             _text(self.gap_from_cursor, "gap_from_cursor")
             _text(self.gap_to_cursor, "gap_to_cursor")
@@ -149,6 +172,7 @@ class CollectorDelta:
         value = dict(raw)
         value["quality_flags"] = tuple(value.get("quality_flags", ()))
         value["gap_state"] = GapState(value.get("gap_state", GapState.NONE))
+        value["sync_state"] = SyncState(value.get("sync_state", SyncState.READY))
         item = cls(**value)
         item.validate()
         return item
@@ -251,6 +275,15 @@ class CollectorDeltaStore(_JsonAtomicStore):
 
         key = f"{delta.source_id}|{delta.stream_epoch}"
         previous_raw = raw["streams"].get(key)
+        prior_epochs = {
+            stream_key.split("|", 1)[1]
+            for stream_key in raw["streams"]
+            if stream_key.startswith(f"{delta.source_id}|")
+        }
+        if prior_epochs and delta.stream_epoch not in prior_epochs and delta.sync_state not in {
+            SyncState.EPOCH_CHANGED, SyncState.CURSOR_RESET
+        }:
+            raise CursorRegressionError("new stream epoch requires explicit epoch-change/reset state")
         previous = None if previous_raw is None else StreamCheckpoint(**previous_raw)
         if previous is not None:
             previous.validate()

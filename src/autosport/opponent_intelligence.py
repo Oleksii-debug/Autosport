@@ -249,6 +249,7 @@ class RatingSnapshot:
     input_performance_ids: tuple[str, ...]
     input_digest: str
     support: int
+    effective_sample: int
     opponent_count: int
     rating: str | None
     uncertainty: str | None
@@ -271,6 +272,7 @@ class RatingSnapshot:
             "input_performance_ids": list(self.input_performance_ids),
             "input_digest": self.input_digest,
             "support": self.support,
+            "effective_sample": self.effective_sample,
             "opponent_count": self.opponent_count,
             "rating": self.rating,
             "uncertainty": self.uncertainty,
@@ -294,6 +296,7 @@ class FeatureSnapshot:
     published_at: str
     input_digest: str
     support: int
+    effective_sample: int
     opponent_count: int
     last_observed_at: str | None
     age_seconds: int | None
@@ -311,6 +314,7 @@ class FeatureSnapshot:
             "published_at": self.published_at,
             "input_digest": self.input_digest,
             "support": self.support,
+            "effective_sample": self.effective_sample,
             "opponent_count": self.opponent_count,
             "last_observed_at": self.last_observed_at,
             "age_seconds": self.age_seconds,
@@ -639,6 +643,8 @@ class OpponentIntelligenceStore:
                 "dependency_sha256": dependency,
                 "numeric": "decimal",
                 "score_domain": "[0,1]",
+                "effective_sample_rule": "min(support,distinct_opponents)",
+                "uncertainty_method": "1/sqrt(effective_sample); descriptive support radius, not a probabilistic CI",
             }
         )
         known_entities = {
@@ -687,6 +693,7 @@ class OpponentIntelligenceStore:
                 opponents.add(item.subject_entity_id)
 
         support = len(scores)
+        effective_sample = min(support, len(opponents))
         last_observed_at = (
             max(
                 (
@@ -721,7 +728,7 @@ class OpponentIntelligenceStore:
         )
         state = (
             SnapshotState.SUPPORTED
-            if support >= min_support and fresh
+            if effective_sample >= min_support and fresh
             else SnapshotState.INSUFFICIENT
         )
         rating: str | None = None
@@ -730,7 +737,7 @@ class OpponentIntelligenceStore:
             with localcontext() as context:
                 context.prec = 28
                 mean = sum(scores, Decimal(0)) / Decimal(support)
-                width = Decimal(1) / Decimal(support).sqrt()
+                width = Decimal(1) / Decimal(effective_sample).sqrt()
             rating = _decimal_text(mean)
             uncertainty = _decimal_text(width)
 
@@ -750,6 +757,7 @@ class OpponentIntelligenceStore:
             "input_performance_ids": list(input_ids),
             "input_digest": input_digest,
             "support": support,
+            "effective_sample": effective_sample,
             "opponent_count": len(opponents),
             "rating": rating,
             "uncertainty": uncertainty,
@@ -773,6 +781,7 @@ class OpponentIntelligenceStore:
             input_ids,
             input_digest,
             support,
+            effective_sample,
             len(opponents),
             rating,
             uncertainty,
@@ -789,6 +798,7 @@ class OpponentIntelligenceStore:
             "published_at": publication,
             "input_digest": input_digest,
             "support": support,
+            "effective_sample": effective_sample,
             "opponent_count": len(opponents),
             "last_observed_at": last_observed_at,
             "age_seconds": age_seconds,
@@ -807,6 +817,7 @@ class OpponentIntelligenceStore:
             publication,
             input_digest,
             support,
+            effective_sample,
             len(opponents),
             last_observed_at,
             age_seconds,
@@ -1186,6 +1197,7 @@ class OpponentIntelligenceStore:
                     tuple(item["input_performance_ids"]),
                     item["input_digest"],
                     item["support"],
+                    item["effective_sample"],
                     item["opponent_count"],
                     item["rating"],
                     item["uncertainty"],
@@ -1213,6 +1225,7 @@ class OpponentIntelligenceStore:
                     item["published_at"],
                     item["input_digest"],
                     item["support"],
+                    item["effective_sample"],
                     item["opponent_count"],
                     item["last_observed_at"],
                     item["age_seconds"],

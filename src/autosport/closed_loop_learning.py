@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Final
 
-from .agent_loop import AgentLoopSnapshot
+from .agent_loop import AgentLoopRuntime
 from .learning_environment import EvidenceTruth
 from .research_curriculum import (
     CurriculumDispatchReceipt,
@@ -168,7 +168,7 @@ class ChallengerArtifact:
 
 def bind_challenger_artifact(
     *,
-    loop_snapshot: AgentLoopSnapshot,
+    runtime: AgentLoopRuntime,
     curriculum: NightResearchCurriculum,
     selection: CurriculumSelectionRecord,
     dispatch: CurriculumDispatchReceipt,
@@ -179,8 +179,9 @@ def bind_challenger_artifact(
 ) -> ChallengerArtifact:
     """Bind already-canonical evidence without creating a new authority."""
 
-    if not isinstance(loop_snapshot, AgentLoopSnapshot):
-        raise TypeError("loop_snapshot must be AgentLoopSnapshot")
+    if not isinstance(runtime, AgentLoopRuntime):
+        raise TypeError("runtime must be AgentLoopRuntime")
+    loop_snapshot = runtime.snapshot()
     if not isinstance(curriculum, NightResearchCurriculum):
         raise TypeError("curriculum must be NightResearchCurriculum")
     if not isinstance(selection, CurriculumSelectionRecord):

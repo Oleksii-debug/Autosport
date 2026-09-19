@@ -135,8 +135,8 @@ class ChampionEligibilityDecision:
                 raise ChampionEligibilityError(f"{name} must be a non-negative integer")
         if self.minimum_samples == 0 or self.minimum_effective_sample_size == 0:
             raise ChampionEligibilityError("minimum evidence thresholds must be positive")
-        if self.effective_sample_size > sum(1 for _ in ids) * max(self.minimum_effective_sample_size, self.effective_sample_size):
-            raise ChampionEligibilityError("effective_sample_size is malformed")
+        if self.effective_sample_size <= 0:
+            raise ChampionEligibilityError("effective_sample_size must be positive")
         actions = _tuple_text(self.admissible_actions, "admissible_actions")
         if self.research_trigger_id is not None:
             _text(self.research_trigger_id, "research_trigger_id")

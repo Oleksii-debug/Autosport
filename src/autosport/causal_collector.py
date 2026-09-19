@@ -272,6 +272,228 @@ class _JsonAtomicStore:
         os.replace(temp, self.path)
 
 
+class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
+    """Durable coordination evidence; market and health stores remain canonical truth."""
+
+    def _empty(self) -> dict[str, Any]:
+        return {"schema_version": 1, "applications": {}}
+
+    @staticmethod
+    def _health_payload(state: Any) -> dict[str, Any]:
+        payload = asdict(state)
+        payload["quality_flags"] = list(state.quality_flags)
+        return payload
+
+    @staticmethod
+    def _health_state(payload: Mapping[str, Any]) -> Any:
+        from .ingestion_health import SourceHealthState
+
+        value = dict(payload)
+        value["quality_flags"] = tuple(value.get("quality_flags", ()))
+        return SourceHealthState(**value)
+
+    def prepare(
+        self,
+        delta: CollectorDelta,
+        *,
+        applied_at: str,
+        health_before: Any,
+        health_after: Any,
+    ) -> dict[str, Any]:
+        delta.validate()
+        _instant(applied_at, "applied_at")
+        raw = self._read()
+        existing = raw["applications"].get(delta.delta_id)
+        immutable = {
+            "delta_id": delta.delta_id,
+            "canonical_event_digest": delta.canonical_event_digest,
+            "source_id": delta.source_id,
+            "source_cursor": delta.source_cursor,
+            "applied_at": applied_at,
+            "health_before": self._health_payload(health_before),
+            "health_after": self._health_payload(health_after),
+            "receipt_id": f"canonical-desktop:{delta.delta_id}:{delta.canonical_event_digest[:16]}",
+        }
+        if existing is not None:
+            for key, value in immutable.items():
+                if existing.get(key) != value:
+                    raise ApplicationReceiptError(
+                        f"canonical application progress conflicts on {key}"
+                    )
+            return existing
+        item = {**immutable, "market_applied": False, "health_applied": False}
+        raw["applications"][delta.delta_id] = item
+        self._write(raw)
+        return item
+
+    def progress(self, delta: CollectorDelta) -> dict[str, Any] | None:
+        item = self._read()["applications"].get(delta.delta_id)
+        if item is None:
+            return None
+        if item.get("canonical_event_digest") != delta.canonical_event_digest:
+            raise ApplicationReceiptError("canonical application digest conflicts with delta")
+        return item
+
+    def _mark(self, delta: CollectorDelta, field: str) -> None:
+        raw = self._read()
+        item = raw["applications"].get(delta.delta_id)
+        if item is None:
+            raise ApplicationReceiptError("canonical application was not prepared")
+        if item.get("canonical_event_digest") != delta.canonical_event_digest:
+            raise ApplicationReceiptError("canonical application digest conflicts with delta")
+        if item.get(field) is True:
+            return
+        item[field] = True
+        self._write(raw)
+
+    def mark_market_applied(self, delta: CollectorDelta) -> None:
+        self._mark(delta, "market_applied")
+
+    def mark_health_applied(self, delta: CollectorDelta) -> None:
+        self._mark(delta, "health_applied")
+
+    def health_before(self, delta: CollectorDelta) -> Any:
+        item = self.progress(delta)
+        if item is None:
+            raise ApplicationReceiptError("canonical application was not prepared")
+        return self._health_state(item["health_before"])
+
+    def health_after(self, delta: CollectorDelta) -> Any:
+        item = self.progress(delta)
+        if item is None:
+            raise ApplicationReceiptError("canonical application was not prepared")
+        return self._health_state(item["health_after"])
+
+    def receipt(self, delta: CollectorDelta) -> DesktopApplicationReceipt | None:
+        item = self.progress(delta)
+        if item is None or not item.get("market_applied") or not item.get("health_applied"):
+            return None
+        receipt = DesktopApplicationReceipt(
+            delta_id=delta.delta_id,
+            canonical_event_digest=delta.canonical_event_digest,
+            receipt_id=item["receipt_id"],
+            applied_at=item["applied_at"],
+        )
+        receipt.validate()
+        return receipt
+
+
+class CanonicalDesktopApplication:
+    """Compose existing market and health authorities into one durable application receipt."""
+
+    def __init__(
+        self,
+        market_bus: Any,
+        health_store: Any,
+        state_path: str | Path,
+        *,
+        clock: Callable[[], str],
+    ) -> None:
+        if not callable(clock):
+            raise TypeError("clock must be callable")
+        self.market_bus = market_bus
+        self.health_store = health_store
+        self.clock = clock
+        self._state = _CanonicalDesktopApplicationStore(state_path)
+
+    def lookup_receipt(self, delta: CollectorDelta) -> DesktopApplicationReceipt | None:
+        return self._state.receipt(delta)
+
+    @staticmethod
+    def _outcome(
+        delta: CollectorDelta,
+        event: Any,
+        *,
+        applied_at: str,
+        health_before: Any,
+    ) -> Any:
+        from .ingestion import CommittedIngestionOutcome, _SourceHealthSnapshot
+
+        return CommittedIngestionOutcome(
+            source_id=delta.source_id,
+            now=applied_at,
+            received=1,
+            accepted=1,
+            rejected=0,
+            elapsed_seconds=1.0,
+            cursor=delta.source_cursor,
+            latest_source_ts=getattr(event, "source_ts", None),
+            quality_flags=tuple(sorted(delta.quality_flags)),
+            health_before=_SourceHealthSnapshot.from_state(health_before),
+        )
+
+    def apply(self, delta: CollectorDelta, event: Any) -> DesktopApplicationReceipt:
+        delta.validate()
+        if getattr(event, "source_id", None) != delta.source_id:
+            raise DeltaConflictError("canonical market event source_id conflicts with collector delta")
+        if getattr(event, "event_id", None) != delta.event_id:
+            raise DeltaConflictError("canonical market event event_id conflicts with collector delta")
+        if getattr(event, "dedupe_key", None) != delta.event_dedupe_key:
+            raise DeltaConflictError("canonical market event dedupe identity conflicts with collector delta")
+        digest = canonical_event_digest(event)
+        if digest != delta.canonical_event_digest:
+            raise DeltaConflictError("canonical market event digest conflicts with collector delta")
+
+        progress = self._state.progress(delta)
+        if progress is None:
+            applied_at = self.clock()
+            applied = _instant(applied_at, "applied_at")
+            if applied < _instant(delta.desktop_available_at, "desktop_available_at"):
+                raise ApplicationReceiptError(
+                    "canonical application cannot predate desktop availability"
+                )
+            health_before = self.health_store.get(delta.source_id)
+            outcome = self._outcome(
+                delta,
+                event,
+                applied_at=applied_at,
+                health_before=health_before,
+            )
+            health_after = outcome.health_before.after_success(outcome).to_state()
+            progress = self._state.prepare(
+                delta,
+                applied_at=applied_at,
+                health_before=health_before,
+                health_after=health_after,
+            )
+
+        if not progress.get("market_applied"):
+            self.market_bus.publish(event)
+            self._state.mark_market_applied(delta)
+            progress = self._state.progress(delta)
+            if progress is None:
+                raise ApplicationReceiptError("canonical application progress disappeared")
+
+        if not progress.get("health_applied"):
+            expected_before = self._state.health_before(delta)
+            expected_after = self._state.health_after(delta)
+            current = self.health_store.get(delta.source_id)
+            if current == expected_after:
+                self._state.mark_health_applied(delta)
+            elif current == expected_before:
+                outcome = self._outcome(
+                    delta,
+                    event,
+                    applied_at=progress["applied_at"],
+                    health_before=expected_before,
+                )
+                recorded = outcome.record_health(self.health_store)
+                if recorded != expected_after:
+                    raise ApplicationReceiptError(
+                        "canonical health authority returned an unexpected post-state"
+                    )
+                self._state.mark_health_applied(delta)
+            else:
+                raise ApplicationReceiptError(
+                    "canonical source health changed during desktop application; refusing ambiguous retry"
+                )
+
+        receipt = self._state.receipt(delta)
+        if receipt is None:
+            raise ApplicationReceiptError("canonical application did not reach durable completion")
+        return receipt
+
+
 class CollectorDeltaStore(_JsonAtomicStore):
     def _empty(self) -> dict[str, Any]:
         return {"schema_version": 1, "deltas": [], "streams": {}}
@@ -408,7 +630,13 @@ class DesktopDeltaCheckpointStore(_JsonAtomicStore):
             raise ApplicationReceiptError("application receipt delta_id does not match collector evidence")
         if application_receipt.canonical_event_digest != delta.canonical_event_digest:
             raise ApplicationReceiptError("application receipt digest does not match collector evidence")
-        _instant(acknowledged_at, "acknowledged_at")
+        desktop_available = _instant(delta.desktop_available_at, "desktop_available_at")
+        applied = _instant(application_receipt.applied_at, "applied_at")
+        acknowledged = _instant(acknowledged_at, "acknowledged_at")
+        if not (desktop_available <= applied <= acknowledged):
+            raise ApplicationReceiptError(
+                "application timing must satisfy desktop_available_at <= applied_at <= acknowledged_at"
+            )
         raw = self._read()
         existing = next((item for item in raw["acks"] if item.get("delta_id") == delta.delta_id), None)
         if existing is not None:
@@ -440,13 +668,13 @@ class DesktopDeltaCheckpointStore(_JsonAtomicStore):
 
 
 class DesktopDeltaConsumer:
-    """Apply one durable logical event effect, then persist the desktop acknowledgement.
+    """Apply one durable canonical event+health effect, then acknowledge the delta.
 
-    ``apply_event`` is the idempotent canonical application boundary: it must not return
-    a receipt until the complete logical event/health application is durably committed by
-    the canonical authority. ``lookup_application_receipt`` must recover that receipt after
-    a crash between application commit and desktop acknowledgement. ``apply_health`` is an
-    optional post-commit observer and is never part of acknowledgement correctness.
+    ``apply_event`` is the complete idempotent application boundary and must not return a
+    receipt until both canonical market persistence and required source-health persistence
+    are durable. ``lookup_application_receipt`` recovers only such complete receipts.
+    Separate post-receipt health mutation is rejected because it creates an unrecoverable
+    crash boundary between event persistence and desktop acknowledgement.
     """
 
     def __init__(
@@ -464,7 +692,10 @@ class DesktopDeltaConsumer:
         self.resolve_event = resolve_event
         self.apply_event = apply_event
         self.lookup_application_receipt = lookup_application_receipt
-        self.apply_health = apply_health
+        if apply_health is not None:
+            raise ApplicationReceiptError(
+                "apply_health must be included inside the durable apply_event boundary"
+            )
 
     def drain(self, *, as_of: str, view: CausalView = CausalView.AS_KNOWN_AT_DECISION) -> tuple[str, ...]:
         now = _instant(as_of, "as_of")
@@ -515,8 +746,6 @@ class DesktopDeltaConsumer:
             receipt.validate()
             if receipt.delta_id != delta.delta_id or receipt.canonical_event_digest != digest:
                 raise ApplicationReceiptError("application receipt is not bound to this delta/digest")
-            if self.apply_health is not None:
-                self.apply_health(delta, event)
             self.checkpoint.ack(
                 delta,
                 application_receipt=receipt,

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from autosport.sport_domain_fitness import (
     CausalView, DomainProfile, EvidenceProvenance, EvidenceState,
-    MetricEvidence, RouteStatus, SportDomainFitnessError,
+    MetricEvidence, RouteRecommendation, RouteStatus, SportDomainFitnessError,
     SportDomainFitnessObservation, SportDomainFitnessStore, recommend_route,
 )
 
@@ -143,6 +143,27 @@ class SportDomainFitnessTests(unittest.TestCase):
             recommend_route(old_but_intrinsically_fresh, as_of=T1_PLUS_11).status,
             RouteStatus.DO_NOT_ROUTE,
         )
+
+        delayed_publication = make_observation(
+            observation_id="delayed-publication",
+            available_at=T1_PLUS_11,
+            freshness_seconds=met("1", "seconds"),
+            freshness_ttl_seconds=met("10", "seconds"),
+        )
+        self.assertEqual(
+            recommend_route(delayed_publication, as_of=T1_PLUS_11).status,
+            RouteStatus.DO_NOT_ROUTE,
+        )
+
+    def test_route_contract_cannot_expand_into_model_or_money_authority(self):
+        route = recommend_route(make_observation(observation_id="bounded-route"), as_of=T1_PLUS_5)
+        self.assertEqual(
+            set(RouteRecommendation.__dataclass_fields__),
+            {"status", "reason", "observation_id", "domain_profile"},
+        )
+        self.assertFalse(hasattr(route, "model_id"))
+        self.assertFalse(hasattr(route, "stake"))
+        self.assertFalse(hasattr(route, "execution_authorized"))
 
     def test_simulated_evidence_cannot_be_reintroduced_as_observed_under_new_id(self):
         with tempfile.TemporaryDirectory() as tmp:

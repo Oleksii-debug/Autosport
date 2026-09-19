@@ -2151,6 +2151,14 @@ def build_portfolio_plan(
             portfolio_truth=portfolio_truth,
         )
 
+    expected_candidates = tuple(intent.candidate_sha256 for intent in intents)
+    dependency_graph_binds_inputs = (
+        dependency_graph is not None
+        and dependency_graph.portfolio_sha256 == portfolio_sha256
+        and dependency_graph.intent_sha256s == intent_sha256s
+        and dependency_graph.candidate_sha256s == expected_candidates
+    )
+
     if dependency_evidence is not None and (
         dependency_graph is None
         or not dependency_evidence.binds(
@@ -2165,18 +2173,15 @@ def build_portfolio_plan(
             reason="dependency evidence does not bind exact portfolio/candidates or is stale",
             intents=intents,
             portfolio_sha256=portfolio_sha256,
-            dependency_graph=dependency_graph,
+            dependency_graph=(
+                dependency_graph if dependency_graph_binds_inputs else None
+            ),
             policy=risk_policy,
             portfolio_truth=portfolio_truth,
         )
 
     if dependency_graph is not None:
-        expected_candidates = tuple(intent.candidate_sha256 for intent in intents)
-        if (
-            dependency_graph.portfolio_sha256 != portfolio_sha256
-            or dependency_graph.intent_sha256s != intent_sha256s
-            or dependency_graph.candidate_sha256s != expected_candidates
-        ):
+        if not dependency_graph_binds_inputs:
             return _terminal_plan(
                 decision_ts=decision_ts,
                 action=PortfolioAction.WAIT,

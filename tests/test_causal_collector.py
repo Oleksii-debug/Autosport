@@ -198,7 +198,16 @@ class CollectorDeltaTests(unittest.TestCase):
                 collector,
                 DesktopDeltaCheckpointStore(desktop_path),
                 resolve_event=lambda delta: payload1 if delta.delta_id == "d1" else payload2,
-                apply_event=first_applied.append,
+                apply_event=lambda delta, event: (
+                    first_applied.append(event)
+                    or DesktopApplicationReceipt(
+                        delta_id=delta.delta_id,
+                        canonical_event_digest=canonical_event_digest(event),
+                        receipt_id=f"receipt-{delta.delta_id}",
+                        applied_at="2026-01-01T00:00:04+00:00",
+                    )
+                ),
+                lookup_application_receipt=lambda delta: None,
             )
             self.assertEqual(
                 first_consumer.drain(as_of="2026-01-01T00:00:05+00:00"),
@@ -213,7 +222,16 @@ class CollectorDeltaTests(unittest.TestCase):
                 reopened_collector,
                 reopened_desktop,
                 resolve_event=lambda delta: payload1 if delta.delta_id == "d1" else payload2,
-                apply_event=second_applied.append,
+                apply_event=lambda delta, event: (
+                    second_applied.append(event)
+                    or DesktopApplicationReceipt(
+                        delta_id=delta.delta_id,
+                        canonical_event_digest=canonical_event_digest(event),
+                        receipt_id=f"receipt-{delta.delta_id}",
+                        applied_at="2026-01-01T00:00:11+00:00",
+                    )
+                ),
+                lookup_application_receipt=lambda delta: None,
             )
             self.assertEqual(
                 second_consumer.drain(as_of="2026-01-01T00:00:11+00:00"),
@@ -339,7 +357,13 @@ class CollectorDeltaTests(unittest.TestCase):
                 collector,
                 checkpoint,
                 resolve_event=lambda _: event_payload(),
-                apply_event=lambda _: None,
+                apply_event=lambda delta, event: DesktopApplicationReceipt(
+                    delta_id=delta.delta_id,
+                    canonical_event_digest=canonical_event_digest(event),
+                    receipt_id=f"receipt-{delta.delta_id}",
+                    applied_at="2026-01-01T00:00:04+00:00",
+                ),
+                lookup_application_receipt=lambda delta: None,
             )
             with self.assertRaises(GapStateError):
                 consumer.drain(as_of="2026-01-01T00:00:05+00:00")
@@ -427,17 +451,8 @@ class CollectorDeltaTests(unittest.TestCase):
                 receipt_id="receipt-d1",
                 applied_at="2026-01-01T00:00:04+00:00",
             )
-            # A real canonical application authority would persist this receipt
-            # atomically with the event/health effect before desktop acknowledgement.
-            raw = desktop._read()
-            raw["acks"].append({
-                "delta_id": delta.delta_id,
-                "canonical_event_digest": delta.canonical_event_digest,
-                "acknowledged_at": "2026-01-01T00:00:04+00:00",
-                "application_receipt_id": receipt.receipt_id,
-                "applied_at": receipt.applied_at,
-            })
-            desktop._write(raw)
+            # A separate canonical application authority has already persisted
+            # the effect+receipt, while the desktop acknowledgement was lost.
             reapplied = []
             consumer = DesktopDeltaConsumer(
                 collector,

@@ -77,6 +77,15 @@ class ParticipantIdentityTests(unittest.TestCase):
         )
         self.assertEqual(reopened.resolve_alias("provider-a", "Alex", as_of=T3).entity_id, "p-new")
 
+    def test_alias_correction_fork_fails_closed(self):
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        registry.add_entity(entity("p-old")); registry.add_entity(entity("p-new")); registry.add_entity(entity("p-other"))
+        original = alias("p-old")
+        registry.add_alias(original)
+        registry.add_alias(alias("p-new", available=T2, supersedes=original.record_id))
+        with self.assertRaisesRegex(ParticipantIdentityError, "correction fork"):
+            registry.add_alias(alias("p-other", available=T3, supersedes=original.record_id))
+
     def test_same_name_is_isolated_by_provider_source(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
         registry.add_entity(entity("p-provider-a")); registry.add_entity(entity("p-provider-b"))
@@ -113,6 +122,26 @@ class ParticipantIdentityTests(unittest.TestCase):
             [item.entity_id for item in registry.roster_at("event-1", "provider-a", as_of=T3)],
             ["p-1"],
         )
+
+    def test_duplicate_alias_and_roster_replay_are_idempotent_after_restart(self):
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        registry.add_entity(entity())
+        alias_record = alias()
+        roster_record = RosterMembership("event-1", "provider-a", "p-1", T0, None, T0, SHA)
+        registry.add_alias(alias_record); registry.add_alias(alias_record)
+        registry.add_roster_membership(roster_record); registry.add_roster_membership(roster_record)
+        reopened = ParticipantIdentityRegistry(self.path)
+        self.assertEqual(reopened.resolve_alias("provider-a", "Alex", as_of=T1).entity_id, "p-1")
+        self.assertEqual(
+            [item.entity_id for item in reopened.roster_at("event-1", "provider-a", as_of=T1)],
+            ["p-1"],
+        )
+
+    def test_invalid_roster_temporal_order_fails_closed(self):
+        with self.assertRaisesRegex(ParticipantIdentityError, "member_until must be after member_from"):
+            RosterMembership("event-1", "provider-a", "p-1", T1, T0, T1, SHA)
+        with self.assertRaisesRegex(ParticipantIdentityError, "cannot be available before member_from"):
+            RosterMembership("event-1", "provider-a", "p-1", T1, None, T0, SHA)
 
     def test_late_merge_lineage_is_evidence_not_historical_rewrite(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)

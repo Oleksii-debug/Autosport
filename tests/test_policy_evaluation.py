@@ -139,6 +139,24 @@ def test_missing_behavior_support_fails_closed():
         evaluate_policy_pair(predecessor, challenger, (case,), completed_at=T2)
 
 
+def test_missing_declared_cost_for_supported_reward_fails_closed():
+    with pytest.raises(ValueError, match="explicit cost evidence"):
+        PolicyEvaluationCase(
+            sample_id="missing-cost",
+            observed_at=T0,
+            reward_available_at=T1,
+            admissible_actions=("BET", "WAIT"),
+            action_rewards=(("BET", Decimal("2")), ("WAIT", Decimal("0"))),
+            action_costs=(("WAIT", Decimal("0")),),
+            behavior_propensities=(("BET", Decimal("0.5")), ("WAIT", Decimal("0.5"))),
+            reward_truth=EvidenceTruth.OBSERVED,
+            reward_mode=PolicyRewardMode.MECHANICAL_PAPER,
+            source_evidence_sha256=EVIDENCE_1,
+            regime_id="table-tennis:pre-match",
+            counterfactual_source_id="paper-settlement-engine:v1",
+        )
+
+
 def test_future_reward_fails_causal_cutoff():
     predecessor = _policy(bet_reward="0", wait_reward="1")
     challenger = _policy(bet_reward="2", wait_reward="1")

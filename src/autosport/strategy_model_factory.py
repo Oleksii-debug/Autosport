@@ -680,8 +680,9 @@ def _run_policy_candidate_unstaged(
     if conservative_ess < 1:
         raise ValueError("policy evaluation effective sample size is below one")
     conservative_ess = min(conservative_ess, len(evaluation.samples))
+    challenger_metric_decimals = dict(evaluation.challenger_metrics)
     guardrails_passed = all(
-        challenger_metrics[name] <= maximum
+        challenger_metric_decimals[name] <= Decimal(str(maximum))
         for name, maximum in rule.protective_metric_maxima
     )
     dataset_source = dataset.payload.get("source_identity")

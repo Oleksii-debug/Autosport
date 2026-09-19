@@ -11,7 +11,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping, Protocol, runtime_checkable
 
+from .decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
 from .integrity import atomic_write_json
+from .market_outcomes import MarketSettlementOutcomeAuthority
+from .scientific_registry import ScientificRegistry
 from .workspace_lock import WorkspaceEconomicLock
 
 _SCHEMA = "autosport.voc_evaluation"
@@ -411,6 +414,89 @@ class VOCCanonicalAuthorityResolver(Protocol):
         *,
         as_of: str,
     ) -> PairedVOCEvaluation | None: ...
+
+
+class CanonicalVOCAuthorityResolver:
+    """Resolve VOC only from durable canonical decision/protocol/outcome authorities."""
+
+    def __init__(
+        self,
+        decision_ledger: JsonlDecisionLedger,
+        scientific_registry: ScientificRegistry,
+        outcome_authority: MarketSettlementOutcomeAuthority,
+    ) -> None:
+        if not isinstance(decision_ledger, JsonlDecisionLedger):
+            raise TypeError("decision_ledger must be JsonlDecisionLedger")
+        if not isinstance(scientific_registry, ScientificRegistry):
+            raise TypeError("scientific_registry must be ScientificRegistry")
+        if not isinstance(outcome_authority, MarketSettlementOutcomeAuthority):
+            raise TypeError("outcome_authority must be MarketSettlementOutcomeAuthority")
+        self.decision_ledger = decision_ledger
+        self.scientific_registry = scientific_registry
+        self.outcome_authority = outcome_authority
+
+    @staticmethod
+    def _decision_digest(record: object) -> str:
+        try:
+            payload = record.to_dict()
+        except AttributeError as exc:
+            raise VOCEvaluationError("canonical decision record is invalid") from exc
+        return _canonical_digest(payload)
+
+    def _require_decision(self, evaluation: PairedVOCEvaluation) -> None:
+        try:
+            records = self.decision_ledger.verified_records()
+        except DecisionLedgerIntegrityError as exc:
+            raise VOCEvaluationError("canonical DecisionLedger verification failed") from exc
+        for record in records:
+            if self._decision_digest(record) != evaluation.decision_evidence_sha256:
+                continue
+            if _instant("observed_ts", record.observed_ts) > _instant("decision_at", evaluation.decision_at):
+                raise VOCEvaluationError("canonical decision evidence postdates paired decision")
+            if _instant("recorded_at", record.recorded_at) > _instant("evaluated_at", evaluation.evaluated_at):
+                raise VOCEvaluationError("canonical decision evidence was recorded after evaluation")
+            return
+        raise VOCEvaluationError("canonical DecisionLedger decision evidence is missing")
+
+    def _require_protocol(self, evaluation: PairedVOCEvaluation) -> None:
+        entry = self.scientific_registry.get(
+            "ResearchProtocol", evaluation.research_protocol_id
+        )
+        if entry is None:
+            raise VOCEvaluationError("canonical ResearchProtocol is missing")
+        payload = entry.payload
+        if payload.get("research_protocol_id") != evaluation.research_protocol_id:
+            raise VOCEvaluationError("canonical ResearchProtocol identity mismatch")
+        if payload.get("protocol_sha256") != evaluation.research_protocol_sha256:
+            raise VOCEvaluationError("canonical ResearchProtocol digest mismatch")
+        if _instant("available_at", entry.available_at) > _instant("decision_at", evaluation.decision_at):
+            raise VOCEvaluationError("canonical ResearchProtocol is not available at decision time")
+
+    def _require_outcome(self, evaluation: PairedVOCEvaluation) -> None:
+        try:
+            decision_at = _instant("decision_at", evaluation.decision_at)
+            self.outcome_authority.assert_available_as_of(decision_at)
+        except (TypeError, ValueError) as exc:
+            raise VOCEvaluationError("canonical MarketSettlementOutcomeAuthority is not causally available") from exc
+        identity = self.outcome_authority.identity
+        if identity.sport != evaluation.sport_id:
+            raise VOCEvaluationError("canonical outcome authority sport scope mismatch")
+        if self.outcome_authority.authority_sha256 != evaluation.outcome_evidence_sha256:
+            raise VOCEvaluationError("canonical outcome authority digest mismatch")
+
+    def resolve(
+        self,
+        evaluation: PairedVOCEvaluation,
+        *,
+        as_of: str,
+    ) -> PairedVOCEvaluation | None:
+        if not isinstance(evaluation, PairedVOCEvaluation):
+            raise TypeError("evaluation must be PairedVOCEvaluation")
+        _instant("as_of", as_of)
+        self._require_decision(evaluation)
+        self._require_protocol(evaluation)
+        self._require_outcome(evaluation)
+        return evaluation
 
 
 class VOCEvaluationStore:

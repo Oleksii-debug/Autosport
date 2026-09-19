@@ -83,6 +83,7 @@ def observation(
     supersedes: str | None = None,
     sport: str = "tennis",
     league: str = "Tour A",
+    market_context: str = "match-outcome",
 ) -> ObservedPerformance:
     return ObservedPerformance(
         event_id=event_id,
@@ -91,6 +92,7 @@ def observation(
         opponent_alias=opponent,
         sport_id=sport,
         league_alias=league,
+        market_context_id=market_context,
         score=score,
         observed_at=observed,
         available_at=available,
@@ -195,8 +197,11 @@ class OpponentIntelligenceTests(unittest.TestCase):
             participant_entity_id="p-alex",
             sport_id="tennis",
             league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
             causal_cutoff=T2,
             published_at=T2,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
             min_support=2,
         )
         self.assertEqual(
@@ -223,8 +228,11 @@ class OpponentIntelligenceTests(unittest.TestCase):
             participant_entity_id="p-alex",
             sport_id="tennis",
             league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
             causal_cutoff=T2,
             published_at=T2,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
             min_support=2,
         )
         self.assertEqual(
@@ -244,8 +252,11 @@ class OpponentIntelligenceTests(unittest.TestCase):
             participant_entity_id="p-alex",
             sport_id="tennis",
             league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
             causal_cutoff=T2,
             published_at=T2,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
             min_support=2,
         )
         self.assertEqual(
@@ -259,8 +270,11 @@ class OpponentIntelligenceTests(unittest.TestCase):
             participant_entity_id="p-alex",
             sport_id="tennis",
             league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
             causal_cutoff=T5,
             published_at=T5,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
             min_support=1,
             max_age_seconds=60,
         )
@@ -281,8 +295,11 @@ class OpponentIntelligenceTests(unittest.TestCase):
             participant_entity_id="p-alex",
             sport_id="tennis",
             league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
             causal_cutoff=T2,
             published_at=T2,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
             min_support=1,
         )
         correction = self.store.record_performance(
@@ -360,8 +377,11 @@ class OpponentIntelligenceTests(unittest.TestCase):
             participant_entity_id="p-alex",
             sport_id="tennis",
             league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
             causal_cutoff=T2,
             published_at=T2,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
             min_support=1,
         )
         original = self.identities.resolve_alias_record(
@@ -450,8 +470,11 @@ class OpponentIntelligenceTests(unittest.TestCase):
             participant_entity_id="p-alex",
             sport_id="tennis",
             league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
             causal_cutoff=T2,
             published_at=T2,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
             min_support=1,
         )
         self.identities.add_lineage(
@@ -612,14 +635,18 @@ class OpponentIntelligenceTests(unittest.TestCase):
             participant_entity_id="p-alex",
             sport_id="tennis",
             league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
             causal_cutoff=T2,
             published_at=T2,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
             min_support=1,
         )
         restated, _ = self.store.build_snapshots(
             participant_entity_id="p-alex",
             sport_id="tennis",
             league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
             causal_cutoff=T2,
             published_at=T2,
             view=IdentityView.RESTATED_RESEARCH,
@@ -629,8 +656,11 @@ class OpponentIntelligenceTests(unittest.TestCase):
             participant_entity_id="p-alex",
             sport_id="tennis",
             league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
             causal_cutoff=T2,
             published_at=T2,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
             min_support=1,
             max_age_seconds=120,
         )

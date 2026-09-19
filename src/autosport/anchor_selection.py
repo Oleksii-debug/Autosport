@@ -517,7 +517,7 @@ def evaluate_anchor_selection(
             continue
         if observed_start < start or observed_end > end:
             continue
-        if observed_end > as_of or available > as_of:
+        if observed_end >= as_of or available >= as_of:
             continue
         candidates[observation.sport_id].append(observation)
         input_ids.add(observation.observation_id)

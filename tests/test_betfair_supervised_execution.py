@@ -627,6 +627,35 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart() -> N
             action_id=action.action_id,
         )
 
+        first_customer_ref = transport.calls[0]["request"]["params"][
+            "customerRef"
+        ]
+        retry_transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        retry_client = _enabled_client(profile, retry_transport)
+        retry_result = execute_betfair_supervised_action(
+            restarted,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-timeout-retry",
+            profile=profile,
+            client=retry_client,
+            clock=lambda: "2026-09-19T08:00:09+00:00",
+        )
+        assert retry_result.outcome is PlaceOrdersOutcome.ACCEPTED
+        retry_request = retry_transport.calls[0]["request"]
+        assert retry_request["params"]["customerRef"] != first_customer_ref
+        assert (
+            retry_request["params"]["instructions"][0]["customerOrderRef"]
+            != provider_ref
+        )
+
 
 def test_unmatched_success_is_unknown_until_readback() -> None:
     with tempfile.TemporaryDirectory() as tmp:

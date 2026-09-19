@@ -1228,6 +1228,29 @@ class OpponentIntelligenceStore:
                     raise OpponentIntelligenceError(
                         "rating snapshot digest mismatch"
                     )
+                if len(set(snapshot.input_performance_ids)) != len(
+                    snapshot.input_performance_ids
+                ):
+                    raise OpponentIntelligenceError(
+                        "rating snapshot contains duplicate durable input IDs"
+                    )
+                missing_inputs = [
+                    performance_id
+                    for performance_id in snapshot.input_performance_ids
+                    if performance_id not in performances
+                ]
+                if missing_inputs:
+                    raise OpponentIntelligenceError(
+                        "rating snapshot references missing durable performance input"
+                    )
+                if _digest(list(snapshot.input_performance_ids)) != snapshot.input_digest:
+                    raise OpponentIntelligenceError(
+                        "rating snapshot input digest does not match durable input IDs"
+                    )
+                if snapshot.support != len(snapshot.input_performance_ids):
+                    raise OpponentIntelligenceError(
+                        "rating snapshot support does not match durable input count"
+                    )
                 ratings[snapshot.snapshot_id] = snapshot
 
             features: dict[str, FeatureSnapshot] = {}

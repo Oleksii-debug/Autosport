@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 from .drift_control import DriftState
 from .research_supervisor import ResearchSupervisor, ResearchTrigger
@@ -75,6 +75,9 @@ class ChampionEligibilityDecision:
     status: ChampionEligibilityStatus
     canonical_strategy_id: str
     model_version_id: str
+    environment_sha256: str
+    protocol_id: str
+    config_sha256: str
     sport: str
     league: str
     regime: str
@@ -97,6 +100,9 @@ class ChampionEligibilityDecision:
     def __post_init__(self) -> None:
         _text(self.canonical_strategy_id, "canonical_strategy_id")
         _text(self.model_version_id, "model_version_id")
+        _sha(self.environment_sha256, "environment_sha256")
+        _text(self.protocol_id, "protocol_id")
+        _sha(self.config_sha256, "config_sha256")
         for name in ("sport", "league", "regime"):
             _text(getattr(self, name), name)
         ids = _tuple_text(self.finding_ids, "finding_ids")
@@ -145,6 +151,9 @@ class ChampionEligibilityDecision:
             "status": self.status.value,
             "canonical_strategy_id": self.canonical_strategy_id,
             "model_version_id": self.model_version_id,
+            "environment_sha256": self.environment_sha256.lower(),
+            "protocol_id": self.protocol_id,
+            "config_sha256": self.config_sha256.lower(),
             "sport": self.sport,
             "league": self.league,
             "regime": self.regime,
@@ -186,6 +195,9 @@ class ChampionEligibilityDecision:
         *,
         canonical_strategy_id: str,
         model_version_id: str,
+        environment_sha256: str,
+        protocol_id: str,
+        config_sha256: str,
         sport: str,
         league: str,
         regime: str,
@@ -268,6 +280,9 @@ class ChampionEligibilityDecision:
             status=status,
             canonical_strategy_id=canonical_strategy_id,
             model_version_id=model_version_id,
+            environment_sha256=environment_sha256,
+            protocol_id=protocol_id,
+            config_sha256=config_sha256,
             sport=sport,
             league=league,
             regime=regime,
@@ -332,6 +347,8 @@ def validate_activation_eligibility(
     *,
     as_of: str,
     canonical_strategy_id: str,
+    expected_strategy_version_id: str,
+    expected_model_version_id: str,
     expected_environment_sha256: str,
     expected_protocol_id: str,
     expected_config_sha256: str,
@@ -351,10 +368,16 @@ def validate_activation_eligibility(
         raise ChampionEligibilityError("eligibility decision is expired")
     if decision.canonical_strategy_id != _text(canonical_strategy_id, "canonical_strategy_id"):
         raise ChampionEligibilityError("eligibility strategy mismatch")
-    if _sha(expected_environment_sha256, "expected_environment_sha256") != expected_environment_sha256.lower():
-        raise ChampionEligibilityError("environment identity is not canonical")
-    _text(expected_protocol_id, "expected_protocol_id")
-    _sha(expected_config_sha256, "expected_config_sha256")
+    if decision.canonical_strategy_id != _text(expected_strategy_version_id, "expected_strategy_version_id"):
+        raise ChampionEligibilityError("eligibility champion identity mismatch")
+    if decision.model_version_id != _text(expected_model_version_id, "expected_model_version_id"):
+        raise ChampionEligibilityError("eligibility model identity mismatch")
+    if decision.environment_sha256 != _sha(expected_environment_sha256, "expected_environment_sha256"):
+        raise ChampionEligibilityError("eligibility environment mismatch")
+    if decision.protocol_id != _text(expected_protocol_id, "expected_protocol_id"):
+        raise ChampionEligibilityError("eligibility protocol mismatch")
+    if decision.config_sha256 != _sha(expected_config_sha256, "expected_config_sha256"):
+        raise ChampionEligibilityError("eligibility config mismatch")
     entry = registry.get(decision.record_type, decision.record_id)
     if entry is None:
         raise ChampionEligibilityError("eligibility decision is not durably registered")

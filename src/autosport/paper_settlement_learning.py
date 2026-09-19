@@ -565,6 +565,7 @@ class PaperSettlementLearningBridge:
                 "binding_id": _digest(semantic),
                 **semantic,
                 "status": BOUND,
+                "settlement_intent": None,
                 "outbox": None,
                 "ack": None,
             }
@@ -595,7 +596,7 @@ class PaperSettlementLearningBridge:
         return ticket
 
     @staticmethod
-    def _bundle(
+    def _collect_evidence(
         ticket: PaperTicket,
         resolutions: tuple[SettlementResolution, ...],
         *,
@@ -604,6 +605,7 @@ class PaperSettlementLearningBridge:
         leg_keys = {leg.quote_key for leg in ticket.legs}
         known: dict[str, str] = {}
         used: dict[str, dict[str, object]] = {}
+        leg_by_key = {leg.quote_key: leg for leg in ticket.legs}
         for resolution in resolutions:
             if not isinstance(resolution, SettlementResolution):
                 raise PaperSettlementLearningBridgeError(
@@ -625,7 +627,6 @@ class PaperSettlementLearningBridge:
             identity_parts = {resolution.event_identity}
             if ":" in resolution.event_identity:
                 identity_parts.add(resolution.event_identity.split(":", 1)[1])
-            leg_by_key = {leg.quote_key: leg for leg in ticket.legs}
             for key in scoped:
                 if leg_by_key[key].event_id not in identity_parts:
                     raise PaperSettlementLearningBridgeError(
@@ -656,6 +657,46 @@ class PaperSettlementLearningBridge:
             used[resolution.evidence_id] = evidence
         if not known:
             return None
+        return [used[key] for key in sorted(used)], known
+
+    @staticmethod
+    def _evidence_can_settle(ticket: PaperTicket, known: dict[str, str]) -> bool:
+        leg_keys = {leg.quote_key for leg in ticket.legs}
+        return "loss" in known.values() or set(known) == leg_keys
+
+    @staticmethod
+    def _causal_lower_bound_satisfied(
+        binding: dict[str, object],
+        ticket: PaperTicket,
+        bundle: list[dict[str, object]],
+    ) -> bool:
+        action_decided_at = _instant(
+            binding["action_decided_at"], "bound action_decided_at"
+        )
+        ticket_placed_at = _instant(ticket.placed_at, "bound ticket placed_at")
+        for item in bundle:
+            evidence_available_at = _instant(
+                item["available_at"], "settlement available_at"
+            )
+            if (
+                evidence_available_at < action_decided_at
+                or evidence_available_at < ticket_placed_at
+            ):
+                return False
+        return True
+
+    @classmethod
+    def _bundle(
+        cls,
+        ticket: PaperTicket,
+        resolutions: tuple[SettlementResolution, ...],
+        *,
+        at: str,
+    ) -> tuple[list[dict[str, object]], dict[str, str]] | None:
+        result = cls._collect_evidence(ticket, resolutions, at=at)
+        if result is None:
+            return None
+        bundle, known = result
         expected = _expected_ticket_economics(ticket, known)
         if expected is None:
             return None
@@ -664,7 +705,113 @@ class PaperSettlementLearningBridge:
             raise PaperSettlementLearningBridgeError(
                 "durable PaperBook settlement conflicts with authoritative evidence"
             )
-        return [used[key] for key in sorted(used)], known
+        return bundle, known
+
+    @staticmethod
+    def _intent_resolutions(intent: object) -> tuple[SettlementResolution, ...]:
+        if type(intent) is not dict:
+            raise PaperSettlementLearningBridgeError(
+                "durable settlement intent must be an object"
+            )
+        try:
+            evidence = intent["settlement_evidence"]
+            if type(evidence) is not list or not evidence:
+                raise TypeError
+            resolutions = tuple(
+                SettlementResolution(
+                    event_identity=item["event_identity"],
+                    settlement_ref=item["settlement_ref"],
+                    quote_outcomes=dict(item["quote_outcomes"]),
+                    evidence_id=item["evidence_id"],
+                    evidence_sha256=item["evidence_sha256"],
+                    available_at=item["available_at"],
+                )
+                for item in evidence
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PaperSettlementLearningBridgeError(
+                "durable settlement intent evidence is not canonical"
+            ) from exc
+        semantic = {
+            "binding_id": intent.get("binding_id"),
+            "ticket_id": intent.get("ticket_id"),
+            "settlement_evidence": evidence,
+            "known_quote_outcomes": intent.get("known_quote_outcomes"),
+            "settlement_bundle_sha256": intent.get("settlement_bundle_sha256"),
+        }
+        if (
+            _sha(intent.get("intent_id"), "settlement_intent intent_id")
+            != _digest(semantic)
+            or _sha(
+                intent.get("settlement_bundle_sha256"),
+                "settlement_intent settlement_bundle_sha256",
+            )
+            != _digest(evidence)
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "durable settlement intent digest mismatch"
+            )
+        return resolutions
+
+    def prepare_settlement(
+        self,
+        *,
+        paper_book_path: Path,
+        resolutions: tuple[SettlementResolution, ...],
+        at: str,
+    ) -> tuple[str, ...]:
+        """Durably stage authoritative evidence before PaperBook settlement mutation."""
+
+        if Path(paper_book_path) != self.paper_book_path:
+            raise PaperSettlementLearningBridgeError(
+                "continuous session uses another PaperBook path"
+            )
+        if type(resolutions) is not tuple:
+            raise TypeError("settlement handoff resolutions must be a tuple")
+        _instant(at, "prepare at")
+
+        prepared: list[str] = []
+        with WorkspaceEconomicLock(self.state_path.parent):
+            state = self._read()
+            book = PaperBook.load(self.paper_book_path)
+            changed = False
+            for ticket_id, binding in state["bindings"].items():
+                if binding["status"] != BOUND:
+                    continue
+                ticket = self._bound_ticket(book, binding)
+                existing = binding.get("settlement_intent")
+                if ticket.status is not TicketStatus.OPEN:
+                    if existing is not None:
+                        self._intent_resolutions(existing)
+                    continue
+                result = self._collect_evidence(ticket, resolutions, at=at)
+                if result is None:
+                    continue
+                bundle, known = result
+                if not self._evidence_can_settle(ticket, known):
+                    continue
+                if not self._causal_lower_bound_satisfied(binding, ticket, bundle):
+                    continue
+                semantic = {
+                    "binding_id": binding["binding_id"],
+                    "ticket_id": ticket_id,
+                    "settlement_evidence": bundle,
+                    "known_quote_outcomes": dict(sorted(known.items())),
+                    "settlement_bundle_sha256": _digest(bundle),
+                }
+                intent = {"intent_id": _digest(semantic), **semantic}
+                if existing is not None:
+                    if existing != intent:
+                        raise PaperSettlementLearningBridgeError(
+                            "settlement intent conflicts with durable prepared evidence"
+                        )
+                else:
+                    binding["settlement_intent"] = intent
+                    changed = True
+                prepared.append(ticket_id)
+            if changed:
+                self._write(state)
+        return tuple(prepared)
 
     def _derive_outbox(
         self,
@@ -681,21 +828,10 @@ class PaperSettlementLearningBridge:
             return None
         bundle, known = result
         bundle_sha = _digest(bundle)
-        action_decided_at = _instant(
-            binding["action_decided_at"], "bound action_decided_at"
-        )
-        ticket_placed_at = _instant(ticket.placed_at, "bound ticket placed_at")
-        for item in bundle:
-            evidence_available_at = _instant(
-                item["available_at"], "settlement available_at"
+        if not self._causal_lower_bound_satisfied(binding, ticket, bundle):
+            raise PaperSettlementLearningBridgeError(
+                "settlement evidence predates bound action or ticket placement"
             )
-            if (
-                evidence_available_at < action_decided_at
-                or evidence_available_at < ticket_placed_at
-            ):
-                raise PaperSettlementLearningBridgeError(
-                    "settlement evidence predates bound action or ticket placement"
-                )
         revealed_at = max(
             (item["available_at"] for item in bundle),
             key=lambda value: _instant(value, "settlement available_at"),
@@ -926,12 +1062,17 @@ class PaperSettlementLearningBridge:
                     continue
                 ticket = self._bound_ticket(book, binding)
                 if binding["status"] == BOUND:
+                    intent = binding.get("settlement_intent")
+                    evidence = resolutions
+                    if intent is not None:
+                        evidence = self._intent_resolutions(intent) + resolutions
                     if ticket_id not in settled_ids:
-                        continue
+                        if intent is None or ticket.status is TicketStatus.OPEN:
+                            continue
                     outbox = self._derive_outbox(
                         binding,
                         ticket,
-                        resolutions,
+                        evidence,
                         at=at,
                     )
                     if outbox is None:

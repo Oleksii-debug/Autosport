@@ -350,90 +350,74 @@ def _canonical_decimal_text(value: Decimal) -> str:
 
 
 def _validate_counterfactual_artifacts(
+    registry,
     artifact_store,
     authority,
     samples: Sequence[dict[str, object]],
     *,
+    protocol_id: str,
     protocol_frozen,
+    dataset_snapshot_id: str,
 ) -> None:
-    """Resolve frozen counterfactual qualification and per-case source evidence."""
-
-    qualification_identity = (
-        f"{authority.authority_id}@{authority.authority_version}"
-    )
-    qualification = artifact_store.read(
-        "counterfactual-qualification",
-        qualification_identity,
+    """Validate durable causal ordering for qualification and post-reveal evidence."""
+    qualification_identity=f"{authority.authority_id}@{authority.authority_version}"
+    qualification=artifact_store.read(
+        "counterfactual-qualification", qualification_identity,
         expected_sha256=authority.qualification_evidence_sha256,
     )
-    qualified_at = qualification.get("qualified_at")
-    expected_qualification = {
-        "schema_version": 1,
-        "kind": "autosport-counterfactual-qualification-v1",
-        "authority_id": authority.authority_id,
-        "authority_version": authority.authority_version,
-        "evaluator_source_sha256": authority.evaluator_source_sha256,
-        "reward_definition_sha256": authority.reward_definition_sha256,
-        "reward_mode": authority.reward_mode.value,
-        "scope": authority.scope,
-        "allowed_source_evidence_sha256": list(
-            authority.allowed_source_evidence_sha256
-        ),
-        "qualification_status": authority.qualification_status,
-        "qualified_at": qualified_at,
-    }
-    if qualification != expected_qualification:
-        raise ValueError(
-            "counterfactual qualification artifact does not match frozen authority"
-        )
-    if _impl._instant(
-        qualified_at, "counterfactual qualification qualified_at"
-    ) > protocol_frozen:
-        raise ValueError(
-            "counterfactual qualification was not available by protocol freeze"
-        )
+    if qualification.get("authority_id")!=authority.authority_id or qualification.get("authority_version")!=authority.authority_version:
+        raise ValueError("counterfactual qualification artifact identity mismatch")
+    if qualification.get("evaluator_source_sha256")!=authority.evaluator_source_sha256 or qualification.get("reward_definition_sha256")!=authority.reward_definition_sha256:
+        raise ValueError("counterfactual qualification artifact semantics mismatch")
+    if qualification.get("reward_mode")!=authority.reward_mode.value or qualification.get("scope")!=authority.scope or qualification.get("qualification_status")!=authority.qualification_status:
+        raise ValueError("counterfactual qualification artifact does not match frozen authority")
+    qualified_at=_impl._instant(qualification.get("qualified_at"),"counterfactual qualification qualified_at")
+    if qualified_at>protocol_frozen:
+        raise ValueError("counterfactual qualification was not available by protocol freeze")
+
+    receipt=registry.get("CounterfactualQualification",qualification_identity)
+    if receipt is None:
+        raise ValueError("counterfactual qualification has no durable registry receipt")
+    if receipt.payload.get("qualification_artifact_sha256")!=authority.qualification_evidence_sha256:
+        raise ValueError("counterfactual qualification registry receipt hash mismatch")
+    for key,expected in (
+        ("authority_id",authority.authority_id),("authority_version",authority.authority_version),
+        ("evaluator_source_sha256",authority.evaluator_source_sha256),("reward_definition_sha256",authority.reward_definition_sha256),
+        ("reward_mode",authority.reward_mode.value),("scope",authority.scope),("qualification_status",authority.qualification_status),
+    ):
+        if receipt.payload.get(key)!=expected:
+            raise ValueError("counterfactual qualification registry receipt does not match frozen authority")
+    if not registry.causal_precedes("CounterfactualQualification",qualification_identity,"ResearchProtocol",protocol_id):
+        raise ValueError("counterfactual qualification was registered after protocol freeze")
 
     for sample in samples:
         if type(sample) is not dict:
             raise ValueError("policy evaluation sample payload is invalid")
-        case_payload = sample.get("case_payload")
+        case_payload=sample.get("case_payload")
         if type(case_payload) is not dict:
-            raise ValueError(
-                "counterfactual sample lacks immutable source-evidence payload"
-            )
-        sample_id = _impl._text(case_payload.get("sample_id"), "policy sample_id")
-        case_source_sha256 = _impl._sha256(
-            case_payload.get("source_evidence_sha256"),
-            "counterfactual case source_evidence_sha256",
-        )
-        if case_source_sha256 != _impl._sha256(
-            sample.get("source_evidence_sha256"),
-            "policy sample source_evidence_sha256",
+            raise ValueError("counterfactual sample lacks immutable source-evidence payload")
+        sample_id=_impl._text(case_payload.get("sample_id"),"policy sample_id")
+        case_source_sha256=_impl._sha256(case_payload.get("source_evidence_sha256"),"counterfactual case source_evidence_sha256")
+        source_identity=f"{authority.authority_id}@{authority.authority_version}:{sample_id}"
+        source_receipt=registry.get("CounterfactualSourceEvidence",source_identity)
+        if source_receipt is None:
+            raise ValueError("counterfactual source evidence lacks durable causal materialization receipt")
+        for key,expected in (
+            ("authority_id",authority.authority_id),("authority_version",authority.authority_version),("sample_id",sample_id),
+            ("source_evidence_sha256",case_source_sha256),("dataset_snapshot_id",dataset_snapshot_id),
+            ("observed_at",case_payload.get("observed_at")),("reward_available_at",case_payload.get("reward_available_at")),
         ):
-            raise ValueError(
-                "counterfactual sample source evidence hash is internally inconsistent"
-            )
-        source_identity = (
-            f"{authority.authority_id}@{authority.authority_version}:{sample_id}"
-        )
-        source_evidence = artifact_store.read(
-            "counterfactual-source-evidence",
-            source_identity,
-            expected_sha256=case_source_sha256,
-        )
-        bound_case = dict(case_payload)
-        bound_case.pop("source_evidence_sha256", None)
-        expected_source_evidence = {
-            "schema_version": 1,
-            "kind": "autosport-counterfactual-source-evidence-v1",
-            "authority_id": authority.authority_id,
-            "authority_version": authority.authority_version,
-            "case": bound_case,
-        }
-        if source_evidence != expected_source_evidence:
-            raise ValueError(
-                "counterfactual source evidence artifact does not match evaluated case"
-            )
+            if source_receipt.payload.get(key)!=expected:
+                raise ValueError("counterfactual source evidence receipt does not match evaluated case")
+        if not registry.causal_precedes("ResearchProtocol",protocol_id,"CounterfactualSourceEvidence",source_identity):
+            raise ValueError("counterfactual source evidence was materialized before protocol freeze")
+        if _impl._instant(source_receipt.available_at,"source evidence materialized_at") < _impl._instant(case_payload.get("reward_available_at"),"reward_available_at"):
+            raise ValueError("counterfactual source evidence materialized before reward availability")
+        source_evidence=artifact_store.read("counterfactual-source-evidence",source_identity,expected_sha256=case_source_sha256)
+        bound_case=dict(case_payload); bound_case.pop("source_evidence_sha256",None)
+        expected_source_evidence={"schema_version":1,"kind":"autosport-counterfactual-source-evidence-v1","authority_id":authority.authority_id,"authority_version":authority.authority_version,"case":bound_case}
+        if source_evidence!=expected_source_evidence:
+            raise ValueError("counterfactual source evidence artifact does not match evaluated case")
 
 
 def _run_policy_candidate_unstaged(
@@ -606,10 +590,13 @@ def _run_policy_candidate_unstaged(
                 "policy evaluation counterfactual authority hash mismatch"
             )
         _validate_counterfactual_artifacts(
+            registry,
             artifact_store,
             authority,
             counterfactual_samples,
+            protocol_id=spec.research_protocol_id,
             protocol_frozen=protocol_frozen,
+            dataset_snapshot_id=spec.dataset_snapshot_id,
         )
         for sample in counterfactual_samples:
             authority.validate_reference(

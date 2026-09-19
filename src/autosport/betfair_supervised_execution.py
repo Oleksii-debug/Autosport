@@ -33,6 +33,7 @@ from .bookmaker_capability import (
 from .economic_goal import AutomationLevel, EconomicGoalContractError
 from .economic_goal_provenance import provenance_for
 from .economic_goal_store import EconomicGoalStore
+from .workspace_lock import WorkspaceEconomicLock
 from .real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
@@ -945,36 +946,44 @@ def execute_betfair_supervised_action(
             "client must be BetfairSupervisedPlaceOrdersClient"
         )
     action = bound.action_for(action_id)
-    client._gate.require(
-        action=action,
-        profile=profile,
-        bound=bound,
-        execution_workspace=ledger.path.parent,
-    )
-
-    begin_supervised_attempt(
-        ledger,
-        bound,
-        approval,
-        action_id=action_id,
-        attempt_id=attempt_id,
-    )
-    provider_order_ref = ledger.bind_provider_order_reference(
-        attempt_id=attempt_id,
-        provider_id=action.bookmaker_id,
-    )
     now = clock or _now
-    ledger.mark_submitted(
-        attempt_id,
-        submitted_at=now(),
-    )
+    execution_workspace = ledger.path.parent.resolve()
+
+    # Fence the canonical owner-authority read and every local pre-transport
+    # execution mutation against the same economic writer boundary used by
+    # EconomicGoalStore. A tighter successor therefore cannot become durable
+    # after authorization but before the attempt/provider-reference/submitted
+    # state is recorded. The provider client re-reads owner authority again
+    # after this local phase, immediately before transport.
+    with WorkspaceEconomicLock(execution_workspace):
+        client._gate.require(
+            action=action,
+            profile=profile,
+            bound=bound,
+            execution_workspace=execution_workspace,
+        )
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action_id,
+            attempt_id=attempt_id,
+        )
+        provider_order_ref = ledger.bind_provider_order_reference(
+            attempt_id=attempt_id,
+            provider_id=action.bookmaker_id,
+        )
+        ledger.mark_submitted(
+            attempt_id,
+            submitted_at=now(),
+        )
     try:
         report = client.place_action(
             action,
             profile=profile,
             bound=bound,
             provider_order_ref=provider_order_ref,
-            execution_workspace=ledger.path.parent,
+            execution_workspace=execution_workspace,
         )
     except (
         BetfairPlaceOrdersAmbiguous,

@@ -376,6 +376,8 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 bridge.bind_ticket(
                     ticket_id=ticket.ticket_id,
                     decision_id=decision.decision_id,
+                    environment=environment,
+                    observation=observation,
                     action=action,
                     baseline_checkpoint=baseline,
                 )

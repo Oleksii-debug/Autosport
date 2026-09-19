@@ -5,6 +5,8 @@ import importlib
 import json
 import math
 import random
+import signal
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -38,6 +40,44 @@ class CollectorServiceError(RuntimeError):
 
 class CollectorStorageLimitError(CollectorServiceError):
     """Raised when the configured durable collector storage budget is exhausted."""
+
+
+class CollectorServiceStoppedError(CollectorServiceError):
+    """Raised when a durably stopped run is used without explicit resume."""
+
+
+class _StopRequested(RuntimeError):
+    """Internal control-flow signal for a requested bounded stop."""
+
+
+class _SignalStopRequest:
+    """Signal handler target that performs no I/O and defers STOP to safe code."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._signal_number: int | None = None
+
+    def __call__(self) -> bool:
+        return self._event.is_set()
+
+    def handle(self, signum: int, _frame: object) -> None:
+        self._signal_number = signum
+        self._event.set()
+
+    def reason(self) -> str:
+        if self._signal_number is None:
+            return "stop_requested"
+        try:
+            name = signal.Signals(self._signal_number).name
+        except ValueError:
+            name = str(self._signal_number)
+        return f"signal:{name}"
+
+    @property
+    def exit_code(self) -> int | None:
+        if self._signal_number is None:
+            return None
+        return 128 + int(self._signal_number)
 
 
 class CollectorServiceSource(Protocol):
@@ -317,6 +357,10 @@ class _CollectorServiceState:
                 raise CollectorServiceError(
                     f"collector service state has invalid {name}"
                 )
+        if (raw["stopped_at"] is None) != (raw["stop_reason"] is None):
+            raise CollectorServiceError(
+                "collector service STOP state is incomplete"
+            )
         return raw
 
     def snapshot(self) -> dict[str, object]:
@@ -332,8 +376,22 @@ class _CollectorServiceState:
         self._instant(at, "at")
 
         def mutate(raw: dict[str, object]) -> None:
+            if raw["stopped_at"] is not None:
+                raise CollectorServiceStoppedError(
+                    "collector run is durably STOPPED; explicit resume is required"
+                )
             raw["cycles_attempted"] = int(raw["cycles_attempted"]) + 1
             raw["last_cycle_at"] = at
+
+        self._update(mutate)
+
+    def resume(self, *, at: str) -> None:
+        """Explicitly authorize a previously durably stopped run to continue."""
+        self._instant(at, "at")
+
+        def mutate(raw: dict[str, object]) -> None:
+            if raw["stopped_at"] is None:
+                return
             raw["stopped_at"] = None
             raw["stop_reason"] = None
 
@@ -403,6 +461,7 @@ class HeadlessCollectorService:
         sleep: Callable[[float], None] | None = None,
         random_value: Callable[[], float] | None = None,
         stop_requested: Callable[[], bool] | None = None,
+        stop_reason: Callable[[], str] | None = None,
     ) -> None:
         if not isinstance(delta_store, CollectorDeltaStore):
             raise TypeError("delta_store must be CollectorDeltaStore")
@@ -426,6 +485,7 @@ class HeadlessCollectorService:
         self.sleep = sleep or time.sleep
         self.random_value = random_value or random.random
         self.stop_requested = stop_requested or (lambda: False)
+        self.stop_reason = stop_reason or (lambda: "stop_requested")
         self._adapter = RemoteCollectorAdapter(self.delta_store.append)
         started_at = self.clock()
         _CollectorServiceState._instant(started_at, "started_at")
@@ -444,14 +504,37 @@ class HeadlessCollectorService:
         """Durable operator-readable state; provider messages/secrets are excluded."""
         return self._state.snapshot()
 
+    def resume(self) -> None:
+        """Explicitly resume the same durable run after an operator STOP."""
+        self._state.resume(at=self.clock())
+
+    def _requested_stop_reason(self) -> str | None:
+        if not self.stop_requested():
+            return None
+        reason = self.stop_reason()
+        if not isinstance(reason, str) or not reason.strip():
+            raise CollectorServiceError(
+                "stop_reason must return a non-empty string when STOP is requested"
+            )
+        return reason
+
+    def _stop_if_requested(self) -> None:
+        reason = self._requested_stop_reason()
+        if reason is None:
+            return
+        self.stop(reason)
+        raise _StopRequested(reason)
+
     def _bounded_provider_call(self, action: Callable[[], object]) -> object:
         delay = self.config.initial_backoff_seconds
         for attempt in range(self.config.retry_attempts):
+            self._stop_if_requested()
             try:
                 return action()
             except ProviderUnavailableError:
                 if attempt + 1 >= self.config.retry_attempts:
                     raise
+                self._stop_if_requested()
                 random_value = self.random_value()
                 if (
                     isinstance(random_value, bool)
@@ -556,6 +639,8 @@ class HeadlessCollectorService:
                 committed_delta_ids=tuple(committed),
                 duplicate_delta_ids=tuple(duplicates),
             )
+        except _StopRequested:
+            raise
         except ProviderUnavailableError as exc:
             self._state.record_provider_failure(code=type(exc).__name__)
             return CollectorCycleResult(
@@ -583,16 +668,21 @@ class HeadlessCollectorService:
         cycles_executed = 0
         last_cycle: CollectorCycleResult | None = None
         while max_cycles is None or cycles_executed < max_cycles:
-            if self.stop_requested():
-                self.stop("stop_requested")
+            reason = self._requested_stop_reason()
+            if reason is not None:
+                self.stop(reason)
                 break
-            last_cycle = self.run_cycle()
+            try:
+                last_cycle = self.run_cycle()
+            except _StopRequested:
+                break
             cycles_executed += 1
             if max_cycles is not None and cycles_executed >= max_cycles:
                 self.stop("max_cycles_reached")
                 break
-            if self.stop_requested():
-                self.stop("stop_requested")
+            reason = self._requested_stop_reason()
+            if reason is not None:
+                self.stop(reason)
                 break
             self.sleep(self.config.poll_interval_seconds)
         return CollectorRunResult(
@@ -625,6 +715,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--source-factory", required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument(
+        "--resume-stopped-run",
+        action="store_true",
+        help="Explicitly resume this durable run_id after a persisted STOP.",
+    )
     parser.add_argument("--max-cycles", type=int)
     parser.add_argument("--max-items", type=int, default=250)
     parser.add_argument("--poll-seconds", type=float, default=30.0)
@@ -640,32 +735,47 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     root = Path(args.workspace)
     root.mkdir(parents=True, exist_ok=True)
-    factory = _load_source_factory(args.source_factory)
-    source = factory()
-    service = HeadlessCollectorService(
-        delta_store=CollectorDeltaStore(root / "collector_deltas.json"),
-        lifecycle=ContinuousEventLifecycle(root / "collector_catalog.json"),
-        source=source,
-        state_path=root / "collector_service_state.json",
-        run_id=args.run_id,
-        config=CollectorServiceConfig(
-            max_items=args.max_items,
-            poll_interval_seconds=args.poll_seconds,
-            retry_attempts=args.retry_attempts,
-            initial_backoff_seconds=args.initial_backoff_seconds,
-            max_backoff_seconds=args.max_backoff_seconds,
-            jitter_fraction=args.jitter_fraction,
-            max_store_bytes=args.max_store_bytes,
-        ),
-    )
+    signal_stop = _SignalStopRequest()
+    previous_handlers = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    for signum in previous_handlers:
+        signal.signal(signum, signal_stop.handle)
+
     try:
-        service.run(max_cycles=args.max_cycles)
-    except KeyboardInterrupt:
-        service.stop("operator_interrupt")
+        factory = _load_source_factory(args.source_factory)
+        source = factory()
+        service = HeadlessCollectorService(
+            delta_store=CollectorDeltaStore(root / "collector_deltas.json"),
+            lifecycle=ContinuousEventLifecycle(root / "collector_catalog.json"),
+            source=source,
+            state_path=root / "collector_service_state.json",
+            run_id=args.run_id,
+            config=CollectorServiceConfig(
+                max_items=args.max_items,
+                poll_interval_seconds=args.poll_seconds,
+                retry_attempts=args.retry_attempts,
+                initial_backoff_seconds=args.initial_backoff_seconds,
+                max_backoff_seconds=args.max_backoff_seconds,
+                jitter_fraction=args.jitter_fraction,
+                max_store_bytes=args.max_store_bytes,
+            ),
+            stop_requested=signal_stop,
+            stop_reason=signal_stop.reason,
+        )
+        if args.resume_stopped_run:
+            service.resume()
+        try:
+            service.run(max_cycles=args.max_cycles)
+        except CollectorServiceStoppedError:
+            print(json.dumps(service.status(), ensure_ascii=False, sort_keys=True))
+            return 3
         print(json.dumps(service.status(), ensure_ascii=False, sort_keys=True))
-        return 130
-    print(json.dumps(service.status(), ensure_ascii=False, sort_keys=True))
-    return 0
+        return signal_stop.exit_code or 0
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 if __name__ == "__main__":

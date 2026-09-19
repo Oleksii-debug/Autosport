@@ -406,6 +406,159 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             )
             self.assertEqual(loop_state["resolutions"][0]["reward_value"], "0.00")
 
+    def test_future_settlement_evidence_cannot_mint_observed_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            book = PaperBook.load(root / "paper_book.json")
+            engine = SettlementEngine()
+            engine.record({leg.quote_key: "win"})
+            self.assertEqual(engine.settle_ready(book), [ticket.ticket_id])
+            book.save(root / "paper_book.json")
+            future = SettlementResolution(
+                event_identity=f"provider-a:{leg.event_id}",
+                settlement_ref="future-result",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="future-evidence",
+                evidence_sha256="d" * 64,
+                available_at="2026-09-19T21:21:00+00:00",
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "causal validation",
+            ):
+                bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(future,),
+                    settled_ticket_ids=(ticket.ticket_id,),
+                    at="2026-09-19T21:20:00+00:00",
+                )
+            self.assertEqual(runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+            loop_state = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(loop_state["resolutions"], [])
+
+    def test_wrong_event_scope_cannot_mint_observed_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            book = PaperBook.load(root / "paper_book.json")
+            engine = SettlementEngine()
+            engine.record({leg.quote_key: "win"})
+            self.assertEqual(engine.settle_ready(book), [ticket.ticket_id])
+            book.save(root / "paper_book.json")
+            wrong_scope = SettlementResolution(
+                event_identity="provider-a:another-event",
+                settlement_ref="wrong-scope-result",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="wrong-scope-evidence",
+                evidence_sha256="e" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "event identity",
+            ):
+                bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(wrong_scope,),
+                    settled_ticket_ids=(ticket.ticket_id,),
+                    at="2026-09-19T21:20:00+00:00",
+                )
+            self.assertEqual(runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+
+    def test_unbound_settled_ticket_remains_economic_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                _decision,
+                _environment,
+                _baseline,
+                runtime,
+                _observation,
+                _action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            book, resolutions = _settle(root, outcomes={leg.quote_key: "win"})
+            self.assertEqual(book.balance, Decimal("110.00"))
+            self.assertEqual(
+                bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=resolutions,
+                    settled_ticket_ids=(ticket.ticket_id,),
+                    at="2026-09-19T21:20:00+00:00",
+                ),
+                (),
+            )
+            self.assertEqual(runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+            loop_state = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(loop_state["resolutions"], [])
+
     def test_loss_uses_negative_exact_reward_from_final_paper_economics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

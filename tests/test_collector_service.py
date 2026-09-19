@@ -225,10 +225,17 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
                 [(d1,), (d2,)],
             )
             service = self.make_service(tmp, source)
-            results = service.run(max_cycles=2)
+            result = service.run(max_cycles=2)
+            self.assertEqual(result.cycles_executed, 2)
+            self.assertEqual(result.last_cycle.committed_delta_ids, ("d2",))
             self.assertEqual(
-                [item.committed_delta_ids for item in results],
-                [("d1",), ("d2",)],
+                [
+                    item.delta_id
+                    for item in service.delta_store.deltas_after_commit(
+                        source_id="source-x"
+                    )
+                ],
+                ["d1", "d2"],
             )
             records = service.lifecycle.records()
             self.assertEqual(
@@ -238,6 +245,17 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             self.assertEqual(
                 service.status()["stop_reason"], "max_cycles_reached"
             )
+
+    def test_run_keeps_only_last_cycle_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            delta = make_delta()
+            source = FakeCollectorSource([page], [(delta,)])
+            service = self.make_service(tmp, source)
+            result = service.run(max_cycles=3)
+            self.assertEqual(result.cycles_executed, 3)
+            self.assertEqual(result.last_cycle.duplicate_delta_ids, ("d1",))
+            self.assertFalse(hasattr(result, "results"))
 
     def test_provider_retry_is_bounded_and_redacts_provider_message(self):
         with tempfile.TemporaryDirectory() as tmp:

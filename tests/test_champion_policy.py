@@ -17,7 +17,14 @@ from autosport.learning_environment import (
     RewardEvidence,
     Transition,
 )
-from autosport.scientific_registry import ScientificRegistry
+from autosport.scientific_registry import (
+    EvaluationBundleRef,
+    ModelVersion,
+    PromotionAction,
+    PromotionDecision,
+    ScientificRegistry,
+    StrategyVersion,
+)
 from autosport.strategy_model_factory import FactoryArtifactStore
 from autosport.transparent_bandit_policy import BanditPolicyState
 
@@ -27,6 +34,10 @@ CONFIG_SHA256 = "c" * 64
 PROTOCOL_ID = "protocol-champion-policy-v1"
 STRATEGY_ID = "canonical-transparent-bandit"
 MODEL_ID = "model-transparent-bandit-v2"
+ALTERNATE_MODEL_ID = "model-transparent-bandit-alternate"
+EVALUATION_BUNDLE_ID = "evaluation-champion-policy-v1"
+EVALUATION_BUNDLE_SHA256 = "a" * 64
+PROTOCOL_SHA256 = "b" * 64
 PROMOTED_AT = "2026-09-19T13:10:00Z"
 
 
@@ -87,19 +98,47 @@ def _registry_entries(policy: BanditPolicyState):
             "environment_sha256": policy.environment_id,
             "config_sha256": policy.config_sha256,
             "research_protocol_id": policy.protocol_id,
+            "seed": policy.seed,
         }
     )
     return strategy, model
 
 
+def _promotion_entries(policy: BanditPolicyState):
+    promotion = SimpleNamespace(
+        payload={
+            "action": "PROMOTE",
+            "candidate_strategy_version_id": policy.policy_id,
+            "candidate_model_version_id": MODEL_ID,
+            "research_protocol_id": policy.protocol_id,
+            "evaluation_bundle_id": EVALUATION_BUNDLE_ID,
+            "evaluation_bundle_sha256": EVALUATION_BUNDLE_SHA256,
+            "predecessor_strategy_version_id": None,
+            "rollback_to_strategy_version_id": None,
+        }
+    )
+    bundle = SimpleNamespace(
+        payload={
+            "evaluation_bundle_id": EVALUATION_BUNDLE_ID,
+            "bundle_sha256": EVALUATION_BUNDLE_SHA256,
+            "evaluated_strategy_version_id": policy.policy_id,
+            "evaluated_model_version_id": MODEL_ID,
+        }
+    )
+    return promotion, bundle
+
+
 def _load_with_authority(registry, store, policy, *, as_of=PROMOTED_AT, **overrides):
     strategy, model = _registry_entries(policy)
+    promotion, bundle = _promotion_entries(policy)
 
     def get(_self, kind, record_id):
         if kind == "StrategyVersion" and record_id == policy.policy_id:
             return strategy
         if kind == "ModelVersion" and record_id == MODEL_ID:
             return model
+        if kind == "EvaluationBundle" and record_id == EVALUATION_BUNDLE_ID:
+            return bundle
         return None
 
     arguments = {
@@ -117,6 +156,12 @@ def _load_with_authority(registry, store, policy, *, as_of=PROMOTED_AT, **overri
             "champion_strategy",
             autospec=True,
             return_value=policy.policy_id,
+        ),
+        patch.object(
+            ScientificRegistry,
+            "causal_records",
+            autospec=True,
+            return_value=(promotion,),
         ),
         patch.object(ScientificRegistry, "get", autospec=True, side_effect=get),
     ):
@@ -208,31 +253,8 @@ def test_missing_or_tampered_champion_artifact_fails_closed(tmp_path):
     _, successor, _ = _policy_successor()
     registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
     store = FactoryArtifactStore(tmp_path / "artifacts")
-    strategy, model = _registry_entries(successor)
-
-    def get(_self, kind, _record_id):
-        return strategy if kind == "StrategyVersion" else model
-
-    with (
-        patch.object(
-            ScientificRegistry,
-            "champion_strategy",
-            autospec=True,
-            return_value=successor.policy_id,
-        ),
-        patch.object(ScientificRegistry, "get", autospec=True, side_effect=get),
-    ):
-        with pytest.raises(ChampionPolicyError, match="artifact is unavailable"):
-            load_champion_policy(
-                registry,
-                store,
-                as_of=PROMOTED_AT,
-                canonical_strategy_id=STRATEGY_ID,
-                environment_id=ENVIRONMENT_ID,
-                protocol_id=PROTOCOL_ID,
-                config_sha256=CONFIG_SHA256,
-                admissible_actions=frozenset({"PAPER_PROPOSAL", "WAIT"}),
-            )
+    with pytest.raises(ChampionPolicyError, match="artifact is unavailable"):
+        _load_with_authority(registry, store, successor)
 
     persist_policy_state(store, successor)
     path = store.path_for_testing(POLICY_ARTIFACT_KIND, successor.policy_id)
@@ -268,3 +290,146 @@ def test_champion_activation_requires_exact_next_episode_context(
 
     with pytest.raises(ChampionPolicyError, match=message):
         _load_with_authority(registry, store, successor, **override)
+
+def _write_minimal_promoted_registry(
+    path,
+    policy: BanditPolicyState,
+    *,
+    strategy_model_id: str = MODEL_ID,
+    evaluated_model_id: str = MODEL_ID,
+    model_seed: int | None = None,
+):
+    """Write structurally valid restart evidence, including deliberate rebind cases."""
+
+    wanted_seed = policy.seed if model_seed is None else model_seed
+    model_ids = {MODEL_ID, strategy_model_id}
+    entries = []
+    for index, model_id in enumerate(sorted(model_ids), start=1):
+        seed = wanted_seed if model_id == strategy_model_id else policy.seed
+        entries.append(
+            ScientificRegistry._entry(
+                ModelVersion(
+                    model_version_id=model_id,
+                    model_family="transparent-bandit",
+                    artifact_sha256=(str(index) * 64)[:64],
+                    source_sha256="4" * 64,
+                    environment_sha256=policy.environment_id,
+                    dataset_snapshot_id="dataset-champion-policy-v1",
+                    feature_set_id="features-champion-policy-v1",
+                    research_protocol_id=policy.protocol_id,
+                    seed=seed,
+                    config_sha256=policy.config_sha256,
+                    created_at="2026-09-19T13:06:00Z",
+                )
+            )
+        )
+    entries.append(
+        ScientificRegistry._entry(
+            StrategyVersion(
+                strategy_version_id=policy.policy_id,
+                canonical_strategy_id=STRATEGY_ID,
+                source_sha256="5" * 64,
+                environment_sha256=policy.environment_id,
+                config_sha256=policy.config_sha256,
+                created_at="2026-09-19T13:07:00Z",
+                model_version_id=strategy_model_id,
+            )
+        )
+    )
+    entries.append(
+        ScientificRegistry._entry(
+            EvaluationBundleRef(
+                evaluation_bundle_id=EVALUATION_BUNDLE_ID,
+                bundle_sha256=EVALUATION_BUNDLE_SHA256,
+                evaluator_source_sha256="6" * 64,
+                dataset_snapshot_id="dataset-champion-policy-v1",
+                protocol_sha256=PROTOCOL_SHA256,
+                artifact_hashes=("7" * 64,),
+                created_at="2026-09-19T13:08:00Z",
+                evaluated_strategy_version_id=policy.policy_id,
+                evaluated_model_version_id=evaluated_model_id,
+            )
+        )
+    )
+    entries.append(
+        ScientificRegistry._entry(
+            PromotionDecision(
+                promotion_decision_id="promotion-champion-policy-v1",
+                action=PromotionAction.PROMOTE,
+                candidate_strategy_version_id=policy.policy_id,
+                candidate_model_version_id=evaluated_model_id,
+                research_protocol_id=policy.protocol_id,
+                protocol_sha256=PROTOCOL_SHA256,
+                evaluation_bundle_id=EVALUATION_BUNDLE_ID,
+                evaluation_bundle_sha256=EVALUATION_BUNDLE_SHA256,
+                decided_at=PROMOTED_AT,
+            )
+        )
+    )
+    path.write_text(
+        json.dumps(
+            {"schema_version": ScientificRegistry.SCHEMA_VERSION, "records": entries},
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return ScientificRegistry(path)
+
+
+def _load_real_registry(registry, store):
+    return load_champion_policy(
+        registry,
+        store,
+        as_of=PROMOTED_AT,
+        canonical_strategy_id=STRATEGY_ID,
+        environment_id=ENVIRONMENT_ID,
+        protocol_id=PROTOCOL_ID,
+        config_sha256=CONFIG_SHA256,
+        admissible_actions=frozenset({"PAPER_PROPOSAL", "WAIT"}),
+    )
+
+
+def test_champion_activation_uses_durable_promotion_model_lineage(tmp_path):
+    _, successor, _ = _policy_successor()
+    registry = _write_minimal_promoted_registry(
+        tmp_path / "registry.json",
+        successor,
+    )
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, successor)
+
+    activated = _load_real_registry(registry, store)
+
+    assert activated.policy_id == successor.policy_id
+    assert activated.seed == successor.seed
+
+
+def test_champion_activation_rejects_self_consistent_strategy_model_rebind(tmp_path):
+    _, successor, _ = _policy_successor()
+    registry = _write_minimal_promoted_registry(
+        tmp_path / "registry.json",
+        successor,
+        strategy_model_id=ALTERNATE_MODEL_ID,
+        evaluated_model_id=MODEL_ID,
+    )
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, successor)
+
+    with pytest.raises(ChampionPolicyError, match="promotion model lineage mismatch"):
+        _load_real_registry(registry, store)
+
+
+def test_champion_activation_rejects_model_policy_seed_mismatch(tmp_path):
+    _, successor, _ = _policy_successor()
+    registry = _write_minimal_promoted_registry(
+        tmp_path / "registry.json",
+        successor,
+        model_seed=successor.seed + 1,
+    )
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, successor)
+
+    with pytest.raises(ChampionPolicyError, match="seed lineage mismatch"):
+        _load_real_registry(registry, store)
+

@@ -456,6 +456,9 @@ class PortfolioDependencyGraph:
 
 
 
+_MIN_DEPENDENCY_EVIDENCE_SAMPLE_SIZE = 30
+
+
 @dataclass(frozen=True, slots=True)
 class PortfolioDependencyEvidence:
     """Versioned empirical joint-dependency evidence bound to exact portfolio inputs."""
@@ -490,7 +493,11 @@ class PortfolioDependencyEvidence:
             raise ValueError("dependency evidence candidate identities must be unique")
         _canonical_text("dependency evidence population_id", self.population_id)
         _canonical_text("dependency evidence method", self.method)
-        if isinstance(self.sample_size, bool) or not isinstance(self.sample_size, int) or self.sample_size < 2:
+        if (
+            isinstance(self.sample_size, bool)
+            or not isinstance(self.sample_size, int)
+            or self.sample_size < 2
+        ):
             raise ValueError("dependency evidence sample_size must be an integer >= 2")
         _, cutoff = _canonical_timestamp("dependency evidence causal_cutoff", self.causal_cutoff)
         _, as_of = _canonical_timestamp("dependency evidence as_of", self.as_of)
@@ -530,6 +537,11 @@ class PortfolioDependencyEvidence:
         ):
             if not isinstance(value, Decimal) or not value.is_finite() or value < 0 or value > 1:
                 raise ValueError(f"dependency evidence {name} must be an exact Decimal between 0 and 1")
+
+    @property
+    def support_qualified(self) -> bool:
+        """Deterministic conservative admission floor, not a sufficiency claim."""
+        return self.sample_size >= _MIN_DEPENDENCY_EVIDENCE_SAMPLE_SIZE
 
     @property
     def evidence_sha256(self) -> str:
@@ -1318,6 +1330,8 @@ class PortfolioPlan:
     risk_policy_sha256: str
     portfolio_truth: EvidenceTruth
     reason: str
+    dependency_evidence: PortfolioDependencyEvidence | None = None
+    robust_proposal: RobustPortfolioProposal | None = None
 
     def __post_init__(self) -> None:
         _canonical_timestamp("decision_ts", self.decision_ts)
@@ -1362,6 +1376,61 @@ class PortfolioPlan:
                 raise ValueError("dependency graph must bind the exact portfolio identity")
             if self.intent_sha256s != self.dependency_graph.intent_sha256s:
                 raise ValueError("dependency graph must bind the exact intent vector")
+        if self.dependency_evidence is not None:
+            if not isinstance(self.dependency_evidence, PortfolioDependencyEvidence):
+                raise ValueError(
+                    "dependency_evidence must be PortfolioDependencyEvidence"
+                )
+            if self.dependency_graph is None:
+                raise ValueError(
+                    "dependency evidence requires a bound dependency graph"
+                )
+            if self.portfolio_sha256 != self.dependency_evidence.portfolio_sha256:
+                raise ValueError(
+                    "dependency evidence must bind the exact portfolio identity"
+                )
+            if self.intent_sha256s != self.dependency_evidence.intent_sha256s:
+                raise ValueError(
+                    "dependency evidence must bind the exact intent vector"
+                )
+            if (
+                self.dependency_graph.candidate_sha256s
+                != self.dependency_evidence.candidate_sha256s
+            ):
+                raise ValueError(
+                    "dependency evidence must bind the exact candidate vector"
+                )
+            _, decision_time = _canonical_timestamp(
+                "portfolio plan decision_ts", self.decision_ts
+            )
+            _, evidence_as_of = _canonical_timestamp(
+                "dependency evidence as_of", self.dependency_evidence.as_of
+            )
+            if evidence_as_of > decision_time:
+                raise ValueError(
+                    "dependency evidence must not be from the future"
+                )
+        if self.robust_proposal is not None:
+            if not isinstance(self.robust_proposal, RobustPortfolioProposal):
+                raise ValueError(
+                    "robust_proposal must be RobustPortfolioProposal"
+                )
+            if self.dependency_evidence is None:
+                raise ValueError(
+                    "robust proposal requires durable dependency evidence"
+                )
+            recomputed = RobustPortfolioProposal.derive(
+                self.robust_proposal.base_stakes,
+                self.dependency_evidence,
+            )
+            if recomputed != self.robust_proposal:
+                raise ValueError(
+                    "robust proposal must exactly match durable dependency evidence"
+                )
+            if self.robust_proposal.proposed_stakes != self.stakes:
+                raise ValueError(
+                    "robust proposal must bind the exact portfolio stake vector"
+                )
         if self.terminal_economics is not None:
             if not isinstance(self.terminal_economics, VerifiedTerminalEconomics):
                 raise ValueError(
@@ -1450,8 +1519,24 @@ class PortfolioPlan:
             else self.dependency_graph.graph_sha256
         )
 
+    @property
+    def dependency_evidence_sha256(self) -> str | None:
+        return (
+            None
+            if self.dependency_evidence is None
+            else self.dependency_evidence.evidence_sha256
+        )
+
+    @property
+    def robust_proposal_sha256(self) -> str | None:
+        return (
+            None
+            if self.robust_proposal is None
+            else self.robust_proposal.proposal_sha256
+        )
+
     def _identity_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema": "autosport.portfolio_plan",
             "schema_version": 4,
             "decision_ts": self.decision_ts,
@@ -1475,6 +1560,25 @@ class PortfolioPlan:
             "portfolio_truth": self.portfolio_truth.value,
             "reason": self.reason,
         }
+        if self.dependency_evidence is not None or self.robust_proposal is not None:
+            payload["schema_version"] = 5
+            payload.update(
+                {
+                    "dependency_evidence": (
+                        None
+                        if self.dependency_evidence is None
+                        else self.dependency_evidence.to_dict()
+                    ),
+                    "dependency_evidence_sha256": self.dependency_evidence_sha256,
+                    "robust_proposal": (
+                        None
+                        if self.robust_proposal is None
+                        else self.robust_proposal.to_dict()
+                    ),
+                    "robust_proposal_sha256": self.robust_proposal_sha256,
+                }
+            )
+        return payload
 
     @property
     def plan_sha256(self) -> str:
@@ -1492,7 +1596,7 @@ class PortfolioPlan:
             MarketSettlementOutcomeAuthority, ...
         ] = (),
     ) -> "PortfolioPlan":
-        expected = {
+        legacy_expected = {
             "schema",
             "schema_version",
             "decision_ts",
@@ -1511,12 +1615,25 @@ class PortfolioPlan:
             "reason",
             "plan_sha256",
         }
-        if type(raw) is not dict or set(raw) != expected:
+        durable_dependency_fields = {
+            "dependency_evidence",
+            "dependency_evidence_sha256",
+            "robust_proposal",
+            "robust_proposal_sha256",
+        }
+        if type(raw) is not dict:
             raise ValueError("serialized portfolio plan must contain canonical fields")
-        if raw["schema"] != "autosport.portfolio_plan":
+        if raw.get("schema") != "autosport.portfolio_plan":
             raise ValueError("unsupported portfolio plan schema")
-        if raw["schema_version"] != 4:
+        schema_version = raw.get("schema_version")
+        if schema_version == 4:
+            expected = legacy_expected
+        elif schema_version == 5:
+            expected = legacy_expected | durable_dependency_fields
+        else:
             raise ValueError("unsupported portfolio plan schema_version")
+        if set(raw) != expected:
+            raise ValueError("serialized portfolio plan must contain canonical fields")
         try:
             stakes_raw = raw["stakes"]
             intent_ids_raw = raw["intent_ids"]
@@ -1552,6 +1669,21 @@ class PortfolioPlan:
                     decision_as_of=decision_time,
                 )
             )
+            dependency_evidence = None
+            robust_proposal = None
+            if schema_version == 5:
+                dependency_raw = raw["dependency_evidence"]
+                robust_raw = raw["robust_proposal"]
+                dependency_evidence = (
+                    None
+                    if dependency_raw is None
+                    else PortfolioDependencyEvidence.from_dict(dependency_raw)
+                )
+                robust_proposal = (
+                    None
+                    if robust_raw is None
+                    else RobustPortfolioProposal.from_dict(robust_raw)
+                )
             plan = cls(
                 decision_ts=raw["decision_ts"],
                 action=PortfolioAction(raw["action"]),
@@ -1569,10 +1701,24 @@ class PortfolioPlan:
                 risk_policy_sha256=raw["risk_policy_sha256"],
                 portfolio_truth=EvidenceTruth(raw["portfolio_truth"]),
                 reason=raw["reason"],
+                dependency_evidence=dependency_evidence,
+                robust_proposal=robust_proposal,
             )
             serialized_graph_sha256 = raw["dependency_graph_sha256"]
             if serialized_graph_sha256 != plan.dependency_graph_sha256:
                 raise ValueError("serialized dependency graph digest does not match graph")
+            if schema_version == 5:
+                if (
+                    raw["dependency_evidence_sha256"]
+                    != plan.dependency_evidence_sha256
+                ):
+                    raise ValueError(
+                        "serialized dependency evidence digest does not match evidence"
+                    )
+                if raw["robust_proposal_sha256"] != plan.robust_proposal_sha256:
+                    raise ValueError(
+                        "serialized robust proposal digest does not match proposal"
+                    )
             serialized_plan_sha256 = _canonical_sha256(
                 "serialized plan_sha256", raw["plan_sha256"]
             )
@@ -1581,7 +1727,6 @@ class PortfolioPlan:
             return plan
         except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
             raise ValueError("serialized portfolio plan is invalid") from exc
-
 
 _PORTFOLIO_PLAN_DECISION_AGENT = "portfolio-plan"
 _PORTFOLIO_PLAN_DECISION_ACTION = "RECORD_PORTFOLIO_PLAN"
@@ -2179,6 +2324,24 @@ def build_portfolio_plan(
             policy=risk_policy,
             portfolio_truth=portfolio_truth,
         )
+    if (
+        dependency_evidence is not None
+        and not dependency_evidence.support_qualified
+    ):
+        return _terminal_plan(
+            decision_ts=decision_ts,
+            action=PortfolioAction.WAIT,
+            reason=(
+                "dependency evidence is under-supported: "
+                f"sample_size={dependency_evidence.sample_size} is below deterministic "
+                f"admission floor {_MIN_DEPENDENCY_EVIDENCE_SAMPLE_SIZE}"
+            ),
+            intents=intents,
+            portfolio_sha256=portfolio_sha256,
+            dependency_graph=dependency_graph,
+            policy=risk_policy,
+            portfolio_truth=portfolio_truth,
+        )
 
     if dependency_graph is not None:
         if not dependency_graph_binds_inputs:
@@ -2544,4 +2707,6 @@ def build_portfolio_plan(
                 )
             )
         ),
+        dependency_evidence=dependency_evidence,
+        robust_proposal=robust_proposal,
     )

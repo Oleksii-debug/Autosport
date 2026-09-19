@@ -12,6 +12,7 @@ from autosport.continuous_observation import (
     main,
     run_continuous_observation,
 )
+from autosport.ingestion_health import SourceHealthStore
 from autosport.providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
 from autosport.storage import SQLiteMarketStore
 
@@ -148,6 +149,36 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(status["health_status"], "healthy")
             self.assertIsNone(status["last_error"])
 
+    def test_provider_unavailable_respects_attempt_budget_and_backoff_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = SequenceProvider(
+                [ProviderUnavailableError(f"outage-{index}") for index in range(4)]
+            )
+            waits = []
+            config = ContinuousObservationConfig(
+                workspace=Path(tmp),
+                max_cycles=4,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=2,
+                max_items=10,
+            )
+            result = run_continuous_observation(
+                provider,
+                config,
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                waiter=lambda seconds: waits.append(seconds) or False,
+                reporter=None,
+            )
+
+            self.assertEqual(result.exit_code, 4)
+            self.assertEqual(result.stop_reason, "max_cycles_after_provider_unavailable")
+            self.assertEqual(result.attempted_cycles, 4)
+            self.assertEqual(result.successful_cycles, 0)
+            self.assertEqual(provider.calls, 4)
+            self.assertEqual(waits, [1.0, 2.0, 2.0])
+
     def test_local_durable_failure_is_terminal_and_never_retried(self):
         with tempfile.TemporaryDirectory() as tmp:
             provider = SequenceProvider([_batch(_quote(), cursor="unused")])
@@ -245,6 +276,11 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(status["previous_run_id"], "run-one")
             self.assertEqual(status["previous_state"], "stopped")
             self.assertFalse(status["previous_unclean_shutdown"])
+            health = SourceHealthStore(workspace / "source_health.json").get(provider_source_id := SequenceProvider.source_id)
+            self.assertEqual(health.source_id, provider_source_id)
+            self.assertEqual(health.poll_count, 2)
+            self.assertEqual(health.total_received, 2)
+            self.assertEqual(health.total_accepted, 1)
 
     def test_invalid_previous_status_fails_before_any_provider_io(self):
         with tempfile.TemporaryDirectory() as tmp:

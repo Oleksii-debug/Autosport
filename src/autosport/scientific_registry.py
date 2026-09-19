@@ -129,6 +129,25 @@ def promotion_holdout_access_id(
         }
     )
 
+def _frozen_promotion_rule_payload(value: object) -> dict[str, Any]:
+    text = _text(value, "binding.promotion_rule")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise PromotionEvidenceError("frozen promotion rule is not canonical JSON") from exc
+    if type(payload) is not dict or payload.get("kind") != "autosport-promotion-rule-v1":
+        raise PromotionEvidenceError("frozen promotion rule kind is unsupported")
+    primary_metric = payload.get("primary_metric")
+    minimum_improvement = payload.get("minimum_improvement")
+    minimum_effective_sample_size = payload.get("minimum_effective_sample_size")
+    if type(primary_metric) is not str or not primary_metric:
+        raise PromotionEvidenceError("frozen promotion rule lacks primary metric")
+    if isinstance(minimum_improvement, bool) or not isinstance(minimum_improvement, (int, float)) or not math.isfinite(minimum_improvement):
+        raise PromotionEvidenceError("frozen promotion rule minimum improvement is invalid")
+    if isinstance(minimum_effective_sample_size, bool) or not isinstance(minimum_effective_sample_size, int) or minimum_effective_sample_size <= 0:
+        raise PromotionEvidenceError("frozen promotion rule minimum effective sample size is invalid")
+    return payload
+
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -1162,6 +1181,11 @@ class ScientificRegistry:
                     isinstance(frozen_rule, str)
                     and frozen_rule.startswith('{"kind":"autosport-promotion-rule-v1"')
                 )
+                frozen_rule_payload = (
+                    _frozen_promotion_rule_payload(frozen_rule)
+                    if promotion_evidence_required
+                    else None
+                )
                 if strategy["payload"].get("predecessor_strategy_version_id") != decision.predecessor_strategy_version_id:
                     raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
                 if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:
@@ -1207,7 +1231,10 @@ class ScientificRegistry:
                     raise PromotionEvidenceError("PROMOTE requires an unconsumed confirmation holdout")
                 effective_n = ep.get("effective_sample_size")
                 minimum_n = ep.get("minimum_effective_sample_size")
-                if type(effective_n) is not int or type(minimum_n) is not int or effective_n < minimum_n:
+                frozen_minimum_n = frozen_rule_payload.get("minimum_effective_sample_size")
+                if type(minimum_n) is not int or minimum_n != frozen_minimum_n:
+                    raise PromotionEvidenceError("promotion evidence minimum effective sample size is not frozen")
+                if type(effective_n) is not int or effective_n < frozen_minimum_n:
                     raise PromotionEvidenceError("PROMOTE requires sufficient effective sample size")
                 if ep.get("guardrails_passed") is not True:
                     raise PromotionEvidenceError("PROMOTE requires passing guardrails")
@@ -1224,8 +1251,11 @@ class ScientificRegistry:
                     raise PromotionEvidenceError("promotion evidence uncertainty method is not frozen")
                 low = Decimal(ep.get("effect_interval_low"))
                 practical = Decimal(ep.get("practical_improvement"))
+                frozen_minimum_improvement = Decimal(str(frozen_rule_payload.get("minimum_improvement")))
                 if low <= 0 or practical <= 0:
                     raise PromotionEvidenceError("PROMOTE requires strictly positive observed improvement and effect interval")
+                if low < frozen_minimum_improvement or practical < frozen_minimum_improvement:
+                    raise PromotionEvidenceError("PROMOTE requires improvement clearing the frozen minimum")
                 for raw in state["records"]:
                     if raw["record_type"] != "PromotionDecision":
                         continue

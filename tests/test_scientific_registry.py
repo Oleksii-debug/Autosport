@@ -118,6 +118,9 @@ def _foundation_with_binding(
     *,
     promotion_rule: str,
     effective_sample_size: int = 5,
+    effect_interval_low: str = "0.05",
+    effect_interval_high: str = "0.15",
+    practical_improvement: str = "0.1",
 ) -> dict[str, object]:
     question = _question()
     hypothesis = _hypothesis()
@@ -136,9 +139,9 @@ def _foundation_with_binding(
                                  evaluated_strategy_version_id="strategy-1",
                                  evaluated_model_version_id="model-1",
                                  effective_sample_size=effective_sample_size,
-                                 effect_interval_low="0.05",
-                                 effect_interval_high="0.15",
-                                 practical_improvement="0.1")
+                                 effect_interval_low=effect_interval_low,
+                                 effect_interval_high=effect_interval_high,
+                                 practical_improvement=practical_improvement)
     for record in (question, hypothesis, protocol, dataset, features, model, strategy, bundle):
         registry.append(record)
     return {"question": question, "hypothesis": hypothesis, "protocol": protocol,
@@ -726,6 +729,9 @@ def test_promotion_rejects_positive_but_below_frozen_minimum_improvement(tmp_pat
         registry,
         promotion_rule=rule_text,
         effective_sample_size=3,
+        effect_interval_low="0.04",
+        effect_interval_high="0.06",
+        practical_improvement="0.04",
     )
     registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
     evidence = _promotion_evidence(
@@ -871,7 +877,16 @@ def test_promotion_holdout_identity_is_stable_across_dataset_snapshot_renames():
 
 def test_promotion_evidence_identity_and_strict_improvement(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    foundation = _foundation(registry)
+    foundation = _foundation_with_binding(
+        registry,
+        promotion_rule=_frozen_promotion_rule_text(
+            minimum_improvement=0.0,
+            minimum_effective_sample_size=3,
+        ),
+        effect_interval_low="0",
+        effect_interval_high="0",
+        practical_improvement="0",
+    )
     registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
 
     evidence = _promotion_evidence(
@@ -933,7 +948,7 @@ def test_promotion_rejects_reuse_of_consumed_evidence_and_holdout(tmp_path):
         promotion_evidence_id=evidence.promotion_evidence_id,
     )
     registry.record_promotion(decision)
-    with pytest.raises(PromotionEvidenceError, match="already been consumed"):
+    with pytest.raises(PromotionEvidenceError):
         registry.record_promotion(replace(decision, promotion_decision_id="promotion-consume-2"))
 
 

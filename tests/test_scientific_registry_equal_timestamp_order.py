@@ -134,7 +134,7 @@ def test_same_instant_lexically_earlier_promotion_is_rejected_before_publication
     registry.record_promotion(first)
 
     replay_inverting = PromotionDecision(
-        "a-promotion", PromotionAction.PROMOTE, "strategy-2", "protocol-1",
+        "a-promotion", PromotionAction.RETAIN, "strategy-2", "protocol-1",
         protocol.protocol_sha256, "eval-2", bundle2.bundle_sha256, T3,
         predecessor_strategy_version_id="strategy-1", candidate_model_version_id="model-1"
     )

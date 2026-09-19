@@ -124,7 +124,7 @@ def _seed_registry(path):
         experiment_id="experiment-1", strategy_id="strategy-1", model_id="model-1",
         bundle_id="eval-1", dataset_id="dataset-1", protocol_id="protocol-1",
         bundle_sha=eval1.bundle_sha256, evidence_id="promotion-1-evidence",
-        rollback_identity="NONE", minimum_n=3,
+        rollback_identity="NONE", minimum_n=3, created_at=T2,
     )
     registry.append(evidence1)
     registry.record_promotion(

@@ -150,7 +150,7 @@ def test_hard_example_curriculum_cannot_be_confirmation_population(tmp_path):
         reasons=("observed-loss", "repeated-failure"),
         outcome_available_at="2026-09-19T03:15:00Z",
     )
-    curriculum.select(
+    record = curriculum.select(
         (hard,),
         purpose=CurriculumPurpose.CURRICULUM,
         selector_policy_version="night-v1",
@@ -158,6 +158,8 @@ def test_hard_example_curriculum_cannot_be_confirmation_population(tmp_path):
         seed=1,
         budget_units=1,
     )
+    assert record.outcome_information_available is True
+    assert record.selected_outcome_available_at == "2026-09-19T03:15:00Z"
     with pytest.raises(ResearchCurriculumError, match="no causally eligible"):
         curriculum.select(
             (hard,),
@@ -262,6 +264,91 @@ def test_pause_stop_survive_restart_and_block_selection(tmp_path):
             seed=1,
             budget_units=1,
         )
+
+
+def test_pause_after_selection_blocks_new_dispatch_without_supervisor_run(tmp_path):
+    _, supervisor, curriculum = _workspace(tmp_path)
+    record = curriculum.select(
+        (_candidate(episode_id="d" * 64),),
+        purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=4,
+        budget_units=1,
+    )
+    curriculum.pause()
+
+    with pytest.raises(ResearchCurriculumError, match="not active"):
+        curriculum.dispatch(record)
+
+    assert len(supervisor.list_runs()) == 0
+
+
+def test_stop_after_dispatch_reservation_does_not_orphan_supervisor_run(
+    tmp_path, monkeypatch
+):
+    _, supervisor, curriculum = _workspace(tmp_path)
+    record = curriculum.select(
+        (_candidate(episode_id="e" * 64),),
+        purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=5,
+        budget_units=1,
+    )
+    original_accept = ResearchTriggerAdapter.accept
+
+    def stop_then_accept(adapter, event):
+        curriculum.stop("operator stop after dispatch admission")
+        return original_accept(adapter, event)
+
+    monkeypatch.setattr(ResearchTriggerAdapter, "accept", stop_then_accept)
+    receipt = curriculum.dispatch(record)
+
+    assert curriculum.status.value == "STOPPED"
+    assert supervisor.status(receipt.run_id).run_id == receipt.run_id
+    dispatch = curriculum.snapshot()["dispatches"][record.selection_id]
+    assert dispatch["status"] == "ACCEPTED"
+    assert dispatch["run_id"] == receipt.run_id
+
+
+def test_pending_dispatch_cannot_publish_outcome_and_exact_retry_recovers(
+    tmp_path, monkeypatch
+):
+    _, supervisor, curriculum = _workspace(tmp_path)
+    record = curriculum.select(
+        (_candidate(episode_id="f" * 64),),
+        purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=6,
+        budget_units=1,
+    )
+    original_accept = ResearchTriggerAdapter.accept
+
+    def fail_once(adapter, event):
+        monkeypatch.setattr(ResearchTriggerAdapter, "accept", original_accept)
+        raise RuntimeError("simulated crash after durable dispatch reservation")
+
+    monkeypatch.setattr(ResearchTriggerAdapter, "accept", fail_once)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        curriculum.dispatch(record)
+
+    pending = curriculum.snapshot()["dispatches"][record.selection_id]
+    assert pending["status"] == "PENDING"
+    assert len(supervisor.list_runs()) == 0
+    with pytest.raises(ResearchCurriculumError, match="no accepted supervisor dispatch"):
+        curriculum.record_outcome(
+            record.selection_id,
+            outcome=CurriculumOutcome.NEGATIVE,
+            at="2026-09-19T03:21:00Z",
+        )
+
+    recovered = curriculum.dispatch(record)
+    accepted = curriculum.snapshot()["dispatches"][record.selection_id]
+    assert accepted["status"] == "ACCEPTED"
+    assert accepted["run_id"] == recovered.run_id
+    assert len(supervisor.list_runs()) == 1
 
 
 def test_no_bet_has_no_fixed_positive_selection_bonus(tmp_path):

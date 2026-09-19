@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -23,7 +25,9 @@ from autosport.live_decision_loop import (
 )
 from autosport.market_bus import MarketEventBus
 from autosport.paper import PaperBook
+from autosport.portfolio_plan import OpportunityIntent
 from autosport.providers import ProviderUnavailableError
+from autosport.scientific_registry import ScientificRegistry, StrategyVersion
 from autosport.risk import PaperRiskPolicy
 from autosport.storage import SQLiteMarketStore
 
@@ -67,7 +71,11 @@ class _DurableObserver:
 
 
 class _EmptyIntentFactory:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        strategy_version_id: str = "live-test-strategy-v1",
+    ) -> None:
+        self.strategy_version_id = strategy_version_id
         self.calls: list[tuple[str, tuple[tuple[str, int, str], ...]]] = []
 
     def __call__(self, input_id, snapshot):
@@ -85,8 +93,18 @@ class _EmptyIntentFactory:
 
 class PersistentLiveDecisionLoopTests(unittest.TestCase):
     START = datetime(2026, 9, 18, 18, 0, 0, tzinfo=timezone.utc)
-    INTENT_CONTEXT_SHA256 = "11" * 32
-    ALT_INTENT_CONTEXT_SHA256 = "22" * 32
+    INTENT_SOURCE_SHA256 = hashlib.sha256(
+        b"tests.test_live_decision_loop:_EmptyIntentFactory:v1"
+    ).hexdigest()
+    INTENT_ENVIRONMENT_SHA256 = hashlib.sha256(
+        b"tests.test_live_decision_loop:environment:v1"
+    ).hexdigest()
+    INTENT_CONFIG_SHA256 = hashlib.sha256(
+        b"tests.test_live_decision_loop:empty-intent-config:v1"
+    ).hexdigest()
+    ALT_INTENT_CONFIG_SHA256 = hashlib.sha256(
+        b"tests.test_live_decision_loop:empty-intent-config:v2"
+    ).hexdigest()
 
     @staticmethod
     def _event(
@@ -124,19 +142,54 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             PaperRiskPolicy(economic_goal=goal),
         )
 
+    @classmethod
+    def _strategy_version(
+        cls,
+        *,
+        strategy_version_id: str = "live-test-strategy-v1",
+        config_sha256: str | None = None,
+        created_at: datetime | None = None,
+    ) -> StrategyVersion:
+        return StrategyVersion(
+            strategy_version_id=strategy_version_id,
+            canonical_strategy_id="live-test-strategy",
+            source_sha256=cls.INTENT_SOURCE_SHA256,
+            environment_sha256=cls.INTENT_ENVIRONMENT_SHA256,
+            config_sha256=(
+                cls.INTENT_CONFIG_SHA256
+                if config_sha256 is None
+                else config_sha256
+            ),
+            created_at=(cls.START if created_at is None else created_at).isoformat(),
+        )
+
+    @classmethod
+    def _scientific_registry(
+        cls,
+        workspace: Path,
+        strategy_version: StrategyVersion,
+    ) -> ScientificRegistry:
+        registry = ScientificRegistry.initialize_pristine(
+            workspace / "scientific_registry.json"
+        )
+        registry.append(strategy_version)
+        return registry
+
     def _loop(
         self,
         workspace: Path,
         *,
         observer: _DurableObserver,
-        factory: _EmptyIntentFactory,
+        factory,
         clock: _ManualClock,
         bounds: LiveLoopBounds | None = None,
         post_append_hook=None,
-        intent_context_sha256: str | None = None,
+        strategy_version: StrategyVersion | None = None,
         book: PaperBook | None = None,
         authority: EconomicDecisionAuthority | None = None,
     ) -> PersistentLiveDecisionLoop:
+        selected_strategy = strategy_version or self._strategy_version()
+        registry = self._scientific_registry(workspace, selected_strategy)
         return PersistentLiveDecisionLoop(
             workspace,
             loop_id="live-test-loop",
@@ -144,17 +197,124 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             book=PaperBook("1000") if book is None else book,
             authority=self._authority() if authority is None else authority,
             intent_factory=factory,
-            intent_context_sha256=(
-                self.INTENT_CONTEXT_SHA256
-                if intent_context_sha256 is None
-                else intent_context_sha256
-            ),
+            scientific_registry=registry,
             observation_runner=observer,
             bounds=bounds,
             max_quote_age=timedelta(seconds=5),
             clock=clock,
             post_append_hook=post_append_hook,
         )
+
+    def test_constructor_requires_durable_registered_intent_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = ScientificRegistry.initialize_pristine(
+                workspace / "scientific_registry.json"
+            )
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "StrategyVersion is missing",
+            ):
+                PersistentLiveDecisionLoop(
+                    workspace,
+                    loop_id="missing-provenance",
+                    mode=LiveDecisionMode.PAPER,
+                    book=PaperBook("1000"),
+                    authority=self._authority(),
+                    intent_factory=_EmptyIntentFactory(
+                        "caller-minted-arbitrary-digest"
+                    ),
+                    scientific_registry=registry,
+                    observation_runner=_DurableObserver(workspace, [()]),
+                    max_quote_age=timedelta(seconds=5),
+                    clock=_ManualClock(self.START),
+                )
+
+    def test_constructor_rejects_future_registered_intent_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "not causally available",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START),
+                    strategy_version=self._strategy_version(
+                        created_at=self.START + timedelta(seconds=1),
+                    ),
+                )
+
+    def test_factory_cannot_relabel_itself_after_provenance_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=factory,
+                clock=_ManualClock(self.START),
+            )
+            factory.strategy_version_id = "live-test-strategy-v2"
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "factory strategy-version provenance changed",
+            ):
+                loop._decision_context_sha256()
+
+    def test_emitted_intent_cannot_relabel_registered_strategy_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            forged = object.__new__(OpportunityIntent)
+            object.__setattr__(forged, "strategy_id", "relabelled-strategy-v9")
+            object.__setattr__(forged, "config_sha256", self.INTENT_CONFIG_SHA256)
+            object.__setattr__(forged, "model_id", None)
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "strategy identity does not match registered StrategyVersion",
+            ):
+                loop._validated_intents((forged,))
+
+    def test_decision_ledger_binds_exact_registered_intent_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(record.payload["schema_version"], 2)
+            self.assertEqual(
+                record.payload["intent_strategy_version_id"],
+                loop.intent_provenance.strategy_version_id,
+            )
+            self.assertIsNone(record.payload["intent_model_version_id"])
+            self.assertEqual(
+                record.payload["intent_provenance_sha256"],
+                loop.intent_provenance.provenance_sha256,
+            )
 
     @staticmethod
     def _register_two(loop: PersistentLiveDecisionLoop) -> None:
@@ -490,6 +650,8 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             def fail_after_pending(input_id, snapshot):
                 raise RuntimeError("simulated process loss after pending cursor")
 
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+
             first = self._loop(
                 workspace,
                 observer=first_observer,
@@ -540,6 +702,8 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             def fail_after_pending(input_id, snapshot):
                 raise RuntimeError("simulated process loss after pending cursor")
 
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+
             first = self._loop(
                 workspace,
                 observer=_DurableObserver(
@@ -585,12 +749,14 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_factory.calls, [])
             self.assertFalse((workspace / "decisions.jsonl").exists())
 
-    def test_pending_restart_rejects_changed_intent_context_before_poll(self) -> None:
+    def test_pending_restart_rejects_changed_intent_provenance_before_poll(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
 
             def fail_after_pending(input_id, snapshot):
                 raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
 
             first = self._loop(
                 workspace,
@@ -609,9 +775,12 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             resumed = self._loop(
                 workspace,
                 observer=resumed_observer,
-                factory=_EmptyIntentFactory(),
+                factory=_EmptyIntentFactory("live-test-strategy-v2"),
                 clock=_ManualClock(self.START + timedelta(seconds=2)),
-                intent_context_sha256=self.ALT_INTENT_CONTEXT_SHA256,
+                strategy_version=self._strategy_version(
+                    strategy_version_id="live-test-strategy-v2",
+                    config_sha256=self.ALT_INTENT_CONFIG_SHA256,
+                ),
             )
             with self.assertRaisesRegex(
                 LiveDecisionProgressError,
@@ -621,12 +790,72 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_observer.calls, 0)
             self.assertFalse((workspace / "decisions.jsonl").exists())
 
+    def test_pending_restart_rejects_provenance_unavailable_at_original_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            strategy = self._strategy_version(
+                created_at=self.START + timedelta(seconds=2),
+            )
+            seed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+                strategy_version=strategy,
+            )
+            decision_context_sha256 = seed._decision_context_sha256()
+            seed.close()
+
+            legacy_pending = {
+                "schema": "autosport.live_decision_progress",
+                "schema_version": 1,
+                "loop_id": "live-test-loop",
+                "phase": "pending",
+                "decision_ts": (self.START + timedelta(seconds=1)).isoformat(),
+                "market_state_sha256": hashlib.sha256(
+                    b"legacy-pre-causal-provenance"
+                ).hexdigest(),
+                "decision_context_sha256": decision_context_sha256,
+                "affected_input_ids": [],
+                "registered_input_ids": [],
+                "decision_id": None,
+                "plan_sha256": None,
+                "ledger_offset": None,
+                "gate": "normal",
+            }
+            (
+                workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+            ).write_text(
+                json.dumps(legacy_pending, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+                strategy_version=strategy,
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "not causally available",
+            ):
+                resumed.run_cycle()
+
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
     def test_pending_restart_rejects_changed_paper_book_before_poll(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
 
             def fail_after_pending(input_id, snapshot):
                 raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
 
             first = self._loop(
                 workspace,
@@ -867,6 +1096,8 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 goal,
                 PaperRiskPolicy(economic_goal=goal),
             )
+            strategy_version = self._strategy_version()
+            registry = self._scientific_registry(workspace, strategy_version)
             with self.assertRaisesRegex(ValueError, "cannot exceed EconomicGoalContract"):
                 PersistentLiveDecisionLoop(
                     workspace,
@@ -875,7 +1106,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     book=PaperBook("1000"),
                     authority=authority,
                     intent_factory=_EmptyIntentFactory(),
-                    intent_context_sha256=self.INTENT_CONTEXT_SHA256,
+                    scientific_registry=registry,
                     observation_runner=_DurableObserver(workspace, [()]),
                     max_quote_age=timedelta(seconds=6),
                     clock=_ManualClock(self.START),

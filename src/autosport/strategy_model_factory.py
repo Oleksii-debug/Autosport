@@ -800,7 +800,6 @@ def _run_policy_candidate_unstaged(
         for sample in counterfactual_samples:
             authority.validate_reference(
                 counterfactual_source_id=sample.get("counterfactual_source_id"),
-                source_evidence_sha256=sample.get("source_evidence_sha256"),
                 reward_mode=sample.get("reward_mode"),
                 scope=sample.get("regime_id"),
             )

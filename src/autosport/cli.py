@@ -10,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Callable
 
+from . import dataset_calculation_cli
 from . import ingestion as ingestion_module
 from .agents import AgentContext, AgentOrchestrator, MarketMirrorAgent, PaperBaselineAgent
 from .dataset import load_dataset
@@ -156,6 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     endurance.add_argument("--restart-cycles", type=int, default=3)
     endurance.add_argument("--tickets", type=int, default=50)
     endurance.add_argument("--output", type=Path, default=None)
+    dataset_calculation_cli.add_parser(sub)
     sub.add_parser("gui", help="launch Windows-oriented GUI")
     return parser
 
@@ -552,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
             tickets=args.tickets,
             output=args.output,
         )
+    if args.command == "calculate-dataset-quote":
+        return dataset_calculation_cli.run(args)
     if args.command == "gui":
         from .gui import main as gui_main
         return gui_main()

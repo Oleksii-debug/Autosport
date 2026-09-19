@@ -333,6 +333,13 @@ class ChampionEligibilityDecision:
             if any(scope != scoped for scope in authoritative_scopes[1:]):
                 raise ChampionEligibilityError("drift evidence scope changes across windows")
 
+        canonical_window_start = min(item[0] for item in ordered).isoformat().replace("+00:00", "Z")
+        canonical_window_end = max(item[1] for item in ordered).isoformat().replace("+00:00", "Z")
+        if _ts(window_start, "window_start") != canonical_window_start:
+            raise ChampionEligibilityError("window_start does not match causal evidence")
+        if _ts(window_end, "window_end") != canonical_window_end:
+            raise ChampionEligibilityError("window_end does not match causal evidence")
+
         if scoped is None:
             status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
             status_reason = "authoritative_sport_league_regime_scope_is_missing"

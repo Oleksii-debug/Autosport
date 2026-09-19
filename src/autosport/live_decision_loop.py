@@ -97,6 +97,8 @@ class LiveLoopBounds:
 
 
 class LiveIntentFactory(Protocol):
+    strategy_version_id: str
+
     def __call__(
         self,
         input_id: str,
@@ -609,7 +611,6 @@ class PersistentLiveDecisionLoop:
         authority: EconomicDecisionAuthority,
         intent_factory: LiveIntentFactory,
         scientific_registry: ScientificRegistry,
-        intent_strategy_version_id: str,
         provider: MarketProvider | None = None,
         decision_ledger: JsonlDecisionLedger | None = None,
         ingestion_policy: IngestionPolicy | None = None,
@@ -630,9 +631,18 @@ class PersistentLiveDecisionLoop:
             raise TypeError("authority must be EconomicDecisionAuthority")
         if not callable(intent_factory):
             raise TypeError("intent_factory must be callable")
+        factory_strategy_version_id = getattr(
+            intent_factory,
+            "strategy_version_id",
+            None,
+        )
+        if type(factory_strategy_version_id) is not str:
+            raise TypeError(
+                "intent_factory must expose canonical strategy_version_id"
+            )
         intent_provenance = LiveIntentProvenance.from_registry(
             scientific_registry,
-            intent_strategy_version_id,
+            factory_strategy_version_id,
         )
         goal_quote_age = authority.contract.max_quote_age_seconds
         if max_quote_age is None:
@@ -1019,7 +1029,28 @@ class PersistentLiveDecisionLoop:
         self._needs_cache_rebuild = False
         return result
 
+    def _verify_intent_factory_provenance(self) -> None:
+        factory_strategy_version_id = getattr(
+            self.intent_factory,
+            "strategy_version_id",
+            None,
+        )
+        try:
+            factory_strategy_version_id = _canonical_text(
+                "intent_factory.strategy_version_id",
+                factory_strategy_version_id,
+            )
+        except ValueError as exc:
+            raise LiveDecisionProgressError(
+                "live intent factory lost canonical strategy-version provenance"
+            ) from exc
+        if factory_strategy_version_id != self.intent_provenance.strategy_version_id:
+            raise LiveDecisionProgressError(
+                "live intent factory strategy-version provenance changed"
+            )
+
     def _decision_context_sha256(self) -> str:
+        self._verify_intent_factory_provenance()
         book_state_sha256 = self.authority.risk_policy.risk_of_ruin_portfolio_sha256(
             self.book
         )
@@ -1166,6 +1197,7 @@ class PersistentLiveDecisionLoop:
     def _validated_intents(self, produced: object) -> tuple[object, ...]:
         from .portfolio_plan import OpportunityIntent
 
+        self._verify_intent_factory_provenance()
         if type(produced) is not tuple:
             raise TypeError("intent_factory must return a tuple")
         if any(not isinstance(intent, OpportunityIntent) for intent in produced):

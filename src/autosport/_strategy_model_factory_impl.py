@@ -1464,7 +1464,11 @@ class ExperimentRunner:
                 allow_nan=False,
             ).encode("utf-8")
         ).hexdigest()
-        typed_evidence_payload = dict(evidence_payload)
+        typed_evidence_payload = {
+            key: value
+            for key, value in evidence_payload.items()
+            if key != "schema_version"
+        }
         typed_evidence_payload["direction"] = PromotionEvidenceDirection(
             evidence_payload["direction"]
         )

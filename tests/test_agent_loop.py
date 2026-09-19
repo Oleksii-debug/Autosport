@@ -1161,3 +1161,91 @@ def test_admissible_direct_action_cannot_predate_observation_availability(tmp_pa
     snapshot = runtime.snapshot()
     assert snapshot.phase is AgentLoopPhase.ACT_OR_ABSTAIN
     assert snapshot.action_id is None
+
+
+def _rewrite_state_with_digest(path, mutate):
+    state = json_load(path)
+    mutate(state)
+    payload = {key: value for key, value in state.items() if key != "state_sha256"}
+    state["state_sha256"] = __import__("hashlib").sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    path.write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_restart_rejects_self_consistent_orphaned_current_pointer(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+
+    _rewrite_state_with_digest(
+        runtime.path,
+        lambda state: state["current"].update(
+            action_id="f" * 64,
+        ),
+    )
+    with pytest.raises(AgentLoopError, match="current action_id points to missing durable history"):
+        AgentLoopRuntime(runtime.path)
+
+
+def test_restart_rejects_self_consistent_malformed_history_record(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+
+    def forge(state):
+        state["decisions"][0]["unexpected_field"] = "forged"
+
+    _rewrite_state_with_digest(runtime.path, forge)
+    with pytest.raises(AgentLoopError, match="decision record fields mismatch"):
+        AgentLoopRuntime(runtime.path)

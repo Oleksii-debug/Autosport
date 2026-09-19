@@ -66,6 +66,15 @@ _ANCHOR_METRICS = frozenset(
     }
 )
 
+_SUPPLEMENTAL_METRICS = frozenset(
+    {
+        "calibration_error",
+        "execution_feasibility",
+        "settlement_identity_complexity",
+        "oos_net_economic_value",
+    }
+)
+
 
 def _text(name: str, value: object) -> str:
     if type(value) is not str or not value or value != value.strip() or "\x00" in value:
@@ -148,11 +157,22 @@ class AnchorSupplementalMetric:
         elif self.value is not None:
             raise AnchorSelectionError("unmeasured supplemental metric must not carry a value")
 
+    def payload(self) -> dict[str, str | None]:
+        return {
+            "state": self.state.value,
+            "value": None if self.value is None else str(self.value),
+            "unit": self.unit,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class AnchorSupplementalEvidence:
     observation_id: str
     evidence_sha256: str
+    source_evidence_sha256: str
+    measured_until: str
+    available_at: str
+    provenance: EvidenceProvenance
     calibration_error: AnchorSupplementalMetric
     execution_feasibility: AnchorSupplementalMetric
     settlement_identity_complexity: AnchorSupplementalMetric
@@ -161,6 +181,17 @@ class AnchorSupplementalEvidence:
     def __post_init__(self) -> None:
         _text("observation_id", self.observation_id)
         _sha256(self.evidence_sha256, "evidence_sha256")
+        _sha256(self.source_evidence_sha256, "source_evidence_sha256")
+        measured_until = _instant("supplemental.measured_until", self.measured_until)
+        available_at = _instant("supplemental.available_at", self.available_at)
+        if available_at < measured_until:
+            raise AnchorSelectionError(
+                "supplemental available_at precedes measured_until"
+            )
+        if not isinstance(self.provenance, EvidenceProvenance):
+            raise AnchorSelectionError(
+                "supplemental provenance must be EvidenceProvenance"
+            )
         for name, unit in {
             "calibration_error": "fraction",
             "execution_feasibility": "fraction",
@@ -172,12 +203,35 @@ class AnchorSupplementalEvidence:
                 raise AnchorSelectionError(f"{name} must use unit {unit!r}")
         for name in ("calibration_error", "execution_feasibility"):
             metric = getattr(self, name)
-            if metric.state is EvidenceState.MEASURED and not Decimal("0") <= metric.value <= Decimal("1"):
+            if (
+                metric.state is EvidenceState.MEASURED
+                and not Decimal("0") <= metric.value <= Decimal("1")
+            ):
                 raise AnchorSelectionError(f"{name} must be between 0 and 1")
 
     def metric_value(self, name: str) -> Decimal | None:
         metric = getattr(self, name)
         return metric.value if metric.state is EvidenceState.MEASURED else None
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "observation_id": self.observation_id,
+            "evidence_sha256": self.evidence_sha256,
+            "source_evidence_sha256": self.source_evidence_sha256,
+            "measured_until": _time(
+                "supplemental.measured_until", self.measured_until
+            ),
+            "available_at": _time("supplemental.available_at", self.available_at),
+            "provenance": self.provenance.value,
+            "metrics": {
+                name: getattr(self, name).payload()
+                for name in sorted(_SUPPLEMENTAL_METRICS)
+            },
+        }
+
+    @property
+    def supplemental_sha256(self) -> str:
+        return _digest(self.payload())
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +322,12 @@ class AnchorSelectionProtocol:
         names = [rule.name for rule in self.metrics]
         if len(names) != len(set(names)):
             raise AnchorSelectionError("anchor metrics must be unique")
+        missing_required = sorted(_ANCHOR_METRICS.difference(names))
+        if missing_required:
+            raise AnchorSelectionError(
+                "anchor protocol must preserve all required dimensions: "
+                + ",".join(missing_required)
+            )
 
     @property
     def measurement_window_seconds(self) -> int:
@@ -585,7 +645,30 @@ def evaluate_anchor_selection(
         if observation is None:
             raise AnchorSelectionError("supplemental evidence references an unknown observation")
         if observation.evidence_sha256 != evidence.evidence_sha256:
-            raise AnchorSelectionError("supplemental evidence does not bind the observation evidence hash")
+            raise AnchorSelectionError(
+                "supplemental evidence does not bind the observation evidence hash"
+            )
+        if evidence.provenance is not EvidenceProvenance.OBSERVED:
+            raise AnchorSelectionError(
+                "supplemental evidence must have observed provenance"
+            )
+        supplemental_measured_until = _instant(
+            "supplemental.measured_until", evidence.measured_until
+        )
+        supplemental_available_at = _instant(
+            "supplemental.available_at", evidence.available_at
+        )
+        if supplemental_measured_until > end:
+            raise AnchorSelectionError(
+                "supplemental evidence exceeds the frozen measurement window"
+            )
+        if (
+            supplemental_measured_until > as_of
+            or supplemental_available_at > as_of
+        ):
+            raise AnchorSelectionError(
+                "supplemental evidence is not causally available at the decision boundary"
+            )
         supplemental_by_observation[evidence.observation_id] = evidence
 
     candidates: dict[str, list[SportDomainFitnessObservation]] = {

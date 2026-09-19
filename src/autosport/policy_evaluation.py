@@ -11,7 +11,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Decimal, localcontext
 from enum import StrEnum
 from typing import Sequence
 
@@ -231,8 +231,10 @@ class PolicyEvaluationCase:
         )
         if any(value <= 0 or value > 1 for value in propensities.values()):
             raise ValueError("behavior propensity must be in (0,1]")
-        if not set(costs).issubset(rewards):
-            raise ValueError("cost evidence exists for action without reward evidence")
+        if set(costs) != set(rewards):
+            raise ValueError(
+                "every supported reward action requires explicit cost evidence"
+            )
 
         if self.reward_mode is PolicyRewardMode.OBSERVED_ACTION:
             historical = _text(self.historical_action, "historical_action")
@@ -244,7 +246,9 @@ class PolicyEvaluationCase:
                 raise ValueError("observed-action case cannot claim counterfactual source")
         else:
             if self.historical_action is not None:
-                _text(self.historical_action, "historical_action")
+                historical = _text(self.historical_action, "historical_action")
+                if historical not in actions:
+                    raise ValueError("historical_action must be admissible")
             source_id = _text(self.counterfactual_source_id, "counterfactual_source_id")
             if set(rewards) != set(actions):
                 raise ValueError("qualified full-information case requires every action reward")
@@ -514,7 +518,10 @@ def evaluate_policy_pair(
         paired_improvements.append(delta)
         with localcontext() as context:
             context.prec = 50
-            importance_weights.append(Decimal(1) / challenger_propensity)
+            conservative_support = min(
+                predecessor_propensity, challenger_propensity
+            )
+            importance_weights.append(Decimal(1) / conservative_support)
         regime_deltas.setdefault(case.regime_id, []).append(delta)
         sample_payloads.append(
             {

@@ -2326,6 +2326,8 @@ class AgentLoopRuntime:
             state["checkpointed_transition_id"] = (
                 environment_checkpoint.last_transition_id
             )
+            # Validate the candidate state before _mutate can persist it.
+            self._validate_history(state)
 
         return self._mutate(at, apply)
 

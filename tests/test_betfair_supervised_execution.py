@@ -662,6 +662,48 @@ def test_unmatched_success_is_unknown_until_readback() -> None:
         )
 
 
+def test_duplicate_provider_json_key_is_unknown_not_terminal() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action = _prepared(tmp)
+
+        def duplicate_status_response(request: dict[str, object]) -> bytes:
+            payload = _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            ).decode("utf-8")
+            duplicate = payload.replace(
+                '"status": "SUCCESS"',
+                '"status": "FAILURE", "status": "SUCCESS"',
+                1,
+            )
+            assert duplicate != payload
+            return duplicate.encode("utf-8")
+
+        transport = _Transport(duplicate_status_response)
+        client = _enabled_client(profile, transport)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-duplicate-json",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+        assert len(transport.calls) == 1
+
+
 def test_duplicate_terminal_attempt_never_calls_placeorders_twice() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action = _prepared(tmp)

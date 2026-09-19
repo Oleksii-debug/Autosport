@@ -52,16 +52,20 @@ class AccessibilityAuditTests(unittest.TestCase):
                 self._widget(shell["state"], "Стан вибраної поверхні", role="TEXT", patterns=("VALUE",)),
                 self._widget(shell["open"], "Перейти до робочої поверхні", patterns=("INVOKE",)),
                 self._widget(shell["details"], "Контракт вибраного екрана", role="LIST", answers_rows=True),
+                self._widget(shell["owner_economic_open"], "Економічні межі власника", patterns=("INVOKE",)),
+                self._widget(shell["owner_economic_status"], "Стан економічних меж власника", role="TEXT", patterns=("VALUE",)),
+                self._widget(shell["owner_economic_readback"], "Точні економічні межі власника", role="LIST", answers_rows=True),
             ),
             provider_trouble=(),
             providers_stood_down_because=None,
         )
 
-    def _summarize(self, description, *, bankroll_readonly=True, shell_state_readonly=True):
+    def _summarize(self, description, *, bankroll_readonly=True, shell_state_readonly=True, owner_economic_state_readonly=True):
         return summarize_description(
             description,
             bankroll_readonly=bankroll_readonly,
             shell_state_readonly=shell_state_readonly,
+            owner_economic_state_readonly=owner_economic_state_readonly,
         )
 
     def test_v1_replay_speed_contract_includes_event_jump_and_1000x(self):
@@ -87,7 +91,7 @@ class AccessibilityAuditTests(unittest.TestCase):
     def test_critical_contract_passes_with_names_roles_patterns_rows_and_readonly(self):
         report = self._summarize(self._passing_description())
         self.assertEqual(report["status"], "PASS")
-        self.assertEqual(len(report["critical_controls"]), 17)
+        self.assertEqual(len(report["critical_controls"]), 20)
         bankroll = next(
             item
             for item in report["critical_controls"]
@@ -156,6 +160,11 @@ class AccessibilityAuditTests(unittest.TestCase):
         report = self._summarize(self._passing_description(), shell_state_readonly=False)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("shell state is not runtime readonly" in item for item in report["failures"]))
+
+    def test_editable_owner_economic_state_fails_closed(self):
+        report = self._summarize(self._passing_description(), owner_economic_state_readonly=False)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(any("owner economic state is not runtime readonly" in item for item in report["failures"]))
 
     def test_missing_bankroll_runtime_state_evidence_fails_closed(self):
         report = summarize_description(self._passing_description(), shell_state_readonly=True)

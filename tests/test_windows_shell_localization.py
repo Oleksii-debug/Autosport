@@ -52,6 +52,7 @@ _ALLOWED_SHORTCUT_OR_PLATFORM_TOKENS = frozenset(
         "F6",
         "F7",
         "F8",
+        "F9",
         "Left",
         "R",
         "Right",
@@ -72,7 +73,7 @@ def _assert_no_unexplained_english(value: str) -> None:
 
 def test_windows_shell_catalog_extends_one_versioned_ukrainian_boundary():
     assert DEFAULT_LOCALE == "uk-UA"
-    assert CATALOG_VERSION == 4
+    assert CATALOG_VERSION == 5
     assert WINDOWS_SHELL_LOCALIZATION_KEYS <= set(catalog())
     assert WINDOWS_SURFACE_LOCALIZATION_KEYS <= set(catalog())
     assert text("ui.windows.shell.frame.title") == "Навігація продукту"

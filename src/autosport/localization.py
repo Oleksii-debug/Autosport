@@ -4,11 +4,12 @@ from types import MappingProxyType
 from typing import Mapping
 
 from . import localization_v2 as _v2
+from .localization_owner_economic import OWNER_ECONOMIC_AUTHORITY_UK_UA
 from .localization_windows_surfaces import WINDOWS_SURFACE_CONTENT_UK_UA
 
 
 DEFAULT_LOCALE = _v2.DEFAULT_LOCALE
-CATALOG_VERSION = 4
+CATALOG_VERSION = 5
 
 # Public v4 keeps one localization API while preserving the proven v2 catalog
 # as an immutable base resource. Windows shell chrome and surface-contract
@@ -60,12 +61,28 @@ _WINDOWS_SHELL_UK_UA = MappingProxyType(
     }
 )
 
+_OWNER_COLLISIONS = set(_WINDOWS_SHELL_UK_UA).intersection(OWNER_ECONOMIC_AUTHORITY_UK_UA)
+if _OWNER_COLLISIONS:
+    raise RuntimeError(f"localization v5 shell/owner resources collide: {sorted(_OWNER_COLLISIONS)!r}")
+
 _CUSTOM_COLLISIONS = set(_WINDOWS_SHELL_UK_UA).intersection(WINDOWS_SURFACE_CONTENT_UK_UA)
 if _CUSTOM_COLLISIONS:
     raise RuntimeError(f"localization v4 custom resources collide: {sorted(_CUSTOM_COLLISIONS)!r}")
 
+_SURFACE_OWNER_COLLISIONS = set(WINDOWS_SURFACE_CONTENT_UK_UA).intersection(
+    OWNER_ECONOMIC_AUTHORITY_UK_UA
+)
+if _SURFACE_OWNER_COLLISIONS:
+    raise RuntimeError(
+        f"localization v5 surface/owner resources collide: {sorted(_SURFACE_OWNER_COLLISIONS)!r}"
+    )
+
 _CUSTOM_UK_UA = MappingProxyType(
-    {**_WINDOWS_SHELL_UK_UA, **WINDOWS_SURFACE_CONTENT_UK_UA}
+    {
+        **_WINDOWS_SHELL_UK_UA,
+        **WINDOWS_SURFACE_CONTENT_UK_UA,
+        **OWNER_ECONOMIC_AUTHORITY_UK_UA,
+    }
 )
 _BASE_UK_UA = _v2.catalog(DEFAULT_LOCALE)
 _COLLISIONS = set(_BASE_UK_UA).intersection(_CUSTOM_UK_UA)

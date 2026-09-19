@@ -308,6 +308,40 @@ class _ContinuousSessionState:
 
         self._update(mutate)
 
+    @staticmethod
+    def _normalized_settlement_evidence(
+        evidence: SettlementResolution,
+    ) -> dict[str, str]:
+        return {
+            "event_identity": evidence.event_identity,
+            "settlement_ref": evidence.settlement_ref,
+            "evidence_id": evidence.evidence_id,
+            "evidence_sha256": evidence.evidence_sha256,
+            "available_at": _instant(
+                evidence.available_at,
+                "available_at",
+            ).isoformat(),
+        }
+
+    def validate_settlement_evidence(
+        self,
+        *,
+        settlement_evidence: tuple[SettlementResolution, ...],
+    ) -> None:
+        raw = self._read()
+        known = {
+            item["evidence_id"]: item
+            for item in raw["settlement_evidence"]
+        }
+        for evidence in settlement_evidence:
+            normalized = self._normalized_settlement_evidence(evidence)
+            existing = known.get(evidence.evidence_id)
+            if existing is not None and existing != normalized:
+                raise ContinuousSessionError(
+                    "settlement evidence id conflicts with durable evidence"
+                )
+            known[evidence.evidence_id] = normalized
+
     def record_success(
         self,
         *,
@@ -330,16 +364,7 @@ class _ContinuousSessionState:
             }
             for evidence in settlement_evidence:
                 existing = known.get(evidence.evidence_id)
-                normalized = {
-                    "event_identity": evidence.event_identity,
-                    "settlement_ref": evidence.settlement_ref,
-                    "evidence_id": evidence.evidence_id,
-                    "evidence_sha256": evidence.evidence_sha256,
-                    "available_at": _instant(
-                        evidence.available_at,
-                        "available_at",
-                    ).isoformat(),
-                }
+                normalized = self._normalized_settlement_evidence(evidence)
                 if existing is not None:
                     if existing != normalized:
                         raise ContinuousSessionError(
@@ -639,6 +664,9 @@ class ContinuousSessionCoordinator:
                     newly_registered.append(input_id)
 
             resolutions = self._settlement_resolutions(as_of=now)
+            self._state.validate_settlement_evidence(
+                settlement_evidence=resolutions
+            )
             settled, evidence_ids = self._settle(resolutions=resolutions)
 
             cycle_index = self._state.snapshot().cycles_completed + 1

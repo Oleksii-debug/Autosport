@@ -170,6 +170,7 @@ def test_full_paper_loop_attribution_research_handoff_and_restart(tmp_path):
 
     runtime.begin_observation(
         observation,
+        environment_identity=environment.identity,
         at="2026-09-19T13:00:01Z",
     )
     assert _advance_to_action(runtime).phase is AgentLoopPhase.ACT_OR_ABSTAIN
@@ -272,12 +273,38 @@ def test_full_paper_loop_attribution_research_handoff_and_restart(tmp_path):
     assert len(supervisor.list_runs()) == 1
 
 
+def test_post_cutoff_observation_cannot_bypass_environment_authority(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    post_cutoff = Observation(
+        environment_id=environment.environment_id,
+        observed_at="2026-09-19T14:00:01Z",
+        available_at="2026-09-19T14:00:02Z",
+        evidence=(("market_state", "post-cutoff"),),
+    )
+
+    with pytest.raises(
+        AgentLoopError,
+        match="canonical environment evidence cutoff",
+    ):
+        runtime.begin_observation(
+            post_cutoff,
+            environment_identity=environment.identity,
+            at="2026-09-19T14:00:03Z",
+        )
+
+    snapshot = runtime.snapshot()
+    assert snapshot.phase is AgentLoopPhase.BOOTSTRAP
+    assert snapshot.observation_id is None
+
+
 def test_restart_never_reauthorizes_same_action(tmp_path):
     environment = _environment()
     runtime = _runtime(tmp_path, environment)
     observation = _observation(environment)
     runtime.begin_observation(
         observation,
+        environment_identity=environment.identity,
         at="2026-09-19T13:00:01Z",
     )
     _advance_to_action(runtime)
@@ -314,6 +341,7 @@ def test_direct_action_cannot_bypass_episode_admissible_set(tmp_path):
     observation = _observation(environment)
     runtime.begin_observation(
         observation,
+        environment_identity=environment.identity,
         at="2026-09-19T13:00:01Z",
     )
     _advance_to_action(runtime)
@@ -347,6 +375,7 @@ def test_unknown_external_effect_fails_closed_until_reconciled(tmp_path):
     observation = _observation(environment)
     runtime.begin_observation(
         observation,
+        environment_identity=environment.identity,
         at="2026-09-19T13:00:01Z",
     )
     _advance_to_action(runtime)
@@ -394,6 +423,7 @@ def test_future_evidence_and_observed_simulated_relabel_fail_closed(
     observation = _observation(environment)
     runtime.begin_observation(
         observation,
+        environment_identity=environment.identity,
         at="2026-09-19T13:00:01Z",
     )
     _advance_to_action(runtime)
@@ -479,6 +509,7 @@ def test_attribution_must_bind_exact_reward_and_unknown_cannot_invent_credit(
     observation = _observation(environment)
     runtime.begin_observation(
         observation,
+        environment_identity=environment.identity,
         at="2026-09-19T13:00:01Z",
     )
     _advance_to_action(runtime)
@@ -527,6 +558,7 @@ def test_pause_recovery_preserves_exact_phase_and_authority_fingerprints(
     observation = _observation(environment)
     runtime.begin_observation(
         observation,
+        environment_identity=environment.identity,
         at="2026-09-19T13:00:01Z",
     )
     paused = runtime.pause(at="2026-09-19T13:00:02Z")
@@ -575,6 +607,7 @@ def test_checkpoint_rejects_stale_environment_identity(tmp_path):
     observation = _observation(environment)
     runtime.begin_observation(
         observation,
+        environment_identity=environment.identity,
         at="2026-09-19T13:00:01Z",
     )
     _advance_to_action(runtime)
@@ -684,6 +717,7 @@ def test_resolution_rejects_forged_environment_decision_and_time_evidence(tmp_pa
     observation = _observation(environment)
     runtime.begin_observation(
         observation,
+        environment_identity=environment.identity,
         at="2026-09-19T13:00:01Z",
     )
     _advance_to_action(runtime)
@@ -853,6 +887,7 @@ def test_postmortem_cannot_relabel_supported_attribution_as_unresolved(tmp_path)
     observation = _observation(environment)
     runtime.begin_observation(
         observation,
+        environment_identity=environment.identity,
         at="2026-09-19T13:00:01Z",
     )
     _advance_to_action(runtime)
@@ -915,6 +950,7 @@ def test_admissible_direct_action_cannot_predate_observation_availability(tmp_pa
     observation = _observation(environment)
     runtime.begin_observation(
         observation,
+        environment_identity=environment.identity,
         at="2026-09-19T13:00:01Z",
     )
     _advance_to_action(runtime)

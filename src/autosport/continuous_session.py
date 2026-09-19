@@ -329,19 +329,24 @@ class _ContinuousSessionState:
                 for item in raw["settlement_evidence"]
             }
             for evidence in settlement_evidence:
-                known.setdefault(
-                    evidence.evidence_id,
-                    {
-                        "event_identity": evidence.event_identity,
-                        "settlement_ref": evidence.settlement_ref,
-                        "evidence_id": evidence.evidence_id,
-                        "evidence_sha256": evidence.evidence_sha256,
-                        "available_at": _instant(
-                            evidence.available_at,
-                            "available_at",
-                        ).isoformat(),
-                    },
-                )
+                existing = known.get(evidence.evidence_id)
+                normalized = {
+                    "event_identity": evidence.event_identity,
+                    "settlement_ref": evidence.settlement_ref,
+                    "evidence_id": evidence.evidence_id,
+                    "evidence_sha256": evidence.evidence_sha256,
+                    "available_at": _instant(
+                        evidence.available_at,
+                        "available_at",
+                    ).isoformat(),
+                }
+                if existing is not None:
+                    if existing != normalized:
+                        raise ContinuousSessionError(
+                            "settlement evidence id conflicts with durable evidence"
+                        )
+                    continue
+                known[evidence.evidence_id] = normalized
             raw["settlement_evidence"] = list(
                 sorted(known.values(), key=lambda item: item["evidence_id"])
             )

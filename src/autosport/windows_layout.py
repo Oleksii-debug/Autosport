@@ -52,6 +52,31 @@ WINDOWS_SHELL_AUTOMATION_IDS = {
     "owner_economic_dialog_readback": 308,
 }
 
+OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS = {
+    "readback": 308,
+    "goal_id": 309,
+    "bankroll_id": 310,
+    "currency": 311,
+    "max_stake_fraction": 312,
+    "max_stake_amount": 313,
+    "max_session_loss_fraction": 314,
+    "max_day_loss_fraction": 315,
+    "max_drawdown_fraction": 316,
+    "max_capital_at_risk_fraction": 317,
+    "max_risk_of_ruin": 318,
+    "max_quote_age_seconds": 319,
+    "minimum_data_quality": 320,
+    "max_concurrent_positions": 321,
+    "max_parlay_legs": 322,
+    "automation_level": 323,
+    "blocked_sports": 324,
+    "blocked_providers": 325,
+    "blocked_markets": 326,
+    "emergency_stop": 327,
+    "create": 328,
+    "close": 329,
+}
+
 WINDOWS_SHELL_LOCALIZATION_KEYS = frozenset(
     {
         "ui.windows.shell.frame.title",
@@ -257,15 +282,28 @@ def _show_owner_economic_dialog(app: Any) -> None:
     tk_uia.set_acc_description(readback, text("ui.windows.owner_authority.accessibility.readback.description"))
     tk_uia.set_automation_id(
         readback,
-        WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_dialog_readback"],
+        OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["readback"],
     )
+
+    def add_close_button(parent: Any) -> Any:
+        close_button = ttk.Button(
+            parent,
+            text=text("ui.windows.owner_authority.button.close"),
+            command=dialog.destroy,
+            takefocus=True,
+        )
+        tk_uia.set_acc_name(close_button, text("ui.windows.owner_authority.button.close"))
+        tk_uia.set_automation_id(
+            close_button,
+            OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["close"],
+        )
+        close_button.pack(anchor="e", pady=(8, 0))
+        return close_button
 
     bound_workspace, blocked = _owner_economic_workspace(app)
     if bound_workspace is None:
         readback.insert("end", blocked or text("ui.windows.owner_authority.state.corrupt"))
-        ttk.Button(body, text=text("ui.windows.owner_authority.button.close"), command=dialog.destroy).pack(
-            anchor="e", pady=(8, 0)
-        )
+        add_close_button(body)
         readback.focus_set()
         return
 
@@ -274,9 +312,7 @@ def _show_owner_economic_dialog(app: Any) -> None:
     for line in view.lines_uk:
         readback.insert("end", line)
     if not view.can_initialize:
-        ttk.Button(body, text=text("ui.windows.owner_authority.button.close"), command=dialog.destroy).pack(
-            anchor="e", pady=(8, 0)
-        )
+        add_close_button(body)
         readback.focus_set()
         return
 
@@ -294,14 +330,33 @@ def _show_owner_economic_dialog(app: Any) -> None:
         entry = ttk.Entry(form, textvariable=variable, width=24, takefocus=True)
         entry.grid(row=row, column=column + 1, sticky="ew", padx=(0, 12), pady=2)
         tk_uia.set_acc_name(entry, text(f"ui.windows.owner_authority.field.{field}"))
+        tk_uia.set_automation_id(
+            entry,
+            OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS[field],
+        )
 
     emergency_stop = tk.BooleanVar(value=False)
-    ttk.Checkbutton(
+    emergency_stop_control = ttk.Checkbutton(
         form,
         text=text("ui.windows.owner_authority.field.emergency_stop"),
         variable=emergency_stop,
         takefocus=True,
-    ).grid(row=(len(OWNER_ECONOMIC_FORM_FIELDS) + 1) // 2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+    )
+    emergency_stop_control.grid(
+        row=(len(OWNER_ECONOMIC_FORM_FIELDS) + 1) // 2,
+        column=0,
+        columnspan=2,
+        sticky="w",
+        pady=(4, 0),
+    )
+    tk_uia.set_acc_name(
+        emergency_stop_control,
+        text("ui.windows.owner_authority.field.emergency_stop"),
+    )
+    tk_uia.set_automation_id(
+        emergency_stop_control,
+        OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["emergency_stop"],
+    )
 
     def create_initial_contract() -> None:
         current_workspace, _ = _owner_economic_workspace(app)
@@ -373,7 +428,22 @@ def _show_owner_economic_dialog(app: Any) -> None:
     create_button.pack(side="left")
     tk_uia.set_acc_name(create_button, text("ui.windows.owner_authority.accessibility.create.name"))
     tk_uia.set_acc_description(create_button, text("ui.windows.owner_authority.accessibility.create.description"))
-    ttk.Button(button_row, text=text("ui.windows.owner_authority.button.close"), command=dialog.destroy).pack(side="right")
+    tk_uia.set_automation_id(
+        create_button,
+        OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["create"],
+    )
+    close_button = ttk.Button(
+        button_row,
+        text=text("ui.windows.owner_authority.button.close"),
+        command=dialog.destroy,
+        takefocus=True,
+    )
+    close_button.pack(side="right")
+    tk_uia.set_acc_name(close_button, text("ui.windows.owner_authority.button.close"))
+    tk_uia.set_automation_id(
+        close_button,
+        OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["close"],
+    )
     readback.focus_set()
 
 

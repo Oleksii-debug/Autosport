@@ -232,8 +232,8 @@ class ChampionEligibilityDecision:
             if _instant(entry.available_at, "DriftFinding.available_at") > evaluated_cutoff:
                 raise ChampionEligibilityError(f"DriftFinding:{finding_id} is future evidence")
             finding = entry.payload
-            if finding.get("strategy_version_id") != canonical_strategy_id:
-                raise ChampionEligibilityError("drift finding strategy scope mismatch")
+            if finding.get("strategy_version_id") != strategy_version_id:
+                raise ChampionEligibilityError("drift finding strategy version scope mismatch")
             if finding.get("model_version_id") != model_version_id:
                 raise ChampionEligibilityError("drift finding model scope mismatch")
             try:
@@ -373,7 +373,7 @@ def validate_activation_eligibility(
         raise ChampionEligibilityError("eligibility decision is expired")
     if decision.canonical_strategy_id != _text(canonical_strategy_id, "canonical_strategy_id"):
         raise ChampionEligibilityError("eligibility strategy mismatch")
-    if decision.canonical_strategy_id != _text(expected_strategy_version_id, "expected_strategy_version_id"):
+    if decision.strategy_version_id != _text(expected_strategy_version_id, "expected_strategy_version_id"):
         raise ChampionEligibilityError("eligibility champion identity mismatch")
     if decision.model_version_id != _text(expected_model_version_id, "expected_model_version_id"):
         raise ChampionEligibilityError("eligibility model identity mismatch")

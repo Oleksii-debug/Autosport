@@ -548,7 +548,9 @@ def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None
         assert result.external_receipt_id == provider_ref
 
 
-def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart() -> None:
+def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
+    monkeypatch,
+) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action = _prepared(tmp)
         transport = _TimeoutTransport()
@@ -630,6 +632,10 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart() -> N
         first_customer_ref = transport.calls[0]["request"]["params"][
             "customerRef"
         ]
+        monkeypatch.setattr(
+            "autosport.supervised_execution._trusted_now",
+            lambda: "2026-09-19T08:00:06+00:00",
+        )
         retry_transport = _Transport(
             lambda request: _response(
                 request,

@@ -236,6 +236,8 @@ def _promotion_evidence(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     ).hexdigest()
     fields = {key: value for key, value in payload.items() if key != "schema_version"}
+    fields["direction"] = PromotionEvidenceDirection(payload["direction"])
+    fields["validity"] = PromotionEvidenceValidity(payload["validity"])
     return PromotionEvidence(canonical_id, **fields)
 
 

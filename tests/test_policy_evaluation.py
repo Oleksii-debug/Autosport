@@ -5,6 +5,7 @@ import pytest
 from autosport.learning_environment import EvidenceTruth
 from autosport.policy_evaluation import (
     PolicyEvaluationCase,
+    QualifiedCounterfactualAuthority,
     PolicyEvaluationConfig,
     PolicyRewardMode,
     evaluate_policy_pair,
@@ -21,6 +22,8 @@ REWARD_DEF = "e" * 64
 COST_DEF = "f" * 64
 EVIDENCE_1 = "1" * 64
 EVIDENCE_2 = "2" * 64
+EVALUATOR_SOURCE = "7" * 64
+QUALIFICATION_EVIDENCE = "8" * 64
 T0 = "2026-09-19T10:00:00Z"
 T1 = "2026-09-19T11:00:00Z"
 T2 = "2026-09-19T12:00:00Z"
@@ -37,6 +40,27 @@ def _policy(*, bet_reward: str, wait_reward: str) -> BanditPolicyState:
             ActionEstimate("BET", 1, Decimal(bet_reward)),
             ActionEstimate("WAIT", 1, Decimal(wait_reward)),
         ),
+    )
+
+
+def _authority(
+    *,
+    authority_id="paper-settlement-engine:v1",
+    evaluator_source_sha256=EVALUATOR_SOURCE,
+    qualification_status="QUALIFIED",
+    scope="table-tennis:pre-match",
+    allowed=(EVIDENCE_1, EVIDENCE_2),
+) -> QualifiedCounterfactualAuthority:
+    return QualifiedCounterfactualAuthority(
+        authority_id=authority_id,
+        authority_version="1",
+        evaluator_source_sha256=evaluator_source_sha256,
+        qualification_evidence_sha256=QUALIFICATION_EVIDENCE,
+        reward_definition_sha256=REWARD_DEF,
+        reward_mode=PolicyRewardMode.MECHANICAL_PAPER,
+        scope=scope,
+        allowed_source_evidence_sha256=tuple(sorted(allowed)),
+        qualification_status=qualification_status,
     )
 
 
@@ -73,6 +97,7 @@ def test_policy_evaluator_executes_exact_policy_choices_on_paired_rewards():
         challenger,
         cases,
         completed_at=T2,
+        counterfactual_authority=_authority(),
     )
 
     assert result.predecessor_policy_id == predecessor.policy_id
@@ -93,10 +118,18 @@ def test_policy_choice_change_changes_evaluation_with_same_reward_population():
     cases = (_case("sample-1", EVIDENCE_1), _case("sample-2", EVIDENCE_2))
 
     bet_result = evaluate_policy_pair(
-        predecessor, challenger_bet, cases, completed_at=T2
+        predecessor,
+        challenger_bet,
+        cases,
+        completed_at=T2,
+        counterfactual_authority=_authority(),
     )
     wait_result = evaluate_policy_pair(
-        predecessor, challenger_wait, cases, completed_at=T2
+        predecessor,
+        challenger_wait,
+        cases,
+        completed_at=T2,
+        counterfactual_authority=_authority(),
     )
 
     assert bet_result.practical_improvement == Decimal("1.75")
@@ -136,7 +169,13 @@ def test_missing_behavior_support_fails_closed():
     )
 
     with pytest.raises(ValueError, match="propensity/support"):
-        evaluate_policy_pair(predecessor, challenger, (case,), completed_at=T2)
+        evaluate_policy_pair(
+            predecessor,
+            challenger,
+            (case,),
+            completed_at=T2,
+            counterfactual_authority=_authority(),
+        )
 
 
 def test_missing_declared_cost_for_supported_reward_fails_closed():
@@ -176,7 +215,89 @@ def test_future_reward_fails_causal_cutoff():
     )
 
     with pytest.raises(ValueError, match="not causally available"):
-        evaluate_policy_pair(predecessor, challenger, (case,), completed_at=T2)
+        evaluate_policy_pair(
+            predecessor,
+            challenger,
+            (case,),
+            completed_at=T2,
+            counterfactual_authority=_authority(),
+        )
+
+
+def test_counterfactual_reward_requires_frozen_authority():
+    predecessor = _policy(bet_reward="0", wait_reward="1")
+    challenger = _policy(bet_reward="2", wait_reward="1")
+    case = _case("sample-1", EVIDENCE_1)
+
+    with pytest.raises(ValueError, match="frozen qualified authority"):
+        evaluate_policy_pair(
+            predecessor,
+            challenger,
+            (case,),
+            completed_at=T2,
+        )
+
+
+def test_invented_counterfactual_source_id_fails_closed():
+    predecessor = _policy(bet_reward="0", wait_reward="1")
+    challenger = _policy(bet_reward="2", wait_reward="1")
+    base = _case("sample-1", EVIDENCE_1)
+    case = PolicyEvaluationCase(
+        sample_id=base.sample_id,
+        observed_at=base.observed_at,
+        reward_available_at=base.reward_available_at,
+        admissible_actions=base.admissible_actions,
+        action_rewards=base.action_rewards,
+        action_costs=base.action_costs,
+        behavior_propensities=base.behavior_propensities,
+        reward_truth=base.reward_truth,
+        reward_mode=base.reward_mode,
+        source_evidence_sha256=base.source_evidence_sha256,
+        regime_id=base.regime_id,
+        historical_action=base.historical_action,
+        counterfactual_source_id="invented-settlement-engine:v99",
+    )
+
+    with pytest.raises(ValueError, match="authority identity mismatch"):
+        evaluate_policy_pair(
+            predecessor,
+            challenger,
+            (case,),
+            completed_at=T2,
+            counterfactual_authority=_authority(),
+        )
+
+
+def test_unknown_counterfactual_evidence_digest_fails_closed():
+    predecessor = _policy(bet_reward="0", wait_reward="1")
+    challenger = _policy(bet_reward="2", wait_reward="1")
+    case = _case("sample-unknown", "9" * 64)
+
+    with pytest.raises(ValueError, match="not qualified by frozen authority"):
+        evaluate_policy_pair(
+            predecessor,
+            challenger,
+            (case,),
+            completed_at=T2,
+            counterfactual_authority=_authority(),
+        )
+
+
+def test_unqualified_counterfactual_authority_fails_closed():
+    predecessor = _policy(bet_reward="0", wait_reward="1")
+    challenger = _policy(bet_reward="2", wait_reward="1")
+    case = _case("sample-1", EVIDENCE_1)
+
+    with pytest.raises(ValueError, match="not qualified"):
+        evaluate_policy_pair(
+            predecessor,
+            challenger,
+            (case,),
+            completed_at=T2,
+            counterfactual_authority=_authority(
+                qualification_status="UNQUALIFIED"
+            ),
+        )
 
 
 def test_policy_evaluation_config_round_trip_is_exact():
@@ -186,6 +307,8 @@ def test_policy_evaluation_config_round_trip_is_exact():
         FEATURE_SOURCE,
         REWARD_DEF,
         COST_DEF,
+        "WAIT",
+        _authority(),
     )
 
     restored = PolicyEvaluationConfig.from_frozen_text(config.frozen_text)

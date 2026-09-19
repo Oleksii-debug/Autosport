@@ -1,0 +1,641 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import patch
+
+from autosport.opponent_intelligence import (
+    InvalidationReason,
+    InvalidationTarget,
+    ObservedPerformance,
+    OpponentIntelligenceError,
+    OpponentIntelligenceStore,
+    SnapshotState,
+)
+from autosport.participant_identity import (
+    AliasRecord,
+    EntityIdentity,
+    EntityKind,
+    EntityLineage,
+    IdentityView,
+    LineageRelation,
+    ParticipantIdentityRegistry,
+)
+
+
+SHA_A = "a" * 64
+SHA_B = "b" * 64
+SHA_C = "c" * 64
+T0 = "2026-01-01T00:00:00Z"
+T1 = "2026-01-02T00:00:00Z"
+T2 = "2026-01-03T00:00:00Z"
+T3 = "2026-01-04T00:00:00Z"
+T4 = "2026-01-05T00:00:00Z"
+T5 = "2026-01-06T00:00:00Z"
+
+
+def entity(
+    entity_id: str,
+    *,
+    kind: EntityKind = EntityKind.PARTICIPANT,
+) -> EntityIdentity:
+    return EntityIdentity(
+        entity_id,
+        kind,
+        f"provider:{entity_id}",
+        SHA_A,
+        T0,
+        T0,
+    )
+
+
+def alias(
+    source: str,
+    text: str,
+    entity_id: str,
+    *,
+    available: str = T0,
+    supersedes: str | None = None,
+) -> AliasRecord:
+    return AliasRecord(
+        source,
+        text,
+        entity_id,
+        T0,
+        None,
+        available,
+        SHA_A,
+        available,
+        supersedes_record_id=supersedes,
+    )
+
+
+def observation(
+    *,
+    event_id: str = "event-1",
+    source: str = "provider-a",
+    subject: str = "Alex",
+    opponent: str = "Blair",
+    score: str = "1",
+    observed: str = T1,
+    available: str = T1,
+    recorded: str = T1,
+    evidence: str = SHA_B,
+    supersedes: str | None = None,
+    sport: str = "tennis",
+    league: str = "tour-a",
+) -> ObservedPerformance:
+    return ObservedPerformance(
+        event_id=event_id,
+        source_id=source,
+        subject_alias=subject,
+        opponent_alias=opponent,
+        sport_id=sport,
+        league_id=league,
+        score=score,
+        observed_at=observed,
+        available_at=available,
+        recorded_at=recorded,
+        evidence_sha256=evidence,
+        supersedes_performance_id=supersedes,
+    )
+
+
+class OpponentIntelligenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = TemporaryDirectory()
+        root = Path(self.temporary.name)
+        self.identity_path = root / "identity.json"
+        self.store_path = root / "opponents.json"
+        self.identities = (
+            ParticipantIdentityRegistry.initialize_pristine(
+                self.identity_path
+            )
+        )
+        for item in (
+            entity("p-alex"),
+            entity("p-blair"),
+            entity("p-casey"),
+            entity("p-drew"),
+        ):
+            self.identities.add_entity(item)
+        self.identities.add_alias(
+            alias("provider-a", "Alex", "p-alex")
+        )
+        self.identities.add_alias(
+            alias("provider-a", "Blair", "p-blair")
+        )
+        self.identities.add_alias(
+            alias("provider-a", "Casey", "p-casey")
+        )
+        self.identities.add_alias(
+            alias("provider-a", "Drew", "p-drew")
+        )
+        self.store = OpponentIntelligenceStore.initialize_pristine(
+            self.store_path,
+            self.identities,
+        )
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_decision_view_excludes_late_backfill_but_restatement_includes_it(
+        self,
+    ):
+        first = self.store.record_performance(observation())
+        late = self.store.record_performance(
+            observation(
+                event_id="event-2",
+                opponent="Casey",
+                score="0",
+                observed=T1,
+                available=T3,
+                recorded=T3,
+                evidence=SHA_C,
+            )
+        )
+        decision_ids = {
+            edge.performance_id
+            for edge in self.store.graph_edges(as_of=T2)
+        }
+        restated_ids = {
+            edge.performance_id
+            for edge in self.store.graph_edges(
+                as_of=T2,
+                view=IdentityView.RESTATED_RESEARCH,
+            )
+        }
+        self.assertEqual(
+            decision_ids,
+            {first.performance_id},
+        )
+        self.assertEqual(
+            restated_ids,
+            {first.performance_id, late.performance_id},
+        )
+
+    def test_snapshot_is_deterministic_restart_safe_and_input_order_independent(
+        self,
+    ):
+        first = self.store.record_performance(
+            observation(score="1")
+        )
+        second = self.store.record_performance(
+            observation(
+                event_id="event-2",
+                opponent="Casey",
+                score="0",
+                evidence=SHA_C,
+            )
+        )
+        rating, feature = self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_id="tour-a",
+            causal_cutoff=T2,
+            published_at=T2,
+            min_support=2,
+        )
+        self.assertEqual(
+            rating.state,
+            SnapshotState.SUPPORTED,
+        )
+        self.assertEqual(rating.rating, "0.5")
+        self.assertEqual(rating.support, 2)
+        self.assertEqual(rating.opponent_count, 2)
+        self.assertEqual(
+            set(rating.input_performance_ids),
+            {first.performance_id, second.performance_id},
+        )
+        self.assertEqual(
+            feature.rating_snapshot_id,
+            rating.snapshot_id,
+        )
+
+        reopened = OpponentIntelligenceStore(
+            self.store_path,
+            ParticipantIdentityRegistry(self.identity_path),
+        )
+        rating_again, feature_again = reopened.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_id="tour-a",
+            causal_cutoff=T2,
+            published_at=T2,
+            min_support=2,
+        )
+        self.assertEqual(
+            rating_again.snapshot_id,
+            rating.snapshot_id,
+        )
+        self.assertEqual(
+            feature_again.snapshot_id,
+            feature.snapshot_id,
+        )
+
+    def test_insufficient_or_stale_evidence_never_publishes_exact_strength(
+        self,
+    ):
+        self.store.record_performance(observation(score="1"))
+        insufficient, _ = self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_id="tour-a",
+            causal_cutoff=T2,
+            published_at=T2,
+            min_support=2,
+        )
+        self.assertEqual(
+            insufficient.state,
+            SnapshotState.INSUFFICIENT,
+        )
+        self.assertIsNone(insufficient.rating)
+        self.assertIsNone(insufficient.uncertainty)
+
+        stale, feature = self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_id="tour-a",
+            causal_cutoff=T5,
+            published_at=T5,
+            min_support=1,
+            max_age_seconds=60,
+        )
+        self.assertEqual(
+            stale.state,
+            SnapshotState.INSUFFICIENT,
+        )
+        self.assertIsNone(stale.rating)
+        self.assertGreater(feature.age_seconds, 60)
+
+    def test_outcome_correction_invalidates_edge_and_snapshots_without_rewrite(
+        self,
+    ):
+        first = self.store.record_performance(
+            observation(score="1")
+        )
+        rating, feature = self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_id="tour-a",
+            causal_cutoff=T2,
+            published_at=T2,
+            min_support=1,
+        )
+        correction = self.store.record_performance(
+            observation(
+                score="0",
+                available=T3,
+                recorded=T3,
+                evidence=SHA_C,
+                supersedes=first.performance_id,
+            )
+        )
+        rating_invalidations = self.store.invalidations(
+            rating.snapshot_id
+        )
+        self.assertEqual(len(rating_invalidations), 1)
+        self.assertEqual(
+            rating_invalidations[0].reason,
+            InvalidationReason.OUTCOME_CORRECTION,
+        )
+        self.assertEqual(
+            rating_invalidations[0].evidence_id,
+            correction.performance_id,
+        )
+        self.assertEqual(
+            rating_invalidations[0].target_kind,
+            InvalidationTarget.RATING_SNAPSHOT,
+        )
+        self.assertEqual(
+            self.store.invalidations(
+                feature.snapshot_id
+            )[0].target_kind,
+            InvalidationTarget.FEATURE_SNAPSHOT,
+        )
+        self.assertEqual(
+            self.store.invalidations(
+                first.performance_id
+            )[0].target_kind,
+            InvalidationTarget.OPPONENT_EDGE,
+        )
+
+        decision_ids = {
+            edge.performance_id
+            for edge in self.store.graph_edges(as_of=T2)
+        }
+        restated_ids = {
+            edge.performance_id
+            for edge in self.store.graph_edges(
+                as_of=T2,
+                view=IdentityView.RESTATED_RESEARCH,
+            )
+        }
+        self.assertEqual(
+            decision_ids,
+            {first.performance_id},
+        )
+        self.assertEqual(
+            restated_ids,
+            {correction.performance_id},
+        )
+
+        reopened = OpponentIntelligenceStore(
+            self.store_path,
+            ParticipantIdentityRegistry(self.identity_path),
+        )
+        self.assertEqual(
+            reopened.invalidations(rating.snapshot_id),
+            rating_invalidations,
+        )
+
+    def test_late_alias_correction_fences_restatement_until_corrected_performance(
+        self,
+    ):
+        first = self.store.record_performance(observation())
+        rating, _ = self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_id="tour-a",
+            causal_cutoff=T2,
+            published_at=T2,
+            min_support=1,
+        )
+        original = self.identities.resolve_alias_record(
+            "provider-a",
+            "Alex",
+            as_of=T2,
+        )
+        corrected = alias(
+            "provider-a",
+            "Alex",
+            "p-drew",
+            available=T4,
+            supersedes=original.record_id,
+        )
+        self.identities.add_alias(corrected)
+
+        self.assertEqual(
+            self.identities.resolve_alias(
+                "provider-a",
+                "Alex",
+                as_of=T2,
+            ).entity_id,
+            "p-alex",
+        )
+        self.assertEqual(
+            self.identities.resolve_alias(
+                "provider-a",
+                "Alex",
+                as_of=T2,
+                view=IdentityView.RESTATED_RESEARCH,
+            ).entity_id,
+            "p-drew",
+        )
+        self.store.refresh_identity_invalidations(
+            detected_at=T4
+        )
+        matched = self.store.invalidations(
+            rating.snapshot_id
+        )
+        self.assertEqual(len(matched), 1)
+        self.assertEqual(
+            matched[0].reason,
+            InvalidationReason.IDENTITY_CORRECTION,
+        )
+        self.assertEqual(
+            matched[0].evidence_id,
+            corrected.record_id,
+        )
+        with self.assertRaisesRegex(
+            OpponentIntelligenceError,
+            "identity-invalidated edge",
+        ):
+            self.store.graph_edges(
+                as_of=T2,
+                view=IdentityView.RESTATED_RESEARCH,
+            )
+
+        restated = self.store.record_performance(
+            observation(
+                score="1",
+                available=T4,
+                recorded=T4,
+                evidence=corrected.record_id,
+                supersedes=first.performance_id,
+            ),
+            identity_view=IdentityView.RESTATED_RESEARCH,
+        )
+        edges = self.store.graph_edges(
+            as_of=T2,
+            view=IdentityView.RESTATED_RESEARCH,
+        )
+        self.assertEqual(
+            [edge.performance_id for edge in edges],
+            [restated.performance_id],
+        )
+        self.assertEqual(
+            edges[0].subject_entity_id,
+            "p-drew",
+        )
+
+    def test_late_lineage_correction_marks_downstream_for_recompute(
+        self,
+    ):
+        first = self.store.record_performance(observation())
+        rating, _ = self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_id="tour-a",
+            causal_cutoff=T2,
+            published_at=T2,
+            min_support=1,
+        )
+        self.identities.add_lineage(
+            EntityLineage(
+                "p-alex",
+                "p-drew",
+                LineageRelation.SUPERSEDES,
+                T0,
+                T3,
+                T3,
+                SHA_C,
+            )
+        )
+        self.store.refresh_identity_invalidations(
+            detected_at=T4
+        )
+        matched = self.store.invalidations(
+            rating.snapshot_id
+        )
+        self.assertEqual(len(matched), 1)
+        self.assertEqual(
+            matched[0].reason,
+            InvalidationReason.IDENTITY_CORRECTION,
+        )
+        self.assertEqual(
+            self.store.invalidations(
+                first.performance_id
+            )[0].target_kind,
+            InvalidationTarget.OPPONENT_EDGE,
+        )
+
+    def test_same_display_name_across_sources_never_aliases(
+        self,
+    ):
+        self.identities.add_entity(
+            entity("p-provider-b")
+        )
+        self.identities.add_entity(
+            entity("p-b-opponent")
+        )
+        self.identities.add_alias(
+            alias(
+                "provider-b",
+                "Alex",
+                "p-provider-b",
+            )
+        )
+        self.identities.add_alias(
+            alias(
+                "provider-b",
+                "Blair",
+                "p-b-opponent",
+            )
+        )
+        first = self.store.record_performance(
+            observation(source="provider-a")
+        )
+        second = self.store.record_performance(
+            observation(
+                source="provider-b",
+                event_id="event-b",
+                evidence=SHA_C,
+            )
+        )
+        by_id = {
+            edge.performance_id: edge
+            for edge in self.store.graph_edges(as_of=T2)
+        }
+        self.assertEqual(
+            by_id[first.performance_id].subject_entity_id,
+            "p-alex",
+        )
+        self.assertEqual(
+            by_id[second.performance_id].subject_entity_id,
+            "p-provider-b",
+        )
+
+    def test_cross_kind_opponent_pair_fails_closed(self):
+        self.identities.add_entity(
+            entity("team-x", kind=EntityKind.TEAM)
+        )
+        self.identities.add_alias(
+            alias("provider-a", "Team X", "team-x")
+        )
+        with self.assertRaisesRegex(
+            OpponentIntelligenceError,
+            "same-kind",
+        ):
+            self.store.record_performance(
+                observation(opponent="Team X")
+            )
+
+    def test_duplicate_delivery_is_idempotent_and_correction_fork_fails_closed(
+        self,
+    ):
+        raw = observation()
+        first = self.store.record_performance(raw)
+        self.assertEqual(
+            self.store.record_performance(raw),
+            first,
+        )
+        correction = observation(
+            score="0",
+            available=T3,
+            recorded=T3,
+            evidence=SHA_C,
+            supersedes=first.performance_id,
+        )
+        self.store.record_performance(correction)
+        with self.assertRaisesRegex(
+            OpponentIntelligenceError,
+            "correction fork",
+        ):
+            self.store.record_performance(
+                observation(
+                    score="0.5",
+                    available=T4,
+                    recorded=T4,
+                    evidence="d" * 64,
+                    supersedes=first.performance_id,
+                )
+            )
+
+    def test_atomic_publication_failure_does_not_mutate_memory_or_disk(
+        self,
+    ):
+        raw = observation()
+        before = self.store_path.read_text(
+            encoding="utf-8"
+        )
+        with patch(
+            "autosport.opponent_intelligence.atomic_write_json",
+            side_effect=OSError("disk fault"),
+        ):
+            with self.assertRaises(OSError):
+                self.store.record_performance(raw)
+        self.assertEqual(
+            self.store_path.read_text(encoding="utf-8"),
+            before,
+        )
+        self.assertEqual(
+            self.store.graph_edges(as_of=T2),
+            (),
+        )
+
+    def test_snapshot_identity_binds_view_cutoff_config_and_exact_inputs(
+        self,
+    ):
+        self.store.record_performance(observation())
+        decision, _ = self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_id="tour-a",
+            causal_cutoff=T2,
+            published_at=T2,
+            min_support=1,
+        )
+        restated, _ = self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_id="tour-a",
+            causal_cutoff=T2,
+            published_at=T2,
+            view=IdentityView.RESTATED_RESEARCH,
+            min_support=1,
+        )
+        different_config, _ = self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_id="tour-a",
+            causal_cutoff=T2,
+            published_at=T2,
+            min_support=1,
+            max_age_seconds=120,
+        )
+        self.assertNotEqual(
+            decision.snapshot_id,
+            restated.snapshot_id,
+        )
+        self.assertNotEqual(
+            decision.snapshot_id,
+            different_config.snapshot_id,
+        )
+        self.assertNotEqual(
+            decision.config_sha256,
+            different_config.config_sha256,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

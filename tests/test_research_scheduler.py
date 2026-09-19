@@ -778,3 +778,70 @@ def test_curriculum_wake_rechecks_status_at_dispatch_reservation(
     assert curriculum.snapshot()["dispatches"] == {}
     assert not supervisor.list_runs()
 
+
+def test_curriculum_dispatching_marker_recovers_after_crash_then_stop(
+    tmp_path,
+    monkeypatch,
+):
+    _, supervisor, curriculum = _workspace(tmp_path, max_budget_units=8)
+    candidate = (_candidate(episode_id="c-wake-dispatching-recovery"),)
+    path = tmp_path / "research-scheduler.json"
+    scheduler = ResearchScheduler.initialize_pristine(path, curriculum.trigger_adapter)
+    wake_id = scheduler.queue_curriculum_wake(
+        curriculum,
+        candidate,
+        purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=23,
+        budget_units=1,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+
+    original_begin = scheduler._begin_curriculum_dispatch_locked
+
+    def crash_after_begin(reserved_wake_id, selection_id):
+        original_begin(reserved_wake_id, selection_id)
+        raise RuntimeError("simulated crash after scheduler dispatch linearization")
+
+    monkeypatch.setattr(
+        scheduler,
+        "_begin_curriculum_dispatch_locked",
+        crash_after_begin,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        scheduler.tick_curriculum(
+            curriculum,
+            candidate,
+            max_concurrency=1,
+            active_concurrency=0,
+            remaining_budget_units=8,
+        )
+
+    interrupted = ResearchScheduler(path, curriculum.trigger_adapter)
+    raw = interrupted.snapshot()["curriculum_wakes"][wake_id]
+    assert raw["status"] == "DISPATCHING"
+    assert raw["selection_id"] is not None
+    assert curriculum.snapshot()["dispatches"] == {}
+    assert not supervisor.list_runs()
+
+    interrupted.stop("operator STOP after dispatch linearization")
+    recovered = ResearchScheduler(path, curriculum.trigger_adapter)
+    result = recovered.tick_curriculum(
+        curriculum,
+        candidate,
+        max_concurrency=1,
+        active_concurrency=1,
+        remaining_budget_units=0,
+    )
+
+    assert result.action is TickAction.DELIVERED
+    accepted = recovered.snapshot()["curriculum_wakes"][wake_id]
+    assert accepted["status"] == "ACCEPTED"
+    assert accepted["selection_id"] == result.curriculum_selection_id
+    assert len(supervisor.list_runs()) == 1
+    assert recovered.status is SchedulerStatus.STOPPED
+

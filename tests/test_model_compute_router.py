@@ -20,8 +20,12 @@ from autosport.model_compute_router import (
 )
 from autosport.sport_domain_fitness import (
     DomainProfile,
+    EvidenceProvenance,
+    EvidenceState,
+    MetricEvidence,
     RouteRecommendation,
     RouteStatus,
+    SportDomainFitnessObservation,
 )
 
 
@@ -108,10 +112,50 @@ def voc(**overrides):
 def slow_route(status=RouteStatus.ROUTE_SLOW_RESEARCH):
     return RouteRecommendation(
         status,
-        "measured domain route",
+        "caller-constructed domain route",
         "fitness-1",
         DomainProfile.SLOW,
     )
+
+
+def metric(value, unit):
+    return MetricEvidence(
+        EvidenceState.MEASURED,
+        Decimal(str(value)),
+        unit,
+    )
+
+
+def slow_observation(**overrides):
+    values = dict(
+        observation_id="fitness-1",
+        sport_id="table-tennis",
+        league_id="league-1",
+        market_id="match",
+        provider_id="provider-1",
+        measured_from=T0,
+        measured_until=T0,
+        available_at=T0,
+        evidence_sha256=SHA_C,
+        provenance=EvidenceProvenance.OBSERVED,
+        domain_profile=DomainProfile.SLOW,
+        catalogue_coverage=metric("0.9", "fraction"),
+        quote_coverage=metric("0.8", "fraction"),
+        recurrence_per_hour=metric("12", "events/hour"),
+        freshness_seconds=metric("1", "seconds"),
+        reaction_slack_seconds=metric("10", "seconds"),
+        executable_liquidity=metric("100", "units"),
+        fee_fraction=metric("0.01", "fraction"),
+        slippage_fraction=metric("0.01", "fraction"),
+        capital_time_hours=metric("0.25", "hours"),
+        data_cost=metric("0.10", "cost"),
+        compute_cost=metric("5", "cost"),
+        compute_duration_seconds=metric("4", "seconds"),
+        slow_analysis_deadline_seconds=metric("5", "seconds"),
+        freshness_ttl_seconds=metric("30", "seconds"),
+    )
+    values.update(overrides)
+    return SportDomainFitnessObservation(**values)
 
 
 class ModelComputeRouterTests(unittest.TestCase):
@@ -139,7 +183,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             disabled,
             as_of=T1,
             voc_evidence=voc(),
-            domain_route=slow_route(),
+            domain_observation=slow_observation(),
         )
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertEqual(decision.candidate_id, "local")
@@ -152,7 +196,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             policy(),
             as_of=T1,
             voc_evidence=voc(),
-            domain_route=slow_route(),
+            domain_observation=slow_observation(),
         )
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertIn("non-public", decision.reason)
@@ -164,19 +208,20 @@ class ModelComputeRouterTests(unittest.TestCase):
             policy(),
             as_of=T1,
             voc_evidence=voc(),
-            domain_route=slow_route(),
+            domain_observation=slow_observation(),
         )
         self.assertEqual(decision.tier, ComputeTier.CLOUD)
         self.assertEqual(decision.backend_id, "permitted-cloud")
         self.assertEqual(decision.model_id, "challenger-v2")
         self.assertEqual(decision.config_sha256, SHA_B)
+        self.assertEqual(decision.domain_observation_id, "fitness-1")
 
         no_voc = route_compute(
             replace(request(), request_id="req-no-voc"),
             self.candidates,
             policy(),
             as_of=T1,
-            domain_route=slow_route(),
+            domain_observation=slow_observation(),
         )
         self.assertEqual(no_voc.tier, ComputeTier.LOCAL)
 
@@ -190,7 +235,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 challenger_utility=Decimal("1.5"),
                 compute_cost_penalty=Decimal("0.5"),
             ),
-            domain_route=slow_route(),
+            domain_observation=slow_observation(),
         )
         self.assertEqual(nonpositive.tier, ComputeTier.LOCAL)
         self.assertIn("non-positive", nonpositive.reason)
@@ -204,22 +249,22 @@ class ModelComputeRouterTests(unittest.TestCase):
                 evidence_id="voc-simulated",
                 provenance=VOCEvidenceProvenance.SIMULATED,
             ),
-            domain_route=slow_route(),
+            domain_observation=slow_observation(),
         )
         self.assertEqual(simulated.tier, ComputeTier.LOCAL)
 
-    def test_missing_domain_route_cannot_authorize_cloud(self):
+    def test_forged_domain_route_cannot_authorize_cloud_without_observation(self):
         decision = route_compute(
-            request(request_id="req-missing-domain-route"),
+            request(request_id="req-forged-domain-route"),
             self.candidates,
             policy(),
             as_of=T1,
-            voc_evidence=voc(evidence_id="voc-missing-domain-route"),
-            domain_route=None,
+            voc_evidence=voc(evidence_id="voc-forged-domain-route"),
+            domain_route=slow_route(),
         )
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertEqual(decision.candidate_id, "local")
-        self.assertIn("missing sport-domain evidence", decision.reason)
+        self.assertIn("missing verified sport-domain", decision.reason)
 
     def test_stale_voc_and_non_slow_domain_route_fail_closed(self):
         stale_policy = policy(voc_max_age_seconds=Decimal("5"))
@@ -229,7 +274,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             stale_policy,
             as_of=T1,
             voc_evidence=voc(evidence_id="voc-stale"),
-            domain_route=slow_route(),
+            domain_observation=slow_observation(),
         )
         self.assertEqual(stale.tier, ComputeTier.LOCAL)
         self.assertIn("stale", stale.reason)
@@ -240,7 +285,10 @@ class ModelComputeRouterTests(unittest.TestCase):
             policy(),
             as_of=T1,
             voc_evidence=voc(evidence_id="voc-domain"),
-            domain_route=slow_route(RouteStatus.ROUTE_BASELINE),
+            domain_observation=slow_observation(
+                observation_id="fitness-baseline",
+                compute_duration_seconds=metric("6", "seconds"),
+            ),
         )
         self.assertEqual(baseline_domain.tier, ComputeTier.LOCAL)
         self.assertIn("sport-domain", baseline_domain.reason)
@@ -322,7 +370,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 policy(),
                 as_of=T1,
                 voc_evidence=voc(),
-                domain_route=slow_route(),
+                domain_observation=slow_observation(),
             )
             reopened = ModelComputeRouterStore(path)
             self.assertEqual(
@@ -331,6 +379,10 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
 
             raw = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                raw["routes"][0]["domain_observation"]["observation_id"],
+                "fitness-1",
+            )
             raw["routes"][0]["decision"]["reason"] = "tampered"
             path.write_text(
                 json.dumps(raw),
@@ -348,7 +400,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 policy(),
                 as_of=T1,
                 voc_evidence=voc(),
-                domain_route=slow_route(),
+                domain_observation=slow_observation(),
             )
             with self.assertRaisesRegex(
                 ModelComputeRouterError,
@@ -360,7 +412,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                     policy(),
                     as_of=T1,
                     voc_evidence=voc(),
-                    domain_route=slow_route(),
+                    domain_observation=slow_observation(),
                 )
 
     def test_execution_accounting_records_rejected_cost_but_never_accepts_late_stale_or_wrong_identity(self):
@@ -584,7 +636,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 cloud_policy,
                 as_of=T1,
                 voc_evidence=voc(evidence_id="voc-actual-cloud-budget"),
-                domain_route=slow_route(),
+                domain_observation=slow_observation(),
             )
             self.assertEqual(cloud_decision.tier, ComputeTier.CLOUD)
             cloud_overrun = store.record_execution(
@@ -628,7 +680,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             policy(),
             as_of=T1,
             voc_evidence=future,
-            domain_route=slow_route(),
+            domain_observation=slow_observation(),
         )
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertIn("not causally available", decision.reason)
@@ -640,7 +692,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             policy(),
             as_of=T1,
             voc_evidence=voc(),
-            domain_route=slow_route(),
+            domain_observation=slow_observation(),
         )
         self.assertEqual(len(decision.decision_sha256), 64)
         payload = decision.payload()
@@ -664,7 +716,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             policy(max_cloud_cost=Decimal("10")),
             as_of=T1,
             voc_evidence=voc(evidence_id="voc-estimated"),
-            domain_route=slow_route(),
+            domain_observation=slow_observation(),
         )
         self.assertEqual(estimated.tier, ComputeTier.LOCAL)
 
@@ -677,7 +729,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 evidence_id="voc-measured",
                 measured_compute_cost=Decimal("11"),
             ),
-            domain_route=slow_route(),
+            domain_observation=slow_observation(),
         )
         self.assertEqual(measured.tier, ComputeTier.LOCAL)
 

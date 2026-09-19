@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
-from typing import Any, Mapping, Sequence
+from typing import Any, ClassVar, Mapping, Sequence
 
 from .forecasting import ForecastRecord
 from .opponent_intelligence import RatingSnapshot, SnapshotState
@@ -214,6 +214,8 @@ class StrengthSnapshotPair:
     def training_point(
         self, *, subject_won: bool, target_available_at: str
     ) -> TrainingPoint:
+        if type(subject_won) is not bool:
+            raise ParticipantStrengthError("subject_won must be boolean")
         reveal = _instant(target_available_at, "target_available_at")
         decision = _instant(self.decision_at, "decision_at")
         if reveal <= decision:
@@ -314,7 +316,7 @@ class RatingDifferenceBaselineModel:
 
 @dataclass(frozen=True, slots=True)
 class RatingDifferenceBaselineFactory:
-    model_family: str = RatingDifferenceBaselineModel.model_family
+    model_family: ClassVar[str] = RatingDifferenceBaselineModel.model_family
 
     def fit(
         self,
@@ -491,7 +493,7 @@ class HistogramCalibratedStrengthModel:
 class HistogramCalibratedStrengthFactory:
     bin_count: int = 5
     prior_weight: str = "2"
-    model_family: str = HistogramCalibratedStrengthModel.model_family
+    model_family: ClassVar[str] = HistogramCalibratedStrengthModel.model_family
 
     def __post_init__(self) -> None:
         if type(self.bin_count) is not int or self.bin_count < 2 or self.bin_count > 20:

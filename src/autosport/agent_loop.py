@@ -23,6 +23,7 @@ from .learning_environment import (
     EnvironmentCheckpoint,
     EnvironmentIdentity,
     Episode,
+    LearningEnvironmentError,
     EvidenceTruth,
     Observation,
     Outcome,
@@ -836,16 +837,19 @@ class AgentLoopRuntime:
                         _sha256(item[1], "checkpoint decision payload_id"),
                     )
                 )
-            checkpoint = EnvironmentCheckpoint(
-                environment_id=record["environment_id"],
-                episode_id=record["episode_id"],
-                policy_id=record["policy_id"],
-                step_index=record["step_index"],
-                chain_sha256=record["chain_sha256"],
-                last_transition_id=record["last_transition_id"],
-                committed_action_ids=tuple(record["committed_action_ids"]),
-                committed_decision_intents=tuple(intents),
-            )
+            try:
+                checkpoint = EnvironmentCheckpoint(
+                    environment_id=record["environment_id"],
+                    episode_id=record["episode_id"],
+                    policy_id=record["policy_id"],
+                    step_index=record["step_index"],
+                    chain_sha256=record["chain_sha256"],
+                    last_transition_id=record["last_transition_id"],
+                    committed_action_ids=tuple(record["committed_action_ids"]),
+                    committed_decision_intents=tuple(intents),
+                )
+            except LearningEnvironmentError as exc:
+                raise AgentLoopError("checkpoint record is not canonical") from exc
             if record["checkpoint_id"] != checkpoint.checkpoint_id:
                 raise AgentLoopError("checkpoint record identity mismatch")
             if (

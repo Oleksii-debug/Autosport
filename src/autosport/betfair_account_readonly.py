@@ -1124,6 +1124,7 @@ def _install_execution_readback_authority() -> None:
         *,
         action_id: str,
         market_id: str,
+        provider_order_ref: str | None = None,
         page_size: int = 1000,
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
@@ -1131,6 +1132,7 @@ def _install_execution_readback_authority() -> None:
             self,
             action_id=action_id,
             market_id=market_id,
+            provider_order_ref=provider_order_ref,
             page_size=page_size,
             max_pages=max_pages,
         )

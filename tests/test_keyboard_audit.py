@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import autosport.keyboard_audit as keyboard_audit
@@ -174,8 +175,14 @@ class KeyboardAuditTests(unittest.TestCase):
                 "real_money_execution": False,
             }
 
+            audit_dialog = SimpleNamespace(destroy=lambda: None)
             with (
                 patch.object(keyboard_audit, "WindowsAutosportApp", return_value=_AuditApp()),
+                patch.object(
+                    keyboard_audit,
+                    "show_manual_calculation_workbench",
+                    return_value=audit_dialog,
+                ),
                 patch.object(keyboard_audit, "_binding_presence", return_value={}),
                 patch.object(keyboard_audit, "_execute_focus_shortcuts", return_value={}),
                 patch.object(keyboard_audit, "_tab_reachable_controls", return_value=[]),

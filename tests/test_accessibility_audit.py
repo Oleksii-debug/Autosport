@@ -281,9 +281,19 @@ class AccessibilityAuditTests(unittest.TestCase):
                 "real_money_execution": False,
             }
 
+            audit_dialog = SimpleNamespace(
+                _autosport_workbench_controls={},
+                destroy=lambda: None,
+            )
             with (
                 patch.object(accessibility_audit, "WindowsAutosportApp", return_value=_AuditApp()),
+                patch.object(
+                    accessibility_audit,
+                    "show_manual_calculation_workbench",
+                    return_value=audit_dialog,
+                ),
                 patch.object(accessibility_audit.tk_uia, "describe", return_value=object()),
+                patch.object(accessibility_audit, "_combined_description", return_value=object()),
                 patch.object(
                     accessibility_audit,
                     "summarize_description",

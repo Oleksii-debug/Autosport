@@ -267,12 +267,17 @@ def run_accessibility_audit(output_path: str | Path) -> int:
         app = WindowsAutosportApp()
         app.update_idletasks()
         app.update()
+        # Snapshot the already-enabled main window before opening a new Toplevel.
+        # tk-uia 0.8.0 covers later windows from the original enable(root), while
+        # keeping the main-window description independent of Toplevel handle churn.
+        root_description = tk_uia.describe(app)
         dialog = show_manual_calculation_workbench(app)
         app.update_idletasks()
         app.update()
         controls = getattr(dialog, "_autosport_workbench_controls", {})
+        dialog_description = tk_uia.describe(dialog)
         report = summarize_description(
-            _combined_description(tk_uia.describe(app), tk_uia.describe(dialog)),
+            _combined_description(root_description, dialog_description),
             bankroll_readonly=_bankroll_summary_is_readonly(app),
             shell_state_readonly=_shell_state_is_readonly(app),
             owner_economic_state_readonly=_owner_economic_state_is_readonly(app),

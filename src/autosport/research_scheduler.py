@@ -744,7 +744,7 @@ class ResearchScheduler:
             raise ResearchSchedulerError("curriculum external budget admission unavailable")
         if budget_units > curriculum.max_budget_units:
             raise ResearchSchedulerError("curriculum budget exceeds curriculum authority")
-        if curriculum.status is not curriculum.status.ACTIVE:
+        if curriculum.status is not CurriculumStatus.ACTIVE:
             raise ResearchSchedulerError("curriculum is not active")
         if deadline_at is not None:
             deadline_at = _timestamp(deadline_at, "deadline_at")
@@ -824,7 +824,7 @@ class ResearchScheduler:
             wake_id, wake = pending
             if active_concurrency >= max_concurrency or remaining_budget_units < wake["budget_units"]:
                 return TickResult(TickAction.ADMISSION_BLOCKED, curriculum_wake_id=wake_id)
-            if curriculum.status is curriculum.status.STOPPED:
+            if curriculum.status is CurriculumStatus.STOPPED:
                 return TickResult(TickAction.STOPPED, curriculum_wake_id=wake_id)
             population = self._curriculum_population(candidates)
             actual_ids, actual_digest = self._curriculum_population_digest(population)

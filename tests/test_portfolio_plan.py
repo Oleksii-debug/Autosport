@@ -699,6 +699,7 @@ class PortfolioPlanTests(unittest.TestCase):
         )
         self.assertEqual(mismatch_plan.action, PortfolioAction.WAIT)
         self.assertIn("does not bind exact portfolio/candidates", mismatch_plan.reason)
+        self.assertIsNone(mismatch_plan.dependency_graph)
 
     def test_correlated_positive_candidates_use_robust_haircut_and_remain_exact_decimal(self) -> None:
         goal = self._goal()

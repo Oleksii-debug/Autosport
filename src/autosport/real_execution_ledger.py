@@ -1161,6 +1161,7 @@ class RealExecutionLedger:
                 )
             submitted_time: datetime | None = None
             unknown_time: datetime | None = None
+            provider_order_reference_seen = False
             found_reconciliations: dict[str, ExternalEffectReconciliation] = {}
             found_receipt_id: str | None = None
             for followup in attempt_events[1:]:
@@ -1256,6 +1257,11 @@ class RealExecutionLedger:
                         followup["event_type"]
                         == EventType.PROVIDER_ORDER_REFERENCE_BOUND.value
                     ):
+                        if provider_order_reference_seen:
+                            raise ExecutionLedgerIntegrityError(
+                                "attempt has multiple provider order reference bindings"
+                            )
+                        provider_order_reference_seen = True
                         if submitted_time is not None:
                             raise ExecutionLedgerIntegrityError(
                                 "provider order reference was bound after submission"
@@ -1433,6 +1439,23 @@ class RealExecutionLedger:
                         "attempt chronology timestamp is invalid"
                     ) from exc
             cls._state(attempt_events)
+
+        provider_reference_owners: dict[tuple[str, str, str], str] = {}
+        for event in events:
+            if event["event_type"] != EventType.PROVIDER_ORDER_REFERENCE_BOUND.value:
+                continue
+            payload = event["payload"]
+            key = (
+                payload["provider_id"],
+                payload["account_id"],
+                payload["provider_order_ref"],
+            )
+            prior_owner = provider_reference_owners.get(key)
+            if prior_owner is not None and prior_owner != event["attempt_id"]:
+                raise ExecutionLedgerIntegrityError(
+                    "provider order reference belongs to multiple attempts"
+                )
+            provider_reference_owners[key] = event["attempt_id"]
 
         for event in events:
             if event["event_type"] in {

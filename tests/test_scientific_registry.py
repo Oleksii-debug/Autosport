@@ -135,7 +135,10 @@ def _foundation_with_binding(
                                  protocol.protocol_sha256, (SHA_A, SHA_B), T2,
                                  evaluated_strategy_version_id="strategy-1",
                                  evaluated_model_version_id="model-1",
-                                 effective_sample_size=effective_sample_size)
+                                 effective_sample_size=effective_sample_size,
+                                 effect_interval_low="0.05",
+                                 effect_interval_high="0.15",
+                                 practical_improvement="0.1")
     for record in (question, hypothesis, protocol, dataset, features, model, strategy, bundle):
         registry.append(record)
     return {"question": question, "hypothesis": hypothesis, "protocol": protocol,
@@ -190,6 +193,9 @@ def _foundation(registry: ScientificRegistry) -> dict[str, object]:
         evaluated_strategy_version_id="strategy-1",
         evaluated_model_version_id="model-1",
         effective_sample_size=5,
+        effect_interval_low="0.05",
+        effect_interval_high="0.15",
+        practical_improvement="0.1",
     )
     for record in (question, hypothesis, protocol, dataset, features, model, strategy, bundle):
         registry.append(record)
@@ -466,6 +472,45 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
     registry.record_promotion(rollback)
     assert registry.champion_strategy(as_of=T3) == "strategy-1"
 
+
+def test_promotion_rejects_forged_effect_interval_against_durable_evaluation(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    foundation = _foundation(registry)
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
+
+    forged = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="forged-effect-interval",
+        rollback_identity="NONE",
+        interval_low="0.06",
+        interval_high="0.16",
+        practical="0.11",
+    )
+    registry.append(forged)
+    decision = PromotionDecision(
+        "promotion-forged-effect",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        SHA_D,
+        T3,
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=forged.promotion_evidence_id,
+    )
+
+    with pytest.raises(
+        PromotionEvidenceError,
+        match="effect interval low does not match durable evaluation",
+    ):
+        registry.record_promotion(decision)
 
 def test_reproducibility_bundle_is_deterministic_reference_only(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")

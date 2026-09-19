@@ -478,3 +478,65 @@ def test_registered_forecast_rejects_future_model_registry_availability(tmp_path
             strategy_version_id="strategy-future",
             quote_key="event-1:match-winner:participant-a",
         )
+
+
+def test_registered_forecast_rejects_missing_scientific_foundation(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry.json"
+    )
+    artifacts = FactoryArtifactStore(tmp_path / "factory-artifacts")
+    points = (_point(0, 0.2, 1.0), _point(1, -0.2, 0.0))
+    model = RatingDifferenceBaselineFactory().fit(
+        "model-orphan", points, training_cutoff=T2
+    )
+    payload = model.to_payload()
+    payload.update(
+        {
+            "model_version_id": "model-orphan",
+            "research_protocol_id": "protocol-missing",
+            "dataset_snapshot_id": "dataset-missing",
+            "feature_set_id": "features-missing",
+            "config_sha256": SHA_C,
+            "training_points_manifest_sha256": model.training_manifest_sha256,
+        }
+    )
+    artifact_sha = artifacts.write("model", "model-orphan", payload)
+    registry.append(
+        ModelVersion(
+            model_version_id="model-orphan",
+            model_family=model.model_family,
+            artifact_sha256=artifact_sha,
+            source_sha256=SHA_A,
+            environment_sha256=SHA_B,
+            dataset_snapshot_id="dataset-missing",
+            feature_set_id="features-missing",
+            research_protocol_id="protocol-missing",
+            seed=1,
+            config_sha256=SHA_C,
+            created_at=T2,
+        )
+    )
+    registry.append(
+        StrategyVersion(
+            strategy_version_id="strategy-orphan",
+            canonical_strategy_id="participant-strength",
+            source_sha256=SHA_A,
+            environment_sha256=SHA_B,
+            config_sha256=SHA_C,
+            created_at=T2,
+            model_version_id="model-orphan",
+        )
+    )
+
+    with pytest.raises(
+        ParticipantStrengthError,
+        match="lacks DatasetSnapshot/FeatureSet/ResearchProtocol foundation",
+    ):
+        emit_registered_strength_forecast(
+            registry=registry,
+            artifact_store=artifacts,
+            evidence=_pair(decision_at=T3),
+            model_version_id="model-orphan",
+            strategy_version_id="strategy-orphan",
+            quote_key="event-1:match-winner:participant-a",
+        )

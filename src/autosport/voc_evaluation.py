@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Mapping, Protocol, Protocol, runtime_checkable
 
 from .integrity import atomic_write_json
 from .workspace_lock import WorkspaceEconomicLock
@@ -91,6 +91,12 @@ def _canonical_digest(payload: object) -> str:
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
+
+class CanonicalVOCAuthority(Protocol):
+    """Canonical source resolver required before measured VOC may authorize CLOUD."""
+
+    def verify(self, evaluation: "PairedVOCEvaluation", *, as_of: str) -> None:
+        """Raise VOCEvaluationError unless every canonical reference resolves."""
 
 @dataclass(frozen=True, slots=True)
 class PairedVOCEvaluation:

@@ -104,12 +104,24 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             lifecycle = ContinuousEventLifecycle(Path(directory) / "catalog.json")
             lifecycle.apply_page(
-                self._page(1, self._event(sport="table_tennis")),
+                self._page(
+                    1,
+                    self._catalog_event(
+                        sport="table_tennis",
+                        available_offset=1,
+                    ),
+                ),
                 discovered_at=(self.START + timedelta(seconds=1)).isoformat(),
             )
             with self.assertRaises(CatalogConflictError):
                 lifecycle.apply_page(
-                    self._page(2, self._event(sport="soccer", observed_offset=1)),
+                    self._page(
+                        2,
+                        self._catalog_event(
+                            sport="soccer",
+                            available_offset=2,
+                        ),
+                    ),
                     discovered_at=(self.START + timedelta(seconds=2)).isoformat(),
                 )
 

@@ -487,15 +487,9 @@ class ParticipantIdentityRegistry:
         moment = _instant("as_of", as_of)
         if not isinstance(view, IdentityView):
             raise TypeError("view must be IdentityView")
-        canonical_event_id = _text("event_id", event_id)
-        canonical_source_id = _text("source_id", source_id)
         result: dict[str, EntityIdentity] = {}
         for membership in self._rosters:
-            if (
-                membership.event_id == canonical_event_id
-                and membership.source_id == canonical_source_id
-                and _contains(membership.member_from, membership.member_until, moment)
-            ):
+            if membership.event_id == _text("event_id", event_id) and membership.source_id == _text("source_id", source_id) and _contains(membership.member_from, membership.member_until, moment):
                 if view is IdentityView.RESTATED_RESEARCH or _instant("available_at", membership.available_at) <= moment:
                     entity = self._entities[membership.entity_id]
                     if view is IdentityView.AS_KNOWN_AT_DECISION and _instant("available_at", entity.available_at) > moment:

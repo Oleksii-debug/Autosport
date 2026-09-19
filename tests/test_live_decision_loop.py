@@ -16,6 +16,12 @@ from autosport.decision_ledger import (
 )
 from autosport.domain import MarketEvent
 from autosport.economic_goal import EconomicGoalContract
+from autosport.event_lifecycle import (
+    CatalogEvent,
+    CatalogPage,
+    ContinuousEventLifecycle,
+    EventPhase,
+)
 from autosport.live_decision_loop import (
     LiveCycleStatus,
     LiveDecisionMode,
@@ -187,6 +193,10 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
         strategy_version: StrategyVersion | None = None,
         book: PaperBook | None = None,
         authority: EconomicDecisionAuthority | None = None,
+        catalog_lifecycle: ContinuousEventLifecycle | None = None,
+        catalog_fetch_page=None,
+        catalog_source_id: str | None = None,
+        catalog_required_history: timedelta = timedelta(0),
     ) -> PersistentLiveDecisionLoop:
         selected_strategy = strategy_version or self._strategy_version()
         registry = self._scientific_registry(workspace, selected_strategy)
@@ -203,6 +213,10 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             max_quote_age=timedelta(seconds=5),
             clock=clock,
             post_append_hook=post_append_hook,
+            catalog_lifecycle=catalog_lifecycle,
+            catalog_fetch_page=catalog_fetch_page,
+            catalog_source_id=catalog_source_id,
+            catalog_required_history=catalog_required_history,
         )
 
     def test_constructor_requires_durable_registered_intent_provenance(self) -> None:
@@ -1144,6 +1158,94 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
             self.assertEqual([item[0] for item in factory.calls], ["input-a"])
 
+    def test_catalog_provider_gap_preserves_checkpoint_and_recovers_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            lifecycle_path = workspace / "catalog_lifecycle.json"
+            lifecycle = ContinuousEventLifecycle(lifecycle_path)
+            clock = _ManualClock(self.START + timedelta(seconds=2))
+            quote_time = self.START + timedelta(seconds=1)
+            quote = MarketEvent(
+                event_id="provider-a:event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts=quote_time.isoformat(),
+                source_id="provider-a",
+                sequence=1,
+                status="open",
+                source_ts=quote_time.isoformat(),
+                ingest_ts=quote_time.isoformat(),
+                sport="table_tennis",
+            )
+            store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                store.append(quote)
+            finally:
+                store.close()
+
+            page = CatalogPage(
+                source_id="provider-a",
+                stream_epoch="epoch-1",
+                cursor="cursor-1",
+                position=1,
+                events=(
+                    CatalogEvent(
+                        source_id="provider-a",
+                        sport="table_tennis",
+                        event_id="event-1",
+                        phase=EventPhase.PRE_MATCH,
+                        available_at=quote_time.isoformat(),
+                    ),
+                ),
+            )
+            seen_positions: list[int | None] = []
+
+            def fetch_page(checkpoint):
+                seen_positions.append(
+                    None if checkpoint is None else checkpoint.position
+                )
+                if len(seen_positions) == 1:
+                    raise ProviderUnavailableError("catalog unavailable")
+                return page
+
+            observer = _DurableObserver(workspace, [(), ()])
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+                catalog_lifecycle=lifecycle,
+                catalog_fetch_page=fetch_page,
+                catalog_source_id="provider-a",
+            )
+            input_id = "catalog:provider-a:event-1"
+
+            gap = loop.run_cycle()
+            self.assertEqual(gap.status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertEqual(gap.plan.action.value, "zero")
+            self.assertIn("ProviderUnavailableError", gap.detail)
+            self.assertEqual(observer.calls, 0)
+            self.assertIsNone(lifecycle.checkpoint("provider-a"))
+            self.assertEqual(seen_positions, [None])
+
+            clock.value = self.START + timedelta(seconds=3)
+            recovered = loop.run_cycle()
+            self.assertNotEqual(recovered.status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertEqual(observer.calls, 1)
+            self.assertEqual(lifecycle.checkpoint("provider-a").position, 1)
+            self.assertEqual(loop.dependencies.input_ids, (input_id,))
+            self.assertEqual(len(lifecycle.records()), 1)
+            self.assertEqual(seen_positions, [None, None])
+
+            clock.value = self.START + timedelta(seconds=4)
+            loop.run_cycle()
+            self.assertEqual(observer.calls, 2)
+            self.assertEqual(loop.dependencies.input_ids, (input_id,))
+            self.assertEqual(len(lifecycle.records()), 1)
+            self.assertEqual(seen_positions, [None, None, 1])
+            loop.close()
+
     def test_local_observation_failure_propagates_without_provider_gap_record(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -1476,6 +1578,141 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     clock=_ManualClock(self.START + timedelta(seconds=2)),
                 )
             self.assertEqual(resumed_observer.calls, 0)
+
+    def test_catalog_runtime_discovers_retires_and_restart_preserves_retirement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            lifecycle_path = workspace / "catalog_lifecycle.json"
+            lifecycle = ContinuousEventLifecycle(lifecycle_path)
+            clock = _ManualClock(self.START + timedelta(seconds=2))
+            quote_time = self.START + timedelta(seconds=1)
+            quote = MarketEvent(
+                event_id="provider-a:event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts=quote_time.isoformat(),
+                source_id="provider-a",
+                sequence=1,
+                status="open",
+                source_ts=quote_time.isoformat(),
+                ingest_ts=quote_time.isoformat(),
+                sport="table_tennis",
+            )
+            pre_match = CatalogEvent(
+                source_id="provider-a",
+                sport="table_tennis",
+                event_id="event-1",
+                phase=EventPhase.PRE_MATCH,
+                available_at=quote_time.isoformat(),
+            )
+            completed = CatalogEvent(
+                source_id="provider-a",
+                sport="table_tennis",
+                event_id="event-1",
+                phase=EventPhase.COMPLETED,
+                available_at=(self.START + timedelta(seconds=4)).isoformat(),
+                completion_ref="provider-result:rev-1",
+            )
+            pre_page = CatalogPage(
+                source_id="provider-a",
+                stream_epoch="epoch-1",
+                cursor="cursor-1",
+                position=1,
+                events=(pre_match,),
+            )
+            completed_page = CatalogPage(
+                source_id="provider-a",
+                stream_epoch="epoch-1",
+                cursor="cursor-2",
+                position=2,
+                events=(completed,),
+            )
+            catalog_state = {"completed": False}
+
+            def fetch_page(checkpoint):
+                if catalog_state["completed"]:
+                    return completed_page
+                return pre_page
+
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(quote,), (), (), ()]),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+                catalog_lifecycle=lifecycle,
+                catalog_fetch_page=fetch_page,
+                catalog_source_id="provider-a",
+            )
+            input_id = "catalog:provider-a:event-1"
+
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(loop.dependencies.input_ids, ())
+
+            clock.value = self.START + timedelta(seconds=3)
+            second = loop.run_cycle()
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(loop.dependencies.input_ids, (input_id,))
+            self.assertIn(input_id, loop._freshness_deadlines)
+
+            catalog_state["completed"] = True
+            clock.value = self.START + timedelta(seconds=4)
+            third = loop.run_cycle()
+            self.assertEqual(third.status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(loop.dependencies.input_ids, ())
+            self.assertNotIn(input_id, loop._freshness_deadlines)
+
+            clock.value = self.START + timedelta(seconds=10)
+            fourth = loop.run_cycle()
+            self.assertEqual(fourth.status, LiveCycleStatus.NO_CHANGE)
+            self.assertNotIn(input_id, loop._pending_affected)
+            loop.close()
+
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=11)),
+                catalog_lifecycle=ContinuousEventLifecycle(lifecycle_path),
+                catalog_fetch_page=fetch_page,
+                catalog_source_id="provider-a",
+            )
+            self.assertEqual(resumed.dependencies.input_ids, ())
+            self.assertEqual(
+                resumed.catalog_lifecycle.checkpoint("provider-a").position,
+                2,
+            )
+            self.assertEqual(resumed.run_cycle().status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(resumed.dependencies.input_ids, ())
+            resumed.close()
+
+    def test_retired_input_tombstone_blocks_stale_freshness_after_reregister(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            old_deadline = self.START + timedelta(seconds=3)
+            loop._freshness_generations["input-a"] = 7
+            loop._freshness_deadlines["input-a"] = old_deadline
+            loop._freshness_heap.append((old_deadline, "input-a", 7))
+
+            self.assertTrue(loop.unregister_input("input-a"))
+            self.assertEqual(loop._freshness_generations["input-a"], 8)
+            self.assertNotIn("input-a", loop._freshness_deadlines)
+
+            loop.register_input("input-a", selection_ids="selection-a")
+            expired = loop._expire_freshness_inputs(old_deadline + timedelta(seconds=1))
+            self.assertEqual(expired, ())
+            self.assertEqual(loop._freshness_generations["input-a"], 8)
+            self.assertNotIn("input-a", loop._freshness_deadlines)
+            loop.close()
 
     def test_corrupted_dependency_registry_fails_closed_on_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

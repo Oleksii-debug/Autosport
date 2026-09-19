@@ -202,6 +202,7 @@ class MarketMirror:
         self,
         *,
         source_ids: str | Iterable[str] | None = None,
+        sports: str | Iterable[str] | None = None,
         event_ids: str | Iterable[str] | None = None,
         market_ids: str | Iterable[str] | None = None,
         selection_ids: str | Iterable[str] | None = None,
@@ -214,6 +215,7 @@ class MarketMirror:
         state while an updater is active.
         """
         selected_sources = self._selector(source_ids, name="source_ids")
+        selected_sports = self._selector(sports, name="sports")
         selected_events = self._selector(event_ids, name="event_ids")
         selected_markets = self._selector(market_ids, name="market_ids")
         selected_selections = self._selector(selection_ids, name="selection_ids")
@@ -229,6 +231,7 @@ class MarketMirror:
             event
             for event in events
             if (selected_sources is None or event.source_id in selected_sources)
+            and (selected_sports is None or event.sport in selected_sports)
             and (selected_events is None or event.event_id in selected_events)
             and (selected_markets is None or event.market_id in selected_markets)
             and (
@@ -244,6 +247,7 @@ class MarketMirror:
         as_of: datetime,
         max_age: timedelta,
         source_ids: str | Iterable[str] | None = None,
+        sports: str | Iterable[str] | None = None,
         event_ids: str | Iterable[str] | None = None,
         market_ids: str | Iterable[str] | None = None,
         selection_ids: str | Iterable[str] | None = None,
@@ -258,6 +262,7 @@ class MarketMirror:
         boundary, age_limit = self._decision_boundary(as_of=as_of, max_age=max_age)
         captured = self.view(
             source_ids=source_ids,
+            sports=sports,
             event_ids=event_ids,
             market_ids=market_ids,
             selection_ids=selection_ids,
@@ -387,6 +392,7 @@ class MarketMirror:
         as_of: datetime,
         max_age: timedelta,
         source_ids: str | Iterable[str] | None = None,
+        sports: str | Iterable[str] | None = None,
         event_ids: str | Iterable[str] | None = None,
         market_ids: str | Iterable[str] | None = None,
         selection_ids: str | Iterable[str] | None = None,
@@ -415,6 +421,7 @@ class MarketMirror:
             as_of=boundary,
             max_age=age_limit,
             source_ids=source_ids,
+            sports=sports,
             event_ids=event_ids,
             market_ids=market_ids,
             selection_ids=selection_ids,

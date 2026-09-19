@@ -21,6 +21,7 @@ from .decision_ledger import (
     verify_economic_goal_binding,
 )
 from .economic_goal_provenance import provenance_for
+from .event_lifecycle import CatalogCheckpoint, CatalogPage, ContinuousEventLifecycle
 from .ingestion_health import IngestionPolicy, SourceHealthStore
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
@@ -108,6 +109,7 @@ class LiveIntentFactory(Protocol):
 
 Clock = Callable[[], datetime]
 ObservationRunner = Callable[[BoundedMirrorInvalidationBuffer], object]
+CatalogPageFetcher = Callable[[CatalogCheckpoint | None], CatalogPage]
 PostAppendHook = Callable[[], None]
 
 
@@ -140,10 +142,13 @@ _CONTROL_SCHEMA = "autosport.live_decision_control"
 _CONTROL_VERSION = 1
 _CONTROL_KEYS = frozenset({"schema", "schema_version", "loop_id", "state"})
 _INPUTS_SCHEMA = "autosport.live_decision_inputs"
-_INPUTS_VERSION = 1
+_INPUTS_VERSION = 2
 _INPUTS_KEYS = frozenset({"schema", "schema_version", "loop_id", "inputs"})
-_INPUT_SPEC_KEYS = frozenset(
+_INPUT_SPEC_KEYS_V1 = frozenset(
     {"input_id", "source_ids", "event_ids", "market_ids", "selection_ids"}
+)
+_INPUT_SPEC_KEYS_V2 = frozenset(
+    {"input_id", "source_ids", "sports", "event_ids", "market_ids", "selection_ids"}
 )
 
 
@@ -431,13 +436,14 @@ def _selector_tuple(
 class _InputSpec:
     input_id: str
     source_ids: tuple[str, ...] | None
+    sports: tuple[str, ...] | None
     event_ids: tuple[str, ...] | None
     market_ids: tuple[str, ...] | None
     selection_ids: tuple[str, ...] | None
 
     def __post_init__(self) -> None:
         FocusedMirrorDependencyIndex._input_id(self.input_id)
-        for name in ("source_ids", "event_ids", "market_ids", "selection_ids"):
+        for name in ("source_ids", "sports", "event_ids", "market_ids", "selection_ids"):
             values = getattr(self, name)
             if values is None:
                 continue
@@ -455,6 +461,11 @@ class _InputSpec:
                 None
                 if dependency.source_ids is None
                 else tuple(sorted(dependency.source_ids))
+            ),
+            sports=(
+                None
+                if dependency.sports is None
+                else tuple(sorted(dependency.sports))
             ),
             event_ids=(
                 None
@@ -477,6 +488,7 @@ class _InputSpec:
         return {
             "input_id": self.input_id,
             "source_ids": None if self.source_ids is None else list(self.source_ids),
+            "sports": None if self.sports is None else list(self.sports),
             "event_ids": None if self.event_ids is None else list(self.event_ids),
             "market_ids": None if self.market_ids is None else list(self.market_ids),
             "selection_ids": (
@@ -486,7 +498,10 @@ class _InputSpec:
 
     @classmethod
     def from_dict(cls, raw: object) -> "_InputSpec":
-        if type(raw) is not dict or set(raw) != _INPUT_SPEC_KEYS:
+        if type(raw) is not dict or frozenset(raw) not in {
+            _INPUT_SPEC_KEYS_V1,
+            _INPUT_SPEC_KEYS_V2,
+        }:
             raise LiveDecisionProgressError(
                 "live dependency input must contain canonical fields"
             )
@@ -505,6 +520,7 @@ class _InputSpec:
             return cls(
                 input_id=raw["input_id"],
                 source_ids=selector("source_ids"),
+                sports=None if "sports" not in raw else selector("sports"),
                 event_ids=selector("event_ids"),
                 market_ids=selector("market_ids"),
                 selection_ids=selector("selection_ids"),
@@ -674,6 +690,10 @@ class PersistentLiveDecisionLoop:
         clock: Clock | None = None,
         observation_runner: ObservationRunner | None = None,
         post_append_hook: PostAppendHook | None = None,
+        catalog_lifecycle: ContinuousEventLifecycle | None = None,
+        catalog_fetch_page: CatalogPageFetcher | None = None,
+        catalog_source_id: str | None = None,
+        catalog_required_history: timedelta = timedelta(0),
     ) -> None:
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -728,6 +748,28 @@ class PersistentLiveDecisionLoop:
         self.bounds = bounds or LiveLoopBounds()
         self.clock = resolved_clock
         self.post_append_hook = post_append_hook
+        if catalog_lifecycle is not None and not isinstance(
+            catalog_lifecycle, ContinuousEventLifecycle
+        ):
+            raise TypeError("catalog_lifecycle must be ContinuousEventLifecycle or None")
+        if catalog_fetch_page is not None and not callable(catalog_fetch_page):
+            raise TypeError("catalog_fetch_page must be callable or None")
+        if catalog_source_id is not None:
+            catalog_source_id = _canonical_text("catalog_source_id", catalog_source_id)
+        if catalog_required_history < timedelta(0):
+            raise ValueError("catalog_required_history must be non-negative")
+        if (catalog_lifecycle is None) != (catalog_fetch_page is None):
+            raise ValueError(
+                "catalog_lifecycle and catalog_fetch_page must be supplied together"
+            )
+        if catalog_fetch_page is not None and catalog_source_id is None:
+            raise ValueError(
+                "catalog_source_id is required when catalog lifecycle refresh is enabled"
+            )
+        self.catalog_lifecycle = catalog_lifecycle
+        self.catalog_fetch_page = catalog_fetch_page
+        self.catalog_source_id = catalog_source_id
+        self.catalog_required_history = catalog_required_history
         self._default_market_store: SQLiteMarketStore | None = None
         self._default_health_store: SourceHealthStore | None = None
 
@@ -752,6 +794,7 @@ class PersistentLiveDecisionLoop:
             dependency = self.dependencies.register(
                 spec.input_id,
                 source_ids=spec.source_ids,
+                sports=spec.sports,
                 event_ids=spec.event_ids,
                 market_ids=spec.market_ids,
                 selection_ids=spec.selection_ids,
@@ -823,20 +866,14 @@ class PersistentLiveDecisionLoop:
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger file is missing or unreadable"
             )
-        if self._progress is not None:
-            durable_input_ids = set(self.dependencies.input_ids)
-            progress_input_ids = set(self._progress.registered_input_ids)
-            if not progress_input_ids.issubset(durable_input_ids):
-                raise LiveDecisionProgressError(
-                    "persisted live progress references missing durable dependency inputs"
-                )
-            if (
-                self._progress.phase == _PHASE_APPEND_PENDING
-                and self._progress.registered_input_ids != self.dependencies.input_ids
-            ):
-                raise LiveDecisionProgressError(
-                    "unfinished ledger append requires exact durable dependency registry"
-                )
+        if (
+            self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+            and self._progress.registered_input_ids != self.dependencies.input_ids
+        ):
+            raise LiveDecisionProgressError(
+                "unfinished live decision requires exact durable dependency registry"
+            )
         durable_control = self._load_control()
         if durable_control is None:
             durable_control = _Control(self.loop_id, LiveControlState.RUNNING)
@@ -880,6 +917,7 @@ class PersistentLiveDecisionLoop:
         input_id: str,
         *,
         source_ids: str | tuple[str, ...] | None = None,
+        sports: str | tuple[str, ...] | None = None,
         event_ids: str | tuple[str, ...] | None = None,
         market_ids: str | tuple[str, ...] | None = None,
         selection_ids: str | tuple[str, ...] | None = None,
@@ -888,6 +926,7 @@ class PersistentLiveDecisionLoop:
         candidate = _InputSpec(
             input_id=normalized_id,
             source_ids=_selector_tuple(source_ids, name="source_ids"),
+            sports=_selector_tuple(sports, name="sports"),
             event_ids=_selector_tuple(event_ids, name="event_ids"),
             market_ids=_selector_tuple(market_ids, name="market_ids"),
             selection_ids=_selector_tuple(selection_ids, name="selection_ids"),
@@ -906,6 +945,7 @@ class PersistentLiveDecisionLoop:
         dependency = self.dependencies.register(
             candidate.input_id,
             source_ids=candidate.source_ids,
+            sports=candidate.sports,
             event_ids=candidate.event_ids,
             market_ids=candidate.market_ids,
             selection_ids=candidate.selection_ids,
@@ -919,6 +959,39 @@ class PersistentLiveDecisionLoop:
             raise
         self._pending_affected[dependency.input_id] = None
         self._needs_cache_rebuild = True
+
+    def unregister_input(self, input_id: str) -> bool:
+        normalized_id = FocusedMirrorDependencyIndex._input_id(input_id)
+        existing = self._input_specs.get(normalized_id)
+        if existing is None:
+            return False
+        previous_specs = tuple(self._input_specs.values())
+        if not self.dependencies.unregister(normalized_id):
+            raise LiveDecisionProgressError(
+                "live dependency registry is inconsistent during retirement"
+            )
+        self._input_specs.pop(normalized_id)
+        try:
+            self._persist_input_registry(expected_previous=previous_specs)
+        except BaseException:
+            self._input_specs[normalized_id] = existing
+            self.dependencies.register(
+                existing.input_id,
+                source_ids=existing.source_ids,
+                sports=existing.sports,
+                event_ids=existing.event_ids,
+                market_ids=existing.market_ids,
+                selection_ids=existing.selection_ids,
+            )
+            raise
+        self._pending_affected.pop(normalized_id, None)
+        self._intent_cache.pop(normalized_id, None)
+        self._input_market_sha256.pop(normalized_id, None)
+        self._freshness_deadlines.pop(normalized_id, None)
+        self._freshness_generations[normalized_id] = (
+            self._freshness_generations.get(normalized_id, 0) + 1
+        )
+        return True
 
     def pause(self) -> None:
         if self.stopped:
@@ -977,7 +1050,10 @@ class PersistentLiveDecisionLoop:
         ):
             return self._recover_unfinished_progress()
 
+        catalog_now = _require_utc_clock(self.clock)
         try:
+            if self.catalog_lifecycle is not None:
+                self._refresh_catalog_lifecycle(catalog_now)
             self._observe(self.mirror_updates)
         except ProviderUnavailableError as exc:
             self._needs_cache_rebuild = True
@@ -1086,6 +1162,26 @@ class PersistentLiveDecisionLoop:
         self._pending_affected.clear()
         self._needs_cache_rebuild = False
         return result
+
+    def _refresh_catalog_lifecycle(self, now: datetime) -> tuple[str, ...]:
+        lifecycle = self.catalog_lifecycle
+        fetch_page = self.catalog_fetch_page
+        source_id = self.catalog_source_id
+        if lifecycle is None or fetch_page is None or source_id is None:
+            return ()
+        store = SQLiteMarketStore(self.workspace / "market.db")
+        try:
+            return lifecycle.refresh_and_register(
+                fetch_page,
+                store,
+                source_id=source_id,
+                discovered_at=now.isoformat(),
+                required_history=self.catalog_required_history,
+                register_input=self.register_input,
+                retire_input=self.unregister_input,
+            )
+        finally:
+            store.close()
 
     def _verify_intent_factory_provenance(self) -> None:
         factory_strategy_version_id = getattr(
@@ -1240,6 +1336,7 @@ class PersistentLiveDecisionLoop:
                     for event in snapshot.events
                     if (
                         (spec.source_ids is None or event.source_id in spec.source_ids)
+                        and (spec.sports is None or event.sport in spec.sports)
                         and (spec.event_ids is None or event.event_id in spec.event_ids)
                         and (spec.market_ids is None or event.market_id in spec.market_ids)
                         and (
@@ -1625,7 +1722,7 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "live dependency registry must contain canonical fields"
             )
-        if raw["schema"] != _INPUTS_SCHEMA or raw["schema_version"] != _INPUTS_VERSION:
+        if raw["schema"] != _INPUTS_SCHEMA or raw["schema_version"] not in {1, _INPUTS_VERSION}:
             raise LiveDecisionProgressError("unsupported live dependency registry schema")
         if raw["loop_id"] != self.loop_id:
             raise LiveDecisionProgressError(
@@ -1881,6 +1978,7 @@ class PersistentLiveDecisionLoop:
                 for event in event_tuple
                 if (
                     (spec.source_ids is None or event.source_id in spec.source_ids)
+                    and (spec.sports is None or event.sport in spec.sports)
                     and (spec.event_ids is None or event.event_id in spec.event_ids)
                     and (spec.market_ids is None or event.market_id in spec.market_ids)
                     and (

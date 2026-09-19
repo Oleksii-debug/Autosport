@@ -858,3 +858,25 @@ def test_registered_forecast_rejects_hypothesis_frozen_after_protocol(tmp_path):
             quote_key="event-1:match-winner:participant-a",
         )
 
+def test_registered_forecast_rejects_dataset_cutoff_after_snapshot_availability(tmp_path):
+    registry, artifacts = _registered_strength_lineage(
+        tmp_path,
+        dataset_cutoff=T2,
+        dataset_available_at=T1,
+        model_created_at=T3,
+        strategy_created_at=T3,
+    )
+
+    with pytest.raises(
+        ParticipantStrengthError,
+        match="DatasetSnapshot causal cutoff exceeds snapshot availability",
+    ):
+        emit_registered_strength_forecast(
+            registry=registry,
+            artifact_store=artifacts,
+            evidence=_pair(decision_at=T4),
+            model_version_id="model-lineage",
+            strategy_version_id="strategy-lineage",
+            quote_key="event-1:match-winner:participant-a",
+        )
+

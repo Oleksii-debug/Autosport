@@ -1707,7 +1707,7 @@ class PersistentLiveDecisionLoop:
             or existing.payload.get("decision_context_sha256")
             != progress.decision_context_sha256
             or existing.payload.get("affected_input_ids")
-            != list(progress.affected_input_ids)
+            != progress.affected_input_ids
             or existing.payload.get("plan_sha256") != progress.plan_sha256
             or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
             != progress.decision_id

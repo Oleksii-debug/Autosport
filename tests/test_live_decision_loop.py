@@ -1158,6 +1158,94 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
             self.assertEqual([item[0] for item in factory.calls], ["input-a"])
 
+    def test_catalog_provider_gap_preserves_checkpoint_and_recovers_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            lifecycle_path = workspace / "catalog_lifecycle.json"
+            lifecycle = ContinuousEventLifecycle(lifecycle_path)
+            clock = _ManualClock(self.START + timedelta(seconds=2))
+            quote_time = self.START + timedelta(seconds=1)
+            quote = MarketEvent(
+                event_id="provider-a:event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts=quote_time.isoformat(),
+                source_id="provider-a",
+                sequence=1,
+                status="open",
+                source_ts=quote_time.isoformat(),
+                ingest_ts=quote_time.isoformat(),
+                sport="table_tennis",
+            )
+            store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                store.append(quote)
+            finally:
+                store.close()
+
+            page = CatalogPage(
+                source_id="provider-a",
+                stream_epoch="epoch-1",
+                cursor="cursor-1",
+                position=1,
+                events=(
+                    CatalogEvent(
+                        source_id="provider-a",
+                        sport="table_tennis",
+                        event_id="event-1",
+                        phase=EventPhase.PRE_MATCH,
+                        available_at=quote_time.isoformat(),
+                    ),
+                ),
+            )
+            seen_positions: list[int | None] = []
+
+            def fetch_page(checkpoint):
+                seen_positions.append(
+                    None if checkpoint is None else checkpoint.position
+                )
+                if len(seen_positions) == 1:
+                    raise ProviderUnavailableError("catalog unavailable")
+                return page
+
+            observer = _DurableObserver(workspace, [(), ()])
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+                catalog_lifecycle=lifecycle,
+                catalog_fetch_page=fetch_page,
+                catalog_source_id="provider-a",
+            )
+            input_id = "catalog:provider-a:event-1"
+
+            gap = loop.run_cycle()
+            self.assertEqual(gap.status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertEqual(gap.plan.action.value, "zero")
+            self.assertIn("ProviderUnavailableError", gap.detail)
+            self.assertEqual(observer.calls, 0)
+            self.assertIsNone(lifecycle.checkpoint("provider-a"))
+            self.assertEqual(seen_positions, [None])
+
+            clock.value = self.START + timedelta(seconds=3)
+            recovered = loop.run_cycle()
+            self.assertNotEqual(recovered.status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertEqual(observer.calls, 1)
+            self.assertEqual(lifecycle.checkpoint("provider-a").position, 1)
+            self.assertEqual(loop.dependencies.input_ids, (input_id,))
+            self.assertEqual(len(lifecycle.records()), 1)
+            self.assertEqual(seen_positions, [None, None])
+
+            clock.value = self.START + timedelta(seconds=4)
+            loop.run_cycle()
+            self.assertEqual(observer.calls, 2)
+            self.assertEqual(loop.dependencies.input_ids, (input_id,))
+            self.assertEqual(len(lifecycle.records()), 1)
+            self.assertEqual(seen_positions, [None, None, 1])
+            loop.close()
+
     def test_local_observation_failure_propagates_without_provider_gap_record(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

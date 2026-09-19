@@ -17,7 +17,9 @@ from typing import Callable, Mapping, Sequence
 
 from .betfair_account_readonly import (
     BETTING_JSON_RPC_ENDPOINT,
+    BetfairExecutionReadbackEnvelope,
     BetfairHttpTransport,
+    BetfairReadOnlyClient,
     BetfairReadOnlyError,
     BetfairSessionCredentials,
     UrllibBetfairHttpTransport,
@@ -268,6 +270,7 @@ class BetfairPlaceExecutionReport:
     bookmaker_id: str
     account_id: str
     action_id: str
+    provider_order_ref: str
     market_id: str
     request_id: int
     request_sha256: str
@@ -282,9 +285,17 @@ class BetfairPlaceExecutionReport:
             "bookmaker_id",
             "account_id",
             "action_id",
+            "provider_order_ref",
             "market_id",
         ):
             _text(getattr(self, name), name)
+        if len(self.provider_order_ref) > 32 or any(
+            character not in "0123456789abcdef"
+            for character in self.provider_order_ref
+        ):
+            raise BetfairSupervisedExecutionError(
+                "provider_order_ref must be <=32 lowercase hex characters"
+            )
         if type(self.request_id) is not int or self.request_id < 1:
             raise BetfairSupervisedExecutionError(
                 "request_id must be positive int"
@@ -316,6 +327,7 @@ class BetfairPlaceExecutionReport:
                 "bookmaker_id": self.bookmaker_id,
                 "account_id": self.account_id,
                 "action_id": self.action_id,
+                "provider_order_ref": self.provider_order_ref,
                 "market_id": self.market_id,
                 "request_id": self.request_id,
                 "request_sha256": self.request_sha256,
@@ -395,6 +407,7 @@ class BetfairSupervisedPlaceOrdersClient:
         *,
         profile: BookmakerCapabilityProfile,
         bound: BoundSupervisedExecutionPlan,
+        provider_order_ref: str,
     ) -> BetfairPlaceExecutionReport:
         if not isinstance(action, ExecutionAction):
             raise BetfairSupervisedExecutionError(
@@ -409,6 +422,14 @@ class BetfairSupervisedPlaceOrdersClient:
             profile=profile,
             bound=bound,
         )
+        provider_ref = _text(provider_order_ref, "provider_order_ref")
+        if len(provider_ref) > 32 or any(
+            character not in "0123456789abcdef"
+            for character in provider_ref
+        ):
+            raise BetfairSupervisedExecutionError(
+                "provider_order_ref must be <=32 lowercase hex characters"
+            )
         try:
             selection_id = int(action.selection_id)
         except (TypeError, ValueError) as exc:
@@ -436,7 +457,7 @@ class BetfairSupervisedPlaceOrdersClient:
                 "price": str(action.requested_odds),
                 "persistenceType": "LAPSE",
             },
-            "customerOrderRef": action.action_id,
+            "customerOrderRef": provider_ref,
         }
         params = {
             "marketId": action.market_id,
@@ -479,6 +500,7 @@ class BetfairSupervisedPlaceOrdersClient:
             request_id=request_id,
             request_sha256=request_sha256,
             action=action,
+            provider_order_ref=provider_ref,
             observed_at=self._clock(),
         )
 
@@ -527,6 +549,7 @@ def _parse_place_orders_response(
     request_id: int,
     request_sha256: str,
     action: ExecutionAction,
+    provider_order_ref: str,
     observed_at: str,
 ) -> BetfairPlaceExecutionReport:
     try:
@@ -684,6 +707,7 @@ def _parse_place_orders_response(
         bookmaker_id=action.bookmaker_id,
         account_id=action.account_id,
         action_id=action.action_id,
+        provider_order_ref=provider_order_ref,
         market_id=action.market_id,
         request_id=request_id,
         request_sha256=request_sha256,
@@ -710,6 +734,43 @@ def _report_outcome(
     if instruction.size_matched > 0:
         return PlaceOrdersOutcome.PARTIAL
     return PlaceOrdersOutcome.UNKNOWN
+
+
+def read_betfair_supervised_action_readback(
+    client: BetfairReadOnlyClient,
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+    *,
+    attempt_id: str,
+    page_size: int = 1000,
+    max_pages: int = 100,
+) -> BetfairExecutionReadbackEnvelope:
+    """Query the exact durable provider order reference used by placeOrders."""
+
+    if not isinstance(client, BetfairReadOnlyClient):
+        raise TypeError("client must be BetfairReadOnlyClient")
+    saga = ledger.saga(bound.execution_plan.plan_id)
+    action_id = saga.attempt_action_ids.get(attempt_id)
+    if action_id is None:
+        raise BetfairSupervisedExecutionError(
+            "attempt does not belong to bound supervised plan"
+        )
+    action = bound.action_for(action_id)
+    provider_order_ref = ledger.provider_order_reference(
+        attempt_id=attempt_id,
+        provider_id=action.bookmaker_id,
+    )
+    if provider_order_ref is None:
+        raise BetfairSupervisedExecutionError(
+            "attempt lacks durable provider order reference"
+        )
+    return client.read_execution_readback(
+        action_id=action.action_id,
+        provider_order_ref=provider_order_ref,
+        market_id=action.market_id,
+        page_size=page_size,
+        max_pages=max_pages,
+    )
 
 
 def execute_betfair_supervised_action(
@@ -748,6 +809,10 @@ def execute_betfair_supervised_action(
         action_id=action_id,
         attempt_id=attempt_id,
     )
+    provider_order_ref = ledger.bind_provider_order_reference(
+        attempt_id=attempt_id,
+        provider_id=action.bookmaker_id,
+    )
     now = clock or _now
     ledger.mark_submitted(
         attempt_id,
@@ -758,6 +823,7 @@ def execute_betfair_supervised_action(
             action,
             profile=profile,
             bound=bound,
+            provider_order_ref=provider_order_ref,
         )
     except (
         BetfairPlaceOrdersAmbiguous,
@@ -804,7 +870,7 @@ def execute_betfair_supervised_action(
         )
 
     if outcome is PlaceOrdersOutcome.REJECTED:
-        receipt = receipt or f"place-report:{evidence_id}"
+        receipt = receipt or provider_order_ref
         acknowledgement = ExternalAcknowledgement(
             attempt_id=attempt_id,
             external_receipt_id=receipt,

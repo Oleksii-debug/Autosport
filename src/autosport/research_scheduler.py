@@ -32,11 +32,12 @@ from .research_trigger_adapter import (
     ResearchTriggerReceipt,
     ResearchTriggerSource,
 )
+from .scientific_registry import ScientificRegistry
 from .workspace_lock import WorkspaceEconomicLock
 
 
 SCHEMA = "autosport.research_scheduler"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -64,6 +65,20 @@ class WakeSource(StrEnum):
     POSTMORTEM_QUESTION = "POSTMORTEM_QUESTION"
     FORWARD_EVALUATION = "FORWARD_EVALUATION"
     SCHEDULED_QUESTION = "SCHEDULED_QUESTION"
+
+
+class EvidenceReusePolicy(StrEnum):
+    """How one schedule may reuse the evidence named by its wake purpose."""
+
+    IMMUTABLE_RECURRING = "IMMUTABLE_RECURRING"
+    SINGLE_CANONICAL_OCCURRENCE = "SINGLE_CANONICAL_OCCURRENCE"
+
+
+_WAKE_SOURCE_RECORD_TYPE = {
+    WakeSource.DRIFT_FINDING: "DriftFinding",
+    WakeSource.POSTMORTEM_QUESTION: "Postmortem",
+    WakeSource.FORWARD_EVALUATION: "EvaluationBundle",
+}
 
 
 class TriggerSink(Protocol):
@@ -232,11 +247,33 @@ class ResearchSchedule:
     source_observed_at: str
     budget_units: int
     deadline_offset_seconds: int | None = None
+    source_record_id: str | None = None
+    evidence_reuse_policy: EvidenceReusePolicy = EvidenceReusePolicy.IMMUTABLE_RECURRING
 
     def __post_init__(self) -> None:
         _text(self.schedule_id, "schedule_id")
         if not isinstance(self.wake_source, WakeSource):
             raise ResearchSchedulerError("wake_source must be WakeSource")
+        if not isinstance(self.evidence_reuse_policy, EvidenceReusePolicy):
+            raise ResearchSchedulerError("evidence_reuse_policy must be EvidenceReusePolicy")
+        if self.wake_source is WakeSource.SCHEDULED_QUESTION:
+            if self.source_record_id is not None:
+                raise ResearchSchedulerError(
+                    "scheduled question must not claim typed source evidence"
+                )
+            if self.evidence_reuse_policy is not EvidenceReusePolicy.IMMUTABLE_RECURRING:
+                raise ResearchSchedulerError(
+                    "scheduled question must use immutable recurring evidence policy"
+                )
+        else:
+            _text(self.source_record_id, "source_record_id")
+            if (
+                self.evidence_reuse_policy
+                is not EvidenceReusePolicy.SINGLE_CANONICAL_OCCURRENCE
+            ):
+                raise ResearchSchedulerError(
+                    "typed wake evidence cannot be reused by a recurring schedule"
+                )
         first = _instant(self.first_fire_at, "first_fire_at")
         observed = _instant(self.source_observed_at, "source_observed_at")
         if observed > first:
@@ -269,6 +306,8 @@ class ResearchSchedule:
             ),
             "budget_units": self.budget_units,
             "deadline_offset_seconds": self.deadline_offset_seconds,
+            "source_record_id": self.source_record_id,
+            "evidence_reuse_policy": self.evidence_reuse_policy.value,
         }
 
     @property
@@ -297,13 +336,18 @@ class ResearchSchedule:
             "source_observed_at",
             "budget_units",
             "deadline_offset_seconds",
+            "source_record_id",
+            "evidence_reuse_policy",
         }
         if set(raw) != expected:
             raise ResearchSchedulerError("schedule payload fields mismatch")
         try:
             wake_source = WakeSource(raw["wake_source"])
+            evidence_reuse_policy = EvidenceReusePolicy(raw["evidence_reuse_policy"])
         except (TypeError, ValueError) as exc:
-            raise ResearchSchedulerError("schedule wake_source is invalid") from exc
+            raise ResearchSchedulerError(
+                "schedule wake_source/evidence_reuse_policy is invalid"
+            ) from exc
         return cls(
             schedule_id=raw["schedule_id"],
             wake_source=wake_source,
@@ -316,6 +360,15 @@ class ResearchSchedule:
             source_observed_at=raw["source_observed_at"],
             budget_units=raw["budget_units"],
             deadline_offset_seconds=raw["deadline_offset_seconds"],
+            source_record_id=raw["source_record_id"],
+            evidence_reuse_policy=evidence_reuse_policy,
+        )
+
+    @property
+    def is_single_occurrence(self) -> bool:
+        return (
+            self.evidence_reuse_policy
+            is EvidenceReusePolicy.SINGLE_CANONICAL_OCCURRENCE
         )
 
     def event_for(self, scheduled_for: str) -> ExternalResearchTrigger:
@@ -340,7 +393,10 @@ class ResearchSchedule:
         return ExternalResearchTrigger(
             source_kind=ResearchTriggerSource.SCHEDULE,
             source_scope=(
-                f"research-scheduler:{self.wake_source.value}:{self.schedule_id}"
+                "research-scheduler:"
+                f"{self.wake_source.value}:"
+                f"{self.source_record_id or self.question_id}:"
+                f"{self.schedule_id}"
             ),
             source_event_id=f"occurrence:{occurrence_key}",
             question_id=self.question_id,
@@ -367,11 +423,22 @@ class TickResult:
 class ResearchScheduler:
     """Durable one-occurrence-at-a-time direct research wakeup runtime."""
 
-    def __init__(self, path: str | Path, trigger_sink: TriggerSink) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        trigger_sink: TriggerSink,
+        *,
+        source_registry: ScientificRegistry | None = None,
+    ) -> None:
         self.path = Path(path)
         if not callable(getattr(trigger_sink, "accept", None)):
             raise TypeError("trigger_sink must expose accept(event)")
+        if source_registry is not None and not isinstance(
+            source_registry, ScientificRegistry
+        ):
+            raise TypeError("source_registry must be ScientificRegistry")
         self.trigger_sink = trigger_sink
+        self.source_registry = source_registry
         try:
             self._validate(self._read())
         except FileNotFoundError as exc:
@@ -382,6 +449,8 @@ class ResearchScheduler:
         cls,
         path: str | Path,
         trigger_sink: TriggerSink,
+        *,
+        source_registry: ScientificRegistry | None = None,
     ) -> "ResearchScheduler":
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -398,7 +467,7 @@ class ResearchScheduler:
                     "curriculum_wakes": {},
                 }
                 atomic_write_json(target, {**body, "state_sha256": _digest(body)})
-        return cls(target, trigger_sink)
+        return cls(target, trigger_sink, source_registry=source_registry)
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -506,9 +575,13 @@ class ResearchScheduler:
                 "schedule_sha256",
                 "next_fire_at",
                 "last_skip",
+                "retired",
             }:
                 raise ResearchSchedulerError("schedule state fields mismatch")
             schedule = ResearchSchedule.from_payload(raw["schedule"])
+            self._validate_schedule_authority(schedule)
+            if not isinstance(raw["retired"], bool):
+                raise ResearchSchedulerError("schedule retired flag must be boolean")
             if schedule.schedule_id != schedule_id:
                 raise ResearchSchedulerError("schedule key identity mismatch")
             if _sha(raw["schedule_sha256"], "schedule_sha256") != schedule.schedule_sha256:
@@ -531,6 +604,47 @@ class ResearchScheduler:
             self._validate_occurrence(occurrence_id, raw, state["schedules"])
         for wake_id, raw in state["curriculum_wakes"].items():
             self._validate_curriculum_wake(wake_id, raw)
+
+    def _validate_schedule_authority(self, schedule: ResearchSchedule) -> None:
+        if schedule.wake_source is WakeSource.SCHEDULED_QUESTION:
+            return
+        if self.source_registry is None:
+            raise ResearchSchedulerError(
+                "typed wake source requires canonical ScientificRegistry authority"
+            )
+        record_type = _WAKE_SOURCE_RECORD_TYPE.get(schedule.wake_source)
+        if record_type is None:
+            raise ResearchSchedulerError("typed wake source has no canonical record mapping")
+        source = self.source_registry.get(record_type, schedule.source_record_id)
+        if source is None:
+            raise ResearchSchedulerError(
+                f"{schedule.wake_source.value} source record is missing"
+            )
+        if source.record_sha256 != schedule.source_evidence_sha256:
+            raise ResearchSchedulerError(
+                "wake source evidence hash does not match canonical source record"
+            )
+        question = self.source_registry.get("ResearchQuestion", schedule.question_id)
+        if question is None:
+            raise ResearchSchedulerError("scheduled wake ResearchQuestion is missing")
+        if question.record_sha256 != schedule.question_record_sha256:
+            raise ResearchSchedulerError(
+                "scheduled wake ResearchQuestion hash mismatch"
+            )
+        if question.payload.get("source_sha256") != source.record_sha256:
+            raise ResearchSchedulerError(
+                "wake source purpose is not bound to the ResearchQuestion"
+            )
+        observed = _instant(schedule.source_observed_at, "source_observed_at")
+        if _instant(source.available_at, "source.available_at") > observed:
+            raise ResearchSchedulerError(
+                "source_observed_at precedes canonical source availability"
+            )
+        first = _instant(schedule.first_fire_at, "first_fire_at")
+        if _instant(question.available_at, "question.available_at") > first:
+            raise ResearchSchedulerError(
+                "scheduled wake ResearchQuestion is unavailable at first fire"
+            )
 
     def _validate_occurrence(
         self,
@@ -555,6 +669,7 @@ class ResearchScheduler:
         schedule_id = _text(raw["schedule_id"], "occurrence.schedule_id")
         if schedule_id not in schedules:
             raise ResearchSchedulerError("occurrence references missing schedule")
+        schedule = ResearchSchedule.from_payload(schedules[schedule_id]["schedule"])
         _timestamp(raw["scheduled_for"], "occurrence.scheduled_for")
         if raw["status"] == "SKIPPED":
             if (
@@ -570,6 +685,11 @@ class ResearchScheduler:
         if raw["skip_reason"] is not None:
             raise ResearchSchedulerError("deliverable occurrence carries skip reason")
         event = self._event_from_payload(raw["event"])
+        expected_event = schedule.event_for(raw["scheduled_for"])
+        if event.source_event_sha256 != expected_event.source_event_sha256:
+            raise ResearchSchedulerError(
+                "occurrence event is not bound to its schedule purpose/evidence"
+            )
         if event.source_event_sha256 != _sha(raw["event_sha256"], "event_sha256"):
             raise ResearchSchedulerError("occurrence event digest mismatch")
         if self._occurrence_id(schedule_id, raw["scheduled_for"]) != occurrence_id:
@@ -882,6 +1002,7 @@ class ResearchScheduler:
     def add_schedule(self, schedule: ResearchSchedule) -> None:
         if not isinstance(schedule, ResearchSchedule):
             raise TypeError("schedule must be ResearchSchedule")
+        self._validate_schedule_authority(schedule)
         with WorkspaceEconomicLock(self.path.parent):
             state = self._read()
             self._validate(state)
@@ -892,6 +1013,7 @@ class ResearchScheduler:
                 "schedule_sha256": schedule.schedule_sha256,
                 "next_fire_at": _timestamp(schedule.first_fire_at, "first_fire_at"),
                 "last_skip": None,
+                "retired": False,
             }
             prior = state["schedules"].get(schedule.schedule_id)
             if prior is not None:
@@ -985,6 +1107,8 @@ class ResearchScheduler:
 
             due: list[tuple[datetime, str, dict[str, Any]]] = []
             for schedule_id, entry in state["schedules"].items():
+                if entry["retired"]:
+                    continue
                 fire = _instant(entry["next_fire_at"], "next_fire_at")
                 if fire <= now_dt:
                     due.append((fire, schedule_id, entry))
@@ -994,27 +1118,32 @@ class ResearchScheduler:
             _, schedule_id, entry = min(due, key=lambda item: (item[0], item[1]))
             schedule = ResearchSchedule.from_payload(entry["schedule"])
             first_due = _instant(entry["next_fire_at"], "next_fire_at")
-            elapsed_seconds = int((now_dt - first_due).total_seconds())
-            additional = elapsed_seconds // schedule.interval_seconds
-            newest_due = first_due + timedelta(
-                seconds=additional * schedule.interval_seconds
-            )
-            next_fire = IntervalCadenceAdapter.next_fire(
-                previous_fire_at=newest_due.isoformat().replace("+00:00", "Z"),
-                first_fire_at=schedule.first_fire_at,
-                interval_seconds=schedule.interval_seconds,
-            )
-            newest_age = (now_dt - newest_due).total_seconds()
-            entry["next_fire_at"] = next_fire.isoformat().replace("+00:00", "Z")
+            if schedule.is_single_occurrence:
+                additional = 0
+                newest_due = first_due
+                entry["retired"] = True
+            else:
+                elapsed_seconds = int((now_dt - first_due).total_seconds())
+                additional = elapsed_seconds // schedule.interval_seconds
+                newest_due = first_due + timedelta(
+                    seconds=additional * schedule.interval_seconds
+                )
+                next_fire = IntervalCadenceAdapter.next_fire(
+                    previous_fire_at=newest_due.isoformat().replace("+00:00", "Z"),
+                    first_fire_at=schedule.first_fire_at,
+                    interval_seconds=schedule.interval_seconds,
+                )
+                entry["next_fire_at"] = next_fire.isoformat().replace("+00:00", "Z")
 
-            if additional:
-                entry["last_skip"] = {
-                    "count": additional,
-                    "through": (
-                        newest_due - timedelta(seconds=schedule.interval_seconds)
-                    ).isoformat().replace("+00:00", "Z"),
-                    "reason": "BACKLOG_COLLAPSED_NEWEST_ONLY",
-                }
+                if additional:
+                    entry["last_skip"] = {
+                        "count": additional,
+                        "through": (
+                            newest_due - timedelta(seconds=schedule.interval_seconds)
+                        ).isoformat().replace("+00:00", "Z"),
+                        "reason": "BACKLOG_COLLAPSED_NEWEST_ONLY",
+                    }
+            newest_age = (now_dt - newest_due).total_seconds()
 
             scheduled_for = newest_due.isoformat().replace("+00:00", "Z")
             occurrence_id = self._occurrence_id(schedule_id, scheduled_for)

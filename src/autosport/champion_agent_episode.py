@@ -163,6 +163,12 @@ class ChampionAgentEpisode:
             raise TypeError("identity must be EnvironmentIdentity")
         if not isinstance(checkpoint, EnvironmentCheckpoint):
             raise TypeError("checkpoint must be EnvironmentCheckpoint")
+        agent_loop = AgentLoopRuntime(path)
+        snapshot = agent_loop.snapshot()
+        if checkpoint.checkpoint_id != snapshot.environment_checkpoint_id:
+            raise ChampionAgentEpisodeError(
+                "checkpoint does not match durable AgentLoop checkpoint"
+            )
         policy = load_champion_policy(
             registry,
             artifact_store,
@@ -180,7 +186,7 @@ class ChampionAgentEpisode:
             admissible_actions=admissible_actions,
             checkpoint=checkpoint,
         )
-        return cls(policy, environment, AgentLoopRuntime(path))
+        return cls(policy, environment, agent_loop)
 
     def decide(
         self,

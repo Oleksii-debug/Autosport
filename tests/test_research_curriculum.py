@@ -1,12 +1,22 @@
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
 
+from autosport.learning_environment import (
+    CausalLearningEnvironment,
+    EnvironmentIdentity,
+    EvidenceTruth,
+    Observation,
+    Outcome,
+    RewardEvidence,
+)
 from autosport.research_curriculum import (
     CurriculumOutcome,
     CurriculumPurpose,
     NightResearchCurriculum,
     ReplayCandidate,
+    ReplayEvidenceBinding,
     ReplayProvenance,
     ResearchCurriculumError,
 )
@@ -15,7 +25,6 @@ from autosport.research_trigger_adapter import ResearchTriggerAdapter
 from autosport.scientific_registry import ResearchQuestion, ScientificRegistry
 
 SOURCE_SHA = "a" * 64
-ENVIRONMENT_ID = "b" * 64
 
 
 def _workspace(tmp_path, *, max_budget_units=8):
@@ -40,29 +49,114 @@ def _workspace(tmp_path, *, max_budget_units=8):
     return registry, supervisor, curriculum
 
 
+def _binding(
+    *,
+    episode_key,
+    provenance=ReplayProvenance.HISTORICAL_OBSERVED,
+    truth=None,
+    outcome_available_at=None,
+):
+    if truth is None:
+        truth = (
+            EvidenceTruth.SIMULATED
+            if provenance
+            in {
+                ReplayProvenance.HISTORICAL_COUNTERFACTUAL_LIMITED,
+                ReplayProvenance.SYNTHETIC_WORLD_MODEL,
+            }
+            else EvidenceTruth.OBSERVED
+        )
+    outcome_available_at = (
+        outcome_available_at or "2026-09-20T00:00:00Z"
+    )
+    identity = EnvironmentIdentity(
+        source_id="test-replay-source",
+        config_id="test-config",
+        data_id="test-data",
+        protocol_id="test-protocol",
+        cutoff_ts="2026-09-20T00:00:00Z",
+        seed=1,
+    )
+    environment = CausalLearningEnvironment(
+        identity,
+        episode_key=episode_key,
+        policy_id="test-policy",
+        admissible_actions=frozenset({"WAIT"}),
+    )
+    observation = Observation(
+        environment_id=environment.environment_id,
+        observed_at="2026-09-19T03:00:00Z",
+        available_at="2026-09-19T03:00:00Z",
+        evidence=(("signal", "sealed"),),
+    )
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T03:05:00Z",
+    )
+    simulation_model_id = "test-simulation-v1" if truth is EvidenceTruth.SIMULATED else None
+    outcome = Outcome(
+        environment_id=environment.environment_id,
+        action_id=action.action_id,
+        revealed_at=outcome_available_at,
+        truth=truth,
+        evidence=(("result", "sealed"),),
+        simulation_model_id=simulation_model_id,
+    )
+    reward = RewardEvidence(
+        environment_id=environment.environment_id,
+        action_id=action.action_id,
+        outcome_id=outcome.outcome_id,
+        reward=Decimal("-1"),
+        available_at=outcome_available_at,
+        truth=truth,
+        evidence=(("metric", "sealed"),),
+        simulation_model_id=simulation_model_id,
+    )
+    transition = environment.resolve(
+        action.action_id,
+        outcome=outcome,
+        reward=reward,
+        resolved_at=outcome_available_at,
+    )
+    checkpoint = environment.checkpoint()
+    return ReplayEvidenceBinding(
+        episode=environment.episode,
+        checkpoint=checkpoint,
+        transition=transition,
+        outcome=outcome,
+        reward=reward,
+        provenance=provenance,
+    )
+
+
 def _candidate(
     *,
     question_id="question-1",
-    episode_id="1" * 64,
+    episode_id="episode-1",
     available_at="2026-09-19T03:10:00Z",
     provenance=ReplayProvenance.HISTORICAL_OBSERVED,
+    truth=None,
     reasons=("high-uncertainty",),
     features=(("uncertainty_bucket", "high"),),
     priority=5,
     expected_learning_value=Decimal("0.8"),
     outcome_available_at=None,
 ):
+    binding = _binding(
+        episode_key=episode_id,
+        provenance=provenance,
+        truth=truth,
+        outcome_available_at=outcome_available_at,
+    )
     return ReplayCandidate(
         question_id=question_id,
-        episode_id=episode_id,
-        environment_id=ENVIRONMENT_ID,
+        evidence_binding=binding,
         available_at=available_at,
-        provenance=provenance,
         reasons=reasons,
         selector_features=features,
         priority=priority,
         expected_learning_value=expected_learning_value,
-        outcome_available_at=outcome_available_at,
     )
 
 
@@ -115,7 +209,7 @@ def test_selection_dispatch_restart_is_idempotent(tmp_path):
     state = reopened.snapshot()
     assert state["consumed_budget_units"] == 2
     assert len(state["selections"]) == 1
-    assert state["selections"][0]["selected_episode_id"] == "1" * 64
+    assert state["selections"][0]["selected_episode_id"] == candidates[1].episode_id
 
 
 def test_exact_replay_survives_fully_consumed_curriculum_budget(tmp_path):
@@ -201,6 +295,18 @@ def test_confirmation_fails_closed_on_outcome_or_nonobserved_evidence(tmp_path, 
         )
 
 
+def test_canonical_simulated_evidence_cannot_be_relabelled_observed():
+    with pytest.raises(
+        ResearchCurriculumError,
+        match="simulated canonical evidence cannot be relabelled observed",
+    ):
+        _binding(
+            episode_key="synthetic-relabel",
+            truth=EvidenceTruth.SIMULATED,
+            provenance=ReplayProvenance.HISTORICAL_OBSERVED,
+        )
+
+
 def test_synthetic_episode_cannot_be_relabelled_observed(tmp_path):
     _, _, curriculum = _workspace(tmp_path)
     episode_id = "6" * 64
@@ -232,6 +338,65 @@ def test_synthetic_episode_cannot_be_relabelled_observed(tmp_path):
             seed=10,
             budget_units=1,
         )
+
+
+def test_confirmatory_observed_binding_is_eligible_before_outcome_reveal(tmp_path):
+    _, _, curriculum = _workspace(tmp_path)
+    candidate = _candidate(
+        episode_id="confirmatory-clean",
+        provenance=ReplayProvenance.HISTORICAL_OBSERVED,
+        outcome_available_at="2026-09-20T00:00:00Z",
+    )
+    record = curriculum.select(
+        (candidate,),
+        purpose=CurriculumPurpose.CONFIRMATORY,
+        selector_policy_version="confirm-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=11,
+        budget_units=1,
+    )
+
+    assert record.selected_episode_id == candidate.episode_id
+    assert record.selected_evidence_binding_id == candidate.evidence_binding.binding_id
+    assert record.selected_evidence_truth is EvidenceTruth.OBSERVED
+    assert record.outcome_information_available is False
+
+
+def test_dispatch_rejects_fabricated_unpersisted_selection_without_side_effect(tmp_path):
+    _, supervisor, curriculum = _workspace(tmp_path)
+    record = curriculum.select(
+        (_candidate(episode_id="persisted-selection"),),
+        purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=12,
+        budget_units=1,
+    )
+    fabricated = (
+        replace(
+            record,
+            purpose=CurriculumPurpose.CONFIRMATORY,
+            outcome_information_available=True,
+        ),
+        replace(
+            record,
+            selected_provenance=ReplayProvenance.SYNTHETIC_WORLD_MODEL,
+            selected_evidence_truth=EvidenceTruth.SIMULATED,
+        ),
+        replace(record, seed=999),
+    )
+
+    for forged in fabricated:
+        with pytest.raises(
+            ResearchCurriculumError,
+            match="exact durably persisted selection evidence",
+        ):
+            curriculum.dispatch(forged)
+
+    state = curriculum.snapshot()
+    assert state["dispatches"] == {}
+    assert state["consumed_budget_units"] == 0
+    assert len(supervisor.list_runs()) == 0
 
 
 def test_future_candidate_is_not_visible(tmp_path):
@@ -408,7 +573,7 @@ def test_no_bet_has_no_fixed_positive_selection_bonus(tmp_path):
         seed=1,
         budget_units=1,
     )
-    assert record.selected_episode_id == "a" * 64
+    assert record.selected_episode_id == unresolved.episode_id
     assert record.selected_reasons == ("model-disagreement",)
 
 

@@ -20,7 +20,7 @@ CONFIG = "f" * 64
 def _decision_registry(tmp_path, *, threshold="0.5"):
     # Reuse the canonical drift fixtures so the decision layer is tested against
     # real ScientificRegistry/DriftFinding records rather than a second fake store.
-    from test_drift_control import _baseline_window, _current_window, _reference, _registry
+    from tests.test_drift_control import _current_window, _reference, _registry
 
     registry = _registry(tmp_path)
     monitor = DriftMonitor(registry)
@@ -35,7 +35,8 @@ def _decision_registry(tmp_path, *, threshold="0.5"):
 
 def _make_decision(registry, finding, **overrides):
     values = {
-        "canonical_strategy_id": "strategy-1",
+        "canonical_strategy_id": "strategy-context",
+        "strategy_version_id": "strategy-1",
         "model_version_id": "model-1",
         "environment_sha256": ENV,
         "protocol_id": "protocol-1",
@@ -96,7 +97,7 @@ def test_no_drift_is_activation_eligible_and_runtime_can_only_narrow_actions(tmp
         registry,
         decision,
         as_of="2026-02-12T12:00:00Z",
-        canonical_strategy_id="strategy-1",
+        canonical_strategy_id="strategy-context",
         expected_strategy_version_id="strategy-1",
         expected_model_version_id="model-1",
         expected_environment_sha256=ENV,

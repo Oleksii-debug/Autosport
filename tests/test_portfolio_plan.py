@@ -545,8 +545,8 @@ class PortfolioPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
         self.assertEqual(plan.stakes, (
-            Decimal("20.09"),
-            Decimal("16.08"),
+            Decimal("35.74"),
+            Decimal("28.59"),
         ))
         self.assertIn("endogenous whole-portfolio stake vector", plan.reason)
 

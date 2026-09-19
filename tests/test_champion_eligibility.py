@@ -110,6 +110,7 @@ def test_activation_rejects_expired_or_tampered_or_wider_evidence(tmp_path):
         _make_decision(registry, finding),
         status=ChampionEligibilityStatus.ELIGIBLE,
         reason="test-qualified",
+        decision_id="",
     )
     persist_eligibility_decision(registry, decision)
     validate_activation_eligibility(
@@ -208,6 +209,7 @@ def test_activation_rejects_wrong_exact_lineage(tmp_path):
         _make_decision(registry, finding),
         status=ChampionEligibilityStatus.ELIGIBLE,
         reason="test-qualified",
+        decision_id="",
     )
     persist_eligibility_decision(registry, decision)
     with pytest.raises(ChampionEligibilityError, match="model identity mismatch"):

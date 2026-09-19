@@ -308,7 +308,13 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             lifecycle = ContinuousEventLifecycle(root / "catalog.json")
             store = SQLiteMarketStore(root / "market.db")
             try:
-                store.append(self._event(observed_offset=0, ingest_offset=0))
+                store.append(
+                    self._event(
+                        event_id=self._stored_event_id("event-1"),
+                        observed_offset=0,
+                        ingest_offset=0,
+                    )
+                )
                 pages = [
                     self._page(
                         1,

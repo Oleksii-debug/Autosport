@@ -215,12 +215,22 @@ def run_policy_retest(
     evaluation_config = PolicyEvaluationConfig.from_frozen_text(
         binding.get("evaluation_design")
     )
+    authority = evaluation_config.counterfactual_authority
+    if (
+        authority is not None
+        and authority.evaluator_source_sha256
+        != spec.evaluator_source_sha256.lower()
+    ):
+        raise ValueError(
+            "counterfactual authority evaluator identity does not match factory spec"
+        )
     evaluation = evaluate_policy_pair(
         predecessor_policy,
         challenger_policy,
         evaluation_cases,
         completed_at=spec.completed_at,
         abstain_action=evaluation_config.abstain_action,
+        counterfactual_authority=authority,
     )
     if evaluation.dataset_manifest_sha256 != protocol.payload.get(
         "dataset_manifest_sha256"

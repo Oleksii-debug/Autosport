@@ -649,10 +649,91 @@ def emit_registered_strength_forecast(
         raise ParticipantStrengthError(
             "registered model lacks DatasetSnapshot/FeatureSet/ResearchProtocol foundation"
         )
+    binding = protocol_entry.payload.get("binding")
+    if type(binding) is not dict:
+        raise ParticipantStrengthError(
+            "registered ResearchProtocol lacks frozen scientific binding"
+        )
+    question_id = _text(
+        binding.get("research_question_id"), "research_question_id"
+    )
+    hypothesis_id = _text(binding.get("hypothesis_id"), "hypothesis_id")
+    question_entry = registry.get("ResearchQuestion", question_id)
+    hypothesis_entry = registry.get("Hypothesis", hypothesis_id)
+    if question_entry is None or hypothesis_entry is None:
+        raise ParticipantStrengthError(
+            "registered ResearchProtocol lacks frozen ResearchQuestion/Hypothesis"
+        )
+    if hypothesis_entry.payload.get("research_question_id") != question_id:
+        raise ParticipantStrengthError(
+            "frozen Hypothesis does not reference frozen ResearchQuestion"
+        )
+    if _digest(question_entry.payload) != _sha256(
+        binding.get("research_question_sha256"), "research_question_sha256"
+    ):
+        raise ParticipantStrengthError(
+            "frozen ResearchQuestion does not match ResearchProtocol"
+        )
+    if _digest(hypothesis_entry.payload) != _sha256(
+        binding.get("hypothesis_sha256"), "hypothesis_sha256"
+    ):
+        raise ParticipantStrengthError(
+            "frozen Hypothesis does not match ResearchProtocol"
+        )
+
+    question_available = _instant(
+        question_entry.available_at, "ResearchQuestion.available_at"
+    )
+    hypothesis_available = _instant(
+        hypothesis_entry.available_at, "Hypothesis.available_at"
+    )
+    protocol_frozen = _instant(
+        binding.get("frozen_at_utc"), "ResearchProtocol.frozen_at_utc"
+    )
+    protocol_available = _instant(
+        protocol_entry.available_at, "ResearchProtocol.available_at"
+    )
+    feature_available = _instant(
+        feature_entry.available_at, "FeatureSet.available_at"
+    )
+    dataset_available = _instant(
+        dataset_entry.available_at, "DatasetSnapshot.available_at"
+    )
+    if question_available > hypothesis_available:
+        raise ParticipantStrengthError(
+            "ResearchQuestion must precede frozen Hypothesis"
+        )
+    if hypothesis_available > protocol_frozen:
+        raise ParticipantStrengthError(
+            "Hypothesis must precede ResearchProtocol freeze"
+        )
+    if feature_available > protocol_frozen:
+        raise ParticipantStrengthError(
+            "FeatureSet must be available by ResearchProtocol freeze"
+        )
+    if protocol_frozen > protocol_available:
+        raise ParticipantStrengthError(
+            "ResearchProtocol cannot be durable before its freeze time"
+        )
+    if protocol_available > dataset_available:
+        raise ParticipantStrengthError(
+            "DatasetSnapshot must not precede durable ResearchProtocol"
+        )
+    if binding.get("feature_set_version") != feature_entry.payload.get("version"):
+        raise ParticipantStrengthError(
+            "FeatureSet version does not match ResearchProtocol"
+        )
+
     dataset_cutoff = _instant(
         dataset_entry.payload.get("causal_cutoff"),
         "DatasetSnapshot.causal_cutoff",
     )
+    if _instant(
+        binding.get("causal_cutoff"), "ResearchProtocol.causal_cutoff"
+    ) != dataset_cutoff:
+        raise ParticipantStrengthError(
+            "ResearchProtocol/DatasetSnapshot causal cutoff mismatch"
+        )
     if dataset_cutoff > model_available:
         raise ParticipantStrengthError(
             "DatasetSnapshot causal cutoff exceeds model version availability"
@@ -714,6 +795,10 @@ def emit_registered_strength_forecast(
         "feature_registry_record_sha256": feature_entry.record_sha256,
         "research_protocol_id": protocol_id,
         "protocol_registry_record_sha256": protocol_entry.record_sha256,
+        "research_question_id": question_id,
+        "research_question_registry_record_sha256": question_entry.record_sha256,
+        "hypothesis_id": hypothesis_id,
+        "hypothesis_registry_record_sha256": hypothesis_entry.record_sha256,
         "config_sha256": model_entry.payload.get("config_sha256"),
         "training_manifest_sha256": model.training_manifest_sha256,
         "uncertainty_semantics": "max-descriptive-rating-radius-not-probability-ci",
@@ -751,6 +836,8 @@ def emit_registered_strength_forecast(
             dataset_entry.record_sha256,
             feature_entry.record_sha256,
             protocol_entry.record_sha256,
+            question_entry.record_sha256,
+            hypothesis_entry.record_sha256,
         ),
         provenance=provenance,
         forecast_id=forecast_identity,

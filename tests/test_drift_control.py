@@ -203,6 +203,74 @@ def _reference(monitor, **overrides):
     return monitor.create_reference(**values)
 
 
+def test_scoped_drift_evidence_is_hash_bound_and_scope_mismatch_fails_closed(tmp_path):
+    baseline = _baseline_window(
+        sport="table_tennis",
+        league="league-a",
+        regime="pre_match",
+    )
+    current = _current_window(
+        sport="table_tennis",
+        league="league-a",
+        regime="pre_match",
+    )
+    registry = _registry(
+        tmp_path,
+        baseline_window=baseline,
+        current_window=current,
+    )
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor, baseline=baseline)
+
+    finding = monitor.evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at=EVALUATED_AT,
+    )
+    observation = registry.get("DriftObservation", finding.observation_id)
+    assert observation is not None
+    assert observation.payload["sport"] == "table_tennis"
+    assert observation.payload["league"] == "league-a"
+    assert observation.payload["regime"] == "pre_match"
+
+    mismatched = DriftWindow.from_samples(
+        dataset_snapshot_id="dataset-other-scope",
+        source_identity="lawful:feed-a",
+        window_start="2026-02-11T00:00:00Z",
+        window_end="2026-02-12T00:00:00Z",
+        as_of="2026-02-13T00:00:00Z",
+        values=("2", "3"),
+        value_observed_at=(
+            "2026-02-11T12:00:00Z",
+            "2026-02-12T00:00:00Z",
+        ),
+        value_available_at=(
+            "2026-02-13T00:00:00Z",
+            "2026-02-13T00:00:00Z",
+        ),
+        sport="table_tennis",
+        league="league-b",
+        regime="pre_match",
+    )
+    registry.append(
+        DatasetSnapshot(
+            dataset_snapshot_id=mismatched.dataset_snapshot_id,
+            manifest_sha256=mismatched.evidence_sha256,
+            source_identity=mismatched.source_identity,
+            license_identity="license:test",
+            causal_cutoff=mismatched.window_end,
+            available_at_utc=mismatched.as_of,
+        )
+    )
+    mismatch_finding = monitor.evaluate(
+        reference.reference_id,
+        mismatched,
+        evaluated_at=mismatched.as_of,
+    )
+    assert mismatch_finding.state is DriftState.INSUFFICIENT_EVIDENCE
+    assert mismatch_finding.insufficiency_reason == "SCOPE_MISMATCH"
+
+
 def test_detected_drift_is_durable_restart_safe_and_diagnostic_only(tmp_path):
     registry = _registry(tmp_path)
     monitor = DriftMonitor(registry)

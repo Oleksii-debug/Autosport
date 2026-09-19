@@ -46,6 +46,7 @@ class ExecutionDisposition(StrEnum):
     REJECTED_LATE = "REJECTED_LATE"
     REJECTED_STALE = "REJECTED_STALE"
     REJECTED_IDENTITY = "REJECTED_IDENTITY"
+    REJECTED_COST = "REJECTED_COST"
 
 
 def _text(name: str, value: object) -> str:
@@ -1209,6 +1210,9 @@ class ModelComputeRouterStore:
         request = ComputeRouteRequest.from_payload(
             record["request"]
         )
+        policy = ComputeRoutingPolicy.from_payload(
+            record["policy"]
+        )
         decision = ComputeRouteDecision.from_payload(
             record["decision"]
         )
@@ -1216,6 +1220,9 @@ class ModelComputeRouterStore:
             raise ModelComputeRouterError(
                 "WAIT decision cannot record compute execution"
             )
+        actual_cost_value = _nonnegative(
+            "actual_cost", actual_cost
+        )
         now = _instant("as_of", as_of)
         completed = _instant(
             "completed_at", completed_at
@@ -1262,11 +1269,29 @@ class ModelComputeRouterStore:
                 "execution response exceeded request "
                 "response TTL"
             )
+        elif actual_cost_value > request.max_cost:
+            disposition = (
+                ExecutionDisposition.REJECTED_COST
+            )
+            reason = (
+                "actual execution cost exceeds request budget"
+            )
+        elif (
+            decision.tier is ComputeTier.CLOUD
+            and actual_cost_value > policy.max_cloud_cost
+        ):
+            disposition = (
+                ExecutionDisposition.REJECTED_COST
+            )
+            reason = (
+                "actual cloud execution cost exceeds "
+                "policy cloud-cost limit"
+            )
         else:
             disposition = ExecutionDisposition.ACCEPTED
             reason = (
-                "execution identity, deadline, availability "
-                "and freshness are valid"
+                "execution identity, deadline, availability, "
+                "freshness and actual cost are valid"
             )
         evidence = ComputeExecutionEvidence(
             execution_id=execution_id,
@@ -1276,7 +1301,7 @@ class ModelComputeRouterStore:
             backend_id=backend_id,
             model_id=model_id,
             config_sha256=config_sha256,
-            actual_cost=actual_cost,
+            actual_cost=actual_cost_value,
             actual_latency_seconds=(
                 actual_latency_seconds
             ),

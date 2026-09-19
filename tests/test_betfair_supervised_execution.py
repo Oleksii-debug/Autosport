@@ -505,8 +505,9 @@ def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
 
         assert result.outcome is PlaceOrdersOutcome.PARTIAL
         assert result.attempt_state is AttemptState.PARTIAL
-        assert ledger.plan_is_stale(
-            bound.execution_plan.plan_id
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
         )
 
 

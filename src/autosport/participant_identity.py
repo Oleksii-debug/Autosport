@@ -112,6 +112,7 @@ class AliasRecord:
     valid_until: str | None
     available_at: str
     evidence_sha256: str
+    recorded_at: str
     relation: str = "CONFIRMED"
     supersedes_record_id: str | None = None
 
@@ -120,6 +121,9 @@ class AliasRecord:
             _text(name, getattr(self, name))
         if len(self.evidence_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in self.evidence_sha256):
             raise ParticipantIdentityError("alias evidence_sha256 must be SHA-256 hex")
+        recorded = _instant("recorded_at", self.recorded_at)
+        if recorded < _instant("available_at", self.available_at):
+            raise ParticipantIdentityError("alias cannot be recorded before available_at")
         if self.supersedes_record_id is not None:
             supersedes = _text("supersedes_record_id", self.supersedes_record_id)
             if len(supersedes) != 64 or any(ch not in "0123456789abcdef" for ch in supersedes):
@@ -139,6 +143,7 @@ class AliasRecord:
                 "valid_from": _time_text("valid_from", self.valid_from),
                 "valid_until": None if self.valid_until is None else _time_text("valid_until", self.valid_until),
                 "available_at": _time_text("available_at", self.available_at), "evidence_sha256": self.evidence_sha256,
+                "recorded_at": _time_text("recorded_at", self.recorded_at),
                 "relation": self.relation, "supersedes_record_id": self.supersedes_record_id}
 
 
@@ -179,6 +184,7 @@ class EntityLineage:
     relation: LineageRelation
     effective_from: str
     available_at: str
+    recorded_at: str
     evidence_sha256: str
 
     def __post_init__(self) -> None:
@@ -191,8 +197,12 @@ class EntityLineage:
         if len(self.evidence_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in self.evidence_sha256):
             raise ParticipantIdentityError("lineage evidence_sha256 must be SHA-256 hex")
         effective = _instant("effective_from", self.effective_from)
-        if _instant("available_at", self.available_at) < effective:
+        available = _instant("available_at", self.available_at)
+        recorded = _instant("recorded_at", self.recorded_at)
+        if available < effective:
             raise ParticipantIdentityError("lineage cannot be available before effective_from")
+        if recorded < available:
+            raise ParticipantIdentityError("lineage cannot be recorded before available_at")
 
     @property
     def record_id(self) -> str:
@@ -205,6 +215,7 @@ class EntityLineage:
             "relation": self.relation.value,
             "effective_from": _time_text("effective_from", self.effective_from),
             "available_at": _time_text("available_at", self.available_at),
+            "recorded_at": _time_text("recorded_at", self.recorded_at),
             "evidence_sha256": self.evidence_sha256,
         }
 
@@ -263,6 +274,8 @@ class ParticipantIdentityRegistry:
                 raise ParticipantIdentityError("alias correction must overlap superseded interval")
             if _instant("available_at", alias.available_at) <= _instant("available_at", target.available_at):
                 raise ParticipantIdentityError("alias correction must become available after superseded record")
+            if _instant("recorded_at", alias.recorded_at) <= _instant("recorded_at", target.recorded_at):
+                raise ParticipantIdentityError("alias correction must be recorded after superseded record")
             if any(record.supersedes_record_id == target.record_id for record in self._aliases):
                 raise ParticipantIdentityError("alias correction fork is not allowed")
 
@@ -291,6 +304,7 @@ class ParticipantIdentityRegistry:
         self._aliases.sort(key=lambda value: (
             value.source_id,
             value.alias,
+            _time_text("recorded_at", value.recorded_at),
             _time_text("available_at", value.available_at),
             _time_text("valid_from", value.valid_from),
             value.record_id,
@@ -333,7 +347,13 @@ class ParticipantIdentityRegistry:
             record for record in self._lineages
             if entity_id in (record.predecessor_entity_id, record.successor_entity_id)
             and _instant("effective_from", record.effective_from) <= moment
-            and (view is IdentityView.RESTATED_RESEARCH or _instant("available_at", record.available_at) <= moment)
+            and (
+                view is IdentityView.RESTATED_RESEARCH
+                or (
+                    _instant("available_at", record.available_at) <= moment
+                    and _instant("recorded_at", record.recorded_at) <= moment
+                )
+            )
         )
 
     def resolve_alias_record(self, source_id: str, alias: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> AliasRecord:
@@ -348,7 +368,10 @@ class ParticipantIdentityRegistry:
                 continue
             if not _contains(record.valid_from, record.valid_until, moment):
                 continue
-            if view is IdentityView.AS_KNOWN_AT_DECISION and _instant("available_at", record.available_at) > moment:
+            if view is IdentityView.AS_KNOWN_AT_DECISION and (
+                _instant("available_at", record.available_at) > moment
+                or _instant("recorded_at", record.recorded_at) > moment
+            ):
                 continue
             matches.append(record)
 
@@ -418,7 +441,7 @@ class ParticipantIdentityRegistry:
                 self.add_lineage(EntityLineage(
                     item["predecessor_entity_id"], item["successor_entity_id"],
                     LineageRelation(item["relation"]), item["effective_from"],
-                    item["available_at"], item["evidence_sha256"],
+                    item["available_at"], item["recorded_at"], item["evidence_sha256"],
                 ))
         finally:
             self._loading = False

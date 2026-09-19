@@ -15,6 +15,7 @@ test = ["pytest>=8,<9"]
 
 [project.scripts]
 autosport = "autosport.cli:main"
+autosport-observe-continuous = "autosport.continuous_observation:main"
 autosport-export-evidence = "autosport.evidence_export:main"
 autosport-verify-evidence = "autosport.evidence_export:verify_main"
 autosport-build-historical-corpus = "autosport.historical_governance:corpus_main"

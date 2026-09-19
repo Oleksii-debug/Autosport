@@ -227,6 +227,10 @@ class PortfolioPlanTests(unittest.TestCase):
         market_id: str | None = None,
         selection_id: str | None = None,
         source_id: str | None = None,
+        uncertainty: Decimal = Decimal("0"),
+        maximum_uncertainty: Decimal = Decimal("0.20"),
+        sample_size: int = 100,
+        valid_until: str | None = None,
     ) -> OpportunityIntent:
         context = cls._context(
             goal,
@@ -255,6 +259,10 @@ class PortfolioPlanTests(unittest.TestCase):
                     in {StrategyClass.PREDICTIVE_EDGE, StrategyClass.HYBRID}
                     else None
                 ),
+                uncertainty=uncertainty,
+                maximum_uncertainty=maximum_uncertainty,
+                sample_size=sample_size,
+                valid_until=valid_until,
             ),
             evidence=evidence
             or cls._evidence(
@@ -1805,6 +1813,176 @@ class PortfolioPlanTests(unittest.TestCase):
         )
         self.assertEqual(duplicate.action, PortfolioAction.WAIT)
         self.assertIn("duplicate", duplicate.reason)
+
+
+    def test_predictive_uncertainty_requires_fresh_qualified_witness(self) -> None:
+        goal = self._goal()
+        book = PaperBook("1000")
+        policy = self._policy(goal)
+
+        missing = self._intent(goal, suffix="missing")
+        missing_forecast = replace(
+            missing.opportunity.forecasts[0],
+            predictive_eligibility=None,
+        )
+        missing = replace(
+            missing,
+            opportunity=replace(
+                missing.opportunity,
+                forecasts=(missing_forecast,),
+            ),
+        )
+        missing_plan = build_portfolio_plan(
+            book,
+            (missing,),
+            policy,
+            self.DECISION_TS,
+            dependency_graph=self._graph(book, (missing,)),
+        )
+        self.assertEqual(missing_plan.action, PortfolioAction.WAIT)
+        self.assertIn("lacks versioned uncertainty/calibration", missing_plan.reason)
+
+        stale = self._intent(
+            goal,
+            suffix="stale",
+            valid_until="2026-09-18T13:19:59+00:00",
+        )
+        stale_plan = build_portfolio_plan(
+            book,
+            (stale,),
+            policy,
+            self.DECISION_TS,
+            dependency_graph=self._graph(book, (stale,)),
+        )
+        self.assertEqual(stale_plan.action, PortfolioAction.WAIT)
+        self.assertIn("calibration eligibility evidence is stale", stale_plan.reason)
+
+        unsupported = self._intent(
+            goal,
+            suffix="support",
+            sample_size=49,
+        )
+        unsupported_plan = build_portfolio_plan(
+            book,
+            (unsupported,),
+            policy,
+            self.DECISION_TS,
+            dependency_graph=self._graph(book, (unsupported,)),
+        )
+        self.assertEqual(unsupported_plan.action, PortfolioAction.WAIT)
+        self.assertIn("insufficient sample support", unsupported_plan.reason)
+
+        excessive = self._intent(
+            goal,
+            suffix="wide",
+            uncertainty=Decimal("0.21"),
+            maximum_uncertainty=Decimal("0.20"),
+        )
+        excessive_plan = build_portfolio_plan(
+            book,
+            (excessive,),
+            policy,
+            self.DECISION_TS,
+            dependency_graph=self._graph(book, (excessive,)),
+        )
+        self.assertEqual(excessive_plan.action, PortfolioAction.WAIT)
+        self.assertIn("exceeds frozen eligibility threshold", excessive_plan.reason)
+
+    def test_wider_predictive_uncertainty_cannot_increase_stake(self) -> None:
+        goal = self._goal()
+        policy = self._policy(goal)
+
+        tight = self._intent(
+            goal,
+            suffix="tight",
+            signal=Decimal("0.05"),
+            uncertainty=Decimal("0.01"),
+        )
+        tight_book = PaperBook("1000")
+        tight_plan = build_portfolio_plan(
+            tight_book,
+            (tight,),
+            policy,
+            self.DECISION_TS,
+            dependency_graph=self._graph(tight_book, (tight,)),
+        )
+
+        wide = self._intent(
+            goal,
+            suffix="wide2",
+            signal=Decimal("0.05"),
+            uncertainty=Decimal("0.03"),
+        )
+        wide_book = PaperBook("1000")
+        wide_plan = build_portfolio_plan(
+            wide_book,
+            (wide,),
+            policy,
+            self.DECISION_TS,
+            dependency_graph=self._graph(wide_book, (wide,)),
+        )
+
+        self.assertEqual(tight_plan.action, PortfolioAction.STAKE_VECTOR)
+        self.assertEqual(wide_plan.action, PortfolioAction.STAKE_VECTOR)
+        self.assertLessEqual(wide_plan.stakes[0], tight_plan.stakes[0])
+        self.assertLess(wide_plan.stakes[0], tight_plan.stakes[0])
+
+    def test_predictive_forecast_ref_v2_round_trip_and_legacy_fail_closed(self) -> None:
+        goal = self._goal()
+        current = self._intent(
+            goal,
+            suffix="roundtrip",
+            uncertainty=Decimal("0.01"),
+        ).opportunity.forecasts[0]
+        self.assertEqual(ForecastRef.from_dict(current.to_dict()), current)
+
+        payload = {
+            "forecast_id": current.forecast_id,
+            "forecast_hash": current.forecast_hash,
+            "quote_key": current.quote_key,
+            "probability": str(current.probability),
+            "input_cutoff_ts": current.input_cutoff_ts,
+            "market_snapshot_hash": current.market_snapshot_hash,
+            "quote_market_event_hash": current.quote_market_event_hash,
+        }
+        legacy = ForecastRef.from_dict(payload)
+        self.assertIsNone(legacy.uncertainty)
+        self.assertIsNone(legacy.predictive_eligibility)
+        reason = legacy.predictive_eligibility_reason(
+            __import__("datetime").datetime.fromisoformat(
+                self.DECISION_TS.replace("Z", "+00:00")
+            ),
+            expected_model_id="model-roundtrip",
+        )
+        self.assertIn("lacks versioned uncertainty/calibration", reason or "")
+
+    def test_structural_hybrid_does_not_invent_forecast_or_model_requirement(self) -> None:
+        goal = self._goal()
+        context = self._context(goal, suffix="structural-hybrid")
+        opportunity = Opportunity(
+            strategy_class=StrategyClass.HYBRID,
+            decision=OpportunityDecision.WAIT,
+            quotes=tuple(
+                QuoteRef.from_market_event(
+                    quote,
+                    market_snapshot_hash=self.SNAPSHOT_SHA,
+                )
+                for quote in context.quotes
+            ),
+            claims_probability_edge=False,
+        )
+        intent = OpportunityIntent(
+            intent_id="intent-structural-hybrid",
+            opportunity=opportunity,
+            evidence=self._evidence(),
+            risk_context=context,
+            signal_strength=Decimal("0"),
+            strategy_id="structural-hybrid",
+            model_id=None,
+            config_sha256="e" * 64,
+        )
+        self.assertIsNone(intent.model_id)
+        self.assertEqual(intent.opportunity.forecasts, ())
 
 
 if __name__ == "__main__":

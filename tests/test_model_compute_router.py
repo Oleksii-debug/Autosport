@@ -476,6 +476,85 @@ class ModelComputeRouterTests(unittest.TestCase):
                 Decimal("7.00"),
             )
 
+    def test_actual_execution_cost_overruns_fail_closed_and_remain_accounted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+
+            local_request = request(
+                request_id="req-actual-request-budget",
+                allow_cloud=False,
+                max_cost=Decimal("2"),
+            )
+            local_decision = store.route(
+                local_request,
+                self.candidates,
+                policy(),
+                as_of=T1,
+            )
+            self.assertEqual(local_decision.tier, ComputeTier.LOCAL)
+            request_overrun = store.record_execution(
+                execution_id="exec-request-budget-overrun",
+                request_id=local_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("2.01"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                request_overrun.disposition,
+                ExecutionDisposition.REJECTED_COST,
+            )
+            self.assertIn("request budget", request_overrun.reason)
+
+            cloud_request = request(
+                request_id="req-actual-cloud-budget",
+                max_cost=Decimal("20"),
+            )
+            cloud_policy = policy(max_cloud_cost=Decimal("10"))
+            cloud_decision = store.route(
+                cloud_request,
+                self.candidates,
+                cloud_policy,
+                as_of=T1,
+                voc_evidence=voc(evidence_id="voc-actual-cloud-budget"),
+                domain_route=slow_route(),
+            )
+            self.assertEqual(cloud_decision.tier, ComputeTier.CLOUD)
+            cloud_overrun = store.record_execution(
+                execution_id="exec-cloud-budget-overrun",
+                request_id=cloud_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="permitted-cloud",
+                model_id="challenger-v2",
+                config_sha256=SHA_B,
+                actual_cost=Decimal("10.01"),
+                actual_latency_seconds=Decimal("4"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                cloud_overrun.disposition,
+                ExecutionDisposition.REJECTED_COST,
+            )
+            self.assertIn("policy cloud-cost", cloud_overrun.reason)
+
+            reopened = ModelComputeRouterStore(path)
+            self.assertEqual(
+                reopened.total_actual_cost(local_request.request_id),
+                Decimal("2.01"),
+            )
+            self.assertEqual(
+                reopened.total_actual_cost(cloud_request.request_id),
+                Decimal("10.01"),
+            )
+
     def test_future_voc_is_not_causally_usable(self):
         future = voc(
             evidence_id="voc-future",

@@ -41,6 +41,7 @@ def make_observation(**overrides):
         capital_time_hours=met("0.25", "hours"),
         data_cost=met("0.10", "cost"),
         compute_cost=met("2", "cost"),
+        compute_duration_seconds=met("2", "seconds"),
         slow_analysis_deadline_seconds=met("1", "seconds"),
         freshness_ttl_seconds=met("10", "seconds"),
     )
@@ -126,16 +127,18 @@ class SportDomainFitnessTests(unittest.TestCase):
         self.assertEqual(recommend_route(stale, as_of=T2).status, RouteStatus.DO_NOT_ROUTE)
         self.assertEqual(recommend_route(zero, as_of=T2).status, RouteStatus.DO_NOT_ROUTE)
 
-    def test_slow_route_is_only_allowed_when_measured_budget_fits(self):
+    def test_slow_route_uses_duration_not_cost_and_requires_measured_budget(self):
         slow = make_observation(
             observation_id="slow", domain_profile=DomainProfile.SLOW,
             reaction_slack_seconds=met("5", "seconds"),
-            compute_cost=met("2", "cost"), slow_analysis_deadline_seconds=met("2", "seconds"),
+            compute_cost=met("200", "cost"),
+            compute_duration_seconds=met("2", "seconds"),
+            slow_analysis_deadline_seconds=met("2", "seconds"),
         )
         self.assertEqual(recommend_route(slow, as_of=T2).status, RouteStatus.ROUTE_SLOW_RESEARCH)
         too_slow = replace(
             slow, observation_id="too-slow",
-            slow_analysis_deadline_seconds=met("4", "seconds"),
+            compute_duration_seconds=met("4", "seconds"),
         )
         self.assertEqual(recommend_route(too_slow, as_of=T2).status, RouteStatus.ROUTE_BASELINE)
 

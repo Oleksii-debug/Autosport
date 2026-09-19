@@ -17,10 +17,14 @@ from autosport.participant_strength import (
     emit_registered_strength_forecast,
 )
 from autosport.scientific_registry import (
+    DatasetSnapshot,
+    FeatureSet,
     ModelVersion,
+    ResearchProtocol,
     ScientificRegistry,
     StrategyVersion,
 )
+from autosport.strategy_experiment import ScientificProtocolBinding
 from autosport.strategy_model_factory import (
     FactoryArtifactStore,
     TrainingPoint,
@@ -311,6 +315,56 @@ def test_registered_forecast_reloads_hash_bound_factory_artifact_and_registry(tm
         }
     )
     artifact_sha = artifacts.write("model", "model-strength-v1", payload)
+    registry.append(
+        FeatureSet(
+            feature_set_id="features-strength-v1",
+            version="1",
+            definition_sha256=SHA_D,
+            source_sha256=SHA_A,
+            available_at_utc=T1,
+        )
+    )
+    binding = ScientificProtocolBinding(
+        research_protocol_id="protocol-strength-v1",
+        research_question_id="question-strength-v1",
+        research_question_sha256=SHA_D,
+        hypothesis_id="hypothesis-strength-v1",
+        hypothesis_sha256=SHA_E,
+        inclusion_criteria="causal canonical rating snapshot pairs only",
+        exclusion_criteria="insufficient or future-contaminated evidence",
+        lawful_source_requirements="canonical Autosport dataset entitlement",
+        causal_cutoff=T3,
+        evaluation_design="frozen causal walk-forward test fixture",
+        feature_set_version="1",
+        uncertainty_method="descriptive snapshot radius plus calibration evidence",
+        multiple_comparison_control="single challenger",
+        robustness_checks=("restart", "future-leakage"),
+        random_seed_policy="deterministic seed 7",
+        stopping_rule="fixed fixture",
+        promotion_rule="no promotion in this forecast-emission test",
+        expected_artifacts=("model",),
+        code_config_sha256=config_sha,
+        frozen_at_utc=T1,
+    )
+    registry.append(
+        ResearchProtocol(
+            binding=binding,
+            source_sha256=SHA_A,
+            environment_sha256=SHA_B,
+            dataset_manifest_sha256=model.training_manifest_sha256,
+            available_at_utc=T1,
+        )
+    )
+    registry.append(
+        DatasetSnapshot(
+            dataset_snapshot_id="dataset-strength-v1",
+            manifest_sha256=model.training_manifest_sha256,
+            source_identity="test-causal-rating-snapshots",
+            license_identity="test-fixture",
+            causal_cutoff=T3,
+            available_at_utc=T3,
+        )
+    )
     registry.append(
         ModelVersion(
             model_version_id="model-strength-v1",

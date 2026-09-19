@@ -331,7 +331,7 @@ def recommend_route(
             "freshness_ttl_seconds", observation.freshness_ttl_seconds.value
         )
         evidence_age = _elapsed_seconds(
-            boundary, _instant("available_at", observation.available_at)
+            boundary, _instant("measured_until", observation.measured_until)
         )
         effective_freshness = measured_freshness + evidence_age
         if effective_freshness > freshness_ttl:

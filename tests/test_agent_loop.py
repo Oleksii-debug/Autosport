@@ -16,6 +16,7 @@ from autosport.agent_loop import (
     ReflectionPostmortem,
 )
 from autosport.learning_environment import (
+    Action,
     CausalLearningEnvironment,
     EnvironmentIdentity,
     EvidenceTruth,
@@ -179,6 +180,7 @@ def test_full_paper_loop_attribution_research_handoff_and_restart(tmp_path):
     )
     commit = runtime.commit_action(
         action,
+        episode=environment.episode,
         effect_state=ExternalEffectState.NONE,
         at="2026-09-19T13:00:05Z",
     )
@@ -285,6 +287,7 @@ def test_restart_never_reauthorizes_same_action(tmp_path):
     )
     first = runtime.commit_action(
         action,
+        episode=environment.episode,
         effect_state=ExternalEffectState.PAPER_ONLY,
         at="2026-09-19T13:00:05Z",
     )
@@ -293,11 +296,44 @@ def test_restart_never_reauthorizes_same_action(tmp_path):
     reopened = AgentLoopRuntime(runtime.path)
     retry = reopened.commit_action(
         action,
+        episode=environment.episode,
         effect_state=ExternalEffectState.PAPER_ONLY,
         at="2026-09-19T13:00:06Z",
     )
     assert retry.newly_committed is False
     assert retry.may_execute is False
+
+
+def test_direct_action_cannot_bypass_episode_admissible_set(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+
+    unauthorized = Action(
+        environment_id=environment.environment_id,
+        observation_id=observation.observation_id,
+        action_type="UNAUTHORIZED",
+        decided_at="2026-09-19T13:00:05Z",
+    )
+    with pytest.raises(
+        AgentLoopError,
+        match="canonical episode admissible set",
+    ):
+        runtime.commit_action(
+            unauthorized,
+            episode=environment.episode,
+            effect_state=ExternalEffectState.NONE,
+            at="2026-09-19T13:00:05Z",
+        )
+
+    snapshot = runtime.snapshot()
+    assert snapshot.phase is AgentLoopPhase.ACT_OR_ABSTAIN
+    assert snapshot.action_id is None
 
 
 def test_unknown_external_effect_fails_closed_until_reconciled(tmp_path):
@@ -316,6 +352,7 @@ def test_unknown_external_effect_fails_closed_until_reconciled(tmp_path):
     )
     committed = runtime.commit_action(
         action,
+        episode=environment.episode,
         effect_state=ExternalEffectState.UNKNOWN_EXTERNAL_EFFECT,
         at="2026-09-19T13:00:05Z",
     )
@@ -327,6 +364,7 @@ def test_unknown_external_effect_fails_closed_until_reconciled(tmp_path):
 
     retry = AgentLoopRuntime(runtime.path).commit_action(
         action,
+        episode=environment.episode,
         effect_state=ExternalEffectState.UNKNOWN_EXTERNAL_EFFECT,
         at="2026-09-19T13:00:06Z",
     )
@@ -359,6 +397,7 @@ def test_future_evidence_and_observed_simulated_relabel_fail_closed(
     )
     runtime.commit_action(
         action,
+        episode=environment.episode,
         effect_state=ExternalEffectState.NONE,
         at="2026-09-19T13:00:05Z",
     )
@@ -442,6 +481,7 @@ def test_attribution_must_bind_exact_reward_and_unknown_cannot_invent_credit(
     )
     runtime.commit_action(
         action,
+        episode=environment.episode,
         effect_state=ExternalEffectState.NONE,
         at="2026-09-19T13:00:05Z",
     )
@@ -536,6 +576,7 @@ def test_checkpoint_rejects_stale_environment_identity(tmp_path):
     )
     runtime.commit_action(
         action,
+        episode=environment.episode,
         effect_state=ExternalEffectState.NONE,
         at="2026-09-19T13:00:05Z",
     )

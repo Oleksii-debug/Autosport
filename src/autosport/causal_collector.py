@@ -285,16 +285,36 @@ class CollectorDeltaStore(_JsonAtomicStore):
         }:
             raise CursorRegressionError("new stream epoch requires explicit epoch-change/reset state")
         previous = None if previous_raw is None else StreamCheckpoint(**previous_raw)
+        if delta.revision_of is not None:
+            revised = next(
+                (item for item in raw["deltas"] if item.get("delta_id") == delta.revision_of), None
+            )
+            if revised is None:
+                raise CursorRegressionError("revision must target an existing predecessor")
+            predecessor = CollectorDelta.from_dict(revised)
+            if predecessor.source_id != delta.source_id:
+                raise CursorRegressionError("revision source_id does not match predecessor")
+            if predecessor.stream_epoch != delta.stream_epoch:
+                raise CursorRegressionError("revision stream_epoch does not match predecessor")
+            if predecessor.event_dedupe_key != delta.event_dedupe_key:
+                raise CursorRegressionError("revision event_dedupe_key does not match predecessor")
+            if predecessor.event_id != delta.event_id:
+                raise CursorRegressionError("revision event_id does not match predecessor")
+            if predecessor.cursor_position != delta.cursor_position:
+                raise CursorRegressionError("revision cursor_position does not match predecessor")
+            if delta.revision_number != predecessor.revision_number + 1:
+                raise CursorRegressionError("revision_number must advance exactly one step")
+            if delta.gap_from_cursor != predecessor.gap_from_cursor || delta.gap_to_cursor != predecessor.gap_to_cursor:
+                raise GapStateError("revision gap bounds must match predecessor")
+            if predecessor.gap_state is GapState.DETECTED:
+                if delta.gap_state is not GapState.RECOVERED:
+                    raise GapStateError("detected gap can only be revised by a recovered marker")
+            elif delta.gap_state is GapState.RECOVERED:
+                raise GapStateError("recovered marker must revise a detected gap")
         if previous is not None:
             previous.validate()
-            if delta.cursor_position < previous.last_position:
-                if delta.revision_of is None:
-                    raise CursorRegressionError("source cursor moved backwards within one epoch")
-                revised = next(
-                    (item for item in raw["deltas"] if item.get("delta_id") == delta.revision_of), None
-                )
-                if revised is None or revised.get("cursor_position") != delta.cursor_position:
-                    raise CursorRegressionError("revision must target an existing cursor position")
+            if delta.cursor_position < previous.last_position and delta.revision_of is None:
+                raise CursorRegressionError("source cursor moved backwards within one epoch")
             if delta.cursor_position == previous.last_position and delta.revision_of is None:
                 raise CursorRegressionError("equal cursor position requires an explicit revision relationship")
 

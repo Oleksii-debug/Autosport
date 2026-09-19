@@ -1320,7 +1320,12 @@ class ModelComputeRouterTests(unittest.TestCase):
                 cloud_candidate_id=None,
                 max_cost=Decimal("3"),
             )
-            store.route(req, self.candidates, policy(), as_of=T1)
+            decision = store.route(
+                req,
+                self.candidates,
+                policy(),
+                as_of=T1,
+            )
             first = store.record_execution(
                 execution_id="exec-restart-freeze-1",
                 request_id=req.request_id,
@@ -1336,6 +1341,15 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
 
             reopened = ModelComputeRouterStore(path)
+            self.assertEqual(
+                reopened.route(
+                    req,
+                    self.candidates,
+                    policy(),
+                    as_of=T1,
+                ),
+                decision,
+            )
             replayed = reopened.record_execution(
                 execution_id=first.execution_id,
                 request_id=req.request_id,
@@ -1601,6 +1615,54 @@ class ModelComputeRouterTests(unittest.TestCase):
                 recovered.disposition,
                 ExecutionDisposition.ACCEPTED,
             )
+
+
+    def test_authority_partial_tail_and_state_ahead_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+            req = request(
+                request_id="req-authority-corrupt-tail",
+                allow_cloud=False,
+                cloud_candidate_id=None,
+            )
+            store.route(req, self.candidates, policy(), as_of=T1)
+            store.record_execution(
+                execution_id="exec-authority-corrupt-tail",
+                request_id=req.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("1"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            authority_path = path.with_name(
+                f"{path.name}.execution-authority.jsonl"
+            )
+            original_authority = authority_path.read_text(
+                encoding="utf-8"
+            )
+
+            authority_path.write_text(
+                original_authority + "{",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "execution authority journal contains invalid JSON",
+            ):
+                ModelComputeRouterStore(path)
+
+            authority_path.write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "execution authority journal is missing",
+            ):
+                ModelComputeRouterStore(path)
 
     def test_immutable_request_id_cannot_be_reused_with_changed_policy_or_input(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -346,6 +346,12 @@ class ValueOfComputationEvidence:
     evidence_id: str
     baseline_candidate_id: str
     challenger_candidate_id: str
+    baseline_backend_id: str
+    baseline_model_id: str
+    baseline_config_sha256: str
+    challenger_backend_id: str
+    challenger_model_id: str
+    challenger_config_sha256: str
     measured_at: str
     available_at: str
     provenance: VOCEvidenceProvenance
@@ -359,6 +365,12 @@ class ValueOfComputationEvidence:
         _text("evidence_id", self.evidence_id)
         _text("baseline_candidate_id", self.baseline_candidate_id)
         _text("challenger_candidate_id", self.challenger_candidate_id)
+        _text("baseline_backend_id", self.baseline_backend_id)
+        _text("baseline_model_id", self.baseline_model_id)
+        _sha256("baseline_config_sha256", self.baseline_config_sha256)
+        _text("challenger_backend_id", self.challenger_backend_id)
+        _text("challenger_model_id", self.challenger_model_id)
+        _sha256("challenger_config_sha256", self.challenger_config_sha256)
         if self.baseline_candidate_id == self.challenger_candidate_id:
             raise ModelComputeRouterError(
                 "VOC evidence requires paired distinct candidates"
@@ -387,11 +399,33 @@ class ValueOfComputationEvidence:
             - self.compute_cost_penalty
         )
 
+    def matches_candidates(
+        self,
+        baseline: ComputeCandidate,
+        challenger: ComputeCandidate,
+    ) -> bool:
+        return (
+            self.baseline_candidate_id == baseline.candidate_id
+            and self.baseline_backend_id == baseline.backend_id
+            and self.baseline_model_id == baseline.model_id
+            and self.baseline_config_sha256 == baseline.config_sha256
+            and self.challenger_candidate_id == challenger.candidate_id
+            and self.challenger_backend_id == challenger.backend_id
+            and self.challenger_model_id == challenger.model_id
+            and self.challenger_config_sha256 == challenger.config_sha256
+        )
+
     def payload(self) -> dict[str, Any]:
         return {
             "evidence_id": self.evidence_id,
             "baseline_candidate_id": self.baseline_candidate_id,
             "challenger_candidate_id": self.challenger_candidate_id,
+            "baseline_backend_id": self.baseline_backend_id,
+            "baseline_model_id": self.baseline_model_id,
+            "baseline_config_sha256": self.baseline_config_sha256,
+            "challenger_backend_id": self.challenger_backend_id,
+            "challenger_model_id": self.challenger_model_id,
+            "challenger_config_sha256": self.challenger_config_sha256,
             "measured_at": _time("measured_at", self.measured_at),
             "available_at": _time("available_at", self.available_at),
             "provenance": self.provenance.value,
@@ -411,6 +445,12 @@ class ValueOfComputationEvidence:
                 evidence_id=raw["evidence_id"],
                 baseline_candidate_id=raw["baseline_candidate_id"],
                 challenger_candidate_id=raw["challenger_candidate_id"],
+                baseline_backend_id=raw["baseline_backend_id"],
+                baseline_model_id=raw["baseline_model_id"],
+                baseline_config_sha256=raw["baseline_config_sha256"],
+                challenger_backend_id=raw["challenger_backend_id"],
+                challenger_model_id=raw["challenger_model_id"],
+                challenger_config_sha256=raw["challenger_config_sha256"],
                 measured_at=raw["measured_at"],
                 available_at=raw["available_at"],
                 provenance=VOCEvidenceProvenance(raw["provenance"]),
@@ -885,15 +925,10 @@ def route_compute(
             "missing paired measured value-of-computation evidence"
         )
     else:
-        if (
-            voc_evidence.baseline_candidate_id
-            != baseline.candidate_id
-            or voc_evidence.challenger_candidate_id
-            != cloud.candidate_id
-        ):
+        if not voc_evidence.matches_candidates(baseline, cloud):
             baseline_reason = (
-                "VOC evidence is not bound to the selected "
-                "baseline/cloud pair"
+                "VOC evidence exact compute identity does not match "
+                "the selected baseline/cloud candidates"
             )
         elif (
             voc_evidence.provenance
@@ -1108,6 +1143,29 @@ class ModelComputeRouterStore:
                     item["voc_evidence"]
                 )
             )
+            if voc is not None:
+                candidates_by_id = {
+                    candidate.candidate_id: candidate
+                    for candidate in candidates
+                }
+                voc_baseline = candidates_by_id.get(
+                    voc.baseline_candidate_id
+                )
+                voc_challenger = candidates_by_id.get(
+                    voc.challenger_candidate_id
+                )
+                if (
+                    voc_baseline is None
+                    or voc_challenger is None
+                    or not voc.matches_candidates(
+                        voc_baseline,
+                        voc_challenger,
+                    )
+                ):
+                    raise ModelComputeRouterError(
+                        "persisted VOC exact compute identity does not "
+                        "match persisted candidates"
+                    )
             domain_observation = (
                 None
                 if item.get("domain_observation") is None

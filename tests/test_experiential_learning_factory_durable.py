@@ -17,7 +17,7 @@ from test_strategy_model_factory import (
 )
 
 
-def test_policy_successor_retest_persists_negative_scientific_memory(tmp_path):
+def test_policy_successor_retest_persists_inconclusive_scientific_memory(tmp_path):
     points = _bad_candidate_points()
     registry, registry_path, rule, store, _, _ = _factory_foundation(
         tmp_path, points=points
@@ -99,7 +99,7 @@ def test_policy_successor_retest_persists_negative_scientific_memory(tmp_path):
     experiment = reopened.get("Experiment", "experiment-v2")
     assert experiment is not None
     assert experiment.payload["strategy_version_id"] == challenger.policy_id
-    assert experiment.payload["outcome"] == "NEGATIVE"
+    assert experiment.payload["outcome"] == "INCONCLUSIVE"
 
     decision = reopened.get("PromotionDecision", "promotion-v2")
     assert decision is not None
@@ -108,7 +108,7 @@ def test_policy_successor_retest_persists_negative_scientific_memory(tmp_path):
 
     postmortem = reopened.get("Postmortem", "experiment-v2:postmortem")
     assert postmortem is not None
-    assert postmortem.payload["classification"] == "NEGATIVE"
+    assert postmortem.payload["classification"] == "INCONCLUSIVE"
     assert postmortem.payload["retest_conditions"]
 
     reproducibility = reopened.reproducibility_bundle("experiment-v2")

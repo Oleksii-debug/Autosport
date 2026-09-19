@@ -260,7 +260,37 @@ def _real_factory_foundation(tmp_path, identity: EnvironmentIdentity):
                 "prediction": 0.0,
                 "target": 1.0,
                 "squared_error": 1.0,
-            }
+            },
+            {
+                "fold_id": "champion-fold-2",
+                "training_cutoff": T2,
+                "evaluation_at": T3,
+                "target_available_at": T3,
+                "causal_training_count": 3,
+                "prediction": 0.0,
+                "target": 1.0,
+                "squared_error": 1.0,
+            },
+            {
+                "fold_id": "champion-fold-3",
+                "training_cutoff": T3,
+                "evaluation_at": T4,
+                "target_available_at": T4,
+                "causal_training_count": 4,
+                "prediction": 0.0,
+                "target": 1.0,
+                "squared_error": 1.0,
+            },
+            {
+                "fold_id": "champion-fold-4",
+                "training_cutoff": T4,
+                "evaluation_at": T5,
+                "target_available_at": T5,
+                "causal_training_count": 5,
+                "prediction": 0.0,
+                "target": 0.0,
+                "squared_error": 0.0,
+            },
         ],
     }
     champion_walk_forward_sha256 = _canonical_sha(champion_walk_forward)
@@ -460,7 +490,7 @@ def test_learned_policy_rejection_is_durable_and_duplicate_retest_is_blocked(tmp
     reopened = ScientificRegistry(registry_path)
     experiment = reopened.get("Experiment", spec.experiment_id)
     assert experiment is not None
-    assert experiment.payload["outcome"] == ResearchOutcome.NEGATIVE.value
+    assert experiment.payload["outcome"] == ResearchOutcome.INCONCLUSIVE.value
     assert reopened.get("Postmortem", f"{spec.experiment_id}:postmortem") is not None
     assert reopened.get("PromotionDecision", spec.promotion_decision_id) is not None
     assert reopened.champion_strategy(
@@ -474,7 +504,7 @@ def test_learned_policy_rejection_is_durable_and_duplicate_retest_is_blocked(tmp
         spec.experiment_id,
         as_of=T7,
     )
-    assert restart.outcome is ResearchOutcome.NEGATIVE
+    assert restart.outcome is ResearchOutcome.INCONCLUSIVE
     assert restart.champion_strategy_version_id == "strategy-v1"
     assert restart.reproducibility_bundle_sha256 == result.reproducibility_bundle_sha256
 

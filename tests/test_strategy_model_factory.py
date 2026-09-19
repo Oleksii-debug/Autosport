@@ -660,7 +660,7 @@ def test_factory_rejects_nonfinite_metrics():
         )
 
 
-def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path):
+def test_registry_backed_factory_vertical_retains_inconclusive_and_survives_restart(tmp_path):
     registry, registry_path, rule, store, evaluator_config, input_manifest = (
         _factory_foundation(tmp_path)
     )
@@ -670,7 +670,8 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
     )
     result = _run_candidate(runner, _candidate_points(), rule)
 
-    assert result.verdict is PromotionVerdict.PROMOTE
+    assert result.verdict is PromotionVerdict.INCONCLUSIVE
+    assert result.registry_action is PromotionAction.RETAIN
     assert result.candidate_metrics["max_squared_error"] <= 0.50
     assert model_factory.fit_ids[-1] == "model-v2"
     assert registry.get("ModelVersion", "model-v2") is not None
@@ -695,6 +696,7 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
     decision_entry = registry.get("PromotionDecision", "promotion-v2")
     assert bundle_entry is not None
     assert decision_entry is not None
+    assert decision_entry.payload["action"] == PromotionAction.RETAIN.value
     evidence_entry = registry.get(
         "PromotionEvidence", decision_entry.payload["promotion_evidence_id"]
     )
@@ -727,8 +729,8 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
         "experiment-v2",
         as_of=T7,
     )
-    assert restarted.champion_strategy_version_id == "strategy-v2"
-    assert restarted.outcome is ResearchOutcome.POSITIVE
+    assert restarted.champion_strategy_version_id == "strategy-v1"
+    assert restarted.outcome is ResearchOutcome.INCONCLUSIVE
     assert restarted.reproducibility_bundle_sha256 == result.reproducibility_bundle_sha256
 
 
@@ -819,7 +821,7 @@ def test_factory_rejects_caller_injected_promotion_authority_metrics(tmp_path):
         )
 
 
-def test_factory_rejection_is_durable_negative_memory_with_postmortem(tmp_path):
+def test_factory_rejection_is_durable_inconclusive_memory_with_postmortem(tmp_path):
     points = _bad_candidate_points()
     registry, registry_path, rule, store, _, _ = _factory_foundation(
         tmp_path, points=points
@@ -828,7 +830,7 @@ def test_factory_rejection_is_durable_negative_memory_with_postmortem(tmp_path):
     assert result.verdict is PromotionVerdict.REJECT
     reopened = ScientificRegistry(registry_path)
     experiment = reopened.get("Experiment", "experiment-v2")
-    assert experiment.payload["outcome"] == "NEGATIVE"
+    assert experiment.payload["outcome"] == "INCONCLUSIVE"
     assert reopened.get("Postmortem", "experiment-v2:postmortem") is not None
     assert reopened.champion_strategy(
         as_of=T7, canonical_strategy_id="canonical-factory-strategy"

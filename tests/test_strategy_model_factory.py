@@ -354,6 +354,42 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
         "candidate_metrics": {"max_squared_error": 1.0, "mse": 0.80},
         "candidate_metrics_artifact_sha256": champion_metrics_sha256,
         "candidate_metrics_source": "causal-walk-forward-v1",
+        "promotion_effect_evidence": {
+            "schema_version": 1,
+            "experiment_id": "experiment-v1",
+            "research_protocol_id": binding.research_protocol_id,
+            "research_question_id": question.question_id,
+            "hypothesis_id": hypothesis.hypothesis_id,
+            "candidate_strategy_version_id": champion_strategy.strategy_version_id,
+            "candidate_model_version_id": champion_model.model_version_id,
+            "evaluation_bundle_id": "eval-v1",
+            "evaluation_bundle_sha256": None,
+            "dataset_snapshot_id": dataset.dataset_snapshot_id,
+            "confirmation_trial_family_id": f"{binding.research_protocol_id}:confirmation-trial-family",
+            "holdout_access_id": promotion_holdout_access_id(
+                research_protocol_id=binding.research_protocol_id,
+                dataset_manifest_sha256=dataset_manifest_sha256,
+                source_identity=dataset.source_identity,
+                license_identity=dataset.license_identity,
+                confirmation_trial_family_id=f"{binding.research_protocol_id}:confirmation-trial-family",
+            ),
+            "estimand": "mse",
+            "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+            "cohort_id": dataset.dataset_snapshot_id,
+            "effective_sample_size": 5,
+            "minimum_effective_sample_size": rule.minimum_effective_sample_size,
+            "effect_interval_low": "0.1",
+            "effect_interval_high": "0.2",
+            "practical_improvement": "0.15",
+            "guardrails_passed": True,
+            "validity": PromotionEvidenceValidity.ELIGIBLE.value,
+            "holdout_consumed": False,
+            "stopping_rule_sha256": hashlib.sha256(b"one final evaluation").hexdigest(),
+            "multiple_comparison_control_sha256": hashlib.sha256(b"single frozen primary metric").hexdigest(),
+            "rollback_identity": "NONE",
+            "uncertainty_method": binding.uncertainty_method,
+            "created_at": T3,
+        },
     }
     champion_evaluation_sha256 = store.write(
         "evaluation", "eval-v1", champion_evaluation_payload
@@ -368,6 +404,10 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
         T3,
         evaluated_strategy_version_id=champion_strategy.strategy_version_id,
         evaluated_model_version_id=champion_model.model_version_id,
+        effective_sample_size=5,
+        effect_interval_low="0.1",
+        effect_interval_high="0.2",
+        practical_improvement="0.15",
     )
     for record in (champion_model, champion_strategy, champion_bundle):
         registry.append(record)

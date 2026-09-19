@@ -1309,6 +1309,278 @@ class ModelComputeRouterTests(unittest.TestCase):
             ):
                 ModelComputeRouterStore(path)
 
+
+    def test_restart_freezes_loaded_request_but_preserves_idempotent_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+            req = request(
+                request_id="req-restart-freeze",
+                allow_cloud=False,
+                cloud_candidate_id=None,
+                max_cost=Decimal("3"),
+            )
+            store.route(req, self.candidates, policy(), as_of=T1)
+            first = store.record_execution(
+                execution_id="exec-restart-freeze-1",
+                request_id=req.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("1"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+
+            reopened = ModelComputeRouterStore(path)
+            replayed = reopened.record_execution(
+                execution_id=first.execution_id,
+                request_id=req.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("1"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(replayed, first)
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "execution-frozen after restart",
+            ):
+                reopened.record_execution(
+                    execution_id="exec-restart-freeze-2",
+                    request_id=req.request_id,
+                    completed_at=T1,
+                    available_at=T1,
+                    backend_id="local-cpu",
+                    model_id="baseline-v1",
+                    config_sha256=SHA_A,
+                    actual_cost=Decimal("1"),
+                    actual_latency_seconds=Decimal("2"),
+                    evidence_sha256=SHA_C,
+                    as_of=T1,
+                )
+
+            fresh = request(
+                request_id="req-restart-fresh",
+                allow_cloud=False,
+                cloud_candidate_id=None,
+                max_cost=Decimal("3"),
+            )
+            reopened.route(fresh, self.candidates, policy(), as_of=T1)
+            accepted = reopened.record_execution(
+                execution_id="exec-restart-fresh-1",
+                request_id=fresh.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("1"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                accepted.disposition,
+                ExecutionDisposition.ACCEPTED,
+            )
+
+    def test_joint_store_and_authority_rollback_cannot_refund_loaded_request(self):
+        cases = (
+            {
+                "name": "request",
+                "request": request(
+                    request_id="req-joint-rollback-request",
+                    allow_cloud=False,
+                    cloud_candidate_id=None,
+                    max_cost=Decimal("2"),
+                ),
+                "policy": policy(),
+                "voc": None,
+                "domain": None,
+                "backend_id": "local-cpu",
+                "model_id": "baseline-v1",
+                "config_sha256": SHA_A,
+                "first_cost": Decimal("1.25"),
+                "second_cost": Decimal("0.80"),
+                "retry_cost": Decimal("0.70"),
+            },
+            {
+                "name": "cloud",
+                "request": request(
+                    request_id="req-joint-rollback-cloud",
+                    max_cost=Decimal("20"),
+                ),
+                "policy": policy(max_cloud_cost=Decimal("10")),
+                "voc": voc(evidence_id="voc-joint-rollback-cloud"),
+                "domain": slow_observation(),
+                "backend_id": "permitted-cloud",
+                "model_id": "challenger-v2",
+                "config_sha256": SHA_B,
+                "first_cost": Decimal("6"),
+                "second_cost": Decimal("4.01"),
+                "retry_cost": Decimal("4"),
+            },
+        )
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "router.json"
+                    store = ModelComputeRouterStore(path)
+                    store.route(
+                        case["request"],
+                        self.candidates,
+                        case["policy"],
+                        as_of=T1,
+                        voc_evidence=case["voc"],
+                        domain_observation=case["domain"],
+                    )
+                    first = store.record_execution(
+                        execution_id=f'exec-joint-{case["name"]}-1',
+                        request_id=case["request"].request_id,
+                        completed_at=T1,
+                        available_at=T1,
+                        backend_id=case["backend_id"],
+                        model_id=case["model_id"],
+                        config_sha256=case["config_sha256"],
+                        actual_cost=case["first_cost"],
+                        actual_latency_seconds=Decimal("2"),
+                        evidence_sha256=SHA_C,
+                        as_of=T1,
+                    )
+                    second = store.record_execution(
+                        execution_id=f'exec-joint-{case["name"]}-2',
+                        request_id=case["request"].request_id,
+                        completed_at=T1,
+                        available_at=T1,
+                        backend_id=case["backend_id"],
+                        model_id=case["model_id"],
+                        config_sha256=case["config_sha256"],
+                        actual_cost=case["second_cost"],
+                        actual_latency_seconds=Decimal("2"),
+                        evidence_sha256=SHA_C,
+                        as_of=T1,
+                    )
+                    self.assertEqual(
+                        first.disposition,
+                        ExecutionDisposition.ACCEPTED,
+                    )
+                    self.assertEqual(
+                        second.disposition,
+                        ExecutionDisposition.REJECTED_COST,
+                    )
+
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    raw["executions"] = [
+                        item
+                        for item in raw["executions"]
+                        if item["execution_id"] != second.execution_id
+                    ]
+                    rewrite_execution_heads_from_surviving_history(path, raw)
+                    authority_path = path.with_name(
+                        f"{path.name}.execution-authority.jsonl"
+                    )
+                    authority_lines = authority_path.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                    self.assertEqual(len(authority_lines), 2)
+                    authority_path.write_text(
+                        authority_lines[0] + "\n",
+                        encoding="utf-8",
+                    )
+
+                    reopened = ModelComputeRouterStore(path)
+                    self.assertEqual(
+                        reopened.total_actual_cost(
+                            case["request"].request_id
+                        ),
+                        case["first_cost"],
+                    )
+                    with self.assertRaisesRegex(
+                        ModelComputeRouterError,
+                        "execution-frozen after restart",
+                    ):
+                        reopened.record_execution(
+                            execution_id=f'exec-joint-{case["name"]}-retry',
+                            request_id=case["request"].request_id,
+                            completed_at=T1,
+                            available_at=T1,
+                            backend_id=case["backend_id"],
+                            model_id=case["model_id"],
+                            config_sha256=case["config_sha256"],
+                            actual_cost=case["retry_cost"],
+                            actual_latency_seconds=Decimal("2"),
+                            evidence_sha256=SHA_C,
+                            as_of=T1,
+                        )
+
+    def test_journal_first_publication_recovers_one_missing_store_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+            req = request(
+                request_id="req-journal-first-recovery",
+                allow_cloud=False,
+                cloud_candidate_id=None,
+                max_cost=Decimal("3"),
+            )
+            store.route(req, self.candidates, policy(), as_of=T1)
+            original_persist = store._persist
+
+            def interrupted_persist(*args, **kwargs):
+                raise OSError("simulated interrupted routing-state publish")
+
+            store._persist = interrupted_persist
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "reopen to recover",
+            ):
+                store.record_execution(
+                    execution_id="exec-journal-first-recovery",
+                    request_id=req.request_id,
+                    completed_at=T1,
+                    available_at=T1,
+                    backend_id="local-cpu",
+                    model_id="baseline-v1",
+                    config_sha256=SHA_A,
+                    actual_cost=Decimal("1.25"),
+                    actual_latency_seconds=Decimal("2"),
+                    evidence_sha256=SHA_C,
+                    as_of=T1,
+                )
+            store._persist = original_persist
+
+            reopened = ModelComputeRouterStore(path)
+            self.assertEqual(
+                reopened.total_actual_cost(req.request_id),
+                Decimal("1.25"),
+            )
+            recovered = reopened.record_execution(
+                execution_id="exec-journal-first-recovery",
+                request_id=req.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("1.25"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                recovered.disposition,
+                ExecutionDisposition.ACCEPTED,
+            )
+
     def test_immutable_request_id_cannot_be_reused_with_changed_policy_or_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ModelComputeRouterStore(Path(tmp) / "router.json")

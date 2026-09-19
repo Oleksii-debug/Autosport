@@ -26,7 +26,7 @@ _VERSION = 3
 _EXECUTION_AUTHORITY_SCHEMA = (
     "autosport.model_compute_router.execution_authority"
 )
-_EXECUTION_AUTHORITY_VERSION = 1
+_EXECUTION_AUTHORITY_VERSION = 2
 _ZERO = Decimal("0")
 
 
@@ -995,6 +995,7 @@ def _execution_authority_record(
         "execution_id": evidence.execution_id,
         "decision_id": evidence.decision_id,
         "execution_record_sha256": evidence.execution_record_sha256,
+        "execution": evidence.payload(),
         "execution_head": head,
     }
     return {
@@ -1018,6 +1019,7 @@ def _validate_execution_authority_record(
         "execution_id",
         "decision_id",
         "execution_record_sha256",
+        "execution",
         "execution_head",
         "authority_sha256",
     }
@@ -1049,6 +1051,17 @@ def _validate_execution_authority_record(
         "execution_record_sha256",
         raw["execution_record_sha256"],
     )
+    execution = ComputeExecutionEvidence.from_payload(raw["execution"])
+    execution.verify_record_sha256()
+    if (
+        execution.execution_id != execution_id
+        or execution.decision_id != decision_id
+        or execution.execution_record_sha256
+        != execution_record_sha256
+    ):
+        raise ModelComputeRouterError(
+            "execution authority full evidence identity mismatch"
+        )
     execution_head = _validate_execution_head_payload(
         raw["execution_head"]
     )
@@ -1064,6 +1077,7 @@ def _validate_execution_authority_record(
         "execution_id": execution_id,
         "decision_id": decision_id,
         "execution_record_sha256": execution_record_sha256,
+        "execution": execution.payload(),
         "execution_head": execution_head,
     }
     authority_sha256 = _sha256(
@@ -1445,6 +1459,8 @@ class ModelComputeRouterStore:
         self._execution_authority_records: list[
             dict[str, Any]
         ] = []
+        self._live_request_ids: set[str] = set()
+        self._publication_interrupted = False
         if self.path.exists():
             self._load()
         else:
@@ -1635,6 +1651,155 @@ class ModelComputeRouterStore:
                 )
 
         return records
+
+    def _recover_interrupted_execution_publication(
+        self,
+        loaded_routes: Mapping[str, Mapping[str, Any]],
+        loaded_decision_authority: Mapping[
+            str,
+            tuple[
+                ComputeRouteRequest,
+                ComputeRoutingPolicy,
+                ComputeRouteDecision,
+            ],
+        ],
+        loaded_executions: Mapping[str, ComputeExecutionEvidence],
+        loaded_execution_heads: Mapping[str, Mapping[str, Any]],
+    ) -> tuple[
+        dict[str, ComputeExecutionEvidence],
+        dict[str, dict[str, Any]],
+    ]:
+        """Complete one journal-first execution publication after a crash.
+
+        The authority journal is fsynced before router.json. Exactly one
+        validated authority record may therefore be ahead after interruption.
+        Any wider or opposite-direction gap is fail-closed.
+        """
+        records = self._read_execution_authority_records()
+        execution_state = dict(loaded_executions)
+        head_state = {
+            key: dict(value)
+            for key, value in loaded_execution_heads.items()
+        }
+        if len(records) <= len(execution_state):
+            return execution_state, head_state
+        if len(records) != len(execution_state) + 1:
+            raise ModelComputeRouterError(
+                "execution authority/state publication gap is not recoverable"
+            )
+
+        prior_records = records[:-1]
+        if {
+            record["execution_id"] for record in prior_records
+        } != set(execution_state):
+            raise ModelComputeRouterError(
+                "execution authority prefix does not match routing state"
+            )
+        for record in prior_records:
+            evidence = execution_state[record["execution_id"]]
+            if (
+                record["decision_id"] != evidence.decision_id
+                or record["execution_record_sha256"]
+                != evidence.execution_record_sha256
+                or record["execution"] != evidence.payload()
+            ):
+                raise ModelComputeRouterError(
+                    "execution authority prefix evidence mismatch"
+                )
+
+        record = records[-1]
+        evidence = ComputeExecutionEvidence.from_payload(
+            record["execution"]
+        )
+        evidence.verify_record_sha256()
+        if evidence.execution_id in execution_state:
+            raise ModelComputeRouterError(
+                "execution authority recovery tail duplicates routing state"
+            )
+        authority = loaded_decision_authority.get(evidence.decision_id)
+        if authority is None:
+            raise ModelComputeRouterError(
+                "execution authority recovery references unknown decision"
+            )
+        request, policy, decision = authority
+        if decision.tier is ComputeTier.WAIT:
+            raise ModelComputeRouterError(
+                "execution authority recovery references WAIT decision"
+            )
+        persisted_head = head_state.get(evidence.decision_id)
+        if persisted_head is None:
+            raise ModelComputeRouterError(
+                "execution authority recovery lacks prior execution head"
+            )
+        history = sorted(
+            (
+                item
+                for item in execution_state.values()
+                if item.decision_id == evidence.decision_id
+            ),
+            key=lambda item: item.execution_sequence,
+        )
+        expected_prior_head = _execution_head_payload(
+            evidence.decision_id,
+            history,
+        )
+        if persisted_head != expected_prior_head:
+            raise ModelComputeRouterError(
+                "execution authority recovery prior head mismatch"
+            )
+        prior_incurred_cost = Decimal(
+            persisted_head["cumulative_incurred_cost"]
+        )
+        if (
+            evidence.execution_sequence
+            != persisted_head["terminal_sequence"] + 1
+            or evidence.prior_incurred_cost != prior_incurred_cost
+        ):
+            raise ModelComputeRouterError(
+                "execution authority recovery sequence/cost mismatch"
+            )
+        expected_disposition, expected_reason = _classify_execution(
+            request=request,
+            policy=policy,
+            decision=decision,
+            completed_at=evidence.completed_at,
+            available_at=evidence.available_at,
+            observed_at=evidence.observed_at,
+            backend_id=evidence.backend_id,
+            model_id=evidence.model_id,
+            config_sha256=evidence.config_sha256,
+            actual_cost=evidence.actual_cost,
+            prior_incurred_cost=prior_incurred_cost,
+        )
+        if (
+            evidence.disposition is not expected_disposition
+            or evidence.reason != expected_reason
+        ):
+            raise ModelComputeRouterError(
+                "execution authority recovery disposition is not reproducible"
+            )
+        expected_head = _execution_head_payload(
+            evidence.decision_id,
+            [*history, evidence],
+        )
+        if record["execution_head"] != expected_head:
+            raise ModelComputeRouterError(
+                "execution authority recovery terminal head mismatch"
+            )
+
+        execution_state[evidence.execution_id] = evidence
+        head_state[evidence.decision_id] = expected_head
+        try:
+            self._persist(
+                loaded_routes,
+                execution_state,
+                head_state,
+            )
+        except OSError as exc:
+            raise ModelComputeRouterError(
+                "execution authority recovery could not repair routing state"
+            ) from exc
+        return execution_state, head_state
 
     @staticmethod
     def _body(
@@ -2026,6 +2191,15 @@ class ModelComputeRouterStore:
                 )
             loaded_execution_heads[decision_id] = head
 
+        loaded_executions, loaded_execution_heads = (
+            self._recover_interrupted_execution_publication(
+                loaded_routes,
+                loaded_decision_authority,
+                loaded_executions,
+                loaded_execution_heads,
+            )
+        )
+
         accepted_spend_by_decision: dict[str, Decimal] = {}
         for evidence in loaded_executions.values():
             if (
@@ -2152,6 +2326,11 @@ class ModelComputeRouterStore:
         domain_observation: SportDomainFitnessObservation | None = None,
         domain_route: RouteRecommendation | None = None,
     ) -> ComputeRouteDecision:
+        if self._publication_interrupted:
+            raise ModelComputeRouterError(
+                "routing store has interrupted execution publication; "
+                "reopen to recover"
+            )
         decision = route_compute(
             request,
             candidates,
@@ -2215,6 +2394,7 @@ class ModelComputeRouterStore:
         )
         self._routes = staged
         self._execution_heads = staged_heads
+        self._live_request_ids.add(request.request_id)
         return decision
 
     def get_decision(
@@ -2245,6 +2425,11 @@ class ModelComputeRouterStore:
         evidence_sha256: str,
         as_of: str,
     ) -> ComputeExecutionEvidence:
+        if self._publication_interrupted:
+            raise ModelComputeRouterError(
+                "routing store has interrupted execution publication; "
+                "reopen to recover"
+            )
         record = self._routes.get(
             _text("request_id", request_id)
         )
@@ -2269,6 +2454,14 @@ class ModelComputeRouterStore:
             "actual_cost", actual_cost
         )
         existing = self._executions.get(execution_id)
+        if (
+            existing is None
+            and request.request_id not in self._live_request_ids
+        ):
+            raise ModelComputeRouterError(
+                "route request loaded from durable state is execution-frozen "
+                "after restart; submit a fresh request_id"
+            )
         if existing is None:
             head = self._execution_heads.get(decision.decision_id)
             if head is None:
@@ -2333,29 +2526,26 @@ class ModelComputeRouterStore:
             decision.decision_id,
             decision_history,
         )
-        self._persist(
-            self._routes,
-            staged,
-            staged_heads,
-        )
         try:
             self._append_execution_authority(
                 evidence,
                 staged_heads[decision.decision_id],
             )
         except ModelComputeRouterError:
-            try:
-                self._persist(
-                    self._routes,
-                    self._executions,
-                    self._execution_heads,
-                )
-            except OSError as rollback_exc:
-                raise ModelComputeRouterError(
-                    "execution authority publication failed and "
-                    "routing-store rollback also failed"
-                ) from rollback_exc
+            self._publication_interrupted = True
             raise
+        try:
+            self._persist(
+                self._routes,
+                staged,
+                staged_heads,
+            )
+        except OSError as exc:
+            self._publication_interrupted = True
+            raise ModelComputeRouterError(
+                "routing-state publication failed after durable execution "
+                "authority; reopen to recover"
+            ) from exc
         self._executions = staged
         self._execution_heads = staged_heads
         return evidence

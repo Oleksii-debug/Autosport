@@ -145,6 +145,39 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+def _decode_provider_json(payload: bytes) -> object:
+    """Decode provider JSON without silently accepting ambiguous object keys."""
+
+    def reject_duplicate_pairs(
+        pairs: list[tuple[str, object]],
+    ) -> dict[str, object]:
+        decoded: dict[str, object] = {}
+        for key, value in pairs:
+            if key in decoded:
+                raise BetfairPlaceOrdersAmbiguous(
+                    "placeOrders response contains duplicate JSON object keys"
+                )
+            decoded[key] = value
+        return decoded
+
+    def reject_constant(value: str) -> object:
+        raise BetfairPlaceOrdersAmbiguous(
+            "placeOrders response contains non-finite JSON number"
+        )
+
+    try:
+        return json.loads(
+            payload.decode("utf-8"),
+            parse_float=Decimal,
+            object_pairs_hook=reject_duplicate_pairs,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BetfairPlaceOrdersAmbiguous(
+            "placeOrders response is not valid UTF-8 JSON"
+        ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class BetfairSupervisedExecutionGate:
     """Externally supplied enablement; disabled is the safe default."""
@@ -552,12 +585,7 @@ def _parse_place_orders_response(
     provider_order_ref: str,
     observed_at: str,
 ) -> BetfairPlaceExecutionReport:
-    try:
-        decoded = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise BetfairPlaceOrdersAmbiguous(
-            "placeOrders response is not valid UTF-8 JSON"
-        ) from exc
+    decoded = _decode_provider_json(payload)
     if isinstance(decoded, list):
         if len(decoded) != 1:
             raise BetfairPlaceOrdersAmbiguous(

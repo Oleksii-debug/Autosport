@@ -148,12 +148,18 @@ def _candidate(
     priority=5,
     expected_learning_value=Decimal("0.8"),
     outcome_available_at=None,
+    outcome_evidence=(("result", "sealed"),),
+    reward_value=Decimal("-1"),
+    reward_evidence=(("metric", "sealed"),),
 ):
     binding = _binding(
         episode_key=episode_id,
         provenance=provenance,
         truth=truth,
         outcome_available_at=outcome_available_at,
+        outcome_evidence=outcome_evidence,
+        reward_value=reward_value,
+        reward_evidence=reward_evidence,
     )
     return ReplayCandidate(
         question_id=question_id,

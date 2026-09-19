@@ -109,7 +109,7 @@ class SportDomainFitnessTests(unittest.TestCase):
                     executable_liquidity=MetricEvidence(state, None, "units"),
                 )
                 self.assertEqual(
-                    recommend_route(obs, as_of=T2).status,
+                    recommend_route(obs, as_of=T1_PLUS_5).status,
                     RouteStatus.INSUFFICIENT_EVIDENCE,
                 )
 
@@ -126,8 +126,8 @@ class SportDomainFitnessTests(unittest.TestCase):
     def test_stale_reaction_slack_and_zero_coverage_fail_closed(self):
         stale = make_observation(observation_id="stale", freshness_seconds=met("11", "seconds"))
         zero = make_observation(observation_id="zero", quote_coverage=met("0", "fraction"))
-        self.assertEqual(recommend_route(stale, as_of=T2).status, RouteStatus.DO_NOT_ROUTE)
-        self.assertEqual(recommend_route(zero, as_of=T2).status, RouteStatus.DO_NOT_ROUTE)
+        self.assertEqual(recommend_route(stale, as_of=T1).status, RouteStatus.DO_NOT_ROUTE)
+        self.assertEqual(recommend_route(zero, as_of=T1_PLUS_5).status, RouteStatus.DO_NOT_ROUTE)
 
     def test_evidence_age_is_causally_bound_to_decision_boundary(self):
         old_but_intrinsically_fresh = make_observation(
@@ -157,11 +157,41 @@ class SportDomainFitnessTests(unittest.TestCase):
                 observation_id="observed-relabel",
                 provenance=EvidenceProvenance.OBSERVED,
             )
-            with self.assertRaises(SportDomainFitnessError):
+            with self.assertRaisesRegex(SportDomainFitnessError, "provenance"):
                 store.add(observed)
             reopened = SportDomainFitnessStore(Path(tmp) / "fitness.json")
-            with self.assertRaises(SportDomainFitnessError):
+            with self.assertRaisesRegex(SportDomainFitnessError, "provenance"):
                 reopened.add(observed)
+
+            with tempfile.TemporaryDirectory() as second_tmp:
+                reverse = SportDomainFitnessStore(Path(second_tmp) / "fitness.json")
+                observed_first = make_observation(observation_id="observed-first")
+                self.assertTrue(reverse.add(observed_first))
+                simulated_later = replace(
+                    observed_first,
+                    observation_id="simulated-later",
+                    provenance=EvidenceProvenance.SIMULATED,
+                )
+                with self.assertRaisesRegex(SportDomainFitnessError, "provenance"):
+                    reverse.add(simulated_later)
+
+    def test_equivalent_time_spelling_cannot_bypass_provenance_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SportDomainFitnessStore(Path(tmp) / "fitness.json")
+            simulated = make_observation(
+                observation_id="sim-z",
+                provenance=EvidenceProvenance.SIMULATED,
+            )
+            store.add(simulated)
+            observed = replace(
+                simulated,
+                observation_id="obs-z",
+                provenance=EvidenceProvenance.OBSERVED,
+                measured_from="2025-12-31T19:00:00-05:00",
+                measured_until="2026-01-01T19:00:00-05:00",
+            )
+            with self.assertRaisesRegex(SportDomainFitnessError, "provenance"):
+                store.add(observed)
 
     def test_slow_route_uses_duration_not_cost_and_requires_measured_budget(self):
         slow = make_observation(
@@ -171,17 +201,17 @@ class SportDomainFitnessTests(unittest.TestCase):
             compute_duration_seconds=met("2", "seconds"),
             slow_analysis_deadline_seconds=met("2", "seconds"),
         )
-        self.assertEqual(recommend_route(slow, as_of=T2).status, RouteStatus.ROUTE_SLOW_RESEARCH)
+        self.assertEqual(recommend_route(slow, as_of=T1_PLUS_5).status, RouteStatus.ROUTE_SLOW_RESEARCH)
         too_slow = replace(
             slow, observation_id="too-slow",
             compute_duration_seconds=met("4", "seconds"),
         )
-        self.assertEqual(recommend_route(too_slow, as_of=T2).status, RouteStatus.ROUTE_BASELINE)
+        self.assertEqual(recommend_route(too_slow, as_of=T1_PLUS_5).status, RouteStatus.ROUTE_BASELINE)
         too_tight = replace(
             slow, observation_id="too-tight",
             reaction_slack_seconds=met("1", "seconds"),
         )
-        self.assertEqual(recommend_route(too_tight, as_of=T2).status, RouteStatus.ROUTE_BASELINE)
+        self.assertEqual(recommend_route(too_tight, as_of=T1_PLUS_5).status, RouteStatus.ROUTE_BASELINE)
 
     def test_conflicting_immutable_id_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

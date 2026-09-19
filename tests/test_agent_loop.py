@@ -1,3 +1,4 @@
+import hashlib
 import json
 from decimal import Decimal
 
@@ -39,6 +40,22 @@ RANDOMNESS_SHA = "6" * 64
 
 def json_load(path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def rewrite_with_valid_state_digest(path, state):
+    unsigned = {key: value for key, value in state.items() if key != "state_sha256"}
+    canonical = json.dumps(
+        unsigned,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    state["state_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    path.write_text(
+        json.dumps(state, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _environment():
@@ -1163,31 +1180,7 @@ def test_admissible_direct_action_cannot_predate_observation_availability(tmp_pa
     assert snapshot.action_id is None
 
 
-def _rewrite_state_with_digest(path, mutate):
-    state = json_load(path)
-    mutate(state)
-    payload = {key: value for key, value in state.items() if key != "state_sha256"}
-    state["state_sha256"] = __import__("hashlib").sha256(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
-    path.write_text(
-        json.dumps(
-            state,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-        encoding="utf-8",
-    )
-
-
-def test_restart_rejects_self_consistent_orphaned_current_pointer(tmp_path):
+def test_restart_rejects_self_consistent_cross_linked_agent_memory(tmp_path):
     environment = _environment()
     runtime = _runtime(tmp_path, environment)
     observation = _observation(environment)
@@ -1209,43 +1202,77 @@ def test_restart_rejects_self_consistent_orphaned_current_pointer(tmp_path):
         effect_state=ExternalEffectState.NONE,
         at="2026-09-19T13:00:05Z",
     )
-
-    _rewrite_state_with_digest(
-        runtime.path,
-        lambda state: state["current"].update(
-            action_id="f" * 64,
-        ),
+    outcome, reward, transition = _resolve(environment, action)
+    runtime.record_resolution(
+        transition,
+        outcome=outcome,
+        reward=reward,
+        at="2026-09-19T13:05:02Z",
     )
-    with pytest.raises(AgentLoopError, match="current action_id points to missing durable history"):
-        AgentLoopRuntime(runtime.path)
-
-
-def test_restart_rejects_self_consistent_malformed_history_record(tmp_path):
-    environment = _environment()
-    runtime = _runtime(tmp_path, environment)
-    observation = _observation(environment)
-    runtime.begin_observation(
-        observation,
-        environment_identity=environment.identity,
-        at="2026-09-19T13:00:01Z",
+    runtime.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:05:03Z",
     )
-    _advance_to_action(runtime)
-    action = environment.act(
-        observation,
-        action_type="WAIT",
-        decision_at="2026-09-19T13:00:05Z",
+    attribution = _attribution(environment, transition, outcome, reward)
+    runtime.record_attribution(
+        attribution,
+        at="2026-09-19T13:05:04Z",
     )
-    runtime.commit_action(
-        action,
-        episode=environment.episode,
-        observation=observation,
-        effect_state=ExternalEffectState.NONE,
-        at="2026-09-19T13:00:05Z",
+    postmortem = ReflectionPostmortem(
+        attribution_id=attribution.attribution_id,
+        transition_id=transition.transition_id,
+        created_at="2026-09-19T13:05:05Z",
+        unresolved_components=(AttributionComponent.RANDOMNESS,),
+        summary_code="UNRESOLVED_RANDOMNESS_REQUIRES_RESEARCH",
+        research_question_statement="Test the unresolved causal component.",
     )
+    runtime.record_postmortem(
+        postmortem,
+        at="2026-09-19T13:05:05Z",
+    )
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry.json"
+    )
+    supervisor = ResearchSupervisor.initialize_pristine(
+        tmp_path / "research-supervisor.json",
+        registry,
+    )
+    runtime.handoff_research(
+        supervisor,
+        budget_units=3,
+        at="2026-09-19T13:05:06Z",
+    )
+    original = json_load(runtime.path)
 
-    def forge(state):
-        state["decisions"][0]["unexpected_field"] = "forged"
+    def clone():
+        return json.loads(json.dumps(original))
 
-    _rewrite_state_with_digest(runtime.path, forge)
-    with pytest.raises(AgentLoopError, match="decision record fields mismatch"):
-        AgentLoopRuntime(runtime.path)
+    corruptions = []
+
+    malformed_decision = clone()
+    malformed_decision["decisions"][0]["untrusted_field"] = "accepted-before-fix"
+    corruptions.append((malformed_decision, "decision record fields mismatch"))
+
+    orphan_current = clone()
+    orphan_current["current"]["action_id"] = "a" * 64
+    corruptions.append((orphan_current, "current action does not bind"))
+
+    orphan_resolution = clone()
+    orphan_resolution["resolutions"][0]["action_id"] = "b" * 64
+    corruptions.append((orphan_resolution, "resolution does not bind"))
+
+    cross_linked_attribution = clone()
+    cross_linked_attribution["attributions"][0]["transition_id"] = "c" * 64
+    corruptions.append((cross_linked_attribution, "attribution record is not canonical"))
+
+    orphan_handoff = clone()
+    orphan_handoff["research_handoffs"][0]["postmortem_id"] = "d" * 64
+    corruptions.append((orphan_handoff, "research handoff does not bind"))
+
+    for corrupted, expected_error in corruptions:
+        rewrite_with_valid_state_digest(runtime.path, corrupted)
+        with pytest.raises(AgentLoopError, match=expected_error):
+            AgentLoopRuntime(runtime.path)
+
+    rewrite_with_valid_state_digest(runtime.path, original)
+    assert AgentLoopRuntime(runtime.path).snapshot().research_run_id is not None

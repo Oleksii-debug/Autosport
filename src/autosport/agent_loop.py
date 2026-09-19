@@ -624,254 +624,524 @@ class AgentLoopRuntime:
 
     @staticmethod
     def _validate_history(state: dict[str, Any]) -> None:
-        def exact(record: object, fields: set[str], name: str) -> dict[str, Any]:
-            if type(record) is not dict or set(record) != fields:
-                raise AgentLoopError(f"{name} fields mismatch")
+        def require_fields(
+            record: object,
+            *,
+            expected: set[str],
+            label: str,
+        ) -> dict[str, Any]:
+            if type(record) is not dict:
+                raise AgentLoopError(f"{label} must be an object")
+            if set(record) != expected:
+                raise AgentLoopError(f"{label} fields mismatch")
             return record
 
-        def optional_hash(record: dict[str, Any], key: str) -> None:
-            value = record.get(key)
-            if value is not None:
-                _sha256(value, key)
+        def stored_decimal(value: object, name: str) -> Decimal:
+            if type(value) is not str:
+                raise AgentLoopError(f"{name} must be a canonical Decimal string")
+            try:
+                parsed = Decimal(value)
+            except ArithmeticError as exc:
+                raise AgentLoopError(
+                    f"{name} must be a canonical Decimal string"
+                ) from exc
+            if not parsed.is_finite() or str(parsed) != value:
+                raise AgentLoopError(f"{name} must be a canonical finite Decimal")
+            return parsed
 
-        decisions: dict[str, dict[str, Any]] = {}
+        identity = state["identity"]
+        decisions_by_action: dict[str, dict[str, Any]] = {}
         observations: set[str] = set()
-        for raw in state["decisions"]:
-            record = exact(
-                raw,
-                {"observation_id","action_id","action_type","decided_at","parameters_sha256","external_effect_state","may_execute"},
-                "decision record",
+        for record in state["decisions"]:
+            record = require_fields(
+                record,
+                expected={
+                    "observation_id",
+                    "action_id",
+                    "action_type",
+                    "decided_at",
+                    "parameters_sha256",
+                    "external_effect_state",
+                    "may_execute",
+                },
+                label="decision record",
             )
-            observation_id = _sha256(record["observation_id"], "decision observation_id")
-            action_id = _sha256(record["action_id"], "decision action_id")
-            _text(record["action_type"], "decision action_type")
-            _instant(record["decided_at"], "decision decided_at")
-            _sha256(record["parameters_sha256"], "decision parameters_sha256")
-            effect = ExternalEffectState(record["external_effect_state"])
-            if type(record["may_execute"]) is not bool:
+            _sha256(record.get("action_id"), "decision action_id")
+            _sha256(record.get("observation_id"), "decision observation_id")
+            _text(record.get("action_type"), "decision action_type")
+            if (
+                _timestamp_identity(record.get("decided_at"), "decision decided_at")
+                != record["decided_at"]
+            ):
+                raise AgentLoopError("decision decided_at is not canonical")
+            _sha256(record.get("parameters_sha256"), "decision parameters_sha256")
+            if type(record.get("may_execute")) is not bool:
                 raise AgentLoopError("decision may_execute must be boolean")
-            if effect is ExternalEffectState.UNKNOWN_EXTERNAL_EFFECT and record["may_execute"]:
-                raise AgentLoopError("unknown external effect decision may not execute")
-            if action_id in decisions or observation_id in observations:
-                raise AgentLoopError("duplicate durable decision identity")
-            decisions[action_id] = record
-            observations.add(observation_id)
-
-        resolutions: dict[str, dict[str, Any]] = {}
-        for raw in state["resolutions"]:
-            record = exact(
-                raw,
-                {"transition_id","action_id","outcome_id","reward_id","reward_value","truth","simulation_model_id","reward_available_at"},
-                "resolution record",
+            ActionCommitReceipt(
+                action_id=record["action_id"],
+                newly_committed=True,
+                may_execute=record["may_execute"],
+                external_effect_state=ExternalEffectState(
+                    record.get("external_effect_state")
+                ),
             )
-            transition_id = _sha256(record["transition_id"], "resolution transition_id")
-            action_id = _sha256(record["action_id"], "resolution action_id")
-            _sha256(record["outcome_id"], "resolution outcome_id")
-            _sha256(record["reward_id"], "resolution reward_id")
-            Decimal(record["reward_value"])
-            EvidenceTruth(record["truth"])
-            optional_hash(record, "simulation_model_id")
-            _instant(record["reward_available_at"], "resolution reward_available_at")
-            if transition_id in resolutions:
-                raise AgentLoopError("duplicate durable resolution identity")
-            if action_id not in decisions:
-                raise AgentLoopError("resolution references missing durable decision")
-            resolutions[transition_id] = record
+            if record["action_id"] in decisions_by_action or record[
+                "observation_id"
+            ] in observations:
+                raise AgentLoopError(
+                    "AgentLoop contains duplicate durable decision identity"
+                )
+            decisions_by_action[record["action_id"]] = record
+            observations.add(record["observation_id"])
 
-        attributions: dict[str, dict[str, Any]] = {}
-        for raw in state["attributions"]:
-            record = exact(
-                raw,
-                {"attribution_id","environment_id","episode_id","transition_id","action_id","outcome_id","reward_id","reward_value","truth","simulation_model_id","attributed_at","findings"},
-                "attribution record",
+        resolutions_by_transition: dict[str, dict[str, Any]] = {}
+        resolved_actions: set[str] = set()
+        resolved_outcomes: set[str] = set()
+        resolved_rewards: set[str] = set()
+        for record in state["resolutions"]:
+            record = require_fields(
+                record,
+                expected={
+                    "transition_id",
+                    "action_id",
+                    "outcome_id",
+                    "reward_id",
+                    "reward_value",
+                    "truth",
+                    "simulation_model_id",
+                    "reward_available_at",
+                },
+                label="resolution record",
             )
-            attribution_id = _sha256(record["attribution_id"], "attribution_id")
-            transition_id = _sha256(record["transition_id"], "attribution transition_id")
-            _sha256(record["action_id"], "attribution action_id")
-            _sha256(record["outcome_id"], "attribution outcome_id")
-            _sha256(record["reward_id"], "attribution reward_id")
-            _sha256(record["environment_id"], "attribution environment_id")
-            _sha256(record["episode_id"], "attribution episode_id")
-            Decimal(record["reward_value"])
-            truth = EvidenceTruth(record["truth"])
-            optional_hash(record, "simulation_model_id")
-            _instant(record["attributed_at"], "attribution attributed_at")
-            if type(record["findings"]) is not list or not record["findings"]:
-                raise AgentLoopError("attribution findings must be a non-empty list")
-            for finding_raw in record["findings"]:
-                finding = exact(
-                    finding_raw,
-                    {"component","status","evidence_sha256","evidence_available_at","contribution","reason_code"},
-                    "attribution finding",
+            for key in ("transition_id", "action_id", "outcome_id", "reward_id"):
+                _sha256(record[key], f"resolution {key}")
+            stored_decimal(record["reward_value"], "resolution reward_value")
+            try:
+                truth = EvidenceTruth(record["truth"])
+            except (TypeError, ValueError) as exc:
+                raise AgentLoopError("resolution truth is invalid") from exc
+            if truth is EvidenceTruth.SIMULATED:
+                _text(record["simulation_model_id"], "resolution simulation_model_id")
+            elif record["simulation_model_id"] is not None:
+                raise AgentLoopError(
+                    "observed resolution cannot carry simulation_model_id"
                 )
-                AttributionFinding(
-                    component=AttributionComponent(finding["component"]),
-                    status=AttributionStatus(finding["status"]),
-                    evidence_sha256=finding["evidence_sha256"],
-                    evidence_available_at=finding["evidence_available_at"],
-                    contribution=None if finding["contribution"] is None else Decimal(finding["contribution"]),
-                    reason_code=finding["reason_code"],
+            if (
+                _timestamp_identity(
+                    record["reward_available_at"], "resolution reward_available_at"
                 )
-            if attribution_id in attributions:
-                raise AgentLoopError("duplicate durable attribution identity")
-            resolution = resolutions.get(transition_id)
+                != record["reward_available_at"]
+            ):
+                raise AgentLoopError("resolution reward_available_at is not canonical")
+            decision = decisions_by_action.get(record["action_id"])
+            if decision is None:
+                raise AgentLoopError("resolution does not bind a durable decision")
+            if _instant(record["reward_available_at"], "reward_available_at") < _instant(
+                decision["decided_at"], "decision decided_at"
+            ):
+                raise AgentLoopError("resolution reward predates its decision")
+            if (
+                record["transition_id"] in resolutions_by_transition
+                or record["action_id"] in resolved_actions
+                or record["outcome_id"] in resolved_outcomes
+                or record["reward_id"] in resolved_rewards
+            ):
+                raise AgentLoopError("AgentLoop contains duplicate resolution identity")
+            resolutions_by_transition[record["transition_id"]] = record
+            resolved_actions.add(record["action_id"])
+            resolved_outcomes.add(record["outcome_id"])
+            resolved_rewards.add(record["reward_id"])
+
+        attributions_by_id: dict[str, dict[str, Any]] = {}
+        attributed_transitions: set[str] = set()
+        for record in state["attributions"]:
+            record = require_fields(
+                record,
+                expected={
+                    "attribution_id",
+                    "environment_id",
+                    "episode_id",
+                    "transition_id",
+                    "action_id",
+                    "outcome_id",
+                    "reward_id",
+                    "reward_value",
+                    "truth",
+                    "simulation_model_id",
+                    "attributed_at",
+                    "findings",
+                },
+                label="attribution record",
+            )
+            findings_raw = record["findings"]
+            if type(findings_raw) is not list:
+                raise AgentLoopError("attribution findings must be a list")
+            findings: list[AttributionFinding] = []
+            for raw_finding in findings_raw:
+                raw_finding = require_fields(
+                    raw_finding,
+                    expected={
+                        "component",
+                        "status",
+                        "evidence_sha256",
+                        "evidence_available_at",
+                        "contribution",
+                        "reason_code",
+                    },
+                    label="attribution finding",
+                )
+                try:
+                    component = AttributionComponent(raw_finding["component"])
+                    status = AttributionStatus(raw_finding["status"])
+                except (TypeError, ValueError) as exc:
+                    raise AgentLoopError("attribution finding enum is invalid") from exc
+                contribution = (
+                    None
+                    if raw_finding["contribution"] is None
+                    else stored_decimal(
+                        raw_finding["contribution"], "attribution contribution"
+                    )
+                )
+                findings.append(
+                    AttributionFinding(
+                        component=component,
+                        status=status,
+                        evidence_sha256=raw_finding["evidence_sha256"],
+                        evidence_available_at=raw_finding["evidence_available_at"],
+                        contribution=contribution,
+                        reason_code=raw_finding["reason_code"],
+                    )
+                )
+            try:
+                truth = EvidenceTruth(record["truth"])
+            except (TypeError, ValueError) as exc:
+                raise AgentLoopError("attribution truth is invalid") from exc
+            attribution = OutcomeAttribution(
+                environment_id=record["environment_id"],
+                episode_id=record["episode_id"],
+                transition_id=record["transition_id"],
+                action_id=record["action_id"],
+                outcome_id=record["outcome_id"],
+                reward_id=record["reward_id"],
+                reward_value=stored_decimal(
+                    record["reward_value"], "attribution reward_value"
+                ),
+                truth=truth,
+                simulation_model_id=record["simulation_model_id"],
+                attributed_at=record["attributed_at"],
+                findings=tuple(findings),
+            )
+            expected = {"attribution_id": attribution.attribution_id, **attribution.payload()}
+            if record != expected:
+                raise AgentLoopError("attribution record is not canonical")
+            if (
+                attribution.environment_id != identity["environment_id"]
+                or attribution.episode_id != identity["episode_id"]
+            ):
+                raise AgentLoopError("attribution belongs to another AgentLoop")
+            resolution = resolutions_by_transition.get(attribution.transition_id)
             if resolution is None:
-                raise AgentLoopError("attribution references missing durable resolution")
-            if record["action_id"] != resolution["action_id"]:
-                raise AgentLoopError("attribution action does not bind resolution")
-            if record["outcome_id"] != resolution["outcome_id"] or record["reward_id"] != resolution["reward_id"]:
-                raise AgentLoopError("attribution outcome/reward does not bind resolution")
-            if record["reward_value"] != resolution["reward_value"] or record["truth"] != resolution["truth"]:
-                raise AgentLoopError("attribution reward/truth does not bind resolution")
-            if record["simulation_model_id"] != resolution["simulation_model_id"] or truth is EvidenceTruth.SIMULATED:
-                if record["simulation_model_id"] != resolution["simulation_model_id"]:
-                    raise AgentLoopError("attribution simulation model does not bind resolution")
-            expected_id = _digest({
-                "schema": AGENT_LOOP_SCHEMA,
-                "kind": "OutcomeAttribution",
-                "transition_id": transition_id,
-                "reward_id": record["reward_id"],
-            })
-            if attribution_id != expected_id:
-                raise AgentLoopError("attribution immutable identity mismatch")
-            attributions[attribution_id] = record
+                raise AgentLoopError("attribution does not bind a durable resolution")
+            for key in ("action_id", "outcome_id", "reward_id", "reward_value"):
+                actual = (
+                    str(attribution.reward_value)
+                    if key == "reward_value"
+                    else getattr(attribution, key)
+                )
+                if actual != resolution[key]:
+                    raise AgentLoopError(
+                        f"attribution {key} does not bind its resolution"
+                    )
+            if (
+                attribution.truth.value != resolution["truth"]
+                or attribution.simulation_model_id
+                != resolution["simulation_model_id"]
+            ):
+                raise AgentLoopError("attribution relabels resolution truth")
+            if _instant(attribution.attributed_at, "attributed_at") < _instant(
+                resolution["reward_available_at"], "reward_available_at"
+            ):
+                raise AgentLoopError("attribution predates reward availability")
+            if (
+                attribution.attribution_id in attributions_by_id
+                or attribution.transition_id in attributed_transitions
+            ):
+                raise AgentLoopError("AgentLoop contains duplicate attribution identity")
+            attributions_by_id[attribution.attribution_id] = record
+            attributed_transitions.add(attribution.transition_id)
 
-        postmortems: dict[str, dict[str, Any]] = {}
-        for raw in state["postmortems"]:
-            record = exact(
-                raw,
-                {"postmortem_id","attribution_id","transition_id","created_at","unresolved_components","summary_code","research_question_statement"},
-                "postmortem record",
+        postmortems_by_id: dict[str, dict[str, Any]] = {}
+        reflected_attributions: set[str] = set()
+        for record in state["postmortems"]:
+            record = require_fields(
+                record,
+                expected={
+                    "postmortem_id",
+                    "attribution_id",
+                    "transition_id",
+                    "created_at",
+                    "unresolved_components",
+                    "summary_code",
+                    "research_question_statement",
+                },
+                label="postmortem record",
             )
-            postmortem_id = _sha256(record["postmortem_id"], "postmortem_id")
-            attribution_id = _sha256(record["attribution_id"], "postmortem attribution_id")
-            transition_id = _sha256(record["transition_id"], "postmortem transition_id")
-            _instant(record["created_at"], "postmortem created_at")
-            _text(record["summary_code"], "postmortem summary_code")
-            if type(record["unresolved_components"]) is not list:
+            unresolved_raw = record["unresolved_components"]
+            if type(unresolved_raw) is not list:
                 raise AgentLoopError("postmortem unresolved_components must be a list")
-            for item in record["unresolved_components"]:
-                AttributionComponent(item)
-            if record["research_question_statement"] is not None:
-                _text(record["research_question_statement"], "research_question_statement")
-            if postmortem_id in postmortems:
-                raise AgentLoopError("duplicate durable postmortem identity")
-            attribution = attributions.get(attribution_id)
-            if attribution is None:
-                raise AgentLoopError("postmortem references missing durable attribution")
-            if transition_id != attribution["transition_id"]:
-                raise AgentLoopError("postmortem transition does not bind attribution")
-            finding_status = {f["component"]: f["status"] for f in attribution["findings"]}
-            for component in record["unresolved_components"]:
-                if component not in finding_status or finding_status[component] not in {"UNKNOWN","MIXED"}:
-                    raise AgentLoopError("postmortem unresolved components must be UNKNOWN or MIXED")
-            expected_id = _digest({
-                "schema": AGENT_LOOP_SCHEMA,
-                "kind": "ReflectionPostmortem",
-                "attribution_id": attribution_id,
-            })
-            if postmortem_id != expected_id:
-                raise AgentLoopError("postmortem immutable identity mismatch")
-            postmortems[postmortem_id] = record
-
-        handoffs: dict[str, dict[str, Any]] = {}
-        for raw in state["research_handoffs"]:
-            record = exact(
-                raw,
-                {"postmortem_id","question_id","question_sha256","trigger_id","trigger_sha256","run_id","budget_units","deadline_at","requested_at","source_event_identity_sha256","source_event_sha256","receipt_sha256","checkpoint_sha256"},
-                "research handoff record",
+            try:
+                unresolved = tuple(
+                    AttributionComponent(value) for value in unresolved_raw
+                )
+            except (TypeError, ValueError) as exc:
+                raise AgentLoopError("postmortem component is invalid") from exc
+            postmortem = ReflectionPostmortem(
+                attribution_id=record["attribution_id"],
+                transition_id=record["transition_id"],
+                created_at=record["created_at"],
+                unresolved_components=unresolved,
+                summary_code=record["summary_code"],
+                research_question_statement=record["research_question_statement"],
             )
-            postmortem_id = _sha256(record["postmortem_id"], "handoff postmortem_id")
+            expected = {"postmortem_id": postmortem.postmortem_id, **postmortem.payload()}
+            if record != expected:
+                raise AgentLoopError("postmortem record is not canonical")
+            attribution = attributions_by_id.get(postmortem.attribution_id)
+            if attribution is None:
+                raise AgentLoopError("postmortem does not bind a durable attribution")
+            if postmortem.transition_id != attribution["transition_id"]:
+                raise AgentLoopError("postmortem transition does not bind attribution")
+            if _instant(postmortem.created_at, "postmortem.created_at") < _instant(
+                attribution["attributed_at"], "attributed_at"
+            ):
+                raise AgentLoopError("postmortem predates attribution")
+            statuses = {
+                item["component"]: item["status"] for item in attribution["findings"]
+            }
+            if any(
+                item.value not in statuses
+                or statuses[item.value] not in {
+                    AttributionStatus.UNKNOWN.value,
+                    AttributionStatus.MIXED.value,
+                }
+                for item in postmortem.unresolved_components
+            ):
+                raise AgentLoopError("postmortem unresolved components are unsupported")
+            if (
+                postmortem.postmortem_id in postmortems_by_id
+                or postmortem.attribution_id in reflected_attributions
+            ):
+                raise AgentLoopError("AgentLoop contains duplicate postmortem identity")
+            postmortems_by_id[postmortem.postmortem_id] = record
+            reflected_attributions.add(postmortem.attribution_id)
+
+        handoffs_by_postmortem: dict[str, dict[str, Any]] = {}
+        handoff_runs: set[str] = set()
+        for record in state["research_handoffs"]:
+            record = require_fields(
+                record,
+                expected={
+                    "postmortem_id",
+                    "question_id",
+                    "question_sha256",
+                    "trigger_id",
+                    "trigger_sha256",
+                    "run_id",
+                    "budget_units",
+                    "deadline_at",
+                    "requested_at",
+                    "source_event_identity_sha256",
+                    "source_event_sha256",
+                    "receipt_sha256",
+                    "checkpoint_sha256",
+                },
+                label="research handoff record",
+            )
+            _sha256(record["postmortem_id"], "handoff postmortem_id")
             _text(record["question_id"], "handoff question_id")
-            _sha256(record["question_sha256"], "handoff question_sha256")
             _text(record["trigger_id"], "handoff trigger_id")
-            _sha256(record["trigger_sha256"], "handoff trigger_sha256")
-            _text(record["run_id"], "handoff run_id")
-            if isinstance(record["budget_units"], bool) or not isinstance(record["budget_units"], int) or record["budget_units"] <= 0:
-                raise AgentLoopError("handoff budget_units must be a positive integer")
-            if record["deadline_at"] is not None:
-                _instant(record["deadline_at"], "handoff deadline_at")
-            _instant(record["requested_at"], "handoff requested_at")
-            for key in ("source_event_identity_sha256","source_event_sha256","receipt_sha256","checkpoint_sha256"):
+            for key in (
+                "question_sha256",
+                "trigger_sha256",
+                "run_id",
+                "source_event_identity_sha256",
+                "source_event_sha256",
+                "receipt_sha256",
+                "checkpoint_sha256",
+            ):
                 _sha256(record[key], f"handoff {key}")
-            if postmortem_id in handoffs:
-                raise AgentLoopError("duplicate durable research handoff identity")
-            if postmortem_id not in postmortems:
-                raise AgentLoopError("research handoff references missing durable postmortem")
-            if postmortems[postmortem_id]["research_question_statement"] is None:
-                raise AgentLoopError("research handoff requires postmortem research question")
-            handoffs[postmortem_id] = record
+            if (
+                isinstance(record["budget_units"], bool)
+                or not isinstance(record["budget_units"], int)
+                or record["budget_units"] <= 0
+            ):
+                raise AgentLoopError("handoff budget_units must be a positive integer")
+            requested_at = _timestamp_identity(record["requested_at"], "requested_at")
+            if requested_at != record["requested_at"]:
+                raise AgentLoopError("handoff requested_at is not canonical")
+            if record["deadline_at"] is not None:
+                deadline_at = _timestamp_identity(record["deadline_at"], "deadline_at")
+                if deadline_at != record["deadline_at"]:
+                    raise AgentLoopError("handoff deadline_at is not canonical")
+                if _instant(deadline_at, "deadline_at") < _instant(
+                    requested_at, "requested_at"
+                ):
+                    raise AgentLoopError("handoff deadline predates request")
+            postmortem = postmortems_by_id.get(record["postmortem_id"])
+            if postmortem is None:
+                raise AgentLoopError("research handoff does not bind a postmortem")
+            statement = postmortem["research_question_statement"]
+            if statement is None:
+                raise AgentLoopError("research handoff postmortem lacks a question")
+            if requested_at != postmortem["created_at"]:
+                raise AgentLoopError("research handoff request time differs from postmortem")
+            expected_question_id = "agentloop-question-" + _digest(
+                {
+                    "loop_id": identity["loop_id"],
+                    "postmortem_id": record["postmortem_id"],
+                    "statement": statement,
+                }
+            )
+            if record["question_id"] != expected_question_id:
+                raise AgentLoopError("research handoff question identity mismatch")
+            question = ResearchQuestion(
+                question_id=record["question_id"],
+                statement=statement,
+                source_sha256=identity["source_sha256"],
+                created_at=requested_at,
+            )
+            if record["question_sha256"] != _digest(question.to_payload()):
+                raise AgentLoopError("research handoff question hash mismatch")
+            if (
+                record["postmortem_id"] in handoffs_by_postmortem
+                or record["run_id"] in handoff_runs
+            ):
+                raise AgentLoopError("AgentLoop contains duplicate research handoff")
+            handoffs_by_postmortem[record["postmortem_id"]] = record
+            handoff_runs.add(record["run_id"])
 
         current = state["current"]
-        valid_ids = {
-            "observation_id": observations,
-            "action_id": set(decisions),
-            "transition_id": set(resolutions),
-            "outcome_id": {r["outcome_id"] for r in resolutions.values()},
-            "reward_id": {r["reward_id"] for r in resolutions.values()},
-            "attribution_id": set(attributions),
-            "postmortem_id": set(postmortems),
-            "research_question_id": {h["question_id"] for h in handoffs.values()},
-            "research_trigger_id": {h["trigger_id"] for h in handoffs.values()},
-            "research_run_id": {h["run_id"] for h in handoffs.values()},
-        }
-        for key, allowed in valid_ids.items():
-            value = current[key]
-            if value is not None and value not in allowed:
-                raise AgentLoopError(f"current {key} points to missing durable history")
-        if current["action_id"] is not None and current["observation_id"] != decisions[current["action_id"]]["observation_id"]:
-            raise AgentLoopError("current action does not bind current observation")
+        ordered = (
+            "observation_id",
+            "action_id",
+            "transition_id",
+            "outcome_id",
+            "reward_id",
+            "attribution_id",
+            "postmortem_id",
+        )
+        seen_gap = False
+        for key in ordered:
+            if current[key] is None:
+                seen_gap = True
+            elif seen_gap:
+                raise AgentLoopError("AgentLoop current causal chain contains a gap")
+        research_values = (
+            current["research_question_id"],
+            current["research_trigger_id"],
+            current["research_run_id"],
+        )
+        if any(value is None for value in research_values) and any(
+            value is not None for value in research_values
+        ):
+            raise AgentLoopError("AgentLoop current research identity is partial")
+
+        decision = None
+        if current["action_id"] is not None:
+            decision = decisions_by_action.get(current["action_id"])
+            if decision is None or decision["observation_id"] != current["observation_id"]:
+                raise AgentLoopError("current action does not bind its decision")
+        resolution = None
         if current["transition_id"] is not None:
-            resolution = resolutions[current["transition_id"]]
-            if current["action_id"] != resolution["action_id"] or current["outcome_id"] != resolution["outcome_id"] or current["reward_id"] != resolution["reward_id"]:
-                raise AgentLoopError("current transition does not bind resolution")
-        if current["attribution_id"] is not None and current["transition_id"] != attributions[current["attribution_id"]]["transition_id"]:
-            raise AgentLoopError("current attribution does not bind current transition")
-        if current["postmortem_id"] is not None and current["attribution_id"] != postmortems[current["postmortem_id"]]["attribution_id"]:
-            raise AgentLoopError("current postmortem does not bind current attribution")
-        if current["research_run_id"] is not None:
-            handoff = next(h for h in handoffs.values() if h["run_id"] == current["research_run_id"])
-            if current["research_question_id"] != handoff["question_id"] or current["research_trigger_id"] != handoff["trigger_id"]:
-                raise AgentLoopError("current research pointers do not bind handoff")
+            resolution = resolutions_by_transition.get(current["transition_id"])
+            if resolution is None:
+                raise AgentLoopError("current transition does not bind a resolution")
+            for key in ("action_id", "outcome_id", "reward_id"):
+                if resolution[key] != current[key]:
+                    raise AgentLoopError(f"current {key} does not bind resolution")
+        attribution = None
+        if current["attribution_id"] is not None:
+            attribution = attributions_by_id.get(current["attribution_id"])
+            if (
+                attribution is None
+                or attribution["transition_id"] != current["transition_id"]
+            ):
+                raise AgentLoopError("current attribution does not bind resolution")
+        postmortem = None
+        if current["postmortem_id"] is not None:
+            postmortem = postmortems_by_id.get(current["postmortem_id"])
+            if (
+                postmortem is None
+                or postmortem["attribution_id"] != current["attribution_id"]
+            ):
+                raise AgentLoopError("current postmortem does not bind attribution")
+        if research_values[0] is not None:
+            if postmortem is None:
+                raise AgentLoopError("current research identity lacks a postmortem")
+            handoff = handoffs_by_postmortem.get(current["postmortem_id"])
+            if handoff is None or (
+                handoff["question_id"], handoff["trigger_id"], handoff["run_id"]
+            ) != research_values:
+                raise AgentLoopError("current research identity does not bind handoff")
+
+        external_state = ExternalEffectState(state["external_effect_state"])
+        if decision is None:
+            if external_state is not ExternalEffectState.NONE:
+                raise AgentLoopError("AgentLoop without an action has an external effect")
+        elif decision["external_effect_state"] != external_state.value:
+            raise AgentLoopError("current external effect differs from decision")
 
         phase = AgentLoopPhase(state["phase"])
-        effect = ExternalEffectState(state["external_effect_state"])
-        if current["action_id"] is not None:
-            decision_effect = ExternalEffectState(decisions[current["action_id"]]["external_effect_state"])
-            if decision_effect is not effect:
-                raise AgentLoopError("external-effect state does not bind current decision")
-        if phase is AgentLoopPhase.OBSERVE and current["observation_id"] is None:
-            raise AgentLoopError("OBSERVE phase requires current observation")
-        if phase in {AgentLoopPhase.ASSESS,AgentLoopPhase.PLAN,AgentLoopPhase.DECIDE,AgentLoopPhase.ACT_OR_ABSTAIN} and current["observation_id"] is None:
-            raise AgentLoopError(f"{phase.value} phase requires current observation")
-        if phase in {AgentLoopPhase.WAIT_OUTCOME,AgentLoopPhase.UNKNOWN_EXTERNAL_EFFECT} and current["action_id"] is None:
-            raise AgentLoopError(f"{phase.value} phase requires current action")
-        if phase is AgentLoopPhase.WAIT_OUTCOME and current["transition_id"] is not None:
-            raise AgentLoopError("WAIT_OUTCOME cannot have resolved transition")
-        if phase is AgentLoopPhase.UNKNOWN_EXTERNAL_EFFECT and effect is not ExternalEffectState.UNKNOWN_EXTERNAL_EFFECT:
-            raise AgentLoopError("UNKNOWN_EXTERNAL_EFFECT phase requires matching effect state")
-        if phase is AgentLoopPhase.EVALUATE and current["transition_id"] is None:
-            raise AgentLoopError("EVALUATE phase requires current transition")
-        if phase is AgentLoopPhase.ATTRIBUTE and (current["transition_id"] is None or current["attribution_id"] is not None):
-            raise AgentLoopError("ATTRIBUTE phase requires unresolved attribution")
-        if phase is AgentLoopPhase.REFLECT and current["attribution_id"] is None:
-            raise AgentLoopError("REFLECT phase requires attribution")
-        if phase is AgentLoopPhase.RESEARCH_HANDOFF and current["postmortem_id"] is None:
-            raise AgentLoopError("RESEARCH_HANDOFF phase requires postmortem")
-        if phase is AgentLoopPhase.CHECKPOINT:
-            if current["action_id"] is not None and current["transition_id"] is None:
-                raise AgentLoopError("CHECKPOINT with action requires resolved transition")
-            if current["transition_id"] is not None and state["checkpointed_transition_id"] != current["transition_id"]:
-                raise AgentLoopError("checkpointed transition does not match current transition")
-        if phase is AgentLoopPhase.PAUSED and state["resume_phase"] is None:
-            raise AgentLoopError("PAUSED phase requires resume_phase")
-        if phase is not AgentLoopPhase.PAUSED and state["resume_phase"] is not None:
-            raise AgentLoopError("resume_phase only allowed while PAUSED")
-        if phase is AgentLoopPhase.RECOVERY and state["resume_phase"] is None:
-            raise AgentLoopError("RECOVERY phase requires retained resume_phase")
-        _sha256(state["environment_checkpoint_id"], "environment_checkpoint_id")
-        if state["checkpointed_transition_id"] is not None:
-            _sha256(state["checkpointed_transition_id"], "checkpointed_transition_id")
+        resume_phase = (
+            None
+            if state["resume_phase"] is None
+            else AgentLoopPhase(state["resume_phase"])
+        )
+        if phase in {AgentLoopPhase.PAUSED, AgentLoopPhase.RECOVERY}:
+            if resume_phase is None:
+                raise AgentLoopError(f"{phase.value} state lacks resume phase")
+            effective_phase = resume_phase
+        else:
+            if resume_phase is not None:
+                raise AgentLoopError("non-paused AgentLoop retains resume phase")
+            effective_phase = phase
+
+        if effective_phase is AgentLoopPhase.BOOTSTRAP:
+            if any(current.values()):
+                raise AgentLoopError("BOOTSTRAP AgentLoop contains current evidence")
+        elif effective_phase in {
+            AgentLoopPhase.OBSERVE,
+            AgentLoopPhase.ASSESS,
+            AgentLoopPhase.PLAN,
+            AgentLoopPhase.DECIDE,
+            AgentLoopPhase.ACT_OR_ABSTAIN,
+        }:
+            if current["observation_id"] is None or current["action_id"] is not None:
+                raise AgentLoopError(f"{effective_phase.value} current evidence mismatch")
+        elif effective_phase in {
+            AgentLoopPhase.WAIT_OUTCOME,
+            AgentLoopPhase.UNKNOWN_EXTERNAL_EFFECT,
+        }:
+            if current["action_id"] is None or current["transition_id"] is not None:
+                raise AgentLoopError(f"{effective_phase.value} current evidence mismatch")
+            if (
+                effective_phase is AgentLoopPhase.UNKNOWN_EXTERNAL_EFFECT
+                and external_state is not ExternalEffectState.UNKNOWN_EXTERNAL_EFFECT
+            ):
+                raise AgentLoopError("UNKNOWN_EXTERNAL_EFFECT phase lacks unknown effect")
+        elif effective_phase in {AgentLoopPhase.EVALUATE, AgentLoopPhase.ATTRIBUTE}:
+            if current["transition_id"] is None or current["attribution_id"] is not None:
+                raise AgentLoopError(f"{effective_phase.value} current evidence mismatch")
+        elif effective_phase is AgentLoopPhase.REFLECT:
+            if current["attribution_id"] is None or current["postmortem_id"] is not None:
+                raise AgentLoopError("REFLECT current evidence mismatch")
+        elif effective_phase is AgentLoopPhase.RESEARCH_HANDOFF:
+            if current["postmortem_id"] is None or current["research_run_id"] is not None:
+                raise AgentLoopError("RESEARCH_HANDOFF current evidence mismatch")
+        elif effective_phase is AgentLoopPhase.CHECKPOINT:
+            if current["postmortem_id"] is None:
+                raise AgentLoopError("CHECKPOINT current evidence lacks reflection")
+
     def snapshot(self) -> AgentLoopSnapshot:
         state = self._read()
         identity = state["identity"]

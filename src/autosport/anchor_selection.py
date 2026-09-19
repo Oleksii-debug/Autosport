@@ -59,6 +59,10 @@ _ANCHOR_METRICS = frozenset(
         "compute_duration_seconds",
         "slow_analysis_deadline_seconds",
         "freshness_ttl_seconds",
+        "calibration_error",
+        "execution_feasibility",
+        "settlement_identity_complexity",
+        "oos_net_economic_value",
     }
 )
 
@@ -129,6 +133,54 @@ def _metric_value(observation: SportDomainFitnessObservation, name: str) -> Deci
 
 
 @dataclass(frozen=True, slots=True)
+class AnchorSupplementalMetric:
+    state: EvidenceState
+    value: Decimal | None
+    unit: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.state, EvidenceState):
+            raise AnchorSelectionError("supplemental metric state must be EvidenceState")
+        _text("unit", self.unit)
+        if self.state is EvidenceState.MEASURED:
+            if self.value is None or not isinstance(self.value, Decimal) or not self.value.is_finite():
+                raise AnchorSelectionError("MEASURED supplemental metric requires finite Decimal")
+        elif self.value is not None:
+            raise AnchorSelectionError("unmeasured supplemental metric must not carry a value")
+
+
+@dataclass(frozen=True, slots=True)
+class AnchorSupplementalEvidence:
+    observation_id: str
+    evidence_sha256: str
+    calibration_error: AnchorSupplementalMetric
+    execution_feasibility: AnchorSupplementalMetric
+    settlement_identity_complexity: AnchorSupplementalMetric
+    oos_net_economic_value: AnchorSupplementalMetric
+
+    def __post_init__(self) -> None:
+        _text("observation_id", self.observation_id)
+        _sha256(self.evidence_sha256, "evidence_sha256")
+        for name, unit in {
+            "calibration_error": "fraction",
+            "execution_feasibility": "fraction",
+            "settlement_identity_complexity": "complexity",
+            "oos_net_economic_value": "net_economic_value",
+        }.items():
+            metric = getattr(self, name)
+            if not isinstance(metric, AnchorSupplementalMetric) or metric.unit != unit:
+                raise AnchorSelectionError(f"{name} must use unit {unit!r}")
+        for name in ("calibration_error", "execution_feasibility"):
+            metric = getattr(self, name)
+            if metric.state is EvidenceState.MEASURED and not Decimal("0") <= metric.value <= Decimal("1"):
+                raise AnchorSelectionError(f"{name} must be between 0 and 1")
+
+    def metric_value(self, name: str) -> Decimal | None:
+        metric = getattr(self, name)
+        return metric.value if metric.state is EvidenceState.MEASURED else None
+
+
+@dataclass(frozen=True, slots=True)
 class AnchorMetricRule:
     name: str
     direction: MetricDirection
@@ -167,6 +219,10 @@ _DEFAULT_RULES = (
     AnchorMetricRule("compute_duration_seconds", MetricDirection.LOWER_IS_BETTER, Decimal("1"), Decimal("10")),
     AnchorMetricRule("slow_analysis_deadline_seconds", MetricDirection.HIGHER_IS_BETTER, Decimal("1"), Decimal("10")),
     AnchorMetricRule("freshness_ttl_seconds", MetricDirection.HIGHER_IS_BETTER, Decimal("1"), Decimal("30")),
+    AnchorMetricRule("calibration_error", MetricDirection.LOWER_IS_BETTER, Decimal("1"), Decimal("0.25")),
+    AnchorMetricRule("execution_feasibility", MetricDirection.HIGHER_IS_BETTER, Decimal("1"), Decimal("1")),
+    AnchorMetricRule("settlement_identity_complexity", MetricDirection.LOWER_IS_BETTER, Decimal("1"), Decimal("5")),
+    AnchorMetricRule("oos_net_economic_value", MetricDirection.HIGHER_IS_BETTER, Decimal("1"), Decimal("1")),
 )
 
 
@@ -357,6 +413,9 @@ def _confidence_interval(values: Sequence[Decimal], *, positive: bool = False) -
 
 
 def _normalized(value: Decimal, rule: AnchorMetricRule) -> Decimal:
+    if rule.name == "oos_net_economic_value":
+        magnitude = abs(value)
+        return Decimal("0.5") + (value / (magnitude + rule.scale)) / Decimal("2")
     ratio = value / (value + rule.scale)
     return ratio if rule.direction is MetricDirection.HIGHER_IS_BETTER else Decimal("1") - ratio
 
@@ -414,6 +473,7 @@ def _aggregate_candidate(
     sport_id: str,
     observations: Sequence[SportDomainFitnessObservation],
     protocol: AnchorSelectionProtocol,
+    supplemental_by_observation: Mapping[str, AnchorSupplementalEvidence],
 ) -> AnchorCandidateAggregate:
     by_cluster: dict[str, list[SportDomainFitnessObservation]] = {}
     seen_identity: set[tuple[str, ...]] = set()
@@ -443,11 +503,20 @@ def _aggregate_candidate(
     for rule in protocol.metrics:
         cluster_values: list[Decimal] = []
         for cluster_observations in by_cluster.values():
-            measured = [
-                _metric_value(item, rule.name)
-                for item in cluster_observations
-                if _metric_value(item, rule.name) is not None
-            ]
+            measured = []
+            for item in cluster_observations:
+                if rule.name in {
+                    "calibration_error",
+                    "execution_feasibility",
+                    "settlement_identity_complexity",
+                    "oos_net_economic_value",
+                }:
+                    evidence = supplemental_by_observation.get(item.observation_id)
+                    value = None if evidence is None else evidence.metric_value(rule.name)
+                else:
+                    value = _metric_value(item, rule.name)
+                if value is not None:
+                    measured.append(value)
             if measured:
                 cluster_values.append(_cluster_mean(measured))
         total_values += effective_n
@@ -492,6 +561,7 @@ def _aggregate_candidate(
 def evaluate_anchor_selection(
     observations: Iterable[SportDomainFitnessObservation],
     protocol: AnchorSelectionProtocol,
+    supplemental_evidence: Iterable[AnchorSupplementalEvidence] = (),
 ) -> AnchorSelectionReport:
     """Evaluate a frozen candidate universe without mutating source evidence."""
     if not isinstance(protocol, AnchorSelectionProtocol):
@@ -500,12 +570,30 @@ def evaluate_anchor_selection(
     start = _instant("measurement_start", protocol.measurement_start)
     end = _instant("measurement_end", protocol.measurement_end)
     as_of = _instant("decision_as_of", protocol.decision_as_of)
+    observed_inputs = tuple(observations)
+    by_id = {item.observation_id: item for item in observed_inputs}
+    if len(by_id) != len(observed_inputs):
+        raise AnchorSelectionError("observation ids must be unique")
+
+    supplemental_by_observation: dict[str, AnchorSupplementalEvidence] = {}
+    for evidence in supplemental_evidence:
+        if not isinstance(evidence, AnchorSupplementalEvidence):
+            raise TypeError("supplemental_evidence must contain AnchorSupplementalEvidence")
+        if evidence.observation_id in supplemental_by_observation:
+            raise AnchorSelectionError("supplemental evidence ids must be unique")
+        observation = by_id.get(evidence.observation_id)
+        if observation is None:
+            raise AnchorSelectionError("supplemental evidence references an unknown observation")
+        if observation.evidence_sha256 != evidence.evidence_sha256:
+            raise AnchorSelectionError("supplemental evidence does not bind the observation evidence hash")
+        supplemental_by_observation[evidence.observation_id] = evidence
+
     candidates: dict[str, list[SportDomainFitnessObservation]] = {
         sport_id: [] for sport_id in protocol.candidate_sports
     }
     input_ids: set[str] = set()
 
-    for observation in observations:
+    for observation in observed_inputs:
         if not isinstance(observation, SportDomainFitnessObservation):
             raise TypeError("observations must contain SportDomainFitnessObservation")
         if observation.provenance is not EvidenceProvenance.OBSERVED:
@@ -523,7 +611,12 @@ def evaluate_anchor_selection(
         input_ids.add(observation.observation_id)
 
     reports = tuple(
-        _aggregate_candidate(sport_id, tuple(candidates[sport_id]), protocol)
+        _aggregate_candidate(
+            sport_id,
+            tuple(candidates[sport_id]),
+            protocol,
+            supplemental_by_observation,
+        )
         for sport_id in protocol.candidate_sports
     )
 

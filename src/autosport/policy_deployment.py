@@ -364,6 +364,10 @@ def validate_activation_binding(
     dp = deployment_snapshot.payload
     if tp.get("dataset_snapshot_id") != training_identity.data_id:
         raise PolicyDeploymentError("training DatasetSnapshot identity mismatch")
+    if _instant(tp.get("causal_cutoff"), "training DatasetSnapshot causal_cutoff") != _instant(
+        training_identity.cutoff_ts, "training environment cutoff"
+    ):
+        raise PolicyDeploymentError("training environment cutoff does not bind DatasetSnapshot")
     if dp.get("dataset_snapshot_id") != deployment_identity.data_id:
         raise PolicyDeploymentError("deployment DatasetSnapshot identity mismatch")
     if (
@@ -424,12 +428,14 @@ def validate_activation_binding(
         epayload.get("candidate_strategy_version_id") != policy.policy_id
         or epayload.get("evaluation_bundle_id") != binding.evaluation_bundle_id
         or epayload.get("research_protocol_id") != policy.protocol_id
+        or epayload.get("dataset_snapshot_id") != training_identity.data_id
         or epayload.get("validity") != "ELIGIBLE"
     ):
         raise PolicyDeploymentError("promotion evidence does not authorize deployed policy")
     if (
         vpayload.get("evaluation_bundle_id") != binding.evaluation_bundle_id
         or vpayload.get("evaluated_strategy_version_id") != policy.policy_id
+        or vpayload.get("dataset_snapshot_id") != training_identity.data_id
     ):
         raise PolicyDeploymentError("evaluation bundle does not bind deployed policy")
     bundle_sha = dpayload.get("evaluation_bundle_sha256")

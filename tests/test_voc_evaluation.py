@@ -467,12 +467,23 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         self.assertIn("missing canonical VOC authority resolver", decision.reason)
 
     def test_qualified_paired_evaluation_can_authorize_cloud(self):
-        decision = self.route_compute(
+        resolver, paired = self._production_resolver_fixture()
+        production_store = VOCEvaluationStore(
+            Path(self._router_tmp.name) / "production-voc.json",
+            canonical_authority_resolver=resolver,
+        )
+        production_store.record(paired)
+        production_request = replace(
             request(),
+            decision_evidence_sha256=paired.decision_evidence_sha256,
+        )
+        decision = route_compute(
+            production_request,
             candidates(),
             policy(),
             as_of=T2,
-            voc_evidence=self.qualified_voc(),
+            voc_evidence=voc(paired),
+            voc_evaluation_store=production_store,
             domain_observation=slow_observation(),
         )
         self.assertEqual(decision.tier, ComputeTier.CLOUD)

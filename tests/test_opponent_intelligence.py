@@ -210,6 +210,7 @@ class OpponentIntelligenceTests(unittest.TestCase):
         )
         self.assertEqual(rating.rating, "0.5")
         self.assertEqual(rating.support, 2)
+        self.assertEqual(rating.effective_sample, 2)
         self.assertEqual(rating.opponent_count, 2)
         self.assertEqual(
             set(rating.input_performance_ids),
@@ -243,6 +244,32 @@ class OpponentIntelligenceTests(unittest.TestCase):
             feature_again.snapshot_id,
             feature.snapshot_id,
         )
+
+    def test_repeated_same_opponent_does_not_inflate_effective_sample(
+        self,
+    ):
+        self.store.record_performance(
+            observation(event_id="event-1", score="1", evidence=SHA_B)
+        )
+        self.store.record_performance(
+            observation(event_id="event-2", score="0", evidence=SHA_C)
+        )
+        rating, _ = self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
+            causal_cutoff=T2,
+            published_at=T2,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
+            min_support=2,
+        )
+        self.assertEqual(rating.support, 2)
+        self.assertEqual(rating.effective_sample, 1)
+        self.assertEqual(rating.state, SnapshotState.INSUFFICIENT)
+        self.assertIsNone(rating.rating)
+        self.assertIsNone(rating.uncertainty)
 
     def test_insufficient_or_stale_evidence_never_publishes_exact_strength(
         self,

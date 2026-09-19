@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -147,6 +148,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
         *,
         strategy_version_id: str = "live-test-strategy-v1",
         config_sha256: str | None = None,
+        created_at: datetime | None = None,
     ) -> StrategyVersion:
         return StrategyVersion(
             strategy_version_id=strategy_version_id,
@@ -158,7 +160,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 if config_sha256 is None
                 else config_sha256
             ),
-            created_at=cls.START.isoformat(),
+            created_at=(cls.START if created_at is None else created_at).isoformat(),
         )
 
     @classmethod
@@ -226,6 +228,23 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     observation_runner=_DurableObserver(workspace, [()]),
                     max_quote_age=timedelta(seconds=5),
                     clock=_ManualClock(self.START),
+                )
+
+    def test_constructor_rejects_future_registered_intent_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "not causally available",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START),
+                    strategy_version=self._strategy_version(
+                        created_at=self.START + timedelta(seconds=1),
+                    ),
                 )
 
     def test_factory_cannot_relabel_itself_after_provenance_resolution(self) -> None:
@@ -768,6 +787,64 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 "runtime context changed",
             ):
                 resumed.run_cycle()
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+    def test_pending_restart_rejects_provenance_unavailable_at_original_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            strategy = self._strategy_version(
+                created_at=self.START + timedelta(seconds=2),
+            )
+            seed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+                strategy_version=strategy,
+            )
+            decision_context_sha256 = seed._decision_context_sha256()
+            seed.close()
+
+            legacy_pending = {
+                "schema": "autosport.live_decision_progress",
+                "schema_version": 1,
+                "loop_id": "live-test-loop",
+                "phase": "pending",
+                "decision_ts": (self.START + timedelta(seconds=1)).isoformat(),
+                "market_state_sha256": hashlib.sha256(
+                    b"legacy-pre-causal-provenance"
+                ).hexdigest(),
+                "decision_context_sha256": decision_context_sha256,
+                "affected_input_ids": [],
+                "registered_input_ids": [],
+                "decision_id": None,
+                "plan_sha256": None,
+                "ledger_offset": None,
+                "gate": "normal",
+            }
+            (
+                workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+            ).write_text(
+                json.dumps(legacy_pending, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+                strategy_version=strategy,
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "not causally available",
+            ):
+                resumed.run_cycle()
+
             self.assertEqual(resumed_observer.calls, 0)
             self.assertFalse((workspace / "decisions.jsonl").exists())
 

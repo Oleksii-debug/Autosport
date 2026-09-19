@@ -476,6 +476,54 @@ class ModelComputeRouterTests(unittest.TestCase):
                 Decimal("7.00"),
             )
 
+    def test_predecision_execution_is_rejected_but_cost_remains_accounted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+            req = request(
+                request_id="req-predecision-execution",
+                allow_cloud=False,
+            )
+            decision = store.route(
+                req,
+                self.candidates,
+                policy(),
+                as_of=T1,
+            )
+            self.assertEqual(decision.decided_at, T1)
+
+            predecision = store.record_execution(
+                execution_id="exec-predecision",
+                request_id=req.request_id,
+                completed_at=T0,
+                available_at=T0,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("0.50"),
+                actual_latency_seconds=Decimal("1"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                predecision.disposition,
+                ExecutionDisposition.REJECTED_CAUSAL,
+            )
+            self.assertIn(
+                "before routed decision",
+                predecision.reason,
+            )
+            self.assertEqual(
+                store.total_actual_cost(req.request_id),
+                Decimal("0.50"),
+            )
+
+            reopened = ModelComputeRouterStore(path)
+            self.assertEqual(
+                reopened.total_actual_cost(req.request_id),
+                Decimal("0.50"),
+            )
+
     def test_actual_execution_cost_overruns_fail_closed_and_remain_accounted(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "router.json"

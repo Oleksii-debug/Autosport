@@ -200,6 +200,20 @@ class DesktopAcknowledgement:
     acknowledged_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class DesktopApplicationReceipt:
+    delta_id: str
+    canonical_event_digest: str
+    receipt_id: str
+    applied_at: str
+
+    def validate(self) -> None:
+        _text(self.delta_id, "delta_id")
+        _text(self.canonical_event_digest, "canonical_event_digest")
+        _text(self.receipt_id, "receipt_id")
+        _instant(self.applied_at, "applied_at")
+
+
 class _JsonAtomicStore:
     schema_version = 1
 
@@ -359,20 +373,46 @@ class DesktopDeltaCheckpointStore(_JsonAtomicStore):
         _text(delta_id, "delta_id")
         return any(item.get("delta_id") == delta_id for item in self._read()["acks"])
 
-    def ack(self, delta: CollectorDelta, *, applied_event_digest: str, acknowledged_at: str) -> bool:
+    def application_receipt(self, delta: CollectorDelta) -> DesktopApplicationReceipt | None:
+        for item in self._read()["acks"]:
+            if item.get("delta_id") != delta.delta_id:
+                continue
+            receipt_id = item.get("application_receipt_id")
+            if not receipt_id:
+                continue
+            receipt = DesktopApplicationReceipt(
+                delta_id=item["delta_id"],
+                canonical_event_digest=item["canonical_event_digest"],
+                receipt_id=receipt_id,
+                applied_at=item["applied_at"],
+            )
+            receipt.validate()
+            return receipt
+        return None
+
+    def ack(self, delta: CollectorDelta, *, application_receipt: DesktopApplicationReceipt, acknowledged_at: str) -> bool:
         delta.validate()
-        if applied_event_digest != delta.canonical_event_digest:
-            raise AckConflictError("desktop ack digest does not match collector evidence")
+        application_receipt.validate()
+        if application_receipt.delta_id != delta.delta_id:
+            raise ApplicationReceiptError("application receipt delta_id does not match collector evidence")
+        if application_receipt.canonical_event_digest != delta.canonical_event_digest:
+            raise ApplicationReceiptError("application receipt digest does not match collector evidence")
         _instant(acknowledged_at, "acknowledged_at")
         raw = self._read()
         existing = next((item for item in raw["acks"] if item.get("delta_id") == delta.delta_id), None)
         if existing is not None:
-            if existing.get("canonical_event_digest") != applied_event_digest:
+            if existing.get("canonical_event_digest") != delta.canonical_event_digest:
                 raise AckConflictError("existing desktop ack disagrees with applied event")
+            if existing.get("application_receipt_id") != application_receipt.receipt_id:
+                raise ApplicationReceiptError("existing desktop receipt disagrees with applied effect")
             return False
-        raw["acks"].append(asdict(DesktopAcknowledgement(
-            delta.delta_id, applied_event_digest, acknowledged_at
-        )))
+        raw["acks"].append({
+            "delta_id": delta.delta_id,
+            "canonical_event_digest": delta.canonical_event_digest,
+            "acknowledged_at": acknowledged_at,
+            "application_receipt_id": application_receipt.receipt_id,
+            "applied_at": application_receipt.applied_at,
+        })
         key = f"{delta.source_id}|{delta.stream_epoch}"
         previous_raw = raw["streams"].get(key)
         if previous_raw is None or delta.cursor_position > previous_raw["last_position"]:
@@ -397,7 +437,8 @@ class DesktopDeltaConsumer:
         checkpoint: DesktopDeltaCheckpointStore,
         *,
         resolve_event: Callable[[CollectorDelta], Any],
-        apply_event: Callable[[Any], None],
+        apply_event: Callable[[CollectorDelta, Any], DesktopApplicationReceipt],
+        lookup_application_receipt: Callable[[CollectorDelta], DesktopApplicationReceipt | None],
         apply_health: Callable[[CollectorDelta, Any], None] | None = None,
     ) -> None:
         self.collector = collector
@@ -415,22 +456,51 @@ class DesktopDeltaConsumer:
                 continue
             if delta.gap_state is GapState.DETECTED:
                 recovered = any(
-                    item.gap_state is GapState.RECOVERED and item.revision_of == delta.delta_id
+                    item.gap_state is GapState.RECOVERED
+                    and item.revision_of == delta.delta_id
+                    and item.source_id == delta.source_id
+                    and item.stream_epoch == delta.stream_epoch
+                    and item.event_dedupe_key == delta.event_dedupe_key
+                    and item.event_id == delta.event_id
+                    and item.revision_number == delta.revision_number + 1
+                    and item.gap_from_cursor == delta.gap_from_cursor
+                    and item.gap_to_cursor == delta.gap_to_cursor
                     for item in available
                 )
                 if recovered:
                     continue
                 raise GapStateError(f"stream gap remains unresolved before delta {delta.delta_id}")
+
+            durable_receipt = self.lookup_application_receipt(delta)
+            if durable_receipt is not None:
+                durable_receipt.validate()
+                if durable_receipt.canonical_event_digest != delta.canonical_event_digest:
+                    raise ApplicationReceiptError(
+                        f"durable application receipt digest conflicts with delta {delta.delta_id}"
+                    )
+                self.checkpoint.ack(
+                    delta,
+                    application_receipt=durable_receipt,
+                    acknowledged_at=now.isoformat(),
+                )
+                delivered.append(delta.delta_id)
+                continue
+
             event = self.resolve_event(delta)
             digest = canonical_event_digest(event)
             if digest != delta.canonical_event_digest:
                 raise DeltaConflictError(f"canonical event digest mismatch for delta {delta.delta_id}")
-            self.apply_event(event)
+            receipt = self.apply_event(delta, event)
+            if not isinstance(receipt, DesktopApplicationReceipt):
+                raise ApplicationReceiptError("apply_event must return a durable DesktopApplicationReceipt")
+            receipt.validate()
+            if receipt.delta_id != delta.delta_id or receipt.canonical_event_digest != digest:
+                raise ApplicationReceiptError("application receipt is not bound to this delta/digest")
             if self.apply_health is not None:
                 self.apply_health(delta, event)
             self.checkpoint.ack(
                 delta,
-                applied_event_digest=digest,
+                application_receipt=receipt,
                 acknowledged_at=now.isoformat(),
             )
             delivered.append(delta.delta_id)

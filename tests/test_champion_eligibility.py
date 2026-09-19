@@ -1,3 +1,4 @@
+from dataclasses import replace
 import pytest
 
 from autosport.champion_eligibility import (
@@ -51,8 +52,8 @@ def _make_decision(registry, finding, **overrides):
         "valid_until": "2026-02-13T00:00:00Z",
         "minimum_samples": 2,
         "minimum_effective_sample_size": 2,
-        "degraded_streak": 0,
-        "recovery_streak": 0,
+        "degraded_streak": None,
+        "recovery_streak": None,
         "admissible_actions": ("BET", "WAIT"),
     }
     values.update(overrides)
@@ -105,7 +106,11 @@ def test_single_no_drift_window_waits_for_authoritative_scope_and_repetition(tmp
 
 def test_activation_rejects_expired_or_tampered_or_wider_evidence(tmp_path):
     registry, finding = _decision_registry(tmp_path, threshold="10")
-    decision = _make_decision(registry, finding)
+    decision = replace(
+        _make_decision(registry, finding),
+        status=ChampionEligibilityStatus.ELIGIBLE,
+        reason="test-qualified",
+    )
     persist_eligibility_decision(registry, decision)
     with pytest.raises(ChampionEligibilityError, match="expired"):
         validate_activation_eligibility(
@@ -187,7 +192,11 @@ def test_research_trigger_binding_is_idempotent(tmp_path):
 
 def test_activation_rejects_wrong_exact_lineage(tmp_path):
     registry, finding = _decision_registry(tmp_path, threshold="10")
-    decision = _make_decision(registry, finding)
+    decision = replace(
+        _make_decision(registry, finding),
+        status=ChampionEligibilityStatus.ELIGIBLE,
+        reason="test-qualified",
+    )
     persist_eligibility_decision(registry, decision)
     with pytest.raises(ChampionEligibilityError, match="model identity mismatch"):
         validate_activation_eligibility(

@@ -488,6 +488,7 @@ class PortfolioDependencyEvidence:
     sample_size: int
     causal_cutoff: str
     as_of: str
+    valid_until: str
     reproducibility_sha256: str
     pairwise_dependency_upper_bounds: tuple[tuple[str, str, Decimal], ...]
     uncertainty_fraction: Decimal = Decimal("0")
@@ -517,8 +518,13 @@ class PortfolioDependencyEvidence:
             raise ValueError("dependency evidence sample_size must be an integer >= 2")
         _, cutoff = _canonical_timestamp("dependency evidence causal_cutoff", self.causal_cutoff)
         _, as_of = _canonical_timestamp("dependency evidence as_of", self.as_of)
+        _, valid_until = _canonical_timestamp(
+            "dependency evidence valid_until", self.valid_until
+        )
         if cutoff > as_of:
             raise ValueError("dependency evidence causal_cutoff must not be after as_of")
+        if as_of > valid_until:
+            raise ValueError("dependency evidence valid_until must not be before as_of")
         _canonical_sha256("dependency evidence reproducibility_sha256", self.reproducibility_sha256)
         expected_pairs = {
             tuple(sorted((left, right)))
@@ -566,7 +572,7 @@ class PortfolioDependencyEvidence:
     def to_dict(self) -> dict[str, object]:
         return {
             "schema": "autosport.portfolio_dependency_evidence",
-            "schema_version": 1,
+            "schema_version": 2,
             "evidence_id": self.evidence_id,
             "portfolio_sha256": self.portfolio_sha256,
             "intent_sha256s": list(self.intent_sha256s),
@@ -576,6 +582,7 @@ class PortfolioDependencyEvidence:
             "sample_size": self.sample_size,
             "causal_cutoff": self.causal_cutoff,
             "as_of": self.as_of,
+            "valid_until": self.valid_until,
             "reproducibility_sha256": self.reproducibility_sha256,
             "pairwise_dependency_upper_bounds": [[a, b, str(bound)] for a, b, bound in self.pairwise_dependency_upper_bounds],
             "uncertainty_fraction": str(self.uncertainty_fraction),
@@ -588,12 +595,12 @@ class PortfolioDependencyEvidence:
         expected = {
             "schema","schema_version","evidence_id","portfolio_sha256","intent_sha256s",
             "candidate_sha256s","population_id","method","sample_size","causal_cutoff",
-            "as_of","reproducibility_sha256","pairwise_dependency_upper_bounds",
+            "as_of","valid_until","reproducibility_sha256","pairwise_dependency_upper_bounds",
             "uncertainty_fraction","fee_fraction","partial_fill_stress_fraction",
         }
         if type(raw) is not dict or set(raw) != expected:
             raise ValueError("serialized dependency evidence fields mismatch")
-        if raw["schema"] != "autosport.portfolio_dependency_evidence" or raw["schema_version"] != 1:
+        if raw["schema"] != "autosport.portfolio_dependency_evidence" or raw["schema_version"] != 2:
             raise ValueError("unsupported dependency evidence schema")
         pairs_raw = raw["pairwise_dependency_upper_bounds"]
         if type(pairs_raw) is not list:
@@ -613,6 +620,7 @@ class PortfolioDependencyEvidence:
             sample_size=raw["sample_size"],
             causal_cutoff=raw["causal_cutoff"],
             as_of=raw["as_of"],
+            valid_until=raw["valid_until"],
             reproducibility_sha256=raw["reproducibility_sha256"],
             pairwise_dependency_upper_bounds=tuple(pairs),
             uncertainty_fraction=_decimal_from_serialized("dependency evidence uncertainty_fraction",raw["uncertainty_fraction"]),
@@ -629,7 +637,10 @@ class PortfolioDependencyEvidence:
             return False
         _, decision = _canonical_timestamp("dependency evidence decision_ts", decision_ts)
         _, as_of = _canonical_timestamp("dependency evidence as_of", self.as_of)
-        return as_of <= decision
+        _, valid_until = _canonical_timestamp(
+            "dependency evidence valid_until", self.valid_until
+        )
+        return as_of <= decision <= valid_until
 
 
 @dataclass(frozen=True, slots=True)
@@ -1426,9 +1437,13 @@ class PortfolioPlan:
             _, evidence_as_of = _canonical_timestamp(
                 "dependency evidence as_of", self.dependency_evidence.as_of
             )
-            if evidence_as_of > decision_time:
+            _, evidence_valid_until = _canonical_timestamp(
+                "dependency evidence valid_until",
+                self.dependency_evidence.valid_until,
+            )
+            if not (evidence_as_of <= decision_time <= evidence_valid_until):
                 raise ValueError(
-                    "dependency evidence must not be from the future"
+                    "dependency evidence must be valid at portfolio decision time"
                 )
         if self.robust_proposal is not None:
             if not isinstance(self.robust_proposal, RobustPortfolioProposal):

@@ -34,6 +34,7 @@ class FocusedMirrorDependency:
 
     input_id: str
     source_ids: frozenset[str] | None
+    sports: frozenset[str] | None
     event_ids: frozenset[str] | None
     market_ids: frozenset[str] | None
     selection_ids: frozenset[str] | None
@@ -41,6 +42,7 @@ class FocusedMirrorDependency:
     def matches(self, event: MarketEvent) -> bool:
         return (
             (self.source_ids is None or event.source_id in self.source_ids)
+            and (self.sports is None or event.sport in self.sports)
             and (self.event_ids is None or event.event_id in self.event_ids)
             and (self.market_ids is None or event.market_id in self.market_ids)
             and (
@@ -93,6 +95,7 @@ class FocusedMirrorDependencyIndex:
         input_id: str,
         *,
         source_ids: str | Iterable[str] | None = None,
+        sports: str | Iterable[str] | None = None,
         event_ids: str | Iterable[str] | None = None,
         market_ids: str | Iterable[str] | None = None,
         selection_ids: str | Iterable[str] | None = None,
@@ -102,6 +105,7 @@ class FocusedMirrorDependencyIndex:
         dependency = FocusedMirrorDependency(
             input_id=normalized_id,
             source_ids=self._selector(source_ids, name="source_ids"),
+            sports=self._selector(sports, name="sports"),
             event_ids=self._selector(event_ids, name="event_ids"),
             market_ids=self._selector(market_ids, name="market_ids"),
             selection_ids=self._selector(selection_ids, name="selection_ids"),
@@ -196,6 +200,7 @@ class FocusedMirrorDependencyIndex:
     def _selectors(dependency: FocusedMirrorDependency) -> dict[str, frozenset[str] | None]:
         return {
             "source_ids": dependency.source_ids,
+            "sports": dependency.sports,
             "event_ids": dependency.event_ids,
             "market_ids": dependency.market_ids,
             "selection_ids": dependency.selection_ids,

@@ -559,6 +559,7 @@ class PortfolioPlanTests(unittest.TestCase):
             book,
             (first, second),
             as_of="2026-09-18T13:20:01+00:00",
+            valid_until="2026-09-18T13:21:00+00:00",
         )
         graph = self._graph(
             book,

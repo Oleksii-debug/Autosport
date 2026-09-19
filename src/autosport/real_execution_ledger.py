@@ -61,6 +61,7 @@ class EventType(str, Enum):
     ATTEMPT_RESERVED = "ATTEMPT_RESERVED"
     ATTEMPT_SUBMITTED = "ATTEMPT_SUBMITTED"
     ATTEMPT_UNKNOWN = "ATTEMPT_UNKNOWN"
+    PROVIDER_ORDER_REFERENCE_BOUND = "PROVIDER_ORDER_REFERENCE_BOUND"
     PROVIDER_EVIDENCE_BOUND = "PROVIDER_EVIDENCE_BOUND"
     EXTERNAL_ACKNOWLEDGEMENT = "EXTERNAL_ACKNOWLEDGEMENT"
     RECONCILED_FOUND = "RECONCILED_FOUND"
@@ -719,6 +720,11 @@ class RealExecutionLedger:
                     )
                 found_receipt_id = external_receipt_id
                 found_reconciliations[evidence_id] = event["payload"]
+            elif kind == EventType.PROVIDER_ORDER_REFERENCE_BOUND.value:
+                if state != AttemptState.RESERVED:
+                    raise ExecutionLedgerIntegrityError(
+                        "provider order reference requires reserved attempt"
+                    )
             elif kind == EventType.PROVIDER_EVIDENCE_BOUND.value:
                 if state not in {AttemptState.SUBMITTED, AttemptState.UNKNOWN}:
                     raise ExecutionLedgerIntegrityError(
@@ -1155,6 +1161,7 @@ class RealExecutionLedger:
                 )
             submitted_time: datetime | None = None
             unknown_time: datetime | None = None
+            provider_order_reference_seen = False
             found_reconciliations: dict[str, ExternalEffectReconciliation] = {}
             found_receipt_id: str | None = None
             for followup in attempt_events[1:]:
@@ -1246,6 +1253,65 @@ class RealExecutionLedger:
                         found_reconciliations[
                             reconciliation.evidence_id
                         ] = reconciliation
+                    elif (
+                        followup["event_type"]
+                        == EventType.PROVIDER_ORDER_REFERENCE_BOUND.value
+                    ):
+                        if provider_order_reference_seen:
+                            raise ExecutionLedgerIntegrityError(
+                                "attempt has multiple provider order reference bindings"
+                            )
+                        provider_order_reference_seen = True
+                        if submitted_time is not None:
+                            raise ExecutionLedgerIntegrityError(
+                                "provider order reference was bound after submission"
+                            )
+                        if set(followup["payload"]) != {
+                            "provider_id",
+                            "account_id",
+                            "provider_order_ref",
+                            "binding_sha256",
+                        }:
+                            raise ExecutionLedgerIntegrityError(
+                                "provider order reference binding schema is invalid"
+                            )
+                        provider_id = _text(
+                            followup["payload"]["provider_id"], "provider_id"
+                        )
+                        account_id = _text(
+                            followup["payload"]["account_id"], "account_id"
+                        )
+                        provider_order_ref = _text(
+                            followup["payload"]["provider_order_ref"],
+                            "provider_order_ref",
+                        )
+                        binding_sha256 = _sha256_text(
+                            followup["payload"]["binding_sha256"],
+                            "binding_sha256",
+                        )
+                        if provider_id != action["bookmaker_id"] or account_id != action["account_id"]:
+                            raise ExecutionLedgerIntegrityError(
+                                "provider order reference authority mismatches action"
+                            )
+                        expected_binding = _digest(
+                            {
+                                "schema": "autosport.provider_order_reference_binding",
+                                "schema_version": 1,
+                                "provider_id": provider_id,
+                                "account_id": account_id,
+                                "plan_id": first["plan_id"],
+                                "action_id": first["action_id"],
+                                "attempt_id": attempt_id,
+                                "effect_fingerprint": first["payload"]["effect_fingerprint"],
+                            }
+                        )
+                        expected_ref = hashlib.sha256(
+                            f"{provider_id}:{account_id}:{expected_binding}".encode("utf-8")
+                        ).hexdigest()[:32]
+                        if binding_sha256 != expected_binding or provider_order_ref != expected_ref:
+                            raise ExecutionLedgerIntegrityError(
+                                "provider order reference binding mismatch"
+                            )
                     elif (
                         followup["event_type"]
                         == EventType.PROVIDER_EVIDENCE_BOUND.value
@@ -1373,6 +1439,23 @@ class RealExecutionLedger:
                         "attempt chronology timestamp is invalid"
                     ) from exc
             cls._state(attempt_events)
+
+        provider_reference_owners: dict[tuple[str, str, str], str] = {}
+        for event in events:
+            if event["event_type"] != EventType.PROVIDER_ORDER_REFERENCE_BOUND.value:
+                continue
+            payload = event["payload"]
+            key = (
+                payload["provider_id"],
+                payload["account_id"],
+                payload["provider_order_ref"],
+            )
+            prior_owner = provider_reference_owners.get(key)
+            if prior_owner is not None and prior_owner != event["attempt_id"]:
+                raise ExecutionLedgerIntegrityError(
+                    "provider order reference belongs to multiple attempts"
+                )
+            provider_reference_owners[key] = event["attempt_id"]
 
         for event in events:
             if event["event_type"] in {
@@ -1538,6 +1621,120 @@ class RealExecutionLedger:
             and event["event_type"] == EventType.SUPERVISED_APPROVAL_REVOKED.value
             for event in events
         )
+
+    def bind_provider_order_reference(
+        self,
+        *,
+        attempt_id: str,
+        provider_id: str,
+    ) -> str:
+        """Durably bind a provider-safe <=32-char order reference before submission."""
+        _text(attempt_id, "attempt_id")
+        provider = _text(provider_id, "provider_id")
+
+        def operation() -> str:
+            events = self._events()
+            attempt_events = self._attempt_events(events, attempt_id)
+            if not attempt_events:
+                raise ExecutionStateError(
+                    "provider order reference requires reserved attempt"
+                )
+            first = attempt_events[0]
+            _, action = self._action_payload(
+                events, first["plan_id"], first["action_id"]
+            )
+            if provider != action["bookmaker_id"]:
+                raise ExecutionIdentityConflict(
+                    "provider order reference authority mismatches action bookmaker"
+                )
+            account_id = _text(action["account_id"], "account_id")
+            binding_sha256 = _digest(
+                {
+                    "schema": "autosport.provider_order_reference_binding",
+                    "schema_version": 1,
+                    "provider_id": provider,
+                    "account_id": account_id,
+                    "plan_id": first["plan_id"],
+                    "action_id": first["action_id"],
+                    "attempt_id": attempt_id,
+                    "effect_fingerprint": first["payload"]["effect_fingerprint"],
+                }
+            )
+            provider_order_ref = hashlib.sha256(
+                f"{provider}:{account_id}:{binding_sha256}".encode("utf-8")
+            ).hexdigest()[:32]
+            payload = {
+                "provider_id": provider,
+                "account_id": account_id,
+                "provider_order_ref": provider_order_ref,
+                "binding_sha256": binding_sha256,
+            }
+            existing = [
+                event
+                for event in attempt_events
+                if event["event_type"]
+                == EventType.PROVIDER_ORDER_REFERENCE_BOUND.value
+            ]
+            if existing:
+                if len(existing) == 1 and existing[0]["payload"] == payload:
+                    return provider_order_ref
+                raise ExecutionIdentityConflict(
+                    "attempt already has a different provider order reference"
+                )
+            if self._state(attempt_events) != AttemptState.RESERVED:
+                raise ExecutionStateError(
+                    "provider order reference must be bound before submission"
+                )
+            for event in events:
+                if (
+                    event["event_type"]
+                    == EventType.PROVIDER_ORDER_REFERENCE_BOUND.value
+                    and event["payload"].get("provider_id") == provider
+                    and event["payload"].get("account_id") == account_id
+                    and event["payload"].get("provider_order_ref") == provider_order_ref
+                    and event["attempt_id"] != attempt_id
+                ):
+                    raise ExecutionIdentityConflict(
+                        "provider order reference collision across attempts"
+                    )
+            self._append(
+                EventType.PROVIDER_ORDER_REFERENCE_BOUND,
+                first["plan_id"],
+                first["action_id"],
+                attempt_id,
+                payload,
+            )
+            return provider_order_ref
+
+        return self._mutate(operation)
+
+    def provider_order_reference(
+        self,
+        *,
+        attempt_id: str,
+        provider_id: str,
+    ) -> str | None:
+        provider = _text(provider_id, "provider_id")
+        events = self._events()
+        matches = [
+            event["payload"]
+            for event in self._attempt_events(events, attempt_id)
+            if event["event_type"]
+            == EventType.PROVIDER_ORDER_REFERENCE_BOUND.value
+            and event["payload"].get("provider_id") == provider
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise ExecutionLedgerIntegrityError(
+                "attempt has multiple provider order reference bindings"
+            )
+        value = matches[0].get("provider_order_ref")
+        if not isinstance(value, str):
+            raise ExecutionLedgerIntegrityError(
+                "provider order reference binding is invalid"
+            )
+        return value
 
     def bind_provider_evidence(
         self,

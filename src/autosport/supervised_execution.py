@@ -814,6 +814,27 @@ def _attempt_action(
     return bound.action_for(action_id), saga.attempts[attempt_id]
 
 
+def _require_attempt_provider_order_reference(
+    ledger: RealExecutionLedger,
+    *,
+    attempt_id: str,
+    action: ExecutionAction,
+    evidence_provider_order_ref: str | None,
+) -> None:
+    """Fail closed when #561 evidence is not bound to the attempt's durable provider ref."""
+
+    expected = ledger.provider_order_reference(
+        attempt_id=attempt_id,
+        provider_id=action.bookmaker_id,
+    )
+    if expected is None:
+        return
+    if evidence_provider_order_ref != expected:
+        raise SupervisedExecutionError(
+            "verified provider order reference mismatches durable attempt binding"
+        )
+
+
 def _validate_slippage(
     action: ExecutionAction,
     constraint: ExecutionLegConstraint,
@@ -894,6 +915,12 @@ def reconcile_provider_readback(
         raise SupervisedExecutionError(
             "verified provider evidence identity mismatches execution action"
         )
+    _require_attempt_provider_order_reference(
+        ledger,
+        attempt_id=attempt_id,
+        action=action,
+        evidence_provider_order_ref=readback.provider_order_ref,
+    )
     _require_verified_profile(
         bound,
         action,
@@ -1038,6 +1065,12 @@ def reconcile_provider_not_found(
         raise SupervisedExecutionError(
             "verified not-found evidence identity mismatches execution action"
         )
+    _require_attempt_provider_order_reference(
+        ledger,
+        attempt_id=attempt_id,
+        action=action,
+        evidence_provider_order_ref=readback.provider_order_ref,
+    )
     _require_verified_profile(
         bound,
         action,

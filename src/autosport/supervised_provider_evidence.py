@@ -202,6 +202,7 @@ class VerifiedProviderEffectEvidence:
     accepted_odds: Decimal
     accepted_stake: Decimal
     evidence_id: str
+    provider_order_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
@@ -219,6 +220,7 @@ class VerifiedProviderAbsenceEvidence:
     current_source_payload_sha256: str
     cleared_source_payload_sha256: str
     evidence_id: str
+    provider_order_ref: str | None = None
 
 
 VerifiedProviderState: TypeAlias = (
@@ -246,6 +248,7 @@ def _verified_provider_evidence_fingerprint(evidence: VerifiedProviderState) -> 
             "accepted_odds": str(evidence.accepted_odds),
             "accepted_stake": str(evidence.accepted_stake),
             "evidence_id": evidence.evidence_id,
+            "provider_order_ref": evidence.provider_order_ref,
         }
     elif isinstance(evidence, VerifiedProviderAbsenceEvidence):
         payload = {
@@ -263,6 +266,7 @@ def _verified_provider_evidence_fingerprint(evidence: VerifiedProviderState) -> 
             "current_source_payload_sha256": evidence.current_source_payload_sha256,
             "cleared_source_payload_sha256": evidence.cleared_source_payload_sha256,
             "evidence_id": evidence.evidence_id,
+            "provider_order_ref": evidence.provider_order_ref,
         }
     else:
         raise ProviderEvidenceError("provider evidence type is not canonical")
@@ -306,6 +310,7 @@ def verify_betfair_provider_state(
     *,
     expected_profile_sha256: str,
     readback: BetfairExecutionReadbackEnvelope,
+    expected_provider_order_ref: str | None = None,
 ) -> VerifiedProviderState:
     """Derive execution truth only from a client-sealed, action-scoped Betfair capture."""
 
@@ -337,6 +342,23 @@ def verify_betfair_provider_state(
         raise ProviderEvidenceError(
             "provider market-to-event identity conflicts with execution action"
         )
+    if expected_provider_order_ref is not None:
+        if (
+            type(expected_provider_order_ref) is not str
+            or not expected_provider_order_ref
+            or len(expected_provider_order_ref) > 32
+            or any(
+                character not in "0123456789abcdef"
+                for character in expected_provider_order_ref
+            )
+        ):
+            raise ProviderEvidenceError(
+                "expected_provider_order_ref must be <=32 lowercase hex characters"
+            )
+        if readback.provider_order_ref != expected_provider_order_ref:
+            raise ProviderEvidenceError(
+                "provider readback order reference conflicts with expected durable binding"
+            )
 
     current, current_sha, current_at = _complete_current_pages(readback.current_pages)
     statuses = tuple(status for status, _ in readback.cleared_pages_by_status)
@@ -392,6 +414,7 @@ def verify_betfair_provider_state(
             "Betfair readback requires canonical positive numeric selection_id"
         )
 
+    provider_order_ref = readback.provider_order_ref or action.action_id
     candidates: list[
         tuple[
             str,
@@ -400,10 +423,10 @@ def verify_betfair_provider_state(
         ]
     ] = []
     for order in current:
-        if order.customer_order_ref == action.action_id:
+        if order.customer_order_ref == provider_order_ref:
             candidates.append(("current", None, order))
     for status, order in cleared:
-        if order.customer_order_ref == action.action_id:
+        if order.customer_order_ref == provider_order_ref:
             candidates.append(("cleared", status, order))
 
     for kind, _, order in candidates:
@@ -435,6 +458,7 @@ def verify_betfair_provider_state(
                 "bookmaker_id": action.bookmaker_id,
                 "account_id": action.account_id,
                 "action_id": action.action_id,
+                "provider_order_ref": provider_order_ref,
                 "event_id": readback.market_event.event_id,
                 "market_id": action.market_id,
                 "selection_id": action.selection_id,
@@ -459,6 +483,7 @@ def verify_betfair_provider_state(
             current_sha,
             cleared_sha,
             evidence_id,
+            readback.provider_order_ref,
         )
 
     # A transition can expose the same receipt in current and cleared evidence.
@@ -511,6 +536,7 @@ def verify_betfair_provider_state(
             "bookmaker_id": action.bookmaker_id,
             "account_id": action.account_id,
             "action_id": action.action_id,
+            "provider_order_ref": provider_order_ref,
             "event_id": readback.market_event.event_id,
             "market_id": action.market_id,
             "selection_id": action.selection_id,
@@ -539,6 +565,7 @@ def verify_betfair_provider_state(
         accepted_odds,
         accepted_stake,
         evidence_id,
+        readback.provider_order_ref,
     )
 
 # Verified provider state is an in-process capability, not a caller assertion.
@@ -556,12 +583,14 @@ def _install_verified_provider_evidence_authority() -> None:
         *,
         expected_profile_sha256: str,
         readback: BetfairExecutionReadbackEnvelope,
+        expected_provider_order_ref: str | None = None,
     ) -> VerifiedProviderState:
         evidence = raw_verify(
             action,
             profile,
             expected_profile_sha256=expected_profile_sha256,
             readback=readback,
+            expected_provider_order_ref=expected_provider_order_ref,
         )
         evidence_key = id(evidence)
 

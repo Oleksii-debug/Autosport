@@ -29,6 +29,9 @@ _REQUIRED_PATTERNS = {
     WINDOWS_SHELL_AUTOMATION_IDS["state"]: {"VALUE"},
     WINDOWS_SHELL_AUTOMATION_IDS["open"]: {"INVOKE"},
     WINDOWS_SHELL_AUTOMATION_IDS["details"]: set(),
+    WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_open"]: {"INVOKE"},
+    WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_status"]: {"VALUE"},
+    WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_readback"]: set(),
 }
 
 _EXPECTED_ROLES = {
@@ -49,6 +52,9 @@ _EXPECTED_ROLES = {
     WINDOWS_SHELL_AUTOMATION_IDS["state"]: "TEXT",
     WINDOWS_SHELL_AUTOMATION_IDS["open"]: "PUSH_BUTTON",
     WINDOWS_SHELL_AUTOMATION_IDS["details"]: "LIST",
+    WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_open"]: "PUSH_BUTTON",
+    WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_status"]: "TEXT",
+    WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_readback"]: "LIST",
 }
 
 _ROW_CONTROLS = {
@@ -56,6 +62,7 @@ _ROW_CONTROLS = {
     AUTOMATION_IDS["live_quotes"],
     AUTOMATION_IDS["evaluation"],
     WINDOWS_SHELL_AUTOMATION_IDS["details"],
+    WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_readback"],
 }
 
 _BLOCKING_GAPS = {
@@ -107,11 +114,17 @@ def _shell_state_is_readonly(app: WindowsAutosportApp) -> bool:
     return _readonly_entry(getattr(app, "shell_state", None))
 
 
+def _owner_economic_state_is_readonly(app: WindowsAutosportApp) -> bool:
+    """Bind the owner-authority state evidence to the actual Tk readonly widget."""
+    return _readonly_entry(getattr(app, "owner_economic_authority_state", None))
+
+
 def summarize_description(
     description: Any,
     *,
     bankroll_readonly: bool | None = None,
     shell_state_readonly: bool | None = None,
+    owner_economic_state_readonly: bool | None = None,
 ) -> dict[str, Any]:
     expected_ids = set(_REQUIRED_PATTERNS)
     controls: dict[int, dict[str, Any]] = {}
@@ -173,6 +186,14 @@ def summarize_description(
                 f"automation_id={shell_state_id}: shell state is not runtime readonly"
             )
 
+    owner_state_id = WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_status"]
+    if owner_state_id in controls:
+        controls[owner_state_id]["read_only"] = owner_economic_state_readonly is True
+        if owner_economic_state_readonly is not True:
+            failures.append(
+                f"automation_id={owner_state_id}: owner economic state is not runtime readonly"
+            )
+
     provider_trouble = [str(item) for item in description.provider_trouble]
     if provider_trouble:
         failures.extend(f"provider trouble: {item}" for item in provider_trouble)
@@ -207,6 +228,7 @@ def run_accessibility_audit(output_path: str | Path) -> int:
             tk_uia.describe(app),
             bankroll_readonly=_bankroll_summary_is_readonly(app),
             shell_state_readonly=_shell_state_is_readonly(app),
+            owner_economic_state_readonly=_owner_economic_state_is_readonly(app),
         )
     except Exception as exc:
         report = {

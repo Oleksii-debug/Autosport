@@ -8,6 +8,8 @@ from autosport.windows_layout import (
     install_compact_windows_layout,
     install_windows_product_shell,
     refresh_windows_shell_open_availability,
+    _owner_economic_workspace,
+    _show_owner_economic_dialog,
     _surface_target_widget,
 )
 
@@ -56,6 +58,10 @@ def test_windows_product_shell_has_stable_uia_ids_and_keyboard_navigation():
         "state": 302,
         "open": 303,
         "details": 304,
+        "owner_economic_open": 305,
+        "owner_economic_status": 306,
+        "owner_economic_readback": 307,
+        "owner_economic_dialog_readback": 308,
     }
 
     build_source = inspect.getsource(install_windows_product_shell)
@@ -68,8 +74,11 @@ def test_windows_product_shell_has_stable_uia_ids_and_keyboard_navigation():
         assert binding in build_source
 
     accessibility_source = inspect.getsource(configure_windows_product_shell_accessibility)
-    for automation_id in WINDOWS_SHELL_AUTOMATION_IDS:
+    for automation_id in set(WINDOWS_SHELL_AUTOMATION_IDS) - {"owner_economic_dialog_readback"}:
         assert f'WINDOWS_SHELL_AUTOMATION_IDS["{automation_id}"]' in accessibility_source
+
+    dialog_source = inspect.getsource(_show_owner_economic_dialog)
+    assert 'WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_dialog_readback"]' in dialog_source
 
     install_source = inspect.getsource(install_compact_windows_layout)
     assert "refresh_windows_shell_open_availability(self)" in install_source
@@ -108,3 +117,19 @@ def test_shell_target_requires_a_real_widget_before_open_is_authorized():
     assert _surface_target_widget(app, "paper_bank") is bank_summary
     refresh_windows_shell_open_availability(app)
     assert app.shell_open_button.state == "normal"
+
+
+def test_owner_economic_creation_is_closed_for_strategies_without_goal_aware_sizing():
+    class App:
+        workspace = "."
+
+        def __init__(self, strategy_id):
+            self.strategy_id = strategy_id
+
+        def _selected_replay_configuration(self):
+            return self.strategy_id, None
+
+    for strategy_id in ("baseline-v1", "observe-only-v1"):
+        workspace, blocked = _owner_economic_workspace(App(strategy_id))
+        assert workspace is None
+        assert blocked is not None

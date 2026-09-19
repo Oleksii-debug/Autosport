@@ -474,7 +474,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
 
     def test_self_consistent_fake_evaluation_cannot_mint_cloud_authority(self):
         canonical = evaluation()
-        self.canonical_authority.register(canonical)
+        self._canonical_voc.publish(canonical)
         forged = evaluation(
             evaluation_id="forged-voc",
             decision_evidence_sha256=SHA_D,

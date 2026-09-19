@@ -215,7 +215,7 @@ def _promotion_evidence(
             license_identity="license-evidence:v1",
             confirmation_trial_family_id=f"{protocol_id}:confirmation-trial-family",
         ),
-        "confirmation_trial_family_id": f"{protocol_id}:trial-family",
+        "confirmation_trial_family_id": f"{protocol_id}:confirmation-trial-family",
         "estimand": "roi",
         "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
         "cohort_id": dataset_id,
@@ -690,7 +690,6 @@ def test_promotion_rejects_reuse_of_consumed_evidence_and_holdout(tmp_path):
         bundle_sha=foundation["bundle"].bundle_sha256,
         evidence_id="consume",
         rollback_identity="NONE",
-        holdout_access_id="shared-holdout",
     )
     registry.append(evidence)
     decision = PromotionDecision(

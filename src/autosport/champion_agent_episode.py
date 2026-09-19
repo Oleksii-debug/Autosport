@@ -20,6 +20,11 @@ from .learning_environment import (
     EnvironmentIdentity,
     Observation,
 )
+from .policy_deployment import (
+    ActivationBinding,
+    DeploymentScope,
+    validate_activation_binding,
+)
 from .scientific_registry import ScientificRegistry
 from .strategy_model_factory import FactoryArtifactStore
 from .transparent_bandit_policy import BanditPolicyState
@@ -52,6 +57,9 @@ class ChampionAgentEpisode:
     policy: BanditPolicyState
     environment: CausalLearningEnvironment
     agent_loop: AgentLoopRuntime
+    training_identity: EnvironmentIdentity | None = None
+    deployment_scope: DeploymentScope | None = None
+    activation_binding: ActivationBinding | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.policy, BanditPolicyState):
@@ -65,8 +73,40 @@ class ChampionAgentEpisode:
         snapshot = self.agent_loop.snapshot()
         policy_actions = frozenset(item.action_type for item in self.policy.estimates)
         episode_actions = frozenset(episode.admissible_actions)
-        if self.policy.environment_id != self.environment.environment_id:
-            raise ChampionAgentEpisodeError("policy/environment identity mismatch")
+        deployment_values = (
+            self.training_identity,
+            self.deployment_scope,
+            self.activation_binding,
+        )
+        if all(value is None for value in deployment_values):
+            if self.policy.environment_id != self.environment.environment_id:
+                raise ChampionAgentEpisodeError("policy/environment identity mismatch")
+            if snapshot.activation_binding_id is not None:
+                raise ChampionAgentEpisodeError(
+                    "legacy episode cannot carry deployment activation binding"
+                )
+        elif any(value is None for value in deployment_values):
+            raise ChampionAgentEpisodeError(
+                "cross-session deployment authority must be complete"
+            )
+        else:
+            assert self.training_identity is not None
+            assert self.activation_binding is not None
+            if self.policy.environment_id != self.training_identity.environment_id:
+                raise ChampionAgentEpisodeError(
+                    "policy no longer binds immutable training environment"
+                )
+            if (
+                self.environment.environment_id
+                != self.activation_binding.deployment_environment_id
+            ):
+                raise ChampionAgentEpisodeError(
+                    "episode does not bind deployment environment"
+                )
+            if snapshot.activation_binding_id != self.activation_binding.binding_id:
+                raise ChampionAgentEpisodeError(
+                    "AgentLoop does not bind deployment activation"
+                )
         if episode.policy_id != self.policy.policy_id:
             raise ChampionAgentEpisodeError("episode does not bind champion policy")
         if not episode_actions.issubset(policy_actions):
@@ -104,6 +144,9 @@ class ChampionAgentEpisode:
         risk_fingerprint: str,
         source_sha256: str,
         at: str,
+        training_identity: EnvironmentIdentity | None = None,
+        deployment_scope: DeploymentScope | None = None,
+        activation_binding: ActivationBinding | None = None,
     ) -> "ChampionAgentEpisode":
         """Start a new paper/shadow episode from canonical champion authority."""
 
@@ -113,19 +156,66 @@ class ChampionAgentEpisode:
             raise ChampionAgentEpisodeError(
                 "champion evidence is not available at AgentLoop initialization"
             )
+        deployment_values = (
+            training_identity,
+            deployment_scope,
+            activation_binding,
+        )
+        if any(value is not None for value in deployment_values) and any(
+            value is None for value in deployment_values
+        ):
+            raise ChampionAgentEpisodeError(
+                "cross-session deployment authority must be complete"
+            )
+        if activation_binding is None:
+            authority_identity = identity
+            authority_as_of = as_of
+            effective_episode_key = episode_key
+            binding_id = None
+        else:
+            assert training_identity is not None
+            assert deployment_scope is not None
+            if _instant(activation_binding.activation_at, "activation_at") != _instant(
+                at, "at"
+            ):
+                raise ChampionAgentEpisodeError(
+                    "activation binding time must equal AgentLoop initialization"
+                )
+            authority_identity = training_identity
+            authority_as_of = activation_binding.activation_at
+            effective_episode_key = (
+                f"{episode_key}|deployment:{activation_binding.binding_id}"
+            )
+            binding_id = activation_binding.binding_id
         policy = load_champion_policy(
             registry,
             artifact_store,
-            as_of=as_of,
+            as_of=authority_as_of,
             canonical_strategy_id=canonical_strategy_id,
-            environment_id=identity.environment_id,
-            protocol_id=identity.protocol_id,
+            environment_id=authority_identity.environment_id,
+            protocol_id=authority_identity.protocol_id,
             config_sha256=config_sha256,
             admissible_actions=admissible_actions,
         )
+        if activation_binding is not None:
+            assert training_identity is not None
+            assert deployment_scope is not None
+            validate_activation_binding(
+                activation_binding,
+                scope=deployment_scope,
+                policy=policy,
+                training_identity=training_identity,
+                deployment_identity=identity,
+                registry=registry,
+                artifact_store=artifact_store,
+                canonical_strategy_id=canonical_strategy_id,
+                admissible_actions=admissible_actions,
+                economic_goal_fingerprint=economic_goal_fingerprint,
+                risk_fingerprint=risk_fingerprint,
+            )
         environment = CausalLearningEnvironment(
             identity,
-            episode_key=episode_key,
+            episode_key=effective_episode_key,
             policy_id=policy.policy_id,
             admissible_actions=admissible_actions,
         )
@@ -139,8 +229,16 @@ class ChampionAgentEpisode:
             source_sha256=source_sha256,
             config_sha256=config_sha256,
             at=at,
+            activation_binding_id=binding_id,
         )
-        return cls(policy, environment, agent_loop)
+        return cls(
+            policy,
+            environment,
+            agent_loop,
+            training_identity,
+            deployment_scope,
+            activation_binding,
+        )
 
     @classmethod
     def resume(
@@ -156,6 +254,9 @@ class ChampionAgentEpisode:
         config_sha256: str,
         episode_key: str,
         admissible_actions: frozenset[str],
+        training_identity: EnvironmentIdentity | None = None,
+        deployment_scope: DeploymentScope | None = None,
+        activation_binding: ActivationBinding | None = None,
     ) -> "ChampionAgentEpisode":
         """Rebuild one exact champion episode from its durable checkpoint."""
 
@@ -169,24 +270,84 @@ class ChampionAgentEpisode:
             raise ChampionAgentEpisodeError(
                 "checkpoint does not match durable AgentLoop checkpoint"
             )
+        deployment_values = (
+            training_identity,
+            deployment_scope,
+            activation_binding,
+        )
+        if any(value is not None for value in deployment_values) and any(
+            value is None for value in deployment_values
+        ):
+            raise ChampionAgentEpisodeError(
+                "cross-session deployment authority must be complete"
+            )
+        if activation_binding is None:
+            if snapshot.activation_binding_id is not None:
+                raise ChampionAgentEpisodeError(
+                    "durable AgentLoop requires explicit deployment binding on resume"
+                )
+            authority_identity = identity
+            authority_as_of = as_of
+            effective_episode_key = episode_key
+        else:
+            assert training_identity is not None
+            assert deployment_scope is not None
+            if snapshot.activation_binding_id != activation_binding.binding_id:
+                raise ChampionAgentEpisodeError(
+                    "resume activation binding does not match durable AgentLoop"
+                )
+            if _instant(as_of, "as_of") < _instant(
+                activation_binding.activation_at, "activation_at"
+            ):
+                raise ChampionAgentEpisodeError(
+                    "resume as_of predates deployment activation"
+                )
+            authority_identity = training_identity
+            authority_as_of = activation_binding.activation_at
+            effective_episode_key = (
+                f"{episode_key}|deployment:{activation_binding.binding_id}"
+            )
         policy = load_champion_policy(
             registry,
             artifact_store,
-            as_of=as_of,
+            as_of=authority_as_of,
             canonical_strategy_id=canonical_strategy_id,
-            environment_id=identity.environment_id,
-            protocol_id=identity.protocol_id,
+            environment_id=authority_identity.environment_id,
+            protocol_id=authority_identity.protocol_id,
             config_sha256=config_sha256,
             admissible_actions=admissible_actions,
         )
+        if activation_binding is not None:
+            assert training_identity is not None
+            assert deployment_scope is not None
+            validate_activation_binding(
+                activation_binding,
+                scope=deployment_scope,
+                policy=policy,
+                training_identity=training_identity,
+                deployment_identity=identity,
+                registry=registry,
+                artifact_store=artifact_store,
+                canonical_strategy_id=canonical_strategy_id,
+                admissible_actions=admissible_actions,
+                economic_goal_fingerprint=snapshot.economic_goal_fingerprint,
+                risk_fingerprint=snapshot.risk_fingerprint,
+            )
         environment = CausalLearningEnvironment.resume(
             identity,
-            episode_key=episode_key,
+            episode_key=effective_episode_key,
             policy_id=policy.policy_id,
             admissible_actions=admissible_actions,
             checkpoint=checkpoint,
         )
-        return cls(policy, environment, agent_loop)
+        return cls(
+            policy,
+            environment,
+            agent_loop,
+            training_identity,
+            deployment_scope,
+            activation_binding,
+        )
 
     def decide(
         self,
@@ -208,11 +369,25 @@ class ChampionAgentEpisode:
             )
         admitted = frozenset(self.environment.episode.admissible_actions)
         action_type = self.policy.choose(admissible_actions=admitted)
+        effective_parameters = parameters
+        if self.activation_binding is not None:
+            if any(key == "activation_binding_id" for key, _ in parameters):
+                raise ChampionAgentEpisodeError(
+                    "caller cannot override activation_binding_id"
+                )
+            effective_parameters = tuple(
+                sorted(
+                    (
+                        *parameters,
+                        ("activation_binding_id", self.activation_binding.binding_id),
+                    )
+                )
+            )
         return self.environment.act(
             observation,
             action_type=action_type,
             decision_at=decision_at,
-            parameters=parameters,
+            parameters=effective_parameters,
         )
 
 

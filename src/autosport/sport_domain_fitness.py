@@ -109,8 +109,8 @@ def _evidence_identity(observation: "SportDomainFitnessObservation") -> tuple[st
         observation.league_id,
         observation.market_id,
         observation.provider_id,
-        observation.measured_from,
-        observation.measured_until,
+        _time("measured_from", observation.measured_from),
+        _time("measured_until", observation.measured_until),
         observation.evidence_sha256,
     )
 
@@ -320,27 +320,26 @@ def recommend_route(
             "evidence is not causally available at the decision boundary",
             observation.observation_id, observation.domain_profile,
         )
-    if observation.freshness_ttl_seconds.state is EvidenceState.MEASURED:
-        assert observation.freshness_ttl_seconds.value is not None
-        evidence_age = _elapsed_seconds(
-            boundary, _instant("available_at", observation.available_at)
-        )
-        if evidence_age > observation.freshness_ttl_seconds.value:
-            return RouteRecommendation(
-                RouteStatus.DO_NOT_ROUTE,
-                "evidence age at the decision boundary exceeds the declared evidence TTL",
-                observation.observation_id, observation.domain_profile,
-            )
     if (
         observation.freshness_seconds.state is EvidenceState.MEASURED
         and observation.freshness_ttl_seconds.state is EvidenceState.MEASURED
-        and observation.freshness_seconds.value > observation.freshness_ttl_seconds.value
     ):
-        return RouteRecommendation(
-            RouteStatus.DO_NOT_ROUTE,
-            "measured freshness exceeds the declared evidence TTL",
-            observation.observation_id, observation.domain_profile,
+        measured_freshness = _nonnegative(
+            "freshness_seconds", observation.freshness_seconds.value
         )
+        freshness_ttl = _nonnegative(
+            "freshness_ttl_seconds", observation.freshness_ttl_seconds.value
+        )
+        evidence_age = _elapsed_seconds(
+            boundary, _instant("available_at", observation.available_at)
+        )
+        effective_freshness = measured_freshness + evidence_age
+        if effective_freshness > freshness_ttl:
+            return RouteRecommendation(
+                RouteStatus.DO_NOT_ROUTE,
+                "effective evidence freshness at the decision boundary exceeds the declared evidence TTL",
+                observation.observation_id, observation.domain_profile,
+            )
     missing = [name for name in _REQUIRED if getattr(observation, name).state is not EvidenceState.MEASURED]
     if missing:
         return RouteRecommendation(
@@ -415,11 +414,10 @@ class SportDomainFitnessStore:
         for existing in self._observations.values():
             if (
                 _evidence_identity(existing) == identity
-                and existing.provenance is EvidenceProvenance.SIMULATED
-                and observation.provenance is EvidenceProvenance.OBSERVED
+                and existing.provenance is not observation.provenance
             ):
                 raise SportDomainFitnessError(
-                    "simulated evidence identity cannot be reintroduced as observed evidence"
+                    "evidence identity provenance is immutable across observation ids"
                 )
         existing = self._observations.get(observation.observation_id)
         if existing is not None:
@@ -480,12 +478,9 @@ class SportDomainFitnessStore:
                 raise SportDomainFitnessError("duplicate observation id")
             identity = _evidence_identity(observation)
             prior_provenance = identities.get(identity)
-            if (
-                prior_provenance is EvidenceProvenance.SIMULATED
-                and observation.provenance is EvidenceProvenance.OBSERVED
-            ):
+            if prior_provenance is not None and prior_provenance is not observation.provenance:
                 raise SportDomainFitnessError(
-                    "persisted evidence relabels simulated identity as observed"
+                    "persisted evidence identity has conflicting provenance"
                 )
             identities[identity] = observation.provenance
             values[observation.observation_id] = observation

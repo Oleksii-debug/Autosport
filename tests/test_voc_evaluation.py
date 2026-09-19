@@ -256,6 +256,10 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         decision_payload = {
             "voc_binding": {
                 "baseline_candidate_id": paired.baseline_candidate_id,
+                "baseline_backend_id": paired.baseline_backend_id,
+                "baseline_model_id": paired.baseline_model_id,
+                "baseline_config_sha256": paired.baseline_config_sha256,
+                "baseline_output_sha256": paired.baseline_output_sha256,
                 "baseline_action": paired.baseline_action,
                 "baseline_abstained": paired.baseline_abstained,
                 "challenger_candidate_id": paired.challenger_candidate_id,

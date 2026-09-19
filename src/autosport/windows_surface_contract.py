@@ -73,7 +73,7 @@ SURFACES: Final[tuple[WindowsSurfaceSpec, ...]] = (
     _localized_surface("evaluation_learning", "active", "evaluation"),
     _localized_surface("bookmakers_accounts", "visible-disabled", None, blocked=True),
     _localized_surface("history_results", "active", "log"),
-    _localized_surface("settings", "visible-disabled", None, blocked=True),
+    _localized_surface("settings", "active", "owner_economic_authority_button"),
     _localized_surface("diagnostics_recovery", "active", "repair_button"),
     _localized_surface("help_about", "presentation-only", None),
 )

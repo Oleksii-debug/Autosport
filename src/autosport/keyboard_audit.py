@@ -19,6 +19,7 @@ _ACTION_BINDINGS = {
 }
 _FOCUS_BINDINGS = {
     "<F2>": "shell_navigation",
+    "<F9>": "owner_economic_open",
     "<F6>": "tickets",
     "<F7>": "live_quotes",
     "<F8>": "evaluation",
@@ -28,6 +29,9 @@ _FOCUSABLE_CONTROLS = (
     "shell_open",
     "shell_state",
     "shell_details",
+    "owner_economic_open",
+    "owner_economic_status",
+    "owner_economic_readback",
     "strategy",
     "research_plan",
     "choose_dataset",
@@ -94,9 +98,12 @@ def summarize_keyboard_contract(
                     "shell_open": "open",
                     "shell_state": "state",
                     "shell_details": "details",
+                    "owner_economic_open": "owner_economic_open",
+                    "owner_economic_status": "owner_economic_status",
+                    "owner_economic_readback": "owner_economic_readback",
                 }[name]
             ]
-            if name.startswith("shell_")
+            if name.startswith("shell_") or name.startswith("owner_economic_")
             else AUTOMATION_IDS[name]
         )
         for name in _FOCUSABLE_CONTROLS
@@ -137,6 +144,9 @@ def _critical_widgets(app: WindowsAutosportApp) -> dict[str, Any]:
         "shell_open": app.shell_open_button,
         "shell_state": app.shell_state,
         "shell_details": app.shell_details,
+        "owner_economic_open": app.owner_economic_authority_button,
+        "owner_economic_status": app.owner_economic_authority_state,
+        "owner_economic_readback": app.owner_economic_authority_readback,
         "strategy": app.strategy,
         "research_plan": app.research_plan_button,
         "choose_dataset": app.choose_button,

@@ -26,11 +26,19 @@ def test_external_uia_audit_covers_packaged_readonly_surfaces() -> None:
         "require_external_focus = $true; expected_control_type = 'ControlType.Edit'; "
         "require_named_rows = $false; require_value_read_only = $true }"
     )
+    expected_owner_state = (
+        "[ordered]@{ key = 'owner_economic_status'; automation_id = '306'; "
+        "name = 'Стан економічних меж власника'; required_pattern = 'Value'; "
+        "require_external_focus = $true; expected_control_type = 'ControlType.Edit'; "
+        "require_named_rows = $false; require_value_read_only = $true }"
+    )
     assert expected_bankroll in audit
     assert expected_shell_state in audit
+    assert expected_owner_state in audit
     assert audit.count("automation_id = '205'") == 1
     assert audit.count("automation_id = '302'") == 1
-    assert audit.count("require_value_read_only = $true") == 2
+    assert audit.count("automation_id = '306'") == 1
+    assert audit.count("require_value_read_only = $true") == 3
 
 
 def test_external_uia_audit_requires_semantic_control_type_for_every_critical_control() -> None:
@@ -53,6 +61,9 @@ def test_external_uia_audit_requires_semantic_control_type_for_every_critical_co
         "302": "ControlType.Edit",
         "303": "ControlType.Button",
         "304": "ControlType.List",
+        "305": "ControlType.Button",
+        "306": "ControlType.Edit",
+        "307": "ControlType.List",
     }
 
     for automation_id, control_type in expected_types.items():
@@ -72,6 +83,8 @@ def test_external_uia_audit_gates_shell_names_patterns_and_rows() -> None:
     assert "key = 'shell_navigation'; automation_id = '301'; name = 'Навігація екранами Автоспорт'" in audit
     assert "key = 'shell_open'; automation_id = '303'; name = 'Перейти до робочої поверхні'" in audit
     assert "key = 'shell_details'; automation_id = '304'; name = 'Контракт вибраного екрана'" in audit
+    assert "key = 'owner_economic_open'; automation_id = '305'; name = 'Економічні межі власника'" in audit
+    assert "key = 'owner_economic_readback'; automation_id = '307'; name = 'Точні економічні межі власника'" in audit
     assert "automation_id=$($spec.automation_id): no externally exposed named ListItem rows" in audit
     assert "automation_id=$($spec.automation_id): missing external UIA $($spec.required_pattern) pattern" in audit
 

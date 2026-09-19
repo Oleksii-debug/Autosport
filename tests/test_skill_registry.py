@@ -37,6 +37,20 @@ def _undeclared_mutation_handler(_payload):
     return SkillExecutionResult(output={}, applied_mutations=("LOCAL_WRITE",))
 
 
+def _budget_overrun_handler(payload):
+    kind = payload["kind"]
+    return SkillExecutionResult(
+        output={"kind": kind},
+        consumed_compute_units=2 if kind == "compute" else 0,
+        consumed_data_units=2 if kind == "data" else 0,
+        consumed_ai_units=2 if kind == "ai" else 0,
+    )
+
+
+def _consume_two_compute(_payload):
+    return SkillExecutionResult(output={}, consumed_compute_units=2)
+
+
 def _registry(tmp_path):
     registry = SkillRegistry.initialize(tmp_path / "skills.json")
     registry.install_builtin_definitions()
@@ -57,6 +71,8 @@ def _invoke(
     mutations=(),
     at="2026-09-19T04:00:00Z",
     compute=1,
+    data=0,
+    ai=0,
 ):
     return registry.invoke(
         skill_id=definition.skill_id,
@@ -72,8 +88,8 @@ def _invoke(
         requested_mutations=mutations,
         provenance=(("source_evidence", SHA_C),),
         requested_compute_units=compute,
-        requested_data_units=0,
-        requested_ai_units=0,
+        requested_data_units=data,
+        requested_ai_units=ai,
         at=at,
     )
 
@@ -221,6 +237,75 @@ def test_budget_is_fail_closed(tmp_path):
     )
     assert denied.status is SkillRunStatus.DENIED
     assert denied.error_code == "COMPUTE_BUDGET_EXCEEDED"
+
+
+@pytest.mark.parametrize("kind", ("compute", "data", "ai"))
+def test_handler_cannot_exceed_immutable_call_budget(tmp_path, kind):
+    registry = SkillRegistry.initialize(tmp_path / "skills.json")
+    definition = SkillDefinition(
+        skill_id="budget-overrun",
+        version="1.0.0",
+        capability="budget_overrun",
+        purpose="Adversarial per-call budget test",
+        input_schema_sha256=SHA_A,
+        output_schema_sha256=SHA_B,
+        implementation_sha256=SHA_C,
+        implementation_kind=SkillImplementationKind.REVIEWED_PLUGIN,
+        required_authorities=("READ_ONLY_ANALYSIS",),
+        required_provenance=("source_evidence",),
+        compute_budget_units=2,
+        data_budget_units=2,
+        ai_budget_units=2,
+    )
+    registry.register(definition)
+    registry._handlers[definition.version_key] = _budget_overrun_handler
+    run = _invoke(
+        registry,
+        definition,
+        call_id=f"budget-overrun-{kind}",
+        payload={"kind": kind},
+        compute=1,
+        data=1,
+        ai=1,
+    )
+    assert run.status is SkillRunStatus.FAILED
+    assert run.error_code == "HANDLER_ERROR_SKILLPERMISSIONERROR"
+
+
+def test_durable_readback_rejects_consumption_above_requested_budget(tmp_path):
+    registry = SkillRegistry.initialize(tmp_path / "skills.json")
+    definition = SkillDefinition(
+        skill_id="budget-readback",
+        version="1.0.0",
+        capability="budget_readback",
+        purpose="Prove requested budget is durable authority",
+        input_schema_sha256=SHA_A,
+        output_schema_sha256=SHA_B,
+        implementation_sha256=SHA_D,
+        implementation_kind=SkillImplementationKind.REVIEWED_PLUGIN,
+        required_authorities=("READ_ONLY_ANALYSIS",),
+        required_provenance=("source_evidence",),
+        compute_budget_units=2,
+    )
+    registry.register(definition)
+    registry._handlers[definition.version_key] = _consume_two_compute
+    run = _invoke(registry, definition, payload={}, compute=2)
+    assert run.status is SkillRunStatus.SUCCEEDED
+
+    state = json.loads(registry.path.read_text(encoding="utf-8"))
+    state["runs"][0]["requested_compute_units"] = 1
+    body = {key: value for key, value in state.items() if key != "state_sha256"}
+    canonical = json.dumps(
+        body,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    state["state_sha256"] = hashlib.sha256(canonical).hexdigest()
+    registry.path.write_text(json.dumps(state), encoding="utf-8")
+    with pytest.raises(SkillRegistryError, match="consumed budget exceeds"):
+        SkillRegistry(registry.path)
 
 
 def test_drift_skill_never_claims_global_stability(tmp_path):

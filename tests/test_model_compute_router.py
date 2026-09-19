@@ -29,6 +29,10 @@ from autosport.sport_domain_fitness import (
     RouteStatus,
     SportDomainFitnessObservation,
 )
+from autosport.voc_evaluation import (
+    PairedVOCEvaluation,
+    VOCEvaluationProvenance,
+)
 
 
 SHA_A = "a" * 64
@@ -252,9 +256,89 @@ def voc(**overrides):
         compute_cost_penalty=Decimal("0.2"),
         latency_opportunity_cost_penalty=Decimal("0.1"),
         measured_compute_cost=Decimal("5"),
-        evaluation_sha256=SHA_C,
     )
+    explicit_evaluation = overrides.pop("evaluation", None)
+    explicit_evaluation_sha256 = overrides.pop("evaluation_sha256", None)
     values.update(overrides)
+
+    if explicit_evaluation is None:
+        net_value = (
+            values["challenger_utility"]
+            - values["baseline_utility"]
+            - values["compute_cost_penalty"]
+            - values["latency_opportunity_cost_penalty"]
+        )
+        if net_value > Decimal("0"):
+            interval_low = net_value / Decimal("2")
+            interval_high = net_value + (net_value / Decimal("2"))
+        elif net_value < Decimal("0"):
+            interval_low = net_value + (net_value / Decimal("2"))
+            interval_high = net_value / Decimal("2")
+        else:
+            interval_low = Decimal("0")
+            interval_high = Decimal("0")
+        evaluation = PairedVOCEvaluation(
+            evaluation_id=values["evidence_id"],
+            task_class="forecast",
+            sport_id="table-tennis",
+            league_id="league-1",
+            regime_id="regime-1",
+            baseline_candidate_id=values["baseline_candidate_id"],
+            baseline_backend_id=values["baseline_backend_id"],
+            baseline_model_id=values["baseline_model_id"],
+            baseline_config_sha256=values["baseline_config_sha256"],
+            challenger_candidate_id=values["challenger_candidate_id"],
+            challenger_backend_id=values["challenger_backend_id"],
+            challenger_model_id=values["challenger_model_id"],
+            challenger_config_sha256=values["challenger_config_sha256"],
+            decision_evidence_sha256=SHA_C,
+            baseline_output_sha256=SHA_A,
+            challenger_output_sha256=SHA_B,
+            baseline_action="baseline-action",
+            challenger_action="challenger-action",
+            baseline_abstained=False,
+            challenger_abstained=False,
+            decision_at=T0,
+            decision_deadline=T3,
+            baseline_completed_at=values["measured_at"],
+            challenger_completed_at=values["measured_at"],
+            outcome_evidence_sha256=SHA_C,
+            outcome_revealed_at=values["measured_at"],
+            evaluated_at=values["measured_at"],
+            scoring_rule_id="frozen-utility-v1",
+            scoring_rule_sha256=SHA_A,
+            research_protocol_id="voc-protocol-v1",
+            research_protocol_sha256=SHA_B,
+            holdout_access_id=f"{values['evidence_id']}:holdout",
+            multiple_comparison_control_sha256=SHA_C,
+            baseline_utility=values["baseline_utility"],
+            challenger_utility=values["challenger_utility"],
+            compute_cost_penalty=values["compute_cost_penalty"],
+            latency_opportunity_cost_penalty=values[
+                "latency_opportunity_cost_penalty"
+            ],
+            measured_compute_cost=values["measured_compute_cost"],
+            paired_sample_count=4,
+            effective_sample_size=4,
+            support_fraction=Decimal("1"),
+            incremental_value_interval_low=interval_low,
+            incremental_value_interval_high=interval_high,
+            provenance=(
+                VOCEvaluationProvenance.MEASURED_SHADOW
+                if values["provenance"]
+                is VOCEvidenceProvenance.MEASURED_SHADOW
+                else VOCEvaluationProvenance.SIMULATED
+            ),
+        )
+    else:
+        evaluation = explicit_evaluation
+
+    values["evaluation"] = evaluation
+    values["evaluation_sha256"] = (
+        evaluation.evaluation_sha256
+        if explicit_evaluation_sha256 is None
+        else explicit_evaluation_sha256
+    )
     return ValueOfComputationEvidence(**values)
 
 
@@ -500,8 +584,8 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(readback, first)
 
-            changed_latency_cost = replace(
-                evidence,
+            changed_latency_cost = voc(
+                evidence_id="voc-identity-restart",
                 latency_opportunity_cost_penalty=Decimal("0.2"),
             )
             with self.assertRaisesRegex(

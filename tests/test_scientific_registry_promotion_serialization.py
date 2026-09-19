@@ -4,6 +4,8 @@ from dataclasses import replace
 
 import pytest
 
+from test_scientific_registry import _frozen_promotion_rule_text, _promotion_evidence
+
 from autosport.scientific_registry import (
     ConflictingScientificRecordError,
     DatasetSnapshot,
@@ -78,7 +80,7 @@ def _seed_promotion_evidence(
         robustness_checks=("time split",),
         random_seed_policy="seed frozen before evaluation",
         stopping_rule="one final evaluation",
-        promotion_rule="promote only on positive frozen outcome",
+        promotion_rule=_frozen_promotion_rule_text(),
         expected_artifacts=("evaluation bundle", "decision"),
         code_config_sha256=frozen_config_sha256,
         frozen_at_utc=T0,
@@ -123,6 +125,10 @@ def _seed_promotion_evidence(
         T2,
         evaluated_strategy_version_id=eval1_strategy_id,
         evaluated_model_version_id=eval1_model_id,
+        effective_sample_size=5,
+        effect_interval_low="0.05",
+        effect_interval_high="0.15",
+        practical_improvement="0.1",
     )
     eval2 = EvaluationBundleRef(
         "eval-2",
@@ -134,6 +140,10 @@ def _seed_promotion_evidence(
         T2,
         evaluated_strategy_version_id="strategy-2",
         evaluated_model_version_id="model-1",
+        effective_sample_size=5,
+        effect_interval_low="0.05",
+        effect_interval_high="0.15",
+        practical_improvement="0.1",
     )
     exp1 = ExperimentRecord(
         "experiment-1",
@@ -178,6 +188,13 @@ def _seed_promotion_evidence(
         exp2,
     ):
         registry.append(record)
+    evidence1 = _promotion_evidence(
+        experiment_id="experiment-1", strategy_id="strategy-1", model_id="model-1",
+        bundle_id="eval-1", dataset_id="dataset-1", protocol_id="protocol-1",
+        bundle_sha=eval1.bundle_sha256, evidence_id="promotion-1-evidence",
+        rollback_identity="NONE", minimum_n=3,
+    )
+    registry.append(evidence1)
     return protocol, eval1, eval2, exp1
 
 
@@ -192,6 +209,7 @@ def _first_promotion(protocol: ResearchProtocol, bundle: EvaluationBundleRef) ->
         bundle.bundle_sha256,
         T3,
         candidate_model_version_id="model-1",
+        promotion_evidence_id="promotion-1-evidence",
     )
 
 

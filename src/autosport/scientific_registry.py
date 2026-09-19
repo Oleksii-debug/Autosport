@@ -299,7 +299,8 @@ class DatasetSnapshot:
     def record_type(self) -> str: return "DatasetSnapshot"
     @property
     def record_id(self) -> str: return self.dataset_snapshot_id
-    @property    def available_at(self) -> str: return self.available_at_utc
+    @property
+    def available_at(self) -> str: return self.available_at_utc
     def to_payload(self) -> dict[str, Any]:
         return {"dataset_snapshot_id": self.dataset_snapshot_id,
                 "manifest_sha256": self.manifest_sha256.lower(),
@@ -498,8 +499,7 @@ class EvaluationBundleRef:
         }
         if self.effective_sample_size is not None:
             payload["effective_sample_size"] = self.effective_sample_size
-        if self.effect_interval_low is not None:
-            payload["effect_interval_low"] = self.effect_interval_low
+        if self.effect_interval_low is not None:            payload["effect_interval_low"] = self.effect_interval_low
             payload["effect_interval_high"] = self.effect_interval_high
             payload["practical_improvement"] = self.practical_improvement
         return payload
@@ -598,6 +598,7 @@ class PromotionDecision:
             raise ValueError("ROLLBACK requires rollback_to_strategy_version_id")
         if type(self.reason) is not str:
             raise ValueError("reason must be a string")
+
     @property
     def record_type(self) -> str: return "PromotionDecision"
     @property
@@ -898,6 +899,7 @@ class ConflictingScientificRecordError(ScientificRegistryError):
 class DuplicateExperimentFingerprintError(ScientificRegistryError):
     pass
 
+
 class PromotionEvidenceError(ScientificRegistryError):
     pass
 
@@ -996,8 +998,7 @@ class ScientificRegistry:
 
     def append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
         if record.record_type == "PromotionDecision":
-            raise PromotionEvidenceError("promotion decisions must be recorded through record_promotion")
-        return self._append(record, allow_repeat_experiment=allow_repeat_experiment)
+            raise PromotionEvidenceError("promotion decisions must be recorded through record_promotion")        return self._append(record, allow_repeat_experiment=allow_repeat_experiment)
 
     def _append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
         entry = self._entry(record)
@@ -1196,7 +1197,8 @@ class ScientificRegistry:
             payload = raw["payload"]
             action = PromotionAction(payload["action"])
             predecessor = payload.get("predecessor_strategy_version_id")
-            if action is PromotionAction.PROMOTE:                if predecessor != champion:
+            if action is PromotionAction.PROMOTE:
+                if predecessor != champion:
                     raise PromotionEvidenceError(
                         "durable promotion history predecessor does not match current context champion"
                     )
@@ -1495,4 +1497,148 @@ class ScientificRegistry:
                 for name, value in (
                     ("effect_interval_low", durable_low),
                     ("effect_interval_high", durable_high),
-                    ("practical_improvement", durable_practical),
+                    ("practical_improvement", durable_practical),                ):
+                    if _canonical_decimal(value, f"EvaluationBundle.{name}") != value:
+                        raise PromotionEvidenceError(
+                            f"durable evaluation {name} is not canonical decimal text"
+                        )
+                if ep.get("effect_interval_low") != durable_low:
+                    raise PromotionEvidenceError(
+                        "promotion evidence effect interval low does not match durable evaluation"
+                    )
+                if ep.get("effect_interval_high") != durable_high:
+                    raise PromotionEvidenceError(
+                        "promotion evidence effect interval high does not match durable evaluation"
+                    )
+                if ep.get("practical_improvement") != durable_practical:
+                    raise PromotionEvidenceError(
+                        "promotion evidence practical improvement does not match durable evaluation"
+                    )
+                if ep.get("guardrails_passed") is not True:
+                    raise PromotionEvidenceError("PROMOTE requires passing guardrails")
+                stopping_sha = _sha256_text(binding.get("stopping_rule"), "binding.stopping_rule")
+                comparison_sha = _sha256_text(
+                    binding.get("multiple_comparison_control"),
+                    "binding.multiple_comparison_control",
+                )
+                if ep.get("stopping_rule_sha256") != stopping_sha:
+                    raise PromotionEvidenceError("promotion evidence stopping rule is not frozen")
+                if ep.get("multiple_comparison_control_sha256") != comparison_sha:
+                    raise PromotionEvidenceError("promotion evidence multiple-comparison control is not frozen")
+                if ep.get("uncertainty_method") != binding.get("uncertainty_method"):
+                    raise PromotionEvidenceError("promotion evidence uncertainty method is not frozen")
+                try:
+                    low = Decimal(ep.get("effect_interval_low"))
+                    practical = Decimal(ep.get("practical_improvement"))
+                    frozen_minimum_improvement = Decimal(
+                        str(frozen_rule_payload.get("minimum_improvement"))
+                    )
+                except (InvalidOperation, TypeError, ValueError) as exc:
+                    raise PromotionEvidenceError(
+                        "promotion evidence effect/threshold values must be canonical decimal text"
+                    ) from exc
+                if not low.is_finite() or not practical.is_finite() or not frozen_minimum_improvement.is_finite():
+                    raise PromotionEvidenceError(
+                        "promotion evidence effect/threshold values must be finite"
+                    )
+                if low <= 0 or practical <= 0:
+                    raise PromotionEvidenceError("PROMOTE requires strictly positive observed improvement and effect interval")
+                if low < frozen_minimum_improvement or practical < frozen_minimum_improvement:
+                    raise PromotionEvidenceError("PROMOTE requires improvement clearing the frozen minimum")
+            return self._append_entry_locked(state, entry)
+
+    def champion_strategy(
+        self,
+        *,
+        as_of: str,
+        canonical_strategy_id: str | None = None,
+    ) -> str | None:
+        decisions = self.causal_records("PromotionDecision", as_of=as_of)
+        state = self._read()
+        if canonical_strategy_id is None:
+            keys = {
+                self._strategy_key_from_state(state, entry.payload["candidate_strategy_version_id"])
+                for entry in decisions
+            }
+            if not keys:
+                return None
+            if len(keys) != 1:
+                raise PromotionEvidenceError(
+                    "canonical_strategy_id is required when multiple strategy contexts have promotion history"
+                )
+            canonical_strategy_id = next(iter(keys))
+        wanted_key = _text(canonical_strategy_id, "canonical_strategy_id")
+        champion: str | None = None
+        for entry in decisions:
+            payload = entry.payload
+            if self._strategy_key_from_state(
+                state, payload["candidate_strategy_version_id"]
+            ) != wanted_key:
+                continue
+            action = PromotionAction(payload["action"])
+            predecessor = payload.get("predecessor_strategy_version_id")
+            if action is PromotionAction.PROMOTE:
+                if predecessor != champion:
+                    raise PromotionEvidenceError(
+                        "promotion predecessor does not match current context champion"
+                    )
+                champion = payload["candidate_strategy_version_id"]
+            elif action is PromotionAction.ROLLBACK:
+                if champion != payload["candidate_strategy_version_id"]:
+                    raise PromotionEvidenceError(
+                        "rollback candidate does not match current context champion"
+                    )
+                rollback_target = payload["rollback_to_strategy_version_id"]
+                if self._strategy_key_from_state(state, rollback_target) != wanted_key:
+                    raise PromotionEvidenceError("rollback target crosses strategy context")
+                champion = rollback_target
+        return champion
+
+    def reproducibility_bundle(self, experiment_id: str) -> dict[str, Any]:
+        experiment = self.get("Experiment", experiment_id)
+        if experiment is None:
+            raise KeyError(experiment_id)
+        payload = experiment.payload
+        refs: dict[str, RegistryEntry] = {}
+        for kind, field in (
+            ("ResearchProtocol", "research_protocol_id"),
+            ("DatasetSnapshot", "dataset_snapshot_id"),
+            ("FeatureSet", "feature_set_id"),
+            ("StrategyVersion", "strategy_version_id"),
+            ("EvaluationBundle", "evaluation_bundle_id"),
+        ):
+            entry = self.get(kind, payload[field])
+            if entry is None:
+                raise ScientificRegistryError(f"experiment references missing {kind}")
+            refs[kind] = entry
+        model_id = payload.get("model_version_id")
+        if model_id is not None:
+            model = self.get("ModelVersion", model_id)
+            if model is None:
+                raise ScientificRegistryError("experiment references missing ModelVersion")
+            refs["ModelVersion"] = model
+
+        bundle = {
+            "schema_version": 1,
+            "kind": "autosport-scientific-reproducibility-reference-bundle",
+            "experiment": {"id": experiment.record_id, "sha256": experiment.record_sha256,
+                           "fingerprint": payload["fingerprint"], "seed": payload["seed"],
+                           "config_sha256": payload["config_sha256"], "outcome": payload["outcome"]},
+            "references": {
+                kind: {"id": entry.record_id, "sha256": entry.record_sha256}
+                for kind, entry in sorted(refs.items())
+            },
+            "artifact_hashes": refs["EvaluationBundle"].payload["artifact_hashes"],
+            "truth": {
+                "raw_dataset_copied": False,
+                "promotion_claim": False,
+                "real_money_execution": False,
+            },
+        }
+        bundle["bundle_sha256"] = _digest(bundle)
+        return bundle
+
+    def export_reproducibility_bundle(self, experiment_id: str, path: str | Path) -> str:
+        bundle = self.reproducibility_bundle(experiment_id)
+        atomic_write_json(path, bundle)
+        return bundle["bundle_sha256"]

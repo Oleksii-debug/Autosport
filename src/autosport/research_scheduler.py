@@ -20,6 +20,12 @@ from typing import Any, Callable, Iterable, Protocol
 from apscheduler.triggers.interval import IntervalTrigger
 
 from .integrity import atomic_write_json
+from .research_curriculum import (
+    CurriculumDispatchReceipt,
+    CurriculumPurpose,
+    NightResearchCurriculum,
+    ReplayCandidate,
+)
 from .research_curriculum import CurriculumPurpose
 from .research_trigger_adapter import (
     ExternalResearchTrigger,
@@ -30,7 +36,7 @@ from .workspace_lock import WorkspaceEconomicLock
 
 
 SCHEMA = "autosport.research_scheduler"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -50,6 +56,7 @@ class TickAction(StrEnum):
     SKIPPED = "SKIPPED"
     PAUSED = "PAUSED"
     STOPPED = "STOPPED"
+    ADMISSION_BLOCKED = "ADMISSION_BLOCKED"
 
 
 class WakeSource(StrEnum):
@@ -386,6 +393,7 @@ class ResearchScheduler:
                     "stop_reason": None,
                     "schedules": {},
                     "occurrences": {},
+                    "curriculum_wakes": {},
                 }
                 atomic_write_json(target, {**body, "state_sha256": _digest(body)})
         return cls(target, trigger_sink)
@@ -467,6 +475,7 @@ class ResearchScheduler:
             "stop_reason",
             "schedules",
             "occurrences",
+            "curriculum_wakes",
             "state_sha256",
         }
         if set(state) != required:
@@ -518,6 +527,8 @@ class ResearchScheduler:
 
         for occurrence_id, raw in state["occurrences"].items():
             self._validate_occurrence(occurrence_id, raw, state["schedules"])
+        for wake_id, raw in state["curriculum_wakes"].items():
+            self._validate_curriculum_wake(wake_id, raw)
 
     def _validate_occurrence(
         self,

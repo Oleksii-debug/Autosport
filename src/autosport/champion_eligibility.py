@@ -489,7 +489,13 @@ def validate_activation_eligibility(
     entry = registry.get(decision.record_type, decision.record_id)
     if entry is None:
         raise ChampionEligibilityError("eligibility decision is not durably registered")
-    if entry.record_sha256 != _digest(decision.to_payload()):
+    expected_entry = {
+        "record_type": entry.record_type,
+        "record_id": entry.record_id,
+        "available_at": _ts(entry.available_at, "entry.available_at"),
+        "payload": decision.to_payload(),
+    }
+    if entry.record_sha256 != _digest(expected_entry):
         raise ChampionEligibilityError("eligibility decision record identity mismatch")
     if type(admissible_actions) is not frozenset or not admissible_actions:
         raise ChampionEligibilityError("admissible_actions must be a non-empty frozenset")

@@ -300,7 +300,7 @@ class ParticipantIdentityTests(unittest.TestCase):
 
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
         for entity_id in ("a", "b", "c"):
-            registry.add_entity(entity_id)
+            registry.add_entity(entity(entity_id))
 
         first = EntityLineage("a", "b", LineageRelation.SUPERSEDES, T1, T3, T1, SHA)
         second = EntityLineage("b", "c", LineageRelation.MERGED_FROM, T1, T3, T1, SHA)

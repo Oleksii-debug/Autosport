@@ -182,6 +182,7 @@ def test_full_paper_loop_attribution_research_handoff_and_restart(tmp_path):
     commit = runtime.commit_action(
         action,
         episode=environment.episode,
+        observation=observation,
         effect_state=ExternalEffectState.NONE,
         at="2026-09-19T13:00:05Z",
     )
@@ -289,6 +290,7 @@ def test_restart_never_reauthorizes_same_action(tmp_path):
     first = runtime.commit_action(
         action,
         episode=environment.episode,
+        observation=observation,
         effect_state=ExternalEffectState.PAPER_ONLY,
         at="2026-09-19T13:00:05Z",
     )
@@ -298,6 +300,7 @@ def test_restart_never_reauthorizes_same_action(tmp_path):
     retry = reopened.commit_action(
         action,
         episode=environment.episode,
+        observation=observation,
         effect_state=ExternalEffectState.PAPER_ONLY,
         at="2026-09-19T13:00:06Z",
     )
@@ -354,6 +357,7 @@ def test_unknown_external_effect_fails_closed_until_reconciled(tmp_path):
     committed = runtime.commit_action(
         action,
         episode=environment.episode,
+        observation=observation,
         effect_state=ExternalEffectState.UNKNOWN_EXTERNAL_EFFECT,
         at="2026-09-19T13:00:05Z",
     )
@@ -366,6 +370,7 @@ def test_unknown_external_effect_fails_closed_until_reconciled(tmp_path):
     retry = AgentLoopRuntime(runtime.path).commit_action(
         action,
         episode=environment.episode,
+        observation=observation,
         effect_state=ExternalEffectState.UNKNOWN_EXTERNAL_EFFECT,
         at="2026-09-19T13:00:06Z",
     )
@@ -399,6 +404,7 @@ def test_future_evidence_and_observed_simulated_relabel_fail_closed(
     runtime.commit_action(
         action,
         episode=environment.episode,
+        observation=observation,
         effect_state=ExternalEffectState.NONE,
         at="2026-09-19T13:00:05Z",
     )
@@ -483,6 +489,7 @@ def test_attribution_must_bind_exact_reward_and_unknown_cannot_invent_credit(
     runtime.commit_action(
         action,
         episode=environment.episode,
+        observation=observation,
         effect_state=ExternalEffectState.NONE,
         at="2026-09-19T13:00:05Z",
     )
@@ -578,6 +585,7 @@ def test_checkpoint_rejects_stale_environment_identity(tmp_path):
     runtime.commit_action(
         action,
         episode=environment.episode,
+        observation=observation,
         effect_state=ExternalEffectState.NONE,
         at="2026-09-19T13:00:05Z",
     )
@@ -686,6 +694,7 @@ def test_resolution_rejects_forged_environment_decision_and_time_evidence(tmp_pa
     runtime.commit_action(
         action,
         episode=environment.episode,
+        observation=observation,
         effect_state=ExternalEffectState.NONE,
         at="2026-09-19T13:00:05Z",
     )
@@ -854,6 +863,7 @@ def test_postmortem_cannot_relabel_supported_attribution_as_unresolved(tmp_path)
     runtime.commit_action(
         action,
         episode=environment.episode,
+        observation=observation,
         effect_state=ExternalEffectState.NONE,
         at="2026-09-19T13:00:05Z",
     )
@@ -897,4 +907,36 @@ def test_postmortem_cannot_relabel_supported_attribution_as_unresolved(tmp_path)
 
     assert runtime.snapshot().phase is AgentLoopPhase.REFLECT
     assert runtime.snapshot().postmortem_id is None
+
+def test_admissible_direct_action_cannot_predate_observation_availability(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+
+    backdated = Action(
+        environment_id=environment.environment_id,
+        observation_id=observation.observation_id,
+        action_type="WAIT",
+        decided_at="2026-09-19T13:00:00Z",
+    )
+    with pytest.raises(
+        AgentLoopError,
+        match="predates observation availability",
+    ):
+        runtime.commit_action(
+            backdated,
+            episode=environment.episode,
+            observation=observation,
+            effect_state=ExternalEffectState.NONE,
+            at="2026-09-19T13:00:05Z",
+        )
+
+    snapshot = runtime.snapshot()
+    assert snapshot.phase is AgentLoopPhase.ACT_OR_ABSTAIN
+    assert snapshot.action_id is None
 

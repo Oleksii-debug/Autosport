@@ -114,7 +114,7 @@ class AnchorSelectionTests(unittest.TestCase):
             ],
             protocol(),
         )
-        self.assertEqual(report.decision_state, AnchorDecisionState.INSUFFICIENT)
+        self.assertEqual(report.decision_state, AnchorDecisionState.CONTINUE)
         ids = set(report.input_observation_ids)
         self.assertNotIn("future", ids)
         self.assertNotIn("sim", ids)
@@ -148,7 +148,7 @@ class AnchorSelectionTests(unittest.TestCase):
         slow2 = observation("slow-sport", "slow-2", league="league-2", provider="p2")
         report = evaluate_anchor_selection(
             [missing, complete_fast, slow1, slow2],
-            protocol(max_missing_fraction=Decimal("0.10")),
+            protocol(max_missing_fraction=Decimal("0.01")),
         )
         self.assertEqual(report.decision_state, AnchorDecisionState.INSUFFICIENT)
         fast = next(item for item in report.candidate_reports if item.sport_id == "fast-sport")

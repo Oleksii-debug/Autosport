@@ -187,6 +187,7 @@ class PortfolioPlanTests(unittest.TestCase):
                         evaluation_id=f"evaluation-{index}",
                         evaluation_sha256=("7" * 63) + str(index % 10),
                         protocol_sha256="6" * 64,
+                        admission_policy_sha256="5" * 64,
                         model_id=predictive_model_id,
                         model_version="1",
                         strategy_version="strategy-v1",

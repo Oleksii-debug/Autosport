@@ -181,6 +181,197 @@ def _attribution(environment, transition, outcome, reward, **overrides):
     return OutcomeAttribution(**values)
 
 
+
+def _rewrite_pristine_as_integrated_v2(path):
+    state = json_load(path)
+    state["schema_version"] = 2
+    state.pop("checkpoint_history")
+    rewrite_with_valid_state_digest(path, state)
+
+
+def test_schema_v2_restart_upgrades_only_from_canonical_checkpoint(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    _rewrite_pristine_as_integrated_v2(runtime.path)
+    legacy_bytes = runtime.path.read_bytes()
+
+    reopened = AgentLoopRuntime(runtime.path)
+    assert reopened.snapshot().phase is AgentLoopPhase.BOOTSTRAP
+    assert runtime.path.read_bytes() == legacy_bytes
+    assert json_load(runtime.path)["schema_version"] == 2
+
+    observation = _observation(environment)
+    reopened.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(reopened)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+    )
+    reopened.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+    legacy_decision = json_load(runtime.path)["decisions"][0]
+    assert "decision_intent_id" not in legacy_decision
+    assert "decision_payload_id" not in legacy_decision
+
+    outcome, reward, transition = _resolve(environment, action)
+    reopened.record_resolution(
+        transition,
+        outcome=outcome,
+        reward=reward,
+        at="2026-09-19T13:05:02Z",
+    )
+    reopened.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:05:03Z",
+    )
+    attribution = _attribution(environment, transition, outcome, reward)
+    reopened.record_attribution(
+        attribution,
+        at="2026-09-19T13:05:04Z",
+    )
+    postmortem = ReflectionPostmortem(
+        attribution_id=attribution.attribution_id,
+        transition_id=transition.transition_id,
+        created_at="2026-09-19T13:05:05Z",
+        unresolved_components=(AttributionComponent.RANDOMNESS,),
+        summary_code="LEGACY_V2_CHECKPOINT_UPGRADE",
+    )
+    reopened.record_postmortem(
+        postmortem,
+        at="2026-09-19T13:05:05Z",
+    )
+    before_upgrade = json_load(runtime.path)
+    assert before_upgrade["schema_version"] == 2
+    assert "checkpoint_history" not in before_upgrade
+
+    first_checkpoint = environment.checkpoint()
+    upgraded = reopened.commit_checkpoint(
+        first_checkpoint,
+        at="2026-09-19T13:05:06Z",
+    )
+    upgraded_state = json_load(runtime.path)
+    assert upgraded_state["schema_version"] == 3
+    assert upgraded_state["checkpoint_history"][0]["checkpoint_id"] == (
+        first_checkpoint.checkpoint_id
+    )
+    upgraded_decision = upgraded_state["decisions"][0]
+    assert upgraded_decision["decision_intent_id"]
+    assert upgraded_decision["decision_payload_id"]
+    assert upgraded.phase is AgentLoopPhase.CHECKPOINT
+
+    second_observation = _observation(environment, suffix="2")
+    reopened.begin_observation(
+        second_observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:05:07Z",
+    )
+    reopened.advance(expected=AgentLoopPhase.OBSERVE, at="2026-09-19T13:05:08Z")
+    reopened.advance(expected=AgentLoopPhase.ASSESS, at="2026-09-19T13:05:09Z")
+    reopened.advance(expected=AgentLoopPhase.PLAN, at="2026-09-19T13:05:10Z")
+    reopened.advance(expected=AgentLoopPhase.DECIDE, at="2026-09-19T13:05:11Z")
+    second_action = environment.act(
+        second_observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:05:11Z",
+    )
+    reopened.commit_action(
+        second_action,
+        episode=environment.episode,
+        observation=second_observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:05:11Z",
+    )
+    second_outcome = Outcome(
+        environment_id=environment.environment_id,
+        action_id=second_action.action_id,
+        revealed_at="2026-09-19T13:10:00Z",
+        truth=EvidenceTruth.OBSERVED,
+        evidence=(("settlement", "paper-result-2"),),
+    )
+    second_reward = RewardEvidence(
+        environment_id=environment.environment_id,
+        action_id=second_action.action_id,
+        outcome_id=second_outcome.outcome_id,
+        reward=Decimal("0.10"),
+        available_at="2026-09-19T13:10:01Z",
+        truth=EvidenceTruth.OBSERVED,
+        evidence=(("reward_rule", "paper-economic-reward-v1"),),
+    )
+    second_transition = environment.resolve(
+        second_action.action_id,
+        outcome=second_outcome,
+        reward=second_reward,
+        resolved_at="2026-09-19T13:10:02Z",
+    )
+    reopened.record_resolution(
+        second_transition,
+        outcome=second_outcome,
+        reward=second_reward,
+        at="2026-09-19T13:10:02Z",
+    )
+    reopened.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:10:03Z",
+    )
+    second_attribution = _attribution(
+        environment,
+        second_transition,
+        second_outcome,
+        second_reward,
+        attributed_at="2026-09-19T13:10:04Z",
+    )
+    reopened.record_attribution(
+        second_attribution,
+        at="2026-09-19T13:10:04Z",
+    )
+    second_postmortem = ReflectionPostmortem(
+        attribution_id=second_attribution.attribution_id,
+        transition_id=second_transition.transition_id,
+        created_at="2026-09-19T13:10:05Z",
+        unresolved_components=(AttributionComponent.RANDOMNESS,),
+        summary_code="POST_UPGRADE_V3_CHECKPOINT",
+    )
+    reopened.record_postmortem(
+        second_postmortem,
+        at="2026-09-19T13:10:05Z",
+    )
+    second_checkpoint = environment.checkpoint()
+    reopened.commit_checkpoint(
+        second_checkpoint,
+        at="2026-09-19T13:10:06Z",
+    )
+    final_state = json_load(runtime.path)
+    assert [item["step_index"] for item in final_state["checkpoint_history"]] == [
+        1,
+        2,
+    ]
+    assert final_state["checkpoint_history"][-1]["checkpoint_id"] == (
+        second_checkpoint.checkpoint_id
+    )
+
+
+def test_schema_v2_self_consistent_malformed_state_fails_closed(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    _rewrite_pristine_as_integrated_v2(runtime.path)
+    malformed = json_load(runtime.path)
+    malformed["decisions"] = {}
+    rewrite_with_valid_state_digest(runtime.path, malformed)
+
+    with pytest.raises(AgentLoopError, match="decisions must be a list"):
+        AgentLoopRuntime(runtime.path)
+
+
 def test_full_paper_loop_attribution_research_handoff_and_restart(tmp_path):
     environment = _environment()
     runtime = _runtime(tmp_path, environment)

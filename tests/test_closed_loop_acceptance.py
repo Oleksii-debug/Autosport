@@ -406,17 +406,20 @@ def _phase_one(tmp_path):
     )
     assert decision_entry is not None
     assert decision.action is PromotionAction.REJECT
-    assert decision_entry.payload["promotion_evidence_id"] is None
-
-    # REJECT must fail closed without consuming confirmation holdout evidence.
-    # The already-durable champion proves the typed promotion/holdout authority,
-    # while this rejected challenger must not manufacture or consume a new one.
-    champion_decision = registry.get("PromotionDecision", "promotion-closed-loop-v1")
-    assert champion_decision is not None
-    champion_evidence_id = champion_decision.payload["promotion_evidence_id"]
-    assert champion_evidence_id is not None
-    promotion_evidence = registry.get("PromotionEvidence", champion_evidence_id)
+    evidence_id = decision_entry.payload["promotion_evidence_id"]
+    assert evidence_id is not None
+    promotion_evidence = registry.get("PromotionEvidence", evidence_id)
     assert promotion_evidence is not None
+    assert promotion_evidence.payload["experiment_id"] == staged.experiment_id
+    assert (
+        promotion_evidence.payload["evaluation_bundle_id"]
+        == staged.evaluation_bundle_id
+    )
+    assert (
+        promotion_evidence.payload["evaluation_bundle_sha256"]
+        == staged.evaluation_bundle_sha256
+    )
+    assert promotion_evidence.payload["holdout_consumed"] is False
     assert (
         promotion_evidence.payload["research_question_id"]
         == question.question_id

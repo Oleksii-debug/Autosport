@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -18,6 +19,7 @@ from .workspace_lock import WorkspaceEconomicLock
 
 SCHEMA: Final = "autosport.skill_registry"
 SCHEMA_VERSION: Final = 1
+AGENT_LOOP_READ_ONLY_AUTHORITY_PROFILE: Final = "agent-loop-read-only-v1"
 _HEX: Final = frozenset("0123456789abcdef")
 NON_DELEGABLE_MUTATIONS: Final = frozenset({
     "ECONOMIC_GOAL_EXPAND", "RISK_LIMIT_EXPAND", "REAL_MONEY_EXECUTION_ENABLE",
@@ -111,6 +113,40 @@ def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return out
 
 @dataclass(frozen=True, slots=True)
+class SkillAuthorityProfile:
+    profile_id: str
+    authorities: tuple[str, ...]
+    tools: tuple[str, ...] = ()
+    def __post_init__(self) -> None:
+        _text(self.profile_id, "profile_id")
+        _texts(self.authorities, "authorities")
+        _texts(self.tools, "tools")
+    @property
+    def profile_sha256(self) -> str:
+        return _digest({
+            "schema": "autosport.skill_authority_profile",
+            "schema_version": 1,
+            "profile_id": self.profile_id,
+            "authorities": list(self.authorities),
+            "tools": list(self.tools),
+        })
+
+_SOURCE_AUTHORITY_PROFILES: Final[dict[str, SkillAuthorityProfile]] = {
+    AGENT_LOOP_READ_ONLY_AUTHORITY_PROFILE: SkillAuthorityProfile(
+        AGENT_LOOP_READ_ONLY_AUTHORITY_PROFILE,
+        ("READ_ONLY_ANALYSIS",),
+        (),
+    )
+}
+
+def _source_authority_profile(profile_id: object) -> SkillAuthorityProfile:
+    key = _text(profile_id, "authority_profile_id")
+    profile = _SOURCE_AUTHORITY_PROFILES.get(key)
+    if profile is None:
+        raise SkillPermissionError("unknown source-owned authority profile")
+    return profile
+
+@dataclass(frozen=True, slots=True)
 class SkillDefinition:
     skill_id: str
     version: str
@@ -177,12 +213,26 @@ class SkillRun:
     run_id: str; call_id: str; caller_loop_id: str; caller_state_sha256: str; source_sha256: str
     definition_id: str; skill_id: str; version: str; capability: str; status: SkillRunStatus
     requested_at: str; completed_at: str | None; input_sha256: str; output_sha256: str | None
+    authority_profile_id: str; authority_profile_sha256: str
     available_authorities: tuple[str,...]; available_tools: tuple[str,...]; requested_mutations: tuple[str,...]
     provenance: tuple[tuple[str,str],...]; requested_compute_units: int; requested_data_units: int; requested_ai_units: int
     consumed_compute_units: int; consumed_data_units: int; consumed_ai_units: int
     used_tools: tuple[str,...]; applied_mutations: tuple[str,...]; emitted_evidence: tuple[tuple[str,str],...]
     research_question_candidate_sha256: str | None; research_question_candidate: str | None
     output: dict[str,Any] | None; error_code: str | None
+
+def _skill_handler_process(handler: SkillHandler, payload: dict[str, Any], sender) -> None:
+    """Execute one source-reviewed handler in an isolated killable process."""
+    try:
+        result = handler(payload)
+        sender.send(("OK", result))
+    except BaseException as exc:
+        try:
+            sender.send(("ERROR", exc.__class__.__name__))
+        except BaseException:
+            pass
+    finally:
+        sender.close()
 
 class SkillRegistry:
     """Durable exact-version registry with fail-closed invocation semantics."""
@@ -212,11 +262,16 @@ class SkillRegistry:
         return _digest({"schema":SCHEMA,"kind":"SkillRun","call_id":call_id,"caller_loop_id":caller_loop_id,"definition_id":definition_id})
     @classmethod
     def _validate_run(cls,e: Mapping[str,Any])->None:
-        for n in ("run_id","caller_state_sha256","source_sha256","definition_id","input_sha256"): _sha(e.get(n),n)
-        for n in ("call_id","caller_loop_id","skill_id","version","capability"): _text(e.get(n),n)
+        for n in ("run_id","caller_state_sha256","source_sha256","definition_id","input_sha256","authority_profile_sha256"): _sha(e.get(n),n)
+        for n in ("call_id","caller_loop_id","skill_id","version","capability","authority_profile_id"): _text(e.get(n),n)
         st=SkillRunStatus(e.get("status")); _time(e.get("requested_at"),"requested_at")
         if e.get("completed_at") is not None: _time(e["completed_at"],"completed_at")
         for n in ("available_authorities","available_tools","requested_mutations","used_tools","applied_mutations"): _texts(tuple(e.get(n,[])),n)
+        authority_profile = _source_authority_profile(e["authority_profile_id"])
+        if e["authority_profile_sha256"] != authority_profile.profile_sha256:
+            raise SkillRegistryError("run authority profile digest mismatch")
+        if tuple(e["available_authorities"]) != authority_profile.authorities or tuple(e["available_tools"]) != authority_profile.tools:
+            raise SkillRegistryError("run authority/tool evidence does not match source-owned profile")
         _prov(tuple(tuple(x) for x in e.get("provenance",[]))); _prov(tuple(tuple(x) for x in e.get("emitted_evidence",[])))
         for n in ("requested_compute_units","requested_data_units","requested_ai_units","consumed_compute_units","consumed_data_units","consumed_ai_units"): _nni(e.get(n),n)
         if type(e.get("input")) is not dict: raise SkillRegistryError("run input must be object")
@@ -255,6 +310,9 @@ class SkillRegistry:
         return s
     def register(self,d:SkillDefinition)->str:
         if not isinstance(d,SkillDefinition): raise TypeError("definition must be SkillDefinition")
+        canonical = _source_executable_definition(d.version_key)
+        if canonical is not None and d != canonical:
+            raise ConflictingSkillDefinitionError("executable skill definition must exactly match source-owned contract")
         e={"definition_id":d.definition_id,"definition":d.payload()}
         with WorkspaceEconomicLock(self.path.parent):
             s=self._read()
@@ -272,6 +330,9 @@ class SkillRegistry:
         if len(found)!=1: raise SkillRegistryError("exact skill definition is not registered")
         d=found[0]
         if (d.skill_id,d.version,d.capability)!=(skill_id,version,capability): raise SkillRegistryError("skill identity/capability does not match exact definition")
+        canonical = _source_executable_definition(d.version_key)
+        if canonical is not None and d != canonical:
+            raise SkillPermissionError("registered executable definition is not the source-owned contract")
         return d
     def bind_handler(self,d:SkillDefinition,h:SkillHandler)->None:
         """Reject runtime handler injection.
@@ -285,7 +346,7 @@ class SkillRegistry:
         if not callable(h): raise TypeError("handler must be callable")
         raise SkillPermissionError("runtime handler binding is forbidden; executable handlers must be source-reviewed")
     def _run(self,e)->SkillRun:
-        return SkillRun(**{**{k:e[k] for k in ("run_id","call_id","caller_loop_id","caller_state_sha256","source_sha256","definition_id","skill_id","version","capability")},
+        return SkillRun(**{**{k:e[k] for k in ("run_id","call_id","caller_loop_id","caller_state_sha256","source_sha256","definition_id","skill_id","version","capability","authority_profile_id","authority_profile_sha256")},
             "status":SkillRunStatus(e["status"]),"requested_at":e["requested_at"],"completed_at":e["completed_at"],"input_sha256":e["input_sha256"],"output_sha256":e["output_sha256"],
             **{n:tuple(e[n]) for n in ("available_authorities","available_tools","requested_mutations","used_tools","applied_mutations")},
             "provenance":tuple(tuple(x) for x in e["provenance"]),"emitted_evidence":tuple(tuple(x) for x in e["emitted_evidence"]),
@@ -322,14 +383,15 @@ class SkillRegistry:
         if not set(r.applied_mutations).issubset(d.allowed_mutations): raise SkillPermissionError("handler reported undeclared mutation")
         if r.consumed_compute_units>d.compute_budget_units or r.consumed_data_units>d.data_budget_units or r.consumed_ai_units>d.ai_budget_units: raise SkillPermissionError("handler exceeded budget")
         if {k for k,_ in r.emitted_evidence}-set(d.emitted_evidence_types): raise SkillPermissionError("handler emitted undeclared evidence type")
-    def invoke(self,*,skill_id:str,version:str,capability:str,definition_id:str,call_id:str,caller_loop_id:str,caller_state_sha256:str,source_sha256:str,input_payload:dict[str,Any],available_authorities:tuple[str,...],available_tools:tuple[str,...],requested_mutations:tuple[str,...],provenance:tuple[tuple[str,str],...],requested_compute_units:int,requested_data_units:int,requested_ai_units:int,at:str)->SkillRun:
+    def invoke(self,*,skill_id:str,version:str,capability:str,definition_id:str,call_id:str,caller_loop_id:str,caller_state_sha256:str,source_sha256:str,input_payload:dict[str,Any],authority_profile_id:str,requested_mutations:tuple[str,...],provenance:tuple[tuple[str,str],...],requested_compute_units:int,requested_data_units:int,requested_ai_units:int,at:str)->SkillRun:
         d=self.resolve(skill_id=skill_id,version=version,capability=capability,definition_id=definition_id)
         if d.implementation_kind is SkillImplementationKind.CANDIDATE_DYNAMIC_CODE: raise SkillPermissionError("candidate dynamic code is not executable")
+        authority_profile=_source_authority_profile(authority_profile_id)
         call_id=_text(call_id,"call_id"); caller_loop_id=_text(caller_loop_id,"caller_loop_id"); caller_state_sha256=_sha(caller_state_sha256,"caller_state_sha256"); source_sha256=_sha(source_sha256,"source_sha256")
-        payload=_obj(input_payload,"input_payload"); a=_texts(available_authorities,"available_authorities"); t=_texts(available_tools,"available_tools"); m=_texts(requested_mutations,"requested_mutations"); p=_prov(provenance)
+        payload=_obj(input_payload,"input_payload"); a=authority_profile.authorities; t=authority_profile.tools; m=_texts(requested_mutations,"requested_mutations"); p=_prov(provenance)
         c=_pos(requested_compute_units,"requested_compute_units"); db=_nni(requested_data_units,"requested_data_units"); ai=_nni(requested_ai_units,"requested_ai_units"); now=_time(at,"at")
         rid=self._run_id(call_id,caller_loop_id,d.definition_id); inp=_digest(payload)
-        immutable={"call_id":call_id,"caller_loop_id":caller_loop_id,"caller_state_sha256":caller_state_sha256,"source_sha256":source_sha256,"definition_id":d.definition_id,"skill_id":d.skill_id,"version":d.version,"capability":d.capability,"input_sha256":inp,"input":payload,"available_authorities":list(a),"available_tools":list(t),"requested_mutations":list(m),"provenance":[list(x) for x in p],"requested_compute_units":c,"requested_data_units":db,"requested_ai_units":ai}
+        immutable={"call_id":call_id,"caller_loop_id":caller_loop_id,"caller_state_sha256":caller_state_sha256,"source_sha256":source_sha256,"definition_id":d.definition_id,"skill_id":d.skill_id,"version":d.version,"capability":d.capability,"input_sha256":inp,"input":payload,"authority_profile_id":authority_profile.profile_id,"authority_profile_sha256":authority_profile.profile_sha256,"available_authorities":list(a),"available_tools":list(t),"requested_mutations":list(m),"provenance":[list(x) for x in p],"requested_compute_units":c,"requested_data_units":db,"requested_ai_units":ai}
         with WorkspaceEconomicLock(self.path.parent):
             s=self._read(); old=next((x for x in s["runs"] if x["run_id"]==rid),None)
             if old is not None:
@@ -343,12 +405,45 @@ class SkillRegistry:
             if denial:return self._run(e)
         h=self._handlers.get(d.version_key)
         if h is None:return self._finish_failure(rid,now,"HANDLER_UNAVAILABLE")
+        r,error=self._execute_handler_bounded(h,payload,d.timeout_seconds)
+        if error is not None:return self._finish_failure(rid,now,error)
         try:
-            r=h(payload)
             if not isinstance(r,SkillExecutionResult):raise SkillRegistryError("skill handler must return SkillExecutionResult")
             self._check_result(d,r)
         except Exception as exc:return self._finish_failure(rid,now,"HANDLER_ERROR_"+exc.__class__.__name__.upper())
         return self._finish_success(rid,d,r,now)
+    @staticmethod
+    def _execute_handler_bounded(h:SkillHandler,payload:dict[str,Any],timeout_seconds:int)->tuple[SkillExecutionResult|None,str|None]:
+        context=multiprocessing.get_context("spawn")
+        receiver,sender=context.Pipe(duplex=False)
+        process=context.Process(target=_skill_handler_process,args=(h,payload,sender),daemon=True)
+        try:
+            process.start()
+        except Exception as exc:
+            receiver.close(); sender.close()
+            return None,"HANDLER_START_"+exc.__class__.__name__.upper()
+        sender.close()
+        process.join(timeout_seconds)
+        if process.is_alive():
+            process.terminate(); process.join(2)
+            if process.is_alive() and hasattr(process,"kill"):
+                process.kill(); process.join(2)
+            receiver.close()
+            return None,"HANDLER_TIMEOUT"
+        if not receiver.poll():
+            receiver.close()
+            return None,"HANDLER_PROCESS_EXITED"
+        try:
+            kind,value=receiver.recv()
+        except (EOFError,OSError):
+            return None,"HANDLER_RESULT_UNAVAILABLE"
+        finally:
+            receiver.close()
+        if kind=="ERROR":
+            return None,"HANDLER_ERROR_"+_text(value,"handler error type").upper()
+        if kind!="OK":
+            return None,"HANDLER_PROTOCOL_ERROR"
+        return value,None
     def _finish_failure(self,rid,at,code):
         with WorkspaceEconomicLock(self.path.parent):
             s=self._read(); e=next(x for x in s["runs"] if x["run_id"]==rid)
@@ -390,10 +485,16 @@ def _postmortem(p):
     return SkillExecutionResult(out,(("POSTMORTEM_DIAGNOSTIC",_digest(out)),),consumed_compute_units=1,research_question_candidate=q)
 
 _BUILTIN_HANDLERS: Final[dict[str,SkillHandler]]={"provider-gap@1.0.0":_provider_gap,"drift-inspection@1.0.0":_drift,"postmortem@1.0.0":_postmortem}
+def _source_handler_hash(handler: SkillHandler) -> str:
+    return _builtin_hash("handler:"+handler.__module__+":"+handler.__qualname__)
 def builtin_skill_definitions()->tuple[SkillDefinition,...]:
     schema=lambda n:_builtin_hash("schema:"+n); common={"required_authorities":("READ_ONLY_ANALYSIS",),"required_provenance":("source_evidence",),"timeout_seconds":10,"compute_budget_units":1}
     return (
-        SkillDefinition("provider-gap","1.0.0","diagnose_provider_gap","Compare declared provider fields without inventing missing evidence.",schema("provider-gap-input-v1"),schema("provider-gap-output-v1"),_builtin_hash("provider-gap@1.0.0"),SkillImplementationKind.BUILTIN,acceptance_ids=("AS-547-PROVIDER-GAP",),emitted_evidence_types=("PROVIDER_GAP_DIAGNOSTIC",),**common),
-        SkillDefinition("drift-inspection","1.0.0","inspect_drift","Aggregate evidenced drift findings without promotion authority.",schema("drift-input-v1"),schema("drift-output-v1"),_builtin_hash("drift-inspection@1.0.0"),SkillImplementationKind.BUILTIN,acceptance_ids=("AS-547-DRIFT",),emitted_evidence_types=("DRIFT_DIAGNOSTIC",),**common),
-        SkillDefinition("postmortem","1.0.0","produce_postmortem","Structure unresolved evidence and emit only a research-question candidate.",schema("postmortem-input-v1"),schema("postmortem-output-v1"),_builtin_hash("postmortem@1.0.0"),SkillImplementationKind.BUILTIN,acceptance_ids=("AS-547-POSTMORTEM",),emitted_evidence_types=("POSTMORTEM_DIAGNOSTIC",),**common),
+        SkillDefinition("provider-gap","1.0.0","diagnose_provider_gap","Compare declared provider fields without inventing missing evidence.",schema("provider-gap-input-v1"),schema("provider-gap-output-v1"),_source_handler_hash(_BUILTIN_HANDLERS["provider-gap@1.0.0"]),SkillImplementationKind.BUILTIN,acceptance_ids=("AS-547-PROVIDER-GAP",),emitted_evidence_types=("PROVIDER_GAP_DIAGNOSTIC",),**common),
+        SkillDefinition("drift-inspection","1.0.0","inspect_drift","Aggregate evidenced drift findings without promotion authority.",schema("drift-input-v1"),schema("drift-output-v1"),_source_handler_hash(_BUILTIN_HANDLERS["drift-inspection@1.0.0"]),SkillImplementationKind.BUILTIN,acceptance_ids=("AS-547-DRIFT",),emitted_evidence_types=("DRIFT_DIAGNOSTIC",),**common),
+        SkillDefinition("postmortem","1.0.0","produce_postmortem","Structure unresolved evidence and emit only a research-question candidate.",schema("postmortem-input-v1"),schema("postmortem-output-v1"),_source_handler_hash(_BUILTIN_HANDLERS["postmortem@1.0.0"]),SkillImplementationKind.BUILTIN,acceptance_ids=("AS-547-POSTMORTEM",),emitted_evidence_types=("POSTMORTEM_DIAGNOSTIC",),**common),
     )
+def _source_executable_definition(version_key: str) -> SkillDefinition | None:
+    if version_key not in _BUILTIN_HANDLERS:
+        return None
+    return next(d for d in builtin_skill_definitions() if d.version_key == version_key)

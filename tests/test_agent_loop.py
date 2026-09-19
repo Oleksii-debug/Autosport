@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 
 import pytest
@@ -234,6 +235,10 @@ def test_full_paper_loop_attribution_research_handoff_and_restart(tmp_path):
     )
     assert len(supervisor.list_runs()) == 1
     assert registry.get("ResearchQuestion", run.question_id) is not None
+    stored_handoff = json_load(runtime.path)["research_handoffs"][0]
+    assert stored_handoff["trigger_id"] == run.trigger_id
+    assert stored_handoff["source_event_identity_sha256"]
+    assert stored_handoff["receipt_sha256"]
 
     checkpoint = environment.checkpoint()
     final = runtime.commit_checkpoint(

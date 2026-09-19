@@ -39,6 +39,7 @@ def _fixture(
     action_type: str = "PAPER_PROPOSAL",
     placed_at: str = "2026-09-19T21:19:10+00:00",
     effect_state: ExternalEffectState = ExternalEffectState.PAPER_ONLY,
+    bind_action_to_decision: bool = True,
 ):
     goal = EconomicGoalContract(
         goal_id="bridge-goal",
@@ -123,10 +124,22 @@ def _fixture(
         AgentLoopPhase.DECIDE,
     ):
         runtime.advance(expected=phase, at="2026-09-19T21:19:02+00:00")
+    action_binding = (
+        (
+            ("economic_decision_id", decision.decision_id),
+            ("paper_ticket_id", ticket.ticket_id),
+        )
+        if bind_action_to_decision
+        else (
+            ("economic_decision_id", "different-economic-decision"),
+            ("paper_ticket_id", "different-paper-ticket"),
+        )
+    )
     action = environment.act(
         observation,
         action_type=action_type,
         decision_at="2026-09-19T21:19:05+00:00",
+        parameters=action_binding,
     )
     runtime.commit_action(
         action,
@@ -928,6 +941,53 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                     action=action,
                     baseline_checkpoint=baseline,
                 )
+
+
+    def test_wrong_non_abstain_agent_action_cannot_bind_ticket_reward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(
+                root,
+                legs=(leg,),
+                bind_action_to_decision=False,
+            )
+            self.assertEqual(action.action_type, "PAPER_PROPOSAL")
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "AgentLoop action is not bound to supplied economic decision and PaperTicket",
+            ):
+                bridge.bind_ticket(
+                    ticket_id=ticket.ticket_id,
+                    decision_id=decision.decision_id,
+                    environment=environment,
+                    observation=observation,
+                    action=action,
+                    baseline_checkpoint=baseline,
+                )
+            self.assertIs(runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+            self.assertIsNone(runtime.snapshot().transition_id)
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(durable["bindings"], {})
 
 
     def test_prepared_settlement_recovers_after_book_save_before_handoff(self) -> None:

@@ -47,6 +47,8 @@ OUTBOX: Final = "OUTBOX"
 ACKED: Final = "ACKED"
 _HEX: Final = frozenset("0123456789abcdef")
 _ABSTAIN: Final = frozenset({"WAIT", "NO_BET", "ABSTAIN"})
+_ACTION_DECISION_ID_PARAMETER: Final = "economic_decision_id"
+_ACTION_TICKET_ID_PARAMETER: Final = "paper_ticket_id"
 
 
 class PaperSettlementLearningBridgeError(RuntimeError):
@@ -418,6 +420,14 @@ class PaperSettlementLearningBridge:
     @staticmethod
     def _decision_matches(record: DecisionRecord, ticket: PaperTicket, action: Action) -> None:
         payload = record.payload
+        action_parameters = dict(action.parameters)
+        if (
+            action_parameters.get(_ACTION_DECISION_ID_PARAMETER) != record.decision_id
+            or action_parameters.get(_ACTION_TICKET_ID_PARAMETER) != ticket.ticket_id
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "AgentLoop action is not bound to supplied economic decision and PaperTicket"
+            )
         if payload.get("ticket_id") != ticket.ticket_id:
             raise PaperSettlementLearningBridgeError(
                 "economic decision does not bind exact PaperTicket"

@@ -219,11 +219,28 @@ def test_effective_sample_size_is_explicit_hash_bound_evidence(tmp_path):
     assert observation.payload["sample_count"] == 2
     assert observation.payload["effective_sample_size"] == 1
 
+    reopened = ScientificRegistry(registry.path)
+    stored = reopened.get("DriftObservation", finding.observation_id)
+    assert stored is not None
+    assert stored.payload["effective_sample_size"] == 1
+
     with pytest.raises(ValueError, match="cannot exceed sample_count"):
         _current_window(effective_sample_size=3)
 
     with pytest.raises(ValueError, match="evidence_sha256"):
         replace(current, effective_sample_size=2)
+
+    raw = json.loads(registry.path.read_text(encoding="utf-8"))
+    target = next(
+        item
+        for item in raw["records"]
+        if item["record_type"] == "DriftObservation"
+        and item["record_id"] == finding.observation_id
+    )
+    target["payload"]["effective_sample_size"] = 2
+    registry.path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="record digest mismatch"):
+        ScientificRegistry(registry.path)
 
 
 def test_scoped_drift_evidence_is_hash_bound_and_scope_mismatch_fails_closed(tmp_path):

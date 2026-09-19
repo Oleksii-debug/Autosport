@@ -41,7 +41,6 @@ from autosport.research_supervisor_actions import (
 )
 from autosport.research_trigger_adapter import ResearchTriggerAdapter
 from autosport.scientific_registry import (
-    PromotionAction,
     ResearchQuestion,
     ScientificRegistry,
 )
@@ -327,7 +326,7 @@ def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
             runtime=runtime,
             curriculum=curriculum,
             selection=relabelled,
-            dispatch=dispatch,
+            replay_binding=replay_binding,
             supervisor=supervisor,
             registry=registry,
             spec=spec,
@@ -346,7 +345,7 @@ def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
             runtime=runtime,
             curriculum=curriculum,
             selection=selection,
-            dispatch=dispatch,
+            replay_binding=replay_binding,
             supervisor=supervisor,
             registry=registry,
             spec=spec,

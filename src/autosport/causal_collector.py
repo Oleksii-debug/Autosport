@@ -660,6 +660,45 @@ class CollectorDeltaStore(_JsonAtomicStore):
         }
         return tuple(item for item in ordered if item.delta_id not in superseded)
 
+    def deltas_after_commit(
+        self,
+        *,
+        source_id: str,
+        after_delta_id: str | None = None,
+        max_items: int = 1000,
+    ) -> tuple[CollectorDelta, ...]:
+        """Return one bounded source feed in durable append/commit order.
+
+        This transport cursor deliberately uses immutable delta identity rather than
+        source cursor position. A correction may be committed later for an older
+        source position; append order ensures a desktop that already consumed newer
+        source positions still receives that correction instead of silently skipping it.
+        """
+        _text(source_id, "source_id")
+        if (
+            isinstance(max_items, bool)
+            or not isinstance(max_items, int)
+            or max_items <= 0
+        ):
+            raise ValueError("max_items must be a positive integer")
+        items = [
+            CollectorDelta.from_dict(raw)
+            for raw in self._read()["deltas"]
+            if raw.get("source_id") == source_id
+        ]
+        start = 0
+        if after_delta_id is not None:
+            _text(after_delta_id, "after_delta_id")
+            for index, item in enumerate(items):
+                if item.delta_id == after_delta_id:
+                    start = index + 1
+                    break
+            else:
+                raise CursorRegressionError(
+                    "delivery cursor delta is not present for this source"
+                )
+        return tuple(items[start : start + max_items])
+
     def stream_checkpoint(self, source_id: str, stream_epoch: str) -> StreamCheckpoint | None:
         raw = self._read()["streams"].get(f"{source_id}|{stream_epoch}")
         return None if raw is None else StreamCheckpoint(**raw)

@@ -282,7 +282,7 @@ class OpportunityIntent:
             )
         if not forecast_dependent and self.model_id is not None:
             raise ValueError(
-                "model_id is valid only for probability-edge opportunity semantics"
+                "model_id is valid only for forecast-dependent probability-edge opportunity semantics"
             )
 
     @property

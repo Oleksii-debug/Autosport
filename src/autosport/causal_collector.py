@@ -329,7 +329,7 @@ class CollectorDeltaStore(_JsonAtomicStore):
                 raise CursorRegressionError("revision source_cursor does not match predecessor")
             if delta.revision_number != predecessor.revision_number + 1:
                 raise CursorRegressionError("revision_number must advance exactly one step")
-            if delta.gap_from_cursor != predecessor.gap_from_cursor || delta.gap_to_cursor != predecessor.gap_to_cursor:
+            if delta.gap_from_cursor != predecessor.gap_from_cursor or delta.gap_to_cursor != predecessor.gap_to_cursor:
                 raise GapStateError("revision gap bounds must match predecessor")
             if predecessor.gap_state is GapState.DETECTED:
                 if delta.gap_state is not GapState.RECOVERED:

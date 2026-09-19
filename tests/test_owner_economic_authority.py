@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from autosport.economic_goal import AutomationLevel
 from autosport.economic_goal_store import EconomicGoalStore
+from autosport.workspace_lock import WorkspaceEconomicLock
 from autosport.owner_economic_authority import (
     INITIAL_OWNER_FORM_DEFAULTS,
     OwnerEconomicAuthorityError,
@@ -133,3 +135,24 @@ def test_corrupt_contract_is_visible_but_never_overwritten_by_owner_initializati
     with pytest.raises(OwnerEconomicAuthorityError, match="не дає права на запис"):
         service.initialize_from_form(_values(), emergency_stop=False, confirmed=True)
     assert path.read_text(encoding="utf-8") == before
+
+
+def test_owner_initialization_persists_only_authority_even_with_supervised_ceiling(
+    tmp_path: Path,
+) -> None:
+    service = OwnerEconomicAuthorityService(tmp_path)
+    persisted = service.initialize_from_form(
+        _values(
+            automation_level=str(int(AutomationLevel.SUPERVISED_EXECUTION)),
+        ),
+        emergency_stop=False,
+        confirmed=True,
+    )
+
+    assert persisted.state == "valid"
+    assert persisted.contract is not None
+    assert persisted.contract.automation_level is AutomationLevel.SUPERVISED_EXECUTION
+    assert {path.name for path in tmp_path.iterdir()} == {
+        EconomicGoalStore.FILE_NAME,
+        WorkspaceEconomicLock.FILE_NAME,
+    }

@@ -117,6 +117,8 @@ def test_windows_product_shell_has_stable_uia_ids_and_keyboard_navigation():
 
     dialog_source = inspect.getsource(_show_owner_economic_dialog)
     assert "_persist_initial_owner_economic_contract(" in dialog_source
+    assert "initial_write_blocker = _owner_economic_write_blocker(app, bound_workspace)" in dialog_source
+    assert 'state=("disabled" if initial_write_blocker is not None else "normal")' in dialog_source
     assert 'OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["readback"]' in dialog_source
     for field in OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS:
         assert f'OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["{field}"]' in dialog_source or (
@@ -269,3 +271,39 @@ def test_owner_economic_persistence_seam_keeps_quarantined_workspace_absent_and_
     assert persisted.contract.emergency_stop is True
     assert other_service.store.path.exists()
     assert not blocked_service.store.path.exists()
+
+
+@pytest.mark.parametrize("busy_source", ("closing", "dataset", "replay", "live", "recovery"))
+def test_owner_economic_write_blocker_disables_creation_for_every_busy_writer(
+    tmp_path, busy_source
+):
+    workspace = tmp_path / "strategies" / "research"
+
+    class Worker:
+        def __init__(self):
+            self.busy = False
+
+    class App:
+        def __init__(self):
+            self._closing = False
+            self._dataset_busy = False
+            self.replay_worker = Worker()
+            self.live_worker = Worker()
+            self.recovery_worker = Worker()
+
+        def _workspace_requires_recovery(self, _workspace):
+            return False
+
+    app = App()
+    if busy_source == "closing":
+        app._closing = True
+    elif busy_source == "dataset":
+        app._dataset_busy = True
+    elif busy_source == "replay":
+        app.replay_worker.busy = True
+    elif busy_source == "live":
+        app.live_worker.busy = True
+    else:
+        app.recovery_worker.busy = True
+
+    assert _owner_economic_write_blocker(app, workspace) is not None

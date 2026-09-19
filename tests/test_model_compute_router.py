@@ -384,6 +384,35 @@ class ModelComputeRouterTests(unittest.TestCase):
                 ExecutionDisposition.ACCEPTED,
             )
 
+            availability_late_request = request(
+                request_id="req-availability-late",
+                allow_cloud=False,
+                response_ttl_seconds=Decimal("30"),
+            )
+            store.route(
+                availability_late_request,
+                self.candidates,
+                policy(),
+                as_of=T1,
+            )
+            availability_late = store.record_execution(
+                execution_id="exec-availability-late",
+                request_id="req-availability-late",
+                completed_at=T2,
+                available_at=T4,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("0"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T4,
+            )
+            self.assertEqual(
+                availability_late.disposition,
+                ExecutionDisposition.REJECTED_LATE,
+            )
+
             stale = store.record_execution(
                 execution_id="exec-stale",
                 request_id="req-exec",

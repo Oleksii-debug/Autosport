@@ -4,7 +4,16 @@ from unittest.mock import patch
 
 import pytest
 
-from autosport.agent_loop import AgentLoopPhase, AgentLoopRuntime, ExternalEffectState
+from autosport.agent_loop import (
+    AgentLoopPhase,
+    AgentLoopRuntime,
+    AttributionComponent,
+    AttributionFinding,
+    AttributionStatus,
+    ExternalEffectState,
+    OutcomeAttribution,
+    ReflectionPostmortem,
+)
 from autosport.champion_agent_episode import (
     ChampionAgentEpisode,
     ChampionAgentEpisodeError,
@@ -384,6 +393,39 @@ def test_resume_rejects_checkpoint_older_than_durable_agent_loop(tmp_path):
         action_type="WAIT",
         decision_at=T0,
     )
+
+    path = tmp_path / "agent-loop.json"
+    agent_loop = AgentLoopRuntime.initialize_pristine(
+        path,
+        loop_id="checkpoint-binding-loop",
+        environment_checkpoint=stale_checkpoint,
+        policy_id=champion.policy_id,
+        economic_goal_fingerprint=GOAL_SHA256,
+        risk_fingerprint=RISK_SHA256,
+        source_sha256=SOURCE_SHA256,
+        config_sha256=CONFIG_SHA256,
+        at=T2,
+    )
+    agent_loop.begin_observation(
+        observation,
+        environment_identity=identity,
+        at=T2,
+    )
+    for phase in (
+        AgentLoopPhase.OBSERVE,
+        AgentLoopPhase.ASSESS,
+        AgentLoopPhase.PLAN,
+        AgentLoopPhase.DECIDE,
+    ):
+        agent_loop.advance(expected=phase, at=T2)
+    agent_loop.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at=T2,
+    )
+
     outcome = Outcome(
         identity.environment_id,
         action.action_id,
@@ -399,26 +441,56 @@ def test_resume_rejects_checkpoint_older_than_durable_agent_loop(tmp_path):
         T1,
         EvidenceTruth.OBSERVED,
     )
-    environment.resolve(
+    transition = environment.resolve(
         action.action_id,
         outcome=outcome,
         reward=reward,
         resolved_at=T1,
     )
+    agent_loop.record_resolution(
+        transition,
+        outcome=outcome,
+        reward=reward,
+        at=T2,
+    )
+    agent_loop.advance(expected=AgentLoopPhase.EVALUATE, at=T2)
+    finding = AttributionFinding(
+        component=AttributionComponent.DATA,
+        status=AttributionStatus.SUPPORTED,
+        evidence_sha256="d" * 64,
+        evidence_available_at=T1,
+        contribution=Decimal("0"),
+        reason_code="CHECKPOINT_BINDING_TEST",
+    )
+    attribution = OutcomeAttribution(
+        environment_id=identity.environment_id,
+        episode_id=environment.episode.episode_id,
+        transition_id=transition.transition_id,
+        action_id=action.action_id,
+        outcome_id=outcome.outcome_id,
+        reward_id=reward.reward_id,
+        reward_value=reward.reward,
+        truth=reward.truth,
+        simulation_model_id=reward.simulation_model_id,
+        attributed_at=T2,
+        findings=(finding,),
+    )
+    agent_loop.record_attribution(attribution, at=T2)
+    postmortem = ReflectionPostmortem(
+        attribution_id=attribution.attribution_id,
+        transition_id=transition.transition_id,
+        created_at=T2,
+        unresolved_components=(),
+        summary_code="CHECKPOINT_BINDING_TEST",
+    )
+    agent_loop.record_postmortem(postmortem, at=T2)
+
     durable_checkpoint = environment.checkpoint()
     assert durable_checkpoint.checkpoint_id != stale_checkpoint.checkpoint_id
-
-    path = tmp_path / "agent-loop.json"
-    AgentLoopRuntime.initialize_pristine(
-        path,
-        loop_id="checkpoint-binding-loop",
-        environment_checkpoint=durable_checkpoint,
-        policy_id=champion.policy_id,
-        economic_goal_fingerprint=GOAL_SHA256,
-        risk_fingerprint=RISK_SHA256,
-        source_sha256=SOURCE_SHA256,
-        config_sha256=CONFIG_SHA256,
-        at=T2,
+    agent_loop.commit_checkpoint(durable_checkpoint, at=T2)
+    assert (
+        agent_loop.snapshot().environment_checkpoint_id
+        == durable_checkpoint.checkpoint_id
     )
 
     patches = _patched_authority(champion)
@@ -439,3 +511,4 @@ def test_resume_rejects_checkpoint_older_than_durable_agent_loop(tmp_path):
                 episode_key="checkpoint-binding-episode",
                 admissible_actions=frozenset({"WAIT"}),
             )
+

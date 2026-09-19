@@ -17,6 +17,14 @@ from pathlib import Path
 from typing import Any, Final, Iterable
 
 from .integrity import atomic_write_json
+from .learning_environment import (
+    EnvironmentCheckpoint,
+    Episode,
+    EvidenceTruth,
+    Outcome,
+    RewardEvidence,
+    Transition,
+)
 from .research_supervisor import SupervisorStatus
 from .research_trigger_adapter import (
     ExternalResearchTrigger,
@@ -66,6 +74,14 @@ _NONCONFIRMATORY_PROVENANCE = frozenset(
     {
         ReplayProvenance.HISTORICAL_COUNTERFACTUAL_LIMITED,
         ReplayProvenance.SYNTHETIC_WORLD_MODEL,
+    }
+)
+_OBSERVED_PROVENANCE = frozenset(
+    {
+        ReplayProvenance.HISTORICAL_OBSERVED,
+        ReplayProvenance.SHADOW_LIVE,
+        ReplayProvenance.PAPER_LIVE,
+        ReplayProvenance.REAL_EXECUTION,
     }
 )
 
@@ -142,28 +158,168 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class ReplayEvidenceBinding:
+    """Scrubbed proof that replay identity/provenance came from canonical evidence.
+
+    The binding accepts canonical learning-environment objects at construction time
+    but retains only identities, truth class and availability time.  Outcome/reward
+    payloads are intentionally not retained, so a selector cannot inspect future
+    target values through this adapter.
+    """
+
+    environment_id: str
+    episode_id: str
+    checkpoint_id: str
+    transition_id: str
+    outcome_id: str
+    reward_id: str
+    evidence_truth: EvidenceTruth
+    provenance: ReplayProvenance
+    outcome_available_at: str
+
+    def __init__(
+        self,
+        *,
+        episode: Episode,
+        checkpoint: EnvironmentCheckpoint,
+        transition: Transition,
+        outcome: Outcome,
+        reward: RewardEvidence,
+        provenance: ReplayProvenance,
+    ) -> None:
+        if not isinstance(episode, Episode):
+            raise ResearchCurriculumError("episode must be canonical Episode evidence")
+        if not isinstance(checkpoint, EnvironmentCheckpoint):
+            raise ResearchCurriculumError(
+                "checkpoint must be canonical EnvironmentCheckpoint evidence"
+            )
+        if not isinstance(transition, Transition):
+            raise ResearchCurriculumError(
+                "transition must be canonical Transition evidence"
+            )
+        if not isinstance(outcome, Outcome) or not isinstance(reward, RewardEvidence):
+            raise ResearchCurriculumError(
+                "outcome/reward must be canonical learning-environment evidence"
+            )
+        if not isinstance(provenance, ReplayProvenance):
+            raise ResearchCurriculumError("provenance must be ReplayProvenance")
+
+        if (
+            checkpoint.environment_id != episode.environment_id
+            or checkpoint.episode_id != episode.episode_id
+            or checkpoint.policy_id != episode.policy_id
+        ):
+            raise ResearchCurriculumError(
+                "checkpoint does not bind the exact canonical episode"
+            )
+        if (
+            transition.environment_id != episode.environment_id
+            or transition.episode_id != episode.episode_id
+            or checkpoint.step_index != transition.step_index
+            or checkpoint.last_transition_id != transition.transition_id
+        ):
+            raise ResearchCurriculumError(
+                "transition does not bind the checkpointed episode head"
+            )
+        if (
+            outcome.environment_id != episode.environment_id
+            or reward.environment_id != episode.environment_id
+            or outcome.action_id != transition.action_id
+            or reward.action_id != transition.action_id
+            or transition.outcome_id != outcome.outcome_id
+            or transition.reward_id != reward.reward_id
+            or reward.outcome_id != outcome.outcome_id
+        ):
+            raise ResearchCurriculumError(
+                "outcome/reward do not bind the exact canonical transition"
+            )
+        if outcome.truth is not reward.truth:
+            raise ResearchCurriculumError("outcome/reward evidence truth conflicts")
+
+        resolved_at = _instant(transition.resolved_at, "transition.resolved_at")
+        outcome_at = _instant(outcome.revealed_at, "outcome.revealed_at")
+        reward_at = _instant(reward.available_at, "reward.available_at")
+        if outcome_at > resolved_at or reward_at > resolved_at:
+            raise ResearchCurriculumError(
+                "checkpointed transition precedes canonical outcome/reward evidence"
+            )
+
+        truth = outcome.truth
+        if truth is EvidenceTruth.SIMULATED:
+            if provenance not in _NONCONFIRMATORY_PROVENANCE:
+                raise ResearchCurriculumError(
+                    "simulated canonical evidence cannot be relabelled observed"
+                )
+        elif truth is EvidenceTruth.OBSERVED:
+            if provenance not in _OBSERVED_PROVENANCE:
+                raise ResearchCurriculumError(
+                    "observed canonical evidence cannot be relabelled simulated"
+                )
+        else:  # pragma: no cover - guarded by canonical EvidenceTruth
+            raise ResearchCurriculumError("unsupported canonical evidence truth")
+
+        object.__setattr__(self, "environment_id", episode.environment_id)
+        object.__setattr__(self, "episode_id", episode.episode_id)
+        object.__setattr__(self, "checkpoint_id", checkpoint.checkpoint_id)
+        object.__setattr__(self, "transition_id", transition.transition_id)
+        object.__setattr__(self, "outcome_id", outcome.outcome_id)
+        object.__setattr__(self, "reward_id", reward.reward_id)
+        object.__setattr__(self, "evidence_truth", truth)
+        object.__setattr__(self, "provenance", provenance)
+        object.__setattr__(
+            self,
+            "outcome_available_at",
+            max(outcome_at, reward_at).isoformat().replace("+00:00", "Z"),
+        )
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "environment_id": self.environment_id,
+            "episode_id": self.episode_id,
+            "checkpoint_id": self.checkpoint_id,
+            "transition_id": self.transition_id,
+            "outcome_id": self.outcome_id,
+            "reward_id": self.reward_id,
+            "evidence_truth": self.evidence_truth.value,
+            "provenance": self.provenance.value,
+            "outcome_available_at": _timestamp(
+                self.outcome_available_at,
+                "outcome_available_at",
+            ),
+        }
+
+    @property
+    def binding_id(self) -> str:
+        return _digest(
+            {
+                "schema": SCHEMA,
+                "schema_version": SCHEMA_VERSION,
+                "kind": "ReplayEvidenceBinding",
+                **self.payload(),
+            }
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayCandidate:
     question_id: str
-    episode_id: str
-    environment_id: str
+    evidence_binding: ReplayEvidenceBinding
     available_at: str
-    provenance: ReplayProvenance
     reasons: tuple[str, ...]
     selector_features: tuple[tuple[str, str], ...]
     priority: int
     expected_learning_value: Decimal
     sampling_probability: Decimal | None = None
     sampling_weight: Decimal | None = None
-    outcome_available_at: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.question_id, "question_id")
-        _sha(self.episode_id, "episode_id")
-        _sha(self.environment_id, "environment_id")
+        if not isinstance(self.evidence_binding, ReplayEvidenceBinding):
+            raise ResearchCurriculumError(
+                "evidence_binding must be canonical ReplayEvidenceBinding"
+            )
         _instant(self.available_at, "available_at")
-        if not isinstance(self.provenance, ReplayProvenance):
-            raise ResearchCurriculumError("provenance must be ReplayProvenance")
         _strings(self.reasons, "reasons")
         _pairs(self.selector_features, "selector_features")
         if isinstance(self.priority, bool) or not isinstance(self.priority, int) or self.priority < 0:
@@ -175,25 +331,45 @@ class ReplayCandidate:
                 raise ResearchCurriculumError("sampling_probability cannot exceed 1")
         if self.sampling_weight is not None:
             _decimal(self.sampling_weight, "sampling_weight", positive=True)
-        if self.outcome_available_at is not None:
-            _instant(self.outcome_available_at, "outcome_available_at")
+
+    @property
+    def episode_id(self) -> str:
+        return self.evidence_binding.episode_id
+
+    @property
+    def environment_id(self) -> str:
+        return self.evidence_binding.environment_id
+
+    @property
+    def provenance(self) -> ReplayProvenance:
+        return self.evidence_binding.provenance
+
+    @property
+    def evidence_truth(self) -> EvidenceTruth:
+        return self.evidence_binding.evidence_truth
+
+    @property
+    def outcome_available_at(self) -> str:
+        return self.evidence_binding.outcome_available_at
 
     def payload(self) -> dict[str, Any]:
         return {
             "question_id": self.question_id,
+            "evidence_binding_id": self.evidence_binding.binding_id,
             "episode_id": self.episode_id,
             "environment_id": self.environment_id,
             "available_at": _timestamp(self.available_at, "available_at"),
             "provenance": self.provenance.value,
+            "evidence_truth": self.evidence_truth.value,
             "reasons": list(self.reasons),
             "selector_features": [list(item) for item in self.selector_features],
             "priority": self.priority,
             "expected_learning_value": str(self.expected_learning_value),
             "sampling_probability": None if self.sampling_probability is None else str(self.sampling_probability),
             "sampling_weight": None if self.sampling_weight is None else str(self.sampling_weight),
-            "outcome_available_at": (
-                None if self.outcome_available_at is None
-                else _timestamp(self.outcome_available_at, "outcome_available_at")
+            "outcome_available_at": _timestamp(
+                self.outcome_available_at,
+                "outcome_available_at",
             ),
         }
 
@@ -215,6 +391,8 @@ class CurriculumSelectionRecord:
     selected_reasons: tuple[str, ...]
     selected_features: tuple[tuple[str, str], ...]
     selected_provenance: ReplayProvenance
+    selected_evidence_binding_id: str
+    selected_evidence_truth: EvidenceTruth
     priority: int
     expected_learning_value: Decimal
     sampling_probability: Decimal | None
@@ -241,6 +419,25 @@ class CurriculumSelectionRecord:
         _pairs(self.selected_features, "selected_features")
         if not isinstance(self.selected_provenance, ReplayProvenance):
             raise ResearchCurriculumError("selected_provenance must be ReplayProvenance")
+        _sha(self.selected_evidence_binding_id, "selected_evidence_binding_id")
+        if not isinstance(self.selected_evidence_truth, EvidenceTruth):
+            raise ResearchCurriculumError(
+                "selected_evidence_truth must be EvidenceTruth"
+            )
+        if (
+            self.selected_evidence_truth is EvidenceTruth.SIMULATED
+            and self.selected_provenance not in _NONCONFIRMATORY_PROVENANCE
+        ):
+            raise ResearchCurriculumError(
+                "simulated selection evidence cannot claim observed provenance"
+            )
+        if (
+            self.selected_evidence_truth is EvidenceTruth.OBSERVED
+            and self.selected_provenance not in _OBSERVED_PROVENANCE
+        ):
+            raise ResearchCurriculumError(
+                "observed selection evidence cannot claim simulated provenance"
+            )
         if isinstance(self.priority, bool) or not isinstance(self.priority, int) or self.priority < 0:
             raise ResearchCurriculumError("priority must be a non-negative integer")
         _decimal(self.expected_learning_value, "expected_learning_value")
@@ -277,6 +474,8 @@ class CurriculumSelectionRecord:
             "selected_reasons": list(self.selected_reasons),
             "selected_features": [list(item) for item in self.selected_features],
             "selected_provenance": self.selected_provenance.value,
+            "selected_evidence_binding_id": self.selected_evidence_binding_id,
+            "selected_evidence_truth": self.selected_evidence_truth.value,
             "priority": self.priority,
             "expected_learning_value": str(self.expected_learning_value),
             "sampling_probability": None if self.sampling_probability is None else str(self.sampling_probability),
@@ -549,6 +748,8 @@ class NightResearchCurriculum:
                 selected_reasons=selected.reasons,
                 selected_features=selected.selector_features,
                 selected_provenance=selected.provenance,
+                selected_evidence_binding_id=selected.evidence_binding.binding_id,
+                selected_evidence_truth=selected.evidence_truth,
                 priority=selected.priority,
                 expected_learning_value=selected.expected_learning_value,
                 sampling_probability=selected.sampling_probability,
@@ -580,9 +781,32 @@ class NightResearchCurriculum:
                 self._write(state)
             return record
 
+    def _require_persisted_selection(
+        self,
+        state: dict[str, Any],
+        record: CurriculumSelectionRecord,
+    ) -> None:
+        expected = {**record.payload(), "selection_id": record.selection_id}
+        persisted = next(
+            (
+                item
+                for item in state["selections"]
+                if item.get("selection_id") == record.selection_id
+            ),
+            None,
+        )
+        if persisted is None or persisted != expected:
+            raise ResearchCurriculumError(
+                "dispatch requires exact durably persisted selection evidence"
+            )
+
     def dispatch(self, record: CurriculumSelectionRecord, *, deadline_at: str | None = None) -> CurriculumDispatchReceipt:
         if not isinstance(record, CurriculumSelectionRecord):
             raise ResearchCurriculumError("record must be CurriculumSelectionRecord")
+        with WorkspaceEconomicLock(self.path.parent):
+            state = self._locked_state()
+            self._require_persisted_selection(state, record)
+
         registry = self.trigger_adapter.supervisor.scientific_registry
         question = registry.get("ResearchQuestion", record.selected_question_id)
         if question is None:
@@ -612,6 +836,7 @@ class NightResearchCurriculum:
         }
         with WorkspaceEconomicLock(self.path.parent):
             state = self._locked_state()
+            self._require_persisted_selection(state, record)
             prior = state["dispatches"].get(record.selection_id)
             if prior is None:
                 if CurriculumStatus(state["status"]) is not CurriculumStatus.ACTIVE:

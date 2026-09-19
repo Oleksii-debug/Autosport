@@ -348,6 +348,18 @@ def test_manual_calculation_workbench_has_no_persistent_or_execution_authority()
     )
 
 
+
+def test_manual_calculation_service_exception_is_not_exposed_as_raw_english_ui_text():
+    from autosport.windows_manual_calculation import _localized_calculation_error
+
+    error = ValueError("boolean must not be accepted as a numeric value")
+    rendered = _localized_calculation_error(error)
+
+    assert rendered == text("ui.windows.manual_calculation.error.calculation_failed")
+    assert "boolean must not be accepted" not in rendered
+    assert any(char in rendered for char in "АБВГҐДЕЄЖЗІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ")
+
+
 def test_manual_calculation_workbench_input_and_error_contracts():
     from autosport.windows_manual_calculation import _calculation_call, _read_lines, _selection_odds
 

@@ -971,6 +971,261 @@ class ExperimentRunner(_impl.ExperimentRunner):
                 _unlink_transaction_manifest(transaction_path)
                 return result
 
+    @staticmethod
+    def verify_policy_restart(
+        registry_path: str | Path,
+        artifact_root: str | Path,
+        experiment_id: str,
+        *,
+        as_of: str,
+    ) -> _impl.FactoryRestartEvidence:
+        """Verify one persisted policy-specific experiment from durable hashes only."""
+
+        from .transparent_bandit_policy import BanditPolicyState
+
+        registry = ScientificRegistry(registry_path)
+        experiment = registry.get("Experiment", experiment_id)
+        if experiment is None:
+            raise ValueError("policy experiment is missing after restart")
+        payload = experiment.payload
+        evaluation_bundle_id = payload.get("evaluation_bundle_id")
+        model_version_id = payload.get("model_version_id")
+        strategy_version_id = payload.get("strategy_version_id")
+        dataset_snapshot_id = payload.get("dataset_snapshot_id")
+        research_protocol_id = payload.get("research_protocol_id")
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                evaluation_bundle_id,
+                model_version_id,
+                strategy_version_id,
+                dataset_snapshot_id,
+                research_protocol_id,
+            )
+        ):
+            raise ValueError("policy experiment lineage is incomplete after restart")
+
+        bundle = registry.get("EvaluationBundle", evaluation_bundle_id)
+        model = registry.get("ModelVersion", model_version_id)
+        strategy = registry.get("StrategyVersion", strategy_version_id)
+        dataset = registry.get("DatasetSnapshot", dataset_snapshot_id)
+        protocol = registry.get("ResearchProtocol", research_protocol_id)
+        if any(value is None for value in (bundle, model, strategy, dataset, protocol)):
+            raise ValueError("policy scientific lineage is incomplete after restart")
+        assert bundle is not None
+        assert model is not None
+        assert strategy is not None
+        assert dataset is not None
+        assert protocol is not None
+
+        if bundle.payload.get("evaluated_strategy_version_id") != strategy_version_id:
+            raise ValueError("policy EvaluationBundle strategy identity mismatch")
+        if bundle.payload.get("evaluated_model_version_id") != model_version_id:
+            raise ValueError("policy EvaluationBundle model identity mismatch")
+        if strategy.payload.get("model_version_id") != model_version_id:
+            raise ValueError("policy StrategyVersion model lineage mismatch")
+        predecessor_strategy_version_id = strategy.payload.get(
+            "predecessor_strategy_version_id"
+        )
+        if not isinstance(predecessor_strategy_version_id, str) or not predecessor_strategy_version_id:
+            raise ValueError("policy StrategyVersion predecessor identity is missing")
+
+        store = FactoryArtifactStore(artifact_root)
+        evaluation_payload = store.read(
+            "evaluation",
+            evaluation_bundle_id,
+            expected_sha256=bundle.payload.get("bundle_sha256"),
+        )
+        if evaluation_payload.get("kind") != "autosport-policy-specific-factory-evaluation-v1":
+            raise ValueError("restart evaluation is not policy-specific causal evidence")
+        exact_lineage = {
+            "experiment_id": experiment_id,
+            "research_protocol_id": research_protocol_id,
+            "dataset_snapshot_id": dataset_snapshot_id,
+            "model_version_id": model_version_id,
+            "strategy_version_id": strategy_version_id,
+            "predecessor_strategy_version_id": predecessor_strategy_version_id,
+            "challenger_policy_id": strategy_version_id,
+            "predecessor_policy_id": predecessor_strategy_version_id,
+        }
+        for key, expected in exact_lineage.items():
+            if evaluation_payload.get(key) != expected:
+                raise ValueError(f"policy restart evaluation lineage mismatch: {key}")
+        if evaluation_payload.get("candidate_metrics_source") != "paired-policy-causal-v1":
+            raise ValueError("policy restart evaluation lacks causal metric source")
+        if evaluation_payload.get("truth") != {
+            "real_money_execution": False,
+            "auto_execution_authority": False,
+            "counterfactual_rewards_invented": False,
+            "llm_arithmetic_authority": False,
+        }:
+            raise ValueError("policy restart truth boundary mismatch")
+
+        binding = protocol.payload.get("binding")
+        if type(binding) is not dict:
+            raise ValueError("policy research protocol lacks frozen binding after restart")
+        evaluator_config = PolicyEvaluationConfig.from_frozen_text(
+            binding.get("evaluation_design")
+        )
+        if evaluation_payload.get("evaluator_config") != evaluator_config.canonical_payload():
+            raise ValueError("policy restart evaluator config payload mismatch")
+        if evaluation_payload.get("evaluator_config_sha256") != evaluator_config.config_sha256:
+            raise ValueError("policy restart evaluator config hash mismatch")
+        dataset_manifest_sha256 = _impl._sha256(
+            dataset.payload.get("manifest_sha256"), "dataset manifest_sha256"
+        )
+        if evaluation_payload.get("dataset_manifest_sha256") != dataset_manifest_sha256:
+            raise ValueError("policy restart dataset manifest mismatch")
+        if protocol.payload.get("dataset_manifest_sha256") != dataset_manifest_sha256:
+            raise ValueError("policy restart protocol/dataset manifest mismatch")
+
+        policy_evaluation = evaluation_payload.get("policy_evaluation")
+        if type(policy_evaluation) is not dict:
+            raise ValueError("policy restart lacks paired policy evaluation payload")
+        if policy_evaluation.get("predecessor_policy_id") != predecessor_strategy_version_id:
+            raise ValueError("policy restart predecessor evaluation identity mismatch")
+        if policy_evaluation.get("challenger_policy_id") != strategy_version_id:
+            raise ValueError("policy restart challenger evaluation identity mismatch")
+        if policy_evaluation.get("dataset_manifest_sha256") != dataset_manifest_sha256:
+            raise ValueError("policy restart paired cohort identity mismatch")
+        policy_evaluation_sha256 = _impl._canonical_digest(policy_evaluation)
+        if evaluation_payload.get("policy_evaluation_sha256") != policy_evaluation_sha256:
+            raise ValueError("policy restart paired evaluation hash mismatch")
+
+        artifact_hashes = tuple(bundle.payload.get("artifact_hashes", ()))
+        model_payload = store.read(
+            "model",
+            model_version_id,
+            expected_sha256=model.payload.get("artifact_sha256"),
+        )
+        if model.payload.get("artifact_sha256") not in artifact_hashes:
+            raise ValueError("policy model artifact is not hash-bound to EvaluationBundle")
+        if model_payload.get("kind") != "autosport-transparent-bandit-policy-model-v1":
+            raise ValueError("policy restart model artifact kind mismatch")
+        if model_payload.get("model_version_id") != model_version_id:
+            raise ValueError("policy restart model artifact identity mismatch")
+        if model_payload.get("policy_id") != strategy_version_id:
+            raise ValueError("policy restart model does not bind evaluated policy")
+        if model_payload.get("policy_evaluation_sha256") != policy_evaluation_sha256:
+            raise ValueError("policy restart model/evaluation hash mismatch")
+        if model_payload.get("dataset_manifest_sha256") != dataset_manifest_sha256:
+            raise ValueError("policy restart model cohort manifest mismatch")
+
+        metrics_sha256 = evaluation_payload.get("candidate_metrics_artifact_sha256")
+        if not isinstance(metrics_sha256, str) or metrics_sha256 not in artifact_hashes:
+            raise ValueError("policy metrics artifact is not hash-bound to EvaluationBundle")
+        metrics_payload = store.read(
+            "metrics",
+            evaluation_bundle_id,
+            expected_sha256=metrics_sha256,
+        )
+        if metrics_payload.get("source") != "paired-policy-causal-v1":
+            raise ValueError("policy restart metrics lack paired causal source")
+        if metrics_payload.get("strategy_version_id") != strategy_version_id:
+            raise ValueError("policy restart metrics strategy identity mismatch")
+        if metrics_payload.get("model_version_id") != model_version_id:
+            raise ValueError("policy restart metrics model identity mismatch")
+        if metrics_payload.get("predecessor_policy_id") != predecessor_strategy_version_id:
+            raise ValueError("policy restart metrics predecessor identity mismatch")
+        if metrics_payload.get("policy_evaluation_sha256") != policy_evaluation_sha256:
+            raise ValueError("policy restart metrics/evaluation hash mismatch")
+        if metrics_payload.get("dataset_manifest_sha256") != dataset_manifest_sha256:
+            raise ValueError("policy restart metrics cohort manifest mismatch")
+        if _impl._metric_map(
+            evaluation_payload.get("candidate_metrics"),
+            "policy evaluation candidate metrics",
+        ) != _impl._metric_map(metrics_payload.get("metrics"), "policy metrics artifact"):
+            raise ValueError("policy restart evaluation/metrics values mismatch")
+
+        policy_artifact_sha256 = model_payload.get("policy_artifact_sha256")
+        if not isinstance(policy_artifact_sha256, str):
+            raise ValueError("policy restart model lacks policy artifact hash")
+        policy_artifact = store.read(
+            "transparent-bandit-policy",
+            strategy_version_id,
+            expected_sha256=policy_artifact_sha256,
+        )
+        if (
+            type(policy_artifact) is not dict
+            or policy_artifact.get("policy_id") != strategy_version_id
+            or type(policy_artifact.get("policy")) is not dict
+        ):
+            raise ValueError("policy restart policy artifact identity mismatch")
+        try:
+            policy = BanditPolicyState.from_payload(policy_artifact["policy"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("policy restart policy artifact is invalid") from exc
+        if policy.policy_id != strategy_version_id:
+            raise ValueError("policy restart policy payload hash mismatch")
+        if policy.predecessor_policy_id != predecessor_strategy_version_id:
+            raise ValueError("policy restart policy predecessor mismatch")
+        if policy.environment_id != strategy.payload.get("environment_sha256"):
+            raise ValueError("policy restart policy environment mismatch")
+        if policy.protocol_id != research_protocol_id:
+            raise ValueError("policy restart policy protocol mismatch")
+        if policy.config_sha256 != model.payload.get("config_sha256"):
+            raise ValueError("policy restart policy config mismatch")
+        if policy.seed != model.payload.get("seed"):
+            raise ValueError("policy restart policy seed mismatch")
+
+        decisions = tuple(
+            decision
+            for decision in registry.causal_records(
+                "PromotionDecision", as_of=as_of
+            )
+            if decision.payload.get("candidate_strategy_version_id")
+            == strategy_version_id
+            and decision.payload.get("evaluation_bundle_id")
+            == evaluation_bundle_id
+            and decision.payload.get("candidate_model_version_id")
+            == model_version_id
+        )
+        if len(decisions) != 1:
+            raise ValueError("policy restart requires one exact promotion decision")
+        decision = decisions[0]
+        if (
+            decision.payload.get("evaluation_bundle_sha256")
+            != bundle.payload.get("bundle_sha256")
+        ):
+            raise ValueError("policy restart promotion/evaluation hash mismatch")
+        evidence_id = decision.payload.get("promotion_evidence_id")
+        if not isinstance(evidence_id, str) or not evidence_id:
+            if decision.payload.get("action") == _impl.PromotionAction.PROMOTE.value:
+                raise ValueError("policy restart PROMOTE lacks typed promotion evidence")
+        else:
+            evidence = registry.get("PromotionEvidence", evidence_id)
+            if evidence is None:
+                raise ValueError("policy restart promotion evidence is missing")
+            ep = evidence.payload
+            if ep.get("candidate_strategy_version_id") != strategy_version_id:
+                raise ValueError("policy restart promotion evidence strategy mismatch")
+            if ep.get("candidate_model_version_id") != model_version_id:
+                raise ValueError("policy restart promotion evidence model mismatch")
+            if ep.get("evaluation_bundle_sha256") != bundle.payload.get(
+                "bundle_sha256"
+            ):
+                raise ValueError("policy restart promotion evidence bundle hash mismatch")
+            if ep.get("rollback_identity") != predecessor_strategy_version_id:
+                raise ValueError("policy restart promotion evidence rollback mismatch")
+
+        reproducibility = registry.reproducibility_bundle(experiment_id)
+        canonical_strategy_id = strategy.payload.get("canonical_strategy_id")
+        if not isinstance(canonical_strategy_id, str) or not canonical_strategy_id:
+            raise ValueError("policy restart canonical strategy identity is missing")
+        champion = registry.champion_strategy(
+            as_of=as_of,
+            canonical_strategy_id=canonical_strategy_id,
+        )
+        return _impl.FactoryRestartEvidence(
+            experiment_id,
+            payload["fingerprint"],
+            bundle.payload["bundle_sha256"],
+            model.payload["artifact_sha256"],
+            reproducibility["bundle_sha256"],
+            champion,
+            _impl.ResearchOutcome(payload["outcome"]),
+        )
+
     def run_baseline_candidate(
         self,
         spec: _impl.FactoryCandidateSpec,

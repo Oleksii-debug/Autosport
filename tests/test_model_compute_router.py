@@ -393,6 +393,24 @@ def slow_observation(**overrides):
     return SportDomainFitnessObservation(**values)
 
 
+class _FixtureCanonicalVOCResolver:
+    """Test-only canonical-evidence registry for router integration tests."""
+
+    def __init__(self):
+        self._records = {}
+
+    def publish(self, value):
+        self._records[value.evaluation_id] = value
+
+    def resolve(self, evaluation, *, as_of):
+        value = self._records.get(evaluation.evaluation_id)
+        if value is None:
+            return None
+        if value.payload() != evaluation.payload():
+            return None
+        return value
+
+
 class ModelComputeRouterTests(unittest.TestCase):
     def setUp(self):
         self.local = candidate()
@@ -408,13 +426,16 @@ class ModelComputeRouterTests(unittest.TestCase):
         self.candidates = (self.local, self.cloud)
         self._voc_tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._voc_tmp.cleanup)
+        self._canonical_voc = _FixtureCanonicalVOCResolver()
         self.voc_store = VOCEvaluationStore(
-            Path(self._voc_tmp.name) / "voc-evaluations.json"
+            Path(self._voc_tmp.name) / "voc-evaluations.json",
+            canonical_authority_resolver=self._canonical_voc,
         )
 
     def qualified_voc(self, **overrides):
         evidence = voc(**overrides)
         if evidence.evaluation is not None:
+            self._canonical_voc.publish(evidence.evaluation)
             self.voc_store.record(evidence.evaluation)
         return evidence
 

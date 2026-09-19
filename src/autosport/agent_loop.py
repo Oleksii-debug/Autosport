@@ -36,6 +36,7 @@ from .research_trigger_adapter import (
     ResearchTriggerSource,
 )
 from .scientific_registry import ResearchQuestion
+from .skill_registry import SkillRegistry, SkillRun
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -700,6 +701,55 @@ class AgentLoopRuntime:
             ),
             updated_at=state["updated_at"],
             state_sha256=state["state_sha256"],
+        )
+
+    def invoke_skill(
+        self,
+        registry: SkillRegistry,
+        *,
+        skill_id: str,
+        version: str,
+        capability: str,
+        definition_id: str,
+        call_id: str,
+        input_payload: dict[str, Any],
+        available_authorities: tuple[str, ...],
+        available_tools: tuple[str, ...] = (),
+        requested_mutations: tuple[str, ...] = (),
+        provenance: tuple[tuple[str, str], ...],
+        requested_compute_units: int = 1,
+        requested_data_units: int = 0,
+        requested_ai_units: int = 0,
+        at: str,
+    ) -> SkillRun:
+        """Run one exact governed procedure bound to this immutable loop snapshot.
+
+        SkillRegistry remains read/analysis procedure authority only. Any candidate
+        research question or other evidence returned here must still cross the
+        existing canonical ResearchSupervisor/scientific handoff before it can
+        affect research or promotion state.
+        """
+        if not isinstance(registry, SkillRegistry):
+            raise TypeError("registry must be SkillRegistry")
+        snapshot = self.snapshot()
+        return registry.invoke(
+            skill_id=skill_id,
+            version=version,
+            capability=capability,
+            definition_id=definition_id,
+            call_id=call_id,
+            caller_loop_id=snapshot.loop_id,
+            caller_state_sha256=snapshot.state_sha256,
+            source_sha256=snapshot.source_sha256,
+            input_payload=input_payload,
+            available_authorities=available_authorities,
+            available_tools=available_tools,
+            requested_mutations=requested_mutations,
+            provenance=provenance,
+            requested_compute_units=requested_compute_units,
+            requested_data_units=requested_data_units,
+            requested_ai_units=requested_ai_units,
+            at=at,
         )
 
     def _mutate(self, at: str, mutate) -> AgentLoopSnapshot:

@@ -201,6 +201,39 @@ def test_confirmation_fails_closed_on_outcome_or_nonobserved_evidence(tmp_path, 
         )
 
 
+def test_synthetic_episode_cannot_be_relabelled_observed(tmp_path):
+    _, _, curriculum = _workspace(tmp_path)
+    episode_id = "6" * 64
+    synthetic = _candidate(
+        episode_id=episode_id,
+        provenance=ReplayProvenance.SYNTHETIC_WORLD_MODEL,
+    )
+
+    with pytest.raises(ResearchCurriculumError, match="no causally eligible"):
+        curriculum.select(
+            (synthetic,),
+            purpose=CurriculumPurpose.CONFIRMATORY,
+            selector_policy_version="confirm-v1",
+            as_of="2026-09-19T03:20:00Z",
+            seed=9,
+            budget_units=1,
+        )
+
+    relabelled = _candidate(
+        episode_id=episode_id,
+        provenance=ReplayProvenance.HISTORICAL_OBSERVED,
+    )
+    with pytest.raises(ResearchCurriculumError, match="cannot be relabelled"):
+        curriculum.select(
+            (relabelled,),
+            purpose=CurriculumPurpose.CONFIRMATORY,
+            selector_policy_version="confirm-v1",
+            as_of="2026-09-19T03:21:00Z",
+            seed=10,
+            budget_units=1,
+        )
+
+
 def test_future_candidate_is_not_visible(tmp_path):
     _, _, curriculum = _workspace(tmp_path)
     with pytest.raises(ResearchCurriculumError, match="no causally eligible"):

@@ -571,3 +571,54 @@ def test_checkpoint_rejects_stale_environment_identity(tmp_path):
             other.checkpoint(),
             at="2026-09-19T13:05:06Z",
         )
+
+
+def test_attribution_and_postmortem_identity_keys_are_causal_and_immutable():
+    from dataclasses import replace
+
+    finding = AttributionFinding(
+        component=AttributionComponent.RANDOMNESS,
+        status=AttributionStatus.UNKNOWN,
+        evidence_sha256=RANDOMNESS_SHA,
+        evidence_available_at="2026-09-19T13:05:03Z",
+        reason_code="UNRESOLVED",
+    )
+    base = OutcomeAttribution(
+        environment_id="a" * 64,
+        episode_id="b" * 64,
+        transition_id="c" * 64,
+        action_id="d" * 64,
+        outcome_id="e" * 64,
+        reward_id="f" * 64,
+        reward_value=Decimal("0.25"),
+        truth=EvidenceTruth.OBSERVED,
+        simulation_model_id=None,
+        attributed_at="2026-09-19T13:05:04Z",
+        findings=(finding,),
+    )
+    changed_payload = replace(
+        base,
+        attributed_at="2026-09-19T13:05:05Z",
+        findings=(
+            replace(finding, reason_code="DIFFERENT_EVIDENCE"),
+        ),
+    )
+    assert base.attribution_id == changed_payload.attribution_id
+
+    postmortem = ReflectionPostmortem(
+        attribution_id=base.attribution_id,
+        transition_id=base.transition_id,
+        created_at="2026-09-19T13:05:06Z",
+        unresolved_components=(AttributionComponent.RANDOMNESS,),
+        summary_code="FIRST",
+    )
+    changed_postmortem = replace(
+        postmortem,
+        created_at="2026-09-19T13:05:07Z",
+        summary_code="SECOND",
+    )
+    assert postmortem.postmortem_id == changed_postmortem.postmortem_id
+
+    from autosport.agent_loop import CreditAssignment
+
+    assert CreditAssignment is AttributionFinding

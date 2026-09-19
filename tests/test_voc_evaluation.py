@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -31,8 +32,6 @@ from autosport.voc_evaluation import (
     VOCEvaluationProvenance,
     VOCEvaluationStore,
 )
-from types import SimpleNamespace
-import hashlib
 
 
 SHA_A = "a" * 64

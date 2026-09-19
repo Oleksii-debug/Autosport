@@ -10,6 +10,7 @@ import pytest
 
 from autosport.research_curriculum import CurriculumPurpose
 from autosport.research_scheduler import (
+    EvidenceReusePolicy,
     ResearchSchedule,
     ResearchScheduler,
     ResearchSchedulerError,
@@ -18,6 +19,12 @@ from autosport.research_scheduler import (
     WakeSource,
 )
 from autosport.research_trigger_adapter import ResearchTriggerReceipt
+from autosport.scientific_registry import (
+    Postmortem,
+    ResearchOutcome,
+    ResearchQuestion,
+    ScientificRegistry,
+)
 
 
 SHA_Q = "1" * 64
@@ -68,7 +75,7 @@ def _schedule(
 ) -> ResearchSchedule:
     return ResearchSchedule(
         schedule_id=schedule_id,
-        wake_source=WakeSource.DRIFT_FINDING,
+        wake_source=WakeSource.SCHEDULED_QUESTION,
         first_fire_at=first_fire_at,
         interval_seconds=interval_seconds,
         misfire_grace_seconds=grace_seconds,
@@ -214,7 +221,7 @@ def test_changed_schedule_authority_fails_closed(tmp_path):
     scheduler.add_schedule(_schedule())
     changed = ResearchSchedule(
         schedule_id="drift-main",
-        wake_source=WakeSource.DRIFT_FINDING,
+        wake_source=WakeSource.SCHEDULED_QUESTION,
         first_fire_at="2026-09-19T10:00:00Z",
         interval_seconds=60,
         misfire_grace_seconds=30,
@@ -248,7 +255,7 @@ def test_schedule_rejects_future_evidence_and_naive_time():
     with pytest.raises(ResearchSchedulerError, match="cannot follow"):
         ResearchSchedule(
             schedule_id="bad",
-            wake_source=WakeSource.POSTMORTEM_QUESTION,
+            wake_source=WakeSource.SCHEDULED_QUESTION,
             first_fire_at="2026-09-19T10:00:00Z",
             interval_seconds=60,
             misfire_grace_seconds=30,
@@ -260,6 +267,117 @@ def test_schedule_rejects_future_evidence_and_naive_time():
         )
     with pytest.raises(ResearchSchedulerError, match="timezone"):
         _schedule(first_fire_at="2026-09-19T10:00:00")
+
+
+def _postmortem_bound_schedule(tmp_path, *, wake_source=WakeSource.POSTMORTEM_QUESTION):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry.json"
+    )
+    postmortem = Postmortem(
+        postmortem_id="postmortem-1",
+        experiment_id="experiment-1",
+        classification=ResearchOutcome.NULL,
+        finding="A frozen negative result needs one governed retest question.",
+        retest_conditions=("new-data-window",),
+        created_at="2026-09-19T09:58:00Z",
+    )
+    registry.append(postmortem)
+    source = registry.get("Postmortem", "postmortem-1")
+    assert source is not None
+    registry.append(
+        ResearchQuestion(
+            question_id="question-postmortem-1",
+            statement="Should this postmortem be retested under its frozen conditions?",
+            source_sha256=source.record_sha256,
+            created_at="2026-09-19T09:59:00Z",
+        )
+    )
+    question = registry.get("ResearchQuestion", "question-postmortem-1")
+    assert question is not None
+    schedule = ResearchSchedule(
+        schedule_id="postmortem-once",
+        wake_source=wake_source,
+        first_fire_at="2026-09-19T10:00:00Z",
+        interval_seconds=60,
+        misfire_grace_seconds=30,
+        question_id=question.record_id,
+        question_record_sha256=question.record_sha256,
+        source_evidence_sha256=source.record_sha256,
+        source_observed_at=source.available_at,
+        budget_units=2,
+        source_record_id=source.record_id,
+        evidence_reuse_policy=EvidenceReusePolicy.SINGLE_CANONICAL_OCCURRENCE,
+    )
+    return registry, schedule
+
+
+def test_typed_wake_is_bound_to_canonical_source_purpose_and_fires_once(tmp_path):
+    registry, schedule = _postmortem_bound_schedule(tmp_path)
+    sink = FakeTriggerSink()
+    scheduler = ResearchScheduler.initialize_pristine(
+        tmp_path / "research-scheduler.json",
+        sink,
+        source_registry=registry,
+    )
+    scheduler.add_schedule(schedule)
+
+    first = scheduler.tick(now="2026-09-19T10:00:00Z")
+    second = scheduler.tick(now="2026-09-19T10:01:00Z")
+
+    assert first.action is TickAction.DELIVERED
+    assert second.action is TickAction.IDLE
+    assert len(sink.calls) == 1
+    assert sink.calls[0].source_scope == (
+        "research-scheduler:POSTMORTEM_QUESTION:postmortem-1:postmortem-once"
+    )
+    assert scheduler.snapshot()["schedules"]["postmortem-once"]["retired"] is True
+
+
+def test_mislabeled_typed_wake_cannot_authorize_another_source_kind(tmp_path):
+    registry, schedule = _postmortem_bound_schedule(
+        tmp_path,
+        wake_source=WakeSource.DRIFT_FINDING,
+    )
+    scheduler = ResearchScheduler.initialize_pristine(
+        tmp_path / "research-scheduler.json",
+        FakeTriggerSink(),
+        source_registry=registry,
+    )
+
+    with pytest.raises(ResearchSchedulerError, match="DRIFT_FINDING source record is missing"):
+        scheduler.add_schedule(schedule)
+
+
+def test_typed_wake_requires_registry_and_forbids_recurring_evidence_reuse(tmp_path):
+    registry, schedule = _postmortem_bound_schedule(tmp_path)
+    scheduler = ResearchScheduler.initialize_pristine(
+        tmp_path / "research-scheduler.json",
+        FakeTriggerSink(),
+    )
+    with pytest.raises(
+        ResearchSchedulerError,
+        match="requires canonical ScientificRegistry authority",
+    ):
+        scheduler.add_schedule(schedule)
+
+    with pytest.raises(
+        ResearchSchedulerError,
+        match="typed wake evidence cannot be reused",
+    ):
+        ResearchSchedule(
+            schedule_id="bad-recurring-postmortem",
+            wake_source=WakeSource.POSTMORTEM_QUESTION,
+            first_fire_at="2026-09-19T10:00:00Z",
+            interval_seconds=60,
+            misfire_grace_seconds=30,
+            question_id=schedule.question_id,
+            question_record_sha256=schedule.question_record_sha256,
+            source_evidence_sha256=schedule.source_evidence_sha256,
+            source_observed_at=schedule.source_observed_at,
+            budget_units=2,
+            source_record_id=schedule.source_record_id,
+            evidence_reuse_policy=EvidenceReusePolicy.IMMUTABLE_RECURRING,
+        )
 
 
 def test_bounded_run_loop_uses_fake_clock_without_busy_spin(tmp_path):

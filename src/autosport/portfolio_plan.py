@@ -2301,7 +2301,69 @@ def build_portfolio_plan(
         robust_proposal = RobustPortfolioProposal.derive(
             allocation.stakes, dependency_evidence
         )
-        allocation = replace(allocation, stakes=robust_proposal.proposed_stakes)
+        rounded = robust_proposal.proposed_stakes
+        if not any(stake > 0 for stake in rounded):
+            allocation = replace(
+                allocation,
+                action="ZERO",
+                stakes=rounded,
+                reason="robust joint-dependency/uncertainty stress leaves no positive stake",
+            )
+        else:
+            shadow = risk_policy._shadow_book_for_allocation(book)
+            if shadow is None:
+                return _terminal_plan(
+                    decision_ts=decision_ts,
+                    action=PortfolioAction.WAIT,
+                    reason="robust proposal post-rounding risk state is invalid",
+                    intents=intents,
+                    portfolio_sha256=portfolio_sha256,
+                    dependency_graph=dependency_graph,
+                    policy=risk_policy,
+                    portfolio_truth=portfolio_truth,
+                )
+            for index, stake in enumerate(rounded):
+                if stake <= 0:
+                    continue
+                decision = risk_policy.evaluate(
+                    shadow, stake, context=intents[index].risk_context
+                )
+                if not decision.allowed:
+                    return _terminal_plan(
+                        decision_ts=decision_ts,
+                        action=PortfolioAction.WAIT,
+                        reason="robust proposal failed canonical post-rounding risk revalidation",
+                        intents=intents,
+                        portfolio_sha256=portfolio_sha256,
+                        dependency_graph=dependency_graph,
+                        policy=risk_policy,
+                        portfolio_truth=portfolio_truth,
+                    )
+                try:
+                    shadow.open_ticket(
+                        intents[index].risk_context.legs,
+                        stake,
+                        reason=f"robust-risk-revalidation:{index}",
+                        placed_at=intents[index].risk_context.proposal_ts,
+                        provider_source_ids=tuple(
+                            sorted(intents[index].risk_context.source_ids)
+                        ),
+                        provider_accounts=intents[index].risk_context.provider_accounts,
+                        bankroll_id=intents[index].risk_context.bankroll_id,
+                        currency=intents[index].risk_context.currency,
+                    )
+                except (ArithmeticError, AttributeError, TypeError, ValueError):
+                    return _terminal_plan(
+                        decision_ts=decision_ts,
+                        action=PortfolioAction.WAIT,
+                        reason="robust proposal post-rounding shadow revalidation failed closed",
+                        intents=intents,
+                        portfolio_sha256=portfolio_sha256,
+                        dependency_graph=dependency_graph,
+                        policy=risk_policy,
+                        portfolio_truth=portfolio_truth,
+                    )
+            allocation = replace(allocation, stakes=rounded)
     if allocation.action == "STAKE_VECTOR":
         actual_positive = tuple(
             intent

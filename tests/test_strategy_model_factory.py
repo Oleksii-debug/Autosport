@@ -131,6 +131,8 @@ def _promotion_evidence(
     rollback_identity: str,
     dataset_manifest_sha256: str,
     created_at: str = T3,
+    effective_n: int = 5,
+    minimum_n: int = 2,
 ) -> PromotionEvidence:
     payload = {
         "schema_version": 1,
@@ -154,8 +156,8 @@ def _promotion_evidence(
         "estimand": "mse",
         "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
         "cohort_id": dataset_id,
-        "effective_sample_size": 5,
-        "minimum_effective_sample_size": 2,
+        "effective_sample_size": effective_n,
+        "minimum_effective_sample_size": minimum_n,
         "effect_interval_low": "0.1",
         "effect_interval_high": "0.2",
         "practical_improvement": "0.15",
@@ -571,6 +573,40 @@ def test_promotion_requires_provenance_rollback_primary_and_protective_metrics()
     )
     assert degraded.verdict is PromotionVerdict.REJECT
     assert "protective metric degraded: max_drawdown" in degraded.reasons
+
+
+def test_promotion_controller_rejects_evidence_local_sample_floor_bypass():
+    rule = PromotionRule("mse", 0.05, minimum_effective_sample_size=10)
+    evidence = _promotion_evidence(
+        experiment_id="experiment-controller-floor",
+        strategy_id="strategy-controller-floor",
+        model_id="model-controller-floor",
+        bundle_id="eval-controller-floor",
+        dataset_id="dataset-controller-floor",
+        protocol_id="protocol-controller-floor",
+        bundle_sha=SHA_D,
+        rollback_identity="strategy-v1",
+        dataset_manifest_sha256=SHA_A,
+        effective_n=2,
+        minimum_n=1,
+    )
+
+    result = PromotionController.evaluate(
+        rule,
+        champion_metrics={"mse": 0.40},
+        challenger_metrics={"mse": 0.20},
+        provenance_complete=True,
+        rollback_target="strategy-v1",
+        promotion_evidence=evidence,
+    )
+
+    assert result.verdict is PromotionVerdict.INCONCLUSIVE
+    assert result.registry_action is PromotionAction.RETAIN
+    assert (
+        "promotion evidence minimum sample size does not match frozen rule"
+        in result.reasons
+    )
+    assert "effective sample size below frozen minimum" in result.reasons
 
 
 def test_factory_rejects_nonfinite_metrics():

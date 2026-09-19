@@ -628,7 +628,14 @@ class PromotionController:
             evidence_reasons.append("promotion evidence is not eligible")
         if promotion_evidence.holdout_consumed:
             evidence_reasons.append("confirmation holdout already consumed")
-        if promotion_evidence.effective_sample_size < promotion_evidence.minimum_effective_sample_size:
+        if (
+            promotion_evidence.minimum_effective_sample_size
+            != rule.minimum_effective_sample_size
+        ):
+            evidence_reasons.append(
+                "promotion evidence minimum sample size does not match frozen rule"
+            )
+        if promotion_evidence.effective_sample_size < rule.minimum_effective_sample_size:
             evidence_reasons.append("effective sample size below frozen minimum")
         if promotion_evidence.guardrails_passed is not True:
             evidence_reasons.append("promotion guardrails are not satisfied")

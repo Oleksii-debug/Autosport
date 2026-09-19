@@ -583,12 +583,22 @@ class PortfolioPlanTests(unittest.TestCase):
             PortfolioDependencyEvidence.from_dict(evidence.to_dict()),
             evidence,
         )
-        incomplete = replace(evidence, pairwise_dependency_upper_bounds=())
         with self.assertRaisesRegex(ValueError, "cover every candidate pair"):
             PortfolioDependencyEvidence(
-                **{
-                    **incomplete.__dict__,
-                }
+                evidence_id=evidence.evidence_id,
+                portfolio_sha256=evidence.portfolio_sha256,
+                intent_sha256s=evidence.intent_sha256s,
+                candidate_sha256s=evidence.candidate_sha256s,
+                population_id=evidence.population_id,
+                method=evidence.method,
+                sample_size=evidence.sample_size,
+                causal_cutoff=evidence.causal_cutoff,
+                as_of=evidence.as_of,
+                reproducibility_sha256=evidence.reproducibility_sha256,
+                pairwise_dependency_upper_bounds=(),
+                uncertainty_fraction=evidence.uncertainty_fraction,
+                fee_fraction=evidence.fee_fraction,
+                partial_fill_stress_fraction=evidence.partial_fill_stress_fraction,
             )
 
     def test_dependency_evidence_stale_or_mismatched_inputs_fail_closed(self) -> None:

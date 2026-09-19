@@ -292,22 +292,22 @@ class ParticipantIdentityTests(unittest.TestCase):
         direct = ParticipantIdentityRegistry.initialize_pristine(direct_path)
         direct.add_entity(entity("a"))
         direct.add_entity(entity("b"))
-        direct_edge = EntityLineage("a", "b", LineageRelation.SUPERSEDES, T1, T3, T1, SHA)
+        direct_edge = EntityLineage("a", "b", LineageRelation.SUPERSEDES, T1, T1, T1, SHA)
         direct.add_lineage(direct_edge)
         with self.assertRaisesRegex(ParticipantIdentityError, "cyclic equivalence"):
-            direct.add_lineage(EntityLineage("b", "a", LineageRelation.SUPERSEDES, T1, T3, T1, "b" * 64))
+            direct.add_lineage(EntityLineage("b", "a", LineageRelation.SUPERSEDES, T1, T1, T1, "b" * 64))
         self.assertEqual(ParticipantIdentityRegistry(direct_path).lineage_at("a", as_of=T2), (direct_edge,))
 
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
         for entity_id in ("a", "b", "c"):
             registry.add_entity(entity(entity_id))
 
-        first = EntityLineage("a", "b", LineageRelation.SUPERSEDES, T1, T3, T1, SHA)
-        second = EntityLineage("b", "c", LineageRelation.MERGED_FROM, T1, T3, T1, SHA)
+        first = EntityLineage("a", "b", LineageRelation.SUPERSEDES, T1, T1, T1, SHA)
+        second = EntityLineage("b", "c", LineageRelation.MERGED_FROM, T1, T1, T1, SHA)
         registry.add_lineage(first)
         registry.add_lineage(second)
         with self.assertRaisesRegex(ParticipantIdentityError, "cyclic equivalence"):
-            registry.add_lineage(EntityLineage("c", "a", LineageRelation.SUPERSEDES, T1, T3, T1, "c" * 64))
+            registry.add_lineage(EntityLineage("c", "a", LineageRelation.SUPERSEDES, T1, T1, T1, "c" * 64))
 
         reopened = ParticipantIdentityRegistry(self.path)
         self.assertEqual(reopened.lineage_at("a", as_of=T2), (first,))

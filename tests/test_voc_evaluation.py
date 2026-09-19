@@ -155,6 +155,7 @@ def request():
         response_ttl_seconds=Decimal("30"),
         baseline_candidate_id="local",
         cloud_candidate_id="cloud",
+        decision_evidence_sha256=SHA_C,
     )
 
 

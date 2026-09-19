@@ -27,7 +27,12 @@ from .learning_environment import (
     RewardEvidence,
     Transition,
 )
-from .research_supervisor import ResearchSupervisor, ResearchTrigger, SupervisorSnapshot
+from .research_supervisor import ResearchSupervisor, SupervisorSnapshot
+from .research_trigger_adapter import (
+    ExternalResearchTrigger,
+    ResearchTriggerAdapter,
+    ResearchTriggerSource,
+)
 from .scientific_registry import ResearchQuestion
 from .workspace_lock import WorkspaceEconomicLock
 
@@ -1224,6 +1229,7 @@ class AgentLoopRuntime:
         at: str,
         deadline_at: str | None = None,
     ) -> SupervisorSnapshot:
+        """Create one bounded question and route it through the canonical #537 ingress."""
         if not isinstance(supervisor, ResearchSupervisor):
             raise TypeError("supervisor must be ResearchSupervisor")
         if (
@@ -1231,19 +1237,14 @@ class AgentLoopRuntime:
             or not isinstance(budget_units, int)
             or budget_units <= 0
         ):
-            raise AgentLoopError(
-                "budget_units must be a positive integer"
-            )
+            raise AgentLoopError("budget_units must be a positive integer")
         normalized_deadline = (
             None
             if deadline_at is None
             else _timestamp_identity(deadline_at, "deadline_at")
         )
         state = self._read()
-        if (
-            AgentLoopPhase(state["phase"])
-            is not AgentLoopPhase.RESEARCH_HANDOFF
-        ):
+        if AgentLoopPhase(state["phase"]) is not AgentLoopPhase.RESEARCH_HANDOFF:
             current_run = state["current"]["research_run_id"]
             if current_run is not None:
                 existing = next(
@@ -1255,9 +1256,7 @@ class AgentLoopRuntime:
                     None,
                 )
                 if existing is None:
-                    raise AgentLoopError(
-                        "research run lacks durable handoff evidence"
-                    )
+                    raise AgentLoopError("research run lacks durable handoff evidence")
                 if (
                     existing["budget_units"] != budget_units
                     or existing["deadline_at"] != normalized_deadline
@@ -1266,9 +1265,8 @@ class AgentLoopRuntime:
                         "research handoff retry changes immutable budget/deadline"
                     )
                 return supervisor.status(current_run)
-            raise StaleAgentLoopStateError(
-                "research handoff requires RESEARCH_HANDOFF"
-            )
+            raise StaleAgentLoopStateError("research handoff requires RESEARCH_HANDOFF")
+
         current = state["current"]
         postmortem = next(
             item
@@ -1279,9 +1277,10 @@ class AgentLoopRuntime:
         if statement is None:
             raise AgentLoopError("postmortem has no research question")
         requested_at = postmortem["created_at"]
+        loop_id = state["identity"]["loop_id"]
         question_id = "agentloop-question-" + _digest(
             {
-                "loop_id": state["identity"]["loop_id"],
+                "loop_id": loop_id,
                 "postmortem_id": postmortem["postmortem_id"],
                 "statement": statement,
             }
@@ -1292,49 +1291,45 @@ class AgentLoopRuntime:
             source_sha256=state["identity"]["source_sha256"],
             created_at=requested_at,
         )
-        supervisor.scientific_registry.append(question)
-        trigger_id = (
-            f"agentloop:{state['identity']['loop_id']}:"
-            f"{postmortem['transition_id']}:"
-            f"{postmortem['postmortem_id']}"
-        )
-        trigger = ResearchTrigger(
-            trigger_id=trigger_id,
-            question_id=question_id,
+        registry = supervisor.scientific_registry
+        registry.append(question)
+
+        event = ExternalResearchTrigger(
+            source_kind=ResearchTriggerSource.RECOVERY,
+            source_scope=f"agent-loop:{loop_id}",
+            source_event_id=postmortem["postmortem_id"],
+            question_id=question.question_id,
+            question_record_sha256=_digest(question.to_payload()),
+            source_evidence_sha256=question.source_sha256,
+            source_observed_at=requested_at,
             requested_at=requested_at,
             budget_units=budget_units,
             deadline_at=normalized_deadline,
         )
-        accepted = supervisor.accept_trigger(
-            trigger,
-            exclusive_trigger_prefix=(
-                f"agentloop:{state['identity']['loop_id']}:"
-                f"{postmortem['transition_id']}:"
-            ),
-        )
+        receipt = ResearchTriggerAdapter(supervisor).accept(event)
         handoff = {
             "postmortem_id": postmortem["postmortem_id"],
-            "question_id": question_id,
+            "question_id": question.question_id,
             "question_sha256": _digest(question.to_payload()),
-            "trigger_id": trigger.trigger_id,
-            "trigger_sha256": trigger.trigger_sha256,
-            "run_id": accepted.run_id,
+            "trigger_id": receipt.supervisor_trigger_id,
+            "trigger_sha256": receipt.supervisor_trigger_sha256,
+            "run_id": receipt.run_id,
             "budget_units": budget_units,
             "deadline_at": normalized_deadline,
             "requested_at": requested_at,
+            "source_event_identity_sha256": receipt.source_event_identity_sha256,
+            "source_event_sha256": receipt.source_event_sha256,
+            "receipt_sha256": receipt.receipt_sha256,
+            "checkpoint_sha256": receipt.checkpoint_sha256,
         }
 
         def apply(latest: dict[str, Any], _now: str) -> None:
-            if (
-                AgentLoopPhase(latest["phase"])
-                is not AgentLoopPhase.RESEARCH_HANDOFF
-            ):
+            if AgentLoopPhase(latest["phase"]) is not AgentLoopPhase.RESEARCH_HANDOFF:
                 existing = next(
                     (
                         item
                         for item in latest["research_handoffs"]
-                        if item["postmortem_id"]
-                        == postmortem["postmortem_id"]
+                        if item["postmortem_id"] == postmortem["postmortem_id"]
                     ),
                     None,
                 )
@@ -1347,8 +1342,7 @@ class AgentLoopRuntime:
                 (
                     item
                     for item in latest["research_handoffs"]
-                    if item["postmortem_id"]
-                    == postmortem["postmortem_id"]
+                    if item["postmortem_id"] == postmortem["postmortem_id"]
                 ),
                 None,
             )
@@ -1358,13 +1352,13 @@ class AgentLoopRuntime:
                 )
             if existing is None:
                 latest["research_handoffs"].append(handoff)
-            latest["current"]["research_question_id"] = question_id
-            latest["current"]["research_trigger_id"] = trigger.trigger_id
-            latest["current"]["research_run_id"] = accepted.run_id
+            latest["current"]["research_question_id"] = question.question_id
+            latest["current"]["research_trigger_id"] = receipt.supervisor_trigger_id
+            latest["current"]["research_run_id"] = receipt.run_id
             latest["phase"] = AgentLoopPhase.CHECKPOINT.value
 
         self._mutate(at, apply)
-        return accepted
+        return supervisor.status(receipt.run_id)
 
     def commit_checkpoint(
         self,

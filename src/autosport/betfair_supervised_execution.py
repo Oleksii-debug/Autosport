@@ -958,29 +958,29 @@ def execute_betfair_supervised_action(
     # canonical owner contract immediately before transport while the fence is
     # held. This prevents a known local authority denial from being mislabeled
     # as provider-effect uncertainty.
-    try:
-        with WorkspaceEconomicLock(execution_workspace):
-            client._gate.require(
-                action=action,
-                profile=profile,
-                bound=bound,
-                execution_workspace=execution_workspace,
-            )
-            begin_supervised_attempt(
-                ledger,
-                bound,
-                approval,
-                action_id=action_id,
-                attempt_id=attempt_id,
-            )
-            provider_order_ref = ledger.bind_provider_order_reference(
-                attempt_id=attempt_id,
-                provider_id=action.bookmaker_id,
-            )
-            ledger.mark_submitted(
-                attempt_id,
-                submitted_at=now(),
-            )
+    with WorkspaceEconomicLock(execution_workspace):
+        client._gate.require(
+            action=action,
+            profile=profile,
+            bound=bound,
+            execution_workspace=execution_workspace,
+        )
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action_id,
+            attempt_id=attempt_id,
+        )
+        provider_order_ref = ledger.bind_provider_order_reference(
+            attempt_id=attempt_id,
+            provider_id=action.bookmaker_id,
+        )
+        ledger.mark_submitted(
+            attempt_id,
+            submitted_at=now(),
+        )
+        try:
             report = client.place_action(
                 action,
                 profile=profile,
@@ -988,25 +988,25 @@ def execute_betfair_supervised_action(
                 provider_order_ref=provider_order_ref,
                 execution_workspace=execution_workspace,
             )
-    except (
-        BetfairPlaceOrdersAmbiguous,
-        BetfairSupervisedExecutionError,
-    ):
-        ledger.mark_unknown(
-            attempt_id,
-            reason=(
-                "betfair_placeOrders_ambiguous_effect_"
-                "requires_readback"
-            ),
-            observed_at=now(),
-        )
-        return BetfairSupervisedExecutionResult(
-            PlaceOrdersOutcome.UNKNOWN,
-            attempt_id,
-            ledger.attempt_state(attempt_id),
-            None,
-            None,
-        )
+        except (
+            BetfairPlaceOrdersAmbiguous,
+            BetfairSupervisedExecutionError,
+        ):
+            ledger.mark_unknown(
+                attempt_id,
+                reason=(
+                    "betfair_placeOrders_ambiguous_effect_"
+                    "requires_readback"
+                ),
+                observed_at=now(),
+            )
+            return BetfairSupervisedExecutionResult(
+                PlaceOrdersOutcome.UNKNOWN,
+                attempt_id,
+                ledger.attempt_state(attempt_id),
+                None,
+                None,
+            )
 
     evidence_id = report.evidence_id
     ledger.bind_provider_evidence(

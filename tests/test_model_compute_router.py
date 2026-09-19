@@ -82,6 +82,39 @@ def rewrite_route_with_valid_hashes(path, raw, route):
     rewrite_store_with_valid_state_hash(path, raw)
 
 
+def rewrite_execution_with_valid_record_hash(path, raw, execution):
+    unsigned = {
+        key: execution[key]
+        for key in (
+            "execution_id",
+            "decision_id",
+            "execution_sequence",
+            "prior_incurred_cost",
+            "completed_at",
+            "available_at",
+            "observed_at",
+            "backend_id",
+            "model_id",
+            "config_sha256",
+            "actual_cost",
+            "actual_latency_seconds",
+            "disposition",
+            "reason",
+            "evidence_sha256",
+        )
+    }
+    execution["execution_record_sha256"] = hashlib.sha256(
+        json.dumps(
+            unsigned,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    rewrite_store_with_valid_state_hash(path, raw)
+
+
 def candidate(
     candidate_id="local",
     *,
@@ -841,6 +874,149 @@ class ModelComputeRouterTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ModelComputeRouterError,
                 "accepted cloud execution cost exceeds policy",
+            ):
+                ModelComputeRouterStore(path)
+
+    def test_restart_rejects_rehashed_rejected_execution_tampering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+            req = request(
+                request_id="req-rejected-tamper",
+                allow_cloud=False,
+                cloud_candidate_id=None,
+                max_cost=Decimal("2"),
+            )
+            store.route(
+                req,
+                self.candidates,
+                policy(),
+                as_of=T1,
+            )
+            accepted = store.record_execution(
+                execution_id="exec-rejected-tamper-1",
+                request_id=req.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("1.25"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            rejected = store.record_execution(
+                execution_id="exec-rejected-tamper-2",
+                request_id=req.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("0.80"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                accepted.disposition,
+                ExecutionDisposition.ACCEPTED,
+            )
+            self.assertEqual(
+                rejected.disposition,
+                ExecutionDisposition.REJECTED_COST,
+            )
+
+            stale_req = request(
+                request_id="req-rejected-stale-tamper",
+                allow_cloud=False,
+                cloud_candidate_id=None,
+                max_cost=Decimal("2"),
+                response_ttl_seconds=Decimal("5"),
+            )
+            store.route(
+                stale_req,
+                self.candidates,
+                policy(),
+                as_of=T1,
+            )
+            stale = store.record_execution(
+                execution_id="exec-rejected-stale-tamper",
+                request_id=stale_req.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("0.10"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T3,
+            )
+            self.assertEqual(
+                stale.disposition,
+                ExecutionDisposition.REJECTED_STALE,
+            )
+            original = path.read_text(encoding="utf-8")
+
+            for field, value in (
+                ("actual_cost", "0.70"),
+                ("disposition", ExecutionDisposition.ACCEPTED.value),
+                ("reason", "forged rejected evidence reason"),
+            ):
+                raw = json.loads(original)
+                execution = next(
+                    item
+                    for item in raw["executions"]
+                    if item["execution_id"]
+                    == "exec-rejected-tamper-2"
+                )
+                execution[field] = value
+                rewrite_store_with_valid_state_hash(path, raw)
+                with self.assertRaisesRegex(
+                    ModelComputeRouterError,
+                    "execution record SHA-256",
+                ):
+                    ModelComputeRouterStore(path)
+
+            raw = json.loads(original)
+            execution = next(
+                item
+                for item in raw["executions"]
+                if item["execution_id"]
+                == "exec-rejected-tamper-2"
+            )
+            execution["prior_incurred_cost"] = "0"
+            rewrite_execution_with_valid_record_hash(
+                path, raw, execution
+            )
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "prior incurred cost does not match durable history",
+            ):
+                ModelComputeRouterStore(path)
+
+            raw = json.loads(original)
+            execution = next(
+                item
+                for item in raw["executions"]
+                if item["execution_id"]
+                == "exec-rejected-stale-tamper"
+            )
+            execution["disposition"] = (
+                ExecutionDisposition.ACCEPTED.value
+            )
+            execution["reason"] = (
+                "execution identity, deadline, availability, "
+                "freshness and actual cost are valid"
+            )
+            rewrite_execution_with_valid_record_hash(
+                path, raw, execution
+            )
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "disposition/reason is not reproducible",
             ):
                 ModelComputeRouterStore(path)
 

@@ -21,7 +21,7 @@ from .sport_domain_fitness import (
 )
 
 _SCHEMA = "autosport.model_compute_router"
-_VERSION = 1
+_VERSION = 2
 _ZERO = Decimal("0")
 
 
@@ -675,8 +675,11 @@ class ComputeRouteDecision:
 class ComputeExecutionEvidence:
     execution_id: str
     decision_id: str
+    execution_sequence: int
+    prior_incurred_cost: Decimal
     completed_at: str
     available_at: str
+    observed_at: str
     backend_id: str
     model_id: str
     config_sha256: str
@@ -685,15 +688,31 @@ class ComputeExecutionEvidence:
     disposition: ExecutionDisposition
     reason: str
     evidence_sha256: str
+    execution_record_sha256: str
 
     def __post_init__(self) -> None:
         _text("execution_id", self.execution_id)
         _text("decision_id", self.decision_id)
+        if (
+            type(self.execution_sequence) is not int
+            or self.execution_sequence < 1
+        ):
+            raise ModelComputeRouterError(
+                "execution_sequence must be positive"
+            )
+        _nonnegative(
+            "prior_incurred_cost", self.prior_incurred_cost
+        )
         completed = _instant("completed_at", self.completed_at)
         available = _instant("available_at", self.available_at)
+        observed = _instant("observed_at", self.observed_at)
         if available < completed:
             raise ModelComputeRouterError(
                 "available_at precedes completed_at"
+            )
+        if observed < available:
+            raise ModelComputeRouterError(
+                "observed_at precedes available_at"
             )
         _text("backend_id", self.backend_id)
         _text("model_id", self.model_id)
@@ -708,13 +727,20 @@ class ComputeExecutionEvidence:
             )
         _text("reason", self.reason)
         _sha256("evidence_sha256", self.evidence_sha256)
+        _sha256(
+            "execution_record_sha256",
+            self.execution_record_sha256,
+        )
 
-    def payload(self) -> dict[str, Any]:
+    def _unsigned_payload(self) -> dict[str, Any]:
         return {
             "execution_id": self.execution_id,
             "decision_id": self.decision_id,
+            "execution_sequence": self.execution_sequence,
+            "prior_incurred_cost": str(self.prior_incurred_cost),
             "completed_at": _time("completed_at", self.completed_at),
             "available_at": _time("available_at", self.available_at),
+            "observed_at": _time("observed_at", self.observed_at),
             "backend_id": self.backend_id,
             "model_id": self.model_id,
             "config_sha256": self.config_sha256,
@@ -727,6 +753,76 @@ class ComputeExecutionEvidence:
             "evidence_sha256": self.evidence_sha256,
         }
 
+    def payload(self) -> dict[str, Any]:
+        return {
+            **self._unsigned_payload(),
+            "execution_record_sha256": self.execution_record_sha256,
+        }
+
+    def verify_record_sha256(self) -> None:
+        if self.execution_record_sha256 != _canonical_digest(
+            self._unsigned_payload()
+        ):
+            raise ModelComputeRouterError(
+                "execution record SHA-256 does not match payload"
+            )
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        execution_id: str,
+        decision_id: str,
+        execution_sequence: int,
+        prior_incurred_cost: Decimal,
+        completed_at: str,
+        available_at: str,
+        observed_at: str,
+        backend_id: str,
+        model_id: str,
+        config_sha256: str,
+        actual_cost: Decimal,
+        actual_latency_seconds: Decimal,
+        disposition: ExecutionDisposition,
+        reason: str,
+        evidence_sha256: str,
+    ) -> "ComputeExecutionEvidence":
+        unsigned = {
+            "execution_id": execution_id,
+            "decision_id": decision_id,
+            "execution_sequence": execution_sequence,
+            "prior_incurred_cost": str(prior_incurred_cost),
+            "completed_at": _time("completed_at", completed_at),
+            "available_at": _time("available_at", available_at),
+            "observed_at": _time("observed_at", observed_at),
+            "backend_id": backend_id,
+            "model_id": model_id,
+            "config_sha256": config_sha256,
+            "actual_cost": str(actual_cost),
+            "actual_latency_seconds": str(actual_latency_seconds),
+            "disposition": disposition.value,
+            "reason": reason,
+            "evidence_sha256": evidence_sha256,
+        }
+        return cls(
+            execution_id=execution_id,
+            decision_id=decision_id,
+            execution_sequence=execution_sequence,
+            prior_incurred_cost=prior_incurred_cost,
+            completed_at=unsigned["completed_at"],
+            available_at=unsigned["available_at"],
+            observed_at=unsigned["observed_at"],
+            backend_id=backend_id,
+            model_id=model_id,
+            config_sha256=config_sha256,
+            actual_cost=actual_cost,
+            actual_latency_seconds=actual_latency_seconds,
+            disposition=disposition,
+            reason=reason,
+            evidence_sha256=evidence_sha256,
+            execution_record_sha256=_canonical_digest(unsigned),
+        )
+
     @classmethod
     def from_payload(
         cls, raw: Mapping[str, Any]
@@ -735,8 +831,13 @@ class ComputeExecutionEvidence:
             return cls(
                 execution_id=raw["execution_id"],
                 decision_id=raw["decision_id"],
+                execution_sequence=raw["execution_sequence"],
+                prior_incurred_cost=Decimal(
+                    raw["prior_incurred_cost"]
+                ),
                 completed_at=raw["completed_at"],
                 available_at=raw["available_at"],
+                observed_at=raw["observed_at"],
                 backend_id=raw["backend_id"],
                 model_id=raw["model_id"],
                 config_sha256=raw["config_sha256"],
@@ -747,6 +848,9 @@ class ComputeExecutionEvidence:
                 disposition=ExecutionDisposition(raw["disposition"]),
                 reason=raw["reason"],
                 evidence_sha256=raw["evidence_sha256"],
+                execution_record_sha256=raw[
+                    "execution_record_sha256"
+                ],
             )
         except (KeyError, TypeError, InvalidOperation, ValueError) as exc:
             if isinstance(exc, ModelComputeRouterError):
@@ -754,6 +858,81 @@ class ComputeExecutionEvidence:
             raise ModelComputeRouterError(
                 "invalid execution evidence payload"
             ) from exc
+
+
+def _classify_execution(
+    *,
+    request: ComputeRouteRequest,
+    policy: ComputeRoutingPolicy,
+    decision: ComputeRouteDecision,
+    completed_at: str,
+    available_at: str,
+    observed_at: str,
+    backend_id: str,
+    model_id: str,
+    config_sha256: str,
+    actual_cost: Decimal,
+    prior_incurred_cost: Decimal,
+) -> tuple[ExecutionDisposition, str]:
+    actual_cost_value = _nonnegative("actual_cost", actual_cost)
+    prior_cost = _nonnegative(
+        "prior_incurred_cost", prior_incurred_cost
+    )
+    cumulative_incurred_cost = prior_cost + actual_cost_value
+    now = _instant("observed_at", observed_at)
+    completed = _instant("completed_at", completed_at)
+    available = _instant("available_at", available_at)
+    if now < available:
+        raise ModelComputeRouterError(
+            "execution evidence is not yet causally available"
+        )
+    identity_matches = (
+        backend_id == decision.backend_id
+        and model_id == decision.model_id
+        and config_sha256 == decision.config_sha256
+    )
+    if completed < _instant("decided_at", decision.decided_at):
+        return (
+            ExecutionDisposition.REJECTED_CAUSAL,
+            "execution completed before routed decision",
+        )
+    if not identity_matches:
+        return (
+            ExecutionDisposition.REJECTED_IDENTITY,
+            "execution backend/model/config identity differs from "
+            "routed decision",
+        )
+    if available > _instant(
+        "decision_deadline", request.decision_deadline
+    ):
+        return (
+            ExecutionDisposition.REJECTED_LATE,
+            "execution became available after decision deadline",
+        )
+    if _seconds(now, completed) > request.response_ttl_seconds:
+        return (
+            ExecutionDisposition.REJECTED_STALE,
+            "execution response exceeded request response TTL",
+        )
+    if cumulative_incurred_cost > request.max_cost:
+        return (
+            ExecutionDisposition.REJECTED_COST,
+            "cumulative actual execution cost exceeds request budget",
+        )
+    if (
+        decision.tier is ComputeTier.CLOUD
+        and cumulative_incurred_cost > policy.max_cloud_cost
+    ):
+        return (
+            ExecutionDisposition.REJECTED_COST,
+            "cumulative actual cloud execution cost exceeds "
+            "policy cloud-cost limit",
+        )
+    return (
+        ExecutionDisposition.ACCEPTED,
+        "execution identity, deadline, availability, freshness and "
+        "actual cost are valid",
+    )
 
 
 def _candidate_map(
@@ -1434,6 +1613,63 @@ class ModelComputeRouterStore:
                     "persisted accepted cloud execution cost "
                     "exceeds policy cloud-cost limit"
                 )
+
+        history_by_decision: dict[
+            str, list[ComputeExecutionEvidence]
+        ] = {}
+        for evidence in loaded_executions.values():
+            evidence.verify_record_sha256()
+            history_by_decision.setdefault(
+                evidence.decision_id, []
+            ).append(evidence)
+        for decision_id, history in history_by_decision.items():
+            request, policy, decision = (
+                loaded_decision_authority[decision_id]
+            )
+            history.sort(
+                key=lambda evidence: evidence.execution_sequence
+            )
+            prior_incurred_cost = _ZERO
+            for expected_sequence, evidence in enumerate(
+                history, start=1
+            ):
+                if evidence.execution_sequence != expected_sequence:
+                    raise ModelComputeRouterError(
+                        "persisted execution sequence is not "
+                        "contiguous"
+                    )
+                if (
+                    evidence.prior_incurred_cost
+                    != prior_incurred_cost
+                ):
+                    raise ModelComputeRouterError(
+                        "persisted execution prior incurred cost "
+                        "does not match durable history"
+                    )
+                expected_disposition, expected_reason = (
+                    _classify_execution(
+                        request=request,
+                        policy=policy,
+                        decision=decision,
+                        completed_at=evidence.completed_at,
+                        available_at=evidence.available_at,
+                        observed_at=evidence.observed_at,
+                        backend_id=evidence.backend_id,
+                        model_id=evidence.model_id,
+                        config_sha256=evidence.config_sha256,
+                        actual_cost=evidence.actual_cost,
+                        prior_incurred_cost=prior_incurred_cost,
+                    )
+                )
+                if (
+                    evidence.disposition is not expected_disposition
+                    or evidence.reason != expected_reason
+                ):
+                    raise ModelComputeRouterError(
+                        "persisted execution disposition/reason "
+                        "is not reproducible from durable authority"
+                    )
+                prior_incurred_cost += evidence.actual_cost
         self._routes = loaded_routes
         self._executions = loaded_executions
 
@@ -1554,102 +1790,54 @@ class ModelComputeRouterStore:
         actual_cost_value = _nonnegative(
             "actual_cost", actual_cost
         )
-        prior_incurred_cost = sum(
-            (
-                evidence.actual_cost
-                for existing_execution_id, evidence
-                in self._executions.items()
-                if existing_execution_id != execution_id
-                and evidence.decision_id == decision.decision_id
-            ),
-            _ZERO,
-        )
-        cumulative_incurred_cost = (
-            prior_incurred_cost + actual_cost_value
-        )
-        now = _instant("as_of", as_of)
-        completed = _instant(
-            "completed_at", completed_at
-        )
-        available = _instant(
-            "available_at", available_at
-        )
-        if now < available:
-            raise ModelComputeRouterError(
-                "execution evidence is not yet "
-                "causally available"
+        existing = self._executions.get(execution_id)
+        if existing is None:
+            decision_history = [
+                evidence
+                for evidence in self._executions.values()
+                if evidence.decision_id == decision.decision_id
+            ]
+            execution_sequence = (
+                max(
+                    (
+                        evidence.execution_sequence
+                        for evidence in decision_history
+                    ),
+                    default=0,
+                )
+                + 1
             )
-        identity_matches = (
-            backend_id == decision.backend_id
-            and model_id == decision.model_id
-            and config_sha256 == decision.config_sha256
-        )
-        if completed < _instant("decided_at", decision.decided_at):
-            disposition = (
-                ExecutionDisposition.REJECTED_CAUSAL
-            )
-            reason = (
-                "execution completed before routed decision"
-            )
-        elif not identity_matches:
-            disposition = (
-                ExecutionDisposition.REJECTED_IDENTITY
-            )
-            reason = (
-                "execution backend/model/config identity "
-                "differs from routed decision"
-            )
-        elif available > _instant(
-            "decision_deadline",
-            request.decision_deadline,
-        ):
-            disposition = (
-                ExecutionDisposition.REJECTED_LATE
-            )
-            reason = (
-                "execution became available after decision deadline"
-            )
-        elif (
-            _seconds(now, completed)
-            > request.response_ttl_seconds
-        ):
-            disposition = (
-                ExecutionDisposition.REJECTED_STALE
-            )
-            reason = (
-                "execution response exceeded request "
-                "response TTL"
-            )
-        elif cumulative_incurred_cost > request.max_cost:
-            disposition = (
-                ExecutionDisposition.REJECTED_COST
-            )
-            reason = (
-                "cumulative actual execution cost exceeds "
-                "request budget"
-            )
-        elif (
-            decision.tier is ComputeTier.CLOUD
-            and cumulative_incurred_cost > policy.max_cloud_cost
-        ):
-            disposition = (
-                ExecutionDisposition.REJECTED_COST
-            )
-            reason = (
-                "cumulative actual cloud execution cost exceeds "
-                "policy cloud-cost limit"
+            prior_incurred_cost = sum(
+                (
+                    evidence.actual_cost
+                    for evidence in decision_history
+                ),
+                _ZERO,
             )
         else:
-            disposition = ExecutionDisposition.ACCEPTED
-            reason = (
-                "execution identity, deadline, availability, "
-                "freshness and actual cost are valid"
-            )
-        evidence = ComputeExecutionEvidence(
-            execution_id=execution_id,
-            decision_id=decision.decision_id,
+            execution_sequence = existing.execution_sequence
+            prior_incurred_cost = existing.prior_incurred_cost
+        disposition, reason = _classify_execution(
+            request=request,
+            policy=policy,
+            decision=decision,
             completed_at=completed_at,
             available_at=available_at,
+            observed_at=as_of,
+            backend_id=backend_id,
+            model_id=model_id,
+            config_sha256=config_sha256,
+            actual_cost=actual_cost_value,
+            prior_incurred_cost=prior_incurred_cost,
+        )
+        evidence = ComputeExecutionEvidence.build(
+            execution_id=execution_id,
+            decision_id=decision.decision_id,
+            execution_sequence=execution_sequence,
+            prior_incurred_cost=prior_incurred_cost,
+            completed_at=completed_at,
+            available_at=available_at,
+            observed_at=as_of,
             backend_id=backend_id,
             model_id=model_id,
             config_sha256=config_sha256,
@@ -1661,7 +1849,6 @@ class ModelComputeRouterStore:
             reason=reason,
             evidence_sha256=evidence_sha256,
         )
-        existing = self._executions.get(execution_id)
         if existing is not None:
             if existing != evidence:
                 raise ModelComputeRouterError(

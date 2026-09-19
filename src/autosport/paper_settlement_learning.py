@@ -22,7 +22,17 @@ from .decision_ledger import DecisionRecord, JsonlDecisionLedger
 from .domain import PaperTicket, TicketStatus
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
-from .learning_environment import Action, EnvironmentCheckpoint, EvidenceTruth, Outcome, RewardEvidence, Transition
+from .learning_environment import (
+    Action,
+    CausalLearningEnvironment,
+    EnvironmentCheckpoint,
+    EnvironmentIdentity,
+    EvidenceTruth,
+    Observation,
+    Outcome,
+    RewardEvidence,
+    Transition,
+)
 from .paper import PaperBook
 from .risk import PaperRiskPolicy
 from .workspace_lock import WorkspaceEconomicLock
@@ -429,6 +439,8 @@ class PaperSettlementLearningBridge:
         *,
         ticket_id: str,
         decision_id: str,
+        environment: CausalLearningEnvironment,
+        observation: Observation,
         action: Action,
         baseline_checkpoint: EnvironmentCheckpoint,
     ) -> str:
@@ -436,10 +448,47 @@ class PaperSettlementLearningBridge:
 
         _text(ticket_id, "ticket_id")
         _text(decision_id, "decision_id")
+        if not isinstance(environment, CausalLearningEnvironment):
+            raise TypeError("environment must be CausalLearningEnvironment")
+        if not isinstance(observation, Observation):
+            raise TypeError("observation must be Observation")
         if not isinstance(action, Action):
             raise TypeError("action must be Action")
         if not isinstance(baseline_checkpoint, EnvironmentCheckpoint):
             raise TypeError("baseline_checkpoint must be EnvironmentCheckpoint")
+        if (
+            environment.environment_id != action.environment_id
+            or observation.environment_id != action.environment_id
+            or observation.observation_id != action.observation_id
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "environment/observation/action identities do not match"
+            )
+        if (
+            environment.episode.episode_id != baseline_checkpoint.episode_id
+            or environment.episode.policy_id != baseline_checkpoint.policy_id
+            or environment.environment_id != baseline_checkpoint.environment_id
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "environment episode differs from baseline checkpoint"
+            )
+        replay = CausalLearningEnvironment.resume(
+            environment.identity,
+            episode_key=environment.episode.episode_key,
+            policy_id=environment.episode.policy_id,
+            admissible_actions=frozenset(environment.episode.admissible_actions),
+            checkpoint=baseline_checkpoint,
+        )
+        replayed_action = replay.act(
+            observation,
+            action_type=action.action_type,
+            decision_at=action.decided_at,
+            parameters=action.parameters,
+        )
+        if replayed_action.action_id != action.action_id:
+            raise PaperSettlementLearningBridgeError(
+                "action is not reproducible from canonical environment evidence"
+            )
 
         with WorkspaceEconomicLock(self.state_path.parent):
             state = self._read()
@@ -471,9 +520,29 @@ class PaperSettlementLearningBridge:
                 "decision_id": decision.decision_id,
                 "decision_sha256": _decision_sha(decision),
                 "environment_id": action.environment_id,
+                "environment_identity": {
+                    "source_id": environment.identity.source_id,
+                    "config_id": environment.identity.config_id,
+                    "data_id": environment.identity.data_id,
+                    "protocol_id": environment.identity.protocol_id,
+                    "cutoff_ts": environment.identity.cutoff_ts,
+                    "seed": environment.identity.seed,
+                },
                 "episode_id": baseline_checkpoint.episode_id,
+                "episode_key": environment.episode.episode_key,
                 "policy_id": baseline_checkpoint.policy_id,
+                "admissible_actions": list(environment.episode.admissible_actions),
                 "observation_id": action.observation_id,
+                "observation": {
+                    "environment_id": observation.environment_id,
+                    "observed_at": _instant_id(
+                        observation.observed_at, "observation observed_at"
+                    ),
+                    "available_at": _instant_id(
+                        observation.available_at, "observation available_at"
+                    ),
+                    "evidence": [list(item) for item in observation.evidence],
+                },
                 "action_id": action.action_id,
                 "action_type": action.action_type,
                 "action_decided_at": _instant_id(action.decided_at, "action decided_at"),
@@ -644,52 +713,62 @@ class PaperSettlementLearningBridge:
             ),
         )
         baseline = _checkpoint(binding["baseline_checkpoint"])
-        transition = Transition(
-            environment_id=binding["environment_id"],
-            episode_id=binding["episode_id"],
-            step_index=baseline.step_index + 1,
-            observation_id=binding["observation_id"],
-            action_id=binding["action_id"],
-            outcome_id=outcome.outcome_id,
-            reward_id=reward.reward_id,
-            decision_at=binding["action_decided_at"],
+        try:
+            identity_payload = binding["environment_identity"]
+            observation_payload = binding["observation"]
+            identity = EnvironmentIdentity(
+                source_id=identity_payload["source_id"],
+                config_id=identity_payload["config_id"],
+                data_id=identity_payload["data_id"],
+                protocol_id=identity_payload["protocol_id"],
+                cutoff_ts=identity_payload["cutoff_ts"],
+                seed=identity_payload["seed"],
+            )
+            environment = CausalLearningEnvironment.resume(
+                identity,
+                episode_key=binding["episode_key"],
+                policy_id=binding["policy_id"],
+                admissible_actions=frozenset(binding["admissible_actions"]),
+                checkpoint=baseline,
+            )
+            observation = Observation(
+                environment_id=observation_payload["environment_id"],
+                observed_at=observation_payload["observed_at"],
+                available_at=observation_payload["available_at"],
+                evidence=tuple(
+                    (item[0], item[1])
+                    for item in observation_payload["evidence"]
+                ),
+            )
+            replayed_action = environment.act(
+                observation,
+                action_type=binding["action_type"],
+                decision_at=binding["action_decided_at"],
+                parameters=tuple(
+                    (item[0], item[1])
+                    for item in binding["action_parameters"]
+                ),
+            )
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            raise PaperSettlementLearningBridgeError(
+                "durable environment binding is not canonically replayable"
+            ) from exc
+        if (
+            identity.environment_id != binding["environment_id"]
+            or environment.episode.episode_id != binding["episode_id"]
+            or observation.observation_id != binding["observation_id"]
+            or replayed_action.action_id != binding["action_id"]
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "durable environment replay identity mismatch"
+            )
+        transition = environment.resolve(
+            replayed_action.action_id,
+            outcome=outcome,
+            reward=reward,
             resolved_at=revealed_at,
         )
-        intent_id = _digest(
-            {
-                "environment_id": binding["environment_id"],
-                "episode_id": binding["episode_id"],
-                "observation_id": binding["observation_id"],
-            }
-        )
-        payload_id = _digest(
-            {
-                "action_type": binding["action_type"],
-                "parameters": binding["action_parameters"],
-            }
-        )
-        intents = dict(baseline.committed_decision_intents)
-        if intent_id in intents:
-            raise PaperSettlementLearningBridgeError(
-                "baseline checkpoint already contains this decision intent"
-            )
-        intents[intent_id] = payload_id
-        chain = hashlib.sha256(
-            bytes.fromhex(baseline.chain_sha256)
-            + bytes.fromhex(transition.transition_id)
-        ).hexdigest()
-        next_checkpoint = EnvironmentCheckpoint(
-            environment_id=baseline.environment_id,
-            episode_id=baseline.episode_id,
-            policy_id=baseline.policy_id,
-            step_index=transition.step_index,
-            chain_sha256=chain,
-            last_transition_id=transition.transition_id,
-            committed_action_ids=tuple(
-                sorted((*baseline.committed_action_ids, binding["action_id"]))
-            ),
-            committed_decision_intents=tuple(sorted(intents.items())),
-        )
+        next_checkpoint = environment.checkpoint()
         semantic = {
             "binding_id": binding["binding_id"],
             "ticket_id": binding["ticket_id"],

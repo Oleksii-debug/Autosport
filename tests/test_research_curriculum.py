@@ -133,7 +133,6 @@ def _binding(
         transition=transition,
         outcome=outcome,
         reward=reward,
-        provenance=provenance,
     )
 
 

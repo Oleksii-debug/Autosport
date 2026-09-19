@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -87,6 +87,22 @@ def _decimal_from_serialized(name: str, value: object) -> Decimal:
     if not parsed.is_finite() or str(parsed) != value:
         raise ValueError(f"{name} must be a canonical finite Decimal string")
     return parsed
+
+
+def _semantic_decimal_string(name: str, value: Decimal) -> str:
+    """Serialize numerically equal finite Decimals identically without context rounding."""
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise ValueError(f"{name} must be a finite Decimal")
+    sign, digits, exponent = value.as_tuple()
+    if not digits or all(digit == 0 for digit in digits):
+        return "0"
+    canonical_digits = list(digits)
+    canonical_exponent = exponent
+    while canonical_digits[-1] == 0:
+        canonical_digits.pop()
+        canonical_exponent += 1
+    exact = Decimal((sign, tuple(canonical_digits), canonical_exponent))
+    return str(exact)
 
 
 def _canonical_json_payload(payload: object) -> str:
@@ -452,6 +468,241 @@ class PortfolioDependencyGraph:
             intent_sha256s=tuple(intent_sha256s),
             candidate_sha256s=tuple(candidate_sha256s),
             dependency_edges=tuple(edges),
+        )
+
+
+
+_MIN_DEPENDENCY_EVIDENCE_SAMPLE_SIZE = 30
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioDependencyEvidence:
+    """Versioned empirical joint-dependency evidence bound to exact portfolio inputs."""
+
+    evidence_id: str
+    portfolio_sha256: str
+    intent_sha256s: tuple[str, ...]
+    candidate_sha256s: tuple[str, ...]
+    population_id: str
+    method: str
+    sample_size: int
+    causal_cutoff: str
+    as_of: str
+    valid_until: str
+    reproducibility_sha256: str
+    pairwise_dependency_upper_bounds: tuple[tuple[str, str, Decimal], ...]
+    uncertainty_fraction: Decimal = Decimal("0")
+    fee_fraction: Decimal = Decimal("0")
+    partial_fill_stress_fraction: Decimal = Decimal("0")
+
+    def __post_init__(self) -> None:
+        _canonical_text("dependency evidence_id", self.evidence_id)
+        _canonical_sha256("dependency portfolio_sha256", self.portfolio_sha256)
+        if type(self.intent_sha256s) is not tuple or type(self.candidate_sha256s) is not tuple:
+            raise ValueError("dependency evidence identities must be tuples")
+        if len(self.intent_sha256s) != len(self.candidate_sha256s):
+            raise ValueError("dependency evidence identity vectors must have matching cardinality")
+        for digest in (*self.intent_sha256s, *self.candidate_sha256s):
+            _canonical_sha256("dependency evidence identity", digest)
+        if len(set(self.intent_sha256s)) != len(self.intent_sha256s):
+            raise ValueError("dependency evidence intent identities must be unique")
+        if len(set(self.candidate_sha256s)) != len(self.candidate_sha256s):
+            raise ValueError("dependency evidence candidate identities must be unique")
+        _canonical_text("dependency evidence population_id", self.population_id)
+        _canonical_text("dependency evidence method", self.method)
+        if (
+            isinstance(self.sample_size, bool)
+            or not isinstance(self.sample_size, int)
+            or self.sample_size < 2
+        ):
+            raise ValueError("dependency evidence sample_size must be an integer >= 2")
+        _, cutoff = _canonical_timestamp("dependency evidence causal_cutoff", self.causal_cutoff)
+        _, as_of = _canonical_timestamp("dependency evidence as_of", self.as_of)
+        _, valid_until = _canonical_timestamp(
+            "dependency evidence valid_until", self.valid_until
+        )
+        if cutoff > as_of:
+            raise ValueError("dependency evidence causal_cutoff must not be after as_of")
+        if as_of > valid_until:
+            raise ValueError("dependency evidence valid_until must not be before as_of")
+        _canonical_sha256("dependency evidence reproducibility_sha256", self.reproducibility_sha256)
+        expected_pairs = {
+            tuple(sorted((left, right)))
+            for index, left in enumerate(self.candidate_sha256s)
+            for right in self.candidate_sha256s[index + 1:]
+        }
+        seen: set[tuple[str, str]] = set()
+        previous: tuple[str, str, Decimal] | None = None
+        for left, right, bound in self.pairwise_dependency_upper_bounds:
+            left = _canonical_sha256("dependency evidence pair candidate", left)
+            right = _canonical_sha256("dependency evidence pair candidate", right)
+            if left == right:
+                raise ValueError("dependency evidence pair cannot self-reference")
+            pair = tuple(sorted((left, right)))
+            if pair not in expected_pairs:
+                raise ValueError("dependency evidence pair must reference exact candidate set")
+            if pair in seen:
+                raise ValueError("dependency evidence pair must be unique")
+            if not isinstance(bound, Decimal) or not bound.is_finite() or bound < 0 or bound > 1:
+                raise ValueError("dependency evidence pair bound must be an exact Decimal between 0 and 1")
+            item = (pair[0], pair[1], bound)
+            if previous is not None and item < previous:
+                raise ValueError("dependency evidence pair bounds must be sorted")
+            previous = item
+            seen.add(pair)
+        if seen != expected_pairs:
+            raise ValueError("dependency evidence must cover every candidate pair exactly once")
+        for name, value in (
+            ("uncertainty_fraction", self.uncertainty_fraction),
+            ("fee_fraction", self.fee_fraction),
+            ("partial_fill_stress_fraction", self.partial_fill_stress_fraction),
+        ):
+            if not isinstance(value, Decimal) or not value.is_finite() or value < 0 or value > 1:
+                raise ValueError(f"dependency evidence {name} must be an exact Decimal between 0 and 1")
+
+    @property
+    def support_qualified(self) -> bool:
+        """Deterministic conservative admission floor, not a sufficiency claim."""
+        return self.sample_size >= _MIN_DEPENDENCY_EVIDENCE_SAMPLE_SIZE
+
+    @property
+    def evidence_sha256(self) -> str:
+        return _sha256_payload(self.to_dict())
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema": "autosport.portfolio_dependency_evidence",
+            "schema_version": 2,
+            "evidence_id": self.evidence_id,
+            "portfolio_sha256": self.portfolio_sha256,
+            "intent_sha256s": list(self.intent_sha256s),
+            "candidate_sha256s": list(self.candidate_sha256s),
+            "population_id": self.population_id,
+            "method": self.method,
+            "sample_size": self.sample_size,
+            "causal_cutoff": self.causal_cutoff,
+            "as_of": self.as_of,
+            "valid_until": self.valid_until,
+            "reproducibility_sha256": self.reproducibility_sha256,
+            "pairwise_dependency_upper_bounds": [[a, b, str(bound)] for a, b, bound in self.pairwise_dependency_upper_bounds],
+            "uncertainty_fraction": str(self.uncertainty_fraction),
+            "fee_fraction": str(self.fee_fraction),
+            "partial_fill_stress_fraction": str(self.partial_fill_stress_fraction),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "PortfolioDependencyEvidence":
+        expected = {
+            "schema","schema_version","evidence_id","portfolio_sha256","intent_sha256s",
+            "candidate_sha256s","population_id","method","sample_size","causal_cutoff",
+            "as_of","valid_until","reproducibility_sha256","pairwise_dependency_upper_bounds",
+            "uncertainty_fraction","fee_fraction","partial_fill_stress_fraction",
+        }
+        if type(raw) is not dict or set(raw) != expected:
+            raise ValueError("serialized dependency evidence fields mismatch")
+        if raw["schema"] != "autosport.portfolio_dependency_evidence" or raw["schema_version"] != 2:
+            raise ValueError("unsupported dependency evidence schema")
+        pairs_raw = raw["pairwise_dependency_upper_bounds"]
+        if type(pairs_raw) is not list:
+            raise ValueError("serialized dependency evidence pairs must be a list")
+        pairs=[]
+        for item in pairs_raw:
+            if type(item) is not list or len(item)!=3:
+                raise ValueError("serialized dependency evidence pair is invalid")
+            pairs.append((item[0],item[1],_decimal_from_serialized("dependency evidence pair bound",item[2])))
+        return cls(
+            evidence_id=raw["evidence_id"],
+            portfolio_sha256=raw["portfolio_sha256"],
+            intent_sha256s=tuple(raw["intent_sha256s"]),
+            candidate_sha256s=tuple(raw["candidate_sha256s"]),
+            population_id=raw["population_id"],
+            method=raw["method"],
+            sample_size=raw["sample_size"],
+            causal_cutoff=raw["causal_cutoff"],
+            as_of=raw["as_of"],
+            valid_until=raw["valid_until"],
+            reproducibility_sha256=raw["reproducibility_sha256"],
+            pairwise_dependency_upper_bounds=tuple(pairs),
+            uncertainty_fraction=_decimal_from_serialized("dependency evidence uncertainty_fraction",raw["uncertainty_fraction"]),
+            fee_fraction=_decimal_from_serialized("dependency evidence fee_fraction",raw["fee_fraction"]),
+            partial_fill_stress_fraction=_decimal_from_serialized("dependency evidence partial_fill_stress_fraction",raw["partial_fill_stress_fraction"]),
+        )
+
+    def binds(self, *, portfolio_sha256: str, intents: tuple[OpportunityIntent, ...], decision_ts: str) -> bool:
+        if self.portfolio_sha256 != portfolio_sha256:
+            return False
+        if self.intent_sha256s != tuple(intent.intent_sha256 for intent in intents):
+            return False
+        if self.candidate_sha256s != tuple(intent.candidate_sha256 for intent in intents):
+            return False
+        _, decision = _canonical_timestamp("dependency evidence decision_ts", decision_ts)
+        _, as_of = _canonical_timestamp("dependency evidence as_of", self.as_of)
+        _, valid_until = _canonical_timestamp(
+            "dependency evidence valid_until", self.valid_until
+        )
+        return as_of <= decision <= valid_until
+
+
+@dataclass(frozen=True, slots=True)
+class RobustPortfolioProposal:
+    base_stakes: tuple[Decimal, ...]
+    proposed_stakes: tuple[Decimal, ...]
+    dependency_haircut_fraction: Decimal
+    uncertainty_fraction: Decimal
+    fee_fraction: Decimal
+    partial_fill_stress_fraction: Decimal
+    robust_scale: Decimal
+
+    @classmethod
+    def derive(cls, base_stakes: tuple[Decimal, ...], evidence: PortfolioDependencyEvidence, *, quantum: Decimal = Decimal("0.01")) -> "RobustPortfolioProposal":
+        if type(base_stakes) is not tuple or len(base_stakes) != len(evidence.candidate_sha256s):
+            raise ValueError("robust proposal stake/evidence cardinality mismatch")
+        if not isinstance(quantum, Decimal) or not quantum.is_finite() or quantum <= 0:
+            raise ValueError("robust proposal quantum must be positive")
+        if any(not isinstance(stake, Decimal) or not stake.is_finite() or stake < 0 for stake in base_stakes):
+            raise ValueError("robust proposal stakes must be non-negative finite Decimals")
+        dependency_haircut = max((bound for _, _, bound in evidence.pairwise_dependency_upper_bounds), default=Decimal("0"))
+        scale = (
+            (Decimal("1") - dependency_haircut)
+            * (Decimal("1") - evidence.uncertainty_fraction)
+            * (Decimal("1") - evidence.fee_fraction)
+            * (Decimal("1") - evidence.partial_fill_stress_fraction)
+        )
+        proposed = tuple((stake * scale).quantize(quantum) for stake in base_stakes)
+        return cls(base_stakes, proposed, dependency_haircut, evidence.uncertainty_fraction, evidence.fee_fraction, evidence.partial_fill_stress_fraction, scale)
+
+    @property
+    def proposal_sha256(self) -> str:
+        return _sha256_payload(self.to_dict())
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema":"autosport.robust_portfolio_proposal",
+            "schema_version":1,
+            "base_stakes":[_semantic_decimal_string("robust base stake", v) for v in self.base_stakes],
+            "proposed_stakes":[_semantic_decimal_string("robust proposed stake", v) for v in self.proposed_stakes],
+            "dependency_haircut_fraction":_semantic_decimal_string("robust dependency haircut", self.dependency_haircut_fraction),
+            "uncertainty_fraction":_semantic_decimal_string("robust uncertainty", self.uncertainty_fraction),
+            "fee_fraction":_semantic_decimal_string("robust fee", self.fee_fraction),
+            "partial_fill_stress_fraction":_semantic_decimal_string("robust partial fill stress", self.partial_fill_stress_fraction),
+            "robust_scale":_semantic_decimal_string("robust scale", self.robust_scale),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "RobustPortfolioProposal":
+        expected={"schema","schema_version","base_stakes","proposed_stakes","dependency_haircut_fraction","uncertainty_fraction","fee_fraction","partial_fill_stress_fraction","robust_scale"}
+        if type(raw) is not dict or set(raw)!=expected:
+            raise ValueError("serialized robust proposal fields mismatch")
+        if raw["schema"]!="autosport.robust_portfolio_proposal" or raw["schema_version"]!=1:
+            raise ValueError("unsupported robust proposal schema")
+        return cls(
+            base_stakes=tuple(_decimal_from_serialized("robust base stake",v) for v in raw["base_stakes"]),
+            proposed_stakes=tuple(_decimal_from_serialized("robust proposed stake",v) for v in raw["proposed_stakes"]),
+            dependency_haircut_fraction=_decimal_from_serialized("robust dependency haircut",raw["dependency_haircut_fraction"]),
+            uncertainty_fraction=_decimal_from_serialized("robust uncertainty",raw["uncertainty_fraction"]),
+            fee_fraction=_decimal_from_serialized("robust fee",raw["fee_fraction"]),
+            partial_fill_stress_fraction=_decimal_from_serialized("robust partial fill stress",raw["partial_fill_stress_fraction"]),
+            robust_scale=_decimal_from_serialized("robust scale",raw["robust_scale"]),
         )
 
 
@@ -1106,6 +1357,8 @@ class PortfolioPlan:
     risk_policy_sha256: str
     portfolio_truth: EvidenceTruth
     reason: str
+    dependency_evidence: PortfolioDependencyEvidence | None = None
+    robust_proposal: RobustPortfolioProposal | None = None
 
     def __post_init__(self) -> None:
         _canonical_timestamp("decision_ts", self.decision_ts)
@@ -1150,6 +1403,69 @@ class PortfolioPlan:
                 raise ValueError("dependency graph must bind the exact portfolio identity")
             if self.intent_sha256s != self.dependency_graph.intent_sha256s:
                 raise ValueError("dependency graph must bind the exact intent vector")
+        if self.dependency_evidence is not None:
+            if not isinstance(self.dependency_evidence, PortfolioDependencyEvidence):
+                raise ValueError(
+                    "dependency_evidence must be PortfolioDependencyEvidence"
+                )
+            if self.dependency_graph is None:
+                raise ValueError(
+                    "dependency evidence requires a bound dependency graph"
+                )
+            if not self.dependency_evidence.support_qualified:
+                raise ValueError(
+                    "durable dependency evidence is under-supported"
+                )
+            if self.portfolio_sha256 != self.dependency_evidence.portfolio_sha256:
+                raise ValueError(
+                    "dependency evidence must bind the exact portfolio identity"
+                )
+            if self.intent_sha256s != self.dependency_evidence.intent_sha256s:
+                raise ValueError(
+                    "dependency evidence must bind the exact intent vector"
+                )
+            if (
+                self.dependency_graph.candidate_sha256s
+                != self.dependency_evidence.candidate_sha256s
+            ):
+                raise ValueError(
+                    "dependency evidence must bind the exact candidate vector"
+                )
+            _, decision_time = _canonical_timestamp(
+                "portfolio plan decision_ts", self.decision_ts
+            )
+            _, evidence_as_of = _canonical_timestamp(
+                "dependency evidence as_of", self.dependency_evidence.as_of
+            )
+            _, evidence_valid_until = _canonical_timestamp(
+                "dependency evidence valid_until",
+                self.dependency_evidence.valid_until,
+            )
+            if not (evidence_as_of <= decision_time <= evidence_valid_until):
+                raise ValueError(
+                    "dependency evidence must be valid at portfolio decision time"
+                )
+        if self.robust_proposal is not None:
+            if not isinstance(self.robust_proposal, RobustPortfolioProposal):
+                raise ValueError(
+                    "robust_proposal must be RobustPortfolioProposal"
+                )
+            if self.dependency_evidence is None:
+                raise ValueError(
+                    "robust proposal requires durable dependency evidence"
+                )
+            recomputed = RobustPortfolioProposal.derive(
+                self.robust_proposal.base_stakes,
+                self.dependency_evidence,
+            )
+            if recomputed != self.robust_proposal:
+                raise ValueError(
+                    "robust proposal must exactly match durable dependency evidence"
+                )
+            if self.robust_proposal.proposed_stakes != self.stakes:
+                raise ValueError(
+                    "robust proposal must bind the exact portfolio stake vector"
+                )
         if self.terminal_economics is not None:
             if not isinstance(self.terminal_economics, VerifiedTerminalEconomics):
                 raise ValueError(
@@ -1238,8 +1554,24 @@ class PortfolioPlan:
             else self.dependency_graph.graph_sha256
         )
 
+    @property
+    def dependency_evidence_sha256(self) -> str | None:
+        return (
+            None
+            if self.dependency_evidence is None
+            else self.dependency_evidence.evidence_sha256
+        )
+
+    @property
+    def robust_proposal_sha256(self) -> str | None:
+        return (
+            None
+            if self.robust_proposal is None
+            else self.robust_proposal.proposal_sha256
+        )
+
     def _identity_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema": "autosport.portfolio_plan",
             "schema_version": 4,
             "decision_ts": self.decision_ts,
@@ -1263,6 +1595,25 @@ class PortfolioPlan:
             "portfolio_truth": self.portfolio_truth.value,
             "reason": self.reason,
         }
+        if self.dependency_evidence is not None or self.robust_proposal is not None:
+            payload["schema_version"] = 5
+            payload.update(
+                {
+                    "dependency_evidence": (
+                        None
+                        if self.dependency_evidence is None
+                        else self.dependency_evidence.to_dict()
+                    ),
+                    "dependency_evidence_sha256": self.dependency_evidence_sha256,
+                    "robust_proposal": (
+                        None
+                        if self.robust_proposal is None
+                        else self.robust_proposal.to_dict()
+                    ),
+                    "robust_proposal_sha256": self.robust_proposal_sha256,
+                }
+            )
+        return payload
 
     @property
     def plan_sha256(self) -> str:
@@ -1280,7 +1631,7 @@ class PortfolioPlan:
             MarketSettlementOutcomeAuthority, ...
         ] = (),
     ) -> "PortfolioPlan":
-        expected = {
+        legacy_expected = {
             "schema",
             "schema_version",
             "decision_ts",
@@ -1299,12 +1650,25 @@ class PortfolioPlan:
             "reason",
             "plan_sha256",
         }
-        if type(raw) is not dict or set(raw) != expected:
+        durable_dependency_fields = {
+            "dependency_evidence",
+            "dependency_evidence_sha256",
+            "robust_proposal",
+            "robust_proposal_sha256",
+        }
+        if type(raw) is not dict:
             raise ValueError("serialized portfolio plan must contain canonical fields")
-        if raw["schema"] != "autosport.portfolio_plan":
+        if raw.get("schema") != "autosport.portfolio_plan":
             raise ValueError("unsupported portfolio plan schema")
-        if raw["schema_version"] != 4:
+        schema_version = raw.get("schema_version")
+        if schema_version == 4:
+            expected = legacy_expected
+        elif schema_version == 5:
+            expected = legacy_expected | durable_dependency_fields
+        else:
             raise ValueError("unsupported portfolio plan schema_version")
+        if set(raw) != expected:
+            raise ValueError("serialized portfolio plan must contain canonical fields")
         try:
             stakes_raw = raw["stakes"]
             intent_ids_raw = raw["intent_ids"]
@@ -1340,6 +1704,21 @@ class PortfolioPlan:
                     decision_as_of=decision_time,
                 )
             )
+            dependency_evidence = None
+            robust_proposal = None
+            if schema_version == 5:
+                dependency_raw = raw["dependency_evidence"]
+                robust_raw = raw["robust_proposal"]
+                dependency_evidence = (
+                    None
+                    if dependency_raw is None
+                    else PortfolioDependencyEvidence.from_dict(dependency_raw)
+                )
+                robust_proposal = (
+                    None
+                    if robust_raw is None
+                    else RobustPortfolioProposal.from_dict(robust_raw)
+                )
             plan = cls(
                 decision_ts=raw["decision_ts"],
                 action=PortfolioAction(raw["action"]),
@@ -1357,10 +1736,24 @@ class PortfolioPlan:
                 risk_policy_sha256=raw["risk_policy_sha256"],
                 portfolio_truth=EvidenceTruth(raw["portfolio_truth"]),
                 reason=raw["reason"],
+                dependency_evidence=dependency_evidence,
+                robust_proposal=robust_proposal,
             )
             serialized_graph_sha256 = raw["dependency_graph_sha256"]
             if serialized_graph_sha256 != plan.dependency_graph_sha256:
                 raise ValueError("serialized dependency graph digest does not match graph")
+            if schema_version == 5:
+                if (
+                    raw["dependency_evidence_sha256"]
+                    != plan.dependency_evidence_sha256
+                ):
+                    raise ValueError(
+                        "serialized dependency evidence digest does not match evidence"
+                    )
+                if raw["robust_proposal_sha256"] != plan.robust_proposal_sha256:
+                    raise ValueError(
+                        "serialized robust proposal digest does not match proposal"
+                    )
             serialized_plan_sha256 = _canonical_sha256(
                 "serialized plan_sha256", raw["plan_sha256"]
             )
@@ -1369,7 +1762,6 @@ class PortfolioPlan:
             return plan
         except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
             raise ValueError("serialized portfolio plan is invalid") from exc
-
 
 _PORTFOLIO_PLAN_DECISION_AGENT = "portfolio-plan"
 _PORTFOLIO_PLAN_DECISION_ACTION = "RECORD_PORTFOLIO_PLAN"
@@ -1836,6 +2228,7 @@ def build_portfolio_plan(
     market_outcome_authorities: tuple[
         MarketSettlementOutcomeAuthority, ...
     ] = (),
+    dependency_evidence: PortfolioDependencyEvidence | None = None,
 ) -> PortfolioPlan:
     """Build one pure whole-portfolio paper plan under canonical RiskPolicy authority."""
 
@@ -1859,6 +2252,8 @@ def build_portfolio_plan(
         raise TypeError(
             "terminal_state_evidence must be TerminalStateCompletenessEvidence"
         )
+    if dependency_evidence is not None and not isinstance(dependency_evidence, PortfolioDependencyEvidence):
+        raise TypeError("dependency_evidence must be PortfolioDependencyEvidence")
     if type(market_outcome_authorities) is not tuple:
         raise TypeError("market_outcome_authorities must be a tuple")
     if any(
@@ -1936,13 +2331,55 @@ def build_portfolio_plan(
             portfolio_truth=portfolio_truth,
         )
 
+    expected_candidates = tuple(intent.candidate_sha256 for intent in intents)
+    dependency_graph_binds_inputs = (
+        dependency_graph is not None
+        and dependency_graph.portfolio_sha256 == portfolio_sha256
+        and dependency_graph.intent_sha256s == intent_sha256s
+        and dependency_graph.candidate_sha256s == expected_candidates
+    )
+
+    if dependency_evidence is not None and (
+        dependency_graph is None
+        or not dependency_evidence.binds(
+            portfolio_sha256=portfolio_sha256,
+            intents=intents,
+            decision_ts=decision_ts,
+        )
+    ):
+        return _terminal_plan(
+            decision_ts=decision_ts,
+            action=PortfolioAction.WAIT,
+            reason="dependency evidence does not bind exact portfolio/candidates or is stale",
+            intents=intents,
+            portfolio_sha256=portfolio_sha256,
+            dependency_graph=(
+                dependency_graph if dependency_graph_binds_inputs else None
+            ),
+            policy=risk_policy,
+            portfolio_truth=portfolio_truth,
+        )
+    if (
+        dependency_evidence is not None
+        and not dependency_evidence.support_qualified
+    ):
+        return _terminal_plan(
+            decision_ts=decision_ts,
+            action=PortfolioAction.WAIT,
+            reason=(
+                "dependency evidence is under-supported: "
+                f"sample_size={dependency_evidence.sample_size} is below deterministic "
+                f"admission floor {_MIN_DEPENDENCY_EVIDENCE_SAMPLE_SIZE}"
+            ),
+            intents=intents,
+            portfolio_sha256=portfolio_sha256,
+            dependency_graph=dependency_graph,
+            policy=risk_policy,
+            portfolio_truth=portfolio_truth,
+        )
+
     if dependency_graph is not None:
-        expected_candidates = tuple(intent.candidate_sha256 for intent in intents)
-        if (
-            dependency_graph.portfolio_sha256 != portfolio_sha256
-            or dependency_graph.intent_sha256s != intent_sha256s
-            or dependency_graph.candidate_sha256s != expected_candidates
-        ):
+        if not dependency_graph_binds_inputs:
             return _terminal_plan(
                 decision_ts=decision_ts,
                 action=PortfolioAction.WAIT,
@@ -2015,7 +2452,7 @@ def build_portfolio_plan(
     # every new positive candidate evaluated alongside an already-open position.
     # This makes omission non-authoritative rather than treating an empty edge list
     # as evidence of independence.
-    if len(positive_candidates) > 1 and terminal_state_evidence is None:
+    if len(positive_candidates) > 1 and terminal_state_evidence is None and dependency_evidence is None:
         return _terminal_plan(
             decision_ts=decision_ts,
             action=PortfolioAction.WAIT,
@@ -2058,6 +2495,78 @@ def build_portfolio_plan(
         risk_of_ruin_vector_evidence=risk_of_ruin_vector_evidence,
     )
     terminal_economics: VerifiedTerminalEconomics | None = None
+    robust_proposal: RobustPortfolioProposal | None = None
+    if (
+        allocation.action == "STAKE_VECTOR"
+        and dependency_evidence is not None
+        and sum(stake > 0 for stake in allocation.stakes) > 1
+    ):
+        robust_proposal = RobustPortfolioProposal.derive(
+            allocation.stakes, dependency_evidence
+        )
+        rounded = robust_proposal.proposed_stakes
+        if not any(stake > 0 for stake in rounded):
+            allocation = replace(
+                allocation,
+                action="ZERO",
+                stakes=rounded,
+                reason="robust joint-dependency/uncertainty stress leaves no positive stake",
+            )
+        else:
+            shadow = risk_policy._shadow_book_for_allocation(book)
+            if shadow is None:
+                return _terminal_plan(
+                    decision_ts=decision_ts,
+                    action=PortfolioAction.WAIT,
+                    reason="robust proposal post-rounding risk state is invalid",
+                    intents=intents,
+                    portfolio_sha256=portfolio_sha256,
+                    dependency_graph=dependency_graph,
+                    policy=risk_policy,
+                    portfolio_truth=portfolio_truth,
+                )
+            for index, stake in enumerate(rounded):
+                if stake <= 0:
+                    continue
+                decision = risk_policy.evaluate(
+                    shadow, stake, context=intents[index].risk_context
+                )
+                if not decision.allowed:
+                    return _terminal_plan(
+                        decision_ts=decision_ts,
+                        action=PortfolioAction.WAIT,
+                        reason="robust proposal failed canonical post-rounding risk revalidation",
+                        intents=intents,
+                        portfolio_sha256=portfolio_sha256,
+                        dependency_graph=dependency_graph,
+                        policy=risk_policy,
+                        portfolio_truth=portfolio_truth,
+                    )
+                try:
+                    shadow.open_ticket(
+                        intents[index].risk_context.legs,
+                        stake,
+                        reason=f"robust-risk-revalidation:{index}",
+                        placed_at=intents[index].risk_context.proposal_ts,
+                        provider_source_ids=tuple(
+                            sorted(intents[index].risk_context.source_ids)
+                        ),
+                        provider_accounts=intents[index].risk_context.provider_accounts,
+                        bankroll_id=intents[index].risk_context.bankroll_id,
+                        currency=intents[index].risk_context.currency,
+                    )
+                except (ArithmeticError, AttributeError, TypeError, ValueError):
+                    return _terminal_plan(
+                        decision_ts=decision_ts,
+                        action=PortfolioAction.WAIT,
+                        reason="robust proposal post-rounding shadow revalidation failed closed",
+                        intents=intents,
+                        portfolio_sha256=portfolio_sha256,
+                        dependency_graph=dependency_graph,
+                        policy=risk_policy,
+                        portfolio_truth=portfolio_truth,
+                    )
+            allocation = replace(allocation, stakes=rounded)
     if allocation.action == "STAKE_VECTOR":
         actual_positive = tuple(
             intent
@@ -2070,6 +2579,7 @@ def build_portfolio_plan(
         )
         needs_complete_dependency = (
             len(actual_positive) > 1
+            and dependency_evidence is None
             or (
                 bool(actual_positive)
                 and any(
@@ -2232,4 +2742,6 @@ def build_portfolio_plan(
                 )
             )
         ),
+        dependency_evidence=dependency_evidence,
+        robust_proposal=robust_proposal,
     )

@@ -496,7 +496,7 @@ class _InputSpec:
 
     @classmethod
     def from_dict(cls, raw: object) -> "_InputSpec":
-        if type(raw) is not dict or set(raw) not in {
+        if type(raw) is not dict or frozenset(raw) not in {
             _INPUT_SPEC_KEYS_V1,
             _INPUT_SPEC_KEYS_V2,
         }:

@@ -419,7 +419,8 @@ class PairedVOCEvaluationTests(unittest.TestCase):
     def test_store_round_trip_preserves_negative_and_positive_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "voc.json"
-            store = VOCEvaluationStore(path)
+            resolver = _FixtureCanonicalVOCResolver()
+            store = VOCEvaluationStore(path, canonical_authority_resolver=resolver)
             positive = evaluation(evaluation_id="positive")
             negative = evaluation(
                 evaluation_id="negative",
@@ -429,10 +430,12 @@ class PairedVOCEvaluationTests(unittest.TestCase):
                 incremental_value_interval_low=Decimal("-1"),
                 incremental_value_interval_high=Decimal("-0.2"),
             )
+            resolver.publish(positive)
+            resolver.publish(negative)
             store.record(positive)
             store.record(negative)
 
-            reopened = VOCEvaluationStore(path)
+            reopened = VOCEvaluationStore(path, canonical_authority_resolver=resolver)
             self.assertEqual(
                 {value.evaluation_id for value in reopened.values()},
                 {"positive", "negative"},

@@ -119,6 +119,24 @@ def _promotion_authority_for_champion(
     return authority
 
 
+def _require_causal_record(
+    registry: ScientificRegistry,
+    record: RegistryEntry,
+    *,
+    as_of: str,
+    name: str,
+) -> None:
+    """Require the exact durable record to have existed by one causal cutoff."""
+
+    for causal in registry.causal_records(record.record_type, as_of=as_of):
+        if causal.record_id != record.record_id:
+            continue
+        if causal.record_sha256 != record.record_sha256:
+            raise ChampionPolicyError(f"{name} causal record identity mismatch")
+        return
+    raise ChampionPolicyError(f"{name} was not causally available at promotion")
+
+
 def load_champion_policy(
     registry: ScientificRegistry,
     artifact_store: FactoryArtifactStore,
@@ -211,6 +229,21 @@ def load_champion_policy(
     ):
         raise ChampionPolicyError(
             "champion promotion EvaluationBundle lineage mismatch"
+        )
+
+    # Restart activation must preserve the same causal availability boundary as
+    # ScientificRegistry.record_promotion(). A locally rehashed registry record
+    # cannot become authority merely because it is structurally valid.
+    for record, name in (
+        (strategy, "champion StrategyVersion"),
+        (model, "champion ModelVersion"),
+        (evaluation, "champion EvaluationBundle"),
+    ):
+        _require_causal_record(
+            registry,
+            record,
+            as_of=promotion.available_at,
+            name=name,
         )
 
     try:

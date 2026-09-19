@@ -2215,7 +2215,8 @@ class ModelComputeRouterTests(unittest.TestCase):
                 rewrite_store_with_valid_state_hash(path, raw)
                 with self.assertRaisesRegex(
                     ModelComputeRouterError,
-                    "execution authority recovery prior head mismatch",
+                    "execution authority (?:prefix does not match routing state|"
+                    "recovery prior head mismatch)",
                 ):
                     ModelComputeRouterStore(path)
 

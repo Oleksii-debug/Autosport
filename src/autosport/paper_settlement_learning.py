@@ -543,6 +543,15 @@ class PaperSettlementLearningBridge:
             }
             if not scoped:
                 continue
+            identity_parts = {resolution.event_identity}
+            if ":" in resolution.event_identity:
+                identity_parts.add(resolution.event_identity.split(":", 1)[1])
+            leg_by_key = {leg.quote_key: leg for leg in ticket.legs}
+            for key in scoped:
+                if leg_by_key[key].event_id not in identity_parts:
+                    raise PaperSettlementLearningBridgeError(
+                        "settlement evidence event identity differs from bound ticket leg"
+                    )
             for key, value in scoped.items():
                 previous = known.get(key)
                 if previous is not None and previous != value:

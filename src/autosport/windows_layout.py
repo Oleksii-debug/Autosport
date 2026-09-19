@@ -56,14 +56,12 @@ WINDOWS_SHELL_AUTOMATION_IDS = {
     "owner_economic_dialog_readback": 308,
 }
 
-MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS = frozenset({
-    "ui.windows.manual_calculation.frame.title",
-    "ui.windows.manual_calculation.button.open",
-    "ui.windows.manual_calculation.accessibility.open.name",
-    "ui.windows.manual_calculation.accessibility.open.description",
-})
-MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS.update(
+MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS = frozenset(
     {
+        "ui.windows.manual_calculation.frame.title",
+        "ui.windows.manual_calculation.button.open",
+        "ui.windows.manual_calculation.accessibility.open.name",
+        "ui.windows.manual_calculation.accessibility.open.description",
         "ui.windows.manual_calculation.dialog.title",
         "ui.windows.manual_calculation.dialog.description",
         "ui.windows.manual_calculation.operation.label",

@@ -21,6 +21,7 @@ from .integrity import atomic_write_json
 from .learning_environment import (
     Action,
     EnvironmentCheckpoint,
+    EnvironmentIdentity,
     Episode,
     EvidenceTruth,
     Observation,
@@ -707,10 +708,16 @@ class AgentLoopRuntime:
         return self.snapshot()
 
     def begin_observation(
-        self, observation: Observation, *, at: str
+        self,
+        observation: Observation,
+        *,
+        environment_identity: EnvironmentIdentity,
+        at: str,
     ) -> AgentLoopSnapshot:
         if not isinstance(observation, Observation):
             raise TypeError("observation must be Observation")
+        if not isinstance(environment_identity, EnvironmentIdentity):
+            raise TypeError("environment_identity must be EnvironmentIdentity")
 
         def apply(state: dict[str, Any], now: str) -> None:
             phase = AgentLoopPhase(state["phase"])
@@ -722,11 +729,33 @@ class AgentLoopRuntime:
                     "new observation requires BOOTSTRAP or CHECKPOINT"
                 )
             if (
-                observation.environment_id
+                environment_identity.environment_id
                 != state["identity"]["environment_id"]
             ):
                 raise AgentLoopError(
+                    "environment identity does not match AgentLoop"
+                )
+            if (
+                observation.environment_id
+                != environment_identity.environment_id
+            ):
+                raise AgentLoopError(
                     "observation belongs to another environment"
+                )
+            cutoff = _instant(
+                environment_identity.cutoff_ts,
+                "environment_identity.cutoff_ts",
+            )
+            if (
+                _instant(observation.observed_at, "observation.observed_at")
+                > cutoff
+                or _instant(
+                    observation.available_at, "observation.available_at"
+                )
+                > cutoff
+            ):
+                raise AgentLoopError(
+                    "observation exceeds canonical environment evidence cutoff"
                 )
             if _instant(
                 observation.available_at, "observation.available_at"

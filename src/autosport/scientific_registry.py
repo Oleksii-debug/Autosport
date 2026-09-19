@@ -5,7 +5,7 @@ import json
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -1178,15 +1178,11 @@ class ScientificRegistry:
                     raise PromotionEvidenceError("candidate model/experiment seed lineage mismatch")
             if decision.action is PromotionAction.PROMOTE:
                 frozen_rule = binding.get("promotion_rule")
-                promotion_evidence_required = (
-                    isinstance(frozen_rule, str)
-                    and frozen_rule.startswith('{"kind":"autosport-promotion-rule-v1"')
-                )
-                frozen_rule_payload = (
-                    _frozen_promotion_rule_payload(frozen_rule)
-                    if promotion_evidence_required
-                    else None
-                )
+                if not isinstance(frozen_rule, str):
+                    raise PromotionEvidenceError(
+                        "PROMOTE requires a frozen typed promotion rule"
+                    )
+                frozen_rule_payload = _frozen_promotion_rule_payload(frozen_rule)
                 if strategy["payload"].get("predecessor_strategy_version_id") != decision.predecessor_strategy_version_id:
                     raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
                 if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:
@@ -1200,13 +1196,27 @@ class ScientificRegistry:
                     license_identity=dataset["payload"].get("license_identity"),
                     confirmation_trial_family_id=evidence_trial_family,
                 )
-                if not promotion_evidence_required:
-                    return self._append_entry_locked(state, entry)
                 evidence_id = decision.promotion_evidence_id
                 if not isinstance(evidence_id, str) or not evidence_id:
                     raise PromotionEvidenceError("PROMOTE requires typed PromotionEvidence")
                 evidence = require("PromotionEvidence", evidence_id)
                 ep = evidence["payload"]
+                for raw in state["records"]:
+                    if raw["record_type"] != "PromotionDecision":
+                        continue
+                    prior_id = raw["payload"].get("promotion_evidence_id")
+                    if prior_id == evidence_id:
+                        raise PromotionEvidenceError("promotion evidence has already been consumed")
+                    if prior_id:
+                        prior = entries.get(("PromotionEvidence", prior_id))
+                        if (
+                            prior is not None
+                            and prior["payload"].get("holdout_access_id")
+                            == ep.get("holdout_access_id")
+                        ):
+                            raise PromotionEvidenceError(
+                                "confirmation holdout access has already been consumed by another promotion"
+                            )
                 expected = {
                     "experiment_id": matching_experiment_entry["record_id"],
                     "research_protocol_id": decision.research_protocol_id,
@@ -1250,23 +1260,24 @@ class ScientificRegistry:
                     raise PromotionEvidenceError("promotion evidence multiple-comparison control is not frozen")
                 if ep.get("uncertainty_method") != binding.get("uncertainty_method"):
                     raise PromotionEvidenceError("promotion evidence uncertainty method is not frozen")
-                low = Decimal(ep.get("effect_interval_low"))
-                practical = Decimal(ep.get("practical_improvement"))
-                frozen_minimum_improvement = Decimal(str(frozen_rule_payload.get("minimum_improvement")))
+                try:
+                    low = Decimal(ep.get("effect_interval_low"))
+                    practical = Decimal(ep.get("practical_improvement"))
+                    frozen_minimum_improvement = Decimal(
+                        str(frozen_rule_payload.get("minimum_improvement"))
+                    )
+                except (InvalidOperation, TypeError, ValueError) as exc:
+                    raise PromotionEvidenceError(
+                        "promotion evidence effect/threshold values must be canonical decimal text"
+                    ) from exc
+                if not low.is_finite() or not practical.is_finite() or not frozen_minimum_improvement.is_finite():
+                    raise PromotionEvidenceError(
+                        "promotion evidence effect/threshold values must be finite"
+                    )
                 if low <= 0 or practical <= 0:
                     raise PromotionEvidenceError("PROMOTE requires strictly positive observed improvement and effect interval")
                 if low < frozen_minimum_improvement or practical < frozen_minimum_improvement:
                     raise PromotionEvidenceError("PROMOTE requires improvement clearing the frozen minimum")
-                for raw in state["records"]:
-                    if raw["record_type"] != "PromotionDecision":
-                        continue
-                    prior_id = raw["payload"].get("promotion_evidence_id")
-                    if prior_id == evidence_id:
-                        raise PromotionEvidenceError("promotion evidence has already been consumed")
-                    if prior_id:
-                        prior = entries.get(("PromotionEvidence", prior_id))
-                        if prior is not None and prior["payload"].get("holdout_access_id") == ep.get("holdout_access_id"):
-                            raise PromotionEvidenceError("confirmation holdout access has already been consumed by another promotion")
             return self._append_entry_locked(state, entry)
 
     def champion_strategy(

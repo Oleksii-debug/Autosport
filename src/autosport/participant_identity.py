@@ -1,0 +1,276 @@
+"""Causal, restart-safe participant identity and alias lineage.
+
+This is deliberately an identity authority only.  It does not score participants,
+infer behaviour, replace provider event identity, or grant strategy/execution power.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+
+from .integrity import atomic_write_json
+
+
+_SCHEMA = "autosport.participant_identity"
+_VERSION = 1
+
+
+class EntityKind(StrEnum):
+    PARTICIPANT = "PARTICIPANT"
+    TEAM = "TEAM"
+    LEAGUE = "LEAGUE"
+
+
+class IdentityView(StrEnum):
+    AS_KNOWN_AT_DECISION = "AS_KNOWN_AT_DECISION"
+    RESTATED_RESEARCH = "RESTATED_RESEARCH"
+
+
+class ParticipantIdentityError(ValueError):
+    """Raised when causal identity evidence is malformed or ambiguous."""
+
+
+def _text(name: str, value: object) -> str:
+    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
+        raise ParticipantIdentityError(f"{name} must be a non-empty canonical string")
+    value.encode("utf-8")
+    return value
+
+
+def _instant(name: str, value: object) -> datetime:
+    text = _text(name, value)
+    try:
+        result = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ParticipantIdentityError(f"{name} must be ISO-8601") from exc
+    if result.tzinfo is None or result.utcoffset() is None:
+        raise ParticipantIdentityError(f"{name} must include a timezone")
+    return result.astimezone(timezone.utc)
+
+
+def _time_text(name: str, value: object) -> str:
+    return _instant(name, value).isoformat().replace("+00:00", "Z")
+
+
+def _digest(payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class EntityIdentity:
+    entity_id: str
+    kind: EntityKind
+    source_reference: str
+    evidence_sha256: str
+    first_known_at: str
+    available_at: str
+
+    def __post_init__(self) -> None:
+        _text("entity_id", self.entity_id)
+        if not isinstance(self.kind, EntityKind):
+            raise ParticipantIdentityError("kind must be EntityKind")
+        _text("source_reference", self.source_reference)
+        if len(_text("evidence_sha256", self.evidence_sha256)) != 64:
+            raise ParticipantIdentityError("evidence_sha256 must be SHA-256 hex")
+        if any(ch not in "0123456789abcdef" for ch in self.evidence_sha256):
+            raise ParticipantIdentityError("evidence_sha256 must be SHA-256 hex")
+        if _instant("available_at", self.available_at) < _instant("first_known_at", self.first_known_at):
+            raise ParticipantIdentityError("identity cannot be available before first_known_at")
+
+    def payload(self) -> dict[str, str]:
+        return {"entity_id": self.entity_id, "kind": self.kind.value, "source_reference": self.source_reference,
+                "evidence_sha256": self.evidence_sha256, "first_known_at": _time_text("first_known_at", self.first_known_at),
+                "available_at": _time_text("available_at", self.available_at)}
+
+
+@dataclass(frozen=True, slots=True)
+class AliasRecord:
+    source_id: str
+    alias: str
+    entity_id: str
+    valid_from: str
+    valid_until: str | None
+    available_at: str
+    evidence_sha256: str
+    relation: str = "CONFIRMED"
+
+    def __post_init__(self) -> None:
+        for name in ("source_id", "alias", "entity_id", "evidence_sha256", "relation"):
+            _text(name, getattr(self, name))
+        if len(self.evidence_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in self.evidence_sha256):
+            raise ParticipantIdentityError("alias evidence_sha256 must be SHA-256 hex")
+        start = _instant("valid_from", self.valid_from)
+        if self.valid_until is not None and _instant("valid_until", self.valid_until) <= start:
+            raise ParticipantIdentityError("valid_until must be after valid_from")
+        if _instant("available_at", self.available_at) < start:
+            raise ParticipantIdentityError("alias cannot be available before valid_from")
+
+    @property
+    def record_id(self) -> str:
+        return _digest(self.payload())
+
+    def payload(self) -> dict[str, str | None]:
+        return {"source_id": self.source_id, "alias": self.alias, "entity_id": self.entity_id,
+                "valid_from": _time_text("valid_from", self.valid_from),
+                "valid_until": None if self.valid_until is None else _time_text("valid_until", self.valid_until),
+                "available_at": _time_text("available_at", self.available_at), "evidence_sha256": self.evidence_sha256,
+                "relation": self.relation}
+
+
+@dataclass(frozen=True, slots=True)
+class RosterMembership:
+    event_id: str
+    source_id: str
+    entity_id: str
+    member_from: str
+    member_until: str | None
+    available_at: str
+    evidence_sha256: str
+
+    def __post_init__(self) -> None:
+        for name in ("event_id", "source_id", "entity_id", "evidence_sha256"):
+            _text(name, getattr(self, name))
+        if len(self.evidence_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in self.evidence_sha256):
+            raise ParticipantIdentityError("roster evidence_sha256 must be SHA-256 hex")
+        start = _instant("member_from", self.member_from)
+        if self.member_until is not None and _instant("member_until", self.member_until) <= start:
+            raise ParticipantIdentityError("member_until must be after member_from")
+        if _instant("available_at", self.available_at) < start:
+            raise ParticipantIdentityError("roster membership cannot be available before member_from")
+
+    def payload(self) -> dict[str, str | None]:
+        return {"event_id": self.event_id, "source_id": self.source_id, "entity_id": self.entity_id,
+                "member_from": _time_text("member_from", self.member_from),
+                "member_until": None if self.member_until is None else _time_text("member_until", self.member_until),
+                "available_at": _time_text("available_at", self.available_at), "evidence_sha256": self.evidence_sha256}
+
+
+class ParticipantIdentityRegistry:
+    """Append-only identity evidence with causal and restated views."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._entities: dict[str, EntityIdentity] = {}
+        self._aliases: list[AliasRecord] = []
+        self._rosters: list[RosterMembership] = []
+        if self.path.exists():
+            self._load()
+
+    @classmethod
+    def initialize_pristine(cls, path: Path) -> "ParticipantIdentityRegistry":
+        registry = cls(path)
+        if registry.path.exists():
+            raise ParticipantIdentityError("identity registry already exists")
+        registry._persist()
+        return registry
+
+    def add_entity(self, entity: EntityIdentity) -> None:
+        if not isinstance(entity, EntityIdentity):
+            raise TypeError("entity must be EntityIdentity")
+        existing = self._entities.get(entity.entity_id)
+        if existing is not None:
+            if existing != entity:
+                raise ParticipantIdentityError("conflicting immutable entity identity")
+            return
+        self._entities[entity.entity_id] = entity
+        self._persist()
+
+    def add_alias(self, alias: AliasRecord) -> None:
+        if not isinstance(alias, AliasRecord):
+            raise TypeError("alias must be AliasRecord")
+        if alias.entity_id not in self._entities:
+            raise ParticipantIdentityError("alias references unknown entity")
+        if alias in self._aliases:
+            return
+        for existing in self._aliases:
+            if existing.source_id != alias.source_id or existing.alias != alias.alias or existing.entity_id == alias.entity_id:
+                continue
+            if _overlap(existing.valid_from, existing.valid_until, alias.valid_from, alias.valid_until):
+                raise ParticipantIdentityError("conflicting alias validity intervals")
+        self._aliases.append(alias)
+        self._aliases.sort(key=lambda value: (value.source_id, value.alias, _time_text("valid_from", value.valid_from), value.record_id))
+        self._persist()
+
+    def add_roster_membership(self, membership: RosterMembership) -> None:
+        if not isinstance(membership, RosterMembership):
+            raise TypeError("membership must be RosterMembership")
+        if membership.entity_id not in self._entities:
+            raise ParticipantIdentityError("roster membership references unknown entity")
+        if membership in self._rosters:
+            return
+        self._rosters.append(membership)
+        self._rosters.sort(key=lambda value: (value.event_id, value.source_id, value.entity_id, _time_text("member_from", value.member_from)))
+        self._persist()
+
+    def resolve_alias(self, source_id: str, alias: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> EntityIdentity:
+        if not isinstance(view, IdentityView):
+            raise TypeError("view must be IdentityView")
+        moment = _instant("as_of", as_of)
+        matches = []
+        for record in self._aliases:
+            if record.source_id != _text("source_id", source_id) or record.alias != _text("alias", alias):
+                continue
+            if not _contains(record.valid_from, record.valid_until, moment):
+                continue
+            if view is IdentityView.AS_KNOWN_AT_DECISION and _instant("available_at", record.available_at) > moment:
+                continue
+            matches.append(record)
+        if len(matches) != 1:
+            raise ParticipantIdentityError("alias cannot be resolved unambiguously at requested causal view")
+        entity = self._entities[matches[0].entity_id]
+        if view is IdentityView.AS_KNOWN_AT_DECISION and _instant("available_at", entity.available_at) > moment:
+            raise ParticipantIdentityError("entity was not known at requested causal view")
+        return entity
+
+    def roster_at(self, event_id: str, source_id: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> tuple[EntityIdentity, ...]:
+        moment = _instant("as_of", as_of)
+        if not isinstance(view, IdentityView):
+            raise TypeError("view must be IdentityView")
+        result = []
+        for membership in self._rosters:
+            if membership.event_id == _text("event_id", event_id) and membership.source_id == _text("source_id", source_id) and _contains(membership.member_from, membership.member_until, moment):
+                if view is IdentityView.RESTATED_RESEARCH or _instant("available_at", membership.available_at) <= moment:
+                    result.append(self._entities[membership.entity_id])
+        return tuple(sorted(result, key=lambda entity: entity.entity_id))
+
+    def _persist(self) -> None:
+        atomic_write_json(self.path, {"schema": _SCHEMA, "version": _VERSION,
+            "entities": [item.payload() for item in sorted(self._entities.values(), key=lambda item: item.entity_id)],
+            "aliases": [item.payload() for item in self._aliases],
+            "rosters": [item.payload() for item in self._rosters]})
+
+    def _load(self) -> None:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ParticipantIdentityError(f"cannot load identity registry: {exc}") from exc
+        if not isinstance(raw, dict) or raw.get("schema") != _SCHEMA or raw.get("version") != _VERSION:
+            raise ParticipantIdentityError("unsupported identity registry schema")
+        for item in raw.get("entities", []):
+            entity = EntityIdentity(item["entity_id"], EntityKind(item["kind"]), item["source_reference"], item["evidence_sha256"], item["first_known_at"], item["available_at"])
+            if entity.entity_id in self._entities:
+                raise ParticipantIdentityError("duplicate entity identity")
+            self._entities[entity.entity_id] = entity
+        for item in raw.get("aliases", []):
+            alias = AliasRecord(**item)
+            self.add_alias(alias)
+        for item in raw.get("rosters", []):
+            self.add_roster_membership(RosterMembership(**item))
+
+
+def _contains(start: str, end: str | None, moment: datetime) -> bool:
+    return _instant("valid_from", start) <= moment and (end is None or moment < _instant("valid_until", end))
+
+
+def _overlap(a_start: str, a_end: str | None, b_start: str, b_end: str | None) -> bool:
+    a0, b0 = _instant("valid_from", a_start), _instant("valid_from", b_start)
+    a1 = None if a_end is None else _instant("valid_until", a_end)
+    b1 = None if b_end is None else _instant("valid_until", b_end)
+    return (b1 is None or a0 < b1) and (a1 is None or b0 < a1)

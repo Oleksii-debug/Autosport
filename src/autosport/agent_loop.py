@@ -23,6 +23,7 @@ from .learning_environment import (
     EnvironmentCheckpoint,
     EnvironmentIdentity,
     Episode,
+    LearningEnvironmentError,
     EvidenceTruth,
     Observation,
     Outcome,
@@ -45,7 +46,8 @@ from .workspace_lock import WorkspaceEconomicLock
 
 
 AGENT_LOOP_SCHEMA: Final = "autosport.agent_loop"
-AGENT_LOOP_SCHEMA_VERSION: Final = 2
+AGENT_LOOP_SCHEMA_VERSION: Final = 3
+AGENT_LOOP_LEGACY_SCHEMA_VERSION: Final = 2
 _HEX: Final = frozenset("0123456789abcdef")
 
 
@@ -459,6 +461,12 @@ class AgentLoopRuntime:
             "current": cls._empty_current(),
             "environment_checkpoint_id": environment_checkpoint.checkpoint_id,
             "checkpointed_transition_id": environment_checkpoint.last_transition_id,
+            "checkpoint_history": [
+                cls._checkpoint_record(
+                    environment_checkpoint,
+                    committed_at=_timestamp_identity(at, "at"),
+                )
+            ],
             "external_effect_state": ExternalEffectState.NONE.value,
             "resume_phase": None,
             "decisions": [],
@@ -503,6 +511,30 @@ class AgentLoopRuntime:
         }
 
     @staticmethod
+    def _checkpoint_record(
+        checkpoint: EnvironmentCheckpoint,
+        *,
+        committed_at: str,
+    ) -> dict[str, Any]:
+        if not isinstance(checkpoint, EnvironmentCheckpoint):
+            raise TypeError("checkpoint must be EnvironmentCheckpoint")
+        return {
+            "checkpoint_id": checkpoint.checkpoint_id,
+            "environment_id": checkpoint.environment_id,
+            "episode_id": checkpoint.episode_id,
+            "policy_id": checkpoint.policy_id,
+            "step_index": checkpoint.step_index,
+            "chain_sha256": checkpoint.chain_sha256,
+            "last_transition_id": checkpoint.last_transition_id,
+            "committed_action_ids": list(checkpoint.committed_action_ids),
+            "committed_decision_intents": [
+                [intent_id, payload_id]
+                for intent_id, payload_id in checkpoint.committed_decision_intents
+            ],
+            "committed_at": _timestamp_identity(committed_at, "checkpoint committed_at"),
+        }
+
+    @staticmethod
     def _without_digest(state: dict[str, Any]) -> dict[str, Any]:
         return {
             key: value for key, value in state.items() if key != "state_sha256"
@@ -528,6 +560,17 @@ class AgentLoopRuntime:
             raise AgentLoopError("AgentLoop state must be valid JSON") from exc
         if type(state) is not dict:
             raise AgentLoopError("AgentLoop state must be an object")
+
+        version = state.get("schema_version")
+        if (
+            state.get("schema") != AGENT_LOOP_SCHEMA
+            or version
+            not in {
+                AGENT_LOOP_LEGACY_SCHEMA_VERSION,
+                AGENT_LOOP_SCHEMA_VERSION,
+            }
+        ):
+            raise AgentLoopError("AgentLoop schema mismatch")
         required = {
             "schema",
             "schema_version",
@@ -547,13 +590,10 @@ class AgentLoopRuntime:
             "updated_at",
             "state_sha256",
         }
+        if version == AGENT_LOOP_SCHEMA_VERSION:
+            required.add("checkpoint_history")
         if set(state) != required:
             raise AgentLoopError("AgentLoop state fields mismatch")
-        if (
-            state["schema"] != AGENT_LOOP_SCHEMA
-            or state["schema_version"] != AGENT_LOOP_SCHEMA_VERSION
-        ):
-            raise AgentLoopError("AgentLoop schema mismatch")
         identity = state["identity"]
         if type(identity) is not dict or set(identity) != {
             "loop_id",
@@ -619,18 +659,147 @@ class AgentLoopRuntime:
         expected = _digest(self._without_digest(state))
         if _sha256(state["state_sha256"], "state_sha256") != expected:
             raise AgentLoopError("AgentLoop state digest mismatch")
-        self._validate_history(state)
+        if version == AGENT_LOOP_LEGACY_SCHEMA_VERSION:
+            self._validate_legacy_v2_history(state)
+        else:
+            self._validate_history(state)
         return state
 
     @staticmethod
-    def _validate_history(state: dict[str, Any]) -> None:
-        decisions: set[str] = set()
-        observations: set[str] = set()
-        for record in state["decisions"]:
+    def _validate_legacy_v2_history(state: dict[str, Any]) -> None:
+        """Validate every semantic relationship provable from integrated v2.
+
+        V2 intentionally lacks checkpoint history and decision intent/payload
+        witnesses. Those fields are not invented here; all shared durable
+        history/current/effect/phase invariants are validated by the canonical
+        semantic validator in legacy mode.
+        """
+
+        AgentLoopRuntime._validate_history(state, legacy_v2=True)
+
+    @staticmethod
+    def _validate_history(state: dict[str, Any], *, legacy_v2: bool = False) -> None:
+        def require_fields(
+            record: object,
+            *,
+            expected: set[str],
+            label: str,
+        ) -> dict[str, Any]:
             if type(record) is not dict:
-                raise AgentLoopError("decision record must be an object")
+                raise AgentLoopError(f"{label} must be an object")
+            if set(record) != expected:
+                raise AgentLoopError(f"{label} fields mismatch")
+            return record
+
+        def stored_decimal(value: object, name: str) -> Decimal:
+            if type(value) is not str:
+                raise AgentLoopError(f"{name} must be a canonical Decimal string")
+            try:
+                parsed = Decimal(value)
+            except ArithmeticError as exc:
+                raise AgentLoopError(
+                    f"{name} must be a canonical Decimal string"
+                ) from exc
+            if not parsed.is_finite() or str(parsed) != value:
+                raise AgentLoopError(f"{name} must be a canonical finite Decimal")
+            return parsed
+
+        identity = state["identity"]
+        decisions_by_action: dict[str, dict[str, Any]] = {}
+        observations: set[str] = set()
+        decisions_without_canonical_parameters: set[str] = set()
+        decision_fields = {
+            "observation_id",
+            "action_id",
+            "action_type",
+            "decided_at",
+            "parameters_sha256",
+            "external_effect_state",
+            "may_execute",
+        }
+        if not legacy_v2:
+            decision_fields.update(
+                {"parameters", "decision_intent_id", "decision_payload_id"}
+            )
+        for record in state["decisions"]:
+            record = require_fields(
+                record,
+                expected=decision_fields,
+                label="decision record",
+            )
             _sha256(record.get("action_id"), "decision action_id")
             _sha256(record.get("observation_id"), "decision observation_id")
+            _text(record.get("action_type"), "decision action_type")
+            if (
+                _timestamp_identity(record.get("decided_at"), "decision decided_at")
+                != record["decided_at"]
+            ):
+                raise AgentLoopError("decision decided_at is not canonical")
+            _sha256(record.get("parameters_sha256"), "decision parameters_sha256")
+            if not legacy_v2:
+                _sha256(record.get("decision_intent_id"), "decision intent_id")
+                _sha256(record.get("decision_payload_id"), "decision payload_id")
+                expected_intent_id = _digest(
+                    {
+                        "environment_id": identity["environment_id"],
+                        "episode_id": identity["episode_id"],
+                        "observation_id": record["observation_id"],
+                    }
+                )
+                if record["decision_intent_id"] != expected_intent_id:
+                    raise AgentLoopError("decision intent does not bind observation")
+                raw_parameters = record["parameters"]
+                if raw_parameters is None:
+                    decisions_without_canonical_parameters.add(record["action_id"])
+                else:
+                    if type(raw_parameters) is not list:
+                        raise AgentLoopError(
+                            "decision parameters must be a canonical list"
+                        )
+                    parameter_pairs: list[tuple[str, str]] = []
+                    for item in raw_parameters:
+                        if type(item) is not list or len(item) != 2:
+                            raise AgentLoopError(
+                                "decision parameters entry mismatch"
+                            )
+                        parameter_pairs.append((item[0], item[1]))
+                    try:
+                        canonical_action = Action(
+                            environment_id=identity["environment_id"],
+                            observation_id=record["observation_id"],
+                            action_type=record["action_type"],
+                            decided_at=record["decided_at"],
+                            parameters=tuple(parameter_pairs),
+                        )
+                    except LearningEnvironmentError as exc:
+                        raise AgentLoopError(
+                            "decision parameters are not canonical"
+                        ) from exc
+                    canonical_parameters = [
+                        [key, value] for key, value in canonical_action.parameters
+                    ]
+                    if raw_parameters != canonical_parameters:
+                        raise AgentLoopError(
+                            "decision parameters are not canonical"
+                        )
+                    if record["parameters_sha256"] != _digest(canonical_parameters):
+                        raise AgentLoopError(
+                            "decision parameters hash mismatch"
+                        )
+                    if record["action_id"] != canonical_action.action_id:
+                        raise AgentLoopError(
+                            "decision action identity mismatch"
+                        )
+                    expected_payload_id = _digest(
+                        {
+                            "action_type": canonical_action.action_type,
+                            "parameters": canonical_parameters,
+                        }
+                    )
+                    if record["decision_payload_id"] != expected_payload_id:
+                        raise AgentLoopError(
+                            "decision payload identity mismatch"
+                        )
             if type(record.get("may_execute")) is not bool:
                 raise AgentLoopError("decision may_execute must be boolean")
             ActionCommitReceipt(
@@ -641,32 +810,700 @@ class AgentLoopRuntime:
                     record.get("external_effect_state")
                 ),
             )
-            if (
-                record["action_id"] in decisions
-                or record["observation_id"] in observations
-            ):
+            if record["action_id"] in decisions_by_action or record[
+                "observation_id"
+            ] in observations:
                 raise AgentLoopError(
                     "AgentLoop contains duplicate durable decision identity"
                 )
-            decisions.add(record["action_id"])
+            decisions_by_action[record["action_id"]] = record
             observations.add(record["observation_id"])
-        for key, id_key in (
-            ("resolutions", "transition_id"),
-            ("attributions", "attribution_id"),
-            ("postmortems", "postmortem_id"),
-            ("research_handoffs", "postmortem_id"),
-        ):
-            seen: set[str] = set()
-            for record in state[key]:
-                if type(record) is not dict:
-                    raise AgentLoopError(f"{key} record must be an object")
-                value = record.get(id_key)
-                _sha256(value, id_key)
-                if value in seen:
+
+        resolutions_by_transition: dict[str, dict[str, Any]] = {}
+        resolved_actions: set[str] = set()
+        resolved_outcomes: set[str] = set()
+        resolved_rewards: set[str] = set()
+        for record in state["resolutions"]:
+            record = require_fields(
+                record,
+                expected={
+                    "transition_id",
+                    "action_id",
+                    "outcome_id",
+                    "reward_id",
+                    "reward_value",
+                    "truth",
+                    "simulation_model_id",
+                    "reward_available_at",
+                },
+                label="resolution record",
+            )
+            for key in ("transition_id", "action_id", "outcome_id", "reward_id"):
+                _sha256(record[key], f"resolution {key}")
+            stored_decimal(record["reward_value"], "resolution reward_value")
+            try:
+                truth = EvidenceTruth(record["truth"])
+            except (TypeError, ValueError) as exc:
+                raise AgentLoopError("resolution truth is invalid") from exc
+            if truth is EvidenceTruth.SIMULATED:
+                _text(record["simulation_model_id"], "resolution simulation_model_id")
+            elif record["simulation_model_id"] is not None:
+                raise AgentLoopError(
+                    "observed resolution cannot carry simulation_model_id"
+                )
+            if (
+                _timestamp_identity(
+                    record["reward_available_at"], "resolution reward_available_at"
+                )
+                != record["reward_available_at"]
+            ):
+                raise AgentLoopError("resolution reward_available_at is not canonical")
+            decision = decisions_by_action.get(record["action_id"])
+            if decision is None:
+                raise AgentLoopError("resolution does not bind a durable decision")
+            if _instant(record["reward_available_at"], "reward_available_at") < _instant(
+                decision["decided_at"], "decision decided_at"
+            ):
+                raise AgentLoopError("resolution reward predates its decision")
+            if (
+                record["transition_id"] in resolutions_by_transition
+                or record["action_id"] in resolved_actions
+                or record["outcome_id"] in resolved_outcomes
+                or record["reward_id"] in resolved_rewards
+            ):
+                raise AgentLoopError("AgentLoop contains duplicate resolution identity")
+            resolutions_by_transition[record["transition_id"]] = record
+            resolved_actions.add(record["action_id"])
+            resolved_outcomes.add(record["outcome_id"])
+            resolved_rewards.add(record["reward_id"])
+
+        if legacy_v2:
+            checkpointed_transition_id = state["checkpointed_transition_id"]
+            if checkpointed_transition_id is None:
+                if len(state["resolutions"]) > 1:
                     raise AgentLoopError(
-                        f"{key} contains duplicate immutable identity"
+                        "legacy AgentLoop has multiple resolutions beyond checkpoint head"
                     )
-                seen.add(value)
+            else:
+                checkpointed_index = next(
+                    (
+                        index
+                        for index, resolution in enumerate(state["resolutions"])
+                        if resolution["transition_id"] == checkpointed_transition_id
+                    ),
+                    None,
+                )
+                if checkpointed_index is None:
+                    raise AgentLoopError(
+                        "legacy checkpoint head does not bind durable resolution history"
+                    )
+                if len(state["resolutions"]) - checkpointed_index - 1 > 1:
+                    raise AgentLoopError(
+                        "legacy AgentLoop has multiple resolutions beyond checkpoint head"
+                    )
+        else:
+            checkpoint_history = state["checkpoint_history"]
+            if type(checkpoint_history) is not list or not checkpoint_history:
+                raise AgentLoopError("checkpoint_history must be a non-empty list")
+            parsed_checkpoints: list[tuple[EnvironmentCheckpoint, str]] = []
+            for index, raw_checkpoint in enumerate(checkpoint_history):
+                record = require_fields(
+                    raw_checkpoint,
+                    expected={
+                        "checkpoint_id",
+                        "environment_id",
+                        "episode_id",
+                        "policy_id",
+                        "step_index",
+                        "chain_sha256",
+                        "last_transition_id",
+                        "committed_action_ids",
+                        "committed_decision_intents",
+                        "committed_at",
+                    },
+                    label="checkpoint record",
+                )
+                if type(record["committed_action_ids"]) is not list:
+                    raise AgentLoopError("checkpoint committed_action_ids must be a list")
+                if type(record["committed_decision_intents"]) is not list:
+                    raise AgentLoopError(
+                        "checkpoint committed_decision_intents must be a list"
+                    )
+                intents: list[tuple[str, str]] = []
+                for item in record["committed_decision_intents"]:
+                    if type(item) is not list or len(item) != 2:
+                        raise AgentLoopError(
+                            "checkpoint committed_decision_intents entry mismatch"
+                        )
+                    intents.append(
+                        (
+                            _sha256(item[0], "checkpoint decision intent_id"),
+                            _sha256(item[1], "checkpoint decision payload_id"),
+                        )
+                    )
+                try:
+                    checkpoint = EnvironmentCheckpoint(
+                        environment_id=record["environment_id"],
+                        episode_id=record["episode_id"],
+                        policy_id=record["policy_id"],
+                        step_index=record["step_index"],
+                        chain_sha256=record["chain_sha256"],
+                        last_transition_id=record["last_transition_id"],
+                        committed_action_ids=tuple(record["committed_action_ids"]),
+                        committed_decision_intents=tuple(intents),
+                    )
+                except LearningEnvironmentError as exc:
+                    raise AgentLoopError("checkpoint record is not canonical") from exc
+                if record["checkpoint_id"] != checkpoint.checkpoint_id:
+                    raise AgentLoopError("checkpoint record identity mismatch")
+                if (
+                    checkpoint.environment_id != identity["environment_id"]
+                    or checkpoint.episode_id != identity["episode_id"]
+                    or checkpoint.policy_id != identity["policy_id"]
+                ):
+                    raise AgentLoopError("checkpoint belongs to another AgentLoop")
+                committed_at = _timestamp_identity(
+                    record["committed_at"], "checkpoint committed_at"
+                )
+                if committed_at != record["committed_at"]:
+                    raise AgentLoopError("checkpoint committed_at is not canonical")
+                if not parsed_checkpoints:
+                    if checkpoint.step_index > len(state["resolutions"]):
+                        raise AgentLoopError(
+                            "checkpoint baseline advances beyond durable resolution history"
+                        )
+                    baseline_resolutions = state["resolutions"][: checkpoint.step_index]
+                    expected_chain = hashlib.sha256(b"").hexdigest()
+                    expected_actions: list[str] = []
+                    expected_intents: dict[str, str] = {}
+                    for resolution in baseline_resolutions:
+                        expected_chain = hashlib.sha256(
+                            bytes.fromhex(expected_chain)
+                            + bytes.fromhex(resolution["transition_id"])
+                        ).hexdigest()
+                        expected_actions.append(resolution["action_id"])
+                        decision = decisions_by_action.get(resolution["action_id"])
+                        if decision is None:
+                            raise AgentLoopError(
+                                "checkpoint baseline resolution lacks durable decision"
+                            )
+                        intent_id = decision["decision_intent_id"]
+                        if intent_id in expected_intents:
+                            raise AgentLoopError(
+                                "checkpoint baseline reuses a committed decision intent"
+                            )
+                        expected_intents[intent_id] = decision["decision_payload_id"]
+                        if _instant(
+                            committed_at, "checkpoint committed_at"
+                        ) < _instant(
+                            resolution["reward_available_at"],
+                            "reward_available_at",
+                        ):
+                            raise AgentLoopError(
+                                "checkpoint baseline predates durable resolution evidence"
+                            )
+                    expected_last_transition = (
+                        None
+                        if not baseline_resolutions
+                        else baseline_resolutions[-1]["transition_id"]
+                    )
+                    if checkpoint.last_transition_id != expected_last_transition:
+                        raise AgentLoopError(
+                            "checkpoint baseline head does not bind durable resolution history"
+                        )
+                    if checkpoint.chain_sha256 != expected_chain:
+                        raise AgentLoopError(
+                            "checkpoint baseline chain does not bind durable transition history"
+                        )
+                    if checkpoint.committed_action_ids != tuple(
+                        sorted(expected_actions)
+                    ):
+                        raise AgentLoopError(
+                            "checkpoint baseline actions do not bind durable history"
+                        )
+                    if checkpoint.committed_decision_intents != tuple(
+                        sorted(expected_intents.items())
+                    ):
+                        raise AgentLoopError(
+                            "checkpoint baseline decision intents do not bind durable history"
+                        )
+                else:
+                    previous, previous_at = parsed_checkpoints[-1]
+                    if checkpoint.step_index != previous.step_index + 1:
+                        raise AgentLoopError(
+                            "checkpoint step_index does not advance by one"
+                        )
+                    resolution_index = checkpoint.step_index - 1
+                    if resolution_index >= len(state["resolutions"]):
+                        raise AgentLoopError(
+                            "checkpoint advances beyond durable resolution history"
+                        )
+                    resolution = state["resolutions"][resolution_index]
+                    if checkpoint.last_transition_id != resolution["transition_id"]:
+                        raise AgentLoopError(
+                            "checkpoint head does not bind durable resolution history"
+                        )
+                    expected_chain = hashlib.sha256(
+                        bytes.fromhex(previous.chain_sha256)
+                        + bytes.fromhex(resolution["transition_id"])
+                    ).hexdigest()
+                    if checkpoint.chain_sha256 != expected_chain:
+                        raise AgentLoopError(
+                            "checkpoint chain does not bind durable transition history"
+                        )
+                    expected_actions = tuple(
+                        sorted((*previous.committed_action_ids, resolution["action_id"]))
+                    )
+                    if checkpoint.committed_action_ids != expected_actions:
+                        raise AgentLoopError(
+                            "checkpoint committed actions do not bind durable history"
+                        )
+                    decision = decisions_by_action.get(resolution["action_id"])
+                    if decision is None:
+                        raise AgentLoopError(
+                            "checkpoint resolution lacks durable decision"
+                        )
+                    expected_intents = dict(previous.committed_decision_intents)
+                    if decision["decision_intent_id"] in expected_intents:
+                        raise AgentLoopError(
+                            "checkpoint reuses a committed decision intent"
+                        )
+                    expected_intents[decision["decision_intent_id"]] = decision[
+                        "decision_payload_id"
+                    ]
+                    if checkpoint.committed_decision_intents != tuple(
+                        sorted(expected_intents.items())
+                    ):
+                        raise AgentLoopError(
+                            "checkpoint decision intents do not bind durable history"
+                        )
+                    if _instant(committed_at, "checkpoint committed_at") < _instant(
+                        resolution["reward_available_at"], "reward_available_at"
+                    ):
+                        raise AgentLoopError(
+                            "checkpoint predates durable resolution evidence"
+                        )
+                    if _instant(committed_at, "checkpoint committed_at") < _instant(
+                        previous_at, "previous checkpoint committed_at"
+                    ):
+                        raise AgentLoopError("checkpoint history moves backwards")
+                parsed_checkpoints.append((checkpoint, committed_at))
+            first_checkpoint, _ = parsed_checkpoints[0]
+            migration_baseline_actions = (
+                set(first_checkpoint.committed_action_ids)
+                if first_checkpoint.step_index > 0
+                else set()
+            )
+            if not decisions_without_canonical_parameters.issubset(
+                migration_baseline_actions
+            ):
+                raise AgentLoopError(
+                    "decision parameters are missing outside legacy migration baseline"
+                )
+            latest_checkpoint, _ = parsed_checkpoints[-1]
+            committed_resolution_count = latest_checkpoint.step_index
+            if len(state["resolutions"]) - committed_resolution_count not in {0, 1}:
+                raise AgentLoopError(
+                    "AgentLoop has resolutions outside the checkpoint progression"
+                )
+            if state["environment_checkpoint_id"] != latest_checkpoint.checkpoint_id:
+                raise AgentLoopError(
+                    "environment checkpoint id differs from latest durable checkpoint"
+                )
+            if state["checkpointed_transition_id"] != latest_checkpoint.last_transition_id:
+                raise AgentLoopError(
+                    "checkpoint head differs from latest durable checkpoint"
+                )
+
+        attributions_by_id: dict[str, dict[str, Any]] = {}
+        attributed_transitions: set[str] = set()
+        for record in state["attributions"]:
+            record = require_fields(
+                record,
+                expected={
+                    "attribution_id",
+                    "environment_id",
+                    "episode_id",
+                    "transition_id",
+                    "action_id",
+                    "outcome_id",
+                    "reward_id",
+                    "reward_value",
+                    "truth",
+                    "simulation_model_id",
+                    "attributed_at",
+                    "findings",
+                },
+                label="attribution record",
+            )
+            findings_raw = record["findings"]
+            if type(findings_raw) is not list:
+                raise AgentLoopError("attribution findings must be a list")
+            findings: list[AttributionFinding] = []
+            for raw_finding in findings_raw:
+                raw_finding = require_fields(
+                    raw_finding,
+                    expected={
+                        "component",
+                        "status",
+                        "evidence_sha256",
+                        "evidence_available_at",
+                        "contribution",
+                        "reason_code",
+                    },
+                    label="attribution finding",
+                )
+                try:
+                    component = AttributionComponent(raw_finding["component"])
+                    status = AttributionStatus(raw_finding["status"])
+                except (TypeError, ValueError) as exc:
+                    raise AgentLoopError("attribution finding enum is invalid") from exc
+                contribution = (
+                    None
+                    if raw_finding["contribution"] is None
+                    else stored_decimal(
+                        raw_finding["contribution"], "attribution contribution"
+                    )
+                )
+                findings.append(
+                    AttributionFinding(
+                        component=component,
+                        status=status,
+                        evidence_sha256=raw_finding["evidence_sha256"],
+                        evidence_available_at=raw_finding["evidence_available_at"],
+                        contribution=contribution,
+                        reason_code=raw_finding["reason_code"],
+                    )
+                )
+            try:
+                truth = EvidenceTruth(record["truth"])
+            except (TypeError, ValueError) as exc:
+                raise AgentLoopError("attribution truth is invalid") from exc
+            attribution = OutcomeAttribution(
+                environment_id=record["environment_id"],
+                episode_id=record["episode_id"],
+                transition_id=record["transition_id"],
+                action_id=record["action_id"],
+                outcome_id=record["outcome_id"],
+                reward_id=record["reward_id"],
+                reward_value=stored_decimal(
+                    record["reward_value"], "attribution reward_value"
+                ),
+                truth=truth,
+                simulation_model_id=record["simulation_model_id"],
+                attributed_at=record["attributed_at"],
+                findings=tuple(findings),
+            )
+            expected = {"attribution_id": attribution.attribution_id, **attribution.payload()}
+            if record != expected:
+                raise AgentLoopError("attribution record is not canonical")
+            if (
+                attribution.environment_id != identity["environment_id"]
+                or attribution.episode_id != identity["episode_id"]
+            ):
+                raise AgentLoopError("attribution belongs to another AgentLoop")
+            resolution = resolutions_by_transition.get(attribution.transition_id)
+            if resolution is None:
+                raise AgentLoopError("attribution does not bind a durable resolution")
+            for key in ("action_id", "outcome_id", "reward_id", "reward_value"):
+                actual = (
+                    str(attribution.reward_value)
+                    if key == "reward_value"
+                    else getattr(attribution, key)
+                )
+                if actual != resolution[key]:
+                    raise AgentLoopError(
+                        f"attribution {key} does not bind its resolution"
+                    )
+            if (
+                attribution.truth.value != resolution["truth"]
+                or attribution.simulation_model_id
+                != resolution["simulation_model_id"]
+            ):
+                raise AgentLoopError("attribution relabels resolution truth")
+            if _instant(attribution.attributed_at, "attributed_at") < _instant(
+                resolution["reward_available_at"], "reward_available_at"
+            ):
+                raise AgentLoopError("attribution predates reward availability")
+            if (
+                attribution.attribution_id in attributions_by_id
+                or attribution.transition_id in attributed_transitions
+            ):
+                raise AgentLoopError("AgentLoop contains duplicate attribution identity")
+            attributions_by_id[attribution.attribution_id] = record
+            attributed_transitions.add(attribution.transition_id)
+
+        postmortems_by_id: dict[str, dict[str, Any]] = {}
+        reflected_attributions: set[str] = set()
+        for record in state["postmortems"]:
+            record = require_fields(
+                record,
+                expected={
+                    "postmortem_id",
+                    "attribution_id",
+                    "transition_id",
+                    "created_at",
+                    "unresolved_components",
+                    "summary_code",
+                    "research_question_statement",
+                },
+                label="postmortem record",
+            )
+            unresolved_raw = record["unresolved_components"]
+            if type(unresolved_raw) is not list:
+                raise AgentLoopError("postmortem unresolved_components must be a list")
+            try:
+                unresolved = tuple(
+                    AttributionComponent(value) for value in unresolved_raw
+                )
+            except (TypeError, ValueError) as exc:
+                raise AgentLoopError("postmortem component is invalid") from exc
+            postmortem = ReflectionPostmortem(
+                attribution_id=record["attribution_id"],
+                transition_id=record["transition_id"],
+                created_at=record["created_at"],
+                unresolved_components=unresolved,
+                summary_code=record["summary_code"],
+                research_question_statement=record["research_question_statement"],
+            )
+            expected = {"postmortem_id": postmortem.postmortem_id, **postmortem.payload()}
+            if record != expected:
+                raise AgentLoopError("postmortem record is not canonical")
+            attribution = attributions_by_id.get(postmortem.attribution_id)
+            if attribution is None:
+                raise AgentLoopError("postmortem does not bind a durable attribution")
+            if postmortem.transition_id != attribution["transition_id"]:
+                raise AgentLoopError("postmortem transition does not bind attribution")
+            if _instant(postmortem.created_at, "postmortem.created_at") < _instant(
+                attribution["attributed_at"], "attributed_at"
+            ):
+                raise AgentLoopError("postmortem predates attribution")
+            statuses = {
+                item["component"]: item["status"] for item in attribution["findings"]
+            }
+            if any(
+                item.value not in statuses
+                or statuses[item.value] not in {
+                    AttributionStatus.UNKNOWN.value,
+                    AttributionStatus.MIXED.value,
+                }
+                for item in postmortem.unresolved_components
+            ):
+                raise AgentLoopError("postmortem unresolved components are unsupported")
+            if (
+                postmortem.postmortem_id in postmortems_by_id
+                or postmortem.attribution_id in reflected_attributions
+            ):
+                raise AgentLoopError("AgentLoop contains duplicate postmortem identity")
+            postmortems_by_id[postmortem.postmortem_id] = record
+            reflected_attributions.add(postmortem.attribution_id)
+
+        handoffs_by_postmortem: dict[str, dict[str, Any]] = {}
+        handoff_runs: set[str] = set()
+        for record in state["research_handoffs"]:
+            record = require_fields(
+                record,
+                expected={
+                    "postmortem_id",
+                    "question_id",
+                    "question_sha256",
+                    "trigger_id",
+                    "trigger_sha256",
+                    "run_id",
+                    "budget_units",
+                    "deadline_at",
+                    "requested_at",
+                    "source_event_identity_sha256",
+                    "source_event_sha256",
+                    "receipt_sha256",
+                    "checkpoint_sha256",
+                },
+                label="research handoff record",
+            )
+            _sha256(record["postmortem_id"], "handoff postmortem_id")
+            _text(record["question_id"], "handoff question_id")
+            _text(record["trigger_id"], "handoff trigger_id")
+            for key in (
+                "question_sha256",
+                "trigger_sha256",
+                "run_id",
+                "source_event_identity_sha256",
+                "source_event_sha256",
+                "receipt_sha256",
+                "checkpoint_sha256",
+            ):
+                _sha256(record[key], f"handoff {key}")
+            if (
+                isinstance(record["budget_units"], bool)
+                or not isinstance(record["budget_units"], int)
+                or record["budget_units"] <= 0
+            ):
+                raise AgentLoopError("handoff budget_units must be a positive integer")
+            requested_at = _timestamp_identity(record["requested_at"], "requested_at")
+            if requested_at != record["requested_at"]:
+                raise AgentLoopError("handoff requested_at is not canonical")
+            if record["deadline_at"] is not None:
+                deadline_at = _timestamp_identity(record["deadline_at"], "deadline_at")
+                if deadline_at != record["deadline_at"]:
+                    raise AgentLoopError("handoff deadline_at is not canonical")
+                if _instant(deadline_at, "deadline_at") < _instant(
+                    requested_at, "requested_at"
+                ):
+                    raise AgentLoopError("handoff deadline predates request")
+            postmortem = postmortems_by_id.get(record["postmortem_id"])
+            if postmortem is None:
+                raise AgentLoopError("research handoff does not bind a postmortem")
+            statement = postmortem["research_question_statement"]
+            if statement is None:
+                raise AgentLoopError("research handoff postmortem lacks a question")
+            if requested_at != postmortem["created_at"]:
+                raise AgentLoopError("research handoff request time differs from postmortem")
+            expected_question_id = "agentloop-question-" + _digest(
+                {
+                    "loop_id": identity["loop_id"],
+                    "postmortem_id": record["postmortem_id"],
+                    "statement": statement,
+                }
+            )
+            if record["question_id"] != expected_question_id:
+                raise AgentLoopError("research handoff question identity mismatch")
+            question = ResearchQuestion(
+                question_id=record["question_id"],
+                statement=statement,
+                source_sha256=identity["source_sha256"],
+                created_at=requested_at,
+            )
+            if record["question_sha256"] != _digest(question.to_payload()):
+                raise AgentLoopError("research handoff question hash mismatch")
+            if (
+                record["postmortem_id"] in handoffs_by_postmortem
+                or record["run_id"] in handoff_runs
+            ):
+                raise AgentLoopError("AgentLoop contains duplicate research handoff")
+            handoffs_by_postmortem[record["postmortem_id"]] = record
+            handoff_runs.add(record["run_id"])
+
+        current = state["current"]
+        ordered = (
+            "observation_id",
+            "action_id",
+            "transition_id",
+            "outcome_id",
+            "reward_id",
+            "attribution_id",
+            "postmortem_id",
+        )
+        seen_gap = False
+        for key in ordered:
+            if current[key] is None:
+                seen_gap = True
+            elif seen_gap:
+                raise AgentLoopError("AgentLoop current causal chain contains a gap")
+        research_values = (
+            current["research_question_id"],
+            current["research_trigger_id"],
+            current["research_run_id"],
+        )
+        if any(value is None for value in research_values) and any(
+            value is not None for value in research_values
+        ):
+            raise AgentLoopError("AgentLoop current research identity is partial")
+
+        decision = None
+        if current["action_id"] is not None:
+            decision = decisions_by_action.get(current["action_id"])
+            if decision is None or decision["observation_id"] != current["observation_id"]:
+                raise AgentLoopError("current action does not bind its decision")
+        resolution = None
+        if current["transition_id"] is not None:
+            resolution = resolutions_by_transition.get(current["transition_id"])
+            if resolution is None:
+                raise AgentLoopError("current transition does not bind a resolution")
+            for key in ("action_id", "outcome_id", "reward_id"):
+                if resolution[key] != current[key]:
+                    raise AgentLoopError(f"current {key} does not bind resolution")
+        attribution = None
+        if current["attribution_id"] is not None:
+            attribution = attributions_by_id.get(current["attribution_id"])
+            if (
+                attribution is None
+                or attribution["transition_id"] != current["transition_id"]
+            ):
+                raise AgentLoopError("current attribution does not bind resolution")
+        postmortem = None
+        if current["postmortem_id"] is not None:
+            postmortem = postmortems_by_id.get(current["postmortem_id"])
+            if (
+                postmortem is None
+                or postmortem["attribution_id"] != current["attribution_id"]
+            ):
+                raise AgentLoopError("current postmortem does not bind attribution")
+        if research_values[0] is not None:
+            if postmortem is None:
+                raise AgentLoopError("current research identity lacks a postmortem")
+            handoff = handoffs_by_postmortem.get(current["postmortem_id"])
+            if handoff is None or (
+                handoff["question_id"], handoff["trigger_id"], handoff["run_id"]
+            ) != research_values:
+                raise AgentLoopError("current research identity does not bind handoff")
+
+        external_state = ExternalEffectState(state["external_effect_state"])
+        if decision is None:
+            if external_state is not ExternalEffectState.NONE:
+                raise AgentLoopError("AgentLoop without an action has an external effect")
+        elif decision["external_effect_state"] != external_state.value:
+            raise AgentLoopError("current external effect differs from decision")
+
+        phase = AgentLoopPhase(state["phase"])
+        resume_phase = (
+            None
+            if state["resume_phase"] is None
+            else AgentLoopPhase(state["resume_phase"])
+        )
+        if phase in {AgentLoopPhase.PAUSED, AgentLoopPhase.RECOVERY}:
+            if resume_phase is None:
+                raise AgentLoopError(f"{phase.value} state lacks resume phase")
+            effective_phase = resume_phase
+        else:
+            if resume_phase is not None:
+                raise AgentLoopError("non-paused AgentLoop retains resume phase")
+            effective_phase = phase
+
+        if effective_phase is AgentLoopPhase.BOOTSTRAP:
+            if any(current.values()):
+                raise AgentLoopError("BOOTSTRAP AgentLoop contains current evidence")
+        elif effective_phase in {
+            AgentLoopPhase.OBSERVE,
+            AgentLoopPhase.ASSESS,
+            AgentLoopPhase.PLAN,
+            AgentLoopPhase.DECIDE,
+            AgentLoopPhase.ACT_OR_ABSTAIN,
+        }:
+            if current["observation_id"] is None or current["action_id"] is not None:
+                raise AgentLoopError(f"{effective_phase.value} current evidence mismatch")
+        elif effective_phase in {
+            AgentLoopPhase.WAIT_OUTCOME,
+            AgentLoopPhase.UNKNOWN_EXTERNAL_EFFECT,
+        }:
+            if current["action_id"] is None or current["transition_id"] is not None:
+                raise AgentLoopError(f"{effective_phase.value} current evidence mismatch")
+            if (
+                effective_phase is AgentLoopPhase.UNKNOWN_EXTERNAL_EFFECT
+                and external_state is not ExternalEffectState.UNKNOWN_EXTERNAL_EFFECT
+            ):
+                raise AgentLoopError("UNKNOWN_EXTERNAL_EFFECT phase lacks unknown effect")
+        elif effective_phase in {AgentLoopPhase.EVALUATE, AgentLoopPhase.ATTRIBUTE}:
+            if current["transition_id"] is None or current["attribution_id"] is not None:
+                raise AgentLoopError(f"{effective_phase.value} current evidence mismatch")
+        elif effective_phase is AgentLoopPhase.REFLECT:
+            if current["attribution_id"] is None or current["postmortem_id"] is not None:
+                raise AgentLoopError("REFLECT current evidence mismatch")
+        elif effective_phase is AgentLoopPhase.RESEARCH_HANDOFF:
+            if current["postmortem_id"] is None or current["research_run_id"] is not None:
+                raise AgentLoopError("RESEARCH_HANDOFF current evidence mismatch")
+        elif effective_phase is AgentLoopPhase.CHECKPOINT:
+            if current["postmortem_id"] is None:
+                raise AgentLoopError("CHECKPOINT current evidence lacks reflection")
 
     def snapshot(self) -> AgentLoopSnapshot:
         state = self._read()
@@ -974,17 +1811,35 @@ class AgentLoopRuntime:
             may_execute = (
                 effect_state is not ExternalEffectState.UNKNOWN_EXTERNAL_EFFECT
             )
-            record = {
+            canonical_parameters = [
+                [key, value] for key, value in action.parameters
+            ]
+            record: dict[str, object] = {
                 "observation_id": action.observation_id,
                 "action_id": action.action_id,
                 "action_type": action.action_type,
                 "decided_at": _timestamp_identity(
                     action.decided_at, "action.decided_at"
                 ),
-                "parameters_sha256": _digest(list(action.parameters)),
+                "parameters_sha256": _digest(canonical_parameters),
                 "external_effect_state": effect_state.value,
                 "may_execute": may_execute,
             }
+            if state["schema_version"] == AGENT_LOOP_SCHEMA_VERSION:
+                record["parameters"] = canonical_parameters
+                record["decision_intent_id"] = _digest(
+                    {
+                        "environment_id": state["identity"]["environment_id"],
+                        "episode_id": state["identity"]["episode_id"],
+                        "observation_id": action.observation_id,
+                    }
+                )
+                record["decision_payload_id"] = _digest(
+                    {
+                        "action_type": action.action_type,
+                        "parameters": canonical_parameters,
+                    }
+                )
             state["decisions"].append(record)
             current["action_id"] = action.action_id
             state["external_effect_state"] = effect_state.value
@@ -1596,6 +2451,83 @@ class AgentLoopRuntime:
         self._mutate(at, apply)
         return supervisor.status(receipt.run_id)
 
+    @classmethod
+    def _upgrade_legacy_v2_checkpoint(
+        cls,
+        state: dict[str, Any],
+        checkpoint: EnvironmentCheckpoint,
+        *,
+        committed_at: str,
+    ) -> None:
+        """Promote v2 only from a complete canonical environment witness."""
+
+        if state["schema_version"] != AGENT_LOOP_LEGACY_SCHEMA_VERSION:
+            raise AgentLoopError("legacy checkpoint upgrade requires schema v2")
+        if checkpoint.step_index != len(state["resolutions"]):
+            raise AgentLoopError(
+                "legacy checkpoint must cover the complete durable resolution history"
+            )
+        committed_actions = set(checkpoint.committed_action_ids)
+        committed_intents = dict(checkpoint.committed_decision_intents)
+        if len(committed_actions) != len(state["decisions"]):
+            raise AgentLoopError(
+                "legacy checkpoint action set does not cover durable decisions"
+            )
+        if len(committed_intents) != len(state["decisions"]):
+            raise AgentLoopError(
+                "legacy checkpoint decision intents do not cover durable decisions"
+            )
+        identity = state["identity"]
+        upgraded_decisions: list[dict[str, object]] = []
+        seen_intents: set[str] = set()
+        seen_actions: set[str] = set()
+        for legacy in state["decisions"]:
+            intent_id = _digest(
+                {
+                    "environment_id": identity["environment_id"],
+                    "episode_id": identity["episode_id"],
+                    "observation_id": legacy["observation_id"],
+                }
+            )
+            payload_id = committed_intents.get(intent_id)
+            if payload_id is None:
+                raise AgentLoopError(
+                    "legacy decision lacks canonical checkpoint payload witness"
+                )
+            if legacy["action_id"] not in committed_actions:
+                raise AgentLoopError(
+                    "legacy decision lacks canonical checkpoint action witness"
+                )
+            if intent_id in seen_intents or legacy["action_id"] in seen_actions:
+                raise AgentLoopError(
+                    "legacy checkpoint upgrade contains duplicate decision witness"
+                )
+            seen_intents.add(intent_id)
+            seen_actions.add(legacy["action_id"])
+            upgraded = dict(legacy)
+            upgraded["parameters"] = None
+            upgraded["decision_intent_id"] = intent_id
+            upgraded["decision_payload_id"] = payload_id
+            upgraded_decisions.append(upgraded)
+        if seen_intents != set(committed_intents):
+            raise AgentLoopError(
+                "legacy checkpoint contains an unbound decision intent"
+            )
+        if seen_actions != committed_actions:
+            raise AgentLoopError(
+                "legacy checkpoint contains an unbound committed action"
+            )
+        state["decisions"] = upgraded_decisions
+        state["schema_version"] = AGENT_LOOP_SCHEMA_VERSION
+        state["checkpoint_history"] = [
+            cls._checkpoint_record(
+                checkpoint,
+                committed_at=committed_at,
+            )
+        ]
+        state["environment_checkpoint_id"] = checkpoint.checkpoint_id
+        state["checkpointed_transition_id"] = checkpoint.last_transition_id
+
     def commit_checkpoint(
         self,
         environment_checkpoint: EnvironmentCheckpoint,
@@ -1607,7 +2539,7 @@ class AgentLoopRuntime:
                 "environment_checkpoint must be EnvironmentCheckpoint"
             )
 
-        def apply(state: dict[str, Any], _now: str) -> None:
+        def apply(state: dict[str, Any], now: str) -> None:
             if (
                 AgentLoopPhase(state["phase"])
                 is not AgentLoopPhase.CHECKPOINT
@@ -1640,12 +2572,34 @@ class AgentLoopRuntime:
                 raise AgentLoopError(
                     "environment checkpoint does not include current transition"
                 )
+            if (
+                state["schema_version"]
+                == AGENT_LOOP_LEGACY_SCHEMA_VERSION
+            ):
+                self._upgrade_legacy_v2_checkpoint(
+                    state,
+                    environment_checkpoint,
+                    committed_at=now,
+                )
+                # Validate the fully promoted candidate before _mutate can
+                # publish any schema-v3 bytes.
+                self._validate_history(state)
+                return
+            checkpoint_record = self._checkpoint_record(
+                environment_checkpoint,
+                committed_at=now,
+            )
+            latest_checkpoint = state["checkpoint_history"][-1]
+            if latest_checkpoint["checkpoint_id"] != environment_checkpoint.checkpoint_id:
+                state["checkpoint_history"].append(checkpoint_record)
             state["environment_checkpoint_id"] = (
                 environment_checkpoint.checkpoint_id
             )
             state["checkpointed_transition_id"] = (
                 environment_checkpoint.last_transition_id
             )
+            # Validate the candidate state before _mutate can persist it.
+            self._validate_history(state)
 
         return self._mutate(at, apply)
 

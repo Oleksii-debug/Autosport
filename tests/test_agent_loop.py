@@ -1,4 +1,6 @@
+import hashlib
 import json
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -39,6 +41,26 @@ RANDOMNESS_SHA = "6" * 64
 
 def json_load(path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def canonical_sha256(value):
+    canonical = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def rewrite_with_valid_state_digest(path, state):
+    unsigned = {key: value for key, value in state.items() if key != "state_sha256"}
+    state["state_sha256"] = canonical_sha256(unsigned)
+    path.write_text(
+        json.dumps(state, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _environment():
@@ -161,6 +183,294 @@ def _attribution(environment, transition, outcome, reward, **overrides):
     }
     values.update(overrides)
     return OutcomeAttribution(**values)
+
+
+
+def _rewrite_pristine_as_integrated_v2(path):
+    state = json_load(path)
+    state["schema_version"] = 2
+    state.pop("checkpoint_history")
+    rewrite_with_valid_state_digest(path, state)
+
+
+def _legacy_v2_runtime_through_attribution(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    _rewrite_pristine_as_integrated_v2(runtime.path)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+    outcome, reward, transition = _resolve(environment, action)
+    runtime.record_resolution(
+        transition,
+        outcome=outcome,
+        reward=reward,
+        at="2026-09-19T13:05:02Z",
+    )
+    runtime.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:05:03Z",
+    )
+    attribution = _attribution(environment, transition, outcome, reward)
+    runtime.record_attribution(
+        attribution,
+        at="2026-09-19T13:05:04Z",
+    )
+    assert runtime.snapshot().phase is AgentLoopPhase.REFLECT
+    return runtime
+
+
+def test_schema_v2_restart_upgrades_only_from_canonical_checkpoint(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    _rewrite_pristine_as_integrated_v2(runtime.path)
+    legacy_bytes = runtime.path.read_bytes()
+
+    reopened = AgentLoopRuntime(runtime.path)
+    assert reopened.snapshot().phase is AgentLoopPhase.BOOTSTRAP
+    assert runtime.path.read_bytes() == legacy_bytes
+    assert json_load(runtime.path)["schema_version"] == 2
+
+    observation = _observation(environment)
+    reopened.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(reopened)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+    )
+    reopened.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+    legacy_decision = json_load(runtime.path)["decisions"][0]
+    assert "decision_intent_id" not in legacy_decision
+    assert "decision_payload_id" not in legacy_decision
+
+    outcome, reward, transition = _resolve(environment, action)
+    reopened.record_resolution(
+        transition,
+        outcome=outcome,
+        reward=reward,
+        at="2026-09-19T13:05:02Z",
+    )
+    reopened.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:05:03Z",
+    )
+    attribution = _attribution(environment, transition, outcome, reward)
+    reopened.record_attribution(
+        attribution,
+        at="2026-09-19T13:05:04Z",
+    )
+    postmortem = ReflectionPostmortem(
+        attribution_id=attribution.attribution_id,
+        transition_id=transition.transition_id,
+        created_at="2026-09-19T13:05:05Z",
+        unresolved_components=(AttributionComponent.RANDOMNESS,),
+        summary_code="LEGACY_V2_CHECKPOINT_UPGRADE",
+    )
+    reopened.record_postmortem(
+        postmortem,
+        at="2026-09-19T13:05:05Z",
+    )
+    before_upgrade = json_load(runtime.path)
+    assert before_upgrade["schema_version"] == 2
+    assert "checkpoint_history" not in before_upgrade
+
+    first_checkpoint = environment.checkpoint()
+    upgraded = reopened.commit_checkpoint(
+        first_checkpoint,
+        at="2026-09-19T13:05:06Z",
+    )
+    upgraded_state = json_load(runtime.path)
+    assert upgraded_state["schema_version"] == 3
+    assert upgraded_state["checkpoint_history"][0]["checkpoint_id"] == (
+        first_checkpoint.checkpoint_id
+    )
+    upgraded_decision = upgraded_state["decisions"][0]
+    assert upgraded_decision["decision_intent_id"]
+    assert upgraded_decision["decision_payload_id"]
+    assert upgraded_decision["parameters"] is None
+    assert upgraded.phase is AgentLoopPhase.CHECKPOINT
+
+    second_observation = _observation(environment, suffix="2")
+    reopened.begin_observation(
+        second_observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:05:07Z",
+    )
+    reopened.advance(expected=AgentLoopPhase.OBSERVE, at="2026-09-19T13:05:08Z")
+    reopened.advance(expected=AgentLoopPhase.ASSESS, at="2026-09-19T13:05:09Z")
+    reopened.advance(expected=AgentLoopPhase.PLAN, at="2026-09-19T13:05:10Z")
+    reopened.advance(expected=AgentLoopPhase.DECIDE, at="2026-09-19T13:05:11Z")
+    second_action = environment.act(
+        second_observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:05:11Z",
+    )
+    reopened.commit_action(
+        second_action,
+        episode=environment.episode,
+        observation=second_observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:05:11Z",
+    )
+    second_outcome = Outcome(
+        environment_id=environment.environment_id,
+        action_id=second_action.action_id,
+        revealed_at="2026-09-19T13:10:00Z",
+        truth=EvidenceTruth.OBSERVED,
+        evidence=(("settlement", "paper-result-2"),),
+    )
+    second_reward = RewardEvidence(
+        environment_id=environment.environment_id,
+        action_id=second_action.action_id,
+        outcome_id=second_outcome.outcome_id,
+        reward=Decimal("0.10"),
+        available_at="2026-09-19T13:10:01Z",
+        truth=EvidenceTruth.OBSERVED,
+        evidence=(("reward_rule", "paper-economic-reward-v1"),),
+    )
+    second_transition = environment.resolve(
+        second_action.action_id,
+        outcome=second_outcome,
+        reward=second_reward,
+        resolved_at="2026-09-19T13:10:02Z",
+    )
+    reopened.record_resolution(
+        second_transition,
+        outcome=second_outcome,
+        reward=second_reward,
+        at="2026-09-19T13:10:02Z",
+    )
+    reopened.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:10:03Z",
+    )
+    second_attribution = _attribution(
+        environment,
+        second_transition,
+        second_outcome,
+        second_reward,
+        attributed_at="2026-09-19T13:10:04Z",
+    )
+    reopened.record_attribution(
+        second_attribution,
+        at="2026-09-19T13:10:04Z",
+    )
+    second_postmortem = ReflectionPostmortem(
+        attribution_id=second_attribution.attribution_id,
+        transition_id=second_transition.transition_id,
+        created_at="2026-09-19T13:10:05Z",
+        unresolved_components=(AttributionComponent.RANDOMNESS,),
+        summary_code="POST_UPGRADE_V3_CHECKPOINT",
+    )
+    reopened.record_postmortem(
+        second_postmortem,
+        at="2026-09-19T13:10:05Z",
+    )
+    second_checkpoint = environment.checkpoint()
+    reopened.commit_checkpoint(
+        second_checkpoint,
+        at="2026-09-19T13:10:06Z",
+    )
+    final_state = json_load(runtime.path)
+    assert [item["step_index"] for item in final_state["checkpoint_history"]] == [
+        1,
+        2,
+    ]
+    assert final_state["checkpoint_history"][-1]["checkpoint_id"] == (
+        second_checkpoint.checkpoint_id
+    )
+
+
+def test_schema_v2_self_consistent_malformed_state_fails_closed(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    _rewrite_pristine_as_integrated_v2(runtime.path)
+    malformed = json_load(runtime.path)
+    malformed["decisions"] = {}
+    rewrite_with_valid_state_digest(runtime.path, malformed)
+
+    with pytest.raises(AgentLoopError, match="decisions must be a list"):
+        AgentLoopRuntime(runtime.path)
+
+
+def test_schema_v2_self_consistent_orphaned_current_attribution_fails_closed(
+    tmp_path,
+):
+    runtime = _legacy_v2_runtime_through_attribution(tmp_path)
+    malformed = json_load(runtime.path)
+    malformed["current"]["attribution_id"] = "f" * 64
+    rewrite_with_valid_state_digest(runtime.path, malformed)
+
+    with pytest.raises(
+        AgentLoopError,
+        match="current attribution does not bind resolution",
+    ):
+        AgentLoopRuntime(runtime.path)
+
+
+def test_schema_v2_self_consistent_resolution_cross_link_fails_closed(tmp_path):
+    runtime = _legacy_v2_runtime_through_attribution(tmp_path)
+    malformed = json_load(runtime.path)
+    malformed["resolutions"][0]["action_id"] = "e" * 64
+    rewrite_with_valid_state_digest(runtime.path, malformed)
+
+    with pytest.raises(
+        AgentLoopError,
+        match="resolution does not bind a durable decision",
+    ):
+        AgentLoopRuntime(runtime.path)
+
+
+def test_schema_v2_self_consistent_effect_and_phase_rewrites_fail_closed(tmp_path):
+    runtime = _legacy_v2_runtime_through_attribution(tmp_path)
+    valid = json_load(runtime.path)
+
+    wrong_effect = json.loads(json.dumps(valid))
+    wrong_effect["external_effect_state"] = (
+        ExternalEffectState.UNKNOWN_EXTERNAL_EFFECT.value
+    )
+    rewrite_with_valid_state_digest(runtime.path, wrong_effect)
+    with pytest.raises(
+        AgentLoopError,
+        match="current external effect differs from decision",
+    ):
+        AgentLoopRuntime(runtime.path)
+
+    wrong_phase = json.loads(json.dumps(valid))
+    wrong_phase["phase"] = AgentLoopPhase.WAIT_OUTCOME.value
+    rewrite_with_valid_state_digest(runtime.path, wrong_phase)
+    with pytest.raises(
+        AgentLoopError,
+        match="WAIT_OUTCOME current evidence mismatch",
+    ):
+        AgentLoopRuntime(runtime.path)
 
 
 def test_full_paper_loop_attribution_research_handoff_and_restart(tmp_path):
@@ -560,6 +870,18 @@ def test_next_observation_requires_durable_current_transition_checkpoint(
     pending = json_load(runtime.path)
     assert runtime.snapshot().phase is AgentLoopPhase.CHECKPOINT
     assert runtime.snapshot().checkpointed_transition_id is None
+
+    forged_checkpoint_head = json.loads(json.dumps(pending))
+    forged_checkpoint_head["checkpointed_transition_id"] = transition.transition_id
+    rewrite_with_valid_state_digest(runtime.path, forged_checkpoint_head)
+    with pytest.raises(
+        AgentLoopError,
+        match="checkpoint head differs from latest durable checkpoint",
+    ):
+        AgentLoopRuntime(runtime.path)
+    rewrite_with_valid_state_digest(runtime.path, pending)
+    assert AgentLoopRuntime(runtime.path).snapshot().phase is AgentLoopPhase.CHECKPOINT
+
     next_observation = _observation(environment, suffix="2")
     with pytest.raises(
         AgentLoopError,
@@ -585,15 +907,34 @@ def test_next_observation_requires_durable_current_transition_checkpoint(
     assert json_load(runtime.path) == pending
 
     checkpoint = environment.checkpoint()
+    forged_checkpoint = replace(checkpoint, chain_sha256="f" * 64)
+    before_forged_commit = recovered.path.read_bytes()
+    with pytest.raises(
+        AgentLoopError,
+        match="checkpoint chain does not bind durable transition history",
+    ):
+        recovered.commit_checkpoint(
+            forged_checkpoint,
+            at="2026-09-19T13:05:08Z",
+        )
+    assert recovered.path.read_bytes() == before_forged_commit
+    assert AgentLoopRuntime(recovered.path).snapshot().phase is AgentLoopPhase.CHECKPOINT
+
     committed = recovered.commit_checkpoint(
         checkpoint,
-        at="2026-09-19T13:05:08Z",
+        at="2026-09-19T13:05:09Z",
     )
     assert committed.checkpointed_transition_id == transition.transition_id
+    committed_state = json_load(runtime.path)
+    assert committed_state["checkpoint_history"][-1]["checkpoint_id"] == checkpoint.checkpoint_id
+    assert (
+        committed_state["checkpoint_history"][-1]["last_transition_id"]
+        == transition.transition_id
+    )
     started = recovered.begin_observation(
         next_observation,
         environment_identity=environment.identity,
-        at="2026-09-19T13:05:09Z",
+        at="2026-09-19T13:05:10Z",
     )
     assert started.phase is AgentLoopPhase.OBSERVE
     assert started.transition_id is None
@@ -1161,3 +1502,241 @@ def test_admissible_direct_action_cannot_predate_observation_availability(tmp_pa
     snapshot = runtime.snapshot()
     assert snapshot.phase is AgentLoopPhase.ACT_OR_ABSTAIN
     assert snapshot.action_id is None
+
+
+
+def test_schema_v3_restart_rejects_rehashed_action_payload_relabelling_before_checkpoint(
+    tmp_path,
+):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+        parameters=(("candidate_id", "candidate-1"),),
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+    original = json_load(runtime.path)
+    assert original["decisions"][0]["parameters"] == [
+        ["candidate_id", "candidate-1"]
+    ]
+
+    relabelled = json.loads(json.dumps(original))
+    relabelled["decisions"][0]["action_type"] = "PAPER_PROPOSAL"
+    rewrite_with_valid_state_digest(runtime.path, relabelled)
+    with pytest.raises(AgentLoopError, match="decision action identity mismatch"):
+        AgentLoopRuntime(runtime.path)
+
+    reparameterized = json.loads(json.dumps(original))
+    parameters = [["candidate_id", "candidate-2"]]
+    reparameterized["decisions"][0]["parameters"] = parameters
+    reparameterized["decisions"][0]["parameters_sha256"] = canonical_sha256(parameters)
+    reparameterized["decisions"][0]["decision_payload_id"] = canonical_sha256(
+        {
+            "action_type": reparameterized["decisions"][0]["action_type"],
+            "parameters": parameters,
+        }
+    )
+    rewrite_with_valid_state_digest(runtime.path, reparameterized)
+    with pytest.raises(AgentLoopError, match="decision action identity mismatch"):
+        AgentLoopRuntime(runtime.path)
+
+
+def test_schema_v3_checkpoint_cannot_downgrade_or_rebind_action_payload_evidence(
+    tmp_path,
+):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+        parameters=(("candidate_id", "candidate-1"),),
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+    outcome, reward, transition = _resolve(environment, action)
+    runtime.record_resolution(
+        transition,
+        outcome=outcome,
+        reward=reward,
+        at="2026-09-19T13:05:02Z",
+    )
+    runtime.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:05:03Z",
+    )
+    attribution = _attribution(environment, transition, outcome, reward)
+    runtime.record_attribution(
+        attribution,
+        at="2026-09-19T13:05:04Z",
+    )
+    postmortem = ReflectionPostmortem(
+        attribution_id=attribution.attribution_id,
+        transition_id=transition.transition_id,
+        created_at="2026-09-19T13:05:05Z",
+        unresolved_components=(AttributionComponent.RANDOMNESS,),
+        summary_code="V3_ACTION_PAYLOAD_BINDING",
+    )
+    runtime.record_postmortem(
+        postmortem,
+        at="2026-09-19T13:05:05Z",
+    )
+    runtime.commit_checkpoint(
+        environment.checkpoint(),
+        at="2026-09-19T13:05:06Z",
+    )
+    original = json_load(runtime.path)
+
+    downgraded = json.loads(json.dumps(original))
+    downgraded["decisions"][0]["parameters"] = None
+    rewrite_with_valid_state_digest(runtime.path, downgraded)
+    with pytest.raises(
+        AgentLoopError,
+        match="missing outside legacy migration baseline",
+    ):
+        AgentLoopRuntime(runtime.path)
+
+    relabelled = json.loads(json.dumps(original))
+    relabelled["decisions"][0]["action_type"] = "PAPER_PROPOSAL"
+    rewrite_with_valid_state_digest(runtime.path, relabelled)
+    with pytest.raises(AgentLoopError, match="decision action identity mismatch"):
+        AgentLoopRuntime(runtime.path)
+
+    reparameterized = json.loads(json.dumps(original))
+    parameters = [["candidate_id", "candidate-2"]]
+    reparameterized["decisions"][0]["parameters"] = parameters
+    reparameterized["decisions"][0]["parameters_sha256"] = canonical_sha256(parameters)
+    reparameterized["decisions"][0]["decision_payload_id"] = canonical_sha256(
+        {
+            "action_type": reparameterized["decisions"][0]["action_type"],
+            "parameters": parameters,
+        }
+    )
+    rewrite_with_valid_state_digest(runtime.path, reparameterized)
+    with pytest.raises(AgentLoopError, match="decision action identity mismatch"):
+        AgentLoopRuntime(runtime.path)
+
+
+def test_restart_rejects_self_consistent_cross_linked_agent_memory(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+    outcome, reward, transition = _resolve(environment, action)
+    runtime.record_resolution(
+        transition,
+        outcome=outcome,
+        reward=reward,
+        at="2026-09-19T13:05:02Z",
+    )
+    runtime.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:05:03Z",
+    )
+    attribution = _attribution(environment, transition, outcome, reward)
+    runtime.record_attribution(
+        attribution,
+        at="2026-09-19T13:05:04Z",
+    )
+    postmortem = ReflectionPostmortem(
+        attribution_id=attribution.attribution_id,
+        transition_id=transition.transition_id,
+        created_at="2026-09-19T13:05:05Z",
+        unresolved_components=(AttributionComponent.RANDOMNESS,),
+        summary_code="UNRESOLVED_RANDOMNESS_REQUIRES_RESEARCH",
+        research_question_statement="Test the unresolved causal component.",
+    )
+    runtime.record_postmortem(
+        postmortem,
+        at="2026-09-19T13:05:05Z",
+    )
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry.json"
+    )
+    supervisor = ResearchSupervisor.initialize_pristine(
+        tmp_path / "research-supervisor.json",
+        registry,
+    )
+    runtime.handoff_research(
+        supervisor,
+        budget_units=3,
+        at="2026-09-19T13:05:06Z",
+    )
+    original = json_load(runtime.path)
+
+    def clone():
+        return json.loads(json.dumps(original))
+
+    corruptions = []
+
+    malformed_decision = clone()
+    malformed_decision["decisions"][0]["untrusted_field"] = "accepted-before-fix"
+    corruptions.append((malformed_decision, "decision record fields mismatch"))
+
+    orphan_current = clone()
+    orphan_current["current"]["action_id"] = "a" * 64
+    corruptions.append((orphan_current, "current action does not bind"))
+
+    orphan_resolution = clone()
+    orphan_resolution["resolutions"][0]["action_id"] = "b" * 64
+    corruptions.append((orphan_resolution, "resolution does not bind"))
+
+    cross_linked_attribution = clone()
+    cross_linked_attribution["attributions"][0]["transition_id"] = "c" * 64
+    corruptions.append((cross_linked_attribution, "attribution record is not canonical"))
+
+    orphan_handoff = clone()
+    orphan_handoff["research_handoffs"][0]["postmortem_id"] = "d" * 64
+    corruptions.append((orphan_handoff, "research handoff does not bind"))
+
+    for corrupted, expected_error in corruptions:
+        rewrite_with_valid_state_digest(runtime.path, corrupted)
+        with pytest.raises(AgentLoopError, match=expected_error):
+            AgentLoopRuntime(runtime.path)
+
+    rewrite_with_valid_state_digest(runtime.path, original)
+    assert AgentLoopRuntime(runtime.path).snapshot().research_run_id is not None

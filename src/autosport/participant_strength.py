@@ -587,13 +587,23 @@ def emit_registered_strength_forecast(
         raise ParticipantStrengthError(
             "forecast requires registered ModelVersion and StrategyVersion"
         )
-    if _instant(model_entry.available_at, "ModelVersion.available_at") > decision:
+    model_available = _instant(
+        model_entry.available_at, "ModelVersion.available_at"
+    )
+    strategy_available = _instant(
+        strategy_entry.available_at, "StrategyVersion.available_at"
+    )
+    if model_available > decision:
         raise ParticipantStrengthError(
             "model version was not available at forecast decision time"
         )
-    if _instant(strategy_entry.available_at, "StrategyVersion.available_at") > decision:
+    if strategy_available > decision:
         raise ParticipantStrengthError(
             "strategy version was not available at forecast decision time"
+        )
+    if model_available > strategy_available:
+        raise ParticipantStrengthError(
+            "model version was not available when strategy version was created"
         )
     if strategy_entry.payload.get("model_version_id") != model_id:
         raise ParticipantStrengthError(
@@ -639,7 +649,14 @@ def emit_registered_strength_forecast(
         raise ParticipantStrengthError(
             "registered model lacks DatasetSnapshot/FeatureSet/ResearchProtocol foundation"
         )
-    model_available = _instant(model_entry.available_at, "ModelVersion.available_at")
+    dataset_cutoff = _instant(
+        dataset_entry.payload.get("causal_cutoff"),
+        "DatasetSnapshot.causal_cutoff",
+    )
+    if dataset_cutoff > model_available:
+        raise ParticipantStrengthError(
+            "DatasetSnapshot causal cutoff exceeds model version availability"
+        )
     for record_name, entry in (
         ("DatasetSnapshot", dataset_entry),
         ("FeatureSet", feature_entry),
@@ -664,9 +681,7 @@ def emit_registered_strength_forecast(
     model = load_strength_model(artifact)
     if model.model_id != model_id:
         raise ParticipantStrengthError("model artifact internal identity mismatch")
-    if _instant(
-        dataset_entry.payload.get("causal_cutoff"), "DatasetSnapshot.causal_cutoff"
-    ) != _instant(model.training_cutoff, "model training_cutoff"):
+    if dataset_cutoff != _instant(model.training_cutoff, "model training_cutoff"):
         raise ParticipantStrengthError(
             "model training cutoff does not match DatasetSnapshot causal cutoff"
         )

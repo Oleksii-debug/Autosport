@@ -729,6 +729,7 @@ def evaluate_policy_pair(
                 "reward_truth": case.reward_truth.value,
                 "reward_mode": case.reward_mode.value,
                 "source_evidence_sha256": case.source_evidence_sha256,
+                "case_payload": case.canonical_payload(),
                 "regime_id": case.regime_id,
                 "admissible_actions": list(case.admissible_actions),
                 "historical_action": case.historical_action,

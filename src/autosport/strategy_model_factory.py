@@ -348,6 +348,94 @@ def _canonical_decimal_text(value: Decimal) -> str:
     return "0" if text in ("", "-0") else text
 
 
+
+def _validate_counterfactual_artifacts(
+    artifact_store,
+    authority,
+    samples: Sequence[dict[str, object]],
+    *,
+    protocol_frozen,
+) -> None:
+    """Resolve frozen counterfactual qualification and per-case source evidence."""
+
+    qualification_identity = (
+        f"{authority.authority_id}@{authority.authority_version}"
+    )
+    qualification = artifact_store.read(
+        "counterfactual-qualification",
+        qualification_identity,
+        expected_sha256=authority.qualification_evidence_sha256,
+    )
+    qualified_at = qualification.get("qualified_at")
+    expected_qualification = {
+        "schema_version": 1,
+        "kind": "autosport-counterfactual-qualification-v1",
+        "authority_id": authority.authority_id,
+        "authority_version": authority.authority_version,
+        "evaluator_source_sha256": authority.evaluator_source_sha256,
+        "reward_definition_sha256": authority.reward_definition_sha256,
+        "reward_mode": authority.reward_mode.value,
+        "scope": authority.scope,
+        "allowed_source_evidence_sha256": list(
+            authority.allowed_source_evidence_sha256
+        ),
+        "qualification_status": authority.qualification_status,
+        "qualified_at": qualified_at,
+    }
+    if qualification != expected_qualification:
+        raise ValueError(
+            "counterfactual qualification artifact does not match frozen authority"
+        )
+    if _impl._instant(
+        qualified_at, "counterfactual qualification qualified_at"
+    ) > protocol_frozen:
+        raise ValueError(
+            "counterfactual qualification was not available by protocol freeze"
+        )
+
+    for sample in samples:
+        if type(sample) is not dict:
+            raise ValueError("policy evaluation sample payload is invalid")
+        case_payload = sample.get("case_payload")
+        if type(case_payload) is not dict:
+            raise ValueError(
+                "counterfactual sample lacks immutable source-evidence payload"
+            )
+        sample_id = _impl._text(case_payload.get("sample_id"), "policy sample_id")
+        case_source_sha256 = _impl._sha256(
+            case_payload.get("source_evidence_sha256"),
+            "counterfactual case source_evidence_sha256",
+        )
+        if case_source_sha256 != _impl._sha256(
+            sample.get("source_evidence_sha256"),
+            "policy sample source_evidence_sha256",
+        ):
+            raise ValueError(
+                "counterfactual sample source evidence hash is internally inconsistent"
+            )
+        source_identity = (
+            f"{authority.authority_id}@{authority.authority_version}:{sample_id}"
+        )
+        source_evidence = artifact_store.read(
+            "counterfactual-source-evidence",
+            source_identity,
+            expected_sha256=case_source_sha256,
+        )
+        bound_case = dict(case_payload)
+        bound_case.pop("source_evidence_sha256", None)
+        expected_source_evidence = {
+            "schema_version": 1,
+            "kind": "autosport-counterfactual-source-evidence-v1",
+            "authority_id": authority.authority_id,
+            "authority_version": authority.authority_version,
+            "case": bound_case,
+        }
+        if source_evidence != expected_source_evidence:
+            raise ValueError(
+                "counterfactual source evidence artifact does not match evaluated case"
+            )
+
+
 def _run_policy_candidate_unstaged(
     registry: ScientificRegistry,
     artifact_store,
@@ -517,6 +605,12 @@ def _run_policy_candidate_unstaged(
             raise ValueError(
                 "policy evaluation counterfactual authority hash mismatch"
             )
+        _validate_counterfactual_artifacts(
+            artifact_store,
+            authority,
+            counterfactual_samples,
+            protocol_frozen=protocol_frozen,
+        )
         for sample in counterfactual_samples:
             authority.validate_reference(
                 counterfactual_source_id=sample.get("counterfactual_source_id"),

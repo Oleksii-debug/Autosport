@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Mapping
 
-from .drift_control import DriftState
+from .drift_control import DriftControlError, DriftMonitor, DriftState
 from .research_supervisor import ResearchSupervisor, ResearchTrigger
 from .scientific_registry import RegistryEntry, ScientificRegistry
 
@@ -265,17 +265,22 @@ class ChampionEligibilityDecision:
                     )
             return None
 
+        drift_monitor = DriftMonitor(registry)
         entries: list[RegistryEntry] = []
         counts: list[int] = []
         effective_sample_sizes: list[int | None] = []
         windows: list[tuple[datetime, datetime, str, DriftState, tuple[str, str, str] | None]] = []
 
         for finding_id in ids:
-            entry = registry.get("DriftFinding", finding_id)
-            if entry is None:
-                raise ChampionEligibilityError(f"missing DriftFinding:{finding_id}")
-            if _instant(entry.available_at, "DriftFinding.available_at") > evaluated_cutoff:
-                raise ChampionEligibilityError(f"DriftFinding:{finding_id} is future evidence")
+            try:
+                entry, reference, observation = drift_monitor.require_canonical_finding(
+                    finding_id,
+                    as_of=evaluated_at,
+                )
+            except (DriftControlError, TypeError, ValueError) as exc:
+                raise ChampionEligibilityError(
+                    f"DriftFinding:{finding_id} canonical provenance is invalid"
+                ) from exc
 
             finding = entry.payload
             if finding.get("strategy_version_id") != strategy_version_id:
@@ -291,11 +296,6 @@ class ChampionEligibilityDecision:
             reference_id = finding.get("reference_id")
             if type(reference_id) is not str:
                 raise ChampionEligibilityError("drift finding reference identity is missing")
-            reference = registry.get("DriftReference", reference_id)
-            if reference is None:
-                raise ChampionEligibilityError("drift reference is missing")
-            if _instant(reference.available_at, "DriftReference.available_at") > evaluated_cutoff:
-                raise ChampionEligibilityError("drift reference is future evidence")
 
             baseline_sample_count = reference.payload.get("sample_count")
             if (
@@ -318,11 +318,6 @@ class ChampionEligibilityDecision:
             observation_id = finding.get("observation_id")
             if type(observation_id) is not str:
                 raise ChampionEligibilityError("drift finding observation identity is missing")
-            observation = registry.get("DriftObservation", observation_id)
-            if observation is None:
-                raise ChampionEligibilityError("drift observation is missing")
-            if observation.payload.get("reference_id") != reference_id:
-                raise ChampionEligibilityError("drift observation/reference identity mismatch")
 
             sample_count = observation.payload.get("sample_count")
             if isinstance(sample_count, bool) or not isinstance(sample_count, int) or sample_count <= 0:

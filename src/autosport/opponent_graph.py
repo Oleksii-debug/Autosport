@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Final
 
 from .integrity import atomic_write_json
-from .participant_identity import ParticipantIdentityRegistry, ParticipantIdentityError
+from .participant_identity import IdentityView, ParticipantIdentityRegistry
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -33,11 +33,6 @@ _DECIMAL_QUANT = Decimal("0.000001")
 
 class OpponentGraphError(ValueError):
     """Raised when causal graph/rating evidence is malformed or unsafe."""
-
-
-class IdentityView(StrEnum):
-    AS_KNOWN_AT_DECISION = "AS_KNOWN_AT_DECISION"
-    RESTATED_RESEARCH = "RESTATED_RESEARCH"
 
 
 class MatchResult(StrEnum):
@@ -369,18 +364,7 @@ class OpponentGraphStore:
             if existing != observation:
                 raise OpponentGraphError("conflicting immutable observation identity")
             return observation.observation_id
-        self._observations[observation.observation_id] = observation
-        self._edges[OpponentEdge(
-            observation_id=observation.observation_id,
-            participant_a_id=observation.participant_a_id,
-            participant_b_id=observation.participant_b_id,
-            event_id=observation.event_id,
-            sport_id=observation.sport_id,
-            observed_at=observation.observed_at,
-            available_at=observation.available_at,
-            result=observation.result,
-            evidence_sha256=observation.evidence_sha256,
-        ).edge_id] = OpponentEdge(
+        edge = OpponentEdge(
             observation_id=observation.observation_id,
             participant_a_id=observation.participant_a_id,
             participant_b_id=observation.participant_b_id,
@@ -391,7 +375,18 @@ class OpponentGraphStore:
             result=observation.result,
             evidence_sha256=observation.evidence_sha256,
         )
-        self._persist()
+        candidate_observations = dict(self._observations)
+        candidate_observations[observation.observation_id] = observation
+        candidate_edges = dict(self._edges)
+        candidate_edges[edge.edge_id] = edge
+        self._persist_snapshot(
+            observations=candidate_observations,
+            edges=candidate_edges,
+            snapshots=self._snapshots,
+            work=self._work,
+        )
+        self._observations = candidate_observations
+        self._edges = candidate_edges
         if observation.supersedes_observation_id is not None:
             self.invalidate_for_correction(observation.supersedes_observation_id, observation.observation_id)
         return observation.observation_id
@@ -622,12 +617,19 @@ class OpponentGraphStore:
     def recompute_work(self) -> tuple[RecomputeWork, ...]:
         return tuple(sorted(self._work.values(), key=lambda row: row.work_id))
 
-    def _persist(self) -> None:
+    def _persist_snapshot(
+        self,
+        *,
+        observations: dict[str, PerformanceOutcome],
+        edges: dict[str, OpponentEdge],
+        snapshots: dict[str, RatingSnapshot],
+        work: dict[str, RecomputeWork],
+    ) -> None:
         payload = {
             "schema": _SCHEMA,
             "version": _VERSION,
             "observations": [
-                row.payload() for row in sorted(self._observations.values(), key=lambda row: row.observation_id)
+                row.payload() for row in sorted(observations.values(), key=lambda row: row.observation_id)
             ],
             "edges": [
                 {
@@ -641,14 +643,22 @@ class OpponentGraphStore:
                     "result": row.result.value,
                     "evidence_sha256": row.evidence_sha256,
                 }
-                for row in sorted(self._edges.values(), key=lambda row: row.edge_id)
+                for row in sorted(edges.values(), key=lambda row: row.edge_id)
             ],
-            "snapshots": [row.payload() for row in sorted(self._snapshots.values(), key=lambda row: row.snapshot_id)],
-            "recompute_work": [row.payload() for row in sorted(self._work.values(), key=lambda row: row.work_id)],
+            "snapshots": [row.payload() for row in sorted(snapshots.values(), key=lambda row: row.snapshot_id)],
+            "recompute_work": [row.payload() for row in sorted(work.values(), key=lambda row: row.work_id)],
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with WorkspaceEconomicLock(self.path.parent):
             atomic_write_json(self.path, payload)
+
+    def _persist(self) -> None:
+        self._persist_snapshot(
+            observations=self._observations,
+            edges=self._edges,
+            snapshots=self._snapshots,
+            work=self._work,
+        )
 
     def _persist_loading(self) -> None:
         self._persist()

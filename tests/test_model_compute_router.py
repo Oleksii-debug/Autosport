@@ -1054,6 +1054,27 @@ class ModelComputeRouterTests(unittest.TestCase):
         )
         self.assertEqual(estimated.tier, ComputeTier.LOCAL)
 
+        affordable_cloud = replace(
+            self.cloud,
+            estimated_cost=Decimal("3"),
+        )
+        measured_request = route_compute(
+            request(
+                request_id="req-measured-request",
+                max_cost=Decimal("4"),
+            ),
+            (self.local, affordable_cloud),
+            policy(max_cloud_cost=Decimal("10")),
+            as_of=T1,
+            voc_evidence=voc(
+                evidence_id="voc-measured-request",
+                measured_compute_cost=Decimal("5"),
+            ),
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(measured_request.tier, ComputeTier.LOCAL)
+        self.assertIn("request budget", measured_request.reason)
+
         measured = route_compute(
             request(request_id="req-measured"),
             self.candidates,

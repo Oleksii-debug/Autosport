@@ -343,6 +343,7 @@ class NightResearchCurriculum:
             "max_budget_units": self.max_budget_units,
             "consumed_budget_units": 0,
             "selections": [],
+            "episode_provenance": {},
             "dispatches": {},
             "outcomes": {},
             "stop_reason": None,
@@ -377,8 +378,21 @@ class NightResearchCurriculum:
         consumed = state.get("consumed_budget_units")
         if isinstance(consumed, bool) or not isinstance(consumed, int) or not 0 <= consumed <= self.max_budget_units:
             raise ResearchCurriculumError("invalid consumed_budget_units")
-        if not isinstance(state.get("selections"), list) or not isinstance(state.get("dispatches"), dict) or not isinstance(state.get("outcomes"), dict):
+        if (
+            not isinstance(state.get("selections"), list)
+            or not isinstance(state.get("episode_provenance"), dict)
+            or not isinstance(state.get("dispatches"), dict)
+            or not isinstance(state.get("outcomes"), dict)
+        ):
             raise ResearchCurriculumError("curriculum state collections are invalid")
+        for episode_identity, provenance in state["episode_provenance"].items():
+            _sha(episode_identity, "episode provenance identity")
+            try:
+                ReplayProvenance(provenance)
+            except ValueError as exc:
+                raise ResearchCurriculumError(
+                    "invalid durable episode provenance"
+                ) from exc
 
     def _locked_state(self) -> dict[str, Any]:
         state = self._read()
@@ -411,6 +425,43 @@ class NightResearchCurriculum:
 
     def stop(self, reason: str) -> None:
         self._set_status(CurriculumStatus.STOPPED, reason=reason)
+
+    def _bind_episode_provenance(
+        self,
+        candidates: tuple[ReplayCandidate, ...],
+        *,
+        as_of: str,
+        state: dict[str, Any],
+    ) -> bool:
+        """Bind causally visible episode identity to one immutable provenance class."""
+
+        cutoff = _instant(as_of, "as_of")
+        ledger = state["episode_provenance"]
+        changed = False
+        for candidate in candidates:
+            if not isinstance(candidate, ReplayCandidate):
+                raise ResearchCurriculumError(
+                    "candidates must be ReplayCandidate values"
+                )
+            if _instant(candidate.available_at, "candidate.available_at") > cutoff:
+                continue
+            episode_identity = _digest(
+                {
+                    "environment_id": candidate.environment_id,
+                    "episode_id": candidate.episode_id,
+                }
+            )
+            prior = ledger.get(episode_identity)
+            if prior is not None and prior != candidate.provenance.value:
+                raise ResearchCurriculumError(
+                    "episode provenance cannot be relabelled"
+                )
+            if prior is None:
+                ledger[episode_identity] = candidate.provenance.value
+                changed = True
+        if changed:
+            state["episode_provenance"] = dict(sorted(ledger.items()))
+        return changed
 
     def _eligible(self, candidates: Iterable[ReplayCandidate], *, purpose: CurriculumPurpose, as_of: str, state: dict[str, Any]) -> tuple[ReplayCandidate, ...]:
         cutoff = _instant(as_of, "as_of")
@@ -451,12 +502,26 @@ class NightResearchCurriculum:
             raise ResearchCurriculumError("seed must be non-negative")
         if isinstance(budget_units, bool) or not isinstance(budget_units, int) or budget_units <= 0:
             raise ResearchCurriculumError("budget_units must be positive")
+        population = tuple(candidates)
         with WorkspaceEconomicLock(self.path.parent):
             state = self._locked_state()
             if CurriculumStatus(state["status"]) is not CurriculumStatus.ACTIVE:
                 raise ResearchCurriculumError("curriculum is not active")
-            eligible = self._eligible(candidates, purpose=purpose, as_of=as_of, state=state)
+            provenance_changed = self._bind_episode_provenance(
+                population,
+                as_of=as_of,
+                state=state,
+            )
+            eligible = self._eligible(
+                population,
+                purpose=purpose,
+                as_of=as_of,
+                state=state,
+            )
             if not eligible:
+                if provenance_changed:
+                    state["state_version"] += 1
+                    self._write(state)
                 raise ResearchCurriculumError("no causally eligible replay candidates")
             ranked = sorted(
                 eligible,
@@ -504,9 +569,13 @@ class NightResearchCurriculum:
                 raise ResearchCurriculumError("selection identity conflict")
             if prior is None:
                 if state["consumed_budget_units"] + budget_units > self.max_budget_units:
+                    if provenance_changed:
+                        state["state_version"] += 1
+                        self._write(state)
                     raise ResearchCurriculumError("curriculum budget exhausted")
                 state["selections"].append(payload)
                 state["selections"].sort(key=lambda item: item["selection_id"])
+            if provenance_changed or prior is None:
                 state["state_version"] += 1
                 self._write(state)
             return record

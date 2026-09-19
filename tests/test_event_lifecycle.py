@@ -17,11 +17,14 @@ from autosport.event_lifecycle import (
     EventPhase,
     canonical_event_identity,
 )
+from autosport.ingestion import IngestionEngine
+from autosport.market_bus import MarketEventBus
 from autosport.market_mirror import MarketMirror
 from autosport.market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependencyIndex,
 )
+from autosport.providers import InMemoryProvider, ProviderQuote
 from autosport.storage import SQLiteMarketStore
 
 
@@ -165,6 +168,39 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 store.close()
             self.assertEqual(before.status, EvidenceEligibility.WAIT_EVIDENCE)
             self.assertEqual(after.status, EvidenceEligibility.COMPLETED)
+
+            retired: list[str] = []
+            lifecycle.register_eligible(
+                store,
+                as_of=(self.START + timedelta(seconds=5)).isoformat(),
+                required_history=timedelta(0),
+                register_input=lambda input_id, **_: None,
+                retire_input=lambda input_id: retired.append(input_id),
+            )
+            self.assertEqual(retired, [])
+
+            with self.assertRaisesRegex(
+                CatalogConflictError,
+                "discovery cutoff cannot move backwards",
+            ):
+                lifecycle.apply_page(
+                    self._page(
+                        3,
+                        CatalogEvent(
+                            source_id="provider-a",
+                            sport="table_tennis",
+                            event_id="event-1",
+                            phase=EventPhase.COMPLETED,
+                            available_at=(
+                                self.START + timedelta(seconds=5)
+                            ).isoformat(),
+                            completion_ref="provider-result:rev-1",
+                        ),
+                    ),
+                    discovered_at=(
+                        self.START + timedelta(seconds=5)
+                    ).isoformat(),
+                )
 
     def test_post_start_discovery_progresses_same_identity_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -440,6 +476,73 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                     (),
                 )
                 self.assertEqual(calls, [])
+            finally:
+                store.close()
+
+    def test_ingestion_normalizer_identity_matches_lifecycle_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                engine = IngestionEngine(
+                    bus,
+                    clock=lambda: (
+                        self.START + timedelta(seconds=1)
+                    ).isoformat(),
+                )
+                provider = InMemoryProvider(
+                    "provider-a",
+                    [
+                        ProviderQuote(
+                            provider_event_id="event-1",
+                            provider_market_id="winner",
+                            provider_selection_id="home",
+                            decimal_odds=Decimal("2.00"),
+                            observed_ts=self.START.isoformat(),
+                            sequence=1,
+                            source_ts=self.START.isoformat(),
+                            sport="table_tennis",
+                        )
+                    ],
+                )
+                stats = engine.poll_once(provider)
+                self.assertEqual(stats.accepted, 1)
+                persisted = store.events("provider-a:event-1")
+                self.assertEqual(len(persisted), 1)
+
+                lifecycle = ContinuousEventLifecycle(root / "catalog.json")
+                event = self._catalog_event(
+                    sport="table_tennis",
+                    event_id="event-1",
+                    available_offset=1,
+                )
+                lifecycle.apply_page(
+                    self._page(1, event),
+                    discovered_at=(
+                        self.START + timedelta(seconds=2)
+                    ).isoformat(),
+                )
+                assessment = lifecycle.assess_evidence(
+                    event.identity,
+                    store,
+                    as_of=(self.START + timedelta(seconds=2)).isoformat(),
+                    required_history=timedelta(0),
+                )
+                self.assertEqual(assessment.status, EvidenceEligibility.ELIGIBLE)
+
+                calls: list[tuple[str, dict[str, object]]] = []
+                registered = lifecycle.register_eligible(
+                    store,
+                    as_of=(self.START + timedelta(seconds=2)).isoformat(),
+                    required_history=timedelta(0),
+                    register_input=lambda input_id, **selectors: calls.append(
+                        (input_id, selectors)
+                    ),
+                )
+                self.assertEqual(registered, ("catalog:provider-a:event-1",))
+                self.assertEqual(calls[0][1]["event_ids"], persisted[0].event_id)
+                self.assertEqual(calls[0][1]["sports"], persisted[0].sport)
             finally:
                 store.close()
 

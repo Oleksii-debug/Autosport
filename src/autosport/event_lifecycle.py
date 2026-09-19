@@ -217,6 +217,7 @@ class EventLifecycleRecord:
     settlement_ref: str | None
     completion_discovered_at: str | None = None
     settlement_discovered_at: str | None = None
+    last_discovered_at: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.identity, "identity")
@@ -225,11 +226,49 @@ class EventLifecycleRecord:
         _text(self.event_id, "event_id")
         if not isinstance(self.phase, EventPhase):
             raise ValueError("phase must be EventPhase")
-        _instant(self.first_discovered_at, "first_discovered_at")
-        _instant(self.last_available_at, "last_available_at")
+        first_discovered = _instant(self.first_discovered_at, "first_discovered_at")
+        last_available = _instant(self.last_available_at, "last_available_at")
+        last_discovered = _optional_instant(
+            self.last_discovered_at,
+            "last_discovered_at",
+        )
+        completion_discovered = _optional_instant(
+            self.completion_discovered_at,
+            "completion_discovered_at",
+        )
+        settlement_discovered = _optional_instant(
+            self.settlement_discovered_at,
+            "settlement_discovered_at",
+        )
         _optional_instant(self.scheduled_start_at, "scheduled_start_at")
-        _optional_instant(self.completion_discovered_at, "completion_discovered_at")
-        _optional_instant(self.settlement_discovered_at, "settlement_discovered_at")
+        if last_discovered is None:
+            raise ValueError("last_discovered_at is required")
+        if first_discovered > last_discovered:
+            raise ValueError("first_discovered_at cannot be after last_discovered_at")
+        if last_available > last_discovered:
+            raise ValueError("last_available_at cannot be after last_discovered_at")
+        if completion_discovered is not None and (
+            completion_discovered < first_discovered
+            or completion_discovered > last_discovered
+        ):
+            raise ValueError(
+                "completion_discovered_at must be within the durable discovery interval"
+            )
+        if settlement_discovered is not None and (
+            settlement_discovered < first_discovered
+            or settlement_discovered > last_discovered
+        ):
+            raise ValueError(
+                "settlement_discovered_at must be within the durable discovery interval"
+            )
+        if (
+            completion_discovered is not None
+            and settlement_discovered is not None
+            and settlement_discovered < completion_discovered
+        ):
+            raise ValueError(
+                "settlement discovery cannot precede completion discovery"
+            )
         if self.completion_ref is not None:
             _text(self.completion_ref, "completion_ref")
         if self.settlement_ref is not None:
@@ -263,13 +302,30 @@ class EventLifecycleRecord:
             "settlement_ref",
             "completion_discovered_at",
             "settlement_discovered_at",
+            "last_discovered_at",
         }
-        legacy_expected = expected - {"completion_discovered_at", "settlement_discovered_at"}
-        if set(raw) not in {expected, legacy_expected}:
+        prior_causal_expected = expected - {"last_discovered_at"}
+        legacy_expected = prior_causal_expected - {
+            "completion_discovered_at",
+            "settlement_discovered_at",
+        }
+        if set(raw) not in {expected, prior_causal_expected, legacy_expected}:
             raise ValueError("lifecycle record fields mismatch")
         value = dict(raw)
         value.setdefault("completion_discovered_at", None)
         value.setdefault("settlement_discovered_at", None)
+        if "last_discovered_at" not in value:
+            discovery_candidates = [
+                value["first_discovered_at"],
+                value["last_available_at"],
+                value["completion_discovered_at"],
+                value["settlement_discovered_at"],
+            ]
+            known = [item for item in discovery_candidates if item is not None]
+            value["last_discovered_at"] = max(
+                known,
+                key=lambda item: _instant(item, "legacy_discovery_boundary"),
+            )
         value["phase"] = EventPhase(value["phase"])
         return cls(**value)
 
@@ -394,6 +450,7 @@ class ContinuousEventLifecycle:
                 settlement_discovered_at=(
                     discovered_at if event.settlement_ref is not None else None
                 ),
+                last_discovered_at=discovered_at,
             )
         if (
             previous.source_id != event.source_id
@@ -418,6 +475,12 @@ class ContinuousEventLifecycle:
             previous.last_available_at, "last_available_at"
         ):
             raise CatalogConflictError("event evidence availability cannot move backwards")
+        assert previous.last_discovered_at is not None
+        if _instant(discovered_at, "discovered_at") < _instant(
+            previous.last_discovered_at,
+            "last_discovered_at",
+        ):
+            raise CatalogConflictError("catalog discovery cutoff cannot move backwards")
         completion_ref = event.completion_ref or previous.completion_ref
         settlement_ref = event.settlement_ref or previous.settlement_ref
         completion_discovered_at = previous.completion_discovered_at
@@ -451,6 +514,7 @@ class ContinuousEventLifecycle:
             settlement_ref=settlement_ref,
             completion_discovered_at=completion_discovered_at,
             settlement_discovered_at=settlement_discovered_at,
+            last_discovered_at=discovered_at,
         )
 
     def apply_page(self, page: CatalogPage, *, discovered_at: str) -> tuple[str, ...]:
@@ -576,6 +640,21 @@ class ContinuousEventLifecycle:
             raise KeyError(f"unknown catalog event {identity!r}")
         cutoff = _instant(as_of, "as_of")
         required_seconds = int(required_history.total_seconds())
+        first_discovered = _instant(
+            record.first_discovered_at,
+            "first_discovered_at",
+        )
+        if cutoff < first_discovered:
+            return EventEvidenceAssessment(
+                identity=record.identity,
+                status=EvidenceEligibility.WAIT_EVIDENCE,
+                evidence_first_available_at=record.first_discovered_at,
+                required_history_seconds=required_seconds,
+                detail=(
+                    "catalog event was discovered after the causal cutoff; "
+                    "late discovery cannot backfill event availability"
+                ),
+            )
         if record.phase is EventPhase.COMPLETED:
             if record.completion_discovered_at is None:
                 return EventEvidenceAssessment(
@@ -679,16 +758,16 @@ class ContinuousEventLifecycle:
             if record is None:
                 raise CatalogLifecycleError(f"unknown catalog event {identity!r}")
             input_id = f"catalog:{record.identity}"
-            if record.phase is EventPhase.COMPLETED:
-                if retire_input is not None:
-                    retire_input(input_id)
-                continue
             assessment = self.assess_evidence(
                 identity,
                 store,
                 as_of=as_of,
                 required_history=required_history,
             )
+            if assessment.status is EvidenceEligibility.COMPLETED:
+                if retire_input is not None:
+                    retire_input(input_id)
+                continue
             if not assessment.eligible:
                 continue
             record = self.get(identity)

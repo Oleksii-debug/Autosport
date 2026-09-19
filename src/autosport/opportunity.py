@@ -360,6 +360,7 @@ class PredictiveEligibilityEvidence:
     evaluation_id: str
     evaluation_sha256: str
     protocol_sha256: str
+    admission_policy_sha256: str
     model_id: str
     model_version: str
     strategy_version: str
@@ -374,6 +375,10 @@ class PredictiveEligibilityEvidence:
         _canonical_text(self.evaluation_id, "predictive evaluation_id")
         _canonical_hash(self.evaluation_sha256, "predictive evaluation_sha256")
         _canonical_hash(self.protocol_sha256, "predictive protocol_sha256")
+        _canonical_hash(
+            self.admission_policy_sha256,
+            "predictive admission_policy_sha256",
+        )
         _canonical_text(self.model_id, "predictive model_id")
         _canonical_text(self.model_version, "predictive model_version")
         _canonical_text(self.strategy_version, "predictive strategy_version")
@@ -419,6 +424,7 @@ class PredictiveEligibilityEvidence:
             "evaluation_id": self.evaluation_id,
             "evaluation_sha256": self.evaluation_sha256,
             "protocol_sha256": self.protocol_sha256,
+            "admission_policy_sha256": self.admission_policy_sha256,
             "model_id": self.model_id,
             "model_version": self.model_version,
             "strategy_version": self.strategy_version,
@@ -438,6 +444,7 @@ class PredictiveEligibilityEvidence:
             "evaluation_id",
             "evaluation_sha256",
             "protocol_sha256",
+            "admission_policy_sha256",
             "model_id",
             "model_version",
             "strategy_version",
@@ -468,6 +475,10 @@ class PredictiveEligibilityEvidence:
             ),
             protocol_sha256=_canonical_hash(
                 raw["protocol_sha256"], "predictive protocol_sha256"
+            ),
+            admission_policy_sha256=_canonical_hash(
+                raw["admission_policy_sha256"],
+                "predictive admission_policy_sha256",
             ),
             model_id=_canonical_text(raw["model_id"], "predictive model_id"),
             model_version=_canonical_text(

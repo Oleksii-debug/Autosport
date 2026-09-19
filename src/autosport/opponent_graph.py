@@ -393,6 +393,14 @@ class OpponentGraphStore:
             if _instant("recorded_at", outcome.recorded_at) <= _instant("recorded_at", predecessor.recorded_at):
                 raise OpponentGraphError("outcome correction must be recorded after predecessor")
             self._validate_identity_correction(predecessor, outcome)
+            if (
+                outcome.participant_id == predecessor.participant_id
+                and outcome.opponent_id == predecessor.opponent_id
+                and outcome.league_id == predecessor.league_id
+                and _decimal("score", outcome.score) == _decimal("predecessor score", predecessor.score)
+                and outcome.evidence_sha256 == predecessor.evidence_sha256
+            ):
+                raise OpponentGraphError("outcome correction must change authoritative evidence or content")
 
         candidate_outcomes = dict(self._outcomes)
         candidate_outcomes[outcome.outcome_id] = outcome
@@ -798,26 +806,22 @@ class OpponentGraphStore:
         causal_cutoff: str,
         view: IdentityView,
     ) -> str | None:
-        candidates = [
+        # A normal decision-time recomputation with identical durable inputs must
+        # remain idempotent.  Predecessor lineage is reserved for an explicit
+        # RESTATED_RESEARCH snapshot derived from a preserved decision snapshot.
+        if view is not IdentityView.RESTATED_RESEARCH:
+            return None
+        decision = [
             snapshot for snapshot in self._snapshots.values()
             if snapshot.participant_id == participant_id
             and snapshot.sport == sport
             and snapshot.league_id == league_id
             and snapshot.causal_cutoff == causal_cutoff
+            and snapshot.view is IdentityView.AS_KNOWN_AT_DECISION
         ]
-        if not candidates:
-            return None
-        if view is IdentityView.RESTATED_RESEARCH:
-            decision = [
-                snapshot for snapshot in candidates
-                if snapshot.view is IdentityView.AS_KNOWN_AT_DECISION
-            ]
-            if decision:
-                return sorted(decision, key=lambda item: item.snapshot_id)[-1].snapshot_id
-        same_view = [snapshot for snapshot in candidates if snapshot.view is view]
         return (
-            sorted(same_view, key=lambda item: item.snapshot_id)[-1].snapshot_id
-            if same_view else None
+            sorted(decision, key=lambda item: item.snapshot_id)[-1].snapshot_id
+            if decision else None
         )
 
     @staticmethod
@@ -878,6 +882,7 @@ class OpponentGraphStore:
                 raise OpponentGraphError("duplicate serialized outcome_id")
             outcomes[outcome.outcome_id] = outcome
         self._outcomes = outcomes
+        predecessor_successors: dict[str, str] = {}
         for outcome in outcomes.values():
             self._validate_identity_binding(
                 outcome, correction=outcome.supersedes_outcome_id is not None
@@ -886,6 +891,18 @@ class OpponentGraphStore:
                 predecessor = outcomes.get(outcome.supersedes_outcome_id)
                 if predecessor is None:
                     raise OpponentGraphError("serialized correction references unknown predecessor")
+                prior_successor = predecessor_successors.get(predecessor.outcome_id)
+                if prior_successor is not None and prior_successor != outcome.outcome_id:
+                    raise OpponentGraphError("serialized outcome correction fork is not allowed")
+                predecessor_successors[predecessor.outcome_id] = outcome.outcome_id
+                if outcome.event_id != predecessor.event_id or outcome.source_id != predecessor.source_id:
+                    raise OpponentGraphError("serialized outcome correction must preserve event/source identity")
+                if outcome.sport != predecessor.sport:
+                    raise OpponentGraphError("serialized outcome correction must preserve sport")
+                if _instant("available_at", outcome.available_at) <= _instant("available_at", predecessor.available_at):
+                    raise OpponentGraphError("serialized outcome correction must become available after predecessor")
+                if _instant("recorded_at", outcome.recorded_at) <= _instant("recorded_at", predecessor.recorded_at):
+                    raise OpponentGraphError("serialized outcome correction must be recorded after predecessor")
                 self._validate_identity_correction(predecessor, outcome)
 
         snapshots: dict[str, RatingSnapshot] = {}

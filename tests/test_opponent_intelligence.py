@@ -649,6 +649,8 @@ class OpponentIntelligenceTests(unittest.TestCase):
             market_context_id="match-outcome",
             causal_cutoff=T2,
             published_at=T2,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
             view=IdentityView.RESTATED_RESEARCH,
             min_support=1,
         )

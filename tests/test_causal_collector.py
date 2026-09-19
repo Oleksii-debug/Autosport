@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -36,6 +37,31 @@ def event_payload(*, event_id="e1", odds="1.80"):
         "ingest_ts": "2026-01-01T00:00:01+00:00",
         "metadata": {},
     }
+
+
+class DurableApplicationReceiptStore:
+    def __init__(self, path):
+        self.path = Path(path)
+        if not self.path.exists():
+            self.path.write_text("{}\n", encoding="utf-8")
+
+    def put(self, receipt):
+        receipt.validate()
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        payload[receipt.delta_id] = {
+            "delta_id": receipt.delta_id,
+            "canonical_event_digest": receipt.canonical_event_digest,
+            "receipt_id": receipt.receipt_id,
+            "applied_at": receipt.applied_at,
+        }
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(self.path)
+
+    def get(self, delta):
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        item = payload.get(delta.delta_id)
+        return None if item is None else DesktopApplicationReceipt(**item)
 
 
 class CollectorDeltaTests(unittest.TestCase):
@@ -411,7 +437,7 @@ class CollectorDeltaTests(unittest.TestCase):
             checkpoint = DesktopDeltaCheckpointStore(Path(tmp) / "desktop.json")
             delta = self.make_delta()
             collector.append(delta)
-            with self.assertRaises(AckConflictError):
+            with self.assertRaises(ApplicationReceiptError):
                 checkpoint.ack(
                     delta,
                     application_receipt=DesktopApplicationReceipt(
@@ -490,6 +516,58 @@ class CollectorDeltaTests(unittest.TestCase):
             )
             with self.assertRaises(ApplicationReceiptError):
                 consumer.drain(as_of="2026-01-01T00:00:05+00:00")
+
+    def test_crash_after_application_before_ack_recovers_durable_receipt_without_reapply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector_path = Path(tmp) / "collector.json"
+            desktop_path = Path(tmp) / "desktop.json"
+            receipt_path = Path(tmp) / "application-receipts.json"
+            collector = CollectorDeltaStore(collector_path)
+            delta = self.make_delta()
+            collector.append(delta)
+
+            canonical_receipts = DurableApplicationReceiptStore(receipt_path)
+            first_effects = []
+
+            def apply_then_crash(current, event):
+                first_effects.append(event)
+                canonical_receipts.put(
+                    DesktopApplicationReceipt(
+                        delta_id=current.delta_id,
+                        canonical_event_digest=canonical_event_digest(event),
+                        receipt_id=f"receipt:{current.delta_id}",
+                        applied_at="2026-01-01T00:00:04+00:00",
+                    )
+                )
+                raise RuntimeError("crash-after-application-before-ack")
+
+            first = DesktopDeltaConsumer(
+                collector,
+                DesktopDeltaCheckpointStore(desktop_path),
+                resolve_event=lambda _: event_payload(),
+                apply_event=apply_then_crash,
+                lookup_application_receipt=canonical_receipts.get,
+            )
+            with self.assertRaises(RuntimeError):
+                first.drain(as_of="2026-01-01T00:00:05+00:00")
+            self.assertEqual(len(first_effects), 1)
+            self.assertFalse(DesktopDeltaCheckpointStore(desktop_path).has_ack("d1"))
+
+            reopened_receipts = DurableApplicationReceiptStore(receipt_path)
+            second_effects = []
+            second = DesktopDeltaConsumer(
+                CollectorDeltaStore(collector_path),
+                DesktopDeltaCheckpointStore(desktop_path),
+                resolve_event=lambda _: event_payload(),
+                apply_event=lambda current, event: (
+                    second_effects.append(event)
+                    or (_ for _ in ()).throw(AssertionError("effect was replayed"))
+                ),
+                lookup_application_receipt=reopened_receipts.get,
+            )
+            self.assertEqual(second.drain(as_of="2026-01-01T00:00:05+00:00"), ("d1",))
+            self.assertEqual(second_effects, [])
+            self.assertTrue(DesktopDeltaCheckpointStore(desktop_path).has_ack("d1"))
 
     def test_crash_before_atomic_replace_preserves_previous_durable_commit(self):
         with tempfile.TemporaryDirectory() as tmp:

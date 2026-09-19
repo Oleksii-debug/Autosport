@@ -331,6 +331,7 @@ def test_direct_action_cannot_bypass_episode_admissible_set(tmp_path):
         runtime.commit_action(
             unauthorized,
             episode=environment.episode,
+            observation=observation,
             effect_state=ExternalEffectState.NONE,
             at="2026-09-19T13:00:05Z",
         )
@@ -939,4 +940,3 @@ def test_admissible_direct_action_cannot_predate_observation_availability(tmp_pa
     snapshot = runtime.snapshot()
     assert snapshot.phase is AgentLoopPhase.ACT_OR_ABSTAIN
     assert snapshot.action_id is None
-

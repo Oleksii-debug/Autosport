@@ -52,6 +52,10 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             sport=sport,
         )
 
+    @staticmethod
+    def _stored_event_id(event_id: str) -> str:
+        return f"provider-a:{event_id}"
+
     @classmethod
     def _catalog_event(
         cls,
@@ -201,6 +205,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             try:
                 store.append(
                     self._event(
+                        event_id=self._stored_event_id("event-1"),
                         observed_offset=0,
                         ingest_offset=95,
                     )
@@ -219,6 +224,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
 
                 store.append(
                     self._event(
+                        event_id=self._stored_event_id("event-1"),
                         sequence=2,
                         observed_offset=101,
                         ingest_offset=101,
@@ -261,7 +267,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 store.append(
                     self._event(
                         sport="table_tennis",
-                        event_id="shared-local-id",
+                        event_id=self._stored_event_id("shared-local-id"),
                         observed_offset=0,
                         ingest_offset=0,
                     )
@@ -269,7 +275,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 store.append(
                     self._event(
                         sport="soccer",
-                        event_id="shared-local-id",
+                        event_id=self._stored_event_id("shared-local-id"),
                         observed_offset=0,
                         ingest_offset=0,
                     )
@@ -291,7 +297,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                     {"soccer", "table_tennis"},
                 )
                 self.assertTrue(
-                    all(call[1]["event_ids"] == "shared-local-id" for call in calls)
+                    all(call[1]["event_ids"] == "provider-a:shared-local-id" for call in calls)
                 )
             finally:
                 store.close()
@@ -328,7 +334,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 self.assertEqual(len(registered), 1)
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0][1]["sports"], "table_tennis")
-                self.assertEqual(calls[0][1]["event_ids"], "event-1")
+                self.assertEqual(calls[0][1]["event_ids"], "provider-a:event-1")
             finally:
                 store.close()
 

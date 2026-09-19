@@ -357,6 +357,16 @@ class PaperSettlementLearningBridge:
             _sha(binding.get("economic_goal_fingerprint"), "economic_goal_fingerprint")
             _sha(binding.get("risk_fingerprint"), "risk_fingerprint")
             _checkpoint(binding.get("baseline_checkpoint"))
+            intent = binding.get("settlement_intent")
+            if intent is not None:
+                self._intent_resolutions(intent)
+                if (
+                    intent["binding_id"] != binding["binding_id"]
+                    or intent["ticket_id"] != ticket_id
+                ):
+                    raise PaperSettlementLearningBridgeError(
+                        "settlement intent belongs to another ticket binding"
+                    )
         return state
 
     def _runtime_matches(
@@ -709,41 +719,62 @@ class PaperSettlementLearningBridge:
 
     @staticmethod
     def _intent_resolutions(intent: object) -> tuple[SettlementResolution, ...]:
-        if type(intent) is not dict:
+        expected_fields = {
+            "intent_id",
+            "binding_id",
+            "ticket_id",
+            "settlement_evidence",
+            "known_quote_outcomes",
+            "settlement_bundle_sha256",
+        }
+        if type(intent) is not dict or set(intent) != expected_fields:
             raise PaperSettlementLearningBridgeError(
-                "durable settlement intent must be an object"
+                "durable settlement intent schema mismatch"
             )
         try:
             evidence = intent["settlement_evidence"]
             if type(evidence) is not list or not evidence:
                 raise TypeError
-            resolutions = tuple(
-                SettlementResolution(
-                    event_identity=item["event_identity"],
-                    settlement_ref=item["settlement_ref"],
-                    quote_outcomes=dict(item["quote_outcomes"]),
-                    evidence_id=item["evidence_id"],
-                    evidence_sha256=item["evidence_sha256"],
-                    available_at=item["available_at"],
+            resolutions_list: list[SettlementResolution] = []
+            for item in evidence:
+                if type(item) is not dict or set(item) != {
+                    "evidence_id",
+                    "evidence_sha256",
+                    "event_identity",
+                    "settlement_ref",
+                    "available_at",
+                    "quote_outcomes",
+                }:
+                    raise TypeError
+                if type(item["quote_outcomes"]) is not dict:
+                    raise TypeError
+                resolutions_list.append(
+                    SettlementResolution(
+                        event_identity=item["event_identity"],
+                        settlement_ref=item["settlement_ref"],
+                        quote_outcomes=item["quote_outcomes"].copy(),
+                        evidence_id=item["evidence_id"],
+                        evidence_sha256=item["evidence_sha256"],
+                        available_at=item["available_at"],
+                    )
                 )
-                for item in evidence
-            )
+            resolutions = tuple(resolutions_list)
         except (KeyError, TypeError, ValueError) as exc:
             raise PaperSettlementLearningBridgeError(
                 "durable settlement intent evidence is not canonical"
             ) from exc
         semantic = {
-            "binding_id": intent.get("binding_id"),
-            "ticket_id": intent.get("ticket_id"),
+            "binding_id": intent["binding_id"],
+            "ticket_id": intent["ticket_id"],
             "settlement_evidence": evidence,
-            "known_quote_outcomes": intent.get("known_quote_outcomes"),
-            "settlement_bundle_sha256": intent.get("settlement_bundle_sha256"),
+            "known_quote_outcomes": intent["known_quote_outcomes"],
+            "settlement_bundle_sha256": intent["settlement_bundle_sha256"],
         }
         if (
-            _sha(intent.get("intent_id"), "settlement_intent intent_id")
+            _sha(intent["intent_id"], "settlement_intent intent_id")
             != _digest(semantic)
             or _sha(
-                intent.get("settlement_bundle_sha256"),
+                intent["settlement_bundle_sha256"],
                 "settlement_intent settlement_bundle_sha256",
             )
             != _digest(evidence)

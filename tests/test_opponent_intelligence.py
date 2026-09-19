@@ -386,6 +386,22 @@ class OpponentIntelligenceTests(unittest.TestCase):
             restated_ids,
             {correction.performance_id},
         )
+        corrected_rating, _ = self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
+            causal_cutoff=T2,
+            published_at=T3,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
+            view=IdentityView.RESTATED_RESEARCH,
+            min_support=1,
+        )
+        self.assertEqual(
+            corrected_rating.predecessor_snapshot_ids,
+            (rating.snapshot_id,),
+        )
 
         reopened = OpponentIntelligenceStore(
             self.store_path,
@@ -487,6 +503,22 @@ class OpponentIntelligenceTests(unittest.TestCase):
         self.assertEqual(
             edges[0].subject_entity_id,
             "p-drew",
+        )
+        corrected_rating, _ = self.store.build_snapshots(
+            participant_entity_id="p-drew",
+            sport_id="tennis",
+            league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
+            causal_cutoff=T2,
+            published_at=T4,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
+            view=IdentityView.RESTATED_RESEARCH,
+            min_support=1,
+        )
+        self.assertEqual(
+            corrected_rating.predecessor_snapshot_ids,
+            (rating.snapshot_id,),
         )
 
     def test_late_lineage_correction_marks_downstream_for_recompute(

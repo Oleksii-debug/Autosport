@@ -300,6 +300,28 @@ class ChampionEligibilityDecision:
                     "drift finding windows overlap and cannot establish repeated evidence"
                 )
 
+        tail_state = ordered[-1][3]
+        derived_streak = 0
+        for _start, _end, _observation_id, state, _scope in reversed(ordered):
+            if state is not tail_state:
+                break
+            derived_streak += 1
+
+        expected_degraded_streak = (
+            derived_streak if tail_state is DriftState.DRIFT_DETECTED else 0
+        )
+        expected_recovery_streak = (
+            derived_streak if tail_state is DriftState.NO_DRIFT else 0
+        )
+        if degraded_streak is not None and degraded_streak != expected_degraded_streak:
+            raise ChampionEligibilityError(
+                "degraded_streak must match causal finding windows"
+            )
+        if recovery_streak is not None and recovery_streak != expected_recovery_streak:
+            raise ChampionEligibilityError(
+                "recovery_streak must match causal finding windows"
+            )
+
         # Scope is activation authority, not presentation metadata.  The current
         # DriftFinding/DriftObservation schema does not require sport/league/regime,
         # so an absent authoritative scope must fail closed.
@@ -310,63 +332,41 @@ class ChampionEligibilityDecision:
             scoped = authoritative_scopes[0]
             if any(scope != scoped for scope in authoritative_scopes[1:]):
                 raise ChampionEligibilityError("drift evidence scope changes across windows")
+
         if scoped is None:
             status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
             status_reason = "authoritative_sport_league_regime_scope_is_missing"
         elif tuple(requested_scope.values()) != scoped:
             raise ChampionEligibilityError("drift evidence scope does not match champion scope")
+        elif min(counts) < minimum_effective_sample_size or any(
+            count < minimum_samples for count in counts
+        ):
+            status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
+            status_reason = "insufficient_or_under_supported_drift_evidence"
+        elif tail_state is DriftState.DRIFT_DETECTED:
+            if derived_streak < 2:
+                status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
+                status_reason = "single_or_non_sustained_degradation_window"
+            elif research_trigger_id is not None:
+                if not research_trigger_id.startswith("champion-drift:"):
+                    raise ChampionEligibilityError(
+                        "research_trigger_id is not a canonical champion-drift trigger"
+                    )
+                status = ChampionEligibilityStatus.RESEARCH_REQUIRED
+                status_reason = "sustained_scoped_degradation_requires_governed_research"
+            else:
+                status = ChampionEligibilityStatus.SHADOW_DEACTIVATED
+                status_reason = "sustained_scoped_degradation"
+        elif tail_state is DriftState.NO_DRIFT:
+            if derived_streak < 2:
+                status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
+                status_reason = "recovery_requires_repeated_fresh_evidence"
+            else:
+                status = ChampionEligibilityStatus.ELIGIBLE
+                status_reason = "current_scoped_evidence_within_drift_bounds"
         else:
-            tail_state = ordered[-1][3]
-            derived_streak = 0
-            for _start, _end, _observation_id, state, _scope in reversed(ordered):
-                if state is not tail_state:
-                    break
-                derived_streak += 1
-
-            expected_degraded_streak = derived_streak if tail_state is DriftState.DRIFT_DETECTED else 0
-            expected_recovery_streak = derived_streak if tail_state is DriftState.NO_DRIFT else 0
-            if degraded_streak is not None and degraded_streak != expected_degraded_streak:
-                raise ChampionEligibilityError("degraded_streak must match causal finding windows")
-            if recovery_streak is not None and recovery_streak != expected_recovery_streak:
-                raise ChampionEligibilityError("recovery_streak must match causal finding windows")
-
-            if degraded_streak is None and recovery_streak is None:
-                # Derived-only authority.  Never let a caller manufacture a streak.
-                pass
-
-            effective_sample_size = min(counts)
-            if effective_sample_size < minimum_effective_sample_size or any(
-                count < minimum_samples for count in counts
-            ):
-                status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
-                status_reason = "insufficient_or_under_supported_drift_evidence"
-            elif tail_state is DriftState.DRIFT_DETECTED:
-                if derived_streak < 2:
-                    status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
-                    status_reason = "single_or_non_sustained_degradation_window"
-                elif research_trigger_id is not None:
-                    if not research_trigger_id.startswith("champion-drift:"):
-                        raise ChampionEligibilityError("research_trigger_id is not a canonical champion-drift trigger")
-                    status = ChampionEligibilityStatus.RESEARCH_REQUIRED
-                    status_reason = "sustained_scoped_degradation_requires_governed_research"
-                else:
-                    status = ChampionEligibilityStatus.SHADOW_DEACTIVATED
-                    status_reason = "sustained_scoped_degradation"
-            elif tail_state is DriftState.NO_DRIFT:
-                if derived_streak < 2:
-                    status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
-                    status_reason = "recovery_requires_repeated_fresh_evidence"
-                else:
-                    status = ChampionEligibilityStatus.ELIGIBLE
-                    status_reason = "current_scoped_evidence_within_drift_bounds"
-            else:
-                status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
-                status_reason = "mixed_drift_states_require_further_evidence"
-
-            if status is not ChampionEligibilityStatus.WAIT_MORE_EVIDENCE:
-                effective_sample_size = min(counts)
-            else:
-                effective_sample_size = min(counts)
+            status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
+            status_reason = "mixed_drift_states_require_further_evidence"
 
         return cls(
             status=status,

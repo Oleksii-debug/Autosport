@@ -308,6 +308,21 @@ class PairedVOCEvaluation:
         }
 
     @property
+    def record_type(self) -> str:
+        return "PairedVOCEvaluation"
+
+    @property
+    def record_id(self) -> str:
+        return self.evaluation_id
+
+    @property
+    def available_at(self) -> str:
+        return self.evaluated_at
+
+    def to_payload(self) -> dict[str, Any]:
+        return self.payload()
+
+    @property
     def evaluation_sha256(self) -> str:
         return _canonical_digest(self.unsigned_payload())
 
@@ -450,9 +465,17 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError("canonical DecisionLedger verification failed") from exc
         expected_binding = {
             "baseline_candidate_id": evaluation.baseline_candidate_id,
+            "baseline_backend_id": evaluation.baseline_backend_id,
+            "baseline_model_id": evaluation.baseline_model_id,
+            "baseline_config_sha256": evaluation.baseline_config_sha256,
+            "baseline_output_sha256": evaluation.baseline_output_sha256,
             "baseline_action": evaluation.baseline_action,
             "baseline_abstained": evaluation.baseline_abstained,
             "challenger_candidate_id": evaluation.challenger_candidate_id,
+            "challenger_backend_id": evaluation.challenger_backend_id,
+            "challenger_model_id": evaluation.challenger_model_id,
+            "challenger_config_sha256": evaluation.challenger_config_sha256,
+            "challenger_output_sha256": evaluation.challenger_output_sha256,
             "challenger_action": evaluation.challenger_action,
             "challenger_abstained": evaluation.challenger_abstained,
             "sport_id": evaluation.sport_id,
@@ -495,6 +518,10 @@ class CanonicalVOCAuthorityResolver:
         binding = payload.get("binding")
         if type(binding) is not dict:
             raise VOCEvaluationError("canonical ResearchProtocol binding is missing")
+        if binding.get("task_class") != evaluation.task_class:
+            raise VOCEvaluationError(
+                "canonical ResearchProtocol task-class binding does not match paired evaluation"
+            )
         evaluation_design = binding.get("evaluation_design")
         if not isinstance(evaluation_design, str) or not evaluation_design.strip():
             raise VOCEvaluationError("canonical ResearchProtocol evaluation design is missing")
@@ -611,9 +638,45 @@ class CanonicalVOCAuthorityResolver:
             "market_id": identity.market_id,
             "source_id": identity.source_id,
             "market_type": identity.market_type.value,
+            "sport_id": evaluation.sport_id,
+            "league_id": evaluation.league_id,
+            "regime_id": evaluation.regime_id,
         }
-        if outcome_identity != expected_identity:
-            raise VOCEvaluationError("canonical outcome authority identity does not match research scope")
+        for field, expected in expected_identity.items():
+            if outcome_identity.get(field) != expected:
+                raise VOCEvaluationError(
+                    "canonical outcome authority identity does not match research scope"
+                )
+
+    def _require_registry_result(
+        self,
+        evaluation: PairedVOCEvaluation,
+        *,
+        as_of: str,
+    ) -> PairedVOCEvaluation:
+        entry = self.scientific_registry.get(
+            "PairedVOCEvaluation",
+            evaluation.evaluation_id,
+        )
+        if entry is None:
+            raise VOCEvaluationError(
+                "canonical PairedVOCEvaluation result is missing"
+            )
+        available_at = _instant("available_at", entry.available_at)
+        reveal_at = _instant("outcome_revealed_at", evaluation.outcome_revealed_at)
+        if available_at < reveal_at:
+            raise VOCEvaluationError(
+                "canonical PairedVOCEvaluation result predates outcome reveal"
+            )
+        if available_at > _instant("as_of", as_of):
+            raise VOCEvaluationError(
+                "canonical PairedVOCEvaluation result is not causally available"
+            )
+        if entry.payload != evaluation.payload():
+            raise VOCEvaluationError(
+                "canonical PairedVOCEvaluation result differs from routed evaluation"
+            )
+        return PairedVOCEvaluation.from_payload(entry.payload)
 
     def resolve(
         self,
@@ -624,10 +687,11 @@ class CanonicalVOCAuthorityResolver:
         if not isinstance(evaluation, PairedVOCEvaluation):
             raise TypeError("evaluation must be PairedVOCEvaluation")
         _instant("as_of", as_of)
-        self._require_decision(evaluation)
-        self._require_protocol(evaluation)
-        self._require_outcome(evaluation)
-        return evaluation
+        canonical = self._require_registry_result(evaluation, as_of=as_of)
+        self._require_decision(canonical)
+        self._require_protocol(canonical)
+        self._require_outcome(canonical)
+        return canonical
 
 
 class VOCEvaluationStore:

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from autosport.domain import MarketEvent
 from autosport.event_lifecycle import (
+    CatalogConflictError,
     CatalogCursorError,
     CatalogEvent,
     CatalogPage,
@@ -95,6 +96,19 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             events=(event,),
             epoch_changed=epoch_changed,
         )
+
+    def test_same_provider_event_id_across_sports_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = ContinuousEventLifecycle(Path(directory) / "catalog.json")
+            lifecycle.apply_page(
+                self._page(1, self._event(sport="table_tennis")),
+                discovered_at=(self.START + timedelta(seconds=1)).isoformat(),
+            )
+            with self.assertRaises(CatalogConflictError):
+                lifecycle.apply_page(
+                    self._page(2, self._event(sport="soccer", observed_offset=1)),
+                    discovered_at=(self.START + timedelta(seconds=2)).isoformat(),
+                )
 
     def test_lifecycle_identity_reuses_provider_scoped_market_event_identity(self) -> None:
         table_tennis = canonical_event_identity(

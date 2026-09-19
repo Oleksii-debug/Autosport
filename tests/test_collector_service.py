@@ -421,6 +421,17 @@ class CollectorServiceConfigTests(unittest.TestCase):
             CollectorServiceConfig(jitter_fraction=1.1)
         with self.assertRaises(ValueError):
             CollectorServiceConfig(max_store_bytes=0)
+        with self.assertRaises(ValueError):
+            CollectorServiceConfig(max_items=5001)
+        with self.assertRaises(ValueError):
+            CollectorServiceConfig(retry_attempts=11)
+
+    def test_delta_feed_page_bound_is_hard_capped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            feed = ReadOnlyCollectorDeltaFeed(store, source_id="source-x")
+            with self.assertRaises(ValueError):
+                feed.read_page(max_items=5001)
 
 
 if __name__ == "__main__":

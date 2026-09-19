@@ -274,6 +274,8 @@ class SkillRegistry:
             raise SkillRegistryError("run authority/tool evidence does not match source-owned profile")
         _prov(tuple(tuple(x) for x in e.get("provenance",[]))); _prov(tuple(tuple(x) for x in e.get("emitted_evidence",[])))
         for n in ("requested_compute_units","requested_data_units","requested_ai_units","consumed_compute_units","consumed_data_units","consumed_ai_units"): _nni(e.get(n),n)
+        if e["consumed_compute_units"] > e["requested_compute_units"] or e["consumed_data_units"] > e["requested_data_units"] or e["consumed_ai_units"] > e["requested_ai_units"]:
+            raise SkillRegistryError("run consumed budget exceeds immutable requested budget")
         if type(e.get("input")) is not dict: raise SkillRegistryError("run input must be object")
         if e.get("output") is not None and type(e["output"]) is not dict: raise SkillRegistryError("run output must be object or null")
         if e["input_sha256"] != _digest(e["input"]): raise SkillRegistryError("run input digest mismatch")
@@ -377,11 +379,12 @@ class SkillRegistry:
         if ai>d.ai_budget_units:return "AI_BUDGET_EXCEEDED"
         return None
     @staticmethod
-    def _check_result(d,r):
+    def _check_result(d,r,requested_compute_units,requested_data_units,requested_ai_units):
         if set(r.used_tools)-set(d.required_tools): raise SkillPermissionError("handler used undeclared tool")
         if set(r.applied_mutations)&NON_DELEGABLE_MUTATIONS: raise SkillPermissionError("handler reported protected mutation")
         if not set(r.applied_mutations).issubset(d.allowed_mutations): raise SkillPermissionError("handler reported undeclared mutation")
-        if r.consumed_compute_units>d.compute_budget_units or r.consumed_data_units>d.data_budget_units or r.consumed_ai_units>d.ai_budget_units: raise SkillPermissionError("handler exceeded budget")
+        if r.consumed_compute_units>d.compute_budget_units or r.consumed_data_units>d.data_budget_units or r.consumed_ai_units>d.ai_budget_units: raise SkillPermissionError("handler exceeded definition budget")
+        if r.consumed_compute_units>requested_compute_units or r.consumed_data_units>requested_data_units or r.consumed_ai_units>requested_ai_units: raise SkillPermissionError("handler exceeded immutable requested budget")
         if {k for k,_ in r.emitted_evidence}-set(d.emitted_evidence_types): raise SkillPermissionError("handler emitted undeclared evidence type")
     def invoke(self,*,skill_id:str,version:str,capability:str,definition_id:str,call_id:str,caller_loop_id:str,caller_state_sha256:str,source_sha256:str,input_payload:dict[str,Any],authority_profile_id:str,requested_mutations:tuple[str,...],provenance:tuple[tuple[str,str],...],requested_compute_units:int,requested_data_units:int,requested_ai_units:int,at:str)->SkillRun:
         d=self.resolve(skill_id=skill_id,version=version,capability=capability,definition_id=definition_id)
@@ -409,7 +412,7 @@ class SkillRegistry:
         if error is not None:return self._finish_failure(rid,now,error)
         try:
             if not isinstance(r,SkillExecutionResult):raise SkillRegistryError("skill handler must return SkillExecutionResult")
-            self._check_result(d,r)
+            self._check_result(d,r,c,db,ai)
         except Exception as exc:return self._finish_failure(rid,now,"HANDLER_ERROR_"+exc.__class__.__name__.upper())
         return self._finish_success(rid,d,r,now)
     @staticmethod

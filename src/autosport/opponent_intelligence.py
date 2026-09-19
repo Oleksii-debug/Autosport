@@ -116,7 +116,7 @@ class ObservedPerformance:
     subject_alias: str
     opponent_alias: str
     sport_id: str
-    league_id: str
+    league_alias: str
     score: str
     observed_at: str
     available_at: str
@@ -131,7 +131,7 @@ class ObservedPerformance:
             "subject_alias",
             "opponent_alias",
             "sport_id",
-            "league_id",
+            "league_alias",
         ):
             _text(name, getattr(self, name))
         score = _decimal("score", self.score)
@@ -159,7 +159,7 @@ class ObservedPerformance:
             "subject_alias": self.subject_alias,
             "opponent_alias": self.opponent_alias,
             "sport_id": self.sport_id,
-            "league_id": self.league_id,
+            "league_alias": self.league_alias,
             "score": _decimal_text(_decimal("score", self.score)),
             "observed_at": _time_text("observed_at", self.observed_at),
             "available_at": _time_text("available_at", self.available_at),
@@ -181,18 +181,21 @@ class PerformanceRecord:
     observation: ObservedPerformance
     subject_entity_id: str
     opponent_entity_id: str
+    league_entity_id: str
     subject_alias_record_id: str
     opponent_alias_record_id: str
+    league_alias_record_id: str
 
     def __post_init__(self) -> None:
         if self.performance_id != self.observation.performance_id:
             raise OpponentIntelligenceError(
                 "performance_id does not match immutable observation"
             )
-        for name in ("subject_entity_id", "opponent_entity_id"):
+        for name in ("subject_entity_id", "opponent_entity_id", "league_entity_id"):
             _text(name, getattr(self, name))
         _sha256("subject_alias_record_id", self.subject_alias_record_id)
         _sha256("opponent_alias_record_id", self.opponent_alias_record_id)
+        _sha256("league_alias_record_id", self.league_alias_record_id)
         if self.subject_entity_id == self.opponent_entity_id:
             raise OpponentIntelligenceError(
                 "subject and opponent must be distinct canonical identities"
@@ -204,8 +207,10 @@ class PerformanceRecord:
             "observation": self.observation.payload(),
             "subject_entity_id": self.subject_entity_id,
             "opponent_entity_id": self.opponent_entity_id,
+            "league_entity_id": self.league_entity_id,
             "subject_alias_record_id": self.subject_alias_record_id,
             "opponent_alias_record_id": self.opponent_alias_record_id,
+            "league_alias_record_id": self.league_alias_record_id,
         }
 
 
@@ -216,7 +221,7 @@ class OpponentEdge:
     subject_entity_id: str
     opponent_entity_id: str
     sport_id: str
-    league_id: str
+    league_entity_id: str
     score: str
     observed_at: str
     available_at: str
@@ -389,6 +394,12 @@ class OpponentIntelligenceStore:
             as_of=observation.available_at,
             view=identity_view,
         )
+        league_alias = self.identity_registry.resolve_alias_record(
+            observation.source_id,
+            observation.league_alias,
+            as_of=observation.available_at,
+            view=identity_view,
+        )
         subject_entity = self.identity_registry.resolve_alias(
             observation.source_id,
             observation.subject_alias,
@@ -401,9 +412,16 @@ class OpponentIntelligenceStore:
             as_of=observation.available_at,
             view=identity_view,
         )
+        league_entity = self.identity_registry.resolve_alias(
+            observation.source_id,
+            observation.league_alias,
+            as_of=observation.available_at,
+            view=identity_view,
+        )
         if (
             subject_entity.entity_id != subject_alias.entity_id
             or opponent_entity.entity_id != opponent_alias.entity_id
+            or league_entity.entity_id != league_alias.entity_id
         ):
             raise OpponentIntelligenceError(
                 "identity authority returned inconsistent alias/entity evidence"
@@ -419,6 +437,10 @@ class OpponentIntelligenceStore:
         ):
             raise OpponentIntelligenceError(
                 "opponent performance requires same-kind PARTICIPANT or TEAM identities"
+            )
+        if league_entity.kind is not EntityKind.LEAGUE:
+            raise OpponentIntelligenceError(
+                "league context must resolve through canonical LEAGUE identity"
             )
 
         supersedes = observation.supersedes_performance_id
@@ -436,7 +458,7 @@ class OpponentIntelligenceStore:
                     "performance correction fork is not allowed"
                 )
             before = predecessor.observation
-            for name in ("event_id", "source_id", "sport_id", "league_id"):
+            for name in ("event_id", "source_id", "sport_id", "league_alias"):
                 if getattr(before, name) != getattr(observation, name):
                     raise OpponentIntelligenceError(
                         "performance correction must preserve event/context identity"
@@ -459,8 +481,10 @@ class OpponentIntelligenceStore:
             observation=observation,
             subject_entity_id=subject_entity.entity_id,
             opponent_entity_id=opponent_entity.entity_id,
+            league_entity_id=league_entity.entity_id,
             subject_alias_record_id=subject_alias.record_id,
             opponent_alias_record_id=opponent_alias.record_id,
+            league_alias_record_id=league_alias.record_id,
         )
         candidate_performances = dict(self._performances)
         candidate_performances[performance_id] = record
@@ -470,6 +494,7 @@ class OpponentIntelligenceStore:
             identity_changed = (
                 predecessor.subject_entity_id != record.subject_entity_id
                 or predecessor.opponent_entity_id != record.opponent_entity_id
+                or predecessor.league_entity_id != record.league_entity_id
             )
             score_changed = (
                 _decimal("predecessor score", predecessor.observation.score)
@@ -501,7 +526,7 @@ class OpponentIntelligenceStore:
         as_of: str,
         view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION,
         sport_id: str | None = None,
-        league_id: str | None = None,
+        league_entity_id: str | None = None,
     ) -> tuple[OpponentEdge, ...]:
         records = self._active_performances(as_of=as_of, view=view)
         edges: list[OpponentEdge] = []
@@ -511,8 +536,11 @@ class OpponentIntelligenceStore:
                 "sport_id", sport_id
             ):
                 continue
-            if league_id is not None and observation.league_id != _text(
-                "league_id", league_id
+            if (
+                league_entity_id is not None
+                and record.league_entity_id != _text(
+                    "league_entity_id", league_entity_id
+                )
             ):
                 continue
             edges.append(
@@ -522,7 +550,7 @@ class OpponentIntelligenceStore:
                     subject_entity_id=record.subject_entity_id,
                     opponent_entity_id=record.opponent_entity_id,
                     sport_id=observation.sport_id,
-                    league_id=observation.league_id,
+                    league_entity_id=record.league_entity_id,
                     score=_decimal_text(
                         _decimal("score", observation.score)
                     ),
@@ -541,7 +569,7 @@ class OpponentIntelligenceStore:
         *,
         participant_entity_id: str,
         sport_id: str,
-        league_id: str,
+        league_entity_id: str,
         causal_cutoff: str,
         published_at: str,
         view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION,
@@ -555,7 +583,7 @@ class OpponentIntelligenceStore:
             "participant_entity_id", participant_entity_id
         )
         sport = _text("sport_id", sport_id)
-        league = _text("league_id", league_id)
+        league = _text("league_entity_id", league_entity_id)
         cutoff = _time_text("causal_cutoff", causal_cutoff)
         publication = _time_text("published_at", published_at)
         if _instant("published_at", publication) < _instant(
@@ -603,7 +631,7 @@ class OpponentIntelligenceStore:
                 as_of=cutoff, view=view
             )
             if record.observation.sport_id == sport
-            and record.observation.league_id == league
+            and record.league_entity_id == league
             and participant
             in (record.subject_entity_id, record.opponent_entity_id)
         ]
@@ -793,6 +821,10 @@ class OpponentIntelligenceStore:
                     observation.opponent_alias,
                     record.opponent_alias_record_id,
                 ),
+                (
+                    observation.league_alias,
+                    record.league_alias_record_id,
+                ),
             ):
                 current = self.identity_registry.resolve_alias_record(
                     observation.source_id,
@@ -805,6 +837,7 @@ class OpponentIntelligenceStore:
             for entity_id in (
                 record.subject_entity_id,
                 record.opponent_entity_id,
+                record.league_entity_id,
             ):
                 for lineage in self.identity_registry.lineage_at(
                     entity_id,
@@ -1085,8 +1118,10 @@ class OpponentIntelligenceStore:
                     observation,
                     item["subject_entity_id"],
                     item["opponent_entity_id"],
+                    item["league_entity_id"],
                     item["subject_alias_record_id"],
                     item["opponent_alias_record_id"],
+                    item["league_alias_record_id"],
                 )
                 if record.performance_id in performances:
                     raise OpponentIntelligenceError(

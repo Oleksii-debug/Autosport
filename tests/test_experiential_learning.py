@@ -140,6 +140,12 @@ class ExperientialLearningFactoryBridgeTests(unittest.TestCase):
                     points=(),
                     rule=rule,
                 )
+                self.assertTrue(
+                    runner.artifact_store.exists(
+                        "transparent-bandit-policy",
+                        successor.policy_id,
+                    )
+                )
 
         self.assertEqual(result, expected)
         called_spec = delegated.call_args.args[1]

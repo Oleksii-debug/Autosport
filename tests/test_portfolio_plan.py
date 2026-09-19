@@ -662,6 +662,45 @@ class PortfolioPlanTests(unittest.TestCase):
                 partial_fill_stress_fraction=evidence.partial_fill_stress_fraction,
             )
 
+    def test_under_supported_dependency_evidence_fails_closed_to_wait(self) -> None:
+        goal = self._goal()
+        first = self._intent(goal, suffix="weak-a", signal=Decimal("0.05"))
+        second = self._intent(goal, suffix="weak-b", signal=Decimal("0.04"))
+        intents = (first, second)
+        book = PaperBook("1000")
+        graph = self._graph(
+            book,
+            intents,
+            dependency_edges=(
+                tuple(sorted((first.candidate_sha256, second.candidate_sha256))),
+            ),
+        )
+        evidence = replace(
+            self._dependency_evidence(
+                book,
+                intents,
+                dependency=Decimal("0"),
+                uncertainty=Decimal("0"),
+                fee=Decimal("0"),
+                partial_fill=Decimal("0"),
+            ),
+            sample_size=2,
+        )
+
+        plan = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            dependency_evidence=evidence,
+        )
+
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"), Decimal("0")))
+        self.assertIn("under-supported", plan.reason)
+        self.assertFalse(evidence.support_qualified)
+
     def test_dependency_evidence_stale_or_mismatched_inputs_fail_closed(self) -> None:
         goal = self._goal()
         first = self._intent(goal, suffix="stale-a", signal=Decimal("0.05"))
@@ -747,6 +786,70 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertEqual(plan.stakes, proposal.proposed_stakes)
         self.assertTrue(all(stake >= 0 for stake in plan.stakes))
         self.assertTrue(all(isinstance(stake, Decimal) for stake in plan.stakes))
+        self.assertEqual(plan.dependency_evidence, evidence)
+        self.assertEqual(plan.robust_proposal, proposal)
+        self.assertEqual(plan.dependency_evidence_sha256, evidence.evidence_sha256)
+        self.assertEqual(plan.robust_proposal_sha256, proposal.proposal_sha256)
+
+        payload = plan.to_dict()
+        self.assertEqual(payload["schema_version"], 5)
+        self.assertEqual(PortfolioPlan.from_dict(payload), plan)
+
+        tampered_evidence = json.loads(json.dumps(payload))
+        dependency_payload = tampered_evidence["dependency_evidence"]
+        assert isinstance(dependency_payload, dict)
+        dependency_payload["sample_size"] = 99
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized portfolio plan is invalid",
+        ):
+            PortfolioPlan.from_dict(tampered_evidence)
+
+        tampered_proposal = json.loads(json.dumps(payload))
+        proposal_payload = tampered_proposal["robust_proposal"]
+        assert isinstance(proposal_payload, dict)
+        proposal_payload["robust_scale"] = "0.5"
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized portfolio plan is invalid",
+        ):
+            PortfolioPlan.from_dict(tampered_proposal)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "robust-decisions.jsonl"
+            first_record = persist_portfolio_plan_decision(
+                JsonlDecisionLedger(ledger_path),
+                plan,
+                intents,
+                self._policy(goal),
+                initialize_ledger=True,
+                replay_run_id="replay-robust-portfolio",
+                material_action_id="robust-portfolio-plan",
+            )
+            restarted = JsonlDecisionLedger(ledger_path)
+            retry_record = persist_portfolio_plan_decision(
+                restarted,
+                plan,
+                intents,
+                self._policy(goal),
+                initialize_ledger=False,
+                replay_run_id="replay-robust-portfolio",
+                material_action_id="robust-portfolio-plan",
+            )
+            self.assertEqual(retry_record.decision_id, first_record.decision_id)
+            durable = restarted.verified_economic_decision_for_material_action(
+                "robust-portfolio-plan",
+                goal,
+                risk_policy=self._policy(goal),
+            )
+            self.assertIsNotNone(durable)
+            assert durable is not None
+            restored_plan = PortfolioPlan.from_dict(
+                json.loads(durable.payload["portfolio_plan_json"])
+            )
+            self.assertEqual(restored_plan, plan)
+            self.assertEqual(restored_plan.dependency_evidence, evidence)
+            self.assertEqual(restored_plan.robust_proposal, proposal)
 
     def test_outcome_independent_positive_requires_complete_exact_terminal_evidence(self) -> None:
         goal = self._goal()
@@ -953,6 +1056,8 @@ class PortfolioPlanTests(unittest.TestCase):
             "risk_policy_sha256": policy.provenance_sha256,
             "portfolio_truth": EvidenceTruth.EXACT,
             "reason": "externally asserted positive outcome-independent proof",
+            "dependency_evidence": None,
+            "robust_proposal": None,
         }
         with self.assertRaisesRegex(
             ValueError,

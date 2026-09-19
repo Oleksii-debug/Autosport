@@ -49,7 +49,6 @@ def _authority(
     evaluator_source_sha256=EVALUATOR_SOURCE,
     qualification_status="QUALIFIED",
     scope="table-tennis:pre-match",
-    allowed=(EVIDENCE_1, EVIDENCE_2),
 ) -> QualifiedCounterfactualAuthority:
     return QualifiedCounterfactualAuthority(
         authority_id=authority_id,
@@ -59,7 +58,6 @@ def _authority(
         reward_definition_sha256=REWARD_DEF,
         reward_mode=PolicyRewardMode.MECHANICAL_PAPER,
         scope=scope,
-        allowed_source_evidence_sha256=tuple(sorted(allowed)),
         qualification_status=qualification_status,
     )
 
@@ -268,19 +266,12 @@ def test_invented_counterfactual_source_id_fails_closed():
         )
 
 
-def test_unknown_counterfactual_evidence_digest_fails_closed():
-    predecessor = _policy(bet_reward="0", wait_reward="1")
-    challenger = _policy(bet_reward="2", wait_reward="1")
-    case = _case("sample-unknown", "9" * 64)
-
-    with pytest.raises(ValueError, match="not qualified by frozen authority"):
-        evaluate_policy_pair(
-            predecessor,
-            challenger,
-            (case,),
-            completed_at=T2,
-            counterfactual_authority=_authority(),
-        )
+def test_unknown_counterfactual_evidence_digest_is_not_frozen_as_authority():
+    predecessor=_policy(bet_reward="0",wait_reward="1")
+    challenger=_policy(bet_reward="2",wait_reward="1")
+    case=_case("sample-unknown","9"*64)
+    result=evaluate_policy_pair(predecessor,challenger,(case,),completed_at=T2,counterfactual_authority=_authority())
+    assert result.dataset_manifest_sha256==policy_evaluation_cases_manifest_sha256((case,))
 
 
 def test_unqualified_counterfactual_authority_fails_closed():

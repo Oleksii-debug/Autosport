@@ -105,18 +105,10 @@ class CatalogEvent:
                 raise ValueError("unsupported event phase") from exc
         _instant(self.available_at, "available_at")
         _optional_instant(self.scheduled_start_at, "scheduled_start_at")
-        _optional_instant(self.completion_discovered_at, "completion_discovered_at")
-        _optional_instant(self.settlement_discovered_at, "settlement_discovered_at")
         if self.completion_ref is not None:
             _text(self.completion_ref, "completion_ref")
         if self.settlement_ref is not None:
             _text(self.settlement_ref, "settlement_ref")
-        if self.completion_ref is None and self.completion_discovered_at is not None:
-            raise ValueError("completion_discovered_at requires completion_ref or completed phase")
-        if self.settlement_ref is not None and self.settlement_discovered_at is None:
-            raise ValueError("settlement evidence requires durable discovery time")
-        if self.phase is EventPhase.COMPLETED and self.completion_discovered_at is None:
-            raise ValueError("completed phase requires durable completion discovery time")
         if self.phase is not EventPhase.COMPLETED and (
             self.completion_ref is not None or self.settlement_ref is not None
         ):
@@ -236,6 +228,8 @@ class EventLifecycleRecord:
         _instant(self.first_discovered_at, "first_discovered_at")
         _instant(self.last_available_at, "last_available_at")
         _optional_instant(self.scheduled_start_at, "scheduled_start_at")
+        _optional_instant(self.completion_discovered_at, "completion_discovered_at")
+        _optional_instant(self.settlement_discovered_at, "settlement_discovered_at")
         if self.completion_ref is not None:
             _text(self.completion_ref, "completion_ref")
         if self.settlement_ref is not None:

@@ -82,7 +82,7 @@ def observation(
     evidence: str = SHA_B,
     supersedes: str | None = None,
     sport: str = "tennis",
-    league: str = "tour-a",
+    league: str = "Tour A",
 ) -> ObservedPerformance:
     return ObservedPerformance(
         event_id=event_id,
@@ -90,7 +90,7 @@ def observation(
         subject_alias=subject,
         opponent_alias=opponent,
         sport_id=sport,
-        league_id=league,
+        league_alias=league,
         score=score,
         observed_at=observed,
         available_at=available,
@@ -116,6 +116,7 @@ class OpponentIntelligenceTests(unittest.TestCase):
             entity("p-blair"),
             entity("p-casey"),
             entity("p-drew"),
+            entity("league-tour-a", kind=EntityKind.LEAGUE),
         ):
             self.identities.add_entity(item)
         self.identities.add_alias(
@@ -129,6 +130,9 @@ class OpponentIntelligenceTests(unittest.TestCase):
         )
         self.identities.add_alias(
             alias("provider-a", "Drew", "p-drew")
+        )
+        self.identities.add_alias(
+            alias("provider-a", "Tour A", "league-tour-a")
         )
         self.store = OpponentIntelligenceStore.initialize_pristine(
             self.store_path,
@@ -190,7 +194,7 @@ class OpponentIntelligenceTests(unittest.TestCase):
         rating, feature = self.store.build_snapshots(
             participant_entity_id="p-alex",
             sport_id="tennis",
-            league_id="tour-a",
+            league_entity_id="league-tour-a",
             causal_cutoff=T2,
             published_at=T2,
             min_support=2,
@@ -218,7 +222,7 @@ class OpponentIntelligenceTests(unittest.TestCase):
         rating_again, feature_again = reopened.build_snapshots(
             participant_entity_id="p-alex",
             sport_id="tennis",
-            league_id="tour-a",
+            league_entity_id="league-tour-a",
             causal_cutoff=T2,
             published_at=T2,
             min_support=2,
@@ -239,7 +243,7 @@ class OpponentIntelligenceTests(unittest.TestCase):
         insufficient, _ = self.store.build_snapshots(
             participant_entity_id="p-alex",
             sport_id="tennis",
-            league_id="tour-a",
+            league_entity_id="league-tour-a",
             causal_cutoff=T2,
             published_at=T2,
             min_support=2,
@@ -254,7 +258,7 @@ class OpponentIntelligenceTests(unittest.TestCase):
         stale, feature = self.store.build_snapshots(
             participant_entity_id="p-alex",
             sport_id="tennis",
-            league_id="tour-a",
+            league_entity_id="league-tour-a",
             causal_cutoff=T5,
             published_at=T5,
             min_support=1,
@@ -276,7 +280,7 @@ class OpponentIntelligenceTests(unittest.TestCase):
         rating, feature = self.store.build_snapshots(
             participant_entity_id="p-alex",
             sport_id="tennis",
-            league_id="tour-a",
+            league_entity_id="league-tour-a",
             causal_cutoff=T2,
             published_at=T2,
             min_support=1,
@@ -355,7 +359,7 @@ class OpponentIntelligenceTests(unittest.TestCase):
         rating, _ = self.store.build_snapshots(
             participant_entity_id="p-alex",
             sport_id="tennis",
-            league_id="tour-a",
+            league_entity_id="league-tour-a",
             causal_cutoff=T2,
             published_at=T2,
             min_support=1,
@@ -445,7 +449,7 @@ class OpponentIntelligenceTests(unittest.TestCase):
         rating, _ = self.store.build_snapshots(
             participant_entity_id="p-alex",
             sport_id="tennis",
-            league_id="tour-a",
+            league_entity_id="league-tour-a",
             causal_cutoff=T2,
             published_at=T2,
             min_support=1,
@@ -500,6 +504,13 @@ class OpponentIntelligenceTests(unittest.TestCase):
                 "provider-b",
                 "Blair",
                 "p-b-opponent",
+            )
+        )
+        self.identities.add_alias(
+            alias(
+                "provider-b",
+                "Tour A",
+                "league-tour-a",
             )
         )
         first = self.store.record_performance(
@@ -600,7 +611,7 @@ class OpponentIntelligenceTests(unittest.TestCase):
         decision, _ = self.store.build_snapshots(
             participant_entity_id="p-alex",
             sport_id="tennis",
-            league_id="tour-a",
+            league_entity_id="league-tour-a",
             causal_cutoff=T2,
             published_at=T2,
             min_support=1,
@@ -608,7 +619,7 @@ class OpponentIntelligenceTests(unittest.TestCase):
         restated, _ = self.store.build_snapshots(
             participant_entity_id="p-alex",
             sport_id="tennis",
-            league_id="tour-a",
+            league_entity_id="league-tour-a",
             causal_cutoff=T2,
             published_at=T2,
             view=IdentityView.RESTATED_RESEARCH,
@@ -617,7 +628,7 @@ class OpponentIntelligenceTests(unittest.TestCase):
         different_config, _ = self.store.build_snapshots(
             participant_entity_id="p-alex",
             sport_id="tennis",
-            league_id="tour-a",
+            league_entity_id="league-tour-a",
             causal_cutoff=T2,
             published_at=T2,
             min_support=1,

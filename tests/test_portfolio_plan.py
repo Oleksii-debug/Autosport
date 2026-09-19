@@ -515,6 +515,67 @@ class PortfolioPlanTests(unittest.TestCase):
                 dependency_graph="f" * 64,  # type: ignore[arg-type]
             )
 
+
+    def test_typed_dependency_evidence_is_required_to_admit_correlated_predictive_candidates(self) -> None:
+        goal = self._goal()
+        first = self._intent(goal, suffix="joint-a", signal=Decimal("0.05"))
+        second = self._intent(goal, suffix="joint-b", signal=Decimal("0.04"))
+        intents = (first, second)
+        book = PaperBook("1000")
+        graph = self._graph(
+            book,
+            intents,
+            dependency_edges=(tuple(sorted((first.candidate_sha256, second.candidate_sha256))),),
+        )
+        evidence = self._dependency_evidence(
+            book,
+            intents,
+            dependency=Decimal("0.20"),
+            uncertainty=Decimal("0.05"),
+            fee=Decimal("0.01"),
+            partial_fill=Decimal("0.05"),
+        )
+        plan = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            dependency_evidence=evidence,
+        )
+        self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
+        self.assertEqual(plan.stakes, (
+            Decimal("20.09"),
+            Decimal("16.08"),
+        ))
+        self.assertIn("endogenous whole-portfolio stake vector", plan.reason)
+
+    def test_robust_dependency_evidence_rejects_future_or_incomplete_provenance(self) -> None:
+        goal = self._goal()
+        first = self._intent(goal, suffix="prov-a", signal=Decimal("0.05"))
+        second = self._intent(goal, suffix="prov-b", signal=Decimal("0.04"))
+        book = PaperBook("1000")
+        evidence = self._dependency_evidence(
+            book,
+            (first, second),
+            as_of="2026-09-18T13:20:01+00:00",
+        )
+        graph = self._graph(
+            book,
+            (first, second),
+            dependency_edges=(tuple(sorted((first.candidate_sha256, second.candidate_sha256))),),
+        )
+        plan = build_portfolio_plan(
+            book,
+            (first, second),
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            dependency_evidence=evidence,
+        )
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertIn("stale", plan.reason)
+
     def test_correlated_positive_candidates_fail_closed_without_joint_risk_authority(self) -> None:
         goal = self._goal()
         first = self._intent(goal, suffix="corr-a", signal=Decimal("0.05"))

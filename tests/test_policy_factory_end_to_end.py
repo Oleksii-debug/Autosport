@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import hashlib
 from autosport.integrity import atomic_write_json
 import json
@@ -75,6 +77,23 @@ SECOND_COMPLETED = "2026-09-19T10:20:00Z"
 SECOND_DECIDED = "2026-09-19T10:21:00Z"
 
 
+class _FixtureClock:
+    def __init__(self):
+        self._times = iter(
+            (
+                datetime(2026, 9, 19, 9, 4, tzinfo=timezone.utc),
+                datetime(2026, 9, 19, 9, 20, tzinfo=timezone.utc),
+                datetime(2026, 9, 19, 9, 20, tzinfo=timezone.utc),
+            )
+        )
+
+    def __call__(self):
+        return next(
+            self._times,
+            datetime(2026, 9, 19, 9, 40, tzinfo=timezone.utc),
+        )
+
+
 def _digest(payload: object) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -137,10 +156,11 @@ def _policy_successor(
 
 def _foundation(tmp_path):
     artifact_root = tmp_path / "artifacts"
-    store = FactoryArtifactStore(artifact_root)
+    clock = _FixtureClock()
+    store = FactoryArtifactStore(artifact_root, clock=clock)
     cases = _cases(store)
     dataset_manifest = policy_evaluation_cases_manifest_sha256(cases)
-    qualification_evidence_sha256 = store.write(
+    qualification_evidence_sha256 = store.materialize(
         "counterfactual-qualification",
         "mechanical-paper-settlement:v1@1",
         {
@@ -254,9 +274,9 @@ def _foundation(tmp_path):
     for case in cases:
         bound_case=dict(case.canonical_payload()); source_sha=bound_case.pop("source_evidence_sha256")
         identity=f"mechanical-paper-settlement:v1@1:{case.sample_id}"
-        store.write("counterfactual-source-evidence",identity,{"schema_version":1,"kind":"autosport-counterfactual-source-evidence-v1","authority_id":"mechanical-paper-settlement:v1","authority_version":"1","case":bound_case})
+        store.materialize("counterfactual-source-evidence",identity,{"schema_version":1,"kind":"autosport-counterfactual-source-evidence-v1","authority_id":"mechanical-paper-settlement:v1","authority_version":"1","case":bound_case})
         registry.append(CounterfactualSourceEvidence("mechanical-paper-settlement:v1","1",case.sample_id,source_sha,case.observed_at,case.reward_available_at,HOLDOUT_REVEAL_AT,DATASET_ID))
-    store = FactoryArtifactStore(artifact_root)
+    store = FactoryArtifactStore(artifact_root, clock=clock)
 
     predecessor = BanditPolicyState.initial(
         environment_id=ENVIRONMENT,
@@ -688,6 +708,121 @@ def test_policy_retest_rejects_missing_post_reveal_materialization_receipt(tmp_p
     with pytest.raises(ValueError,match="materialization receipt"):
         run_policy_retest(ExperimentRunner(registry,store),predecessor_policy=predecessor,challenger_policy=challenger,update_evidence=update,spec=spec,evaluation_cases=cases,rule=rule)
 
+
+
+
+def test_policy_retest_rejects_tampered_materialization_ledger(tmp_path):
+    (
+        registry,
+        _,
+        artifact_root,
+        store,
+        predecessor,
+        predecessor_model_id,
+        cases,
+        rule,
+    ) = _foundation(tmp_path)
+    ledger = store._materialization_ledger_path()
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["records"][0]["materialized_at"] = FROZEN_AT
+    atomic_write_json(ledger, payload)
+    challenger, update = _policy_successor(
+        predecessor,
+        observation_id="5" * 64,
+        outcome_id="6" * 64,
+        episode_id="7" * 64,
+        decided_at="2026-09-19T09:33:00Z",
+        available_at="2026-09-19T09:34:00Z",
+        reward_value="2",
+    )
+    spec = _spec(
+        experiment_id="experiment-tampered-materialization-ledger",
+        model_id="model-tampered-materialization-ledger",
+        evaluation_id="evaluation-tampered-materialization-ledger",
+        promotion_id="promotion-tampered-materialization-ledger",
+        predecessor_policy_id=predecessor.policy_id,
+        predecessor_model_id=predecessor_model_id,
+        created_at=CHALLENGER_CREATED,
+        completed_at=CHALLENGER_COMPLETED,
+        decided_at=CHALLENGER_DECIDED,
+    )
+    import pytest
+
+    with pytest.raises(ValueError, match="materialization ledger record digest mismatch"):
+        run_policy_retest(
+            ExperimentRunner(registry, store),
+            predecessor_policy=predecessor,
+            challenger_policy=challenger,
+            update_evidence=update,
+            spec=spec,
+            points=(),
+            evaluation_cases=cases,
+            rule=rule,
+        )
+    assert registry.get("EvaluationBundle", spec.evaluation_bundle_id) is None
+    assert registry.get("PromotionDecision", spec.promotion_decision_id) is None
+
+
+def test_policy_retest_rejects_store_materialization_after_evaluation_completion(tmp_path):
+    (
+        registry,
+        _,
+        artifact_root,
+        store,
+        predecessor,
+        predecessor_model_id,
+        cases,
+        rule,
+    ) = _foundation(tmp_path)
+    ledger = store._materialization_ledger_path()
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    for record in payload["records"]:
+        if record["kind"] == "counterfactual-source-evidence" and record["identity"].endswith(":holdout-2"):
+            record["materialized_at"] = "2026-09-19T10:30:00Z"
+            break
+    # Recompute the chain as a controlled fixture mutation so the validator
+    # reaches the temporal rule rather than the ledger-integrity rule.
+    previous = "0" * 64
+    for record in payload["records"]:
+        record["predecessor_record_sha256"] = previous
+        record["record_sha256"] = store._materialization_digest(record)
+        previous = record["record_sha256"]
+    atomic_write_json(ledger, payload)
+    challenger, update = _policy_successor(
+        predecessor,
+        observation_id="5" * 64,
+        outcome_id="6" * 64,
+        episode_id="7" * 64,
+        decided_at="2026-09-19T09:33:00Z",
+        available_at="2026-09-19T09:34:00Z",
+        reward_value="2",
+    )
+    spec = _spec(
+        experiment_id="experiment-late-materialization",
+        model_id="model-late-materialization",
+        evaluation_id="evaluation-late-materialization",
+        promotion_id="promotion-late-materialization",
+        predecessor_policy_id=predecessor.policy_id,
+        predecessor_model_id=predecessor_model_id,
+        created_at=CHALLENGER_CREATED,
+        completed_at=CHALLENGER_COMPLETED,
+        decided_at=CHALLENGER_DECIDED,
+    )
+    import pytest
+
+    with pytest.raises(ValueError, match="materialized after evaluation completion"):
+        run_policy_retest(
+            ExperimentRunner(registry, store),
+            predecessor_policy=predecessor,
+            challenger_policy=challenger,
+            update_evidence=update,
+            spec=spec,
+            points=(),
+            evaluation_cases=cases,
+            rule=rule,
+        )
+    assert registry.get("EvaluationBundle", spec.evaluation_bundle_id) is None
+    assert registry.get("PromotionDecision", spec.promotion_decision_id) is None
 
 def test_second_policy_attempt_cannot_reuse_same_confirmation_holdout(tmp_path):
     (

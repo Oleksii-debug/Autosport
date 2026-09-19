@@ -490,7 +490,7 @@ def test_learned_policy_rejection_is_durable_and_duplicate_retest_is_blocked(tmp
     reopened = ScientificRegistry(registry_path)
     experiment = reopened.get("Experiment", spec.experiment_id)
     assert experiment is not None
-    assert experiment.payload["outcome"] == ResearchOutcome.INCONCLUSIVE.value
+    assert experiment.payload["outcome"] == ResearchOutcome.NEGATIVE.value
     assert reopened.get("Postmortem", f"{spec.experiment_id}:postmortem") is not None
     assert reopened.get("PromotionDecision", spec.promotion_decision_id) is not None
     assert reopened.champion_strategy(
@@ -504,7 +504,7 @@ def test_learned_policy_rejection_is_durable_and_duplicate_retest_is_blocked(tmp
         spec.experiment_id,
         as_of=T7,
     )
-    assert restart.outcome is ResearchOutcome.INCONCLUSIVE
+    assert restart.outcome is ResearchOutcome.NEGATIVE
     assert restart.champion_strategy_version_id == "strategy-v1"
     assert restart.reproducibility_bundle_sha256 == result.reproducibility_bundle_sha256
 

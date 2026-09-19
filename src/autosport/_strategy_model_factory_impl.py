@@ -1533,7 +1533,11 @@ class ExperimentRunner:
         outcome = (
             ResearchOutcome.POSITIVE
             if promotion.verdict is PromotionVerdict.PROMOTE
-            else ResearchOutcome.INCONCLUSIVE
+            else (
+                ResearchOutcome.NEGATIVE
+                if promotion.verdict is PromotionVerdict.REJECT
+                else ResearchOutcome.INCONCLUSIVE
+            )
         )
         experiment = replace(experiment, outcome=outcome, notes="; ".join(promotion.reasons))
         self.registry.append(experiment)

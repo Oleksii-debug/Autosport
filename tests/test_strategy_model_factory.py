@@ -821,7 +821,7 @@ def test_factory_rejects_caller_injected_promotion_authority_metrics(tmp_path):
         )
 
 
-def test_factory_rejection_is_durable_inconclusive_memory_with_postmortem(tmp_path):
+def test_factory_rejection_is_durable_negative_memory_with_postmortem(tmp_path):
     points = _bad_candidate_points()
     registry, registry_path, rule, store, _, _ = _factory_foundation(
         tmp_path, points=points
@@ -830,7 +830,7 @@ def test_factory_rejection_is_durable_inconclusive_memory_with_postmortem(tmp_pa
     assert result.verdict is PromotionVerdict.REJECT
     reopened = ScientificRegistry(registry_path)
     experiment = reopened.get("Experiment", "experiment-v2")
-    assert experiment.payload["outcome"] == "INCONCLUSIVE"
+    assert experiment.payload["outcome"] == "NEGATIVE"
     assert reopened.get("Postmortem", "experiment-v2:postmortem") is not None
     assert reopened.champion_strategy(
         as_of=T7, canonical_strategy_id="canonical-factory-strategy"

@@ -360,6 +360,8 @@ class TickResult:
     occurrence_id: str | None = None
     skipped_count: int = 0
     receipt: ResearchTriggerReceipt | None = None
+    curriculum_wake_id: str | None = None
+    curriculum_selection_id: str | None = None
 
 
 class ResearchScheduler:

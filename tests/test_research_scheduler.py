@@ -8,6 +8,7 @@ from tests.test_research_curriculum import _candidate, _workspace
 
 import pytest
 
+from autosport.research_curriculum import CurriculumPurpose
 from autosport.research_scheduler import (
     ResearchSchedule,
     ResearchScheduler,

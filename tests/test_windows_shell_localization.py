@@ -53,6 +53,7 @@ _ALLOWED_SHORTCUT_OR_PLATFORM_TOKENS = frozenset(
         "F7",
         "F8",
         "F9",
+        "F10",
         "Left",
         "R",
         "Right",

@@ -121,7 +121,7 @@ def _set_uia(widget: Any, *, name: str, description: str, automation_id: int) ->
     tk_uia.set_automation_id(widget, automation_id)
 
 
-def show_manual_calculation_workbench(app: Any) -> None:
+def show_manual_calculation_workbench(app: Any) -> tk.Toplevel:
     """Open a non-persistent, keyboard-first manual calculation dialog."""
 
     dialog = tk.Toplevel(app)
@@ -252,8 +252,8 @@ def show_manual_calculation_workbench(app: Any) -> None:
     )
     _set_uia(
         input_box,
-        name="Вхідні значення ручного розрахунку",
-        description="Лише ручний текстовий ввід. Некоректні, нечислові та дубльовані значення відхиляються до обчислення.",
+        name=text("ui.windows.manual_calculation.uia.input.name"),
+        description=text("ui.windows.manual_calculation.uia.input.description"),
         automation_id=WORKBENCH_AUTOMATION_IDS["input"],
     )
     _set_uia(
@@ -281,6 +281,16 @@ def show_manual_calculation_workbench(app: Any) -> None:
         automation_id=WORKBENCH_AUTOMATION_IDS["result"],
     )
 
+    dialog._autosport_workbench_controls = {
+        "operation": operation,
+        "input": input_box,
+        "calculate": calculate_button,
+        "result": result_box,
+        "clear": clear_button,
+        "close": close_button,
+    }
+
     # The dialog is deliberately keyboard-first: operation -> input -> Calculate ->
     # Clear -> Close, with the result as a read-only focus target after success.
     operation.focus_set()
+    return dialog

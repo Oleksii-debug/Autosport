@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -30,7 +31,9 @@ from autosport.bookmaker_capability import (
 from autosport.bookmaker_routing import VenueQuote
 from autosport.bookmaker_routing_plan import plan_equal_split_residual
 from autosport.domain import MarketEvent, TicketLeg
-from autosport.economic_goal import EconomicGoalContract
+from autosport.economic_goal import AutomationLevel, EconomicGoalContract
+from autosport.economic_goal_provenance import provenance_for
+from autosport.economic_goal_store import EconomicGoalStore
 from autosport.opportunity import (
     Opportunity,
     OpportunityDecision,
@@ -54,6 +57,7 @@ from autosport.supervised_execution import (
     ExecutionLegConstraint,
     SupervisedApproval,
     SupervisedExecutionError,
+    begin_supervised_attempt,
     build_supervised_execution_plan,
     reconcile_provider_not_found,
     reconcile_provider_readback,
@@ -62,6 +66,7 @@ from autosport.supervised_execution import (
     verify_betfair_provider_state,
 )
 from autosport.supervised_provider_evidence import ProviderEvidenceError
+from autosport.workspace_lock import WorkspaceEconomicLockBusyError
 
 DECISION_TS = "2026-09-19T08:00:00+00:00"
 APPROVED_AT = "2026-09-19T08:00:01+00:00"
@@ -104,7 +109,7 @@ def _profile() -> BookmakerCapabilityProfile:
     )
 
 
-def _bound(profile: BookmakerCapabilityProfile):
+def _goal(**changes) -> EconomicGoalContract:
     goal = EconomicGoalContract(
         goal_id="goal-betfair-placeorders",
         revision=1,
@@ -120,7 +125,18 @@ def _bound(profile: BookmakerCapabilityProfile):
         max_execution_slippage_fraction=Decimal("0.05"),
         max_quote_age_seconds=Decimal("3600"),
         max_concurrent_positions=10,
+        automation_level=AutomationLevel.SUPERVISED_EXECUTION,
     )
+    return replace(goal, **changes) if changes else goal
+
+
+def _bound(
+    profile: BookmakerCapabilityProfile,
+    goal: EconomicGoalContract | None = None,
+    *,
+    selection_id: str = "42",
+):
+    goal = goal or _goal()
     policy = PaperRiskPolicy(
         max_ticket_fraction=Decimal("1"),
         max_committed_fraction=Decimal("1"),
@@ -130,7 +146,7 @@ def _bound(profile: BookmakerCapabilityProfile):
     leg = TicketLeg(
         "event-1",
         "1.23456789",
-        "42",
+        selection_id,
         Decimal("2.00"),
         sport="soccer",
     )
@@ -228,7 +244,7 @@ def _bound(profile: BookmakerCapabilityProfile):
         (constraint,),
         created_at=CREATED_AT,
     )
-    return bound, approval
+    return bound, approval, goal
 
 
 class _Transport:
@@ -397,15 +413,14 @@ def _enabled_client(
     profile,
     transport,
     *,
+    store: EconomicGoalStore,
     observed_at: str = READBACK_AT,
 ):
-    gate = BetfairSupervisedExecutionGate(
-        enabled=True,
+    gate = BetfairSupervisedExecutionGate.from_economic_goal_store(
+        store,
         bookmaker_id="betfair",
         account_id="acct-1",
         profile_sha256=profile.profile_id,
-        authority_ref="owner-supervised-activation:test",
-        authority_sha256="d" * 64,
     )
     return BetfairSupervisedPlaceOrdersClient(
         BetfairSessionCredentials("app-key", "session-token"),
@@ -415,18 +430,90 @@ def _enabled_client(
     )
 
 
-def _prepared(tmp: str):
+def _prepared(
+    tmp: str,
+    *,
+    goal: EconomicGoalContract | None = None,
+    selection_id: str = "42",
+):
     profile = _profile()
-    bound, approval = _bound(profile)
+    bound, approval, goal = _bound(
+        profile,
+        goal,
+        selection_id=selection_id,
+    )
+    goal_store = EconomicGoalStore(Path(tmp))
+    goal_store.initialize_owner(goal)
     ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
     reserve_supervised_plan(ledger, bound, approval)
     action = bound.execution_plan.actions[0]
-    return profile, bound, approval, ledger, action
+    return profile, bound, approval, ledger, action, goal_store
+
+
+def _assert_current_goal_denied_before_effect(
+    tmp: str,
+    successor: EconomicGoalContract,
+    *,
+    match: str,
+) -> None:
+    profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+    transport = _Transport(lambda request: _response(request))
+    client = _enabled_client(profile, transport, store=goal_store)
+    goal_store.persist_automatic_successor(successor)
+
+    with pytest.raises(BetfairSupervisedExecutionError, match=match):
+        execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-owner-denied",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+    assert transport.calls == []
+    assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+@pytest.mark.parametrize(
+    "selection_id",
+    ("selection-x", "042"),
+)
+def test_invalid_betfair_selection_fails_before_attempt_or_transport(
+    selection_id: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(
+            tmp,
+            selection_id=selection_id,
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="selection_id must be canonical positive integer text",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-invalid-selection",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
 
 def test_default_gate_cannot_reach_transport() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        profile, bound, approval, ledger, action = _prepared(tmp)
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(lambda request: _response(request))
         client = BetfairSupervisedPlaceOrdersClient(
             BetfairSessionCredentials("app-key", "session-token"),
@@ -455,9 +542,300 @@ def test_default_gate_cannot_reach_transport() -> None:
         ).attempts == {}
 
 
+def test_enabled_gate_rejects_opaque_authority_without_owner_store() -> None:
+    profile = _profile()
+    with pytest.raises(
+        BetfairSupervisedExecutionError,
+        match="canonical EconomicGoalStore",
+    ):
+        BetfairSupervisedExecutionGate(
+            enabled=True,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            profile_sha256=profile.profile_id,
+            authority_ref="caller-minted",
+            authority_sha256="d" * 64,
+        )
+
+
+def test_caller_minted_authority_cannot_enable_with_real_owner_store() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = BetfairSupervisedPlaceOrdersClient(
+            BetfairSessionCredentials("app-key", "session-token"),
+            gate=BetfairSupervisedExecutionGate(
+                enabled=True,
+                bookmaker_id="betfair",
+                account_id="acct-1",
+                profile_sha256=profile.profile_id,
+                authority_ref="caller-minted",
+                authority_sha256="d" * 64,
+                economic_goal_store=goal_store,
+            ),
+            transport=transport,
+            clock=lambda: READBACK_AT,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="does not match bound execution plan",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-minted-owner",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_shadow_owner_store_cannot_bypass_canonical_emergency_stop() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        canonical_workspace = root / "canonical"
+        shadow_workspace = root / "shadow"
+        profile, bound, approval, ledger, action, canonical_store = _prepared(
+            str(canonical_workspace)
+        )
+        shadow_store = EconomicGoalStore(shadow_workspace)
+        shadow_store.initialize_owner(_goal())
+        canonical_store.persist_automatic_successor(
+            _goal(revision=2, emergency_stop=True)
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(
+            profile,
+            transport,
+            store=shadow_store,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="trusted execution workspace",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-shadow-owner",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_redirected_store_object_cannot_hide_canonical_emergency_stop() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        canonical_workspace = root / "canonical"
+        shadow_workspace = root / "shadow"
+        profile, bound, approval, ledger, action, goal_store = _prepared(
+            str(canonical_workspace)
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(
+            profile,
+            transport,
+            store=goal_store,
+        )
+        EconomicGoalStore(canonical_workspace).persist_automatic_successor(
+            _goal(revision=2, emergency_stop=True)
+        )
+        shadow_store = EconomicGoalStore(shadow_workspace)
+        shadow_store.initialize_owner(_goal())
+        goal_store.workspace = shadow_workspace
+        goal_store.path = shadow_store.path
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="emergency STOP",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-redirected-owner",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_bound_plan_preserves_exact_owner_goal_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        goal = _goal()
+        _, bound, _, _, _, _ = _prepared(tmp, goal=goal)
+        assert (
+            bound.economic_goal_contract_sha256
+            == provenance_for(goal).contract_sha256
+        )
+
+
+def test_lowered_automation_denies_before_attempt_or_transport() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        _assert_current_goal_denied_before_effect(
+            tmp,
+            _goal(
+                revision=2,
+                automation_level=AutomationLevel.RECOMMENDATION,
+            ),
+            match="does not permit supervised execution",
+        )
+
+
+def test_emergency_stop_denies_before_attempt_or_transport() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        _assert_current_goal_denied_before_effect(
+            tmp,
+            _goal(revision=2, emergency_stop=True),
+            match="emergency STOP",
+        )
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"blocked_providers": frozenset({"betfair"})}, "blocks this provider"),
+        ({"blocked_markets": frozenset({"1.23456789"})}, "blocks this market"),
+    ],
+)
+def test_owner_deny_lists_stop_execution_before_effect(
+    changes: dict[str, object],
+    message: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        _assert_current_goal_denied_before_effect(
+            tmp,
+            _goal(revision=2, **changes),
+            match=message,
+        )
+
+
+def test_changed_owner_revision_invalidates_frozen_execution_plan() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        _assert_current_goal_denied_before_effect(
+            tmp,
+            _goal(revision=2),
+            match="does not match bound execution plan",
+        )
+
+
+def test_tightened_slippage_denies_frozen_plan_before_effect() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        _assert_current_goal_denied_before_effect(
+            tmp,
+            _goal(
+                revision=2,
+                max_execution_slippage_fraction=Decimal("0.01"),
+            ),
+            match="slippage exceeds current owner authority",
+        )
+
+
+def test_corrupt_owner_store_denies_before_attempt_or_transport() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        goal_store.path.write_text("{}", encoding="utf-8")
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="cannot load durable owner execution authority",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-corrupt-owner",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_owner_tightening_cannot_commit_before_attempt_or_transport(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        stop_contract = _goal(revision=2, emergency_stop=True)
+        begin_interleaving_attempted = False
+        transport_interleaving_attempted = False
+
+        def response_while_tightening_attempted(
+            request: dict[str, object],
+        ) -> bytes:
+            nonlocal transport_interleaving_attempted
+            transport_interleaving_attempted = True
+            with pytest.raises(WorkspaceEconomicLockBusyError):
+                goal_store.persist_automatic_successor(stop_contract)
+            return _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+
+        transport = _Transport(response_while_tightening_attempted)
+        client = _enabled_client(profile, transport, store=goal_store)
+        original_begin = begin_supervised_attempt
+
+        def begin_after_tightening_attempt(*args, **kwargs):
+            nonlocal begin_interleaving_attempted
+            begin_interleaving_attempted = True
+            with pytest.raises(WorkspaceEconomicLockBusyError):
+                goal_store.persist_automatic_successor(stop_contract)
+            return original_begin(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "autosport.betfair_supervised_execution.begin_supervised_attempt",
+            begin_after_tightening_attempt,
+        )
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-owner-fenced",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert begin_interleaving_attempted
+        assert transport_interleaving_attempted
+        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert result.attempt_state is AttemptState.ACCEPTED
+        assert goal_store.load().revision == 1
+        assert len(transport.calls) == 1
+
+        goal_store.persist_automatic_successor(stop_contract)
+        assert goal_store.load().emergency_stop is True
+
+
 def test_full_match_persists_provider_report_and_canonical_ack() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        profile, bound, approval, ledger, action = _prepared(tmp)
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
             lambda request: _response(
                 request,
@@ -465,7 +843,7 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
                 average=action.requested_odds,
             )
         )
-        client = _enabled_client(profile, transport)
+        client = _enabled_client(profile, transport, store=goal_store)
 
         result = execute_betfair_supervised_action(
             ledger,
@@ -509,7 +887,7 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
 
 def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        profile, bound, approval, ledger, action = _prepared(tmp)
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
             lambda request: _response(
                 request,
@@ -521,7 +899,7 @@ def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
                 average=action.requested_odds,
             )
         )
-        client = _enabled_client(profile, transport)
+        client = _enabled_client(profile, transport, store=goal_store)
 
         result = execute_betfair_supervised_action(
             ledger,
@@ -544,7 +922,7 @@ def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
 
 def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        profile, bound, approval, ledger, action = _prepared(tmp)
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
             lambda request: _response(
                 request,
@@ -555,7 +933,7 @@ def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None
                 bet_id=None,
             )
         )
-        client = _enabled_client(profile, transport)
+        client = _enabled_client(profile, transport, store=goal_store)
 
         result = execute_betfair_supervised_action(
             ledger,
@@ -583,9 +961,9 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
     monkeypatch,
 ) -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        profile, bound, approval, ledger, action = _prepared(tmp)
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _TimeoutTransport()
-        client = _enabled_client(profile, transport)
+        client = _enabled_client(profile, transport, store=goal_store)
 
         result = execute_betfair_supervised_action(
             ledger,
@@ -679,6 +1057,7 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
         retry_client = _enabled_client(
             profile,
             retry_transport,
+            store=goal_store,
             observed_at="2026-09-19T08:00:10+00:00",
         )
         retry_result = execute_betfair_supervised_action(
@@ -702,8 +1081,10 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
 
 def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        profile, bound, approval, ledger, action = _prepared(tmp)
-        timeout_client = _enabled_client(profile, _TimeoutTransport())
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        timeout_client = _enabled_client(
+            profile, _TimeoutTransport(), store=goal_store
+        )
         result = execute_betfair_supervised_action(
             ledger,
             bound,
@@ -775,8 +1156,10 @@ def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
 
 def test_foreign_empty_provider_order_ref_cannot_release_retry() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        profile, bound, approval, ledger, action = _prepared(tmp)
-        timeout_client = _enabled_client(profile, _TimeoutTransport())
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        timeout_client = _enabled_client(
+            profile, _TimeoutTransport(), store=goal_store
+        )
         result = execute_betfair_supervised_action(
             ledger,
             bound,
@@ -839,7 +1222,7 @@ def test_foreign_empty_provider_order_ref_cannot_release_retry() -> None:
 
 def test_unmatched_success_is_unknown_until_readback() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        profile, bound, approval, ledger, action = _prepared(tmp)
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
             lambda request: _response(
                 request,
@@ -848,7 +1231,7 @@ def test_unmatched_success_is_unknown_until_readback() -> None:
                 bet_id="bet-unmatched",
             )
         )
-        client = _enabled_client(profile, transport)
+        client = _enabled_client(profile, transport, store=goal_store)
 
         result = execute_betfair_supervised_action(
             ledger,
@@ -873,7 +1256,7 @@ def test_unmatched_success_is_unknown_until_readback() -> None:
 
 def test_duplicate_provider_json_key_is_unknown_not_terminal() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        profile, bound, approval, ledger, action = _prepared(tmp)
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
 
         def duplicate_status_response(request: dict[str, object]) -> bytes:
             payload = _response(
@@ -890,7 +1273,7 @@ def test_duplicate_provider_json_key_is_unknown_not_terminal() -> None:
             return duplicate.encode("utf-8")
 
         transport = _Transport(duplicate_status_response)
-        client = _enabled_client(profile, transport)
+        client = _enabled_client(profile, transport, store=goal_store)
 
         result = execute_betfair_supervised_action(
             ledger,
@@ -915,7 +1298,7 @@ def test_duplicate_provider_json_key_is_unknown_not_terminal() -> None:
 
 def test_duplicate_terminal_attempt_never_calls_placeorders_twice() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        profile, bound, approval, ledger, action = _prepared(tmp)
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
             lambda request: _response(
                 request,
@@ -923,7 +1306,7 @@ def test_duplicate_terminal_attempt_never_calls_placeorders_twice() -> None:
                 average=action.requested_odds,
             )
         )
-        client = _enabled_client(profile, transport)
+        client = _enabled_client(profile, transport, store=goal_store)
 
         execute_betfair_supervised_action(
             ledger,

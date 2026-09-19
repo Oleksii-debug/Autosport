@@ -272,6 +272,7 @@ class ProfileBinding:
 class BoundSupervisedExecutionPlan:
     execution_plan: ExecutionPlan
     portfolio_plan_sha256: str
+    economic_goal_contract_sha256: str
     intent_id: str
     intent_sha256: str
     approval_fingerprint: str
@@ -285,6 +286,7 @@ class BoundSupervisedExecutionPlan:
         expected = _bound_binding_sha256(
             self.execution_plan,
             self.portfolio_plan_sha256,
+            self.economic_goal_contract_sha256,
             self.intent_id,
             self.intent_sha256,
             self.approval_fingerprint,
@@ -322,6 +324,7 @@ class BoundSupervisedExecutionPlan:
 def _bound_binding_sha256(
     execution_plan: ExecutionPlan,
     portfolio_plan_sha256: str,
+    economic_goal_contract_sha256: str,
     intent_id: str,
     intent_sha256: str,
     approval_fingerprint: str,
@@ -336,6 +339,7 @@ def _bound_binding_sha256(
             "schema_version": 2,
             "execution_plan_without_id": plan,
             "portfolio_plan_sha256": portfolio_plan_sha256,
+            "economic_goal_contract_sha256": economic_goal_contract_sha256,
             "intent_id": intent_id,
             "intent_sha256": intent_sha256,
             "approval_fingerprint": approval_fingerprint,
@@ -561,6 +565,13 @@ def build_supervised_execution_plan(
     approval.require_active(created_at)
 
     plan_sha = portfolio_plan.plan_sha256
+    economic_goal_contract_sha256 = (
+        portfolio_plan.economic_goal_contract_sha256
+    )
+    if economic_goal_contract_sha256 is None:
+        raise SupervisedExecutionError(
+            "execution requires exact EconomicGoalContract identity"
+        )
     if approval.portfolio_plan_sha256 != plan_sha or routing_proposal.parent_plan_id != plan_sha:
         raise SupervisedExecutionError("approval/routing does not bind exact PortfolioPlan")
     if approval.routing_request_id != routing_proposal.routing_request_id:
@@ -669,6 +680,7 @@ def build_supervised_execution_plan(
     bridge_id = _bound_binding_sha256(
         provisional,
         plan_sha,
+        economic_goal_contract_sha256,
         intent.intent_id,
         intent.intent_sha256,
         approval.fingerprint,
@@ -686,6 +698,7 @@ def build_supervised_execution_plan(
     return BoundSupervisedExecutionPlan(
         execution,
         plan_sha,
+        economic_goal_contract_sha256,
         intent.intent_id,
         intent.intent_sha256,
         approval.fingerprint,

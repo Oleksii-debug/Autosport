@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import tk_uia
@@ -9,6 +10,7 @@ from .gui import AUTOMATION_IDS
 from .integrity import atomic_write_json
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 from .windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
+from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
 
 
 _REQUIRED_PATTERNS = {
@@ -32,6 +34,13 @@ _REQUIRED_PATTERNS = {
     WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_open"]: {"INVOKE"},
     WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_status"]: {"VALUE"},
     WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_readback"]: set(),
+    WORKBENCH_AUTOMATION_IDS["open"]: {"INVOKE"},
+    WORKBENCH_AUTOMATION_IDS["operation"]: {"VALUE"},
+    WORKBENCH_AUTOMATION_IDS["input"]: {"VALUE"},
+    WORKBENCH_AUTOMATION_IDS["calculate"]: {"INVOKE"},
+    WORKBENCH_AUTOMATION_IDS["result"]: {"VALUE"},
+    WORKBENCH_AUTOMATION_IDS["clear"]: {"INVOKE"},
+    WORKBENCH_AUTOMATION_IDS["close"]: {"INVOKE"},
 }
 
 _EXPECTED_ROLES = {
@@ -55,6 +64,13 @@ _EXPECTED_ROLES = {
     WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_open"]: "PUSH_BUTTON",
     WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_status"]: "TEXT",
     WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_readback"]: "LIST",
+    WORKBENCH_AUTOMATION_IDS["open"]: "PUSH_BUTTON",
+    WORKBENCH_AUTOMATION_IDS["operation"]: "COMBO_BOX",
+    WORKBENCH_AUTOMATION_IDS["input"]: "TEXT",
+    WORKBENCH_AUTOMATION_IDS["calculate"]: "PUSH_BUTTON",
+    WORKBENCH_AUTOMATION_IDS["result"]: "TEXT",
+    WORKBENCH_AUTOMATION_IDS["clear"]: "PUSH_BUTTON",
+    WORKBENCH_AUTOMATION_IDS["close"]: "PUSH_BUTTON",
 }
 
 _ROW_CONTROLS = {
@@ -119,12 +135,30 @@ def _owner_economic_state_is_readonly(app: WindowsAutosportApp) -> bool:
     return _readonly_entry(getattr(app, "owner_economic_authority_state", None))
 
 
+def _disabled_text_is_readonly(widget: Any) -> bool:
+    if widget is None:
+        return False
+    return str(widget.cget("state")) == "disabled"
+
+
+def _combined_description(root: Any, dialog: Any) -> Any:
+    return SimpleNamespace(
+        strategy=root.strategy,
+        widgets=tuple(root.widgets) + tuple(dialog.widgets),
+        provider_trouble=tuple(root.provider_trouble) + tuple(dialog.provider_trouble),
+        providers_stood_down_because=(
+            root.providers_stood_down_because or dialog.providers_stood_down_because
+        ),
+    )
+
+
 def summarize_description(
     description: Any,
     *,
     bankroll_readonly: bool | None = None,
     shell_state_readonly: bool | None = None,
     owner_economic_state_readonly: bool | None = None,
+    workbench_result_readonly: bool | None = None,
 ) -> dict[str, Any]:
     expected_ids = set(_REQUIRED_PATTERNS)
     controls: dict[int, dict[str, Any]] = {}
@@ -194,6 +228,14 @@ def summarize_description(
                 f"automation_id={owner_state_id}: owner economic state is not runtime readonly"
             )
 
+    workbench_result_id = WORKBENCH_AUTOMATION_IDS["result"]
+    if workbench_result_id in controls:
+        controls[workbench_result_id]["read_only"] = workbench_result_readonly is True
+        if workbench_result_readonly is not True:
+            failures.append(
+                f"automation_id={workbench_result_id}: manual calculation result is not runtime readonly"
+            )
+
     provider_trouble = [str(item) for item in description.provider_trouble]
     if provider_trouble:
         failures.extend(f"provider trouble: {item}" for item in provider_trouble)
@@ -220,15 +262,21 @@ def run_accessibility_audit(output_path: str | Path) -> int:
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     app: WindowsAutosportApp | None = None
+    dialog: Any | None = None
     try:
         app = WindowsAutosportApp()
         app.update_idletasks()
         app.update()
+        dialog = show_manual_calculation_workbench(app)
+        app.update_idletasks()
+        app.update()
+        controls = getattr(dialog, "_autosport_workbench_controls", {})
         report = summarize_description(
-            tk_uia.describe(app),
+            _combined_description(tk_uia.describe(app), tk_uia.describe(dialog)),
             bankroll_readonly=_bankroll_summary_is_readonly(app),
             shell_state_readonly=_shell_state_is_readonly(app),
             owner_economic_state_readonly=_owner_economic_state_is_readonly(app),
+            workbench_result_readonly=_disabled_text_is_readonly(controls.get("result")),
         )
     except Exception as exc:
         report = {
@@ -240,6 +288,11 @@ def run_accessibility_audit(output_path: str | Path) -> int:
             "real_money_execution": False,
         }
     finally:
+        if dialog is not None:
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
         if app is not None:
             try:
                 app.close_app()

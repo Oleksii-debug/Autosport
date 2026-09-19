@@ -7,6 +7,7 @@ import autosport.keyboard_audit as keyboard_audit
 from autosport.keyboard_audit import summarize_keyboard_contract
 from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
 from autosport.windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
+from autosport.windows_manual_calculation import WORKBENCH_AUTOMATION_IDS
 
 
 class KeyboardAuditTests(unittest.TestCase):
@@ -20,11 +21,19 @@ class KeyboardAuditTests(unittest.TestCase):
             "<Control-Alt-Right>": True,
             "<F2>": True,
             "<F9>": True,
+            "<F10>": True,
             "<F6>": True,
             "<F7>": True,
             "<F8>": True,
         }
-        focus = {"<F2>": True, "<F9>": True, "<F6>": True, "<F7>": True, "<F8>": True}
+        focus = {
+            "<F2>": True,
+            "<F9>": True,
+            "<F10>": True,
+            "<F6>": True,
+            "<F7>": True,
+            "<F8>": True,
+        }
         reachable = [
             "shell_navigation",
             "shell_open",
@@ -33,6 +42,13 @@ class KeyboardAuditTests(unittest.TestCase):
             "owner_economic_open",
             "owner_economic_status",
             "owner_economic_readback",
+            "manual_calculation_open",
+            "manual_calculation_operation",
+            "manual_calculation_input",
+            "manual_calculation_calculate",
+            "manual_calculation_result",
+            "manual_calculation_clear",
+            "manual_calculation_close",
             "strategy",
             "research_plan",
             "choose_dataset",
@@ -72,6 +88,14 @@ class KeyboardAuditTests(unittest.TestCase):
         self.assertEqual(
             report["expected_automation_ids"]["owner_economic_open"],
             WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_open"],
+        )
+        self.assertEqual(
+            report["expected_automation_ids"]["manual_calculation_open"],
+            WORKBENCH_AUTOMATION_IDS["open"],
+        )
+        self.assertEqual(
+            report["expected_automation_ids"]["manual_calculation_result"],
+            WORKBENCH_AUTOMATION_IDS["result"],
         )
         self.assertFalse(report["human_tested"])
         self.assertFalse(report["nvda_verified"])

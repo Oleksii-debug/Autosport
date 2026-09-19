@@ -9,6 +9,7 @@ from autosport.accessibility_audit import summarize_description
 from autosport.gui import AUTOMATION_IDS, _SPEEDS, _STRATEGY_CHOICES, strategy_id_from_display
 from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
 from autosport.windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
+from autosport.windows_manual_calculation import WORKBENCH_AUTOMATION_IDS
 
 
 class _Named:
@@ -55,17 +56,33 @@ class AccessibilityAuditTests(unittest.TestCase):
                 self._widget(shell["owner_economic_open"], "Економічні межі власника", patterns=("INVOKE",)),
                 self._widget(shell["owner_economic_status"], "Стан економічних меж власника", role="TEXT", patterns=("VALUE",)),
                 self._widget(shell["owner_economic_readback"], "Точні економічні межі власника", role="LIST", answers_rows=True),
+                self._widget(WORKBENCH_AUTOMATION_IDS["open"], "Відкрити робочу поверхню ручних розрахунків", patterns=("INVOKE",)),
+                self._widget(WORKBENCH_AUTOMATION_IDS["operation"], "Операція ручного розрахунку", role="COMBO_BOX", patterns=("VALUE",)),
+                self._widget(WORKBENCH_AUTOMATION_IDS["input"], "Вхідні значення ручного розрахунку", role="TEXT", patterns=("VALUE",)),
+                self._widget(WORKBENCH_AUTOMATION_IDS["calculate"], "Обчислити ручний результат", patterns=("INVOKE",)),
+                self._widget(WORKBENCH_AUTOMATION_IDS["result"], "Результат і evidence ручного розрахунку", role="TEXT", patterns=("VALUE",)),
+                self._widget(WORKBENCH_AUTOMATION_IDS["clear"], "Очистити ручні значення", patterns=("INVOKE",)),
+                self._widget(WORKBENCH_AUTOMATION_IDS["close"], "Закрити ручні розрахунки", patterns=("INVOKE",)),
             ),
             provider_trouble=(),
             providers_stood_down_because=None,
         )
 
-    def _summarize(self, description, *, bankroll_readonly=True, shell_state_readonly=True, owner_economic_state_readonly=True):
+    def _summarize(
+        self,
+        description,
+        *,
+        bankroll_readonly=True,
+        shell_state_readonly=True,
+        owner_economic_state_readonly=True,
+        workbench_result_readonly=True,
+    ):
         return summarize_description(
             description,
             bankroll_readonly=bankroll_readonly,
             shell_state_readonly=shell_state_readonly,
             owner_economic_state_readonly=owner_economic_state_readonly,
+            workbench_result_readonly=workbench_result_readonly,
         )
 
     def test_v1_replay_speed_contract_includes_event_jump_and_1000x(self):
@@ -91,7 +108,7 @@ class AccessibilityAuditTests(unittest.TestCase):
     def test_critical_contract_passes_with_names_roles_patterns_rows_and_readonly(self):
         report = self._summarize(self._passing_description())
         self.assertEqual(report["status"], "PASS")
-        self.assertEqual(len(report["critical_controls"]), 20)
+        self.assertEqual(len(report["critical_controls"]), 27)
         bankroll = next(
             item
             for item in report["critical_controls"]
@@ -165,6 +182,13 @@ class AccessibilityAuditTests(unittest.TestCase):
         report = self._summarize(self._passing_description(), owner_economic_state_readonly=False)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("owner economic state is not runtime readonly" in item for item in report["failures"]))
+
+    def test_workbench_result_must_be_runtime_readonly(self):
+        report = self._summarize(self._passing_description(), workbench_result_readonly=False)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(
+            any("manual calculation result is not runtime readonly" in item for item in report["failures"])
+        )
 
     def test_missing_bankroll_runtime_state_evidence_fails_closed(self):
         report = summarize_description(self._passing_description(), shell_state_readonly=True)

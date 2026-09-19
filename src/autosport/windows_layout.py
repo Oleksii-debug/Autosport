@@ -74,6 +74,8 @@ MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS = frozenset(
         "ui.windows.manual_calculation.status.error",
         "ui.windows.manual_calculation.status.cleared",
         "ui.windows.manual_calculation.error.nonempty",
+        "ui.windows.manual_calculation.uia.input.name",
+        "ui.windows.manual_calculation.uia.input.description",
     }
 )
 require_keys(MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS)

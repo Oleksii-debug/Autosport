@@ -44,7 +44,9 @@ _SURFACE_HEIGHTS = {
     "evaluation": 1,
     "log": 2,
 }
-_SECTION_LABEL_PADY = (6, 2)
+_SECTION_LABEL_PADY = (4, 1)
+_ROOT_FRAME_PADDING = 8
+_LOG_MIRROR_PADY = (0, 2)
 WINDOWS_SHELL_DETAILS_VISIBLE_ROWS = 1
 
 WINDOWS_SHELL_AUTOMATION_IDS = {
@@ -159,6 +161,14 @@ def compact_surface_heights(app: Any) -> None:
         getattr(app, name).configure(height=height)
     for name in ("tickets_label", "evaluation_label", "log_label"):
         getattr(app, name).pack_configure(pady=_SECTION_LABEL_PADY)
+    frame = next(iter(app.winfo_children()), None)
+    if frame is None:
+        raise RuntimeError("Autosport root frame is missing")
+    # Keep content rows intact and reclaim chrome instead. The dedicated
+    # automation_id=202 readonly mirror needs a real mapped Entry rectangle;
+    # otherwise tk-uia correctly reports UNMAPPED_SINCE_ANNOTATED.
+    frame.configure(padding=_ROOT_FRAME_PADDING)
+    app.log_accessible.pack_configure(pady=_LOG_MIRROR_PADY)
 
 
 def _surface_target_widget(app: Any, surface_key: str) -> Any | None:

@@ -34,9 +34,13 @@ class _Widget:
     def __init__(self):
         self.height = None
         self.pady = None
+        self.padding = None
 
     def configure(self, **kwargs):
-        self.height = kwargs.get("height")
+        if "height" in kwargs:
+            self.height = kwargs["height"]
+        if "padding" in kwargs:
+            self.padding = kwargs["padding"]
 
     def pack_configure(self, **kwargs):
         self.pady = kwargs.get("pady")
@@ -48,9 +52,14 @@ class _App:
         self.tickets = _Widget()
         self.evaluation = _Widget()
         self.log = _Widget()
+        self.log_accessible = _Widget()
         self.tickets_label = _Widget()
         self.evaluation_label = _Widget()
         self.log_label = _Widget()
+        self.frame = _Widget()
+
+    def winfo_children(self):
+        return [self.frame]
 
 
 def test_compact_surface_heights_keep_all_critical_scrolling_surfaces_visible():
@@ -62,9 +71,11 @@ def test_compact_surface_heights_keep_all_critical_scrolling_surfaces_visible():
     assert app.tickets.height == 2
     assert app.evaluation.height == 1
     assert app.log.height == 2
-    assert app.tickets_label.pady == (6, 2)
-    assert app.evaluation_label.pady == (6, 2)
-    assert app.log_label.pady == (6, 2)
+    assert app.tickets_label.pady == (4, 1)
+    assert app.evaluation_label.pady == (4, 1)
+    assert app.log_label.pady == (4, 1)
+    assert app.frame.padding == 8
+    assert app.log_accessible.pady == (0, 2)
     assert WINDOWS_SHELL_DETAILS_VISIBLE_ROWS == 1
 
 

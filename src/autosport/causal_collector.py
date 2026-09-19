@@ -84,6 +84,17 @@ def canonical_event_digest(event_or_payload: Any) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def digest_source_payload(raw_payload: bytes | bytearray | memoryview | str) -> str:
+    """Digest the exact provider/source payload bytes independently of normalization."""
+    if isinstance(raw_payload, str):
+        raw = raw_payload.encode("utf-8")
+    elif isinstance(raw_payload, (bytes, bytearray, memoryview)):
+        raw = bytes(raw_payload)
+    else:
+        raise TypeError("raw_payload must be bytes-like or str")
+    return hashlib.sha256(raw).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class CollectorDelta:
     schema_version: int
@@ -96,6 +107,7 @@ class CollectorDelta:
     cursor_position: int
     event_dedupe_key: str
     event_id: str
+    source_payload_digest: str
     canonical_event_digest: str
     source_observed_at: str
     collector_received_at: str
@@ -127,12 +139,16 @@ class CollectorDelta:
             _text(self.revision_of, "revision_of")
             if self.revision_of == self.delta_id:
                 raise ValueError("delta cannot revise itself")
-        if not isinstance(self.canonical_event_digest, str) or len(self.canonical_event_digest) != 64:
-            raise ValueError("canonical_event_digest must be a sha256 hex digest")
-        try:
-            int(self.canonical_event_digest, 16)
-        except ValueError as exc:
-            raise ValueError("canonical_event_digest must be a sha256 hex digest") from exc
+        for field_name, digest in (
+            ("source_payload_digest", self.source_payload_digest),
+            ("canonical_event_digest", self.canonical_event_digest),
+        ):
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise ValueError(f"{field_name} must be a sha256 hex digest")
+            try:
+                int(digest, 16)
+            except ValueError as exc:
+                raise ValueError(f"{field_name} must be a sha256 hex digest") from exc
         times = [
             _instant(self.source_observed_at, "source_observed_at"),
             _instant(self.collector_received_at, "collector_received_at"),
@@ -296,12 +312,12 @@ class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
         self,
         delta: CollectorDelta,
         *,
-        applied_at: str,
+        prepared_at: str,
         health_before: Any,
         health_after: Any,
     ) -> dict[str, Any]:
         delta.validate()
-        _instant(applied_at, "applied_at")
+        _instant(prepared_at, "prepared_at")
         raw = self._read()
         existing = raw["applications"].get(delta.delta_id)
         immutable = {
@@ -309,7 +325,7 @@ class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
             "canonical_event_digest": delta.canonical_event_digest,
             "source_id": delta.source_id,
             "source_cursor": delta.source_cursor,
-            "applied_at": applied_at,
+            "prepared_at": prepared_at,
             "health_before": self._health_payload(health_before),
             "health_after": self._health_payload(health_after),
             "receipt_id": f"canonical-desktop:{delta.delta_id}:{delta.canonical_event_digest[:16]}",
@@ -321,7 +337,12 @@ class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
                         f"canonical application progress conflicts on {key}"
                     )
             return existing
-        item = {**immutable, "market_applied": False, "health_applied": False}
+        item = {
+            **immutable,
+            "market_applied": False,
+            "health_applied": False,
+            "completed_at": None,
+        }
         raw["applications"][delta.delta_id] = item
         self._write(raw)
         return item
@@ -352,6 +373,32 @@ class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
     def mark_health_applied(self, delta: CollectorDelta) -> None:
         self._mark(delta, "health_applied")
 
+    def mark_complete(self, delta: CollectorDelta, *, completed_at: str) -> str:
+        raw = self._read()
+        item = raw["applications"].get(delta.delta_id)
+        if item is None:
+            raise ApplicationReceiptError("canonical application was not prepared")
+        if item.get("canonical_event_digest") != delta.canonical_event_digest:
+            raise ApplicationReceiptError("canonical application digest conflicts with delta")
+        if not item.get("market_applied") or not item.get("health_applied"):
+            raise ApplicationReceiptError(
+                "canonical application cannot complete before market and health are durable"
+            )
+        completed = _instant(completed_at, "completed_at")
+        prepared = _instant(item["prepared_at"], "prepared_at")
+        available = _instant(delta.desktop_available_at, "desktop_available_at")
+        if completed < prepared or completed < available:
+            raise ApplicationReceiptError(
+                "canonical completion cannot predate preparation or desktop availability"
+            )
+        existing = item.get("completed_at")
+        if existing is not None:
+            _instant(existing, "completed_at")
+            return existing
+        item["completed_at"] = completed_at
+        self._write(raw)
+        return completed_at
+
     def health_before(self, delta: CollectorDelta) -> Any:
         item = self.progress(delta)
         if item is None:
@@ -366,13 +413,18 @@ class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
 
     def receipt(self, delta: CollectorDelta) -> DesktopApplicationReceipt | None:
         item = self.progress(delta)
-        if item is None or not item.get("market_applied") or not item.get("health_applied"):
+        if (
+            item is None
+            or not item.get("market_applied")
+            or not item.get("health_applied")
+            or item.get("completed_at") is None
+        ):
             return None
         receipt = DesktopApplicationReceipt(
             delta_id=delta.delta_id,
             canonical_event_digest=delta.canonical_event_digest,
             receipt_id=item["receipt_id"],
-            applied_at=item["applied_at"],
+            applied_at=item["completed_at"],
         )
         receipt.validate()
         return receipt
@@ -436,9 +488,9 @@ class CanonicalDesktopApplication:
 
         progress = self._state.progress(delta)
         if progress is None:
-            applied_at = self.clock()
-            applied = _instant(applied_at, "applied_at")
-            if applied < _instant(delta.desktop_available_at, "desktop_available_at"):
+            prepared_at = self.clock()
+            prepared = _instant(prepared_at, "prepared_at")
+            if prepared < _instant(delta.desktop_available_at, "desktop_available_at"):
                 raise ApplicationReceiptError(
                     "canonical application cannot predate desktop availability"
                 )
@@ -446,13 +498,13 @@ class CanonicalDesktopApplication:
             outcome = self._outcome(
                 delta,
                 event,
-                applied_at=applied_at,
+                applied_at=prepared_at,
                 health_before=health_before,
             )
             health_after = outcome.health_before.after_success(outcome).to_state()
             progress = self._state.prepare(
                 delta,
-                applied_at=applied_at,
+                prepared_at=prepared_at,
                 health_before=health_before,
                 health_after=health_after,
             )
@@ -474,7 +526,7 @@ class CanonicalDesktopApplication:
                 outcome = self._outcome(
                     delta,
                     event,
-                    applied_at=progress["applied_at"],
+                    applied_at=progress["prepared_at"],
                     health_before=expected_before,
                 )
                 recorded = outcome.record_health(self.health_store)
@@ -488,6 +540,7 @@ class CanonicalDesktopApplication:
                     "canonical source health changed during desktop application; refusing ambiguous retry"
                 )
 
+        self._state.mark_complete(delta, completed_at=self.clock())
         receipt = self._state.receipt(delta)
         if receipt is None:
             raise ApplicationReceiptError("canonical application did not reach durable completion")
@@ -583,15 +636,29 @@ class CollectorDeltaStore(_JsonAtomicStore):
             delta for delta in self._all()
             if _instant(delta.desktop_available_at, "desktop_available_at") <= boundary
         ]
-        if view not in {CausalView.AS_KNOWN_AT_DECISION, CausalView.RESTATED_RESEARCH}:
-            raise ValueError("unsupported causal view")
-        return tuple(sorted(
+        try:
+            normalized_view = CausalView(view)
+        except ValueError as exc:
+            raise ValueError("unsupported causal view") from exc
+        ordered = tuple(sorted(
             items,
             key=lambda item: (
                 item.source_id, item.stream_epoch, item.cursor_position,
                 item.revision_number, item.collector_committed_at, item.delta_id
             ),
         ))
+        if normalized_view is CausalView.AS_KNOWN_AT_DECISION:
+            # Preserve the actual evidence stream available by the historical cutoff.
+            # A later correction appears only after its own desktop_available_at.
+            return ordered
+        # Research restatement projects the same cutoff onto the latest available
+        # revision, while retaining revision_of/revision_number/availability evidence.
+        superseded = {
+            item.revision_of
+            for item in ordered
+            if item.revision_of is not None
+        }
+        return tuple(item for item in ordered if item.delta_id not in superseded)
 
     def stream_checkpoint(self, source_id: str, stream_epoch: str) -> StreamCheckpoint | None:
         raw = self._read()["streams"].get(f"{source_id}|{stream_epoch}")

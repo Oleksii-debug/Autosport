@@ -1,6 +1,8 @@
 import inspect
 
+from autosport.owner_economic_authority import OWNER_ECONOMIC_FORM_FIELDS
 from autosport.windows_layout import (
+    OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS,
     WINDOWS_SHELL_AUTOMATION_IDS,
     WINDOWS_SHELL_DETAILS_VISIBLE_ROWS,
     compact_surface_heights,
@@ -65,6 +67,30 @@ def test_windows_product_shell_has_stable_uia_ids_and_keyboard_navigation():
         "owner_economic_readback": 307,
         "owner_economic_dialog_readback": 308,
     }
+    assert OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS == {
+        "readback": 308,
+        "goal_id": 309,
+        "bankroll_id": 310,
+        "currency": 311,
+        "max_stake_fraction": 312,
+        "max_stake_amount": 313,
+        "max_session_loss_fraction": 314,
+        "max_day_loss_fraction": 315,
+        "max_drawdown_fraction": 316,
+        "max_capital_at_risk_fraction": 317,
+        "max_risk_of_ruin": 318,
+        "max_quote_age_seconds": 319,
+        "minimum_data_quality": 320,
+        "max_concurrent_positions": 321,
+        "max_parlay_legs": 322,
+        "automation_level": 323,
+        "blocked_sports": 324,
+        "blocked_providers": 325,
+        "blocked_markets": 326,
+        "emergency_stop": 327,
+        "create": 328,
+        "close": 329,
+    }
 
     build_source = inspect.getsource(install_windows_product_shell)
     for binding in (
@@ -80,7 +106,12 @@ def test_windows_product_shell_has_stable_uia_ids_and_keyboard_navigation():
         assert f'WINDOWS_SHELL_AUTOMATION_IDS["{automation_id}"]' in accessibility_source
 
     dialog_source = inspect.getsource(_show_owner_economic_dialog)
-    assert 'WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_dialog_readback"]' in dialog_source
+    assert 'OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["readback"]' in dialog_source
+    for field in OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS:
+        assert f'OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["{field}"]' in dialog_source or (
+            field in OWNER_ECONOMIC_FORM_FIELDS
+            and "OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS[field]" in dialog_source
+        )
 
     owner_surface_source = inspect.getsource(install_owner_economic_authority_surface)
     assert 'owner_row = ttk.Frame(panel)' in owner_surface_source

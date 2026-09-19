@@ -64,6 +64,65 @@ def rewrite_store_with_valid_state_hash(path, raw):
     path.write_text(json.dumps(raw), encoding="utf-8")
 
 
+def rewrite_execution_heads_from_surviving_history(path, raw):
+    executions_by_decision = {}
+    for execution in raw["executions"]:
+        executions_by_decision.setdefault(
+            execution["decision_id"], []
+        ).append(execution)
+
+    heads = []
+    for route in raw["routes"]:
+        decision_id = route["decision"]["decision_id"]
+        history = sorted(
+            executions_by_decision.get(decision_id, []),
+            key=lambda item: item["execution_sequence"],
+        )
+        record_sha256s = [
+            item["execution_record_sha256"] for item in history
+        ]
+        cumulative = sum(
+            (Decimal(item["actual_cost"]) for item in history),
+            Decimal("0"),
+        )
+        unsigned = {
+            "decision_id": decision_id,
+            "terminal_sequence": len(history),
+            "cumulative_incurred_cost": str(cumulative),
+            "terminal_execution_record_sha256": (
+                None if not history else record_sha256s[-1]
+            ),
+            "history_sha256": hashlib.sha256(
+                json.dumps(
+                    {
+                        "decision_id": decision_id,
+                        "execution_record_sha256s": record_sha256s,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+        heads.append(
+            {
+                **unsigned,
+                "head_sha256": hashlib.sha256(
+                    json.dumps(
+                        unsigned,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+    raw["execution_heads"] = heads
+    rewrite_store_with_valid_state_hash(path, raw)
+
+
 def rewrite_route_with_valid_hashes(path, raw, route):
     unsigned = {
         key: route[key]
@@ -1110,6 +1169,143 @@ class ModelComputeRouterTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ModelComputeRouterError,
                 "disposition/reason is not reproducible",
+            ):
+                ModelComputeRouterStore(path)
+
+
+    def test_separate_authority_rejects_self_consistent_execution_tail_rollback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+            req = request(
+                request_id="req-authority-tail-request",
+                allow_cloud=False,
+                cloud_candidate_id=None,
+                max_cost=Decimal("2"),
+            )
+            store.route(
+                req,
+                self.candidates,
+                policy(),
+                as_of=T1,
+            )
+            first = store.record_execution(
+                execution_id="exec-authority-request-1",
+                request_id=req.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("1.25"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            second = store.record_execution(
+                execution_id="exec-authority-request-2",
+                request_id=req.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("0.80"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                first.disposition,
+                ExecutionDisposition.ACCEPTED,
+            )
+            self.assertEqual(
+                second.disposition,
+                ExecutionDisposition.REJECTED_COST,
+            )
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["executions"] = [
+                item
+                for item in raw["executions"]
+                if item["execution_id"]
+                != "exec-authority-request-2"
+            ]
+            rewrite_execution_heads_from_surviving_history(
+                path, raw
+            )
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "execution authority references missing execution",
+            ):
+                ModelComputeRouterStore(path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+            req = request(
+                request_id="req-authority-tail-cloud",
+                max_cost=Decimal("20"),
+            )
+            route_policy = policy(
+                max_cloud_cost=Decimal("10")
+            )
+            store.route(
+                req,
+                self.candidates,
+                route_policy,
+                as_of=T1,
+                voc_evidence=voc(
+                    evidence_id="voc-authority-tail-cloud"
+                ),
+                domain_observation=slow_observation(),
+            )
+            first = store.record_execution(
+                execution_id="exec-authority-cloud-1",
+                request_id=req.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="permitted-cloud",
+                model_id="challenger-v2",
+                config_sha256=SHA_B,
+                actual_cost=Decimal("6"),
+                actual_latency_seconds=Decimal("4"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            second = store.record_execution(
+                execution_id="exec-authority-cloud-2",
+                request_id=req.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="permitted-cloud",
+                model_id="challenger-v2",
+                config_sha256=SHA_B,
+                actual_cost=Decimal("4"),
+                actual_latency_seconds=Decimal("4"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                first.disposition,
+                ExecutionDisposition.ACCEPTED,
+            )
+            self.assertEqual(
+                second.disposition,
+                ExecutionDisposition.ACCEPTED,
+            )
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["executions"] = [
+                item
+                for item in raw["executions"]
+                if item["execution_id"]
+                != "exec-authority-cloud-2"
+            ]
+            rewrite_execution_heads_from_surviving_history(
+                path, raw
+            )
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "execution authority references missing execution",
             ):
                 ModelComputeRouterStore(path)
 

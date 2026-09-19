@@ -27,7 +27,10 @@ $expected = @(
     [ordered]@{ key = 'shell_navigation'; automation_id = '301'; name = 'Навігація екранами Автоспорт'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; require_named_rows = $false },
     [ordered]@{ key = 'shell_state'; automation_id = '302'; name = 'Стан вибраної поверхні'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false; require_value_read_only = $true },
     [ordered]@{ key = 'shell_open'; automation_id = '303'; name = 'Перейти до робочої поверхні'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
-    [ordered]@{ key = 'shell_details'; automation_id = '304'; name = 'Контракт вибраного екрана'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true }
+    [ordered]@{ key = 'shell_details'; automation_id = '304'; name = 'Контракт вибраного екрана'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
+    [ordered]@{ key = 'owner_economic_open'; automation_id = '305'; name = 'Економічні межі власника'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
+    [ordered]@{ key = 'owner_economic_status'; automation_id = '306'; name = 'Стан економічних меж власника'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false; require_value_read_only = $true },
+    [ordered]@{ key = 'owner_economic_readback'; automation_id = '307'; name = 'Точні економічні межі власника'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true }
 )
 
 function Test-Pattern {

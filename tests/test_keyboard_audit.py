@@ -19,16 +19,20 @@ class KeyboardAuditTests(unittest.TestCase):
             "<Control-Alt-Left>": True,
             "<Control-Alt-Right>": True,
             "<F2>": True,
+            "<F9>": True,
             "<F6>": True,
             "<F7>": True,
             "<F8>": True,
         }
-        focus = {"<F2>": True, "<F6>": True, "<F7>": True, "<F8>": True}
+        focus = {"<F2>": True, "<F9>": True, "<F6>": True, "<F7>": True, "<F8>": True}
         reachable = [
             "shell_navigation",
             "shell_open",
             "shell_state",
             "shell_details",
+            "owner_economic_open",
+            "owner_economic_status",
+            "owner_economic_readback",
             "strategy",
             "research_plan",
             "choose_dataset",
@@ -64,6 +68,10 @@ class KeyboardAuditTests(unittest.TestCase):
         self.assertEqual(
             report["expected_automation_ids"]["shell_details"],
             WINDOWS_SHELL_AUTOMATION_IDS["details"],
+        )
+        self.assertEqual(
+            report["expected_automation_ids"]["owner_economic_open"],
+            WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_open"],
         )
         self.assertFalse(report["human_tested"])
         self.assertFalse(report["nvda_verified"])

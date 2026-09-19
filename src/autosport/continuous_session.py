@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from .causal_collector import CausalView, DesktopDeltaConsumer
 from .collector_service import HeadlessCollectorService
 from .event_lifecycle import ContinuousEventLifecycle, EventLifecycleRecord, EventPhase
 from .integrity import atomic_write_json
+from .json_integrity import strict_json_loads
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependencyIndex,
@@ -66,7 +66,7 @@ class SettlementResolution:
             raise ValueError("quote_outcomes must be a non-empty exact dict")
         for quote_key, outcome in self.quote_outcomes.items():
             _text(quote_key, "quote_outcomes quote_key")
-            if outcome not in {"win", "loss", "void"}:
+            if type(outcome) is not str or outcome not in {"win", "loss", "void"}:
                 raise ValueError("quote_outcomes contains unsupported outcome")
 
 
@@ -242,7 +242,7 @@ class _ContinuousSessionState:
 
     def _read(self) -> dict[str, Any]:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
             raise ContinuousSessionError(
                 "cannot verify continuous session state"
@@ -543,16 +543,6 @@ class ContinuousSessionCoordinator:
             resolutions.append(resolution)
         return tuple(resolutions)
 
-    def _open_quote_keys_for_event(self, record: EventLifecycleRecord) -> set[str]:
-        event_ids = {record.event_id, record.identity}
-        return {
-            leg.quote_key
-            for ticket in self._load_book().tickets.values()
-            if ticket.status.value == "open"
-            for leg in ticket.legs
-            if leg.event_id in event_ids
-        }
-
     def _load_book(self) -> PaperBook:
         if self.paper_book_path.exists():
             return PaperBook.load(self.paper_book_path)
@@ -574,11 +564,13 @@ class ContinuousSessionCoordinator:
             engine = SettlementEngine()
             for resolution in unique.values():
                 allowed = self._open_quote_keys_for_book(book, resolution.event_identity)
-                if not set(resolution.quote_outcomes).issubset(allowed):
-                    raise ContinuousSessionError(
-                        "settlement evidence contains a quote outside the matching open paper event"
-                    )
-                engine.record(resolution.quote_outcomes)
+                scoped = {
+                    quote_key: outcome
+                    for quote_key, outcome in resolution.quote_outcomes.items()
+                    if quote_key in allowed
+                }
+                if scoped:
+                    engine.record(scoped)
             settled = tuple(engine.settle_ready(book))
             if settled:
                 book.save(self.paper_book_path)

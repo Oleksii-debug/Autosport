@@ -728,6 +728,10 @@ def emit_registered_strength_forecast(
         dataset_entry.payload.get("causal_cutoff"),
         "DatasetSnapshot.causal_cutoff",
     )
+    if dataset_cutoff > dataset_available:
+        raise ParticipantStrengthError(
+            "DatasetSnapshot causal cutoff exceeds snapshot availability"
+        )
     if _instant(
         binding.get("causal_cutoff"), "ResearchProtocol.causal_cutoff"
     ) != dataset_cutoff:

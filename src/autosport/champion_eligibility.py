@@ -212,73 +212,161 @@ class ChampionEligibilityDecision:
         valid_until: str,
         minimum_samples: int,
         minimum_effective_sample_size: int,
-        degraded_streak: int,
-        recovery_streak: int,
-        admissible_actions: tuple[str, ...],
+        degraded_streak: int | None = None,
+        recovery_streak: int | None = None,
+        admissible_actions: tuple[str, ...] = ("WAIT",),
         research_trigger_id: str | None = None,
         reason: str = "",
     ) -> "ChampionEligibilityDecision":
         if not isinstance(registry, ScientificRegistry):
             raise TypeError("registry must be ScientificRegistry")
+
         ids = _tuple_text(finding_ids, "finding_ids")
         evaluated_cutoff = _instant(evaluated_at, "evaluated_at")
+        requested_scope = {
+            "sport": _text(sport, "sport"),
+            "league": _text(league, "league"),
+            "regime": _text(regime, "regime"),
+        }
+
+        def _scope_from_authority(
+            finding_payload: Mapping[str, Any],
+            observation_payload: Mapping[str, Any],
+        ) -> tuple[str, str, str] | None:
+            for payload in (finding_payload, observation_payload):
+                if all(type(payload.get(key)) is str for key in ("sport", "league", "regime")):
+                    return (
+                        payload["sport"],
+                        payload["league"],
+                        payload["regime"],
+                    )
+                if all(type(payload.get(key)) is str for key in ("sport_id", "league_id", "regime")):
+                    return (
+                        payload["sport_id"],
+                        payload["league_id"],
+                        payload["regime"],
+                    )
+            return None
+
         entries: list[RegistryEntry] = []
         counts: list[int] = []
-        states: list[DriftState] = []
+        windows: list[tuple[datetime, datetime, str, DriftState, tuple[str, str, str] | None]] = []
+
         for finding_id in ids:
             entry = registry.get("DriftFinding", finding_id)
             if entry is None:
                 raise ChampionEligibilityError(f"missing DriftFinding:{finding_id}")
             if _instant(entry.available_at, "DriftFinding.available_at") > evaluated_cutoff:
                 raise ChampionEligibilityError(f"DriftFinding:{finding_id} is future evidence")
+
             finding = entry.payload
             if finding.get("strategy_version_id") != strategy_version_id:
                 raise ChampionEligibilityError("drift finding strategy version scope mismatch")
             if finding.get("model_version_id") != model_version_id:
                 raise ChampionEligibilityError("drift finding model scope mismatch")
+
             try:
                 state = DriftState(finding.get("state"))
             except (TypeError, ValueError) as exc:
                 raise ChampionEligibilityError("drift finding state is invalid") from exc
+
             observation_id = finding.get("observation_id")
             if type(observation_id) is not str:
                 raise ChampionEligibilityError("drift finding observation identity is missing")
             observation = registry.get("DriftObservation", observation_id)
             if observation is None:
                 raise ChampionEligibilityError("drift observation is missing")
+
             sample_count = observation.payload.get("sample_count")
             if isinstance(sample_count, bool) or not isinstance(sample_count, int) or sample_count <= 0:
                 raise ChampionEligibilityError("drift observation sample_count is invalid")
+
+            observed_start = _instant(observation.payload.get("window_start"), "DriftObservation.window_start")
+            observed_end = _instant(observation.payload.get("window_end"), "DriftObservation.window_end")
+            if observed_end < observed_start:
+                raise ChampionEligibilityError("DriftObservation window is inverted")
+
+            scope = _scope_from_authority(finding, observation.payload)
             entries.append(entry)
             counts.append(sample_count)
-            states.append(state)
+            windows.append((observed_start, observed_end, observation_id, state, scope))
 
-        effective_sample_size = min(counts)
-        if effective_sample_size < minimum_effective_sample_size or any(
-            count < minimum_samples for count in counts
-        ):
-            status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
-            status_reason = "insufficient_or_under_supported_drift_evidence"
-        elif all(state is DriftState.DRIFT_DETECTED for state in states):
-            if degraded_streak < 2:
-                status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
-                status_reason = "single_or_non_sustained_degradation_window"
-            elif research_trigger_id is not None:
-                status = ChampionEligibilityStatus.RESEARCH_REQUIRED
-                status_reason = "sustained_scoped_degradation_requires_governed_research"
-            else:
-                status = ChampionEligibilityStatus.SHADOW_DEACTIVATED
-                status_reason = "sustained_scoped_degradation"
-        elif all(state is DriftState.NO_DRIFT for state in states):
-            if recovery_streak > 0 and recovery_streak < 2:
-                status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
-                status_reason = "recovery_requires_repeated_fresh_evidence"
-            else:
-                status = ChampionEligibilityStatus.ELIGIBLE
-                status_reason = "current_scoped_evidence_within_drift_bounds"
+        ordered = sorted(windows, key=lambda item: (item[0], item[1], item[2]))
+        if len({item[2] for item in ordered}) != len(ordered):
+            raise ChampionEligibilityError("drift findings must reference distinct observation windows")
+        for previous, current in zip(ordered, ordered[1:]):
+            if current[0] < previous[1]:
+                raise ChampionEligibilityError(
+                    "drift finding windows overlap and cannot establish repeated evidence"
+                )
+
+        # Scope is activation authority, not presentation metadata.  The current
+        # DriftFinding/DriftObservation schema does not require sport/league/regime,
+        # so an absent authoritative scope must fail closed.
+        authoritative_scopes = [item[4] for item in ordered]
+        if any(scope is None for scope in authoritative_scopes):
+            scoped = None
         else:
+            scoped = authoritative_scopes[0]
+            if any(scope != scoped for scope in authoritative_scopes[1:]):
+                raise ChampionEligibilityError("drift evidence scope changes across windows")
+        if scoped is None:
             status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
-            status_reason = "mixed_drift_states_require_further_evidence"
+            status_reason = "authoritative_sport_league_regime_scope_is_missing"
+        elif tuple(requested_scope.values()) != scoped:
+            raise ChampionEligibilityError("drift evidence scope does not match champion scope")
+        else:
+            tail_state = ordered[-1][3]
+            derived_streak = 0
+            for _start, _end, _observation_id, state, _scope in reversed(ordered):
+                if state is not tail_state:
+                    break
+                derived_streak += 1
+
+            expected_degraded_streak = derived_streak if tail_state is DriftState.DRIFT_DETECTED else 0
+            expected_recovery_streak = derived_streak if tail_state is DriftState.NO_DRIFT else 0
+            if degraded_streak is not None and degraded_streak != expected_degraded_streak:
+                raise ChampionEligibilityError("degraded_streak must match causal finding windows")
+            if recovery_streak is not None and recovery_streak != expected_recovery_streak:
+                raise ChampionEligibilityError("recovery_streak must match causal finding windows")
+
+            if degraded_streak is None and recovery_streak is None:
+                # Derived-only authority.  Never let a caller manufacture a streak.
+                pass
+
+            effective_sample_size = min(counts)
+            if effective_sample_size < minimum_effective_sample_size or any(
+                count < minimum_samples for count in counts
+            ):
+                status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
+                status_reason = "insufficient_or_under_supported_drift_evidence"
+            elif tail_state is DriftState.DRIFT_DETECTED:
+                if derived_streak < 2:
+                    status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
+                    status_reason = "single_or_non_sustained_degradation_window"
+                elif research_trigger_id is not None:
+                    if not research_trigger_id.startswith("champion-drift:"):
+                        raise ChampionEligibilityError("research_trigger_id is not a canonical champion-drift trigger")
+                    status = ChampionEligibilityStatus.RESEARCH_REQUIRED
+                    status_reason = "sustained_scoped_degradation_requires_governed_research"
+                else:
+                    status = ChampionEligibilityStatus.SHADOW_DEACTIVATED
+                    status_reason = "sustained_scoped_degradation"
+            elif tail_state is DriftState.NO_DRIFT:
+                if derived_streak < 2:
+                    status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
+                    status_reason = "recovery_requires_repeated_fresh_evidence"
+                else:
+                    status = ChampionEligibilityStatus.ELIGIBLE
+                    status_reason = "current_scoped_evidence_within_drift_bounds"
+            else:
+                status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
+                status_reason = "mixed_drift_states_require_further_evidence"
+
+            if status is not ChampionEligibilityStatus.WAIT_MORE_EVIDENCE:
+                effective_sample_size = min(counts)
+            else:
+                effective_sample_size = min(counts)
 
         return cls(
             status=status,
@@ -299,9 +387,17 @@ class ChampionEligibilityDecision:
             valid_until=valid_until,
             minimum_samples=minimum_samples,
             minimum_effective_sample_size=minimum_effective_sample_size,
-            effective_sample_size=effective_sample_size,
-            degraded_streak=degraded_streak,
-            recovery_streak=recovery_streak,
+            effective_sample_size=min(counts),
+            degraded_streak=(
+                sum(1 for item in reversed(ordered) if item[3] is DriftState.DRIFT_DETECTED)
+                if ordered and ordered[-1][3] is DriftState.DRIFT_DETECTED
+                else 0
+            ),
+            recovery_streak=(
+                sum(1 for item in reversed(ordered) if item[3] is DriftState.NO_DRIFT)
+                if ordered and ordered[-1][3] is DriftState.NO_DRIFT
+                else 0
+            ),
             admissible_actions=admissible_actions,
             research_trigger_id=research_trigger_id,
             reason=reason or status_reason,

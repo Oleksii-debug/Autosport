@@ -273,7 +273,19 @@ class RatingSnapshot:
 
     @property
     def snapshot_id(self) -> str:
-        return _digest(self.payload())
+        return _digest(
+            {
+                "algorithm": self.algorithm,
+                "algorithm_version": self.algorithm_version,
+                "config_digest": self.config_digest,
+                "as_of": _time_text("as_of", self.as_of),
+                "view": self.view.value,
+                "input_observation_ids": list(self.input_observation_ids),
+                "input_set_digest": self.input_set_digest,
+                "features": [feature.payload() for feature in self.features],
+                "causal_cutoff": _time_text("causal_cutoff", self.causal_cutoff),
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +355,7 @@ class OpponentGraphStore:
         self._edges: dict[str, OpponentEdge] = {}
         self._snapshots: dict[str, RatingSnapshot] = {}
         self._work: dict[str, RecomputeWork] = {}
+        self._invalidated_edge_ids: set[str] = set()
         self._loading = False
         if self.path.exists():
             self._load()
@@ -535,8 +548,16 @@ class OpponentGraphStore:
     ) -> tuple[str, ...]:
         _sha("predecessor_observation_id", predecessor_observation_id)
         _sha("correction_observation_id", correction_observation_id)
-        affected = []
-        for snapshot_id, snapshot in tuple(self._snapshots.items()):
+        affected_snapshots: list[str] = []
+        affected_edges = set(self._invalidated_edge_ids)
+        candidate_snapshots = dict(self._snapshots)
+        candidate_work = dict(self._work)
+
+        for edge_id, edge in self._edges.items():
+            if edge.observation_id == predecessor_observation_id:
+                affected_edges.add(edge_id)
+
+        for snapshot_id, snapshot in self._snapshots.items():
             if predecessor_observation_id not in snapshot.input_observation_ids:
                 continue
             affected_entities = tuple(sorted(feature.participant_id for feature in snapshot.features))
@@ -546,8 +567,8 @@ class OpponentGraphStore:
                 created_from_observation_id=correction_observation_id,
                 affected_entity_ids=affected_entities,
             )
-            self._work[work.work_id] = work
-            replacement = RatingSnapshot(
+            candidate_work[work.work_id] = work
+            candidate_snapshots[snapshot_id] = RatingSnapshot(
                 algorithm=snapshot.algorithm,
                 algorithm_version=snapshot.algorithm_version,
                 config_digest=snapshot.config_digest,
@@ -560,12 +581,74 @@ class OpponentGraphStore:
                 invalidated=True,
                 invalidation_work_id=work.work_id,
             )
-            self._snapshots.pop(snapshot_id)
-            self._snapshots[replacement.snapshot_id] = replacement
-            affected.append(replacement.snapshot_id)
-        if affected:
-            self._persist()
-        return tuple(sorted(affected))
+            affected_snapshots.append(snapshot_id)
+
+        if affected_snapshots or affected_edges != self._invalidated_edge_ids:
+            self._persist_snapshot(
+                observations=self._observations,
+                edges=self._edges,
+                snapshots=candidate_snapshots,
+                work=candidate_work,
+                invalidated_edge_ids=affected_edges,
+            )
+            self._snapshots = candidate_snapshots
+            self._work = candidate_work
+            self._invalidated_edge_ids = affected_edges
+        return tuple(sorted(affected_snapshots))
+
+    def invalidate_for_identity(
+        self,
+        entity_id: str,
+        *,
+        reason_code: str = "IDENTITY_CORRECTION",
+    ) -> tuple[str, ...]:
+        self._require_entity(entity_id)
+        affected_snapshots: list[str] = []
+        affected_edges = set(self._invalidated_edge_ids)
+        candidate_snapshots = dict(self._snapshots)
+        candidate_work = dict(self._work)
+
+        for edge_id, edge in self._edges.items():
+            if entity_id in (edge.participant_a_id, edge.participant_b_id):
+                affected_edges.add(edge_id)
+
+        for snapshot_id, snapshot in self._snapshots.items():
+            if entity_id not in {feature.participant_id for feature in snapshot.features}:
+                continue
+            work = RecomputeWork.create(
+                target_snapshot_id=snapshot_id,
+                reason_code=reason_code,
+                created_from_observation_id=snapshot.input_observation_ids[0],
+                affected_entity_ids=tuple(sorted(feature.participant_id for feature in snapshot.features)),
+            )
+            candidate_work[work.work_id] = work
+            candidate_snapshots[snapshot_id] = RatingSnapshot(
+                algorithm=snapshot.algorithm,
+                algorithm_version=snapshot.algorithm_version,
+                config_digest=snapshot.config_digest,
+                as_of=snapshot.as_of,
+                view=snapshot.view,
+                input_observation_ids=snapshot.input_observation_ids,
+                input_set_digest=snapshot.input_set_digest,
+                features=snapshot.features,
+                causal_cutoff=snapshot.causal_cutoff,
+                invalidated=True,
+                invalidation_work_id=work.work_id,
+            )
+            affected_snapshots.append(snapshot_id)
+
+        if affected_snapshots or affected_edges != self._invalidated_edge_ids:
+            self._persist_snapshot(
+                observations=self._observations,
+                edges=self._edges,
+                snapshots=candidate_snapshots,
+                work=candidate_work,
+                invalidated_edge_ids=affected_edges,
+            )
+            self._snapshots = candidate_snapshots
+            self._work = candidate_work
+            self._invalidated_edge_ids = affected_edges
+        return tuple(sorted(affected_snapshots))
 
     def invalidate_for_identity(
         self,
@@ -608,8 +691,8 @@ class OpponentGraphStore:
     def observations(self) -> tuple[PerformanceOutcome, ...]:
         return tuple(sorted(self._observations.values(), key=lambda row: row.observation_id))
 
-    def edges(self) -> tuple[OpponentEdge, ...]:
-        return tuple(sorted(self._edges.values(), key=lambda row: row.edge_id))
+    def edges(self, *, include_invalidated: bool = False) -> tuple[OpponentEdge, ...]:
+        return tuple(sorted((edge for edge_id, edge in self._edges.items() if include_invalidated or edge_id not in self._invalidated_edge_ids), key=lambda row: row.edge_id))
 
     def snapshots(self) -> tuple[RatingSnapshot, ...]:
         return tuple(sorted(self._snapshots.values(), key=lambda row: row.snapshot_id))
@@ -624,6 +707,7 @@ class OpponentGraphStore:
         edges: dict[str, OpponentEdge],
         snapshots: dict[str, RatingSnapshot],
         work: dict[str, RecomputeWork],
+        invalidated_edge_ids: set[str] | None = None,
     ) -> None:
         payload = {
             "schema": _SCHEMA,
@@ -647,6 +731,7 @@ class OpponentGraphStore:
             ],
             "snapshots": [row.payload() for row in sorted(snapshots.values(), key=lambda row: row.snapshot_id)],
             "recompute_work": [row.payload() for row in sorted(work.values(), key=lambda row: row.work_id)],
+            "invalidated_edge_ids": sorted(invalidated_edge_ids or set()),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with WorkspaceEconomicLock(self.path.parent):
@@ -731,6 +816,7 @@ class OpponentGraphStore:
                         raise OpponentGraphError("stored snapshot references missing observation")
                 self._snapshots[snapshot.snapshot_id] = snapshot
 
+            self._invalidated_edge_ids = set(raw.get("invalidated_edge_ids", []))
             for item in raw.get("recompute_work", []):
                 work = RecomputeWork(
                     target_snapshot_id=item["target_snapshot_id"],

@@ -96,6 +96,12 @@ def voc(**overrides):
         evidence_id="voc-1",
         baseline_candidate_id="local",
         challenger_candidate_id="cloud",
+        baseline_backend_id="local-cpu",
+        baseline_model_id="baseline-v1",
+        baseline_config_sha256=SHA_A,
+        challenger_backend_id="permitted-cloud",
+        challenger_model_id="challenger-v2",
+        challenger_config_sha256=SHA_B,
         measured_at=T0,
         available_at=T0,
         provenance=VOCEvidenceProvenance.MEASURED_SHADOW,
@@ -252,6 +258,65 @@ class ModelComputeRouterTests(unittest.TestCase):
             domain_observation=slow_observation(),
         )
         self.assertEqual(simulated.tier, ComputeTier.LOCAL)
+
+    def test_voc_exact_compute_identity_cannot_be_reused_under_same_candidate_ids(self):
+        mismatched = voc(
+            evidence_id="voc-old-compute-identity",
+            challenger_backend_id="retired-cloud",
+            challenger_model_id="challenger-v1",
+            challenger_config_sha256=SHA_C,
+        )
+        rejected = route_compute(
+            request(request_id="req-voc-old-compute-identity"),
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=mismatched,
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(rejected.tier, ComputeTier.LOCAL)
+        self.assertEqual(rejected.candidate_id, "local")
+        self.assertIn("exact compute identity", rejected.reason)
+
+        exact = route_compute(
+            request(request_id="req-voc-exact-compute-identity"),
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=voc(evidence_id="voc-exact-compute-identity"),
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(exact.tier, ComputeTier.CLOUD)
+        self.assertEqual(exact.backend_id, "permitted-cloud")
+        self.assertEqual(exact.model_id, "challenger-v2")
+        self.assertEqual(exact.config_sha256, SHA_B)
+
+    def test_voc_exact_compute_identity_survives_restart_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            req = request(request_id="req-voc-identity-restart")
+            evidence = voc(evidence_id="voc-identity-restart")
+            store = ModelComputeRouterStore(path)
+            first = store.route(
+                req,
+                self.candidates,
+                policy(),
+                as_of=T1,
+                voc_evidence=evidence,
+                domain_observation=slow_observation(),
+            )
+            self.assertEqual(first.tier, ComputeTier.CLOUD)
+
+            reopened = ModelComputeRouterStore(path)
+            readback = reopened.route(
+                req,
+                self.candidates,
+                policy(),
+                as_of=T1,
+                voc_evidence=evidence,
+                domain_observation=slow_observation(),
+            )
+            self.assertEqual(readback, first)
 
     def test_forged_domain_route_cannot_authorize_cloud_without_observation(self):
         decision = route_compute(

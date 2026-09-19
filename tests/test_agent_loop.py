@@ -501,6 +501,105 @@ def test_unknown_external_effect_cannot_rewrite_resolved_or_checkpointed_action(
     assert json_load(runtime.path) == checkpointed_state
 
 
+def test_next_observation_requires_durable_current_transition_checkpoint(
+    tmp_path,
+):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+    outcome, reward, transition = _resolve(environment, action)
+    runtime.record_resolution(
+        transition,
+        outcome=outcome,
+        reward=reward,
+        at="2026-09-19T13:05:02Z",
+    )
+    runtime.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:05:03Z",
+    )
+    attribution = _attribution(
+        environment,
+        transition,
+        outcome,
+        reward,
+    )
+    runtime.record_attribution(
+        attribution,
+        at="2026-09-19T13:05:04Z",
+    )
+    runtime.record_postmortem(
+        ReflectionPostmortem(
+            attribution_id=attribution.attribution_id,
+            transition_id=transition.transition_id,
+            created_at="2026-09-19T13:05:05Z",
+            unresolved_components=(),
+            summary_code="NO_RESEARCH_REQUIRED",
+        ),
+        at="2026-09-19T13:05:05Z",
+    )
+
+    pending = json_load(runtime.path)
+    assert runtime.snapshot().phase is AgentLoopPhase.CHECKPOINT
+    assert runtime.snapshot().checkpointed_transition_id is None
+    next_observation = _observation(environment, suffix="2")
+    with pytest.raises(
+        AgentLoopError,
+        match="new observation requires durable checkpoint for current transition",
+    ):
+        runtime.begin_observation(
+            next_observation,
+            environment_identity=environment.identity,
+            at="2026-09-19T13:05:06Z",
+        )
+    assert json_load(runtime.path) == pending
+
+    recovered = AgentLoopRuntime(runtime.path)
+    with pytest.raises(
+        AgentLoopError,
+        match="new observation requires durable checkpoint for current transition",
+    ):
+        recovered.begin_observation(
+            next_observation,
+            environment_identity=environment.identity,
+            at="2026-09-19T13:05:07Z",
+        )
+    assert json_load(runtime.path) == pending
+
+    checkpoint = environment.checkpoint()
+    committed = recovered.commit_checkpoint(
+        checkpoint,
+        at="2026-09-19T13:05:08Z",
+    )
+    assert committed.checkpointed_transition_id == transition.transition_id
+    started = recovered.begin_observation(
+        next_observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:05:09Z",
+    )
+    assert started.phase is AgentLoopPhase.OBSERVE
+    assert started.transition_id is None
+    assert started.checkpointed_transition_id == transition.transition_id
+
+
 def test_future_evidence_and_observed_simulated_relabel_fail_closed(
     tmp_path,
 ):

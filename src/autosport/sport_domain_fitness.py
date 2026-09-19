@@ -95,6 +95,26 @@ def _fraction(name: str, value: object) -> Decimal:
     return result
 
 
+def _elapsed_seconds(later: datetime, earlier: datetime) -> Decimal:
+    delta = later - earlier
+    return (
+        Decimal(delta.days * 86400 + delta.seconds)
+        + (Decimal(delta.microseconds) / Decimal("1000000"))
+    )
+
+
+def _evidence_identity(observation: "SportDomainFitnessObservation") -> tuple[str, ...]:
+    return (
+        observation.sport_id,
+        observation.league_id,
+        observation.market_id,
+        observation.provider_id,
+        observation.measured_from,
+        observation.measured_until,
+        observation.evidence_sha256,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class MetricEvidence:
     state: EvidenceState
@@ -300,6 +320,17 @@ def recommend_route(
             "evidence is not causally available at the decision boundary",
             observation.observation_id, observation.domain_profile,
         )
+    if observation.freshness_ttl_seconds.state is EvidenceState.MEASURED:
+        assert observation.freshness_ttl_seconds.value is not None
+        evidence_age = _elapsed_seconds(
+            boundary, _instant("available_at", observation.available_at)
+        )
+        if evidence_age > observation.freshness_ttl_seconds.value:
+            return RouteRecommendation(
+                RouteStatus.DO_NOT_ROUTE,
+                "evidence age at the decision boundary exceeds the declared evidence TTL",
+                observation.observation_id, observation.domain_profile,
+            )
     if (
         observation.freshness_seconds.state is EvidenceState.MEASURED
         and observation.freshness_ttl_seconds.state is EvidenceState.MEASURED
@@ -380,6 +411,16 @@ class SportDomainFitnessStore:
     def add(self, observation: SportDomainFitnessObservation) -> bool:
         if not isinstance(observation, SportDomainFitnessObservation):
             raise TypeError("observation must be SportDomainFitnessObservation")
+        identity = _evidence_identity(observation)
+        for existing in self._observations.values():
+            if (
+                _evidence_identity(existing) == identity
+                and existing.provenance is EvidenceProvenance.SIMULATED
+                and observation.provenance is EvidenceProvenance.OBSERVED
+            ):
+                raise SportDomainFitnessError(
+                    "simulated evidence identity cannot be reintroduced as observed evidence"
+                )
         existing = self._observations.get(observation.observation_id)
         if existing is not None:
             if existing != observation:
@@ -429,6 +470,7 @@ class SportDomainFitnessStore:
         if not isinstance(raw, dict) or raw.get("schema") != _SCHEMA or raw.get("version") != _VERSION:
             raise SportDomainFitnessError("unsupported fitness evidence store schema")
         values: dict[str, SportDomainFitnessObservation] = {}
+        identities: dict[tuple[str, ...], EvidenceProvenance] = {}
         for item in raw.get("observations", []):
             try:
                 observation = SportDomainFitnessObservation.from_payload(item)
@@ -436,5 +478,15 @@ class SportDomainFitnessStore:
                 raise SportDomainFitnessError("invalid persisted fitness observation") from exc
             if observation.observation_id in values:
                 raise SportDomainFitnessError("duplicate observation id")
+            identity = _evidence_identity(observation)
+            prior_provenance = identities.get(identity)
+            if (
+                prior_provenance is EvidenceProvenance.SIMULATED
+                and observation.provenance is EvidenceProvenance.OBSERVED
+            ):
+                raise SportDomainFitnessError(
+                    "persisted evidence relabels simulated identity as observed"
+                )
+            identities[identity] = observation.provenance
             values[observation.observation_id] = observation
         self._observations = values

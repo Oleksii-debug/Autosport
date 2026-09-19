@@ -208,6 +208,27 @@ class OpponentGraphTests(unittest.TestCase):
         self.assertEqual(s1.rating, s2.rating)
         self.assertEqual(s1.input_digest, s2.input_digest)
 
+    def test_repeated_snapshot_build_is_idempotent(self):
+        self.store.add_outcome(outcome("o1"))
+        first = self.store.build_snapshot(
+            "p1",
+            sport="table-tennis",
+            league_id="league-1",
+            causal_cutoff=T2,
+            min_support=1,
+            stale_after_seconds=999999,
+        )
+        second = self.store.build_snapshot(
+            "p1",
+            sport="table-tennis",
+            league_id="league-1",
+            causal_cutoff=T2,
+            min_support=1,
+            stale_after_seconds=999999,
+        )
+        self.assertEqual(first.snapshot_id, second.snapshot_id)
+        self.assertEqual(len(self.store._snapshots), 1)
+
     def test_duplicate_delivery_is_idempotent_after_restart(self):
         record = outcome("o1")
         self.store.add_outcome(record)

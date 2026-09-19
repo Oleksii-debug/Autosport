@@ -68,6 +68,7 @@ def _payload_sha(record) -> str:
 def _binding(
     question: ResearchQuestion | None = None,
     hypothesis: Hypothesis | None = None,
+    promotion_rule: str | None = None,
 ) -> ScientificProtocolBinding:
     question = question or _question()
     hypothesis = hypothesis or _hypothesis()
@@ -88,11 +89,54 @@ def _binding(
         robustness_checks=("time split", "source split"),
         random_seed_policy="seed fixed before evaluation",
         stopping_rule="one final evaluation",
-        promotion_rule="promote only if primary improves and guardrails pass",
+        promotion_rule=promotion_rule or "promote only if primary improves and guardrails pass",
         expected_artifacts=("evaluation bundle", "decision"),
         code_config_sha256=SHA_B,
         frozen_at_utc=T0,
     )
+
+
+def _frozen_promotion_rule_text(
+    *, minimum_improvement: float = 0.05, minimum_effective_sample_size: int = 3
+) -> str:
+    return json.dumps(
+        {
+            "kind": "autosport-promotion-rule-v1",
+            "primary_metric": "roi",
+            "minimum_improvement": minimum_improvement,
+            "minimum_effective_sample_size": minimum_effective_sample_size,
+            "protective_metric_maxima": [],
+            "metric_direction": "lower_is_better",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _foundation_with_binding(
+    registry: ScientificRegistry, *, promotion_rule: str
+) -> dict[str, object]:
+    question = _question()
+    hypothesis = _hypothesis()
+    protocol = ResearchProtocol(_binding(question, hypothesis, promotion_rule), SHA_C, SHA_D, SHA_A, T0)
+    dataset = DatasetSnapshot(
+        "dataset-1", SHA_A, "lawful-provider:fixture", "license-evidence:v1",
+        T1, T0, outcome_reveal_after=T1,
+    )
+    features = FeatureSet("features-1", "v1", SHA_B, SHA_C, T0)
+    model = ModelVersion("model-1", "fixture-model", SHA_A, SHA_C, SHA_D,
+                         "dataset-1", "features-1", "protocol-1", 7, SHA_B, T1)
+    strategy = StrategyVersion("strategy-1", "canonical-strategy", SHA_C, SHA_D, SHA_B,
+                               T1, model_version_id="model-1")
+    bundle = EvaluationBundleRef("eval-1", SHA_D, SHA_C, "dataset-1",
+                                 protocol.protocol_sha256, (SHA_A, SHA_B), T2,
+                                 evaluated_strategy_version_id="strategy-1",
+                                 evaluated_model_version_id="model-1")
+    for record in (question, hypothesis, protocol, dataset, features, model, strategy, bundle):
+        registry.append(record)
+    return {"question": question, "hypothesis": hypothesis, "protocol": protocol,
+            "dataset": dataset, "features": features, "model": model,
+            "strategy": strategy, "bundle": bundle}
 
 
 def _foundation(registry: ScientificRegistry) -> dict[str, object]:
@@ -621,6 +665,88 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
     assert registry.champion_strategy(as_of="2026-01-04T01:00:00+00:00") == "strategy-offset-2"
 
 
+
+
+def test_promotion_rejects_positive_but_below_frozen_minimum_improvement(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    rule_text = _frozen_promotion_rule_text(minimum_improvement=0.05, minimum_effective_sample_size=3)
+    foundation = _foundation_with_binding(
+        registry,
+        promotion_rule=rule_text,
+    )
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
+    evidence = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="below-threshold",
+        practical="0.04",
+        interval_low="0.04",
+        interval_high="0.06",
+        effective_n=3,
+        minimum_n=3,
+        rollback_identity="NONE",
+    )
+    registry.append(evidence)
+    decision = PromotionDecision(
+        "promotion-below-threshold",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        foundation["bundle"].bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=evidence.promotion_evidence_id,
+    )
+    with pytest.raises(PromotionEvidenceError, match="frozen minimum"):
+        registry.record_promotion(decision)
+
+
+def test_promotion_rejects_caller_selected_sample_floor(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    rule_text = _frozen_promotion_rule_text(minimum_improvement=0.05, minimum_effective_sample_size=3)
+    foundation = _foundation_with_binding(
+        registry,
+        promotion_rule=rule_text,
+    )
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
+    evidence = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="caller-selected-floor",
+        practical="0.10",
+        interval_low="0.10",
+        interval_high="0.12",
+        effective_n=3,
+        minimum_n=2,
+        rollback_identity="NONE",
+    )
+    registry.append(evidence)
+    decision = PromotionDecision(
+        "promotion-caller-selected-floor",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        foundation["bundle"].bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=evidence.promotion_evidence_id,
+    )
+    with pytest.raises(PromotionEvidenceError, match="minimum effective sample size is not frozen"):
+        registry.record_promotion(decision)
 
 
 def test_promotion_holdout_identity_is_stable_across_dataset_snapshot_renames():

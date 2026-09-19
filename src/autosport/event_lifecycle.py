@@ -75,14 +75,12 @@ def _canonical_digest(payload: object) -> str:
 
 
 def canonical_event_identity(*, source_id: str, sport: str, event_id: str) -> str:
-    """Stable provider+sport+event identity, disjoint from local display strings."""
-    payload = [
-        "autosport.catalog_event_identity",
+    """Reuse the persisted MarketEvent identity from the provider boundary."""
+    _canonical_sport_value(sport)
+    return _scoped_identity(
         _text(source_id, "source_id"),
-        _canonical_sport_value(sport),
         _text(event_id, "event_id"),
-    ]
-    return "event-v1-" + _canonical_digest(payload)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,6 +524,7 @@ class ContinuousEventLifecycle:
         discovered_at: str,
         required_history: timedelta,
         register_input: Callable[..., None],
+        retire_input: Callable[[str], object] | None = None,
     ) -> tuple[str, ...]:
         """Discover and route eligible events without a manual event seed list."""
         self.refresh_once(
@@ -538,6 +537,7 @@ class ContinuousEventLifecycle:
             as_of=discovered_at,
             required_history=required_history,
             register_input=register_input,
+            retire_input=retire_input,
         )
 
     def assess_evidence(
@@ -649,7 +649,7 @@ class ContinuousEventLifecycle:
                 input_id,
                 source_ids=record.source_id,
                 sports=record.sport,
-                event_ids=record.event_id,
+                event_ids=record.identity,
             )
             registered.append(input_id)
         return tuple(registered)

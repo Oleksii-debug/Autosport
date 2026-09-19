@@ -527,6 +527,20 @@ def evaluate_anchor_selection(
         for sport_id in protocol.candidate_sports
     )
 
+    # A pre-14-day run is a measurement checkpoint, not a final evidence
+    # sufficiency/selection decision. Preserve the checkpoint state even when
+    # the partial window cannot yet satisfy the frozen minimums.
+    elapsed = as_of - start
+    if elapsed < timedelta(days=14):
+        return AnchorSelectionReport(
+            protocol.protocol_sha256,
+            AnchorDecisionState.CHECKPOINT,
+            None,
+            reports,
+            tuple(sorted(input_ids)),
+            "measurement window is shorter than the fixed 14-day review horizon; report evidence but do not select an anchor",
+        )
+
     insufficient = [
         report
         for report in reports

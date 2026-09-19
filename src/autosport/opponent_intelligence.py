@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .integrity import atomic_write_json
+from .learning_environment import EvidenceTruth
 from .participant_identity import (
     EntityKind,
     IdentityView,
@@ -123,6 +124,7 @@ class ObservedPerformance:
     available_at: str
     recorded_at: str
     evidence_sha256: str
+    truth: EvidenceTruth
     supersedes_performance_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -151,6 +153,12 @@ class ObservedPerformance:
                 "performance cannot be recorded before available_at"
             )
         _sha256("evidence_sha256", self.evidence_sha256)
+        if not isinstance(self.truth, EvidenceTruth):
+            raise OpponentIntelligenceError("truth must be canonical EvidenceTruth")
+        if self.truth is not EvidenceTruth.OBSERVED:
+            raise OpponentIntelligenceError(
+                "historical opponent performance requires observed evidence"
+            )
         if self.supersedes_performance_id is not None:
             _sha256("supersedes_performance_id", self.supersedes_performance_id)
 
@@ -170,6 +178,7 @@ class ObservedPerformance:
             "evidence_sha256": _sha256(
                 "evidence_sha256", self.evidence_sha256
             ),
+            "truth": self.truth.value,
             "supersedes_performance_id": self.supersedes_performance_id,
         }
 

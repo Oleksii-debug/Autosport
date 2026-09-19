@@ -96,7 +96,7 @@ def _localized_calculation_error(exc: BaseException) -> str:
     # service text out of the user/NVDA presentation surface.
     if not isinstance(exc, (TypeError, ValueError, ArithmeticError)):
         raise TypeError("unsupported calculation exception")
-    return text("ui.windows.manual_calculation.error.calculation_failed")
+    return text("ui.windows.manual_calculation.status.error")
 
 
 def _render_evidence_uk(evidence: ManualCalculationEvidence) -> str:

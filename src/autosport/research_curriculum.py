@@ -912,7 +912,7 @@ class NightResearchCurriculum:
         record: CurriculumSelectionRecord,
         *,
         deadline_at: str | None = None,
-        before_reservation: Callable[[], None] | None = None,
+        before_reservation: Callable[[CurriculumSelectionRecord], None] | None = None,
     ) -> CurriculumDispatchReceipt:
         if not isinstance(record, CurriculumSelectionRecord):
             raise ResearchCurriculumError("record must be CurriculumSelectionRecord")
@@ -964,7 +964,7 @@ class NightResearchCurriculum:
                 # is therefore observed; one that waits behind this lock is later
                 # than the already-started immutable dispatch and cannot orphan it.
                 if before_reservation is not None:
-                    before_reservation()
+                    before_reservation(record)
                 state["dispatches"][record.selection_id] = reservation
                 state["consumed_budget_units"] += record.budget_units
                 state["state_version"] += 1
@@ -1011,7 +1011,7 @@ class NightResearchCurriculum:
         seed: int,
         budget_units: int,
         deadline_at: str | None = None,
-        before_reservation: Callable[[], None] | None = None,
+        before_reservation: Callable[[CurriculumSelectionRecord], None] | None = None,
     ) -> CurriculumDispatchReceipt:
         record = self.select(
             candidates,

@@ -210,17 +210,36 @@ def slow_observation():
     )
 
 
+class _FixtureCanonicalVOCResolver:
+    """Test-only stand-in for a resolver backed by canonical durable authorities."""
+
+    def __init__(self):
+        self._records = {}
+
+    def publish(self, value):
+        self._records[value.evaluation_id] = value
+
+    def resolve(self, evaluation, *, as_of):
+        value = self._records.get(evaluation.evaluation_id)
+        if value is None:
+            return None
+        return value
+
+
 class PairedVOCEvaluationTests(unittest.TestCase):
     def setUp(self):
         self._router_tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._router_tmp.cleanup)
+        self._canonical_voc = _FixtureCanonicalVOCResolver()
         self.voc_store = VOCEvaluationStore(
-            Path(self._router_tmp.name) / "router-voc.json"
+            Path(self._router_tmp.name) / "router-voc.json",
+            canonical_authority_resolver=self._canonical_voc,
         )
 
     def qualified_voc(self, value=None):
         evidence = voc(value)
         if evidence.evaluation is not None:
+            self._canonical_voc.publish(evidence.evaluation)
             self.voc_store.record(evidence.evaluation)
         return evidence
 
@@ -238,6 +257,23 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             domain_observation=slow_observation(),
         )
         self.assertEqual(decision.tier, ComputeTier.CLOUD)
+
+    def test_persisted_shadow_record_without_canonical_authority_cannot_mint_cloud(self):
+        raw_store = VOCEvaluationStore(Path(self._router_tmp.name) / "raw-only.json")
+        fake = evaluation(evaluation_id="voc-raw-only")
+        evidence = voc(fake)
+        raw_store.record(fake)
+        decision = self.route_compute(
+            request(),
+            candidates(),
+            policy(),
+            as_of=T2,
+            voc_evidence=evidence,
+            domain_observation=slow_observation(),
+            voc_evaluation_store=raw_store,
+        )
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertIn("missing canonical VOC authority resolver", decision.reason)
 
     def test_opaque_evaluation_sha_cannot_mint_cloud_authority(self):
         paired = evaluation()

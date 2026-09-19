@@ -210,21 +210,38 @@ def slow_observation():
 
 
 class PairedVOCEvaluationTests(unittest.TestCase):
+    def setUp(self):
+        self._router_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._router_tmp.cleanup)
+        self.voc_store = VOCEvaluationStore(
+            Path(self._router_tmp.name) / "router-voc.json"
+        )
+
+    def qualified_voc(self, value=None):
+        evidence = voc(value)
+        if evidence.evaluation is not None:
+            self.voc_store.record(evidence.evaluation)
+        return evidence
+
+    def route_compute(self, *args, **kwargs):
+        kwargs.setdefault("voc_evaluation_store", self.voc_store)
+        return route_compute(*args, **kwargs)
+
     def test_qualified_paired_evaluation_can_authorize_cloud(self):
-        decision = route_compute(
+        decision = self.route_compute(
             request(),
             candidates(),
             policy(),
             as_of=T2,
-            voc_evidence=voc(),
+            voc_evidence=self.qualified_voc(),
             domain_observation=slow_observation(),
         )
         self.assertEqual(decision.tier, ComputeTier.CLOUD)
 
     def test_opaque_evaluation_sha_cannot_mint_cloud_authority(self):
         paired = evaluation()
-        evidence = replace(voc(paired), evaluation=None)
-        decision = route_compute(
+        evidence = replace(self.qualified_voc(paired), evaluation=None)
+        decision = self.route_compute(
             request(),
             candidates(),
             policy(),
@@ -249,12 +266,12 @@ class PairedVOCEvaluationTests(unittest.TestCase):
 
     def test_insufficient_ess_fails_closed(self):
         paired = evaluation(effective_sample_size=4)
-        decision = route_compute(
+        decision = self.route_compute(
             request(),
             candidates(),
             policy(voc_min_effective_sample_size=10),
             as_of=T2,
-            voc_evidence=voc(paired),
+            voc_evidence=self.qualified_voc(paired),
             domain_observation=slow_observation(),
         )
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
@@ -264,12 +281,12 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         paired = evaluation(
             incremental_value_interval_low=Decimal("-0.1"),
         )
-        decision = route_compute(
+        decision = self.route_compute(
             request(),
             candidates(),
             policy(),
             as_of=T2,
-            voc_evidence=voc(paired),
+            voc_evidence=self.qualified_voc(paired),
             domain_observation=slow_observation(),
         )
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
@@ -282,12 +299,12 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             outcome_revealed_at=T2,
             evaluated_at=T2,
         )
-        decision = route_compute(
+        decision = self.route_compute(
             request(),
             candidates(),
             policy(),
             as_of=T2,
-            voc_evidence=voc(paired),
+            voc_evidence=self.qualified_voc(paired),
             domain_observation=slow_observation(),
         )
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
@@ -300,7 +317,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             "utility/cost values do not match",
         ):
             replace(
-                voc(paired),
+                self.qualified_voc(paired),
                 challenger_utility=Decimal("3"),
             )
 
@@ -374,8 +391,8 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             outcome_revealed_at=T3,
             evaluated_at=T3,
         )
-        evidence = voc(paired)
-        decision = route_compute(
+        evidence = self.qualified_voc(paired)
+        decision = self.route_compute(
             request(),
             candidates(),
             policy(),
@@ -411,7 +428,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             evaluation_sha256=paired.evaluation_sha256,
             evaluation=paired,
         )
-        decision = route_compute(
+        decision = self.route_compute(
             request(),
             candidates(),
             policy(),

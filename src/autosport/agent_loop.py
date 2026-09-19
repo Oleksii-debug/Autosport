@@ -40,7 +40,7 @@ from .workspace_lock import WorkspaceEconomicLock
 
 
 AGENT_LOOP_SCHEMA: Final = "autosport.agent_loop"
-AGENT_LOOP_SCHEMA_VERSION: Final = 1
+AGENT_LOOP_SCHEMA_VERSION: Final = 2
 _HEX: Final = frozenset("0123456789abcdef")
 
 
@@ -394,6 +394,7 @@ class AgentLoopSnapshot:
     research_trigger_id: str | None
     research_run_id: str | None
     environment_checkpoint_id: str
+    checkpointed_transition_id: str | None
     external_effect_state: ExternalEffectState
     resume_phase: AgentLoopPhase | None
     updated_at: str
@@ -452,6 +453,7 @@ class AgentLoopRuntime:
             "sequence": 0,
             "current": cls._empty_current(),
             "environment_checkpoint_id": environment_checkpoint.checkpoint_id,
+            "checkpointed_transition_id": environment_checkpoint.last_transition_id,
             "external_effect_state": ExternalEffectState.NONE.value,
             "resume_phase": None,
             "decisions": [],
@@ -529,6 +531,7 @@ class AgentLoopRuntime:
             "sequence",
             "current",
             "environment_checkpoint_id",
+            "checkpointed_transition_id",
             "external_effect_state",
             "resume_phase",
             "decisions",
@@ -590,6 +593,11 @@ class AgentLoopRuntime:
         _sha256(
             state["environment_checkpoint_id"], "environment_checkpoint_id"
         )
+        if state["checkpointed_transition_id"] is not None:
+            _sha256(
+                state["checkpointed_transition_id"],
+                "checkpointed_transition_id",
+            )
         ExternalEffectState(state["external_effect_state"])
         if state["resume_phase"] is not None:
             AgentLoopPhase(state["resume_phase"])
@@ -681,6 +689,7 @@ class AgentLoopRuntime:
             research_trigger_id=current["research_trigger_id"],
             research_run_id=current["research_run_id"],
             environment_checkpoint_id=state["environment_checkpoint_id"],
+            checkpointed_transition_id=state["checkpointed_transition_id"],
             external_effect_state=ExternalEffectState(
                 state["external_effect_state"]
             ),
@@ -727,6 +736,14 @@ class AgentLoopRuntime:
             }:
                 raise StaleAgentLoopStateError(
                     "new observation requires BOOTSTRAP or CHECKPOINT"
+                )
+            if (
+                phase is AgentLoopPhase.CHECKPOINT
+                and state["current"]["transition_id"]
+                != state["checkpointed_transition_id"]
+            ):
+                raise StaleAgentLoopStateError(
+                    "new observation requires durable checkpoint for current transition"
                 )
             if (
                 environment_identity.environment_id
@@ -1574,6 +1591,9 @@ class AgentLoopRuntime:
                 )
             state["environment_checkpoint_id"] = (
                 environment_checkpoint.checkpoint_id
+            )
+            state["checkpointed_transition_id"] = (
+                environment_checkpoint.last_transition_id
             )
 
         return self._mutate(at, apply)

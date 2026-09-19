@@ -241,6 +241,7 @@ class ComputeRouteRequest:
     response_ttl_seconds: Decimal
     baseline_candidate_id: str
     cloud_candidate_id: str | None = None
+    decision_evidence_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _text("request_id", self.request_id)
@@ -264,6 +265,8 @@ class ComputeRouteRequest:
                 raise ModelComputeRouterError(
                     "cloud candidate must differ from baseline"
                 )
+        if self.decision_evidence_sha256 is not None:
+            _sha256("decision_evidence_sha256", self.decision_evidence_sha256)
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -279,6 +282,7 @@ class ComputeRouteRequest:
             "response_ttl_seconds": str(self.response_ttl_seconds),
             "baseline_candidate_id": self.baseline_candidate_id,
             "cloud_candidate_id": self.cloud_candidate_id,
+            "decision_evidence_sha256": self.decision_evidence_sha256,
         }
 
     @classmethod
@@ -297,6 +301,7 @@ class ComputeRouteRequest:
                 response_ttl_seconds=Decimal(raw["response_ttl_seconds"]),
                 baseline_candidate_id=raw["baseline_candidate_id"],
                 cloud_candidate_id=raw.get("cloud_candidate_id"),
+                decision_evidence_sha256=raw.get("decision_evidence_sha256"),
             )
         except (KeyError, TypeError, InvalidOperation, ValueError) as exc:
             if isinstance(exc, ModelComputeRouterError):
@@ -1531,6 +1536,19 @@ def route_compute(
                 )
             else:
                 if (
+                    request.decision_evidence_sha256 is None
+                ):
+                    baseline_reason = (
+                        "missing canonical decision-evidence route identity"
+                    )
+                elif (
+                    resolved_evaluation.decision_evidence_sha256
+                    != request.decision_evidence_sha256
+                ):
+                    baseline_reason = (
+                        "VOC decision evidence does not match current route identity"
+                    )
+                elif (
                     resolved_evaluation.payload()
                     != voc_evidence.evaluation.payload()
                 ):

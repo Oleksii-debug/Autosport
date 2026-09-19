@@ -497,6 +497,7 @@ class HeadlessCollectorService:
                     "source returned more deltas than the configured batch bound"
                 )
 
+            discovered_event_ids = {item.identity for item in records}
             committed: list[str] = []
             duplicates: list[str] = []
             for delta in raw_deltas:
@@ -512,6 +513,10 @@ class HeadlessCollectorService:
                 if delta.stream_epoch != self.source.stream_epoch:
                     raise CollectorServiceError(
                         "collector source returned a delta for another stream_epoch"
+                    )
+                if delta.event_id not in discovered_event_ids:
+                    raise CollectorServiceError(
+                        "collector delta event is absent from durable event lifecycle"
                     )
                 if self._adapter.submit_committed_delta(delta):
                     committed.append(delta.delta_id)

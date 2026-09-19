@@ -404,7 +404,10 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             loop_state = json.loads(
                 (root / "agent-loop.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(loop_state["resolutions"][0]["reward_value"], "0.00")
+            self.assertEqual(
+                Decimal(loop_state["resolutions"][0]["reward_value"]),
+                Decimal("0"),
+            )
 
     def test_future_settlement_evidence_cannot_mint_observed_transition(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

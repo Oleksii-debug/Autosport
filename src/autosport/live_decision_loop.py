@@ -38,6 +38,7 @@ from .portfolio_plan import (
     build_portfolio_plan,
 )
 from .providers import MarketProvider, ProviderUnavailableError
+from .scientific_registry import ModelVersion, ScientificRegistry, StrategyVersion
 from .storage import SQLiteMarketStore
 from .workspace_lock import WorkspaceEconomicLock
 
@@ -96,6 +97,8 @@ class LiveLoopBounds:
 
 
 class LiveIntentFactory(Protocol):
+    strategy_version_id: str
+
     def __call__(
         self,
         input_id: str,
@@ -187,6 +190,171 @@ def _canonical_json_sha256(payload: object) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class LiveIntentProvenance:
+    """Immutable live intent provenance resolved from canonical scientific memory."""
+
+    strategy_version_id: str
+    canonical_strategy_id: str
+    source_sha256: str
+    environment_sha256: str
+    config_sha256: str
+    strategy_record_sha256: str
+    strategy_available_at: str
+    model_version_id: str | None
+    model_record_sha256: str | None
+    model_available_at: str | None
+
+    def __post_init__(self) -> None:
+        _canonical_text("strategy_version_id", self.strategy_version_id)
+        _canonical_text("canonical_strategy_id", self.canonical_strategy_id)
+        _canonical_sha256("source_sha256", self.source_sha256)
+        _canonical_sha256("environment_sha256", self.environment_sha256)
+        _canonical_sha256("config_sha256", self.config_sha256)
+        _canonical_sha256("strategy_record_sha256", self.strategy_record_sha256)
+        _canonical_timestamp("strategy_available_at", self.strategy_available_at)
+        if self.model_version_id is None:
+            if self.model_record_sha256 is not None or self.model_available_at is not None:
+                raise ValueError(
+                    "model provenance requires model_version_id"
+                )
+        else:
+            _canonical_text("model_version_id", self.model_version_id)
+            if self.model_record_sha256 is None or self.model_available_at is None:
+                raise ValueError(
+                    "model_version_id requires complete model provenance"
+                )
+            _canonical_sha256("model_record_sha256", self.model_record_sha256)
+            _canonical_timestamp("model_available_at", self.model_available_at)
+
+    def assert_available_at(self, as_of: datetime) -> None:
+        if not isinstance(as_of, datetime):
+            raise TypeError("intent provenance as_of must be datetime")
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            raise ValueError("intent provenance as_of must be timezone-aware")
+        cutoff = as_of.astimezone(timezone.utc)
+        _, strategy_available = _canonical_timestamp(
+            "strategy_available_at",
+            self.strategy_available_at,
+        )
+        if strategy_available > cutoff:
+            raise LiveDecisionProgressError(
+                "registered live intent provenance was not causally available "
+                "at decision time"
+            )
+        if self.model_available_at is not None:
+            _, model_available = _canonical_timestamp(
+                "model_available_at",
+                self.model_available_at,
+            )
+            if model_available > cutoff:
+                raise LiveDecisionProgressError(
+                    "registered live intent provenance was not causally available "
+                    "at decision time"
+                )
+
+    @classmethod
+    def from_registry(
+        cls,
+        registry: ScientificRegistry,
+        strategy_version_id: str,
+        *,
+        as_of: datetime,
+    ) -> "LiveIntentProvenance":
+        if not isinstance(registry, ScientificRegistry):
+            raise TypeError("scientific_registry must be ScientificRegistry")
+        wanted = _canonical_text("intent_strategy_version_id", strategy_version_id)
+        strategy_entry = registry.get("StrategyVersion", wanted)
+        if strategy_entry is None:
+            raise LiveDecisionProgressError(
+                "registered live intent StrategyVersion is missing"
+            )
+        try:
+            strategy = StrategyVersion(**strategy_entry.payload)
+        except (TypeError, ValueError) as exc:
+            raise LiveDecisionProgressError(
+                "registered live intent StrategyVersion is invalid"
+            ) from exc
+        if (
+            strategy_entry.record_id != strategy.strategy_version_id
+            or strategy.strategy_version_id != wanted
+            or strategy_entry.available_at != strategy.created_at
+        ):
+            raise LiveDecisionProgressError(
+                "registered live intent StrategyVersion identity is inconsistent"
+            )
+
+        model_record_sha256: str | None = None
+        model_available_at: str | None = None
+        if strategy.model_version_id is not None:
+            model_entry = registry.get("ModelVersion", strategy.model_version_id)
+            if model_entry is None:
+                raise LiveDecisionProgressError(
+                    "registered live intent StrategyVersion references missing ModelVersion"
+                )
+            try:
+                model = ModelVersion(**model_entry.payload)
+            except (TypeError, ValueError) as exc:
+                raise LiveDecisionProgressError(
+                    "registered live intent ModelVersion is invalid"
+                ) from exc
+            if (
+                model_entry.record_id != model.model_version_id
+                or model.model_version_id != strategy.model_version_id
+                or model_entry.available_at != model.created_at
+            ):
+                raise LiveDecisionProgressError(
+                    "registered live intent ModelVersion identity is inconsistent"
+                )
+            _, strategy_available = _canonical_timestamp(
+                "StrategyVersion.available_at",
+                strategy_entry.available_at,
+            )
+            _, model_available = _canonical_timestamp(
+                "ModelVersion.available_at",
+                model_entry.available_at,
+            )
+            if model_available > strategy_available:
+                raise LiveDecisionProgressError(
+                    "registered live intent ModelVersion was not available when "
+                    "StrategyVersion became durable"
+                )
+            model_record_sha256 = model_entry.record_sha256
+            model_available_at = model_entry.available_at
+
+        provenance = cls(
+            strategy_version_id=strategy.strategy_version_id,
+            canonical_strategy_id=strategy.canonical_strategy_id,
+            source_sha256=strategy.source_sha256,
+            environment_sha256=strategy.environment_sha256,
+            config_sha256=strategy.config_sha256,
+            strategy_record_sha256=strategy_entry.record_sha256,
+            strategy_available_at=strategy_entry.available_at,
+            model_version_id=strategy.model_version_id,
+            model_record_sha256=model_record_sha256,
+            model_available_at=model_available_at,
+        )
+        provenance.assert_available_at(as_of)
+        return provenance
+
+    @property
+    def provenance_sha256(self) -> str:
+        return _canonical_json_sha256(
+            {
+                "schema": "autosport.live_intent_provenance",
+                "schema_version": 1,
+                "strategy_version_id": self.strategy_version_id,
+                "canonical_strategy_id": self.canonical_strategy_id,
+                "source_sha256": self.source_sha256,
+                "environment_sha256": self.environment_sha256,
+                "config_sha256": self.config_sha256,
+                "strategy_record_sha256": self.strategy_record_sha256,
+                "model_version_id": self.model_version_id,
+                "model_record_sha256": self.model_record_sha256,
+            }
+        )
 
 
 def _require_utc_clock(clock: Clock) -> datetime:
@@ -497,7 +665,7 @@ class PersistentLiveDecisionLoop:
         book: PaperBook,
         authority: EconomicDecisionAuthority,
         intent_factory: LiveIntentFactory,
-        intent_context_sha256: str,
+        scientific_registry: ScientificRegistry,
         provider: MarketProvider | None = None,
         decision_ledger: JsonlDecisionLedger | None = None,
         ingestion_policy: IngestionPolicy | None = None,
@@ -518,9 +686,21 @@ class PersistentLiveDecisionLoop:
             raise TypeError("authority must be EconomicDecisionAuthority")
         if not callable(intent_factory):
             raise TypeError("intent_factory must be callable")
-        intent_context_sha256 = _canonical_sha256(
-            "intent_context_sha256",
-            intent_context_sha256,
+        factory_strategy_version_id = getattr(
+            intent_factory,
+            "strategy_version_id",
+            None,
+        )
+        if type(factory_strategy_version_id) is not str:
+            raise TypeError(
+                "intent_factory must expose canonical strategy_version_id"
+            )
+        resolved_clock = clock or (lambda: datetime.now(timezone.utc))
+        provenance_as_of = _require_utc_clock(resolved_clock)
+        intent_provenance = LiveIntentProvenance.from_registry(
+            scientific_registry,
+            factory_strategy_version_id,
+            as_of=provenance_as_of,
         )
         goal_quote_age = authority.contract.max_quote_age_seconds
         if max_quote_age is None:
@@ -538,7 +718,7 @@ class PersistentLiveDecisionLoop:
         self.book = book
         self.authority = authority
         self.intent_factory = intent_factory
-        self.intent_context_sha256 = intent_context_sha256
+        self.intent_provenance = intent_provenance
         self.provider = provider
         self.decision_ledger = decision_ledger or JsonlDecisionLedger(
             self.workspace / "decisions.jsonl"
@@ -546,7 +726,7 @@ class PersistentLiveDecisionLoop:
         self.ingestion_policy = ingestion_policy
         self.max_quote_age = max_quote_age
         self.bounds = bounds or LiveLoopBounds()
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = resolved_clock
         self.post_append_hook = post_append_hook
         self._default_market_store: SQLiteMarketStore | None = None
         self._default_health_store: SourceHealthStore | None = None
@@ -907,7 +1087,28 @@ class PersistentLiveDecisionLoop:
         self._needs_cache_rebuild = False
         return result
 
+    def _verify_intent_factory_provenance(self) -> None:
+        factory_strategy_version_id = getattr(
+            self.intent_factory,
+            "strategy_version_id",
+            None,
+        )
+        try:
+            factory_strategy_version_id = _canonical_text(
+                "intent_factory.strategy_version_id",
+                factory_strategy_version_id,
+            )
+        except ValueError as exc:
+            raise LiveDecisionProgressError(
+                "live intent factory lost canonical strategy-version provenance"
+            ) from exc
+        if factory_strategy_version_id != self.intent_provenance.strategy_version_id:
+            raise LiveDecisionProgressError(
+                "live intent factory strategy-version provenance changed"
+            )
+
     def _decision_context_sha256(self) -> str:
+        self._verify_intent_factory_provenance()
         book_state_sha256 = self.authority.risk_policy.risk_of_ruin_portfolio_sha256(
             self.book
         )
@@ -915,12 +1116,15 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "cannot derive canonical PaperBook decision context"
             )
+        provenance = self.intent_provenance
         return _canonical_json_sha256(
             {
                 "schema": "autosport.live_decision_runtime_context",
-                "schema_version": 1,
+                "schema_version": 2,
                 "mode": self.mode.value,
-                "intent_context_sha256": self.intent_context_sha256,
+                "intent_strategy_version_id": provenance.strategy_version_id,
+                "intent_model_version_id": provenance.model_version_id,
+                "intent_provenance_sha256": provenance.provenance_sha256,
                 "economic_goal_contract_sha256": provenance_for(
                     self.authority.contract
                 ).contract_sha256,
@@ -945,15 +1149,15 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "unfinished live decision requires exact durable dependency registry"
             )
-        if progress.decision_context_sha256 != self._decision_context_sha256():
-            raise LiveDecisionProgressError(
-                "unfinished live decision runtime context changed across restart"
-            )
-
         decision_ts, decision_time = _canonical_timestamp(
             "pending decision_ts",
             progress.decision_ts,
         )
+        self.intent_provenance.assert_available_at(decision_time)
+        if progress.decision_context_sha256 != self._decision_context_sha256():
+            raise LiveDecisionProgressError(
+                "unfinished live decision runtime context changed across restart"
+            )
         if progress.gate == _GATE_NORMAL:
             self._refresh_intents_from_replay(
                 progress.registered_input_ids,
@@ -1002,8 +1206,6 @@ class PersistentLiveDecisionLoop:
         *,
         expected_market_state_sha256: str,
     ) -> None:
-        from .portfolio_plan import OpportunityIntent
-
         _canonical_sha256(
             "expected replay market_state_sha256",
             expected_market_state_sha256,
@@ -1048,13 +1250,33 @@ class PersistentLiveDecisionLoop:
                 ),
             )
             produced = self.intent_factory(input_id, focused)
-            if type(produced) is not tuple:
-                raise TypeError("intent_factory must return a tuple")
-            if any(not isinstance(intent, OpportunityIntent) for intent in produced):
-                raise TypeError(
-                    "intent_factory must return only canonical OpportunityIntent values"
+            self._intent_cache[input_id] = self._validated_intents(produced)
+
+    def _validated_intents(self, produced: object) -> tuple[object, ...]:
+        from .portfolio_plan import OpportunityIntent
+
+        self._verify_intent_factory_provenance()
+        if type(produced) is not tuple:
+            raise TypeError("intent_factory must return a tuple")
+        if any(not isinstance(intent, OpportunityIntent) for intent in produced):
+            raise TypeError(
+                "intent_factory must return only canonical OpportunityIntent values"
+            )
+        provenance = self.intent_provenance
+        for intent in produced:
+            if intent.strategy_id != provenance.strategy_version_id:
+                raise LiveDecisionProgressError(
+                    "live intent strategy identity does not match registered StrategyVersion"
                 )
-            self._intent_cache[input_id] = produced
+            if intent.config_sha256 != provenance.config_sha256:
+                raise LiveDecisionProgressError(
+                    "live intent config identity does not match registered StrategyVersion"
+                )
+            if intent.model_id != provenance.model_version_id:
+                raise LiveDecisionProgressError(
+                    "live intent model identity does not match registered StrategyVersion"
+                )
+        return produced
 
     def _capture_input_views(
         self,
@@ -1086,17 +1308,9 @@ class PersistentLiveDecisionLoop:
         self,
         snapshots: dict[str, MirrorSnapshot],
     ) -> None:
-        from .portfolio_plan import OpportunityIntent
-
         for input_id, snapshot in snapshots.items():
             produced = self.intent_factory(input_id, snapshot)
-            if type(produced) is not tuple:
-                raise TypeError("intent_factory must return a tuple")
-            if any(not isinstance(intent, OpportunityIntent) for intent in produced):
-                raise TypeError(
-                    "intent_factory must return only canonical OpportunityIntent values"
-                )
-            self._intent_cache[input_id] = produced
+            self._intent_cache[input_id] = self._validated_intents(produced)
 
     def _all_cached_intents(self) -> tuple[object, ...]:
         flattened: list[object] = []
@@ -1205,14 +1419,18 @@ class PersistentLiveDecisionLoop:
         detail: str = "",
     ) -> LiveCycleResult:
         decision_context_sha256 = self._decision_context_sha256()
+        provenance = self.intent_provenance
         context_payload = {
             "schema": "autosport.live_decision_context",
-            "schema_version": 1,
+            "schema_version": 2,
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": gate,
             "market_state_sha256": market_state_sha256,
             "decision_context_sha256": decision_context_sha256,
+            "intent_strategy_version_id": provenance.strategy_version_id,
+            "intent_model_version_id": provenance.model_version_id,
+            "intent_provenance_sha256": provenance.provenance_sha256,
             "plan_sha256": plan.plan_sha256,
         }
         context_hash = _canonical_json_sha256(context_payload)
@@ -1224,12 +1442,15 @@ class PersistentLiveDecisionLoop:
             action=f"LIVE_{plan.action.value.upper()}",
             payload={
                 "schema": "autosport.persistent_live_decision",
-                "schema_version": 1,
+                "schema_version": 2,
                 "loop_id": self.loop_id,
                 "mode": self.mode.value,
                 "gate": gate,
                 "market_state_sha256": market_state_sha256,
                 "decision_context_sha256": decision_context_sha256,
+                "intent_strategy_version_id": provenance.strategy_version_id,
+                "intent_model_version_id": provenance.model_version_id,
+                "intent_provenance_sha256": provenance.provenance_sha256,
                 "affected_input_ids": list(affected_input_ids),
                 "plan_sha256": plan.plan_sha256,
                 "plan": plan.to_dict(),
@@ -1321,6 +1542,12 @@ class PersistentLiveDecisionLoop:
                     != market_state_sha256
                     or existing.payload.get("decision_context_sha256")
                     != decision_context_sha256
+                    or existing.payload.get("intent_strategy_version_id")
+                    != provenance.strategy_version_id
+                    or existing.payload.get("intent_model_version_id")
+                    != provenance.model_version_id
+                    or existing.payload.get("intent_provenance_sha256")
+                    != provenance.provenance_sha256
                     or existing.payload.get("gate") != gate
                     or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
                     != decision_id
@@ -1366,6 +1593,8 @@ class PersistentLiveDecisionLoop:
         affected_input_ids: tuple[str, ...],
         gate: str,
     ) -> None:
+        _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
+        self.intent_provenance.assert_available_at(decision_time)
         pending = _Progress(
             loop_id=self.loop_id,
             phase=_PHASE_PENDING,
@@ -1499,23 +1728,6 @@ class PersistentLiveDecisionLoop:
         assert progress.plan_sha256 is not None
         assert progress.ledger_offset is not None
 
-        context_payload = {
-            "schema": "autosport.live_decision_context",
-            "schema_version": 1,
-            "loop_id": self.loop_id,
-            "mode": self.mode.value,
-            "gate": progress.gate,
-            "market_state_sha256": progress.market_state_sha256,
-            "decision_context_sha256": progress.decision_context_sha256,
-            "plan_sha256": progress.plan_sha256,
-        }
-        expected_context_hash = _canonical_json_sha256(context_payload)
-        expected_decision_id = f"live-{expected_context_hash}"
-        if progress.decision_id != expected_decision_id:
-            raise DecisionLedgerIntegrityError(
-                "committed live progress decision identity is inconsistent"
-            )
-
         existing = self._verified_ledger_record_at_offset(progress.ledger_offset)
         if existing is None:
             raise DecisionLedgerIntegrityError(
@@ -1526,6 +1738,61 @@ class PersistentLiveDecisionLoop:
             self.authority.contract,
             self.authority.risk_policy,
         )
+        payload_version = existing.payload.get("schema_version")
+        if payload_version not in {1, 2}:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision has unsupported schema_version"
+            )
+
+        context_payload = {
+            "schema": "autosport.live_decision_context",
+            "schema_version": payload_version,
+            "loop_id": self.loop_id,
+            "mode": self.mode.value,
+            "gate": progress.gate,
+            "market_state_sha256": progress.market_state_sha256,
+            "decision_context_sha256": progress.decision_context_sha256,
+            "plan_sha256": progress.plan_sha256,
+        }
+        if payload_version == 2:
+            _, committed_decision_time = _canonical_timestamp(
+                "committed decision_ts",
+                progress.decision_ts,
+            )
+            try:
+                self.intent_provenance.assert_available_at(committed_decision_time)
+            except LiveDecisionProgressError as exc:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision intent provenance was not causally "
+                    "available at decision time"
+                ) from exc
+            provenance = self.intent_provenance
+            if (
+                existing.payload.get("intent_strategy_version_id")
+                != provenance.strategy_version_id
+                or existing.payload.get("intent_model_version_id")
+                != provenance.model_version_id
+                or existing.payload.get("intent_provenance_sha256")
+                != provenance.provenance_sha256
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision intent provenance conflicts with canonical registry"
+                )
+            context_payload.update(
+                {
+                    "intent_strategy_version_id": provenance.strategy_version_id,
+                    "intent_model_version_id": provenance.model_version_id,
+                    "intent_provenance_sha256": provenance.provenance_sha256,
+                }
+            )
+
+        expected_context_hash = _canonical_json_sha256(context_payload)
+        expected_decision_id = f"live-{expected_context_hash}"
+        if progress.decision_id != expected_decision_id:
+            raise DecisionLedgerIntegrityError(
+                "committed live progress decision identity is inconsistent"
+            )
+
         if (
             existing.decision_id != progress.decision_id
             or existing.replay_run_id != f"live:{self.loop_id}"
@@ -1534,7 +1801,7 @@ class PersistentLiveDecisionLoop:
             or existing.context_hash != expected_context_hash
             or existing.payload.get("schema")
             != "autosport.persistent_live_decision"
-            or existing.payload.get("schema_version") != 1
+            or existing.payload.get("schema_version") != payload_version
             or existing.payload.get("loop_id") != self.loop_id
             or existing.payload.get("mode") != self.mode.value
             or existing.payload.get("gate") != progress.gate

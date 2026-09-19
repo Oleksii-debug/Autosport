@@ -493,7 +493,7 @@ class CanonicalVOCAuthorityResolver:
             if not isinstance(payload, Mapping):
                 raise VOCEvaluationError("canonical decision payload is invalid")
             binding = payload.get("voc_binding")
-            if type(binding) is not dict:
+            if not isinstance(binding, Mapping):
                 raise VOCEvaluationError("canonical decision VOC binding is missing")
             if binding != expected_binding:
                 raise VOCEvaluationError("canonical decision VOC binding does not match paired evaluation")

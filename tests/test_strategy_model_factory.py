@@ -703,6 +703,9 @@ def test_registry_backed_factory_vertical_retains_inconclusive_and_survives_rest
     assert evidence_entry is not None
     effect_evidence = evaluation["promotion_effect_evidence"]
     assert effect_evidence["evaluation_bundle_id"] == "eval-v2"
+    assert effect_evidence["holdout_consumed"] is True
+    assert evidence_entry.payload["holdout_consumed"] is True
+    assert "confirmation holdout already consumed" in decision_entry.payload["reason"]
     assert (
         effect_evidence["effective_sample_size"]
         == bundle_entry.payload["effective_sample_size"]

@@ -450,6 +450,29 @@ class ContinuousEventLifecycle:
             raise CatalogConflictError("catalog reader returned the wrong source_id")
         return self.apply_page(page, discovered_at=discovered_at)
 
+    def refresh_and_register(
+        self,
+        fetch_page: Callable[[CatalogCheckpoint | None], CatalogPage],
+        store: SQLiteMarketStore,
+        *,
+        source_id: str,
+        discovered_at: str,
+        required_history: timedelta,
+        register_input: Callable[..., None],
+    ) -> tuple[str, ...]:
+        """Discover and route eligible events without a manual event seed list."""
+        self.refresh_once(
+            fetch_page,
+            source_id=source_id,
+            discovered_at=discovered_at,
+        )
+        return self.register_eligible(
+            store,
+            as_of=discovered_at,
+            required_history=required_history,
+            register_input=register_input,
+        )
+
     def assess_evidence(
         self,
         identity: str,
@@ -469,7 +492,7 @@ class ContinuousEventLifecycle:
         required_seconds = int(required_history.total_seconds())
         if record.phase is EventPhase.COMPLETED:
             detail = (
-                "completed with exact external settlement reference"
+                "completed with settlement provenance reference; outcome authority is external"
                 if record.settlement_ref is not None
                 else "completed; settlement remains unresolved"
             )

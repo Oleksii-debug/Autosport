@@ -117,6 +117,7 @@ class ObservedPerformance:
     opponent_alias: str
     sport_id: str
     league_alias: str
+    market_context_id: str
     score: str
     observed_at: str
     available_at: str
@@ -132,6 +133,7 @@ class ObservedPerformance:
             "opponent_alias",
             "sport_id",
             "league_alias",
+            "market_context_id",
         ):
             _text(name, getattr(self, name))
         score = _decimal("score", self.score)
@@ -160,6 +162,7 @@ class ObservedPerformance:
             "opponent_alias": self.opponent_alias,
             "sport_id": self.sport_id,
             "league_alias": self.league_alias,
+            "market_context_id": self.market_context_id,
             "score": _decimal_text(_decimal("score", self.score)),
             "observed_at": _time_text("observed_at", self.observed_at),
             "available_at": _time_text("available_at", self.available_at),
@@ -222,6 +225,7 @@ class OpponentEdge:
     opponent_entity_id: str
     sport_id: str
     league_entity_id: str
+    market_context_id: str
     score: str
     observed_at: str
     available_at: str
@@ -233,12 +237,15 @@ class RatingSnapshot:
     participant_entity_id: str
     sport_id: str
     league_id: str
+    market_context_id: str
     view: IdentityView
     causal_cutoff: str
     published_at: str
     algorithm_family: str
     algorithm_version: str
     config_sha256: str
+    code_sha256: str
+    dependency_sha256: str
     input_performance_ids: tuple[str, ...]
     input_digest: str
     support: int
@@ -252,12 +259,15 @@ class RatingSnapshot:
             "participant_entity_id": self.participant_entity_id,
             "sport_id": self.sport_id,
             "league_id": self.league_id,
+            "market_context_id": self.market_context_id,
             "view": self.view.value,
             "causal_cutoff": self.causal_cutoff,
             "published_at": self.published_at,
             "algorithm_family": self.algorithm_family,
             "algorithm_version": self.algorithm_version,
             "config_sha256": self.config_sha256,
+            "code_sha256": self.code_sha256,
+            "dependency_sha256": self.dependency_sha256,
             "input_performance_ids": list(self.input_performance_ids),
             "input_digest": self.input_digest,
             "support": self.support,
@@ -278,6 +288,7 @@ class FeatureSnapshot:
     participant_entity_id: str
     sport_id: str
     league_id: str
+    market_context_id: str
     view: IdentityView
     causal_cutoff: str
     published_at: str
@@ -294,6 +305,7 @@ class FeatureSnapshot:
             "participant_entity_id": self.participant_entity_id,
             "sport_id": self.sport_id,
             "league_id": self.league_id,
+            "market_context_id": self.market_context_id,
             "view": self.view.value,
             "causal_cutoff": self.causal_cutoff,
             "published_at": self.published_at,
@@ -458,7 +470,7 @@ class OpponentIntelligenceStore:
                     "performance correction fork is not allowed"
                 )
             before = predecessor.observation
-            for name in ("event_id", "source_id", "sport_id", "league_alias"):
+            for name in ("event_id", "source_id", "sport_id", "league_alias", "market_context_id"):
                 if getattr(before, name) != getattr(observation, name):
                     raise OpponentIntelligenceError(
                         "performance correction must preserve event/context identity"
@@ -527,6 +539,7 @@ class OpponentIntelligenceStore:
         view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION,
         sport_id: str | None = None,
         league_entity_id: str | None = None,
+        market_context_id: str | None = None,
     ) -> tuple[OpponentEdge, ...]:
         records = self._active_performances(as_of=as_of, view=view)
         edges: list[OpponentEdge] = []
@@ -543,6 +556,13 @@ class OpponentIntelligenceStore:
                 )
             ):
                 continue
+            if (
+                market_context_id is not None
+                and observation.market_context_id != _text(
+                    "market_context_id", market_context_id
+                )
+            ):
+                continue
             edges.append(
                 OpponentEdge(
                     performance_id=record.performance_id,
@@ -551,6 +571,7 @@ class OpponentIntelligenceStore:
                     opponent_entity_id=record.opponent_entity_id,
                     sport_id=observation.sport_id,
                     league_entity_id=record.league_entity_id,
+                    market_context_id=observation.market_context_id,
                     score=_decimal_text(
                         _decimal("score", observation.score)
                     ),
@@ -570,8 +591,11 @@ class OpponentIntelligenceStore:
         participant_entity_id: str,
         sport_id: str,
         league_entity_id: str,
+        market_context_id: str,
         causal_cutoff: str,
         published_at: str,
+        code_sha256: str,
+        dependency_sha256: str,
         view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION,
         min_support: int = 2,
         max_age_seconds: int = 30 * 24 * 60 * 60,
@@ -584,6 +608,9 @@ class OpponentIntelligenceStore:
         )
         sport = _text("sport_id", sport_id)
         league = _text("league_entity_id", league_entity_id)
+        market = _text("market_context_id", market_context_id)
+        code = _sha256("code_sha256", code_sha256)
+        dependency = _sha256("dependency_sha256", dependency_sha256)
         cutoff = _time_text("causal_cutoff", causal_cutoff)
         publication = _time_text("published_at", published_at)
         if _instant("published_at", publication) < _instant(
@@ -608,6 +635,8 @@ class OpponentIntelligenceStore:
                 "algorithm_version": version,
                 "min_support": min_support,
                 "max_age_seconds": max_age_seconds,
+                "code_sha256": code,
+                "dependency_sha256": dependency,
                 "numeric": "decimal",
                 "score_domain": "[0,1]",
             }
@@ -632,6 +661,7 @@ class OpponentIntelligenceStore:
             )
             if record.observation.sport_id == sport
             and record.league_entity_id == league
+            and record.observation.market_context_id == market
             and participant
             in (record.subject_entity_id, record.opponent_entity_id)
         ]
@@ -708,12 +738,15 @@ class OpponentIntelligenceStore:
             "participant_entity_id": participant,
             "sport_id": sport,
             "league_id": league,
+            "market_context_id": market,
             "view": view.value,
             "causal_cutoff": cutoff,
             "published_at": publication,
             "algorithm_family": family,
             "algorithm_version": version,
             "config_sha256": config_sha256,
+            "code_sha256": code,
+            "dependency_sha256": dependency,
             "input_performance_ids": list(input_ids),
             "input_digest": input_digest,
             "support": support,
@@ -728,12 +761,15 @@ class OpponentIntelligenceStore:
             participant,
             sport,
             league,
+            market,
             view,
             cutoff,
             publication,
             family,
             version,
             config_sha256,
+            code,
+            dependency,
             input_ids,
             input_digest,
             support,
@@ -747,6 +783,7 @@ class OpponentIntelligenceStore:
             "participant_entity_id": participant,
             "sport_id": sport,
             "league_id": league,
+            "market_context_id": market,
             "view": view.value,
             "causal_cutoff": cutoff,
             "published_at": publication,
@@ -764,6 +801,7 @@ class OpponentIntelligenceStore:
             participant,
             sport,
             league,
+            market,
             view,
             cutoff,
             publication,
@@ -1136,12 +1174,15 @@ class OpponentIntelligenceStore:
                     item["participant_entity_id"],
                     item["sport_id"],
                     item["league_id"],
+                    item["market_context_id"],
                     IdentityView(item["view"]),
                     item["causal_cutoff"],
                     item["published_at"],
                     item["algorithm_family"],
                     item["algorithm_version"],
                     item["config_sha256"],
+                    item["code_sha256"],
+                    item["dependency_sha256"],
                     tuple(item["input_performance_ids"]),
                     item["input_digest"],
                     item["support"],
@@ -1166,6 +1207,7 @@ class OpponentIntelligenceStore:
                     item["participant_entity_id"],
                     item["sport_id"],
                     item["league_id"],
+                    item["market_context_id"],
                     IdentityView(item["view"]),
                     item["causal_cutoff"],
                     item["published_at"],

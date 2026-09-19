@@ -379,9 +379,26 @@ def _phase_one(tmp_path):
         robustness_evidence_sha256=artifact.artifact_id,
         forward_evidence_sha256=checkpoint.checkpoint_id,
         reason="closed-loop evidence remains within frozen owner authority",
-        retest_conditions=("independent paper episode before any later promotion",),
     )
     assert postmortem_snapshot.phase is ResearchPhase.POSTMORTEM
+    replay_snapshot, replayed_decision = finalize_factory_decision(
+        supervisor,
+        origin.run_id,
+        runner=runner,
+        spec=spec,
+        staged=staged,
+        final_action=staged.proposed_action,
+        decided_at=T7,
+        robustness_evidence_sha256=artifact.artifact_id,
+        forward_evidence_sha256=checkpoint.checkpoint_id,
+        reason="closed-loop evidence remains within frozen owner authority",
+    )
+    assert replay_snapshot.phase is ResearchPhase.POSTMORTEM
+    assert replayed_decision == decision
+    if decision.postmortem_id is not None:
+        postmortem_entry = registry.get("Postmortem", decision.postmortem_id)
+        assert postmortem_entry is not None
+        assert postmortem_entry.payload["retest_conditions"]
     decision_entry = registry.get(
         "PromotionDecision",
         decision.promotion_decision_id,

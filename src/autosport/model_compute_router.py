@@ -46,6 +46,7 @@ class ExecutionDisposition(StrEnum):
     REJECTED_LATE = "REJECTED_LATE"
     REJECTED_STALE = "REJECTED_STALE"
     REJECTED_IDENTITY = "REJECTED_IDENTITY"
+    REJECTED_CAUSAL = "REJECTED_CAUSAL"
     REJECTED_COST = "REJECTED_COST"
 
 
@@ -1240,7 +1241,14 @@ class ModelComputeRouterStore:
             and model_id == decision.model_id
             and config_sha256 == decision.config_sha256
         )
-        if not identity_matches:
+        if completed < _instant("decided_at", decision.decided_at):
+            disposition = (
+                ExecutionDisposition.REJECTED_CAUSAL
+            )
+            reason = (
+                "execution completed before routed decision"
+            )
+        elif not identity_matches:
             disposition = (
                 ExecutionDisposition.REJECTED_IDENTITY
             )

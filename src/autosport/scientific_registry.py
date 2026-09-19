@@ -919,6 +919,54 @@ class ScientificRegistry:
                 allow_repeat_experiment=allow_repeat_experiment,
             )
 
+    @staticmethod
+    def _validate_promotion_evidence_causal_inputs(
+        state: Mapping[str, Any],
+        evidence: Mapping[str, Any],
+    ) -> None:
+        if evidence.get("record_type") != "PromotionEvidence":
+            raise ValueError("causal promotion-evidence validation requires PromotionEvidence")
+        payload = evidence.get("payload")
+        if not isinstance(payload, Mapping):
+            raise PromotionEvidenceError("promotion evidence payload is invalid")
+        evaluation_bundle_id = payload.get("evaluation_bundle_id")
+        experiment_id = payload.get("experiment_id")
+        if not isinstance(evaluation_bundle_id, str) or not evaluation_bundle_id:
+            raise PromotionEvidenceError("promotion evidence lacks evaluation bundle identity")
+        if not isinstance(experiment_id, str) or not experiment_id:
+            raise PromotionEvidenceError("promotion evidence lacks experiment identity")
+
+        entries = {
+            (raw["record_type"], raw["record_id"]): raw
+            for raw in state["records"]
+        }
+        bundle = entries.get(("EvaluationBundle", evaluation_bundle_id))
+        if bundle is None:
+            raise PromotionEvidenceError(
+                "promotion evidence references missing EvaluationBundle"
+            )
+        experiment = entries.get(("Experiment", experiment_id))
+        if experiment is None:
+            raise PromotionEvidenceError(
+                "promotion evidence references missing matching Experiment"
+            )
+        if experiment["payload"].get("evaluation_bundle_id") != evaluation_bundle_id:
+            raise PromotionEvidenceError(
+                "promotion evidence experiment/evaluation lineage mismatch"
+            )
+
+        evidence_at = _instant(
+            evidence["available_at"], "PromotionEvidence.available_at"
+        )
+        if _instant(bundle["available_at"], "EvaluationBundle.available_at") > evidence_at:
+            raise PromotionEvidenceError(
+                "promotion evidence availability precedes referenced evaluation"
+            )
+        if _instant(experiment["available_at"], "Experiment.available_at") > evidence_at:
+            raise PromotionEvidenceError(
+                "promotion evidence availability precedes matching experiment completion"
+            )
+
     def _append_entry_locked(
         self,
         state: dict[str, Any],
@@ -926,6 +974,8 @@ class ScientificRegistry:
         *,
         allow_repeat_experiment: bool = False,
     ) -> str:
+        if entry["record_type"] == "PromotionEvidence":
+            self._validate_promotion_evidence_causal_inputs(state, entry)
         for existing in state["records"]:
             if (existing["record_type"], existing["record_id"]) == (
                 entry["record_type"], entry["record_id"]
@@ -974,9 +1024,15 @@ class ScientificRegistry:
             raise ValueError("unsupported record_type")
         cutoff = _instant(as_of, "as_of")
         values: list[RegistryEntry] = []
-        for raw in self._read()["records"]:
+        state = self._read()
+        for raw in state["records"]:
             if raw["record_type"] != record_type:
                 continue
+            if raw["record_type"] == "PromotionEvidence":
+                try:
+                    self._validate_promotion_evidence_causal_inputs(state, raw)
+                except PromotionEvidenceError:
+                    continue
             available = _instant(raw["available_at"], "available_at")
             reveal = raw["payload"].get("outcome_reveal_after")
             if available > cutoff:
@@ -1245,6 +1301,7 @@ class ScientificRegistry:
                 if not isinstance(evidence_id, str) or not evidence_id:
                     raise PromotionEvidenceError("PROMOTE requires typed PromotionEvidence")
                 evidence = require("PromotionEvidence", evidence_id)
+                self._validate_promotion_evidence_causal_inputs(state, evidence)
                 ep = evidence["payload"]
                 for raw in state["records"]:
                     if (

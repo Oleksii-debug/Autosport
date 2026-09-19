@@ -622,6 +622,48 @@ def test_promotion_rejects_evidence_not_available_at_decision_time(tmp_path):
         registry.record_promotion(early)
 
 
+def test_backdated_promotion_evidence_is_rejected_before_causal_visibility(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    foundation = _foundation(registry)
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
+    backdated = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="promotion-backdated-evidence",
+        rollback_identity="NONE",
+        created_at=T1,
+    )
+
+    with pytest.raises(
+        PromotionEvidenceError,
+        match="availability precedes referenced evaluation",
+    ):
+        registry.append(backdated)
+
+    assert registry.get("PromotionEvidence", backdated.promotion_evidence_id) is None
+    assert registry.causal_records("PromotionEvidence", as_of=T1) == ()
+
+    decision = PromotionDecision(
+        "promotion-backdated-evidence",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        foundation["bundle"].bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=backdated.promotion_evidence_id,
+    )
+    with pytest.raises(PromotionEvidenceError, match="missing PromotionEvidence"):
+        registry.record_promotion(decision)
+
+
 def test_direct_promotion_append_cannot_bypass_evidence_validation(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     decision = PromotionDecision(

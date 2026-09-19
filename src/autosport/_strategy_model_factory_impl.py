@@ -1562,7 +1562,6 @@ class ExperimentRunner:
             promotion_evidence_id=evidence_id,
             **typed_evidence_payload,
         )
-        self.registry.append(promotion_evidence)
         promotion = PromotionController.evaluate(
             rule,
             champion_metrics=champion_metrics,
@@ -1582,6 +1581,7 @@ class ExperimentRunner:
         )
         experiment = replace(experiment, outcome=outcome, notes="; ".join(promotion.reasons))
         self.registry.append(experiment)
+        self.registry.append(promotion_evidence)
 
         self.registry.record_promotion(
             PromotionDecision(

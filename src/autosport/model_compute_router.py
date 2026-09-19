@@ -1273,6 +1273,20 @@ class ModelComputeRouterStore:
                     "persisted domain route is not derived from "
                     "the bound observation evidence"
                 )
+            if decision.tier is ComputeTier.CLOUD:
+                replayed_decision = route_compute(
+                    request,
+                    candidates,
+                    policy,
+                    as_of=decision.decided_at,
+                    voc_evidence=voc,
+                    domain_observation=domain_observation,
+                )
+                if replayed_decision.payload() != decision.payload():
+                    raise ModelComputeRouterError(
+                        "persisted CLOUD decision is not authorized "
+                        "by persisted route inputs"
+                    )
             unsigned = {
                 "request": request.payload(),
                 "policy": policy.payload(),

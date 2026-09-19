@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from .scientific_registry import ScientificRegistry
+from .scientific_registry import PromotionAction, RegistryEntry, ScientificRegistry
 from .strategy_model_factory import FactoryArtifactStore
 from .transparent_bandit_policy import BanditPolicyState
 
@@ -58,6 +58,65 @@ def persist_policy_state(
     if not isinstance(policy, BanditPolicyState):
         raise TypeError("policy must be BanditPolicyState")
     return artifact_store.write(POLICY_ARTIFACT_KIND, policy.policy_id, _artifact(policy))
+
+
+def _promotion_authority_for_champion(
+    registry: ScientificRegistry,
+    *,
+    as_of: str,
+    canonical_strategy_id: str,
+    champion_id: str,
+) -> RegistryEntry:
+    """Resolve the PROMOTE evidence that authorizes the current champion.
+
+    Rollback may reactivate an earlier champion, so activation cannot simply trust
+    the latest StrategyVersion payload. The returned authority is always the
+    durable PROMOTE decision that originally qualified the active strategy.
+    """
+
+    promoted: dict[str, RegistryEntry] = {}
+    champion: str | None = None
+    authority: RegistryEntry | None = None
+    for decision in registry.causal_records("PromotionDecision", as_of=as_of):
+        payload = decision.payload
+        candidate_id = payload.get("candidate_strategy_version_id")
+        if type(candidate_id) is not str or not candidate_id:
+            raise ChampionPolicyError(
+                "promotion history has invalid candidate strategy identity"
+            )
+        candidate = registry.get("StrategyVersion", candidate_id)
+        if candidate is None:
+            raise ChampionPolicyError(
+                "promotion history references missing StrategyVersion"
+            )
+        if candidate.payload.get("canonical_strategy_id") != canonical_strategy_id:
+            continue
+        try:
+            action = PromotionAction(payload.get("action"))
+        except (TypeError, ValueError) as exc:
+            raise ChampionPolicyError("promotion history action is invalid") from exc
+        if action is PromotionAction.PROMOTE:
+            promoted[candidate_id] = decision
+            champion = candidate_id
+            authority = decision
+        elif action is PromotionAction.ROLLBACK:
+            rollback_target = payload.get("rollback_to_strategy_version_id")
+            if type(rollback_target) is not str or not rollback_target:
+                raise ChampionPolicyError(
+                    "rollback history lacks canonical target identity"
+                )
+            champion = rollback_target
+            authority = promoted.get(rollback_target)
+            if authority is None:
+                raise ChampionPolicyError(
+                    "rollback target lacks prior promotion authority"
+                )
+
+    if champion != champion_id or authority is None:
+        raise ChampionPolicyError(
+            "champion promotion authority does not match canonical history"
+        )
+    return authority
 
 
 def load_champion_policy(
@@ -123,6 +182,37 @@ def load_champion_policy(
     ):
         raise ChampionPolicyError("champion model lineage is incompatible")
 
+    promotion = _promotion_authority_for_champion(
+        registry,
+        as_of=as_of,
+        canonical_strategy_id=strategy_key,
+        champion_id=champion_id,
+    )
+    promotion_payload = promotion.payload
+    if (
+        promotion_payload.get("candidate_strategy_version_id") != champion_id
+        or promotion_payload.get("candidate_model_version_id") != model_id
+        or promotion_payload.get("research_protocol_id") != expected_protocol
+    ):
+        raise ChampionPolicyError("champion promotion model lineage mismatch")
+    evaluation_bundle_id = promotion_payload.get("evaluation_bundle_id")
+    if type(evaluation_bundle_id) is not str or not evaluation_bundle_id:
+        raise ChampionPolicyError("champion promotion evaluation identity is missing")
+    evaluation = registry.get("EvaluationBundle", evaluation_bundle_id)
+    if evaluation is None:
+        raise ChampionPolicyError("champion promotion EvaluationBundle is missing")
+    evaluation_payload = evaluation.payload
+    if (
+        evaluation_payload.get("evaluation_bundle_id") != evaluation_bundle_id
+        or evaluation_payload.get("bundle_sha256")
+        != promotion_payload.get("evaluation_bundle_sha256")
+        or evaluation_payload.get("evaluated_strategy_version_id") != champion_id
+        or evaluation_payload.get("evaluated_model_version_id") != model_id
+    ):
+        raise ChampionPolicyError(
+            "champion promotion EvaluationBundle lineage mismatch"
+        )
+
     try:
         artifact = artifact_store.read(POLICY_ARTIFACT_KIND, champion_id)
     except ValueError as exc:
@@ -153,6 +243,8 @@ def load_champion_policy(
         raise ChampionPolicyError("champion policy protocol mismatch")
     if policy.config_sha256 != expected_config:
         raise ChampionPolicyError("champion policy config mismatch")
+    if type(model_payload.get("seed")) is not int or model_payload["seed"] != policy.seed:
+        raise ChampionPolicyError("champion policy/model seed lineage mismatch")
     policy_actions = frozenset(item.action_type for item in policy.estimates)
     if policy_actions != expected_actions:
         raise ChampionPolicyError("champion policy action universe mismatch")

@@ -224,28 +224,14 @@ def test_rollback_rejects_existing_strategy_that_was_never_a_champion(tmp_path):
     for record in (strategy2, bundle2, experiment2, unrelated):
         registry.append(record)
 
-    registry.record_promotion(
-        PromotionDecision(
-            "promotion-2",
-            PromotionAction.PROMOTE,
-            "strategy-2",
-            "protocol-1",
-            protocol.protocol_sha256,
-            "eval-2",
-            SHA_A,
-            T3,
-            predecessor_strategy_version_id="strategy-1",
-            candidate_model_version_id="model-1",
-        )
-    )
     rollback = PromotionDecision(
         "rollback-3",
         PromotionAction.ROLLBACK,
-        "strategy-2",
+        "strategy-1",
         "protocol-1",
         protocol.protocol_sha256,
-        "eval-2",
-        SHA_A,
+        "eval-1",
+        SHA_D,
         T3,
         rollback_to_strategy_version_id="strategy-unrelated",
         candidate_model_version_id="model-1",
@@ -254,5 +240,5 @@ def test_rollback_rejects_existing_strategy_that_was_never_a_champion(tmp_path):
     with pytest.raises(PromotionEvidenceError, match="prior durable champion"):
         registry.record_promotion(rollback)
 
-    assert registry.champion_strategy(as_of=T3) == "strategy-2"
+    assert registry.champion_strategy(as_of=T3) == "strategy-1"
     assert registry.get("PromotionDecision", "rollback-3") is None

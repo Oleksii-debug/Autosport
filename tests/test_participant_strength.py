@@ -721,7 +721,7 @@ def test_registered_forecast_rejects_training_cutoff_after_model_creation(tmp_pa
     registry, artifacts = _registered_strength_lineage(
         tmp_path,
         dataset_cutoff=T4,
-        dataset_available_at=T1,
+        dataset_available_at=T4,
         model_created_at=T2,
         strategy_created_at=T2,
     )

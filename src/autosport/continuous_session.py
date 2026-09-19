@@ -89,7 +89,16 @@ class SettlementOutcomeAuthority(Protocol):
 
 
 class SettlementLearningHandoff(Protocol):
-    """Optional post-PaperBook durable readback seam for causal learning."""
+    """Optional durable PAPER settlement seam for causal learning."""
+
+    def prepare_settlement(
+        self,
+        *,
+        paper_book_path: Path,
+        resolutions: tuple[SettlementResolution, ...],
+        at: str,
+    ) -> tuple[str, ...]:
+        ...
 
     def reconcile_after_settlement(
         self,
@@ -585,12 +594,18 @@ class ContinuousSessionCoordinator:
             getattr(outcome_authority, "resolve", None)
         ):
             raise TypeError("outcome_authority.resolve must be callable")
-        if settlement_learning_handoff is not None and not callable(
-            getattr(settlement_learning_handoff, "reconcile_after_settlement", None)
-        ):
-            raise TypeError(
-                "settlement_learning_handoff.reconcile_after_settlement must be callable"
-            )
+        if settlement_learning_handoff is not None:
+            if not callable(
+                getattr(settlement_learning_handoff, "reconcile_after_settlement", None)
+            ):
+                raise TypeError(
+                    "settlement_learning_handoff.reconcile_after_settlement must be callable"
+                )
+            prepare = getattr(settlement_learning_handoff, "prepare_settlement", None)
+            if prepare is not None and not callable(prepare):
+                raise TypeError(
+                    "settlement_learning_handoff.prepare_settlement must be callable"
+                )
 
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -912,6 +927,18 @@ class ContinuousSessionCoordinator:
             self._state.validate_settlement_evidence(
                 settlement_evidence=resolutions
             )
+            if self.settlement_learning_handoff is not None:
+                prepare = getattr(
+                    self.settlement_learning_handoff,
+                    "prepare_settlement",
+                    None,
+                )
+                if prepare is not None:
+                    prepare(
+                        paper_book_path=self.paper_book_path,
+                        resolutions=resolutions,
+                        at=now,
+                    )
             settled, evidence_ids = self._settle(resolutions=resolutions)
             if self.settlement_learning_handoff is not None:
                 self.settlement_learning_handoff.reconcile_after_settlement(

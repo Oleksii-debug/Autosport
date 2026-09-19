@@ -245,6 +245,28 @@ class ParticipantIdentityRegistry:
         registry._persist()
         return registry
 
+    def entity_at(
+        self,
+        entity_id: str,
+        *,
+        as_of: str,
+        view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION,
+    ) -> EntityIdentity:
+        """Return one canonical identity without exposing mutable registry internals."""
+        if not isinstance(view, IdentityView):
+            raise TypeError("view must be IdentityView")
+        canonical_id = _text("entity_id", entity_id)
+        moment = _instant("as_of", as_of)
+        entity = self._entities.get(canonical_id)
+        if entity is None:
+            raise ParticipantIdentityError("unknown entity")
+        if (
+            view is IdentityView.AS_KNOWN_AT_DECISION
+            and _instant("available_at", entity.available_at) > moment
+        ):
+            raise ParticipantIdentityError("entity was not known at requested causal view")
+        return entity
+
     def add_entity(self, entity: EntityIdentity) -> None:
         if not isinstance(entity, EntityIdentity):
             raise TypeError("entity must be EntityIdentity")

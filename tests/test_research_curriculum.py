@@ -406,6 +406,59 @@ def test_negative_outcome_is_bound_to_completed_supervisor_run(tmp_path):
     assert curriculum.snapshot()["outcomes"][receipt.selection_id]["outcome"] == "NEGATIVE"
 
 
+def test_negative_cycle_checkpoints_then_selects_next_question(tmp_path):
+    _, supervisor, curriculum = _workspace(tmp_path, max_budget_units=40)
+    first = curriculum.select_and_dispatch(
+        (
+            _candidate(
+                question_id="question-1",
+                episode_id="1" * 64,
+                reasons=("observed-loss",),
+                outcome_available_at="2026-09-19T03:15:00Z",
+            ),
+        ),
+        purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=7,
+        budget_units=20,
+    )
+    _finish(supervisor, first.run_id)
+    curriculum.record_outcome(
+        first.selection_id,
+        outcome=CurriculumOutcome.NEGATIVE,
+        at="2026-09-19T03:40:00Z",
+        scientific_evidence_id="postmortem-negative-1",
+    )
+
+    second = curriculum.select_and_dispatch(
+        (
+            _candidate(
+                question_id="question-2",
+                episode_id="2" * 64,
+                available_at="2026-09-19T03:41:00Z",
+                reasons=("unresolved-follow-up",),
+                expected_learning_value=Decimal("0.9"),
+            ),
+        ),
+        purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:42:00Z",
+        seed=8,
+        budget_units=20,
+    )
+
+    state = curriculum.snapshot()
+    assert second.run_id != first.run_id
+    assert len(supervisor.list_runs()) == 2
+    assert state["outcomes"][first.selection_id]["outcome"] == "NEGATIVE"
+    assert {item["selected_question_id"] for item in state["selections"]} == {
+        "question-1",
+        "question-2",
+    }
+    assert state["consumed_budget_units"] == 40
+
+
 def test_tampered_state_fails_restart(tmp_path):
     _, supervisor, curriculum = _workspace(tmp_path)
     state = curriculum.snapshot()

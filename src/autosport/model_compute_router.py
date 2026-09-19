@@ -12,7 +12,13 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .integrity import atomic_write_json
-from .sport_domain_fitness import RouteRecommendation, RouteStatus
+from .sport_domain_fitness import (
+    CausalView,
+    RouteRecommendation,
+    RouteStatus,
+    SportDomainFitnessObservation,
+    recommend_route,
+)
 
 _SCHEMA = "autosport.model_compute_router"
 _VERSION = 1
@@ -119,6 +125,37 @@ def _seconds(later: datetime, earlier: datetime) -> Decimal:
         Decimal(delta.days * 86400 + delta.seconds)
         + Decimal(delta.microseconds) / Decimal("1000000")
     )
+
+
+def _verified_domain_route(
+    observation: SportDomainFitnessObservation | None,
+    *,
+    as_of: str,
+) -> RouteRecommendation | None:
+    if observation is None:
+        return None
+    if not isinstance(observation, SportDomainFitnessObservation):
+        raise TypeError(
+            "domain_observation must be SportDomainFitnessObservation"
+        )
+    return recommend_route(
+        observation,
+        as_of=as_of,
+        view=CausalView.AS_KNOWN_AT_DECISION,
+    )
+
+
+def _domain_route_payload(
+    route: RouteRecommendation | None,
+) -> dict[str, Any] | None:
+    if route is None:
+        return None
+    return {
+        "status": route.status.value,
+        "reason": route.reason,
+        "observation_id": route.observation_id,
+        "domain_profile": route.domain_profile.value,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -711,6 +748,7 @@ def route_compute(
     *,
     as_of: str,
     voc_evidence: ValueOfComputationEvidence | None = None,
+    domain_observation: SportDomainFitnessObservation | None = None,
     domain_route: RouteRecommendation | None = None,
 ) -> ComputeRouteDecision:
     if not isinstance(request, ComputeRouteRequest):
@@ -718,6 +756,19 @@ def route_compute(
     if not isinstance(policy, ComputeRoutingPolicy):
         raise TypeError("policy must be ComputeRoutingPolicy")
     now = _instant("as_of", as_of)
+    if domain_route is not None and not isinstance(
+        domain_route, RouteRecommendation
+    ):
+        raise TypeError("domain_route must be RouteRecommendation")
+    verified_domain_route = _verified_domain_route(
+        domain_observation,
+        as_of=as_of,
+    )
+    domain_observation_id = (
+        None
+        if domain_observation is None
+        else domain_observation.observation_id
+    )
     if now < _instant("created_at", request.created_at):
         raise ModelComputeRouterError(
             "as_of precedes request creation"
@@ -734,11 +785,7 @@ def route_compute(
             candidate=None,
             reason="decision deadline already expired",
             voc_evidence_id=None,
-            domain_observation_id=(
-                None
-                if domain_route is None
-                else domain_route.observation_id
-            ),
+            domain_observation_id=domain_observation_id,
         )
 
     by_id = _candidate_map(candidates)
@@ -760,11 +807,7 @@ def route_compute(
                 "lacks capability, or misses deadline"
             ),
             voc_evidence_id=None,
-            domain_observation_id=(
-                None
-                if domain_route is None
-                else domain_route.observation_id
-            ),
+            domain_observation_id=domain_observation_id,
         )
 
     if request.cloud_candidate_id is None:
@@ -782,11 +825,7 @@ def route_compute(
                 "no cloud candidate requested"
             ),
             voc_evidence_id=None,
-            domain_observation_id=(
-                None
-                if domain_route is None
-                else domain_route.observation_id
-            ),
+            domain_observation_id=domain_observation_id,
         )
 
     cloud = by_id.get(request.cloud_candidate_id)
@@ -820,16 +859,25 @@ def route_compute(
         baseline_reason = (
             "cloud candidate exceeds policy cloud-cost limit"
         )
-    elif domain_route is None:
+    elif domain_observation is None:
         baseline_reason = (
-            "missing sport-domain evidence for slower research compute"
+            "missing verified sport-domain observation evidence "
+            "for slower research compute"
         )
     elif (
-        domain_route.status
+        domain_route is not None
+        and domain_route != verified_domain_route
+    ):
+        baseline_reason = (
+            "caller-supplied sport-domain recommendation does not "
+            "match observation-derived evidence"
+        )
+    elif (
+        verified_domain_route.status
         is not RouteStatus.ROUTE_SLOW_RESEARCH
     ):
         baseline_reason = (
-            "sport-domain evidence does not authorize "
+            "verified sport-domain evidence does not authorize "
             "slower research compute"
         )
     elif voc_evidence is None:
@@ -910,11 +958,7 @@ def route_compute(
                 if voc_evidence is None
                 else voc_evidence.evidence_id
             ),
-            domain_observation_id=(
-                None
-                if domain_route is None
-                else domain_route.observation_id
-            ),
+            domain_observation_id=domain_observation_id,
         )
 
     return ComputeRouteDecision.build(
@@ -927,8 +971,8 @@ def route_compute(
         tier=ComputeTier.CLOUD,
         candidate=cloud,
         reason=(
-            "explicit public-data cloud permission plus "
-            "fresh positive paired measured VOC evidence"
+            "verified sport-domain evidence plus explicit public-data "
+            "cloud permission and fresh positive paired measured VOC evidence"
         ),
         voc_evidence_id=voc_evidence.evidence_id,
         domain_observation_id=(
@@ -1068,6 +1112,34 @@ class ModelComputeRouterStore:
                     item["voc_evidence"]
                 )
             )
+            domain_observation = (
+                None
+                if item.get("domain_observation") is None
+                else SportDomainFitnessObservation.from_payload(
+                    item["domain_observation"]
+                )
+            )
+            verified_domain_route = _verified_domain_route(
+                domain_observation,
+                as_of=decision.decided_at,
+            )
+            expected_domain_id = (
+                None
+                if domain_observation is None
+                else domain_observation.observation_id
+            )
+            if decision.domain_observation_id != expected_domain_id:
+                raise ModelComputeRouterError(
+                    "decision domain observation does not match "
+                    "persisted evidence"
+                )
+            if item.get("domain_route") != _domain_route_payload(
+                verified_domain_route
+            ):
+                raise ModelComputeRouterError(
+                    "persisted domain route is not derived from "
+                    "the bound observation evidence"
+                )
             unsigned = {
                 "request": request.payload(),
                 "policy": policy.payload(),
@@ -1078,7 +1150,14 @@ class ModelComputeRouterStore:
                 "voc_evidence": (
                     None if voc is None else voc.payload()
                 ),
-                "domain_route": item.get("domain_route"),
+                "domain_observation": (
+                    None
+                    if domain_observation is None
+                    else domain_observation.payload()
+                ),
+                "domain_route": _domain_route_payload(
+                    verified_domain_route
+                ),
             }
             if (
                 _sha256(
@@ -1121,6 +1200,7 @@ class ModelComputeRouterStore:
         *,
         as_of: str,
         voc_evidence: ValueOfComputationEvidence | None = None,
+        domain_observation: SportDomainFitnessObservation | None = None,
         domain_route: RouteRecommendation | None = None,
     ) -> ComputeRouteDecision:
         decision = route_compute(
@@ -1129,20 +1209,21 @@ class ModelComputeRouterStore:
             policy,
             as_of=as_of,
             voc_evidence=voc_evidence,
+            domain_observation=domain_observation,
             domain_route=domain_route,
         )
-        domain_payload = None
-        if domain_route is not None:
-            domain_payload = {
-                "status": domain_route.status.value,
-                "reason": domain_route.reason,
-                "observation_id": (
-                    domain_route.observation_id
-                ),
-                "domain_profile": (
-                    domain_route.domain_profile.value
-                ),
-            }
+        verified_domain_route = _verified_domain_route(
+            domain_observation,
+            as_of=as_of,
+        )
+        domain_observation_payload = (
+            None
+            if domain_observation is None
+            else domain_observation.payload()
+        )
+        domain_route_payload = _domain_route_payload(
+            verified_domain_route
+        )
         unsigned = {
             "request": request.payload(),
             "policy": policy.payload(),
@@ -1156,7 +1237,8 @@ class ModelComputeRouterStore:
                 if voc_evidence is None
                 else voc_evidence.payload()
             ),
-            "domain_route": domain_payload,
+            "domain_observation": domain_observation_payload,
+            "domain_route": domain_route_payload,
         }
         record = {
             **unsigned,

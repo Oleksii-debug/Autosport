@@ -174,7 +174,7 @@ class DatasetQuoteCalculationCliTests(unittest.TestCase):
         self.assertNotIn("outcome", payload)
         # "winner" is a valid market_type/market_id fixture value and is not
         # evidence of reading sealed settlement/outcome payloads.
-        self.assertEqual(payload["selected_quote_identity"]["market_type"], "WINNER")
+        self.assertEqual(payload["selected_quote_identity"]["market_type"], MarketType.WINNER.value)
 
     def test_run_fail_closed_returns_nonzero_without_partial_result(self) -> None:
         dataset = _FakeDataset([_event(observed_ts="2026-09-19T12:01:00+00:00")])

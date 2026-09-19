@@ -362,11 +362,13 @@ def _show_owner_economic_dialog(app: Any) -> None:
 
     button_row = ttk.Frame(body)
     button_row.pack(fill="x", pady=(8, 0))
+    initial_write_blocker = _owner_economic_write_blocker(app, bound_workspace)
     create_button = ttk.Button(
         button_row,
         text=text("ui.windows.owner_authority.button.create"),
         command=create_initial_contract,
         takefocus=True,
+        state=("disabled" if initial_write_blocker is not None else "normal"),
     )
     create_button.pack(side="left")
     tk_uia.set_acc_name(create_button, text("ui.windows.owner_authority.accessibility.create.name"))

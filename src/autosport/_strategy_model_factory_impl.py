@@ -1394,6 +1394,66 @@ class ExperimentRunner:
                 text = text.rstrip("0").rstrip(".")
             return "0" if text in ("", "-0") else text
 
+        stopping_sha = hashlib.sha256(
+            str(binding["stopping_rule"]).encode("utf-8")
+        ).hexdigest()
+        comparison_sha = hashlib.sha256(
+            str(binding["multiple_comparison_control"]).encode("utf-8")
+        ).hexdigest()
+        guardrails_passed = all(
+            candidate_metrics[name] <= maximum
+            for name, maximum in rule.protective_metric_maxima
+        )
+        confirmation_trial_family_id = (
+            f"{spec.research_protocol_id}:confirmation-trial-family"
+        )
+        holdout_access_id = promotion_holdout_access_id(
+            research_protocol_id=spec.research_protocol_id,
+            dataset_manifest_sha256=dataset.payload.get("manifest_sha256"),
+            source_identity=dataset.payload.get("source_identity"),
+            license_identity=dataset.payload.get("license_identity"),
+            confirmation_trial_family_id=confirmation_trial_family_id,
+        )
+        promotion_effect_evidence = {
+            "schema_version": 1,
+            "experiment_id": spec.experiment_id,
+            "research_protocol_id": spec.research_protocol_id,
+            "research_question_id": binding["research_question_id"],
+            "hypothesis_id": binding["hypothesis_id"],
+            "candidate_strategy_version_id": spec.strategy_version_id,
+            "candidate_model_version_id": spec.model_version_id,
+            "evaluation_bundle_id": spec.evaluation_bundle_id,
+            "dataset_snapshot_id": spec.dataset_snapshot_id,
+            "confirmation_trial_family_id": confirmation_trial_family_id,
+            "holdout_access_id": holdout_access_id,
+            "estimand": rule.primary_metric,
+            "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+            "cohort_id": spec.dataset_snapshot_id,
+            "effective_sample_size": len(paired_deltas),
+            "minimum_effective_sample_size": rule.minimum_effective_sample_size,
+            "effect_interval_low": _canonical_decimal_text(effect_low),
+            "effect_interval_high": _canonical_decimal_text(effect_high),
+            "practical_improvement": _canonical_decimal_text(practical),
+            "guardrails_passed": guardrails_passed,
+            "validity": (
+                PromotionEvidenceValidity.ELIGIBLE.value
+                if len(paired_deltas) >= rule.minimum_effective_sample_size
+                and effect_low >= Decimal(str(rule.minimum_improvement))
+                and practical >= Decimal(str(rule.minimum_improvement))
+                and guardrails_passed
+                else PromotionEvidenceValidity.INCONCLUSIVE.value
+            ),
+            "holdout_consumed": False,
+            "stopping_rule_sha256": stopping_sha,
+            "multiple_comparison_control_sha256": comparison_sha,
+            "rollback_identity": current_champion,
+            "uncertainty_method": uncertainty_method,
+            "created_at": spec.decided_at,
+        }
+        evaluation_payload["promotion_effect_evidence"] = dict(
+            promotion_effect_evidence
+        )
+
         evaluation_bundle_sha256 = self.artifact_store.write(
             "evaluation", spec.evaluation_bundle_id, evaluation_payload
         )
@@ -1408,64 +1468,23 @@ class ExperimentRunner:
                 spec.completed_at,
                 evaluated_strategy_version_id=spec.strategy_version_id,
                 evaluated_model_version_id=spec.model_version_id,
-                effective_sample_size=len(paired_deltas),
-                effect_interval_low=_canonical_decimal_text(effect_low),
-                effect_interval_high=_canonical_decimal_text(effect_high),
-                practical_improvement=_canonical_decimal_text(practical),
+                effective_sample_size=promotion_effect_evidence[
+                    "effective_sample_size"
+                ],
+                effect_interval_low=promotion_effect_evidence[
+                    "effect_interval_low"
+                ],
+                effect_interval_high=promotion_effect_evidence[
+                    "effect_interval_high"
+                ],
+                practical_improvement=promotion_effect_evidence[
+                    "practical_improvement"
+                ],
             )
         )
 
-        stopping_sha = hashlib.sha256(str(binding["stopping_rule"]).encode("utf-8")).hexdigest()
-        comparison_sha = hashlib.sha256(
-            str(binding["multiple_comparison_control"]).encode("utf-8")
-        ).hexdigest()
-        guardrails_passed = all(
-            candidate_metrics[name] <= maximum
-            for name, maximum in rule.protective_metric_maxima
-        )
-        evidence_payload = {
-            "schema_version": 1,
-            "experiment_id": spec.experiment_id,
-            "research_protocol_id": spec.research_protocol_id,
-            "research_question_id": binding["research_question_id"],
-            "hypothesis_id": binding["hypothesis_id"],
-            "candidate_strategy_version_id": spec.strategy_version_id,
-            "candidate_model_version_id": spec.model_version_id,
-            "evaluation_bundle_id": spec.evaluation_bundle_id,
-            "evaluation_bundle_sha256": evaluation_bundle_sha256,
-            "dataset_snapshot_id": spec.dataset_snapshot_id,
-            "confirmation_trial_family_id": f"{spec.research_protocol_id}:confirmation-trial-family",
-            "holdout_access_id": promotion_holdout_access_id(
-                research_protocol_id=spec.research_protocol_id,
-                dataset_manifest_sha256=dataset.payload.get("manifest_sha256"),
-                source_identity=dataset.payload.get("source_identity"),
-                license_identity=dataset.payload.get("license_identity"),
-                confirmation_trial_family_id=f"{spec.research_protocol_id}:confirmation-trial-family",
-            ),
-            "estimand": rule.primary_metric,
-            "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
-            "cohort_id": spec.dataset_snapshot_id,
-            "effective_sample_size": len(paired_deltas),
-            "minimum_effective_sample_size": rule.minimum_effective_sample_size,
-            "effect_interval_low": _canonical_decimal_text(effect_low),
-            "effect_interval_high": _canonical_decimal_text(effect_high),
-            "practical_improvement": _canonical_decimal_text(practical),
-            "guardrails_passed": guardrails_passed,
-            "validity": (
-                PromotionEvidenceValidity.ELIGIBLE.value
-                if len(paired_deltas) >= 2
-                and effect_low >= Decimal(str(rule.minimum_improvement))
-                and practical >= Decimal(str(rule.minimum_improvement))
-                and guardrails_passed
-                else PromotionEvidenceValidity.INCONCLUSIVE.value
-            ),
-            "holdout_consumed": False,
-            "stopping_rule_sha256": stopping_sha,
-            "multiple_comparison_control_sha256": comparison_sha,
-            "rollback_identity": current_champion,
-            "uncertainty_method": uncertainty_method,
-            "created_at": spec.decided_at,
-        }
+        evidence_payload = dict(promotion_effect_evidence)
+        evidence_payload["evaluation_bundle_sha256"] = evaluation_bundle_sha256
         evidence_id = hashlib.sha256(
             json.dumps(
                 evidence_payload,

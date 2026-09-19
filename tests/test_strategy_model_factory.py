@@ -615,6 +615,35 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
         evaluation["walk_forward"]
     )
     assert metrics["walk_forward_result_sha256"] == evaluation["walk_forward_result_sha256"]
+    bundle_entry = registry.get("EvaluationBundle", "eval-v2")
+    decision_entry = registry.get("PromotionDecision", "promotion-v2")
+    assert bundle_entry is not None
+    assert decision_entry is not None
+    evidence_entry = registry.get(
+        "PromotionEvidence", decision_entry.payload["promotion_evidence_id"]
+    )
+    assert evidence_entry is not None
+    effect_evidence = evaluation["promotion_effect_evidence"]
+    assert effect_evidence["evaluation_bundle_id"] == "eval-v2"
+    assert (
+        effect_evidence["effective_sample_size"]
+        == bundle_entry.payload["effective_sample_size"]
+        == evidence_entry.payload["effective_sample_size"]
+    )
+    for field in (
+        "effect_interval_low",
+        "effect_interval_high",
+        "practical_improvement",
+    ):
+        assert effect_evidence[field] == bundle_entry.payload[field]
+        assert effect_evidence[field] == evidence_entry.payload[field]
+    for field in (
+        "holdout_access_id",
+        "stopping_rule_sha256",
+        "multiple_comparison_control_sha256",
+        "uncertainty_method",
+    ):
+        assert effect_evidence[field] == evidence_entry.payload[field]
 
     restarted = ExperimentRunner.verify_restart(
         registry_path,

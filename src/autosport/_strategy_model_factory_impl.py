@@ -1426,23 +1426,12 @@ class ExperimentRunner:
             license_identity=dataset.payload.get("license_identity"),
             confirmation_trial_family_id=confirmation_trial_family_id,
         )
-        holdout_consumed = False
-        for prior_decision in self.registry.causal_records(
-            "PromotionDecision", as_of=spec.decided_at
-        ):
-            prior_evidence_id = prior_decision.payload.get("promotion_evidence_id")
-            if not isinstance(prior_evidence_id, str) or not prior_evidence_id:
-                continue
-            prior_evidence = self.registry.get(
-                "PromotionEvidence", prior_evidence_id
+        holdout_consumed = any(
+            prior_evidence.payload.get("holdout_access_id") == holdout_access_id
+            for prior_evidence in self.registry.causal_records(
+                "PromotionEvidence", as_of=spec.decided_at
             )
-            if (
-                prior_evidence is not None
-                and prior_evidence.payload.get("holdout_access_id")
-                == holdout_access_id
-            ):
-                holdout_consumed = True
-                break
+        )
         promotion_effect_evidence = {
             "schema_version": 1,
             "experiment_id": spec.experiment_id,

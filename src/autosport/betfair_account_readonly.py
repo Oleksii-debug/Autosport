@@ -252,6 +252,7 @@ class BetfairExecutionReadbackEnvelope:
     page_size: int
     request_scope_sha256: str
     evidence_sha256: str
+    provider_order_ref: str | None = None
 
     def __post_init__(self) -> None:
         self._validate()
@@ -260,6 +261,17 @@ class BetfairExecutionReadbackEnvelope:
         _required_text(self.venue_id, "venue_id")
         _required_text(self.account_id, "account_id")
         _required_text(self.action_id, "action_id")
+        if self.provider_order_ref is not None:
+            provider_ref = _required_text(
+                self.provider_order_ref, "provider_order_ref"
+            )
+            if len(provider_ref) > 32 or any(
+                character not in "0123456789abcdef"
+                for character in provider_ref
+            ):
+                raise BetfairReadOnlyError(
+                    "provider_order_ref must be <=32 lowercase hex characters"
+                )
         _required_text(self.market_id, "market_id")
         _positive_int(self.page_size, "page_size")
         if self.page_size > 1000:
@@ -297,6 +309,7 @@ class BetfairExecutionReadbackEnvelope:
                 venue_id=self.venue_id,
                 account_id=self.account_id,
                 action_id=self.action_id,
+                provider_order_ref=self.provider_order_ref,
                 market_id=self.market_id,
                 page_size=self.page_size,
             )
@@ -326,6 +339,7 @@ class BetfairExecutionReadbackEnvelope:
             self.adapter_id,
             self.adapter_version,
             self.action_id,
+            self.provider_order_ref,
             self.market_id,
             self.market_event,
             self.current_pages,
@@ -343,12 +357,14 @@ def _execution_request_scope(
     venue_id: str,
     account_id: str,
     action_id: str,
+    provider_order_ref: str | None,
     market_id: str,
     page_size: int,
 ) -> dict[str, object]:
-    return {
+    customer_order_ref = provider_order_ref or action_id
+    scope: dict[str, object] = {
         "schema": "autosport.betfair_execution_readback_scope",
-        "schema_version": 1,
+        "schema_version": 2 if provider_order_ref is not None else 1,
         "venue_id": venue_id,
         "account_id": account_id,
         "adapter_id": ADAPTER_ID,
@@ -364,7 +380,7 @@ def _execution_request_scope(
         "current": {
             "method": _LIST_CURRENT_ORDERS,
             "orderProjection": "ALL",
-            "customerOrderRefs": [action_id],
+            "customerOrderRefs": [customer_order_ref],
             "marketIds": [market_id],
             "page_size": page_size,
         },
@@ -372,12 +388,15 @@ def _execution_request_scope(
             "method": _LIST_CLEARED_ORDERS,
             "statuses": list(_EXECUTION_CLEARED_STATUSES),
             "groupBy": "BET",
-            "customerOrderRefs": [action_id],
+            "customerOrderRefs": [customer_order_ref],
             "marketIds": [market_id],
             "settledDateRange": None,
             "page_size": page_size,
         },
     }
+    if provider_order_ref is not None:
+        scope["provider_order_ref"] = provider_order_ref
+    return scope
 
 
 def _execution_evidence_payload(
@@ -562,10 +581,21 @@ class BetfairReadOnlyClient:
         *,
         action_id: str,
         market_id: str,
+        provider_order_ref: str | None = None,
         page_size: int = 1000,
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
         action = _required_text(action_id, "action_id")
+        order_ref = action
+        if provider_order_ref is not None:
+            order_ref = _required_text(provider_order_ref, "provider_order_ref")
+            if len(order_ref) > 32 or any(
+                character not in "0123456789abcdef"
+                for character in order_ref
+            ):
+                raise BetfairReadOnlyError(
+                    "provider_order_ref must be <=32 lowercase hex characters"
+                )
         market = _required_text(market_id, "market_id")
         _page_bounds(0, page_size)
         _positive_int(max_pages, "max_pages")
@@ -588,7 +618,7 @@ class BetfairReadOnlyClient:
             page = self.read_current_orders_page(
                 from_record=offset,
                 record_count=page_size,
-                customer_order_refs=(action,),
+                customer_order_refs=(order_ref,),
                 market_ids=(market,),
             )
             current_pages.append(page)
@@ -613,7 +643,7 @@ class BetfairReadOnlyClient:
                     from_record=offset,
                     record_count=page_size,
                     bet_status=status,
-                    customer_order_refs=(action,),
+                    customer_order_refs=(order_ref,),
                     market_ids=(market,),
                 )
                 pages.append(page)
@@ -664,6 +694,7 @@ class BetfairReadOnlyClient:
             venue_id=self._venue_id,
             account_id=self._account_id,
             action_id=action,
+            provider_order_ref=provider_order_ref,
             market_id=market,
             page_size=page_size,
         )
@@ -692,6 +723,7 @@ class BetfairReadOnlyClient:
             page_size,
             request_scope_sha256,
             evidence_sha256,
+            provider_order_ref,
         )
 
     def _read_all_current_orders_with_evidence(self, *, page_size: int = 1000, max_pages: int = 100) -> tuple[tuple[BetfairCurrentOrderObservation, ...], tuple[BetfairEvidence, ...]]:
@@ -1092,6 +1124,7 @@ def _install_execution_readback_authority() -> None:
         *,
         action_id: str,
         market_id: str,
+        provider_order_ref: str | None = None,
         page_size: int = 1000,
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
@@ -1099,6 +1132,7 @@ def _install_execution_readback_authority() -> None:
             self,
             action_id=action_id,
             market_id=market_id,
+            provider_order_ref=provider_order_ref,
             page_size=page_size,
             max_pages=max_pages,
         )

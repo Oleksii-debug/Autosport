@@ -70,7 +70,11 @@ class _DurableObserver:
 
 
 class _EmptyIntentFactory:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        strategy_version_id: str = "live-test-strategy-v1",
+    ) -> None:
+        self.strategy_version_id = strategy_version_id
         self.calls: list[tuple[str, tuple[tuple[str, int, str], ...]]] = []
 
     def __call__(self, input_id, snapshot):
@@ -192,7 +196,6 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             authority=self._authority() if authority is None else authority,
             intent_factory=factory,
             scientific_registry=registry,
-            intent_strategy_version_id=selected_strategy.strategy_version_id,
             observation_runner=observer,
             bounds=bounds,
             max_quote_age=timedelta(seconds=5),
@@ -216,13 +219,32 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     mode=LiveDecisionMode.PAPER,
                     book=PaperBook("1000"),
                     authority=self._authority(),
-                    intent_factory=_EmptyIntentFactory(),
+                    intent_factory=_EmptyIntentFactory(
+                        "caller-minted-arbitrary-digest"
+                    ),
                     scientific_registry=registry,
-                    intent_strategy_version_id="caller-minted-arbitrary-digest",
                     observation_runner=_DurableObserver(workspace, [()]),
                     max_quote_age=timedelta(seconds=5),
                     clock=_ManualClock(self.START),
                 )
+
+    def test_factory_cannot_relabel_itself_after_provenance_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=factory,
+                clock=_ManualClock(self.START),
+            )
+            factory.strategy_version_id = "live-test-strategy-v2"
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "factory strategy-version provenance changed",
+            ):
+                loop._decision_context_sha256()
 
     def test_emitted_intent_cannot_relabel_registered_strategy_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -609,6 +631,8 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             def fail_after_pending(input_id, snapshot):
                 raise RuntimeError("simulated process loss after pending cursor")
 
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+
             first = self._loop(
                 workspace,
                 observer=first_observer,
@@ -658,6 +682,8 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             def fail_after_pending(input_id, snapshot):
                 raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
 
             first = self._loop(
                 workspace,
@@ -711,6 +737,8 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             def fail_after_pending(input_id, snapshot):
                 raise RuntimeError("simulated process loss after pending cursor")
 
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+
             first = self._loop(
                 workspace,
                 observer=_DurableObserver(
@@ -728,7 +756,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             resumed = self._loop(
                 workspace,
                 observer=resumed_observer,
-                factory=_EmptyIntentFactory(),
+                factory=_EmptyIntentFactory("live-test-strategy-v2"),
                 clock=_ManualClock(self.START + timedelta(seconds=2)),
                 strategy_version=self._strategy_version(
                     strategy_version_id="live-test-strategy-v2",
@@ -749,6 +777,8 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             def fail_after_pending(input_id, snapshot):
                 raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
 
             first = self._loop(
                 workspace,
@@ -1000,7 +1030,6 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     authority=authority,
                     intent_factory=_EmptyIntentFactory(),
                     scientific_registry=registry,
-                    intent_strategy_version_id=strategy_version.strategy_version_id,
                     observation_runner=_DurableObserver(workspace, [()]),
                     max_quote_age=timedelta(seconds=6),
                     clock=_ManualClock(self.START),

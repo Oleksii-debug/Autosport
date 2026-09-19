@@ -293,6 +293,7 @@ class AccessibilityAuditTests(unittest.TestCase):
                     return_value=audit_dialog,
                 ),
                 patch.object(accessibility_audit.tk_uia, "describe", return_value=object()),
+                patch.object(accessibility_audit, "show_manual_calculation_workbench", return_value=object()),
                 patch.object(accessibility_audit, "_combined_description", return_value=object()),
                 patch.object(
                     accessibility_audit,

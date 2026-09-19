@@ -90,7 +90,7 @@ class ChampionEligibilityDecision:
     valid_until: str
     minimum_samples: int
     minimum_effective_sample_size: int
-    effective_sample_size: int
+    effective_sample_size: int | None
     degraded_streak: int
     recovery_streak: int
     admissible_actions: tuple[str, ...]
@@ -126,7 +126,6 @@ class ChampionEligibilityDecision:
         for name in (
             "minimum_samples",
             "minimum_effective_sample_size",
-            "effective_sample_size",
             "degraded_streak",
             "recovery_streak",
         ):
@@ -135,8 +134,14 @@ class ChampionEligibilityDecision:
                 raise ChampionEligibilityError(f"{name} must be a non-negative integer")
         if self.minimum_samples == 0 or self.minimum_effective_sample_size == 0:
             raise ChampionEligibilityError("minimum evidence thresholds must be positive")
-        if self.effective_sample_size <= 0:
-            raise ChampionEligibilityError("effective_sample_size must be positive")
+        if self.effective_sample_size is not None and (
+            isinstance(self.effective_sample_size, bool)
+            or not isinstance(self.effective_sample_size, int)
+            or self.effective_sample_size <= 0
+        ):
+            raise ChampionEligibilityError(
+                "effective_sample_size must be a positive integer when present"
+            )
         actions = _tuple_text(self.admissible_actions, "admissible_actions")
         if self.research_trigger_id is not None:
             _text(self.research_trigger_id, "research_trigger_id")
@@ -222,6 +227,18 @@ class ChampionEligibilityDecision:
             raise TypeError("registry must be ScientificRegistry")
 
         ids = _tuple_text(finding_ids, "finding_ids")
+        for threshold_name, threshold_value in (
+            ("minimum_samples", minimum_samples),
+            ("minimum_effective_sample_size", minimum_effective_sample_size),
+        ):
+            if (
+                isinstance(threshold_value, bool)
+                or not isinstance(threshold_value, int)
+                or threshold_value <= 0
+            ):
+                raise ChampionEligibilityError(
+                    f"{threshold_name} must be a positive integer"
+                )
         evaluated_cutoff = _instant(evaluated_at, "evaluated_at")
         requested_scope = {
             "sport": _text(sport, "sport"),
@@ -250,6 +267,7 @@ class ChampionEligibilityDecision:
 
         entries: list[RegistryEntry] = []
         counts: list[int] = []
+        effective_sample_sizes: list[int | None] = []
         windows: list[tuple[datetime, datetime, str, DriftState, tuple[str, str, str] | None]] = []
 
         for finding_id in ids:
@@ -280,6 +298,16 @@ class ChampionEligibilityDecision:
             sample_count = observation.payload.get("sample_count")
             if isinstance(sample_count, bool) or not isinstance(sample_count, int) or sample_count <= 0:
                 raise ChampionEligibilityError("drift observation sample_count is invalid")
+            effective_sample_size = observation.payload.get("effective_sample_size")
+            if effective_sample_size is not None and (
+                isinstance(effective_sample_size, bool)
+                or not isinstance(effective_sample_size, int)
+                or effective_sample_size <= 0
+                or effective_sample_size > sample_count
+            ):
+                raise ChampionEligibilityError(
+                    "drift observation effective_sample_size is invalid"
+                )
 
             observed_start = _instant(observation.payload.get("window_start"), "DriftObservation.window_start")
             observed_end = _instant(observation.payload.get("window_end"), "DriftObservation.window_end")
@@ -289,6 +317,7 @@ class ChampionEligibilityDecision:
             scope = _scope_from_authority(finding, observation.payload)
             entries.append(entry)
             counts.append(sample_count)
+            effective_sample_sizes.append(effective_sample_size)
             windows.append((observed_start, observed_end, observation_id, state, scope))
 
         ordered = sorted(windows, key=lambda item: (item[0], item[1], item[2]))
@@ -340,13 +369,20 @@ class ChampionEligibilityDecision:
         if _ts(window_end, "window_end") != canonical_window_end:
             raise ChampionEligibilityError("window_end does not match causal evidence")
 
+        canonical_effective_sample_size = (
+            None
+            if any(value is None for value in effective_sample_sizes)
+            else min(value for value in effective_sample_sizes if value is not None)
+        )
+
         if scoped is None:
             status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
             status_reason = "authoritative_sport_league_regime_scope_is_missing"
         elif tuple(requested_scope.values()) != scoped:
             raise ChampionEligibilityError("drift evidence scope does not match champion scope")
-        elif min(counts) < minimum_effective_sample_size or any(
-            count < minimum_samples for count in counts
+        elif any(count < minimum_samples for count in counts) or (
+            canonical_effective_sample_size is None
+            or canonical_effective_sample_size < minimum_effective_sample_size
         ):
             status = ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
             status_reason = "insufficient_or_under_supported_drift_evidence"
@@ -394,7 +430,7 @@ class ChampionEligibilityDecision:
             valid_until=valid_until,
             minimum_samples=minimum_samples,
             minimum_effective_sample_size=minimum_effective_sample_size,
-            effective_sample_size=min(counts),
+            effective_sample_size=canonical_effective_sample_size,
             degraded_streak=expected_degraded_streak,
             recovery_streak=expected_recovery_streak,
             admissible_actions=admissible_actions,

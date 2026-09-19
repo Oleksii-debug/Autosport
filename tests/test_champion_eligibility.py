@@ -49,6 +49,7 @@ def _scoped_window(
     sport="table_tennis",
     league="league-a",
     regime="pre_match",
+    effective_sample_size=2,
 ):
     return DriftWindow.from_samples(
         dataset_snapshot_id=dataset_snapshot_id,
@@ -59,6 +60,7 @@ def _scoped_window(
         values=values,
         value_observed_at=(window_start, window_end),
         value_available_at=(as_of, as_of),
+        effective_sample_size=effective_sample_size,
         sport=sport,
         league=league,
         regime=regime,
@@ -70,6 +72,7 @@ def _scoped_history(
     *,
     league="league-a",
     values_sequence=(("3", "4"), ("3", "4")),
+    effective_sample_size=2,
 ):
     from tests.test_drift_control import _reference, _registry
 
@@ -80,6 +83,7 @@ def _scoped_history(
         as_of="2026-02-04T00:00:00Z",
         values=("1", "2"),
         league=league,
+        effective_sample_size=effective_sample_size,
     )
     specs = (
         ("dataset-current", "2026-02-09T00:00:00Z", "2026-02-10T00:00:00Z", "2026-02-11T00:00:00Z"),
@@ -97,6 +101,7 @@ def _scoped_history(
             as_of=specs[index][3],
             values=values,
             league=league,
+            effective_sample_size=effective_sample_size,
         )
         for index, values in enumerate(values_sequence)
     )
@@ -207,6 +212,19 @@ def test_insufficient_evidence_is_wait_not_drift_claim(tmp_path):
         minimum_samples=3,
         minimum_effective_sample_size=3,
     )
+    assert decision.status is ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
+
+
+def test_effective_sample_size_is_not_raw_sample_count(tmp_path):
+    registry, findings, windows = _scoped_history(
+        tmp_path,
+        effective_sample_size=1,
+    )
+    decision = _scoped_decision(registry, findings, windows)
+
+    assert all(window.sample_count == 2 for window in windows)
+    assert all(window.effective_sample_size == 1 for window in windows)
+    assert decision.effective_sample_size == 1
     assert decision.status is ChampionEligibilityStatus.WAIT_MORE_EVIDENCE
 
 

@@ -159,6 +159,19 @@ def _canonical_decimal(value: object, name: str) -> str:
     return canonical
 
 
+def _canonical_effective_sample_size(
+    value: object | None,
+    sample_count: int,
+) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("effective_sample_size must be a positive integer")
+    if value > sample_count:
+        raise ValueError("effective_sample_size cannot exceed sample_count")
+    return value
+
+
 def _window_evidence_sha256(
     *,
     dataset_snapshot_id: object,
@@ -169,6 +182,7 @@ def _window_evidence_sha256(
     values: tuple[str, ...],
     value_observed_at: tuple[str, ...],
     value_available_at: tuple[str, ...],
+    effective_sample_size: object | None = None,
     sport: object | None = None,
     league: object | None = None,
     regime: object | None = None,
@@ -194,6 +208,12 @@ def _window_evidence_sha256(
             for index, value in enumerate(value_available_at)
         ],
     }
+    effective = _canonical_effective_sample_size(
+        effective_sample_size,
+        len(values),
+    )
+    if effective is not None:
+        payload["effective_sample_size"] = effective
     scope = _canonical_scope(sport=sport, league=league, regime=regime)
     if scope is not None:
         payload["sport"], payload["league"], payload["regime"] = scope
@@ -245,6 +265,7 @@ class DriftWindow:
     value_observed_at: tuple[str, ...]
     value_available_at: tuple[str, ...]
     evidence_sha256: str
+    effective_sample_size: int | None = None
     sport: str | None = None
     league: str | None = None
     regime: str | None = None
@@ -279,6 +300,10 @@ class DriftWindow:
             )
         for index, value in enumerate(self.values):
             _canonical_decimal(value, f"values[{index}]")
+        _canonical_effective_sample_size(
+            self.effective_sample_size,
+            len(self.values),
+        )
         for index, observed_at in enumerate(self.value_observed_at):
             observed = _instant(observed_at, f"value_observed_at[{index}]")
             if observed < start or observed > end:
@@ -305,6 +330,7 @@ class DriftWindow:
             values=self.values,
             value_observed_at=self.value_observed_at,
             value_available_at=self.value_available_at,
+            effective_sample_size=self.effective_sample_size,
             sport=self.sport,
             league=self.league,
             regime=self.regime,
@@ -331,6 +357,7 @@ class DriftWindow:
         values: tuple[str, ...],
         value_observed_at: tuple[str, ...],
         value_available_at: tuple[str, ...],
+        effective_sample_size: int | None = None,
         sport: str | None = None,
         league: str | None = None,
         regime: str | None = None,
@@ -344,6 +371,7 @@ class DriftWindow:
             values=values,
             value_observed_at=value_observed_at,
             value_available_at=value_available_at,
+            effective_sample_size=effective_sample_size,
             sport=sport,
             league=league,
             regime=regime,
@@ -359,6 +387,7 @@ class DriftWindow:
             value_observed_at=value_observed_at,
             value_available_at=value_available_at,
             evidence_sha256=evidence,
+            effective_sample_size=effective_sample_size,
             sport=sport,
             league=league,
             regime=regime,
@@ -504,6 +533,7 @@ class DriftObservation:
     evidence_sha256: str
     sample_count: int
     mean_fraction: str | None
+    effective_sample_size: int | None = None
     sport: str | None = None
     league: str | None = None
     regime: str | None = None
@@ -522,6 +552,10 @@ class DriftObservation:
             raise ValueError("sample_count must be an integer")
         if self.sample_count < 0:
             raise ValueError("sample_count must be non-negative")
+        _canonical_effective_sample_size(
+            self.effective_sample_size,
+            self.sample_count,
+        )
         if self.sample_count == 0:
             if self.mean_fraction is not None:
                 raise ValueError("empty observation cannot carry a mean")
@@ -554,6 +588,8 @@ class DriftObservation:
             "sample_count": self.sample_count,
             "mean_fraction": self.mean_fraction,
         }
+        if self.effective_sample_size is not None:
+            payload["effective_sample_size"] = self.effective_sample_size
         scope = _canonical_scope(sport=self.sport, league=self.league, regime=self.regime)
         if scope is not None:
             payload["sport"], payload["league"], payload["regime"] = scope
@@ -892,6 +928,7 @@ class DriftMonitor:
             evidence_sha256=current.evidence_sha256,
             sample_count=current.sample_count,
             mean_fraction=current.mean_fraction,
+            effective_sample_size=current.effective_sample_size,
             sport=current.sport,
             league=current.league,
             regime=current.regime,

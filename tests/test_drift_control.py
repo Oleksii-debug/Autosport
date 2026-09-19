@@ -203,6 +203,29 @@ def _reference(monitor, **overrides):
     return monitor.create_reference(**values)
 
 
+def test_effective_sample_size_is_explicit_hash_bound_evidence(tmp_path):
+    current = _current_window(effective_sample_size=1)
+    registry = _registry(tmp_path, current_window=current)
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor)
+
+    finding = monitor.evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at=EVALUATED_AT,
+    )
+    observation = registry.get("DriftObservation", finding.observation_id)
+    assert observation is not None
+    assert observation.payload["sample_count"] == 2
+    assert observation.payload["effective_sample_size"] == 1
+
+    with pytest.raises(ValueError, match="cannot exceed sample_count"):
+        _current_window(effective_sample_size=3)
+
+    with pytest.raises(ValueError, match="evidence_sha256"):
+        replace(current, effective_sample_size=2)
+
+
 def test_scoped_drift_evidence_is_hash_bound_and_scope_mismatch_fails_closed(tmp_path):
     baseline = _baseline_window(
         sport="table_tennis",

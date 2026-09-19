@@ -919,19 +919,19 @@ class ScientificRegistry:
                 allow_repeat_experiment=allow_repeat_experiment,
             )
 
-    def _stage_entry_locked(
+    def _append_entry_locked(
         self,
         state: dict[str, Any],
         entry: dict[str, Any],
         *,
         allow_repeat_experiment: bool = False,
-    ) -> tuple[str, bool]:
+    ) -> str:
         for existing in state["records"]:
             if (existing["record_type"], existing["record_id"]) == (
                 entry["record_type"], entry["record_id"]
             ):
                 if existing["record_sha256"] == entry["record_sha256"]:
-                    return entry["record_sha256"], False
+                    return entry["record_sha256"]
                 raise ConflictingScientificRecordError(
                     f"conflicting immutable scientific record: {entry['record_type']}:{entry['record_id']}"
                 )
@@ -956,25 +956,9 @@ class ScientificRegistry:
                     "experiment fingerprint already has durable history; inspect negative/null results before repeating"
                 )
         state["records"].append(entry)
-        return entry["record_sha256"], True
-
-    def _append_entry_locked(
-        self,
-        state: dict[str, Any],
-        entry: dict[str, Any],
-        *,
-        allow_repeat_experiment: bool = False,
-    ) -> str:
-        record_sha256, added = self._stage_entry_locked(
-            state,
-            entry,
-            allow_repeat_experiment=allow_repeat_experiment,
-        )
-        if not added:
-            return record_sha256
         atomic_write_json(self.path, state)
         self._read()
-        return record_sha256
+        return entry["record_sha256"]
 
     def get(self, record_type: str, record_id: str) -> RegistryEntry | None:
         _text(record_type, "record_type")
@@ -1070,24 +1054,10 @@ class ScientificRegistry:
                 champion = rollback_target
         return champion
 
-    def record_promotion(
-        self,
-        decision: PromotionDecision,
-        *,
-        pending_experiment: ExperimentRecord | None = None,
-    ) -> str:
+    def record_promotion(self, decision: PromotionDecision) -> str:
         entry = self._entry(decision)
-        pending_entry = (
-            self._entry(pending_experiment)
-            if pending_experiment is not None
-            else None
-        )
-        if pending_entry is not None and pending_entry["record_type"] != "Experiment":
-            raise ValueError("pending_experiment must be an ExperimentRecord")
         with WorkspaceEconomicLock(self.path.parent):
             state = self._read()
-            if pending_entry is not None:
-                self._stage_entry_locked(state, pending_entry)
             for existing in state["records"]:
                 if (existing["record_type"], existing["record_id"]) == (
                     entry["record_type"], entry["record_id"]

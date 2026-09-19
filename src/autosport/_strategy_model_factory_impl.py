@@ -20,7 +20,6 @@ from .scientific_registry import (
     PromotionAction,
     PromotionDecision,
     PromotionEvidence,
-    PromotionEvidenceError,
     PromotionEvidenceDirection,
     PromotionEvidenceValidity,
     promotion_holdout_access_id,
@@ -1582,61 +1581,24 @@ class ExperimentRunner:
             )
         )
         experiment = replace(experiment, outcome=outcome, notes="; ".join(promotion.reasons))
-        decision = PromotionDecision(
-            spec.promotion_decision_id,
-            promotion.registry_action,
-            spec.strategy_version_id,
-            spec.research_protocol_id,
-            protocol_sha256,
-            spec.evaluation_bundle_id,
-            evaluation_bundle_sha256,
-            spec.decided_at,
-            predecessor_strategy_version_id=spec.predecessor_strategy_version_id,
-            candidate_model_version_id=spec.model_version_id,
-            promotion_evidence_id=promotion_evidence.promotion_evidence_id,
-            reason="; ".join(promotion.reasons),
+        self.registry.append(experiment)
+
+        self.registry.record_promotion(
+            PromotionDecision(
+                spec.promotion_decision_id,
+                promotion.registry_action,
+                spec.strategy_version_id,
+                spec.research_protocol_id,
+                protocol_sha256,
+                spec.evaluation_bundle_id,
+                evaluation_bundle_sha256,
+                spec.decided_at,
+                predecessor_strategy_version_id=spec.predecessor_strategy_version_id,
+                candidate_model_version_id=spec.model_version_id,
+                promotion_evidence_id=promotion_evidence.promotion_evidence_id,
+                reason="; ".join(promotion.reasons),
+            )
         )
-        try:
-            self.registry.record_promotion(
-                decision,
-                pending_experiment=experiment,
-            )
-        except PromotionEvidenceError as exc:
-            holdout_conflict = (
-                "confirmation holdout access has already been consumed or disclosed by prior evidence"
-                in str(exc)
-                or "confirmation holdout access has already been consumed by another promotion"
-                in str(exc)
-            )
-            if (
-                promotion.registry_action is not PromotionAction.PROMOTE
-                or not holdout_conflict
-            ):
-                raise
-            race_reason = (
-                "confirmation holdout became consumed before durable promotion commit"
-            )
-            promotion = replace(
-                promotion,
-                verdict=PromotionVerdict.INCONCLUSIVE,
-                registry_action=PromotionAction.RETAIN,
-                reasons=(race_reason,),
-            )
-            outcome = ResearchOutcome.INCONCLUSIVE
-            experiment = replace(
-                experiment,
-                outcome=outcome,
-                notes=race_reason,
-            )
-            decision = replace(
-                decision,
-                action=PromotionAction.RETAIN,
-                reason=race_reason,
-            )
-            self.registry.record_promotion(
-                decision,
-                pending_experiment=experiment,
-            )
 
         if outcome is not ResearchOutcome.POSITIVE:
             self.registry.append(

@@ -20,9 +20,10 @@ from .sport_domain_fitness import (
     SportDomainFitnessObservation,
     recommend_route,
 )
+from .voc_evaluation import PairedVOCEvaluation, VOCEvaluationProvenance
 
 _SCHEMA = "autosport.model_compute_router"
-_VERSION = 3
+_VERSION = 4
 _EXECUTION_AUTHORITY_SCHEMA = (
     "autosport.model_compute_router.execution_authority"
 )
@@ -305,6 +306,7 @@ class ComputeRoutingPolicy:
     cloud_enabled: bool = False
     max_cloud_cost: Decimal = Decimal("0")
     voc_max_age_seconds: Decimal = Decimal("0")
+    voc_min_effective_sample_size: int = 1
 
     def __post_init__(self) -> None:
         _text("policy_id", self.policy_id)
@@ -316,6 +318,14 @@ class ComputeRoutingPolicy:
             raise ModelComputeRouterError("cloud_enabled must be bool")
         _nonnegative("max_cloud_cost", self.max_cloud_cost)
         _nonnegative("voc_max_age_seconds", self.voc_max_age_seconds)
+        if (
+            isinstance(self.voc_min_effective_sample_size, bool)
+            or not isinstance(self.voc_min_effective_sample_size, int)
+            or self.voc_min_effective_sample_size < 1
+        ):
+            raise ModelComputeRouterError(
+                "voc_min_effective_sample_size must be a positive integer"
+            )
         if self.cloud_enabled:
             _positive("voc_max_age_seconds", self.voc_max_age_seconds)
 
@@ -326,6 +336,7 @@ class ComputeRoutingPolicy:
             "cloud_enabled": self.cloud_enabled,
             "max_cloud_cost": str(self.max_cloud_cost),
             "voc_max_age_seconds": str(self.voc_max_age_seconds),
+            "voc_min_effective_sample_size": self.voc_min_effective_sample_size,
         }
 
     @classmethod
@@ -337,6 +348,9 @@ class ComputeRoutingPolicy:
                 cloud_enabled=raw["cloud_enabled"],
                 max_cloud_cost=Decimal(raw["max_cloud_cost"]),
                 voc_max_age_seconds=Decimal(raw["voc_max_age_seconds"]),
+                voc_min_effective_sample_size=raw.get(
+                    "voc_min_effective_sample_size", 1
+                ),
             )
         except (KeyError, TypeError, InvalidOperation, ValueError) as exc:
             if isinstance(exc, ModelComputeRouterError):
@@ -366,6 +380,7 @@ class ValueOfComputationEvidence:
     latency_opportunity_cost_penalty: Decimal
     measured_compute_cost: Decimal
     evaluation_sha256: str
+    evaluation: PairedVOCEvaluation | None = None
 
     def __post_init__(self) -> None:
         _text("evidence_id", self.evidence_id)
@@ -400,6 +415,80 @@ class ValueOfComputationEvidence:
         )
         _nonnegative("measured_compute_cost", self.measured_compute_cost)
         _sha256("evaluation_sha256", self.evaluation_sha256)
+        if self.evaluation is not None:
+            if not isinstance(self.evaluation, PairedVOCEvaluation):
+                raise ModelComputeRouterError(
+                    "evaluation must be PairedVOCEvaluation"
+                )
+            evaluation = self.evaluation
+            if evaluation.evaluation_id != self.evidence_id:
+                raise ModelComputeRouterError(
+                    "VOC evaluation identity does not match evidence_id"
+                )
+            if evaluation.evaluation_sha256 != self.evaluation_sha256:
+                raise ModelComputeRouterError(
+                    "VOC evaluation digest does not match durable paired evaluation"
+                )
+            expected_identity = (
+                self.baseline_candidate_id,
+                self.baseline_backend_id,
+                self.baseline_model_id,
+                self.baseline_config_sha256,
+                self.challenger_candidate_id,
+                self.challenger_backend_id,
+                self.challenger_model_id,
+                self.challenger_config_sha256,
+            )
+            actual_identity = (
+                evaluation.baseline_candidate_id,
+                evaluation.baseline_backend_id,
+                evaluation.baseline_model_id,
+                evaluation.baseline_config_sha256,
+                evaluation.challenger_candidate_id,
+                evaluation.challenger_backend_id,
+                evaluation.challenger_model_id,
+                evaluation.challenger_config_sha256,
+            )
+            if actual_identity != expected_identity:
+                raise ModelComputeRouterError(
+                    "VOC evaluation compute identity does not match evidence"
+                )
+            expected_values = (
+                self.baseline_utility,
+                self.challenger_utility,
+                self.compute_cost_penalty,
+                self.latency_opportunity_cost_penalty,
+                self.measured_compute_cost,
+            )
+            actual_values = (
+                evaluation.baseline_utility,
+                evaluation.challenger_utility,
+                evaluation.compute_cost_penalty,
+                evaluation.latency_opportunity_cost_penalty,
+                evaluation.measured_compute_cost,
+            )
+            if actual_values != expected_values:
+                raise ModelComputeRouterError(
+                    "VOC evaluation utility/cost values do not match evidence"
+                )
+            if _instant("measured_at", self.measured_at) != _instant(
+                "evaluated_at", evaluation.evaluated_at
+            ):
+                raise ModelComputeRouterError(
+                    "VOC measured_at does not match paired evaluation time"
+                )
+            if (
+                self.provenance is VOCEvidenceProvenance.MEASURED_SHADOW
+                and evaluation.provenance
+                is not VOCEvaluationProvenance.MEASURED_SHADOW
+            ) or (
+                self.provenance is VOCEvidenceProvenance.SIMULATED
+                and evaluation.provenance
+                is not VOCEvaluationProvenance.SIMULATED
+            ):
+                raise ModelComputeRouterError(
+                    "VOC evaluation provenance does not match evidence"
+                )
 
     @property
     def net_value(self) -> Decimal:
@@ -448,6 +537,9 @@ class ValueOfComputationEvidence:
             ),
             "measured_compute_cost": str(self.measured_compute_cost),
             "evaluation_sha256": self.evaluation_sha256,
+            "evaluation": (
+                None if self.evaluation is None else self.evaluation.payload()
+            ),
         }
 
     @classmethod
@@ -476,6 +568,11 @@ class ValueOfComputationEvidence:
                 ),
                 measured_compute_cost=Decimal(raw["measured_compute_cost"]),
                 evaluation_sha256=raw["evaluation_sha256"],
+                evaluation=(
+                    None
+                    if raw.get("evaluation") is None
+                    else PairedVOCEvaluation.from_payload(raw["evaluation"])
+                ),
             )
         except (KeyError, TypeError, InvalidOperation, ValueError) as exc:
             if isinstance(exc, ModelComputeRouterError):
@@ -1345,6 +1442,10 @@ def route_compute(
         baseline_reason = (
             "missing paired measured value-of-computation evidence"
         )
+    elif voc_evidence.evaluation is None:
+        baseline_reason = (
+            "missing qualified paired outcome evaluation for VOC evidence"
+        )
     else:
         if not voc_evidence.matches_candidates(baseline, cloud):
             baseline_reason = (
@@ -1402,6 +1503,17 @@ def route_compute(
             baseline_reason = (
                 "measured value of computation is non-positive"
             )
+        else:
+            evaluation_reason = (
+                voc_evidence.evaluation.routing_ineligibility_reason(
+                    as_of=as_of,
+                    minimum_effective_sample_size=(
+                        policy.voc_min_effective_sample_size
+                    ),
+                )
+            )
+            if evaluation_reason is not None:
+                baseline_reason = evaluation_reason
 
     if baseline_reason is not None:
         return ComputeRouteDecision.build(

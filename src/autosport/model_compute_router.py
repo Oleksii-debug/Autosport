@@ -20,7 +20,12 @@ from .sport_domain_fitness import (
     SportDomainFitnessObservation,
     recommend_route,
 )
-from .voc_evaluation import PairedVOCEvaluation, VOCEvaluationProvenance
+from .voc_evaluation import (
+    PairedVOCEvaluation,
+    VOCEvaluationError,
+    VOCEvaluationProvenance,
+    VOCEvaluationStore,
+)
 
 _SCHEMA = "autosport.model_compute_router"
 _VERSION = 4
@@ -1306,6 +1311,7 @@ def route_compute(
     *,
     as_of: str,
     voc_evidence: ValueOfComputationEvidence | None = None,
+    voc_evaluation_store: VOCEvaluationStore | None = None,
     domain_observation: SportDomainFitnessObservation | None = None,
     domain_route: RouteRecommendation | None = None,
 ) -> ComputeRouteDecision:
@@ -1503,17 +1509,45 @@ def route_compute(
             baseline_reason = (
                 "measured value of computation is non-positive"
             )
-        else:
-            evaluation_reason = (
-                voc_evidence.evaluation.routing_ineligibility_reason(
-                    as_of=as_of,
-                    minimum_effective_sample_size=(
-                        policy.voc_min_effective_sample_size
-                    ),
-                )
+        elif voc_evaluation_store is None:
+            baseline_reason = (
+                "missing durable VOC evaluation authority"
             )
-            if evaluation_reason is not None:
-                baseline_reason = evaluation_reason
+        elif not isinstance(voc_evaluation_store, VOCEvaluationStore):
+            raise TypeError(
+                "voc_evaluation_store must be VOCEvaluationStore"
+            )
+        else:
+            try:
+                resolved_evaluation = voc_evaluation_store.require(
+                    voc_evidence.evidence_id,
+                    evaluation_sha256=voc_evidence.evaluation_sha256,
+                    as_of=as_of,
+                )
+            except VOCEvaluationError as exc:
+                baseline_reason = (
+                    "durable VOC evaluation authority rejected evidence: "
+                    + str(exc)
+                )
+            else:
+                if (
+                    resolved_evaluation.payload()
+                    != voc_evidence.evaluation.payload()
+                ):
+                    baseline_reason = (
+                        "durable VOC evaluation differs from routed evidence"
+                    )
+                else:
+                    evaluation_reason = (
+                        resolved_evaluation.routing_ineligibility_reason(
+                            as_of=as_of,
+                            minimum_effective_sample_size=(
+                                policy.voc_min_effective_sample_size
+                            ),
+                        )
+                    )
+                    if evaluation_reason is not None:
+                        baseline_reason = evaluation_reason
 
     if baseline_reason is not None:
         return ComputeRouteDecision.build(
@@ -1558,8 +1592,21 @@ def route_compute(
 class ModelComputeRouterStore:
     """Restart-safe route/cost ledger with separate execution authority."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        voc_evaluation_store: VOCEvaluationStore | None = None,
+    ) -> None:
+        if (
+            voc_evaluation_store is not None
+            and not isinstance(voc_evaluation_store, VOCEvaluationStore)
+        ):
+            raise TypeError(
+                "voc_evaluation_store must be VOCEvaluationStore or None"
+            )
         self.path = Path(path)
+        self._voc_evaluation_store = voc_evaluation_store
         self._execution_authority_path = self.path.with_name(
             f"{self.path.name}.execution-authority.jsonl"
         )
@@ -2167,6 +2214,7 @@ class ModelComputeRouterStore:
                 policy,
                 as_of=decision.decided_at,
                 voc_evidence=voc,
+                voc_evaluation_store=self._voc_evaluation_store,
                 domain_observation=domain_observation,
             )
             if replayed_decision.payload() != decision.payload():
@@ -2449,6 +2497,7 @@ class ModelComputeRouterStore:
             policy,
             as_of=as_of,
             voc_evidence=voc_evidence,
+            voc_evaluation_store=self._voc_evaluation_store,
             domain_observation=domain_observation,
             domain_route=domain_route,
         )

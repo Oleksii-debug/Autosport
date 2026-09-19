@@ -33,6 +33,8 @@ _RECORD_TYPES = frozenset(
         "DriftReference",
         "DriftObservation",
         "DriftFinding",
+        "CounterfactualQualification",
+        "CounterfactualSourceEvidence",
     }
 )
 
@@ -781,6 +783,99 @@ class Postmortem:
 
 
 @dataclass(frozen=True, slots=True)
+class CounterfactualQualification:
+    authority_id: str
+    authority_version: str
+    evaluator_source_sha256: str
+    reward_definition_sha256: str
+    reward_mode: str
+    scope: str
+    qualification_status: str
+    qualified_at: str
+    created_at: str
+    qualification_artifact_sha256: str
+
+    def __post_init__(self) -> None:
+        _text(self.authority_id, "authority_id")
+        _text(self.authority_version, "authority_version")
+        for name in ("evaluator_source_sha256", "reward_definition_sha256", "qualification_artifact_sha256"):
+            _sha256(getattr(self, name), name)
+        _text(self.reward_mode, "reward_mode")
+        _text(self.scope, "scope")
+        _text(self.qualification_status, "qualification_status")
+        if self.qualification_status not in {"QUALIFIED", "REVOKED", "UNQUALIFIED"}:
+            raise ValueError("unsupported counterfactual qualification_status")
+        _iso(self.qualified_at, "qualified_at")
+        _iso(self.created_at, "created_at")
+        if _instant(self.qualified_at, "qualified_at") > _instant(self.created_at, "created_at"):
+            raise ValueError("qualification cannot become valid after registry creation")
+
+    @property
+    def record_type(self) -> str: return "CounterfactualQualification"
+    @property
+    def record_id(self) -> str: return f"{self.authority_id}@{self.authority_version}"
+    @property
+    def available_at(self) -> str: return self.created_at
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "authority_id": self.authority_id,
+            "authority_version": self.authority_version,
+            "evaluator_source_sha256": self.evaluator_source_sha256.lower(),
+            "reward_definition_sha256": self.reward_definition_sha256.lower(),
+            "reward_mode": self.reward_mode,
+            "scope": self.scope,
+            "qualification_status": self.qualification_status,
+            "qualified_at": self.qualified_at,
+            "qualification_artifact_sha256": self.qualification_artifact_sha256.lower(),
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CounterfactualSourceEvidence:
+    authority_id: str
+    authority_version: str
+    sample_id: str
+    source_evidence_sha256: str
+    observed_at: str
+    reward_available_at: str
+    created_at: str
+    dataset_snapshot_id: str
+
+    def __post_init__(self) -> None:
+        _text(self.authority_id, "authority_id")
+        _text(self.authority_version, "authority_version")
+        _text(self.sample_id, "sample_id")
+        _sha256(self.source_evidence_sha256, "source_evidence_sha256")
+        _iso(self.observed_at, "observed_at")
+        _iso(self.reward_available_at, "reward_available_at")
+        _iso(self.created_at, "created_at")
+        _text(self.dataset_snapshot_id, "dataset_snapshot_id")
+        if _instant(self.reward_available_at, "reward_available_at") < _instant(self.observed_at, "observed_at"):
+            raise ValueError("reward_available_at must not precede observed_at")
+        if _instant(self.created_at, "created_at") < _instant(self.reward_available_at, "reward_available_at"):
+            raise ValueError("source evidence cannot materialize before reward availability")
+
+    @property
+    def record_type(self) -> str: return "CounterfactualSourceEvidence"
+    @property
+    def record_id(self) -> str: return f"{self.authority_id}@{self.authority_version}:{self.sample_id}"
+    @property
+    def available_at(self) -> str: return self.created_at
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "authority_id": self.authority_id,
+            "authority_version": self.authority_version,
+            "sample_id": self.sample_id,
+            "source_evidence_sha256": self.source_evidence_sha256.lower(),
+            "observed_at": self.observed_at,
+            "reward_available_at": self.reward_available_at,
+            "dataset_snapshot_id": self.dataset_snapshot_id,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RegistryEntry:
     record_type: str
     record_id: str
@@ -1009,6 +1104,17 @@ class ScientificRegistry:
         atomic_write_json(self.path, state)
         self._read()
         return entry["record_sha256"]
+
+    def causal_precedes(self, earlier_record_type: str, earlier_record_id: str, later_record_type: str, later_record_id: str) -> bool:
+        """Return whether immutable registry append order proves one record existed before another."""
+        for value, name in ((earlier_record_type,"earlier_record_type"),(earlier_record_id,"earlier_record_id"),(later_record_type,"later_record_type"),(later_record_id,"later_record_id")):
+            _text(value, name)
+        state=self._read(); earlier=None; later=None
+        for index, raw in enumerate(state["records"]):
+            key=(raw["record_type"],raw["record_id"])
+            if key==(earlier_record_type,earlier_record_id): earlier=index
+            if key==(later_record_type,later_record_id): later=index
+        return earlier is not None and later is not None and earlier < later
 
     def get(self, record_type: str, record_id: str) -> RegistryEntry | None:
         _text(record_type, "record_type")

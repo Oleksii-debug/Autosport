@@ -7,6 +7,7 @@ from .gui import AUTOMATION_IDS
 from .integrity import atomic_write_json
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 from .windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
+from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
 
 
 _ACTION_BINDINGS = {
@@ -20,6 +21,7 @@ _ACTION_BINDINGS = {
 _FOCUS_BINDINGS = {
     "<F2>": "shell_navigation",
     "<F9>": "owner_economic_open",
+    "<F10>": "manual_calculation_open",
     "<F6>": "tickets",
     "<F7>": "live_quotes",
     "<F8>": "evaluation",
@@ -32,6 +34,13 @@ _FOCUSABLE_CONTROLS = (
     "owner_economic_open",
     "owner_economic_status",
     "owner_economic_readback",
+    "manual_calculation_open",
+    "manual_calculation_operation",
+    "manual_calculation_input",
+    "manual_calculation_calculate",
+    "manual_calculation_result",
+    "manual_calculation_clear",
+    "manual_calculation_close",
     "strategy",
     "research_plan",
     "choose_dataset",
@@ -88,11 +97,23 @@ def summarize_keyboard_contract(
             failures.append("Shift+Tab traversal cannot reach: " + ", ".join(missing_reverse_tab))
 
     shell_ids = WINDOWS_SHELL_AUTOMATION_IDS
-    expected_ids = {
-        name: (
-            WINDOWS_BANKROLL_AUTOMATION_ID
-            if name == "bankroll"
-            else shell_ids[
+    workbench_names = {
+        "manual_calculation_open": "open",
+        "manual_calculation_operation": "operation",
+        "manual_calculation_input": "input",
+        "manual_calculation_calculate": "calculate",
+        "manual_calculation_result": "result",
+        "manual_calculation_clear": "clear",
+        "manual_calculation_close": "close",
+    }
+
+    def automation_id_for(name: str) -> int:
+        if name == "bankroll":
+            return WINDOWS_BANKROLL_AUTOMATION_ID
+        if name in workbench_names:
+            return WORKBENCH_AUTOMATION_IDS[workbench_names[name]]
+        if name.startswith("shell_") or name.startswith("owner_economic_"):
+            return shell_ids[
                 {
                     "shell_navigation": "navigation",
                     "shell_open": "open",
@@ -103,11 +124,9 @@ def summarize_keyboard_contract(
                     "owner_economic_readback": "owner_economic_readback",
                 }[name]
             ]
-            if name.startswith("shell_") or name.startswith("owner_economic_")
-            else AUTOMATION_IDS[name]
-        )
-        for name in _FOCUSABLE_CONTROLS
-    }
+        return AUTOMATION_IDS[name]
+
+    expected_ids = {name: automation_id_for(name) for name in _FOCUSABLE_CONTROLS}
     return {
         "status": "PASS" if not failures else "FAIL",
         "action_shortcuts_bound": {
@@ -128,9 +147,9 @@ def summarize_keyboard_contract(
         "failures": failures,
         "evidence_scope": (
             "in-process packaged Windows GUI keyboard contract: action shortcuts and shell cycling are bound, "
-            "F2/F6/F7/F8 focus shortcuts are executed, and critical shell plus V1 controls including the "
-            "shell Open action and read-only bankroll summary are reachable through forward Tab and reverse "
-            "Shift+Tab traversal; not physical keyboard or NVDA speech proof"
+            "F2/F6/F7/F8/F9/F10 focus shortcuts are executed, and critical shell controls plus the manual "
+            "calculation workbench are reachable through forward Tab and reverse Shift+Tab traversal; "
+            "not physical keyboard or NVDA speech proof"
         ),
         "human_tested": False,
         "nvda_verified": False,
@@ -138,8 +157,11 @@ def summarize_keyboard_contract(
     }
 
 
-def _critical_widgets(app: WindowsAutosportApp) -> dict[str, Any]:
-    return {
+def _critical_widgets(
+    app: WindowsAutosportApp,
+    workbench_dialog: Any | None = None,
+) -> dict[str, Any]:
+    controls = {
         "shell_navigation": app.shell_navigation,
         "shell_open": app.shell_open_button,
         "shell_state": app.shell_state,
@@ -160,28 +182,51 @@ def _critical_widgets(app: WindowsAutosportApp) -> dict[str, Any]:
         "evaluation": app.evaluation,
         "log": app.log,
         "bankroll": app.bank_summary,
+        "manual_calculation_open": app.manual_calculation_button,
     }
+    if workbench_dialog is not None:
+        workbench = getattr(workbench_dialog, "_autosport_workbench_controls", {})
+        for key in ("operation", "input", "calculate", "result", "clear", "close"):
+            widget = workbench.get(key)
+            if widget is not None:
+                controls[f"manual_calculation_{key}"] = widget
+    return controls
 
 
-def _tab_reachable_controls(app: WindowsAutosportApp, *, reverse: bool = False) -> list[str]:
-    controls = _critical_widgets(app)
+def _tab_reachable_controls(
+    app: WindowsAutosportApp,
+    *,
+    reverse: bool = False,
+    workbench_dialog: Any | None = None,
+) -> list[str]:
+    controls = _critical_widgets(app, workbench_dialog)
     names_by_widget = {widget: name for name, widget in controls.items()}
-    start = app.shell_navigation
-    current = start
-    seen_widgets: set[Any] = set()
-    reachable: list[str] = []
-    for _ in range(80):
-        if current in seen_widgets:
-            break
-        seen_widgets.add(current)
-        name = names_by_widget.get(current)
-        if name is not None:
-            reachable.append(name)
-        next_widget = current.tk_focusPrev() if reverse else current.tk_focusNext()
-        if next_widget is None:
-            break
-        current = next_widget
-    return reachable
+
+    def walk(start: Any) -> list[str]:
+        current = start
+        seen_widgets: set[Any] = set()
+        result: list[str] = []
+        for _ in range(120):
+            if current in seen_widgets:
+                break
+            seen_widgets.add(current)
+            name = names_by_widget.get(current)
+            if name is not None:
+                result.append(name)
+            next_widget = current.tk_focusPrev() if reverse else current.tk_focusNext()
+            if next_widget is None:
+                break
+            current = next_widget
+        return result
+
+    reachable = walk(app.shell_navigation)
+    if workbench_dialog is not None:
+        workbench = getattr(workbench_dialog, "_autosport_workbench_controls", {})
+        start_key = "close" if reverse else "operation"
+        start = workbench.get(start_key)
+        if start is not None:
+            reachable.extend(walk(start))
+    return list(dict.fromkeys(reachable))
 
 
 def _binding_presence(app: WindowsAutosportApp) -> dict[str, bool]:
@@ -191,8 +236,11 @@ def _binding_presence(app: WindowsAutosportApp) -> dict[str, bool]:
     }
 
 
-def _execute_focus_shortcuts(app: WindowsAutosportApp) -> dict[str, bool]:
-    controls = _critical_widgets(app)
+def _execute_focus_shortcuts(
+    app: WindowsAutosportApp,
+    workbench_dialog: Any | None = None,
+) -> dict[str, bool]:
+    controls = _critical_widgets(app, workbench_dialog)
     results: dict[str, bool] = {}
     app.strategy.focus_set()
     app.update()
@@ -209,15 +257,19 @@ def run_keyboard_audit(output_path: str | Path) -> int:
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     app: WindowsAutosportApp | None = None
+    dialog: Any | None = None
     try:
         app = WindowsAutosportApp()
         app.update_idletasks()
         app.update()
+        dialog = show_manual_calculation_workbench(app)
+        app.update_idletasks()
+        app.update()
         report = summarize_keyboard_contract(
             _binding_presence(app),
-            _execute_focus_shortcuts(app),
-            _tab_reachable_controls(app),
-            _tab_reachable_controls(app, reverse=True),
+            _execute_focus_shortcuts(app, dialog),
+            _tab_reachable_controls(app, workbench_dialog=dialog),
+            _tab_reachable_controls(app, reverse=True, workbench_dialog=dialog),
         )
     except Exception as exc:
         report = {
@@ -229,6 +281,11 @@ def run_keyboard_audit(output_path: str | Path) -> int:
             "real_money_execution": False,
         }
     finally:
+        if dialog is not None:
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
         if app is not None:
             try:
                 app.close_app()

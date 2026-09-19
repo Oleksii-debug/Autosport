@@ -30,7 +30,14 @@ $expected = @(
     [ordered]@{ key = 'shell_details'; automation_id = '304'; name = 'Контракт вибраного екрана'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
     [ordered]@{ key = 'owner_economic_open'; automation_id = '305'; name = 'Економічні межі власника'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
     [ordered]@{ key = 'owner_economic_status'; automation_id = '306'; name = 'Стан економічних меж власника'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false; require_value_read_only = $true },
-    [ordered]@{ key = 'owner_economic_readback'; automation_id = '307'; name = 'Точні економічні межі власника'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true }
+    [ordered]@{ key = 'owner_economic_readback'; automation_id = '307'; name = 'Точні економічні межі власника'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
+    [ordered]@{ key = 'manual_calculation_open'; automation_id = '330'; name = 'Відкрити робочу поверхню ручних розрахунків'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
+    [ordered]@{ key = 'manual_calculation_operation'; automation_id = '331'; name = 'Операція ручного розрахунку'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; require_named_rows = $false },
+    [ordered]@{ key = 'manual_calculation_input'; automation_id = '332'; name = 'Вхідні значення ручного розрахунку'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false },
+    [ordered]@{ key = 'manual_calculation_calculate'; automation_id = '333'; name = 'Обчислити ручний результат'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
+    [ordered]@{ key = 'manual_calculation_result'; automation_id = '334'; name = 'Результат і evidence ручного розрахунку'; required_pattern = 'Value'; require_external_focus = $false; expected_control_type = 'ControlType.Edit'; require_named_rows = $false; require_value_read_only = $true; allow_disabled = $true },
+    [ordered]@{ key = 'manual_calculation_clear'; automation_id = '335'; name = 'Очистити ручні значення'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
+    [ordered]@{ key = 'manual_calculation_close'; automation_id = '336'; name = 'Закрити ручні розрахунки'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false }
 )
 
 function Test-Pattern {
@@ -128,6 +135,37 @@ function Find-UiaRootForProcessFamily {
     return $null
 }
 
+function Find-UiaElementForProcessFamily {
+    param(
+        [int[]]$ProcessIds,
+        [string]$AutomationId
+    )
+
+    $condition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+        $AutomationId
+    )
+    try {
+        $desktop = [System.Windows.Automation.AutomationElement]::RootElement
+        $windows = $desktop.FindAll(
+            [System.Windows.Automation.TreeScope]::Children,
+            [System.Windows.Automation.Condition]::TrueCondition
+        )
+        foreach ($window in $windows) {
+            if (-not ($ProcessIds -contains [int]$window.Current.ProcessId)) { continue }
+            if ([string]$window.Current.AutomationId -eq $AutomationId) { return $window }
+            $element = $window.FindFirst(
+                [System.Windows.Automation.TreeScope]::Descendants,
+                $condition
+            )
+            if ($null -ne $element) { return $element }
+        }
+    } catch {
+        # The UIA tree may change while a dialog opens; bounded callers retry.
+    }
+    return $null
+}
+
 $report = [ordered]@{
     status = 'FAIL'
     source = 'external_windows_uia_client'
@@ -181,12 +219,37 @@ try {
     )
     $report.descendant_count = $descendants.Count
 
+    $manualOpen = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'
+    if ($null -eq $manualOpen) {
+        $report.failures += 'automation_id=330: cannot open manual calculation workbench for external UIA audit'
+    } else {
+        try {
+            $invokeObject = $null
+            if (-not $manualOpen.TryGetCurrentPattern(
+                [System.Windows.Automation.InvokePattern]::Pattern,
+                [ref]$invokeObject
+            )) {
+                throw 'manual calculation open control has no InvokePattern'
+            }
+            ([System.Windows.Automation.InvokePattern]$invokeObject).Invoke()
+            $dialogDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(5, $TimeoutSeconds))
+            $dialogProbe = $null
+            while ([DateTime]::UtcNow -lt $dialogDeadline) {
+                $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
+                $dialogProbe = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '331'
+                if ($null -ne $dialogProbe) { break }
+                Start-Sleep -Milliseconds 100
+            }
+            if ($null -eq $dialogProbe) {
+                $report.failures += 'automation_id=331: manual calculation dialog did not become externally inspectable'
+            }
+        } catch {
+            $report.failures += "manual calculation dialog open failed: $($_.Exception.Message)"
+        }
+    }
+
     foreach ($spec in $expected) {
-        $idCondition = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
-            [string]$spec.automation_id
-        )
-        $element = $uiaRoot.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $idCondition)
+        $element = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId ([string]$spec.automation_id)
         if ($null -eq $element) {
             $report.failures += "automation_id=$($spec.automation_id): not found by external UIA client"
             continue
@@ -249,7 +312,7 @@ try {
         if ([bool]$spec.require_named_rows -and $namedRowCount -lt 1) {
             $report.failures += "automation_id=$($spec.automation_id): no externally exposed named ListItem rows"
         }
-        if (-not $enabled) {
+        if (-not $enabled -and -not [bool]$spec.allow_disabled) {
             $report.failures += "automation_id=$($spec.automation_id): externally disabled at startup"
         }
         if (-not $patternOk) {

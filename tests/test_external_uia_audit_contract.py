@@ -32,13 +32,20 @@ def test_external_uia_audit_covers_packaged_readonly_surfaces() -> None:
         "require_external_focus = $true; expected_control_type = 'ControlType.Edit'; "
         "require_named_rows = $false; require_value_read_only = $true }"
     )
+    expected_workbench_result = (
+        "[ordered]@{ key = 'manual_calculation_result'; automation_id = '334'; "
+        "name = 'Результат і evidence ручного розрахунку'; required_pattern = 'Value'; "
+        "require_external_focus = $false; expected_control_type = 'ControlType.Edit'; "
+        "require_named_rows = $false; require_value_read_only = $true; allow_disabled = $true }"
+    )
     assert expected_bankroll in audit
     assert expected_shell_state in audit
     assert expected_owner_state in audit
+    assert expected_workbench_result in audit
     assert audit.count("automation_id = '205'") == 1
     assert audit.count("automation_id = '302'") == 1
     assert audit.count("automation_id = '306'") == 1
-    assert audit.count("require_value_read_only = $true") == 3
+    assert audit.count("require_value_read_only = $true") == 4
 
 
 def test_external_uia_audit_requires_semantic_control_type_for_every_critical_control() -> None:

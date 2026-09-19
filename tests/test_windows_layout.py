@@ -24,6 +24,8 @@ from autosport.windows_layout import (
     _owner_economic_write_blocker,
     _persist_initial_owner_economic_contract,
     _show_owner_economic_dialog,
+    MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS,
+    install_manual_calculation_workbench_surface,
     _surface_target_widget,
 )
 
@@ -32,9 +34,13 @@ class _Widget:
     def __init__(self):
         self.height = None
         self.pady = None
+        self.padding = None
 
     def configure(self, **kwargs):
-        self.height = kwargs.get("height")
+        if "height" in kwargs:
+            self.height = kwargs["height"]
+        if "padding" in kwargs:
+            self.padding = kwargs["padding"]
 
     def pack_configure(self, **kwargs):
         self.pady = kwargs.get("pady")
@@ -46,9 +52,14 @@ class _App:
         self.tickets = _Widget()
         self.evaluation = _Widget()
         self.log = _Widget()
+        self.log_accessible = _Widget()
         self.tickets_label = _Widget()
         self.evaluation_label = _Widget()
         self.log_label = _Widget()
+        self.frame = _Widget()
+
+    def winfo_children(self):
+        return [self.frame]
 
 
 def test_compact_surface_heights_keep_all_critical_scrolling_surfaces_visible():
@@ -56,13 +67,15 @@ def test_compact_surface_heights_keep_all_critical_scrolling_surfaces_visible():
 
     compact_surface_heights(app)
 
-    assert app.live_quotes.height == 2
-    assert app.tickets.height == 3
-    assert app.evaluation.height == 2
+    assert app.live_quotes.height == 1
+    assert app.tickets.height == 2
+    assert app.evaluation.height == 1
     assert app.log.height == 2
-    assert app.tickets_label.pady == (6, 2)
-    assert app.evaluation_label.pady == (6, 2)
-    assert app.log_label.pady == (6, 2)
+    assert app.tickets_label.pady == (4, 1)
+    assert app.evaluation_label.pady == (4, 1)
+    assert app.log_label.pady == (4, 1)
+    assert app.frame.padding == 8
+    assert app.log_accessible.pady == (0, 2)
     assert WINDOWS_SHELL_DETAILS_VISIBLE_ROWS == 1
 
 
@@ -307,3 +320,239 @@ def test_owner_economic_write_blocker_disables_creation_for_every_busy_writer(
         app.recovery_worker.busy = True
 
     assert _owner_economic_write_blocker(app, workspace) is not None
+
+
+def test_manual_calculation_workbench_localization_and_surface_contract():
+    from autosport.localization import text
+    from autosport.windows_surface_contract import SURFACE_BY_KEY
+    from autosport.windows_manual_calculation import WORKBENCH_OPERATIONS
+
+    assert text("ui.windows.manual_calculation.dialog.title") == "Автоспорт — ручні розрахунки"
+    assert SURFACE_BY_KEY["manual_calculation"].phase == "active"
+    assert SURFACE_BY_KEY["manual_calculation"].target_widget == "manual_calculation_button"
+    assert len(WORKBENCH_OPERATIONS) == 7
+    assert all(label for _, label in WORKBENCH_OPERATIONS)
+
+
+def test_manual_calculation_workbench_has_no_persistent_or_execution_authority():
+    import inspect
+    from autosport.windows_manual_calculation import show_manual_calculation_workbench
+    source = inspect.getsource(show_manual_calculation_workbench)
+    assert "atomic_write_json" not in source
+    assert "PaperBook" not in source
+    assert "provider" not in source
+    from autosport.localization import text
+    assert "ui.windows.manual_calculation.status.success" in source
+    assert text("ui.windows.manual_calculation.status.success").endswith(
+        "real_money_execution=false."
+    )
+
+
+
+def test_manual_calculation_service_exception_is_not_exposed_as_raw_english_ui_text():
+    from autosport.localization import text
+    from autosport.windows_manual_calculation import _localized_calculation_error
+
+    error = ValueError("boolean must not be accepted as a numeric value")
+    rendered = _localized_calculation_error(error)
+
+    assert rendered == text("ui.windows.manual_calculation.status.error")
+    assert "boolean must not be accepted" not in rendered
+    assert any(char in rendered for char in "АБВГҐДЕЄЖЗІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ")
+
+
+def test_manual_calculation_workbench_input_and_error_contracts():
+    from autosport.windows_manual_calculation import _calculation_call, _read_lines, _selection_odds
+
+    class Input:
+        def __init__(self, value):
+            self.value = value
+        def get(self, *_args):
+            return self.value
+
+    assert _read_lines(Input("1.90,2.10")) == ["1.90", "2.10"]
+    assert _selection_odds(Input("a=1.90\nb=2.10")) == {"a": "1.90", "b": "2.10"}
+    with pytest.raises(ValueError, match="Повторний"):
+        _selection_odds(Input("a=1.90\na=2.10"))
+
+    class Service:
+        def odds_conversion(self, _value):
+            raise ValueError("Infinity")
+    with pytest.raises(ValueError):
+        _calculation_call(Service(), "odds_conversion", Input("Infinity"))
+
+
+def test_manual_calculation_workbench_is_active_and_keyboard_reachable():
+    from autosport.windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, WORKBENCH_OPERATIONS
+    from autosport.windows_surface_contract import SURFACE_BY_KEY
+
+    surface = SURFACE_BY_KEY["manual_calculation"]
+    assert surface.phase == "active"
+    assert surface.target_widget == "manual_calculation_button"
+    assert WORKBENCH_AUTOMATION_IDS == {
+        "open": 330,
+        "operation": 331,
+        "input": 332,
+        "calculate": 333,
+        "result": 334,
+        "clear": 335,
+        "close": 336,
+    }
+    assert len(WORKBENCH_OPERATIONS) == 7
+    assert "<F10>" in inspect.getsource(install_manual_calculation_workbench_surface)
+    assert "show_manual_calculation_workbench(app)" in inspect.getsource(
+        install_manual_calculation_workbench_surface
+    )
+
+
+def test_manual_calculation_workbench_uses_canonical_service_for_all_supported_operations():
+    from autosport.windows_manual_calculation import _calculation_call
+
+    class Input:
+        def __init__(self, value):
+            self.value = value
+        def get(self, *_args):
+            return self.value
+
+    class Service:
+        def __init__(self):
+            self.calls = []
+        def odds_conversion(self, value):
+            self.calls.append(("odds_conversion", value))
+            return object()
+        def implied_probability(self, value):
+            self.calls.append(("implied_probability", value))
+            return object()
+        def multiplicative_devig(self, value):
+            self.calls.append(("multiplicative_devig", value))
+            return object()
+        def expected_return(self, *value):
+            self.calls.append(("expected_return", value))
+            return object()
+        def paper_payout(self, *value):
+            self.calls.append(("paper_payout", value))
+            return object()
+        def fractional_kelly(self, *value, **kwargs):
+            self.calls.append(("fractional_kelly", value, kwargs))
+            return object()
+        def maximum_drawdown(self, value):
+            self.calls.append(("maximum_drawdown", value))
+            return object()
+
+    svc = Service()
+    assert _calculation_call(svc, "odds_conversion", Input("2.10"))
+    assert _calculation_call(svc, "implied_probability", Input("2.10"))
+    assert _calculation_call(svc, "multiplicative_devig", Input("a=2.10\nb=1.90"))
+    assert _calculation_call(svc, "expected_return", Input("0.6\n2.10\n25"))
+    assert _calculation_call(svc, "paper_payout", Input("25\n2.10"))
+    assert _calculation_call(svc, "fractional_kelly", Input("0.6\n2.10\n0.5\n0.2"))
+    assert _calculation_call(svc, "maximum_drawdown", Input("100\n120\n90"))
+    assert [call[0] for call in svc.calls] == [
+        "odds_conversion",
+        "implied_probability",
+        "multiplicative_devig",
+        "expected_return",
+        "paper_payout",
+        "fractional_kelly",
+        "maximum_drawdown",
+    ]
+
+
+def test_manual_calculation_ukrainian_result_preserves_canonical_evidence():
+    from autosport.calculation_manual import ManualCalculationService
+    from autosport.windows_manual_calculation import _render_evidence_uk
+
+    service = ManualCalculationService()
+    evidence = service.paper_payout("25", "2.10")
+    rendered = _render_evidence_uk(evidence)
+    human = rendered.split("Канонічний evidence JSON (незмінений):", 1)[0]
+
+    assert rendered == _render_evidence_uk(evidence)
+    assert "Результат ручного розрахунку" in human
+    assert "Метод (канонічний ID): decimal_odds_payout" in human
+    assert "Статус точності: точний (exact)" in human
+    assert "Припущення:" in human
+    assert "Розрахунок лише паперовий; повноваження реального виконання відсутнє." in human
+    assert "одиниця: paper_currency" in human
+    assert f"Хеш evidence: {evidence.evidence_sha256}" in human
+    assert "Реальне виконання: ні (real_money_execution=false)" in human
+    assert evidence.to_text().rstrip("\n") in rendered
+
+
+def test_manual_calculation_ukrainian_renderer_covers_all_current_assumptions_and_warnings():
+    from autosport.calculation_manual import ManualCalculationService
+    from autosport.windows_manual_calculation import _render_evidence_uk
+
+    service = ManualCalculationService()
+    evidence = (
+        service.odds_conversion("2.10"),
+        service.odds_conversion("1.90"),
+        service.implied_probability("2.10"),
+        service.multiplicative_devig({"a": "2.10", "b": "1.90"}),
+        service.expected_return("0.60", "2.10", "25"),
+        service.paper_payout("25", "2.10"),
+        service.fractional_kelly("0.60", "2.10", fraction="0.5", cap="0.2"),
+        service.maximum_drawdown(("100", "120", "90")),
+    )
+    rendered = [_render_evidence_uk(item) for item in evidence]
+    assert all("Канонічний evidence JSON (незмінений):" in item for item in rendered)
+    assert "Ділення округлюється в детермінованому десятковому контексті." in rendered[2]
+    assert "Мультиплікативна нормалізація є методом моделювання" in rendered[3]
+    assert "Ділення у формулі Kelly округлюється" in rendered[6]
+    assert "Ділення частки просадки округлюється" in rendered[7]
+
+
+def test_manual_calculation_result_contract_is_read_only_and_nonpersistent():
+    from autosport.windows_manual_calculation import show_manual_calculation_workbench
+    source = inspect.getsource(show_manual_calculation_workbench)
+    assert 'result_box.configure(state="disabled")' in source
+    assert "atomic_write_json" not in source
+    assert "Store(" not in source
+    assert "PaperBook" not in source
+    assert "Provider" not in source
+
+
+def test_manual_calculation_cancel_clear_and_error_have_no_result_authority():
+    from autosport.windows_manual_calculation import show_manual_calculation_workbench
+    source = inspect.getsource(show_manual_calculation_workbench)
+    assert "set_result(None)" in source
+    assert "messagebox.ask" not in source
+    assert "messagebox.askokcancel" not in source
+    assert 'command=dialog.destroy' in source
+    assert '"ui.windows.manual_calculation.status.error"' in source
+
+
+def test_manual_calculation_localization_keys_are_all_present():
+    from autosport.localization import require_keys
+    require_keys(MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS)
+
+
+def test_manual_calculation_real_service_rejects_nonfinite_and_repeats_identical_evidence():
+    from autosport.calculation_manual import ManualCalculationService
+    from autosport.windows_manual_calculation import _calculation_call
+
+    class Input:
+        def __init__(self, value):
+            self.value = value
+        def get(self, *_args):
+            return self.value
+
+    service = ManualCalculationService()
+    with pytest.raises(ValueError):
+        _calculation_call(service, "implied_probability", Input("NaN"))
+    with pytest.raises(ValueError):
+        _calculation_call(service, "odds_conversion", Input("Infinity"))
+
+    first = _calculation_call(service, "paper_payout", Input("25\n2.10"))
+    second = _calculation_call(service, "paper_payout", Input("25\n2.10"))
+    assert first.to_text() == second.to_text()
+    assert first.evidence_sha256 == second.evidence_sha256
+    assert first.real_money_execution is False
+
+
+def test_manual_calculation_source_has_no_automatic_event_market_or_outcome_selection():
+    from autosport.windows_manual_calculation import _calculation_call
+    source = inspect.getsource(_calculation_call)
+    assert "MarketEvent" not in source
+    assert "event_id" not in source
+    assert "_selection_odds(widget)" in source

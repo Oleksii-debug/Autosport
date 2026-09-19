@@ -233,6 +233,17 @@ class AutosportApp(tk.Tk):
         self._set_evaluation_lines([text("ui.status.evaluation.empty")])
         self.log_label = ttk.Label(frame, text=text("ui.label.log"))
         self.log_label.pack(anchor="w", pady=(14, 4))
+        # Keep the rich multiline history for the visible shell, plus a canonical
+        # readonly single-value mirror so external UIA clients receive a stable
+        # Edit/Value surface even when the underlying Tk Text proxy is unavailable.
+        self.log_value = tk.StringVar(value="")
+        self.log_accessible = ttk.Entry(
+            frame,
+            textvariable=self.log_value,
+            state="readonly",
+            takefocus=True,
+        )
+        self.log_accessible.pack(fill="x", pady=(0, 4))
         self.log = tk.Text(frame, height=9, wrap="word", takefocus=True)
         self.log.pack(fill="both", expand=True)
 
@@ -259,7 +270,7 @@ class AutosportApp(tk.Tk):
             (self.live_quotes, text("ui.accessibility.live_quotes.name"), text("ui.accessibility.live_quotes.description"), AUTOMATION_IDS["live_quotes"]),
             (self.tickets, text("ui.accessibility.tickets.name"), text("ui.accessibility.tickets.description"), AUTOMATION_IDS["tickets"]),
             (self.evaluation, text("ui.accessibility.evaluation.name"), text("ui.accessibility.evaluation.description"), AUTOMATION_IDS["evaluation"]),
-            (self.log, text("ui.accessibility.log.name"), text("ui.accessibility.log.description"), AUTOMATION_IDS["log"]),
+            (self.log_accessible, text("ui.accessibility.log.name"), text("ui.accessibility.log.description"), AUTOMATION_IDS["log"]),
         )
         for widget, name, description, automation_id in controls:
             tk_uia.set_acc_name(widget, name)
@@ -601,6 +612,11 @@ class AutosportApp(tk.Tk):
     def _append_log(self, text: str) -> None:
         self.log.insert("end", text + "\n")
         self.log.see("end")
+        # UIA exposes this readonly Entry as the canonical Value surface. Keep the
+        # mirror bounded to avoid unbounded control values while retaining recent
+        # evidence for assistive clients.
+        value = self.log.get("1.0", "end-1c")
+        self.log_value.set(value[-12000:])
 
     def _set_replay_controls_busy(self, busy: bool) -> None:
         if busy or self._dataset_busy:

@@ -8,6 +8,10 @@ from tkinter import messagebox, ttk
 import tk_uia
 
 from .localization import require_keys, text
+from .windows_manual_calculation import (
+    WORKBENCH_AUTOMATION_IDS,
+    show_manual_calculation_workbench,
+)
 from .owner_economic_authority import (
     INITIAL_OWNER_FORM_DEFAULTS,
     OWNER_ECONOMIC_FORM_FIELDS,
@@ -29,16 +33,20 @@ from .windows_surface_contract import (
 # wrapper removes excess vertical chrome so the final execution log remains
 # mapped after the product shell is inserted.
 _SURFACE_HEIGHTS = {
-    # #579 adds a compact three-control owner-authority panel above the
-    # existing product surfaces. Preserve the 1080x860 Windows UIA mapping
-    # budget by reclaiming one row from each scrollable summary surface while
-    # keeping the execution log at two rows.
-    "live_quotes": 2,
-    "tickets": 3,
-    "evaluation": 2,
+    # #579 added the compact owner-authority panel and #585 added a dedicated
+    # readonly UIA log mirror. A Tk packer can keep later managed children
+    # logically packed but physically unmapped when the vertical cavity is
+    # exhausted; tk-uia reports that exact state as UNMAPPED_SINCE_ANNOTATED.
+    # Reclaim one additional row from each scrollable summary surface so the
+    # log mirror and two-row execution history both stay mapped at 1080x860.
+    "live_quotes": 1,
+    "tickets": 2,
+    "evaluation": 1,
     "log": 2,
 }
-_SECTION_LABEL_PADY = (6, 2)
+_SECTION_LABEL_PADY = (4, 1)
+_ROOT_FRAME_PADDING = 8
+_LOG_MIRROR_PADY = (0, 2)
 WINDOWS_SHELL_DETAILS_VISIBLE_ROWS = 1
 
 WINDOWS_SHELL_AUTOMATION_IDS = {
@@ -51,6 +59,66 @@ WINDOWS_SHELL_AUTOMATION_IDS = {
     "owner_economic_readback": 307,
     "owner_economic_dialog_readback": 308,
 }
+
+MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS = frozenset(
+    {
+        "ui.windows.manual_calculation.frame.title",
+        "ui.windows.manual_calculation.button.open",
+        "ui.windows.manual_calculation.accessibility.open.name",
+        "ui.windows.manual_calculation.accessibility.open.description",
+        "ui.windows.manual_calculation.dialog.title",
+        "ui.windows.manual_calculation.dialog.description",
+        "ui.windows.manual_calculation.operation.label",
+        "ui.windows.manual_calculation.input.label",
+        "ui.windows.manual_calculation.result.heading",
+        "ui.windows.manual_calculation.result.operation",
+        "ui.windows.manual_calculation.result.method",
+        "ui.windows.manual_calculation.result.classification",
+        "ui.windows.manual_calculation.result.classification.exact",
+        "ui.windows.manual_calculation.result.classification.approximate_decimal",
+        "ui.windows.manual_calculation.result.inputs",
+        "ui.windows.manual_calculation.result.outputs",
+        "ui.windows.manual_calculation.result.unit",
+        "ui.windows.manual_calculation.result.assumptions",
+        "ui.windows.manual_calculation.result.warnings",
+        "ui.windows.manual_calculation.result.none",
+        "ui.windows.manual_calculation.result.input_hash",
+        "ui.windows.manual_calculation.result.result_hash",
+        "ui.windows.manual_calculation.result.evidence_hash",
+        "ui.windows.manual_calculation.result.service_version",
+        "ui.windows.manual_calculation.result.input_mode",
+        "ui.windows.manual_calculation.result.real_money_execution",
+        "ui.windows.manual_calculation.result.real_money_false",
+        "ui.windows.manual_calculation.result.canonical_json",
+        "ui.windows.manual_calculation.error.unlocalized_evidence",
+        "ui.windows.manual_calculation.message.decimal_odds_supplied",
+        "ui.windows.manual_calculation.message.american_unrounded",
+        "ui.windows.manual_calculation.message.american_decimal_context",
+        "ui.windows.manual_calculation.message.american_display_rounding",
+        "ui.windows.manual_calculation.message.division_rounding",
+        "ui.windows.manual_calculation.message.one_market",
+        "ui.windows.manual_calculation.message.devig_model",
+        "ui.windows.manual_calculation.message.probability_caller",
+        "ui.windows.manual_calculation.message.paper_only",
+        "ui.windows.manual_calculation.message.probability_research",
+        "ui.windows.manual_calculation.message.kelly_single_position",
+        "ui.windows.manual_calculation.message.paper_research",
+        "ui.windows.manual_calculation.message.kelly_rounding",
+        "ui.windows.manual_calculation.message.balances_chronological",
+        "ui.windows.manual_calculation.message.drawdown_rounding",
+        "ui.windows.manual_calculation.calculate",
+        "ui.windows.manual_calculation.clear",
+        "ui.windows.manual_calculation.close",
+        "ui.windows.manual_calculation.status.ready",
+        "ui.windows.manual_calculation.status.success",
+        "ui.windows.manual_calculation.status.error",
+        "ui.windows.manual_calculation.status.cleared",
+        "ui.windows.manual_calculation.error.nonempty",
+        "ui.windows.manual_calculation.uia.input.name",
+        "ui.windows.manual_calculation.uia.input.description",
+    }
+)
+require_keys(MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS)
 
 OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS = {
     "readback": 308,
@@ -129,6 +197,14 @@ def compact_surface_heights(app: Any) -> None:
         getattr(app, name).configure(height=height)
     for name in ("tickets_label", "evaluation_label", "log_label"):
         getattr(app, name).pack_configure(pady=_SECTION_LABEL_PADY)
+    frame = next(iter(app.winfo_children()), None)
+    if frame is None:
+        raise RuntimeError("Autosport root frame is missing")
+    # Keep content rows intact and reclaim chrome instead. The dedicated
+    # automation_id=202 readonly mirror needs a real mapped Entry rectangle;
+    # otherwise tk-uia correctly reports UNMAPPED_SINCE_ANNOTATED.
+    frame.configure(padding=_ROOT_FRAME_PADDING)
+    app.log_accessible.pack_configure(pady=_LOG_MIRROR_PADY)
 
 
 def _surface_target_widget(app: Any, surface_key: str) -> Any | None:
@@ -502,6 +578,31 @@ def install_owner_economic_authority_surface(app: Any, frame: Any) -> None:
     refresh_owner_economic_authority_surface(app)
 
 
+def install_manual_calculation_workbench_surface(app: Any, frame: Any) -> None:
+    """Install the single active manual-calculation Windows workbench target."""
+    panel = ttk.LabelFrame(
+        frame,
+        text=text("ui.windows.manual_calculation.frame.title"),
+        padding=(8, 2),
+    )
+    first = frame.winfo_children()[0] if frame.winfo_children() else None
+    if first is None:
+        panel.pack(fill="x", pady=(0, 2))
+    else:
+        panel.pack(fill="x", pady=(0, 2), before=first)
+    app.manual_calculation_button = ttk.Button(
+        panel,
+        text=text("ui.windows.manual_calculation.button.open"),
+        command=lambda: show_manual_calculation_workbench(app),
+        takefocus=True,
+    )
+    app.manual_calculation_button.pack(fill="x")
+    app.bind(
+        "<F10>",
+        lambda _event: app.manual_calculation_button.focus_set(),
+    )
+
+
 def install_windows_product_shell(app: Any) -> None:
     """Install the truthful keyboard-first product navigator in the existing Tk shell."""
     children = app.winfo_children()
@@ -591,6 +692,18 @@ def configure_windows_product_shell_accessibility(app: Any) -> None:
     )
     tk_uia.set_automation_id(app.shell_details, WINDOWS_SHELL_AUTOMATION_IDS["details"])
     tk_uia.set_acc_name(
+        app.manual_calculation_button,
+        text("ui.windows.manual_calculation.accessibility.open.name"),
+    )
+    tk_uia.set_acc_description(
+        app.manual_calculation_button,
+        text("ui.windows.manual_calculation.accessibility.open.description"),
+    )
+    tk_uia.set_automation_id(
+        app.manual_calculation_button,
+        WORKBENCH_AUTOMATION_IDS["open"],
+    )
+    tk_uia.set_acc_name(
         app.owner_economic_authority_button,
         text("ui.windows.owner_authority.accessibility.open.name"),
     )
@@ -651,6 +764,7 @@ def install_compact_windows_layout() -> None:
         frame = next(iter(self.winfo_children()), None)
         if frame is None:
             raise RuntimeError("Autosport root frame is missing")
+        install_manual_calculation_workbench_surface(self, frame)
         install_owner_economic_authority_surface(self, frame)
 
     def configure_with_windows_shell(self) -> None:

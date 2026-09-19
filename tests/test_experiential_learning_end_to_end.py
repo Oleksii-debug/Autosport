@@ -311,6 +311,10 @@ def _real_factory_foundation(tmp_path, identity: EnvironmentIdentity):
         T3,
         evaluated_strategy_version_id=champion_strategy.strategy_version_id,
         evaluated_model_version_id=champion_model.model_version_id,
+        effective_sample_size=5,
+        effect_interval_low="0.1",
+        effect_interval_high="0.2",
+        practical_improvement="0.15",
     )
     for record in (champion_model, champion_strategy, champion_bundle):
         registry.append(record)

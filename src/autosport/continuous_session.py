@@ -663,5 +663,5 @@ class ContinuousSessionCoordinator:
                 last_success_at=self._state.snapshot().last_success_at or now,
             )
         except Exception as exc:
-            self._state.record_failure(type(exc).__name__)
+            self._state.record_failure(code=type(exc).__name__)
             raise

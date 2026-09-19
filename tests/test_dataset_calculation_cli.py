@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import unittest
+from contextlib import redirect_stdout
 from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from autosport.cli import main as cli_main
+from autosport.dataset import ReplayDataset
 from autosport.dataset_calculation_cli import calculate_dataset_quote, render_result, run
 from autosport.domain import MarketEvent, MarketType
 
@@ -46,6 +52,29 @@ def _args(**overrides: object) -> argparse.Namespace:
     return argparse.Namespace(**values)
 
 
+def _cli_argv(path: str | Path = "unused-dataset") -> list[str]:
+    return [
+        "calculate-dataset-quote",
+        str(path),
+        "--event-id",
+        "race-1",
+        "--market-id",
+        "winner",
+        "--selection-id",
+        "driver-a",
+        "--source-id",
+        "provider-a",
+        "--sequence",
+        "7",
+        "--cutoff",
+        "2026-09-19T12:00:00+00:00",
+        "--operation",
+        "implied-probability",
+        "--format",
+        "json",
+    ]
+
+
 def _event(
     *,
     status: str = "open",
@@ -73,6 +102,69 @@ def _event(
 
 
 class DatasetQuoteCalculationCliTests(unittest.TestCase):
+    def test_production_cli_routes_selected_quote_command(self) -> None:
+        dataset = _FakeDataset([_event()])
+        output = io.StringIO()
+        with patch(
+            "autosport.dataset_calculation_cli.load_dataset",
+            return_value=dataset,
+        ), redirect_stdout(output):
+            rc = cli_main(_cli_argv())
+
+        self.assertEqual(rc, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["selected_quote_identity"]["selection_id"], "driver-a")
+        self.assertEqual(payload["result"]["calculation_id"], "implied_probability")
+        self.assertFalse(payload["outcomes_accessed"])
+        self.assertTrue(payload["paper_only"])
+
+    def test_production_cli_fails_closed_on_tampered_market_hash(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            market_path = root / "market.jsonl"
+            results_path = root / "results.json"
+            market_path.write_text(
+                json.dumps(
+                    {
+                        "event_id": "race-1",
+                        "market_id": "winner",
+                        "selection_id": "driver-a",
+                        "decimal_odds": "2.50",
+                        "observed_ts": "2026-09-19T11:59:00+00:00",
+                        "source_id": "provider-a",
+                        "sequence": 7,
+                        "market_type": "winner",
+                        "status": "open",
+                        "source_ts": "2026-09-19T11:58:00+00:00",
+                        "ingest_ts": "2026-09-19T11:59:30+00:00",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            results_path.write_text("{}", encoding="utf-8")
+            dataset = ReplayDataset(
+                root=root,
+                name="tampered-fixture",
+                sport="unknown",
+                market_path=market_path,
+                results_path=results_path,
+                market_sha256="0" * 64,
+                results_sha256="0" * 64,
+            )
+            output = io.StringIO()
+            with patch(
+                "autosport.dataset_calculation_cli.load_dataset",
+                return_value=dataset,
+            ), redirect_stdout(output):
+                rc = cli_main(_cli_argv(root))
+
+        self.assertEqual(rc, 3)
+        self.assertIn("market dataset hash changed after verification", output.getvalue())
+        self.assertNotIn('"result"', output.getvalue())
+
     def test_valid_exact_quote_is_calculated_without_outcome_access(self) -> None:
         dataset = _FakeDataset([_event()])
         with patch(

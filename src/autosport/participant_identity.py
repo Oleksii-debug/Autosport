@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -359,6 +359,10 @@ class ParticipantIdentityRegistry:
             ):
                 continue
             raise ParticipantIdentityError("conflicting lineage validity intervals")
+
+        if lineage.relation is not LineageRelation.SPLIT_FROM and self._active_non_split_lineage_cycle(lineage):
+            raise ParticipantIdentityError("lineage would create a cyclic equivalence")
+
         candidate_lineages = [*self._lineages, lineage]
         candidate_lineages.sort(key=lambda value: (
             value.predecessor_entity_id, value.successor_entity_id,
@@ -366,6 +370,51 @@ class ParticipantIdentityRegistry:
         ))
         self._persist_state(lineages=candidate_lineages)
         self._lineages = candidate_lineages
+
+    def _active_non_split_lineage_cycle(self, candidate: EntityLineage) -> bool:
+        """Reject cycles in non-SPLIT lineage at any shared validity instant."""
+        boundaries = {_instant("effective_from", candidate.effective_from)}
+        if candidate.valid_until is not None:
+            boundaries.add(_instant("valid_until", candidate.valid_until))
+        candidate_start = min(boundaries)
+        candidate_end = None if candidate.valid_until is None else _instant("valid_until", candidate.valid_until)
+
+        for existing in self._lineages:
+            if existing.relation is LineageRelation.SPLIT_FROM:
+                continue
+            if not _overlap(existing.effective_from, existing.valid_until, candidate.effective_from, candidate.valid_until):
+                continue
+            existing_start = _instant("effective_from", existing.effective_from)
+            existing_end = None if existing.valid_until is None else _instant("valid_until", existing.valid_until)
+            if existing_start >= candidate_start and (candidate_end is None or existing_start < candidate_end):
+                boundaries.add(existing_start)
+            if existing_end is not None and existing_end > candidate_start and (candidate_end is None or existing_end < candidate_end):
+                boundaries.add(existing_end)
+
+        ordered = sorted(boundaries)
+        for moment in ordered:
+            if candidate_end is not None and moment >= candidate_end:
+                continue
+            graph: dict[str, set[str]] = {}
+            for existing in self._lineages:
+                if (
+                    existing.relation is not LineageRelation.SPLIT_FROM
+                    and _contains(existing.effective_from, existing.valid_until, moment)
+                ):
+                    graph.setdefault(existing.predecessor_entity_id, set()).add(existing.successor_entity_id)
+            graph.setdefault(candidate.predecessor_entity_id, set()).add(candidate.successor_entity_id)
+
+            stack = [candidate.successor_entity_id]
+            seen: set[str] = set()
+            while stack:
+                node = stack.pop()
+                if node == candidate.predecessor_entity_id:
+                    return True
+                if node in seen:
+                    continue
+                seen.add(node)
+                stack.extend(graph.get(node, ()))
+        return False
 
     def lineage_at(self, entity_id: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> tuple[EntityLineage, ...]:
         """Return causal correction evidence; do not rewrite identity truth."""

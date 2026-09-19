@@ -380,29 +380,35 @@ def _show_owner_economic_dialog(app: Any) -> None:
 def install_owner_economic_authority_surface(app: Any, frame: Any) -> None:
     """Install the compact active Settings target in the packaged Windows shell."""
 
-    panel = ttk.LabelFrame(frame, text=text("ui.windows.owner_authority.frame.title"), padding=(8, 4))
+    # Keep the Settings authority surface inside the same proven 1080x860
+    # vertical budget as the canonical product shell. The button and readonly
+    # status are peers, not a semantic hierarchy, so render them on one row;
+    # the exact selectable readback remains a dedicated row below.
+    panel = ttk.LabelFrame(frame, text=text("ui.windows.owner_authority.frame.title"), padding=(8, 2))
     first = frame.winfo_children()[0] if frame.winfo_children() else None
     if first is None:
-        panel.pack(fill="x", pady=(0, 4))
+        panel.pack(fill="x", pady=(0, 2))
     else:
-        panel.pack(fill="x", pady=(0, 4), before=first)
+        panel.pack(fill="x", pady=(0, 2), before=first)
     app.owner_economic_authority_status = tk.StringVar()
+    owner_row = ttk.Frame(panel)
+    owner_row.pack(fill="x")
     app.owner_economic_authority_button = ttk.Button(
-        panel,
+        owner_row,
         text=text("ui.windows.owner_authority.button.open"),
         command=lambda: _show_owner_economic_dialog(app),
         takefocus=True,
     )
-    app.owner_economic_authority_button.pack(fill="x")
+    app.owner_economic_authority_button.pack(side="left", padx=(0, 4))
     app.owner_economic_authority_state = ttk.Entry(
-        panel,
+        owner_row,
         textvariable=app.owner_economic_authority_status,
         state="readonly",
         takefocus=True,
     )
-    app.owner_economic_authority_state.pack(fill="x", pady=(2, 0))
+    app.owner_economic_authority_state.pack(side="left", fill="x", expand=True)
     app.owner_economic_authority_readback = tk.Listbox(panel, height=1, takefocus=True)
-    app.owner_economic_authority_readback.pack(fill="x", pady=(2, 0))
+    app.owner_economic_authority_readback.pack(fill="x", pady=(1, 0))
     app.bind("<F9>", lambda _event: app.owner_economic_authority_button.focus_set())
     refresh_owner_economic_authority_surface(app)
 

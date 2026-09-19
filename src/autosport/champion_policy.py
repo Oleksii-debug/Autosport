@@ -165,18 +165,6 @@ def load_champion_policy(
     expected_actions = frozenset(
         _text(action, "admissible action") for action in admissible_actions
     )
-    if eligibility_decision is not None:
-        validate_activation_eligibility(
-            registry,
-            eligibility_decision,
-            as_of=as_of,
-            canonical_strategy_id=strategy_key,
-            expected_environment_sha256=expected_environment,
-            expected_protocol_id=expected_protocol,
-            expected_config_sha256=expected_config,
-            admissible_actions=expected_actions,
-        )
-
     champion_id = registry.champion_strategy(
         as_of=as_of,
         canonical_strategy_id=strategy_key,
@@ -205,6 +193,19 @@ def load_champion_policy(
     if model is None:
         raise ChampionPolicyError("champion ModelVersion is missing")
     model_payload = model.payload
+    if eligibility_decision is not None:
+        validate_activation_eligibility(
+            registry,
+            eligibility_decision,
+            as_of=as_of,
+            canonical_strategy_id=strategy_key,
+            expected_strategy_version_id=champion_id,
+            expected_model_version_id=model_id,
+            expected_environment_sha256=expected_environment,
+            expected_protocol_id=expected_protocol,
+            expected_config_sha256=expected_config,
+            admissible_actions=expected_actions,
+        )
     if (
         model_payload.get("model_version_id") != model_id
         or model_payload.get("environment_sha256") != expected_environment

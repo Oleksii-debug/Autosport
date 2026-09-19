@@ -1366,6 +1366,19 @@ class ModelComputeRouterStore:
         actual_cost_value = _nonnegative(
             "actual_cost", actual_cost
         )
+        prior_actual_cost = sum(
+            (
+                evidence.actual_cost
+                for existing_execution_id, evidence
+                in self._executions.items()
+                if existing_execution_id != execution_id
+                and evidence.decision_id == decision.decision_id
+            ),
+            _ZERO,
+        )
+        cumulative_actual_cost = (
+            prior_actual_cost + actual_cost_value
+        )
         now = _instant("as_of", as_of)
         completed = _instant(
             "completed_at", completed_at
@@ -1419,22 +1432,23 @@ class ModelComputeRouterStore:
                 "execution response exceeded request "
                 "response TTL"
             )
-        elif actual_cost_value > request.max_cost:
+        elif cumulative_actual_cost > request.max_cost:
             disposition = (
                 ExecutionDisposition.REJECTED_COST
             )
             reason = (
-                "actual execution cost exceeds request budget"
+                "cumulative actual execution cost exceeds "
+                "request budget"
             )
         elif (
             decision.tier is ComputeTier.CLOUD
-            and actual_cost_value > policy.max_cloud_cost
+            and cumulative_actual_cost > policy.max_cloud_cost
         ):
             disposition = (
                 ExecutionDisposition.REJECTED_COST
             )
             reason = (
-                "actual cloud execution cost exceeds "
+                "cumulative actual cloud execution cost exceeds "
                 "policy cloud-cost limit"
             )
         else:

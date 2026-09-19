@@ -748,6 +748,154 @@ class ModelComputeRouterTests(unittest.TestCase):
                 Decimal("10.01"),
             )
 
+    def test_cumulative_actual_cost_budget_is_fail_closed_and_restart_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+
+            local_request = request(
+                request_id="req-cumulative-request-budget",
+                allow_cloud=False,
+                max_cost=Decimal("2"),
+            )
+            store.route(
+                local_request,
+                self.candidates,
+                policy(),
+                as_of=T1,
+            )
+            first_local = store.record_execution(
+                execution_id="exec-cumulative-request-1",
+                request_id=local_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("1.25"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                first_local.disposition,
+                ExecutionDisposition.ACCEPTED,
+            )
+            second_local = store.record_execution(
+                execution_id="exec-cumulative-request-2",
+                request_id=local_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("0.80"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                second_local.disposition,
+                ExecutionDisposition.REJECTED_COST,
+            )
+            self.assertIn(
+                "cumulative actual execution cost",
+                second_local.reason,
+            )
+            self.assertEqual(
+                store.total_actual_cost(local_request.request_id),
+                Decimal("2.05"),
+            )
+
+            cloud_request = request(
+                request_id="req-cumulative-cloud-budget",
+                max_cost=Decimal("20"),
+            )
+            cloud_policy = policy(max_cloud_cost=Decimal("10"))
+            store.route(
+                cloud_request,
+                self.candidates,
+                cloud_policy,
+                as_of=T1,
+                voc_evidence=voc(
+                    evidence_id="voc-cumulative-cloud-budget"
+                ),
+                domain_observation=slow_observation(),
+            )
+            first_cloud = store.record_execution(
+                execution_id="exec-cumulative-cloud-1",
+                request_id=cloud_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="permitted-cloud",
+                model_id="challenger-v2",
+                config_sha256=SHA_B,
+                actual_cost=Decimal("6"),
+                actual_latency_seconds=Decimal("4"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                first_cloud.disposition,
+                ExecutionDisposition.ACCEPTED,
+            )
+            second_cloud = store.record_execution(
+                execution_id="exec-cumulative-cloud-2",
+                request_id=cloud_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="permitted-cloud",
+                model_id="challenger-v2",
+                config_sha256=SHA_B,
+                actual_cost=Decimal("4.01"),
+                actual_latency_seconds=Decimal("4"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                second_cloud.disposition,
+                ExecutionDisposition.REJECTED_COST,
+            )
+            self.assertIn(
+                "cumulative actual cloud execution cost",
+                second_cloud.reason,
+            )
+            self.assertEqual(
+                store.total_actual_cost(cloud_request.request_id),
+                Decimal("10.01"),
+            )
+
+            reopened = ModelComputeRouterStore(path)
+            self.assertEqual(
+                reopened.total_actual_cost(local_request.request_id),
+                Decimal("2.05"),
+            )
+            self.assertEqual(
+                reopened.total_actual_cost(cloud_request.request_id),
+                Decimal("10.01"),
+            )
+            post_restart = reopened.record_execution(
+                execution_id="exec-cumulative-request-after-restart",
+                request_id=local_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("0"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                post_restart.disposition,
+                ExecutionDisposition.REJECTED_COST,
+            )
+            self.assertEqual(
+                reopened.total_actual_cost(local_request.request_id),
+                Decimal("2.05"),
+            )
+
     def test_future_voc_is_not_causally_usable(self):
         future = voc(
             evidence_id="voc-future",

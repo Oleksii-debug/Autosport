@@ -320,7 +320,7 @@ def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
     )
     with pytest.raises(
         ClosedLoopBindingError,
-        match="selection is not exact durable curriculum evidence",
+        match="replay evidence truth/provenance was relabelled",
     ):
         bind_challenger_artifact(
             runtime=runtime,

@@ -5,6 +5,7 @@ import unittest
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 from autosport.model_compute_router import (
     ComputeCandidate,

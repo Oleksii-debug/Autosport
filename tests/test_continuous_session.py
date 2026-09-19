@@ -77,9 +77,9 @@ def _event(*, phase: EventPhase, settlement_ref: str | None = None) -> CatalogEv
     )
 
 
-def _market_event() -> MarketEvent:
+def _market_event(*, event_id: str = "event-1") -> MarketEvent:
     return MarketEvent(
-        event_id="event-1",
+        event_id=event_id,
         market_id="winner",
         selection_id="home",
         decimal_odds=Decimal("2.00"),
@@ -150,7 +150,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 root, source, clock
             )
             try:
-                store.append(_market_event())
+                store.append(_market_event(event_id="provider-a:event-1"))
                 result = coordinator.tick()
                 self.assertEqual(result.cycle_index, 1)
                 self.assertEqual(result.registered_input_ids, ("catalog:provider-a:event-1",))

@@ -89,6 +89,7 @@ def test_policy_successor_retest_persists_negative_scientific_memory(tmp_path):
 
     assert result.verdict is PromotionVerdict.REJECT
     assert result.strategy_version_id == challenger.policy_id
+    assert store.exists("transparent-bandit-policy", challenger.policy_id)
 
     reopened = ScientificRegistry(registry_path)
     strategy = reopened.get("StrategyVersion", challenger.policy_id)

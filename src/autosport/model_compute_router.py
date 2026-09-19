@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -22,6 +23,10 @@ from .sport_domain_fitness import (
 
 _SCHEMA = "autosport.model_compute_router"
 _VERSION = 3
+_EXECUTION_AUTHORITY_SCHEMA = (
+    "autosport.model_compute_router.execution_authority"
+)
+_EXECUTION_AUTHORITY_VERSION = 1
 _ZERO = Decimal("0")
 
 
@@ -961,6 +966,116 @@ def _validate_execution_head_payload(
     return {**unsigned, "head_sha256": raw["head_sha256"]}
 
 
+def _execution_authority_record(
+    *,
+    authority_sequence: int,
+    previous_authority_sha256: str | None,
+    evidence: ComputeExecutionEvidence,
+    execution_head: Mapping[str, Any],
+) -> dict[str, Any]:
+    if type(authority_sequence) is not int or authority_sequence <= 0:
+        raise ModelComputeRouterError(
+            "authority_sequence must be a positive integer"
+        )
+    if previous_authority_sha256 is not None:
+        _sha256(
+            "previous_authority_sha256",
+            previous_authority_sha256,
+        )
+    head = _validate_execution_head_payload(dict(execution_head))
+    if head["decision_id"] != evidence.decision_id:
+        raise ModelComputeRouterError(
+            "execution authority head decision does not match execution"
+        )
+    unsigned = {
+        "schema": _EXECUTION_AUTHORITY_SCHEMA,
+        "version": _EXECUTION_AUTHORITY_VERSION,
+        "authority_sequence": authority_sequence,
+        "previous_authority_sha256": previous_authority_sha256,
+        "execution_id": evidence.execution_id,
+        "decision_id": evidence.decision_id,
+        "execution_record_sha256": evidence.execution_record_sha256,
+        "execution_head": head,
+    }
+    return {
+        **unsigned,
+        "authority_sha256": _canonical_digest(unsigned),
+    }
+
+
+def _validate_execution_authority_record(
+    raw: object,
+) -> dict[str, Any]:
+    if type(raw) is not dict:
+        raise ModelComputeRouterError(
+            "execution authority record must be an object"
+        )
+    expected_keys = {
+        "schema",
+        "version",
+        "authority_sequence",
+        "previous_authority_sha256",
+        "execution_id",
+        "decision_id",
+        "execution_record_sha256",
+        "execution_head",
+        "authority_sha256",
+    }
+    if set(raw) != expected_keys:
+        raise ModelComputeRouterError(
+            "execution authority record fields mismatch"
+        )
+    if (
+        raw["schema"] != _EXECUTION_AUTHORITY_SCHEMA
+        or raw["version"] != _EXECUTION_AUTHORITY_VERSION
+    ):
+        raise ModelComputeRouterError(
+            "execution authority schema/version is invalid"
+        )
+    authority_sequence = raw["authority_sequence"]
+    if type(authority_sequence) is not int or authority_sequence <= 0:
+        raise ModelComputeRouterError(
+            "authority_sequence must be a positive integer"
+        )
+    previous_authority_sha256 = raw["previous_authority_sha256"]
+    if previous_authority_sha256 is not None:
+        previous_authority_sha256 = _sha256(
+            "previous_authority_sha256",
+            previous_authority_sha256,
+        )
+    execution_id = _text("execution_id", raw["execution_id"])
+    decision_id = _text("decision_id", raw["decision_id"])
+    execution_record_sha256 = _sha256(
+        "execution_record_sha256",
+        raw["execution_record_sha256"],
+    )
+    execution_head = _validate_execution_head_payload(
+        raw["execution_head"]
+    )
+    if execution_head["decision_id"] != decision_id:
+        raise ModelComputeRouterError(
+            "execution authority head decision mismatch"
+        )
+    unsigned = {
+        "schema": _EXECUTION_AUTHORITY_SCHEMA,
+        "version": _EXECUTION_AUTHORITY_VERSION,
+        "authority_sequence": authority_sequence,
+        "previous_authority_sha256": previous_authority_sha256,
+        "execution_id": execution_id,
+        "decision_id": decision_id,
+        "execution_record_sha256": execution_record_sha256,
+        "execution_head": execution_head,
+    }
+    authority_sha256 = _sha256(
+        "authority_sha256", raw["authority_sha256"]
+    )
+    if authority_sha256 != _canonical_digest(unsigned):
+        raise ModelComputeRouterError(
+            "execution authority SHA-256 mismatch"
+        )
+    return {**unsigned, "authority_sha256": authority_sha256}
+
+
 def _classify_execution(
     *,
     request: ComputeRouteRequest,
@@ -1315,19 +1430,211 @@ def route_compute(
 
 
 class ModelComputeRouterStore:
-    """Atomic restart-safe route/cost ledger with tamper detection."""
+    """Restart-safe route/cost ledger with separate execution authority."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self._execution_authority_path = self.path.with_name(
+            f"{self.path.name}.execution-authority.jsonl"
+        )
         self._routes: dict[str, dict[str, Any]] = {}
         self._executions: dict[
             str, ComputeExecutionEvidence
         ] = {}
         self._execution_heads: dict[str, dict[str, Any]] = {}
+        self._execution_authority_records: list[
+            dict[str, Any]
+        ] = []
         if self.path.exists():
             self._load()
         else:
             self._persist()
+
+    def _read_execution_authority_records(
+        self,
+    ) -> list[dict[str, Any]]:
+        if not self._execution_authority_path.exists():
+            return []
+        try:
+            lines = self._execution_authority_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ModelComputeRouterError(
+                "execution authority journal is unreadable"
+            ) from exc
+        records: list[dict[str, Any]] = []
+        previous_sha256: str | None = None
+        for expected_sequence, line in enumerate(lines, start=1):
+            if not line:
+                raise ModelComputeRouterError(
+                    "execution authority journal contains a blank record"
+                )
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ModelComputeRouterError(
+                    "execution authority journal contains invalid JSON"
+                ) from exc
+            record = _validate_execution_authority_record(raw)
+            if record["authority_sequence"] != expected_sequence:
+                raise ModelComputeRouterError(
+                    "execution authority sequence is not contiguous"
+                )
+            if (
+                record["previous_authority_sha256"]
+                != previous_sha256
+            ):
+                raise ModelComputeRouterError(
+                    "execution authority predecessor mismatch"
+                )
+            records.append(record)
+            previous_sha256 = record["authority_sha256"]
+        return records
+
+    def _append_execution_authority(
+        self,
+        evidence: ComputeExecutionEvidence,
+        execution_head: Mapping[str, Any],
+    ) -> None:
+        previous_sha256 = (
+            None
+            if not self._execution_authority_records
+            else self._execution_authority_records[-1][
+                "authority_sha256"
+            ]
+        )
+        record = _execution_authority_record(
+            authority_sequence=len(
+                self._execution_authority_records
+            )
+            + 1,
+            previous_authority_sha256=previous_sha256,
+            evidence=evidence,
+            execution_head=execution_head,
+        )
+        encoded = json.dumps(
+            record,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        self._execution_authority_path.parent.mkdir(
+            parents=True, exist_ok=True
+        )
+        try:
+            with self._execution_authority_path.open(
+                "a",
+                encoding="utf-8",
+                newline="\n",
+            ) as handle:
+                handle.write(encoded)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise ModelComputeRouterError(
+                "execution authority journal is unwritable"
+            ) from exc
+        self._execution_authority_records.append(record)
+
+    def _validate_execution_authority_records(
+        self,
+        loaded_executions: Mapping[
+            str, ComputeExecutionEvidence
+        ],
+        loaded_execution_heads: Mapping[
+            str, Mapping[str, Any]
+        ],
+    ) -> list[dict[str, Any]]:
+        records = self._read_execution_authority_records()
+        if loaded_executions and not records:
+            raise ModelComputeRouterError(
+                "execution authority journal is missing"
+            )
+
+        seen_execution_ids: set[str] = set()
+        records_by_decision: dict[
+            str, list[dict[str, Any]]
+        ] = {}
+        for record in records:
+            execution_id = record["execution_id"]
+            if execution_id in seen_execution_ids:
+                raise ModelComputeRouterError(
+                    "duplicate execution authority record"
+                )
+            seen_execution_ids.add(execution_id)
+            evidence = loaded_executions.get(execution_id)
+            if evidence is None:
+                raise ModelComputeRouterError(
+                    "execution authority references missing execution"
+                )
+            if (
+                evidence.decision_id != record["decision_id"]
+                or evidence.execution_record_sha256
+                != record["execution_record_sha256"]
+            ):
+                raise ModelComputeRouterError(
+                    "execution authority does not match execution evidence"
+                )
+            if (
+                record["execution_head"]["terminal_sequence"]
+                != evidence.execution_sequence
+            ):
+                raise ModelComputeRouterError(
+                    "execution authority sequence does not match evidence"
+                )
+            records_by_decision.setdefault(
+                evidence.decision_id, []
+            ).append(record)
+
+        histories: dict[
+            str, list[ComputeExecutionEvidence]
+        ] = {}
+        for evidence in loaded_executions.values():
+            histories.setdefault(evidence.decision_id, []).append(
+                evidence
+            )
+
+        for decision_id, persisted_head in loaded_execution_heads.items():
+            history = sorted(
+                histories.get(decision_id, []),
+                key=lambda item: item.execution_sequence,
+            )
+            decision_records = records_by_decision.get(
+                decision_id, []
+            )
+            if len(decision_records) != len(history):
+                raise ModelComputeRouterError(
+                    "execution authority history length mismatch"
+                )
+            for index, (evidence, record) in enumerate(
+                zip(history, decision_records, strict=True),
+                start=1,
+            ):
+                if record["execution_id"] != evidence.execution_id:
+                    raise ModelComputeRouterError(
+                        "execution authority order mismatch"
+                    )
+                expected_head = _execution_head_payload(
+                    decision_id,
+                    history[:index],
+                )
+                if record["execution_head"] != expected_head:
+                    raise ModelComputeRouterError(
+                        "execution authority prefix head mismatch"
+                    )
+            if history and (
+                decision_records[-1]["execution_head"]
+                != persisted_head
+            ):
+                raise ModelComputeRouterError(
+                    "routing store terminal head does not match "
+                    "separate execution authority"
+                )
+
+        return records
 
     @staticmethod
     def _body(
@@ -1821,9 +2128,18 @@ class ModelComputeRouterStore:
                     "persisted execution history does not match "
                     "durable terminal head"
                 )
+        loaded_authority_records = (
+            self._validate_execution_authority_records(
+                loaded_executions,
+                loaded_execution_heads,
+            )
+        )
         self._routes = loaded_routes
         self._executions = loaded_executions
         self._execution_heads = loaded_execution_heads
+        self._execution_authority_records = (
+            loaded_authority_records
+        )
 
     def route(
         self,
@@ -2022,6 +2338,24 @@ class ModelComputeRouterStore:
             staged,
             staged_heads,
         )
+        try:
+            self._append_execution_authority(
+                evidence,
+                staged_heads[decision.decision_id],
+            )
+        except ModelComputeRouterError:
+            try:
+                self._persist(
+                    self._routes,
+                    self._executions,
+                    self._execution_heads,
+                )
+            except OSError as rollback_exc:
+                raise ModelComputeRouterError(
+                    "execution authority publication failed and "
+                    "routing-store rollback also failed"
+                ) from rollback_exc
+            raise
         self._executions = staged
         self._execution_heads = staged_heads
         return evidence

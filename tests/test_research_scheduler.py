@@ -1,0 +1,285 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import datetime, timezone
+
+import pytest
+
+from autosport.research_scheduler import (
+    ResearchSchedule,
+    ResearchScheduler,
+    ResearchSchedulerError,
+    SchedulerStatus,
+    TickAction,
+    WakeSource,
+)
+from autosport.research_trigger_adapter import ResearchTriggerReceipt
+
+
+SHA_Q = "1" * 64
+SHA_SOURCE = "2" * 64
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class FakeTriggerSink:
+    def __init__(self, *, fail_after_accept_once: bool = False) -> None:
+        self.calls = []
+        self.accepted = {}
+        self.fail_after_accept_once = fail_after_accept_once
+
+    def accept(self, event):
+        self.calls.append(event)
+        identity = event.source_event_identity_sha256
+        prior = self.accepted.get(identity)
+        if prior is not None and prior[0] != event.source_event_sha256:
+            raise RuntimeError("conflicting event identity")
+        if prior is None:
+            trigger = event.to_research_trigger()
+            receipt = ResearchTriggerReceipt(
+                source_event_identity_sha256=identity,
+                source_event_sha256=event.source_event_sha256,
+                supervisor_trigger_id=trigger.trigger_id,
+                supervisor_trigger_sha256=trigger.trigger_sha256,
+                run_id=trigger.run_id,
+                checkpoint_sha256=_sha("checkpoint:" + trigger.run_id),
+            )
+            self.accepted[identity] = (event.source_event_sha256, receipt)
+        else:
+            receipt = prior[1]
+        if self.fail_after_accept_once:
+            self.fail_after_accept_once = False
+            raise RuntimeError("simulated crash after downstream acceptance")
+        return receipt
+
+
+def _schedule(
+    *,
+    schedule_id: str = "drift-main",
+    first_fire_at: str = "2026-09-19T10:00:00Z",
+    interval_seconds: int = 60,
+    grace_seconds: int = 30,
+) -> ResearchSchedule:
+    return ResearchSchedule(
+        schedule_id=schedule_id,
+        wake_source=WakeSource.DRIFT_FINDING,
+        first_fire_at=first_fire_at,
+        interval_seconds=interval_seconds,
+        misfire_grace_seconds=grace_seconds,
+        question_id="question-1",
+        question_record_sha256=SHA_Q,
+        source_evidence_sha256=SHA_SOURCE,
+        source_observed_at="2026-09-19T09:59:00Z",
+        budget_units=3,
+        deadline_offset_seconds=120,
+    )
+
+
+def test_exact_fire_persists_acceptance_and_restart_does_not_duplicate(tmp_path):
+    path = tmp_path / "research-scheduler.json"
+    sink = FakeTriggerSink()
+    scheduler = ResearchScheduler.initialize_pristine(path, sink)
+    scheduler.add_schedule(_schedule())
+
+    result = scheduler.tick(now="2026-09-19T10:00:00Z")
+
+    assert result.action is TickAction.DELIVERED
+    assert len(sink.calls) == 1
+    snapshot = scheduler.snapshot()
+    occurrence = snapshot["occurrences"][result.occurrence_id]
+    assert occurrence["status"] == "ACCEPTED"
+    assert occurrence["event"]["requested_at"] == "2026-09-19T10:00:00Z"
+
+    reopened = ResearchScheduler(path, sink)
+    assert reopened.tick(now="2026-09-19T10:00:00Z").action is TickAction.IDLE
+    assert len(sink.calls) == 1
+
+
+def test_crash_after_acceptance_replays_identical_pending_event(tmp_path):
+    path = tmp_path / "research-scheduler.json"
+    sink = FakeTriggerSink(fail_after_accept_once=True)
+    scheduler = ResearchScheduler.initialize_pristine(path, sink)
+    scheduler.add_schedule(_schedule())
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        scheduler.tick(now="2026-09-19T10:00:00Z")
+
+    pending = ResearchScheduler(path, sink).snapshot()
+    raw = next(iter(pending["occurrences"].values()))
+    assert raw["status"] == "PENDING"
+    frozen_event = raw["event"]
+
+    recovered = ResearchScheduler(path, sink)
+    result = recovered.tick(now="2026-09-19T10:45:00Z")
+
+    assert result.action is TickAction.DELIVERED
+    assert sink.calls[0].canonical_payload() == frozen_event
+    assert sink.calls[1].canonical_payload() == frozen_event
+    assert len(sink.accepted) == 1
+
+
+def test_newest_within_grace_collapses_backlog(tmp_path):
+    sink = FakeTriggerSink()
+    scheduler = ResearchScheduler.initialize_pristine(
+        tmp_path / "research-scheduler.json", sink
+    )
+    scheduler.add_schedule(_schedule(grace_seconds=30))
+
+    result = scheduler.tick(now="2026-09-19T10:05:10Z")
+
+    assert result.action is TickAction.DELIVERED
+    assert len(sink.calls) == 1
+    assert sink.calls[0].requested_at == "2026-09-19T10:05:00Z"
+    entry = scheduler.snapshot()["schedules"]["drift-main"]
+    assert entry["next_fire_at"] == "2026-09-19T10:06:00Z"
+    assert entry["last_skip"] == {
+        "count": 5,
+        "through": "2026-09-19T10:04:00Z",
+        "reason": "BACKLOG_COLLAPSED_NEWEST_ONLY",
+    }
+
+
+def test_misfire_outside_grace_is_durably_skipped(tmp_path):
+    sink = FakeTriggerSink()
+    scheduler = ResearchScheduler.initialize_pristine(
+        tmp_path / "research-scheduler.json", sink
+    )
+    scheduler.add_schedule(_schedule(interval_seconds=3600, grace_seconds=300))
+
+    result = scheduler.tick(now="2026-09-19T13:10:00Z")
+
+    assert result.action is TickAction.SKIPPED
+    assert result.skipped_count == 4
+    assert not sink.calls
+    snapshot = scheduler.snapshot()
+    raw = snapshot["occurrences"][result.occurrence_id]
+    assert raw["status"] == "SKIPPED"
+    assert raw["skip_reason"] == "MISFIRE_GRACE_EXCEEDED"
+    assert snapshot["schedules"]["drift-main"]["next_fire_at"] == (
+        "2026-09-19T14:00:00Z"
+    )
+
+
+def test_pause_and_stop_survive_restart_and_stop_is_irreversible(tmp_path):
+    path = tmp_path / "research-scheduler.json"
+    sink = FakeTriggerSink()
+    scheduler = ResearchScheduler.initialize_pristine(path, sink)
+    scheduler.add_schedule(_schedule())
+    scheduler.pause()
+
+    reopened = ResearchScheduler(path, sink)
+    assert reopened.status is SchedulerStatus.PAUSED
+    assert reopened.tick(now="2026-09-19T10:00:00Z").action is TickAction.PAUSED
+    assert not sink.calls
+
+    reopened.resume()
+    reopened.stop("operator STOP")
+    stopped = ResearchScheduler(path, sink)
+    assert stopped.status is SchedulerStatus.STOPPED
+    assert stopped.tick(now="2026-09-19T10:00:00Z").action is TickAction.STOPPED
+    with pytest.raises(ResearchSchedulerError, match="cannot change status"):
+        stopped.resume()
+
+
+def test_stop_after_pending_reservation_recovers_before_stop(tmp_path):
+    path = tmp_path / "research-scheduler.json"
+    sink = FakeTriggerSink(fail_after_accept_once=True)
+    scheduler = ResearchScheduler.initialize_pristine(path, sink)
+    scheduler.add_schedule(_schedule())
+
+    with pytest.raises(RuntimeError):
+        scheduler.tick(now="2026-09-19T10:00:00Z")
+    scheduler.stop("operator STOP")
+
+    recovered = ResearchScheduler(path, sink)
+    result = recovered.tick(now="2026-09-19T11:00:00Z")
+
+    assert result.action is TickAction.DELIVERED
+    assert recovered.status is SchedulerStatus.STOPPED
+    assert len(sink.accepted) == 1
+    assert recovered.tick(now="2026-09-19T11:00:00Z").action is TickAction.STOPPED
+
+
+def test_changed_schedule_authority_fails_closed(tmp_path):
+    sink = FakeTriggerSink()
+    scheduler = ResearchScheduler.initialize_pristine(
+        tmp_path / "research-scheduler.json", sink
+    )
+    scheduler.add_schedule(_schedule())
+    changed = ResearchSchedule(
+        schedule_id="drift-main",
+        wake_source=WakeSource.DRIFT_FINDING,
+        first_fire_at="2026-09-19T10:00:00Z",
+        interval_seconds=60,
+        misfire_grace_seconds=30,
+        question_id="question-1",
+        question_record_sha256=SHA_Q,
+        source_evidence_sha256="3" * 64,
+        source_observed_at="2026-09-19T09:59:00Z",
+        budget_units=3,
+        deadline_offset_seconds=120,
+    )
+    with pytest.raises(ResearchSchedulerError, match="identity conflict"):
+        scheduler.add_schedule(changed)
+
+
+def test_state_tampering_fails_before_delivery(tmp_path):
+    path = tmp_path / "research-scheduler.json"
+    sink = FakeTriggerSink()
+    scheduler = ResearchScheduler.initialize_pristine(path, sink)
+    scheduler.add_schedule(_schedule())
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["status"] = "PAUSED"
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(ResearchSchedulerError, match="digest mismatch"):
+        ResearchScheduler(path, sink)
+    assert not sink.calls
+
+
+def test_schedule_rejects_future_evidence_and_naive_time():
+    with pytest.raises(ResearchSchedulerError, match="cannot follow"):
+        ResearchSchedule(
+            schedule_id="bad",
+            wake_source=WakeSource.POSTMORTEM_QUESTION,
+            first_fire_at="2026-09-19T10:00:00Z",
+            interval_seconds=60,
+            misfire_grace_seconds=30,
+            question_id="q",
+            question_record_sha256=SHA_Q,
+            source_evidence_sha256=SHA_SOURCE,
+            source_observed_at="2026-09-19T10:00:01Z",
+            budget_units=1,
+        )
+    with pytest.raises(ResearchSchedulerError, match="timezone"):
+        _schedule(first_fire_at="2026-09-19T10:00:00")
+
+
+def test_bounded_run_loop_uses_fake_clock_without_busy_spin(tmp_path):
+    sink = FakeTriggerSink()
+    scheduler = ResearchScheduler.initialize_pristine(
+        tmp_path / "research-scheduler.json", sink
+    )
+    scheduler.add_schedule(_schedule())
+    sleeps = []
+    times = iter(
+        [
+            datetime(2026, 9, 19, 9, 59, 59, tzinfo=timezone.utc),
+            datetime(2026, 9, 19, 10, 0, 0, tzinfo=timezone.utc),
+        ]
+    )
+
+    ticks = scheduler.run(
+        clock=lambda: next(times),
+        sleep=sleeps.append,
+        poll_seconds=2,
+        max_ticks=2,
+    )
+
+    assert ticks == 2
+    assert sleeps == [2.0]
+    assert len(sink.calls) == 1

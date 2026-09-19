@@ -118,6 +118,31 @@ def test_selection_dispatch_restart_is_idempotent(tmp_path):
     assert state["selections"][0]["selected_episode_id"] == "1" * 64
 
 
+def test_exact_replay_survives_fully_consumed_curriculum_budget(tmp_path):
+    _, supervisor, curriculum = _workspace(tmp_path, max_budget_units=2)
+    candidate = _candidate(episode_id="c" * 64)
+    first = curriculum.select_and_dispatch(
+        (candidate,),
+        purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=3,
+        budget_units=2,
+    )
+    replay = curriculum.select_and_dispatch(
+        (candidate,),
+        purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=3,
+        budget_units=2,
+    )
+
+    assert replay == first
+    assert len(supervisor.list_runs()) == 1
+    assert curriculum.snapshot()["consumed_budget_units"] == 2
+
+
 def test_hard_example_curriculum_cannot_be_confirmation_population(tmp_path):
     _, _, curriculum = _workspace(tmp_path)
     hard = _candidate(

@@ -220,6 +220,7 @@ class CurriculumSelectionRecord:
     sampling_probability: Decimal | None
     sampling_weight: Decimal | None
     outcome_information_available: bool
+    selected_outcome_available_at: str | None
     budget_units: int
     seed: int
     as_of: str
@@ -251,6 +252,8 @@ class CurriculumSelectionRecord:
             _decimal(self.sampling_weight, "sampling_weight", positive=True)
         if type(self.outcome_information_available) is not bool:
             raise ResearchCurriculumError("outcome_information_available must be bool")
+        if self.selected_outcome_available_at is not None:
+            _instant(self.selected_outcome_available_at, "selected_outcome_available_at")
         if isinstance(self.budget_units, bool) or not isinstance(self.budget_units, int) or self.budget_units <= 0:
             raise ResearchCurriculumError("budget_units must be positive")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
@@ -279,6 +282,14 @@ class CurriculumSelectionRecord:
             "sampling_probability": None if self.sampling_probability is None else str(self.sampling_probability),
             "sampling_weight": None if self.sampling_weight is None else str(self.sampling_weight),
             "outcome_information_available": self.outcome_information_available,
+            "selected_outcome_available_at": (
+                None
+                if self.selected_outcome_available_at is None
+                else _timestamp(
+                    self.selected_outcome_available_at,
+                    "selected_outcome_available_at",
+                )
+            ),
             "budget_units": self.budget_units,
             "seed": self.seed,
             "as_of": _timestamp(self.as_of, "as_of"),
@@ -478,6 +489,7 @@ class NightResearchCurriculum:
                 sampling_probability=selected.sampling_probability,
                 sampling_weight=selected.sampling_weight,
                 outcome_information_available=outcome_visible,
+                selected_outcome_available_at=selected.outcome_available_at,
                 budget_units=budget_units,
                 seed=seed,
                 as_of=as_of,
@@ -523,29 +535,54 @@ class NightResearchCurriculum:
             budget_units=record.budget_units,
             deadline_at=deadline_at,
         )
-        receipt = self.trigger_adapter.accept(event)
-        payload = {
+        reservation = {
+            "status": "PENDING",
             "selection_id": record.selection_id,
             "source_event_sha256": event.source_event_sha256,
-            "receipt_sha256": receipt.receipt_sha256,
-            "run_id": receipt.run_id,
-            "checkpoint_sha256": receipt.checkpoint_sha256,
             "budget_units": record.budget_units,
         }
         with WorkspaceEconomicLock(self.path.parent):
             state = self._locked_state()
-            if CurriculumStatus(state["status"]) is not CurriculumStatus.ACTIVE:
-                raise ResearchCurriculumError("curriculum became non-active during dispatch")
             prior = state["dispatches"].get(record.selection_id)
-            if prior is not None and prior != payload:
-                raise ResearchCurriculumError("dispatch identity conflict")
             if prior is None:
+                if CurriculumStatus(state["status"]) is not CurriculumStatus.ACTIVE:
+                    raise ResearchCurriculumError("curriculum is not active")
                 if state["consumed_budget_units"] + record.budget_units > self.max_budget_units:
                     raise ResearchCurriculumError("curriculum budget exhausted")
-                state["dispatches"][record.selection_id] = payload
+                state["dispatches"][record.selection_id] = reservation
                 state["consumed_budget_units"] += record.budget_units
                 state["state_version"] += 1
                 self._write(state)
+            else:
+                if (
+                    prior.get("selection_id") != record.selection_id
+                    or prior.get("source_event_sha256") != event.source_event_sha256
+                    or prior.get("budget_units") != record.budget_units
+                    or prior.get("status") not in {"PENDING", "ACCEPTED"}
+                ):
+                    raise ResearchCurriculumError("dispatch identity conflict")
+
+        # Reservation is the linearization point. Pause/STOP after it may prevent
+        # later selections, but cannot turn an already-started immutable dispatch
+        # into an uncheckpointed supervisor side effect.
+        receipt = self.trigger_adapter.accept(event)
+        accepted = {
+            **reservation,
+            "status": "ACCEPTED",
+            "receipt_sha256": receipt.receipt_sha256,
+            "run_id": receipt.run_id,
+            "checkpoint_sha256": receipt.checkpoint_sha256,
+        }
+        with WorkspaceEconomicLock(self.path.parent):
+            state = self._locked_state()
+            prior = state["dispatches"].get(record.selection_id)
+            if prior == accepted:
+                return CurriculumDispatchReceipt(record.selection_id, receipt)
+            if prior != reservation:
+                raise ResearchCurriculumError("dispatch reservation conflict")
+            state["dispatches"][record.selection_id] = accepted
+            state["state_version"] += 1
+            self._write(state)
         return CurriculumDispatchReceipt(record.selection_id, receipt)
 
     def select_and_dispatch(self, candidates: Iterable[ReplayCandidate], *, purpose: CurriculumPurpose, selector_policy_version: str, as_of: str, seed: int, budget_units: int, deadline_at: str | None = None) -> CurriculumDispatchReceipt:

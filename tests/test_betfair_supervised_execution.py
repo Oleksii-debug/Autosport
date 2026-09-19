@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import tempfile
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from autosport.betfair_account_readonly import (
+    BetfairReadOnlyClient,
     BetfairReadOnlyError,
     BetfairSessionCredentials,
 )
@@ -17,6 +19,7 @@ from autosport.betfair_supervised_execution import (
     BetfairSupervisedPlaceOrdersClient,
     PlaceOrdersOutcome,
     execute_betfair_supervised_action,
+    read_betfair_supervised_action_readback,
 )
 from autosport.bookmaker_capability import (
     BookmakerCapability,
@@ -310,6 +313,58 @@ def _response(
     ).encode("utf-8")
 
 
+class _ReadbackTransport:
+    def __init__(self, *, provider_order_ref: str, action) -> None:
+        self.provider_order_ref = provider_order_ref
+        self.action = action
+        self.calls: list[dict[str, object]] = []
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers,
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        request = json.loads(body.decode("utf-8"))
+        self.calls.append(request)
+        method = request["method"]
+        params = request["params"]
+        if method.endswith("listMarketCatalogue"):
+            result: object = [
+                {
+                    "marketId": self.action.market_id,
+                    "event": {"id": self.action.event_id},
+                }
+            ]
+        elif method.endswith("listCurrentOrders"):
+            assert params["customerOrderRefs"] == [
+                self.provider_order_ref
+            ]
+            result = {
+                "currentOrders": [],
+                "moreAvailable": False,
+            }
+        elif method.endswith("listClearedOrders"):
+            assert params["customerOrderRefs"] == [
+                self.provider_order_ref
+            ]
+            result = {
+                "clearedOrders": [],
+                "moreAvailable": False,
+            }
+        else:
+            raise AssertionError(f"unexpected readback method: {method}")
+        return json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "result": result,
+                "id": request["id"],
+            }
+        ).encode("utf-8")
+
+
 def _enabled_client(profile, transport):
     gate = BetfairSupervisedExecutionGate(
         enabled=True,
@@ -403,12 +458,19 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
         assert request["method"] == "SportsAPING/v1.0/placeOrders"
         assert request["params"]["async"] is False
         assert len(request["params"]["customerRef"]) == 32
+        provider_ref = ledger.provider_order_reference(
+            attempt_id="attempt-accepted",
+            provider_id="betfair",
+        )
+        assert provider_ref is not None
+        assert len(provider_ref) == 32
         assert (
             request["params"]["instructions"][0][
                 "customerOrderRef"
             ]
-            == action.action_id
+            == provider_ref
         )
+        assert provider_ref != action.action_id
         assert ledger.verify_integrity() > 0
 
 
@@ -475,9 +537,12 @@ def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None
         assert result.outcome is PlaceOrdersOutcome.REJECTED
         assert result.attempt_state is AttemptState.REJECTED
         assert result.evidence_id is not None
-        assert result.external_receipt_id == (
-            f"place-report:{result.evidence_id}"
+        provider_ref = ledger.provider_order_reference(
+            attempt_id="attempt-rejected",
+            provider_id="betfair",
         )
+        assert provider_ref is not None
+        assert result.external_receipt_id == provider_ref
 
 
 def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart() -> None:
@@ -509,6 +574,37 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart() -> N
         assert not restarted.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
+        )
+        provider_ref = restarted.provider_order_reference(
+            attempt_id="attempt-timeout",
+            provider_id="betfair",
+        )
+        assert provider_ref is not None
+        assert len(provider_ref) == 32
+
+        read_transport = _ReadbackTransport(
+            provider_order_ref=provider_ref,
+            action=action,
+        )
+        read_client = BetfairReadOnlyClient(
+            BetfairSessionCredentials("app-key", "session-token"),
+            transport=read_transport,
+            clock=lambda: datetime.fromisoformat(READBACK_AT),
+            venue_id="betfair",
+            account_id="acct-1",
+        )
+        envelope = read_betfair_supervised_action_readback(
+            read_client,
+            restarted,
+            bound,
+            attempt_id="attempt-timeout",
+        )
+        assert envelope.action_id == action.action_id
+        assert envelope.provider_order_ref == provider_ref
+        assert all(
+            call["params"].get("customerOrderRefs")
+            in (None, [provider_ref])
+            for call in read_transport.calls
         )
 
 

@@ -444,8 +444,6 @@ class NightResearchCurriculum:
             state = self._locked_state()
             if CurriculumStatus(state["status"]) is not CurriculumStatus.ACTIVE:
                 raise ResearchCurriculumError("curriculum is not active")
-            if state["consumed_budget_units"] + budget_units > self.max_budget_units:
-                raise ResearchCurriculumError("curriculum budget exhausted")
             eligible = self._eligible(candidates, purpose=purpose, as_of=as_of, state=state)
             if not eligible:
                 raise ResearchCurriculumError("no causally eligible replay candidates")
@@ -493,6 +491,8 @@ class NightResearchCurriculum:
             if prior is not None and prior != payload:
                 raise ResearchCurriculumError("selection identity conflict")
             if prior is None:
+                if state["consumed_budget_units"] + budget_units > self.max_budget_units:
+                    raise ResearchCurriculumError("curriculum budget exhausted")
                 state["selections"].append(payload)
                 state["selections"].sort(key=lambda item: item["selection_id"])
                 state["state_version"] += 1

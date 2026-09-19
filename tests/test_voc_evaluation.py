@@ -118,6 +118,25 @@ def voc(value=None):
     )
 
 
+
+
+class FixtureCanonicalAuthorityResolver:
+    """Small independent stand-in for durable Decision/Scientific/Outcome authorities."""
+
+    def __init__(self):
+        self._records = {}
+
+    def register(self, value):
+        self._records[value.evaluation_id] = value
+
+    def resolve(self, evaluation, *, as_of):
+        canonical = self._records.get(evaluation.evaluation_id)
+        if canonical is None or canonical.payload() != evaluation.payload():
+            return None
+        if canonical.evaluated_at > as_of:
+            return None
+        return canonical
+
 def candidates():
     return (
         ComputeCandidate(
@@ -247,6 +266,24 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         kwargs.setdefault("voc_evaluation_store", self.voc_store)
         return route_compute(*args, **kwargs)
 
+    def test_cloud_requires_independent_canonical_authority(self):
+        store = VOCEvaluationStore(
+            Path(self._router_tmp.name) / "no-authority.json"
+        )
+        evidence = voc()
+        store.record(evidence.evaluation)
+        decision = route_compute(
+            request(),
+            candidates(),
+            policy(),
+            as_of=T2,
+            voc_evidence=evidence,
+            voc_evaluation_store=store,
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertIn("missing canonical VOC authority resolver", decision.reason)
+
     def test_qualified_paired_evaluation_can_authorize_cloud(self):
         decision = self.route_compute(
             request(),
@@ -274,6 +311,27 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertIn("missing canonical VOC authority resolver", decision.reason)
+
+    def test_self_consistent_fake_evaluation_cannot_mint_cloud_authority(self):
+        canonical = evaluation()
+        self.canonical_authority.register(canonical)
+        forged = evaluation(
+            evaluation_id="forged-voc",
+            decision_evidence_sha256=SHA_D,
+            challenger_output_sha256=SHA_C,
+        )
+        evidence = voc(forged)
+        self.voc_store.record(forged)
+        decision = self.route_compute(
+            request(),
+            candidates(),
+            policy(),
+            as_of=T2,
+            voc_evidence=evidence,
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertIn("canonical VOC authority could not resolve", decision.reason)
 
     def test_opaque_evaluation_sha_cannot_mint_cloud_authority(self):
         paired = evaluation()

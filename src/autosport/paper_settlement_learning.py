@@ -16,7 +16,7 @@ from decimal import Context, Decimal, DecimalException, Inexact, InvalidOperatio
 from pathlib import Path
 from typing import Final
 
-from .agent_loop import AgentLoopPhase, AgentLoopRuntime
+from .agent_loop import AgentLoopPhase, AgentLoopRuntime, ExternalEffectState
 from .continuous_session import SettlementResolution
 from .decision_ledger import DecisionRecord, JsonlDecisionLedger
 from .domain import PaperTicket, TicketStatus
@@ -396,6 +396,10 @@ class PaperSettlementLearningBridge:
             )
         if snapshot.transition_id is not None:
             raise PaperSettlementLearningBridgeError("AgentLoop action is already resolved")
+        if snapshot.external_effect_state is not ExternalEffectState.PAPER_ONLY:
+            raise PaperSettlementLearningBridgeError(
+                "learning binding requires durable PAPER_ONLY action effect"
+            )
         if action.action_type.upper() in _ABSTAIN:
             raise PaperSettlementLearningBridgeError(
                 "WAIT/NO_BET/ABSTAIN cannot bind a settled-ticket reward"
@@ -499,6 +503,12 @@ class PaperSettlementLearningBridge:
             if ticket.status is not TicketStatus.OPEN or ticket.payout != Decimal("0"):
                 raise PaperSettlementLearningBridgeError(
                     "ticket must be bound before settlement"
+                )
+            if _instant(ticket.placed_at, "ticket placed_at") < _instant(
+                action.decided_at, "action decided_at"
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "PaperTicket predates bound AgentLoop action"
                 )
             if (
                 ticket.bankroll_id != self.economic_goal.bankroll_id

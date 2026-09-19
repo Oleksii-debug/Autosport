@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from autosport._strategy_model_factory_impl import _holdout_consumed_by_other_evidence
 from autosport.scientific_registry import (
     DatasetSnapshot,
     DuplicateExperimentFingerprintError,
@@ -15,6 +16,10 @@ from autosport.scientific_registry import (
     ModelVersion,
     PromotionAction,
     PromotionDecision,
+    PromotionEvidence,
+    PromotionEvidenceDirection,
+    PromotionEvidenceValidity,
+    promotion_holdout_access_id,
     ResearchOutcome,
     ResearchProtocol,
     ResearchQuestion,
@@ -115,6 +120,64 @@ def _factory_rule() -> PromotionRule:
     return PromotionRule("mse", 0.05, (("max_squared_error", 0.50),))
 
 
+def _promotion_evidence(
+    *,
+    experiment_id: str,
+    strategy_id: str,
+    model_id: str,
+    bundle_id: str,
+    dataset_id: str,
+    protocol_id: str,
+    bundle_sha: str,
+    rollback_identity: str,
+    dataset_manifest_sha256: str,
+    created_at: str = T3,
+    effective_n: int = 5,
+    minimum_n: int = 2,
+) -> PromotionEvidence:
+    payload = {
+        "schema_version": 1,
+        "experiment_id": experiment_id,
+        "research_protocol_id": protocol_id,
+        "research_question_id": "question-factory",
+        "hypothesis_id": "hypothesis-factory",
+        "candidate_strategy_version_id": strategy_id,
+        "candidate_model_version_id": model_id,
+        "evaluation_bundle_id": bundle_id,
+        "evaluation_bundle_sha256": bundle_sha,
+        "dataset_snapshot_id": dataset_id,
+        "holdout_access_id": promotion_holdout_access_id(
+            research_protocol_id=protocol_id,
+            dataset_manifest_sha256=dataset_manifest_sha256,
+            source_identity="lawful-provider:fixture",
+        license_identity="license-evidence:v1",
+        confirmation_trial_family_id=f"{protocol_id}:confirmation-trial-family",
+    ),
+        "confirmation_trial_family_id": f"{protocol_id}:confirmation-trial-family",
+        "estimand": "mse",
+        "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+        "cohort_id": dataset_id,
+        "effective_sample_size": effective_n,
+        "minimum_effective_sample_size": minimum_n,
+        "effect_interval_low": "0.1",
+        "effect_interval_high": "0.2",
+        "practical_improvement": "0.15",
+        "guardrails_passed": True,
+        "validity": PromotionEvidenceValidity.ELIGIBLE.value,
+        "holdout_consumed": False,
+        "stopping_rule_sha256": hashlib.sha256(b"one final evaluation").hexdigest(),
+        "multiple_comparison_control_sha256": hashlib.sha256(b"single frozen primary metric").hexdigest(),
+        "rollback_identity": rollback_identity,
+        "uncertainty_method": "paired min/max interval",
+        "created_at": created_at,
+    }
+    evidence_id = _canonical_sha(payload)
+    fields = {key: value for key, value in payload.items() if key != "schema_version"}
+    fields["direction"] = PromotionEvidenceDirection(payload["direction"])
+    fields["validity"] = PromotionEvidenceValidity(payload["validity"])
+    return PromotionEvidence(evidence_id, **fields)
+
+
 def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
     governed_points = _candidate_points() if points is None else tuple(points)
     evaluator_config = WalkForwardEvaluationConfig(
@@ -157,7 +220,7 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
         causal_cutoff=T2,
         evaluation_design=evaluator_config.frozen_text,
         feature_set_version="v1",
-        uncertainty_method="deterministic baseline checkpoint",
+        uncertainty_method="paired min/max interval",
         multiple_comparison_control="single frozen primary metric",
         robustness_checks=("time order", "protective metric"),
         random_seed_policy="seed fixed before evaluation",
@@ -292,6 +355,42 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
         "candidate_metrics": {"max_squared_error": 1.0, "mse": 0.80},
         "candidate_metrics_artifact_sha256": champion_metrics_sha256,
         "candidate_metrics_source": "causal-walk-forward-v1",
+        "promotion_effect_evidence": {
+            "schema_version": 1,
+            "experiment_id": "experiment-v1",
+            "research_protocol_id": binding.research_protocol_id,
+            "research_question_id": question.question_id,
+            "hypothesis_id": hypothesis.hypothesis_id,
+            "candidate_strategy_version_id": champion_strategy.strategy_version_id,
+            "candidate_model_version_id": champion_model.model_version_id,
+            "evaluation_bundle_id": "eval-v1",
+            "evaluation_bundle_sha256": None,
+            "dataset_snapshot_id": dataset.dataset_snapshot_id,
+            "confirmation_trial_family_id": f"{binding.research_protocol_id}:confirmation-trial-family",
+            "holdout_access_id": promotion_holdout_access_id(
+                research_protocol_id=binding.research_protocol_id,
+                dataset_manifest_sha256=dataset_manifest_sha256,
+                source_identity=dataset.source_identity,
+                license_identity=dataset.license_identity,
+                confirmation_trial_family_id=f"{binding.research_protocol_id}:confirmation-trial-family",
+            ),
+            "estimand": "mse",
+            "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+            "cohort_id": dataset.dataset_snapshot_id,
+            "effective_sample_size": 5,
+            "minimum_effective_sample_size": rule.minimum_effective_sample_size,
+            "effect_interval_low": "0.1",
+            "effect_interval_high": "0.2",
+            "practical_improvement": "0.15",
+            "guardrails_passed": True,
+            "validity": PromotionEvidenceValidity.ELIGIBLE.value,
+            "holdout_consumed": False,
+            "stopping_rule_sha256": hashlib.sha256(b"one final evaluation").hexdigest(),
+            "multiple_comparison_control_sha256": hashlib.sha256(b"single frozen primary metric").hexdigest(),
+            "rollback_identity": "NONE",
+            "uncertainty_method": binding.uncertainty_method,
+            "created_at": T3,
+        },
     }
     champion_evaluation_sha256 = store.write(
         "evaluation", "eval-v1", champion_evaluation_payload
@@ -306,6 +405,10 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
         T3,
         evaluated_strategy_version_id=champion_strategy.strategy_version_id,
         evaluated_model_version_id=champion_model.model_version_id,
+        effective_sample_size=5,
+        effect_interval_low="0.1",
+        effect_interval_high="0.2",
+        practical_improvement="0.15",
     )
     for record in (champion_model, champion_strategy, champion_bundle):
         registry.append(record)
@@ -325,6 +428,18 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
         notes="fixture champion",
     )
     registry.append(champion_experiment)
+    champion_evidence = _promotion_evidence(
+        experiment_id=champion_experiment.experiment_id,
+        strategy_id=champion_strategy.strategy_version_id,
+        model_id=champion_model.model_version_id,
+        bundle_id=champion_bundle.evaluation_bundle_id,
+        dataset_id=dataset.dataset_snapshot_id,
+        protocol_id=binding.research_protocol_id,
+        bundle_sha=champion_evaluation_sha256,
+        rollback_identity="NONE",
+        dataset_manifest_sha256=dataset_manifest_sha256,
+    )
+    registry.append(champion_evidence)
     registry.record_promotion(
         PromotionDecision(
             "promotion-v1",
@@ -336,6 +451,7 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
             champion_evaluation_sha256,
             T3,
             candidate_model_version_id=champion_model.model_version_id,
+            promotion_evidence_id=champion_evidence.promotion_evidence_id,
             reason="fixture baseline champion",
         )
     )
@@ -487,7 +603,8 @@ def test_promotion_requires_provenance_rollback_primary_and_protective_metrics()
         provenance_complete=True,
         rollback_target="strategy-v1",
     )
-    assert accepted.verdict is PromotionVerdict.PROMOTE
+    assert accepted.verdict is PromotionVerdict.INCONCLUSIVE
+    assert accepted.registry_action is PromotionAction.RETAIN
     degraded = PromotionController.evaluate(
         rule,
         champion_metrics={"mse": 0.40, "max_drawdown": 0.10},
@@ -497,6 +614,77 @@ def test_promotion_requires_provenance_rollback_primary_and_protective_metrics()
     )
     assert degraded.verdict is PromotionVerdict.REJECT
     assert "protective metric degraded: max_drawdown" in degraded.reasons
+
+
+def test_promotion_controller_rejects_evidence_local_sample_floor_bypass():
+    rule = PromotionRule("mse", 0.05, minimum_effective_sample_size=10)
+    evidence = _promotion_evidence(
+        experiment_id="experiment-controller-floor",
+        strategy_id="strategy-controller-floor",
+        model_id="model-controller-floor",
+        bundle_id="eval-controller-floor",
+        dataset_id="dataset-controller-floor",
+        protocol_id="protocol-controller-floor",
+        bundle_sha=SHA_D,
+        rollback_identity="strategy-v1",
+        dataset_manifest_sha256=SHA_A,
+        effective_n=2,
+        minimum_n=1,
+    )
+
+    result = PromotionController.evaluate(
+        rule,
+        champion_metrics={"mse": 0.40},
+        challenger_metrics={"mse": 0.20},
+        provenance_complete=True,
+        rollback_target="strategy-v1",
+        promotion_evidence=evidence,
+    )
+
+    assert result.verdict is PromotionVerdict.INCONCLUSIVE
+    assert result.registry_action is PromotionAction.RETAIN
+    assert (
+        "promotion evidence minimum sample size does not match frozen rule"
+        in result.reasons
+    )
+    assert "effective sample size below frozen minimum" in result.reasons
+
+
+def test_holdout_consumption_allows_same_frozen_attempt_retry_only():
+    same_attempt = {
+        "experiment_id": "experiment-v2",
+        "research_protocol_id": "protocol-factory",
+        "research_question_id": "question-factory",
+        "hypothesis_id": "hypothesis-factory",
+        "candidate_strategy_version_id": "strategy-v2",
+        "candidate_model_version_id": "model-v2",
+        "evaluation_bundle_id": "eval-v2",
+        "dataset_snapshot_id": "dataset-factory",
+        "confirmation_trial_family_id": "protocol-factory:confirmation-trial-family",
+        "holdout_access_id": "holdout-stable",
+        "estimand": "mse",
+        "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+        "rollback_identity": "strategy-v1",
+        "created_at": T7,
+    }
+    assert not _holdout_consumed_by_other_evidence(
+        (dict(same_attempt),),
+        same_attempt_identity=same_attempt,
+    )
+
+    other_attempt = dict(same_attempt)
+    other_attempt["experiment_id"] = "experiment-other"
+    assert _holdout_consumed_by_other_evidence(
+        (other_attempt,),
+        same_attempt_identity=same_attempt,
+    )
+
+    unrelated_holdout = dict(other_attempt)
+    unrelated_holdout["holdout_access_id"] = "holdout-other"
+    assert not _holdout_consumed_by_other_evidence(
+        (unrelated_holdout,),
+        same_attempt_identity=same_attempt,
+    )
 
 
 def test_factory_rejects_nonfinite_metrics():
@@ -510,7 +698,7 @@ def test_factory_rejects_nonfinite_metrics():
         )
 
 
-def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path):
+def test_registry_backed_factory_vertical_retains_inconclusive_and_survives_restart(tmp_path):
     registry, registry_path, rule, store, evaluator_config, input_manifest = (
         _factory_foundation(tmp_path)
     )
@@ -520,7 +708,8 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
     )
     result = _run_candidate(runner, _candidate_points(), rule)
 
-    assert result.verdict is PromotionVerdict.PROMOTE
+    assert result.verdict is PromotionVerdict.INCONCLUSIVE
+    assert result.registry_action is PromotionAction.RETAIN
     assert result.candidate_metrics["max_squared_error"] <= 0.50
     assert model_factory.fit_ids[-1] == "model-v2"
     assert registry.get("ModelVersion", "model-v2") is not None
@@ -541,6 +730,39 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
         evaluation["walk_forward"]
     )
     assert metrics["walk_forward_result_sha256"] == evaluation["walk_forward_result_sha256"]
+    bundle_entry = registry.get("EvaluationBundle", "eval-v2")
+    decision_entry = registry.get("PromotionDecision", "promotion-v2")
+    assert bundle_entry is not None
+    assert decision_entry is not None
+    assert decision_entry.payload["action"] == PromotionAction.RETAIN.value
+    evidence_entry = registry.get(
+        "PromotionEvidence", decision_entry.payload["promotion_evidence_id"]
+    )
+    assert evidence_entry is not None
+    effect_evidence = evaluation["promotion_effect_evidence"]
+    assert effect_evidence["evaluation_bundle_id"] == "eval-v2"
+    assert effect_evidence["holdout_consumed"] is True
+    assert evidence_entry.payload["holdout_consumed"] is True
+    assert "confirmation holdout already consumed" in decision_entry.payload["reason"]
+    assert (
+        effect_evidence["effective_sample_size"]
+        == bundle_entry.payload["effective_sample_size"]
+        == evidence_entry.payload["effective_sample_size"]
+    )
+    for field in (
+        "effect_interval_low",
+        "effect_interval_high",
+        "practical_improvement",
+    ):
+        assert effect_evidence[field] == bundle_entry.payload[field]
+        assert effect_evidence[field] == evidence_entry.payload[field]
+    for field in (
+        "holdout_access_id",
+        "stopping_rule_sha256",
+        "multiple_comparison_control_sha256",
+        "uncertainty_method",
+    ):
+        assert effect_evidence[field] == evidence_entry.payload[field]
 
     restarted = ExperimentRunner.verify_restart(
         registry_path,
@@ -548,8 +770,8 @@ def test_registry_backed_factory_vertical_promotes_and_survives_restart(tmp_path
         "experiment-v2",
         as_of=T7,
     )
-    assert restarted.champion_strategy_version_id == "strategy-v2"
-    assert restarted.outcome is ResearchOutcome.POSITIVE
+    assert restarted.champion_strategy_version_id == "strategy-v1"
+    assert restarted.outcome is ResearchOutcome.INCONCLUSIVE
     assert restarted.reproducibility_bundle_sha256 == result.reproducibility_bundle_sha256
 
 

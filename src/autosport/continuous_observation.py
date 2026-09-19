@@ -524,7 +524,8 @@ def main(
     try:
         provider = provider_factory(api_key, public_preview=args.public_preview)
     except (ProviderPayloadError, ValueError) as exc:
-        print(f"continuous_observation=CONFIG_ERROR error={exc}")
+        redacted_error = _redacted_error(exc, (api_key,) if api_key else ())
+        print(f"continuous_observation=CONFIG_ERROR error={redacted_error}")
         return 2
 
     stop_event = threading.Event()

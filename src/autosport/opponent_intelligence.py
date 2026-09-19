@@ -246,6 +246,7 @@ class RatingSnapshot:
     config_sha256: str
     code_sha256: str
     dependency_sha256: str
+    predecessor_snapshot_ids: tuple[str, ...]
     input_performance_ids: tuple[str, ...]
     input_digest: str
     support: int
@@ -269,6 +270,7 @@ class RatingSnapshot:
             "config_sha256": self.config_sha256,
             "code_sha256": self.code_sha256,
             "dependency_sha256": self.dependency_sha256,
+            "predecessor_snapshot_ids": list(self.predecessor_snapshot_ids),
             "input_performance_ids": list(self.input_performance_ids),
             "input_digest": self.input_digest,
             "support": self.support,
@@ -681,6 +683,20 @@ class OpponentIntelligenceStore:
         )
         input_ids = tuple(item.performance_id for item in inputs)
         input_digest = _digest(list(input_ids))
+        superseded_input_ids = {
+            item.observation.supersedes_performance_id
+            for item in inputs
+            if item.observation.supersedes_performance_id is not None
+        }
+        predecessor_snapshot_ids = tuple(
+            sorted(
+                snapshot.snapshot_id
+                for snapshot in self._ratings.values()
+                if superseded_input_ids.intersection(
+                    snapshot.input_performance_ids
+                )
+            )
+        )
         scores: list[Decimal] = []
         opponents: set[str] = set()
         for item in inputs:
@@ -754,6 +770,7 @@ class OpponentIntelligenceStore:
             "config_sha256": config_sha256,
             "code_sha256": code,
             "dependency_sha256": dependency,
+            "predecessor_snapshot_ids": list(predecessor_snapshot_ids),
             "input_performance_ids": list(input_ids),
             "input_digest": input_digest,
             "support": support,
@@ -778,6 +795,7 @@ class OpponentIntelligenceStore:
             config_sha256,
             code,
             dependency,
+            predecessor_snapshot_ids,
             input_ids,
             input_digest,
             support,
@@ -1194,6 +1212,7 @@ class OpponentIntelligenceStore:
                     item["config_sha256"],
                     item["code_sha256"],
                     item["dependency_sha256"],
+                    tuple(item["predecessor_snapshot_ids"]),
                     tuple(item["input_performance_ids"]),
                     item["input_digest"],
                     item["support"],

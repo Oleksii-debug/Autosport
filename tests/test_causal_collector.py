@@ -14,6 +14,7 @@ from autosport.causal_collector import (
     DesktopDeltaConsumer,
     GapState,
     GapStateError,
+    SyncState,
     canonical_event_digest,
 )
 
@@ -47,8 +48,16 @@ class CollectorDeltaTests(unittest.TestCase):
         revision_of=None,
         revision_number=0,
         gap_state=GapState.NONE,
+        sync_state=None,
     ):
         payload = payload or event_payload()
+        if sync_state is None:
+            sync_state = {
+                GapState.NONE: SyncState.READY,
+                GapState.DETECTED: SyncState.GAP_DETECTED,
+                GapState.RECOVERED: SyncState.RECOVERED,
+                GapState.CURSOR_RESET: SyncState.CURSOR_RESET,
+            }[gap_state]
         return CollectorDelta(
             schema_version=1,
             delta_id=delta_id,
@@ -68,6 +77,7 @@ class CollectorDeltaTests(unittest.TestCase):
             revision_of=revision_of,
             revision_number=revision_number,
             gap_state=gap_state,
+            sync_state=sync_state,
             gap_from_cursor="1" if gap_state in {GapState.DETECTED, GapState.RECOVERED} else None,
             gap_to_cursor="2" if gap_state in {GapState.DETECTED, GapState.RECOVERED} else None,
         )
@@ -128,6 +138,13 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertEqual(checkpoint.last_position, 2)
             self.assertEqual(checkpoint.last_delta_id, "d2")
 
+    def test_new_epoch_requires_explicit_epoch_change_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            store.append(self.make_delta(delta_id="d9", cursor_position=9))
+            with self.assertRaises(CursorRegressionError):
+                store.append(self.make_delta(delta_id="bad-reset", cursor_position=0, epoch="epoch-2"))
+
     def test_new_epoch_allows_cursor_reset(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CollectorDeltaStore(Path(tmp) / "collector.json")
@@ -156,6 +173,58 @@ class CollectorDeltaTests(unittest.TestCase):
             )
             self.assertEqual([item.delta_id for item in known], ["early"])
             self.assertEqual({item.delta_id for item in research}, {"early", "late"})
+
+    def test_end_to_end_offline_reconnect_survives_restart(self):
+        payload1 = event_payload(event_id="e1")
+        payload2 = event_payload(event_id="e2", odds="1.90")
+        with tempfile.TemporaryDirectory() as tmp:
+            collector_path = Path(tmp) / "collector.json"
+            desktop_path = Path(tmp) / "desktop.json"
+            collector = CollectorDeltaStore(collector_path)
+            collector.append(self.make_delta(delta_id="d1", cursor_position=1, payload=payload1))
+            collector.append(
+                self.make_delta(
+                    delta_id="d2",
+                    cursor_position=2,
+                    payload=payload2,
+                    available="2026-01-01T00:00:10+00:00",
+                )
+            )
+
+            first_applied = []
+            first_consumer = DesktopDeltaConsumer(
+                collector,
+                DesktopDeltaCheckpointStore(desktop_path),
+                resolve_event=lambda delta: payload1 if delta.delta_id == "d1" else payload2,
+                apply_event=first_applied.append,
+            )
+            self.assertEqual(
+                first_consumer.drain(as_of="2026-01-01T00:00:05+00:00"),
+                ("d1",),
+            )
+            self.assertEqual(first_applied, [payload1])
+
+            reopened_collector = CollectorDeltaStore(collector_path)
+            reopened_desktop = DesktopDeltaCheckpointStore(desktop_path)
+            second_applied = []
+            second_consumer = DesktopDeltaConsumer(
+                reopened_collector,
+                reopened_desktop,
+                resolve_event=lambda delta: payload1 if delta.delta_id == "d1" else payload2,
+                apply_event=second_applied.append,
+            )
+            self.assertEqual(
+                second_consumer.drain(as_of="2026-01-01T00:00:11+00:00"),
+                ("d2",),
+            )
+            self.assertEqual(second_applied, [payload2])
+
+            final_desktop = DesktopDeltaCheckpointStore(desktop_path)
+            self.assertEqual(
+                final_desktop.stream_checkpoint("source-x", "epoch-1").last_position,
+                2,
+            )
+            self.assertEqual(second_consumer.drain(as_of="2026-01-01T00:00:11+00:00"), ())
 
     def test_consumer_applies_canonical_event_and_health_then_acks(self):
         payload = event_payload()

@@ -606,8 +606,10 @@ class NightResearchCurriculum:
         with WorkspaceEconomicLock(self.path.parent):
             state = self._locked_state()
             dispatch = state["dispatches"].get(selection_id)
-            if dispatch is None:
-                raise ResearchCurriculumError("selection has not been dispatched")
+            if dispatch is None or dispatch.get("status") != "ACCEPTED":
+                raise ResearchCurriculumError(
+                    "selection has no accepted supervisor dispatch"
+                )
             snapshot = self.trigger_adapter.supervisor.status(dispatch["run_id"])
             if outcome is CurriculumOutcome.STOPPED:
                 if snapshot.status is not SupervisorStatus.STOPPED:

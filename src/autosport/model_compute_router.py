@@ -975,6 +975,14 @@ def route_compute(
             baseline_reason = "VOC evidence is stale"
         elif (
             voc_evidence.measured_compute_cost
+            > request.max_cost
+        ):
+            baseline_reason = (
+                "measured VOC compute cost exceeds "
+                "request budget"
+            )
+        elif (
+            voc_evidence.measured_compute_cost
             > policy.max_cloud_cost
         ):
             baseline_reason = (

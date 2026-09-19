@@ -1143,7 +1143,10 @@ class ModelComputeRouterStore:
                     item["voc_evidence"]
                 )
             )
-            if voc is not None:
+            if (
+                voc is not None
+                and decision.tier is ComputeTier.CLOUD
+            ):
                 candidates_by_id = {
                     candidate.candidate_id: candidate
                     for candidate in candidates
@@ -1163,8 +1166,8 @@ class ModelComputeRouterStore:
                     )
                 ):
                     raise ModelComputeRouterError(
-                        "persisted VOC exact compute identity does not "
-                        "match persisted candidates"
+                        "persisted CLOUD VOC exact compute identity "
+                        "does not match persisted candidates"
                     )
             domain_observation = (
                 None

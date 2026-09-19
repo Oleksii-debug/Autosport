@@ -287,6 +287,34 @@ class _StagedFactoryArtifactStore:
             return self._staged.sha256(kind, identity)
         return self._real.sha256(kind, identity)
 
+    def materialization_receipt(
+        self,
+        kind: str,
+        identity: str,
+        *,
+        expected_sha256: str | None = None,
+    ) -> dict[str, object]:
+        """Read only a receipt that was durably materialized before this transaction."""
+        if self._staged.exists(kind, identity):
+            raise ValueError(
+                "staged factory artifact has no durable materialization receipt: "
+                f"{kind}:{identity}"
+            )
+        materialization_receipt = getattr(
+            self._real,
+            "materialization_receipt",
+            None,
+        )
+        if materialization_receipt is None:
+            raise ValueError(
+                "factory artifact store does not provide durable materialization receipts"
+            )
+        return materialization_receipt(
+            kind,
+            identity,
+            expected_sha256=expected_sha256,
+        )
+
     def path_for_testing(self, kind: str, identity: str) -> Path:
         if self._staged.exists(kind, identity):
             return self._staged.path_for_testing(kind, identity)

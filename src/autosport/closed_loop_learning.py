@@ -16,8 +16,8 @@ from typing import Any, Final
 from .agent_loop import AgentLoopRuntime
 from .learning_environment import EvidenceTruth
 from .research_curriculum import (
-    CurriculumDispatchReceipt,
     CurriculumSelectionRecord,
+    ReplayEvidenceBinding,
     NightResearchCurriculum,
     ReplayProvenance,
 )
@@ -74,8 +74,7 @@ class ChallengerArtifact:
     """Immutable identity bridge from one causal episode to one factory challenger."""
 
     research_question_id: str
-    originating_research_run_id: str
-    curriculum_run_id: str
+    research_run_id: str
     curriculum_selection_id: str
     replay_evidence_binding_id: str
     replay_provenance: ReplayProvenance
@@ -99,8 +98,7 @@ class ChallengerArtifact:
     def __post_init__(self) -> None:
         for name in (
             "research_question_id",
-            "originating_research_run_id",
-            "curriculum_run_id",
+            "research_run_id",
             "research_protocol_id",
             "experiment_id",
             "model_version_id",
@@ -138,8 +136,7 @@ class ChallengerArtifact:
             "schema_version": SCHEMA_VERSION,
             "kind": "ChallengerArtifact",
             "research_question_id": self.research_question_id,
-            "originating_research_run_id": self.originating_research_run_id,
-            "curriculum_run_id": self.curriculum_run_id,
+            "research_run_id": self.research_run_id,
             "curriculum_selection_id": self.curriculum_selection_id,
             "replay_evidence_binding_id": self.replay_evidence_binding_id,
             "replay_provenance": self.replay_provenance.value,
@@ -171,7 +168,7 @@ def bind_challenger_artifact(
     runtime: AgentLoopRuntime,
     curriculum: NightResearchCurriculum,
     selection: CurriculumSelectionRecord,
-    dispatch: CurriculumDispatchReceipt,
+    replay_binding: ReplayEvidenceBinding,
     supervisor: ResearchSupervisor,
     registry: ScientificRegistry,
     spec: FactoryCandidateSpec,
@@ -186,8 +183,8 @@ def bind_challenger_artifact(
         raise TypeError("curriculum must be NightResearchCurriculum")
     if not isinstance(selection, CurriculumSelectionRecord):
         raise TypeError("selection must be CurriculumSelectionRecord")
-    if not isinstance(dispatch, CurriculumDispatchReceipt):
-        raise TypeError("dispatch must be CurriculumDispatchReceipt")
+    if not isinstance(replay_binding, ReplayEvidenceBinding):
+        raise TypeError("replay_binding must be ReplayEvidenceBinding")
     if not isinstance(supervisor, ResearchSupervisor):
         raise TypeError("supervisor must be ResearchSupervisor")
     if not isinstance(registry, ScientificRegistry):
@@ -211,26 +208,34 @@ def bind_challenger_artifact(
         )
     if selection.selected_episode_id != loop_snapshot.episode_id:
         raise ClosedLoopBindingError("curriculum selection episode differs from AgentLoop")
-    if dispatch.selection_id != selection.selection_id:
-        raise ClosedLoopBindingError("curriculum dispatch does not bind exact selection")
+    if replay_binding.binding_id != selection.selected_evidence_binding_id:
+        raise ClosedLoopBindingError("curriculum selection does not bind exact replay evidence")
+    if (
+        replay_binding.environment_id != loop_snapshot.environment_id
+        or replay_binding.episode_id != loop_snapshot.episode_id
+        or replay_binding.transition_id != transition_id
+        or replay_binding.reward_id != reward_id
+    ):
+        raise ClosedLoopBindingError(
+            "replay evidence does not bind exact AgentLoop causal transition"
+        )
+    if (
+        replay_binding.provenance is not selection.selected_provenance
+        or replay_binding.evidence_truth is not selection.selected_evidence_truth
+    ):
+        raise ClosedLoopBindingError("replay evidence truth/provenance was relabelled")
 
     curriculum_state = curriculum.snapshot()
     expected_selection = {**selection.payload(), "selection_id": selection.selection_id}
     if expected_selection not in curriculum_state.get("selections", []):
         raise ClosedLoopBindingError("selection is not exact durable curriculum evidence")
-    persisted_dispatch = curriculum_state.get("dispatches", {}).get(selection.selection_id)
-    if (
-        type(persisted_dispatch) is not dict
-        or persisted_dispatch.get("status") != "ACCEPTED"
-        or persisted_dispatch.get("run_id") != dispatch.run_id
-        or persisted_dispatch.get("receipt_sha256")
-        != dispatch.trigger_receipt.receipt_sha256
-    ):
-        raise ClosedLoopBindingError("dispatch is not exact durable curriculum evidence")
+    if selection.selection_id in curriculum_state.get("dispatches", {}):
+        raise ClosedLoopBindingError(
+            "closed-loop curriculum selection must not create a duplicate research run"
+        )
 
     origin = supervisor.status(origin_run_id)
-    curriculum_run = supervisor.status(dispatch.run_id)
-    if origin.question_id != question_id or curriculum_run.question_id != question_id:
+    if origin.question_id != question_id:
         raise ClosedLoopBindingError("ResearchSupervisor run question identity mismatch")
 
     question = registry.get("ResearchQuestion", question_id)
@@ -244,6 +249,12 @@ def bind_challenger_artifact(
         raise ClosedLoopBindingError(
             "factory protocol does not bind AgentLoop-generated ResearchQuestion"
         )
+    if protocol.payload.get("environment_sha256") != loop_snapshot.environment_id:
+        raise ClosedLoopBindingError("factory protocol environment differs from AgentLoop")
+    if binding.get("code_config_sha256") != loop_snapshot.config_sha256:
+        raise ClosedLoopBindingError("factory protocol config differs from AgentLoop")
+    if spec.environment_sha256.lower() != loop_snapshot.environment_id:
+        raise ClosedLoopBindingError("factory candidate environment differs from AgentLoop")
 
     expected_stage = {
         "experiment_id": spec.experiment_id,
@@ -280,8 +291,7 @@ def bind_challenger_artifact(
 
     return ChallengerArtifact(
         research_question_id=question_id,
-        originating_research_run_id=origin_run_id,
-        curriculum_run_id=dispatch.run_id,
+        research_run_id=origin_run_id,
         curriculum_selection_id=selection.selection_id,
         replay_evidence_binding_id=selection.selected_evidence_binding_id,
         replay_provenance=selection.selected_provenance,

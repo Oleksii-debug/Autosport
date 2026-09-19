@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from . import _strategy_model_factory_impl as _impl
 from ._strategy_model_factory_impl import *  # noqa: F401,F403
@@ -17,10 +18,168 @@ from .workspace_lock import WorkspaceEconomicLock
 
 
 _FACTORY_PUBLISH_TRANSACTION_FILENAME = ".factory-publish-transaction-v1.json"
+_FACTORY_MATERIALIZATION_LEDGER_FILENAME = ".factory-materialization-ledger-v1.json"
+_FACTORY_MATERIALIZATION_SCHEMA_VERSION = 1
+_FACTORY_ZERO_PREDECESSOR_SHA256 = "0" * 64
 
 
 class FactoryArtifactStore(_impl.FactoryArtifactStore):
     """Immutable factory evidence read from one stable regular filesystem object."""
+
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        super().__init__(root)
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _materialization_ledger_path(self) -> Path:
+        return self.root / _FACTORY_MATERIALIZATION_LEDGER_FILENAME
+
+    @staticmethod
+    def _materialization_digest(record: dict[str, object]) -> str:
+        payload = {
+            key: record[key]
+            for key in (
+                "materialized_at",
+                "kind",
+                "identity",
+                "artifact_sha256",
+                "predecessor_record_sha256",
+            )
+        }
+        return _impl._digest(payload)
+
+    def _read_materialization_ledger(self) -> list[dict[str, object]]:
+        path = self._materialization_ledger_path()
+        if not path.exists():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("factory materialization ledger is invalid JSON") from exc
+        if type(payload) is not dict or set(payload) != {"schema_version", "records"}:
+            raise ValueError("factory materialization ledger fields mismatch")
+        if payload.get("schema_version") != _FACTORY_MATERIALIZATION_SCHEMA_VERSION:
+            raise ValueError("factory materialization ledger schema version mismatch")
+        records = payload.get("records")
+        if type(records) is not list:
+            raise ValueError("factory materialization ledger records must be a list")
+        previous = _FACTORY_ZERO_PREDECESSOR_SHA256
+        validated: list[dict[str, object]] = []
+        for raw in records:
+            if type(raw) is not dict or set(raw) != {
+                "materialized_at",
+                "kind",
+                "identity",
+                "artifact_sha256",
+                "predecessor_record_sha256",
+                "record_sha256",
+            }:
+                raise ValueError("factory materialization record fields mismatch")
+            materialized_at = _impl._instant(
+                raw.get("materialized_at"),
+                "factory materialized_at",
+            )
+            _impl._text(raw.get("kind"), "factory materialization kind")
+            _impl._text(raw.get("identity"), "factory materialization identity")
+            _impl._sha256(raw.get("artifact_sha256"), "factory materialization artifact_sha256")
+            predecessor = _impl._sha256(
+                raw.get("predecessor_record_sha256"),
+                "factory materialization predecessor_record_sha256",
+            )
+            record_sha256 = _impl._sha256(
+                raw.get("record_sha256"),
+                "factory materialization record_sha256",
+            )
+            if predecessor != previous:
+                raise ValueError("factory materialization ledger predecessor mismatch")
+            expected = self._materialization_digest(raw)
+            if record_sha256 != expected:
+                raise ValueError("factory materialization ledger record digest mismatch")
+            checked = dict(raw)
+            checked["materialized_at"] = materialized_at.isoformat().replace("+00:00", "Z")
+            validated.append(checked)
+            previous = record_sha256
+        return validated
+
+    def materialize(
+        self,
+        kind: str,
+        identity: str,
+        payload: dict[str, object],
+    ) -> str:
+        """Persist an immutable artifact and a store-owned materialization receipt."""
+        digest = self.write(kind, identity, payload)
+        self.record_materialization(kind, identity, artifact_sha256=digest)
+        return digest
+
+    def record_materialization(
+        self,
+        kind: str,
+        identity: str,
+        *,
+        artifact_sha256: str | None = None,
+    ) -> dict[str, object]:
+        """Append one store-timestamped receipt under the workspace lock."""
+        actual_sha256 = self.sha256(kind, identity)
+        if artifact_sha256 is not None and actual_sha256 != _impl._sha256(
+            artifact_sha256,
+            "artifact_sha256",
+        ):
+            raise ValueError("factory materialization artifact hash mismatch")
+        with WorkspaceEconomicLock(self.root):
+            records = self._read_materialization_ledger()
+            for record in records:
+                if record["kind"] == _impl._text(kind, "kind") and record["identity"] == _impl._text(identity, "identity"):
+                    if record["artifact_sha256"] != actual_sha256:
+                        raise ValueError("factory materialization identity is already bound to another artifact hash")
+                    return record
+            now = self._clock()
+            if not isinstance(now, datetime) or now.tzinfo is None:
+                raise ValueError("factory materialization clock must return an aware datetime")
+            materialized_at = now.astimezone(timezone.utc)
+            record: dict[str, object] = {
+                "materialized_at": materialized_at.isoformat().replace("+00:00", "Z"),
+                "kind": _impl._text(kind, "kind"),
+                "identity": _impl._text(identity, "identity"),
+                "artifact_sha256": actual_sha256,
+                "predecessor_record_sha256": (
+                    records[-1]["record_sha256"]
+                    if records
+                    else _FACTORY_ZERO_PREDECESSOR_SHA256
+                ),
+            }
+            record["record_sha256"] = self._materialization_digest(record)
+            payload = {
+                "schema_version": _FACTORY_MATERIALIZATION_SCHEMA_VERSION,
+                "records": [*records, record],
+            }
+            atomic_write_json(self._materialization_ledger_path(), payload)
+            return record
+
+    def materialization_receipt(
+        self,
+        kind: str,
+        identity: str,
+        *,
+        expected_sha256: str | None = None,
+    ) -> dict[str, object]:
+        """Read and verify the immutable store-owned receipt for one artifact."""
+        actual_sha256 = self.sha256(kind, identity)
+        if expected_sha256 is not None and actual_sha256 != _impl._sha256(
+            expected_sha256,
+            "expected_sha256",
+        ):
+            raise ValueError("factory materialization receipt artifact hash mismatch")
+        for record in self._read_materialization_ledger():
+            if record["kind"] == _impl._text(kind, "kind") and record["identity"] == _impl._text(identity, "identity"):
+                if record["artifact_sha256"] != actual_sha256:
+                    raise ValueError("factory materialization receipt artifact hash mismatch")
+                return record
+        raise ValueError(f"factory materialization receipt is missing: {kind}:{identity}")
 
     def _stable_snapshot(self, kind: str, identity: str):
         path = self._path(kind, identity)
@@ -358,6 +517,7 @@ def _validate_counterfactual_artifacts(
     protocol_id: str,
     protocol_frozen,
     dataset_snapshot_id: str,
+    evaluation_completed_at,
 ) -> None:
     """Validate durable causal ordering for qualification and post-reveal evidence."""
     qualification_identity=f"{authority.authority_id}@{authority.authority_version}"
@@ -374,6 +534,17 @@ def _validate_counterfactual_artifacts(
     qualified_at=_impl._instant(qualification.get("qualified_at"),"counterfactual qualification qualified_at")
     if qualified_at>protocol_frozen:
         raise ValueError("counterfactual qualification was not available by protocol freeze")
+    qualification_materialization=artifact_store.materialization_receipt(
+        "counterfactual-qualification",
+        qualification_identity,
+        expected_sha256=authority.qualification_evidence_sha256,
+    )
+    qualification_materialized_at=_impl._instant(
+        qualification_materialization.get("materialized_at"),
+        "counterfactual qualification materialized_at",
+    )
+    if qualification_materialized_at>protocol_frozen:
+        raise ValueError("counterfactual qualification was materialized after protocol freeze")
 
     receipt=registry.get("CounterfactualQualification",qualification_identity)
     if receipt is None:
@@ -411,8 +582,27 @@ def _validate_counterfactual_artifacts(
                 raise ValueError("counterfactual source evidence receipt does not match evaluated case")
         if not registry.causal_precedes("ResearchProtocol",protocol_id,"CounterfactualSourceEvidence",source_identity):
             raise ValueError("counterfactual source evidence was materialized before protocol freeze")
-        if _impl._instant(source_receipt.available_at,"source evidence materialized_at") < _impl._instant(case_payload.get("reward_available_at"),"reward_available_at"):
-            raise ValueError("counterfactual source evidence materialized before reward availability")
+        source_materialization=artifact_store.materialization_receipt(
+            "counterfactual-source-evidence",
+            source_identity,
+            expected_sha256=case_source_sha256,
+        )
+        source_materialized_at=_impl._instant(
+            source_materialization.get("materialized_at"),
+            "counterfactual source evidence materialized_at",
+        )
+        reward_available_at=_impl._instant(
+            case_payload.get("reward_available_at"),
+            "reward_available_at",
+        )
+        evaluation_completed=_impl._instant(
+            evaluation_completed_at,
+            "evaluation completed_at",
+        )
+        if source_materialized_at < reward_available_at:
+            raise ValueError("counterfactual source evidence was materialized before reward availability")
+        if source_materialized_at > evaluation_completed:
+            raise ValueError("counterfactual source evidence was materialized after evaluation completion")
         source_evidence=artifact_store.read("counterfactual-source-evidence",source_identity,expected_sha256=case_source_sha256)
         bound_case=dict(case_payload); bound_case.pop("source_evidence_sha256",None)
         expected_source_evidence={"schema_version":1,"kind":"autosport-counterfactual-source-evidence-v1","authority_id":authority.authority_id,"authority_version":authority.authority_version,"case":bound_case}
@@ -597,6 +787,7 @@ def _run_policy_candidate_unstaged(
             protocol_id=spec.research_protocol_id,
             protocol_frozen=protocol_frozen,
             dataset_snapshot_id=spec.dataset_snapshot_id,
+            evaluation_completed_at=evaluation.completed_at,
         )
         for sample in counterfactual_samples:
             authority.validate_reference(

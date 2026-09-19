@@ -26,7 +26,6 @@ from autosport.learning_environment import (
     RewardEvidence,
 )
 from autosport.research_curriculum import (
-    CurriculumOutcome,
     CurriculumPurpose,
     NightResearchCurriculum,
     ReplayCandidate,
@@ -271,10 +270,7 @@ def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
         seed=17,
         budget_units=64,
     )
-    dispatch = curriculum.dispatch(
-        selection,
-        deadline_at="2026-01-10T00:00:00+00:00",
-    )
+    assert len(supervisor.list_runs()) == 1
     assert selection.selected_question_id == runtime.snapshot().research_question_id
     assert selection.selected_provenance is ReplayProvenance.PAPER_LIVE
     assert selection.selected_evidence_truth is EvidenceTruth.OBSERVED
@@ -292,10 +288,10 @@ def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
         environment.environment_id,
     )
 
-    _advance_to(supervisor, dispatch.run_id, ResearchPhase.EXPERIMENT)
+    _advance_to(supervisor, origin.run_id, ResearchPhase.EXPERIMENT)
     _, staged = stage_factory_evaluation(
         supervisor,
-        dispatch.run_id,
+        origin.run_id,
         runner=runner,
         spec=spec,
         points=points,
@@ -306,7 +302,7 @@ def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
         runtime=AgentLoopRuntime(runtime.path),
         curriculum=curriculum,
         selection=selection,
-        dispatch=dispatch,
+        replay_binding=replay_binding,
         supervisor=supervisor,
         registry=registry,
         spec=spec,
@@ -359,18 +355,18 @@ def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
 
     _advance_to(
         supervisor,
-        dispatch.run_id,
+        origin.run_id,
         ResearchPhase.FORWARD_PAPER_SHADOW,
     )
     checkpoint_causal_environment(
         supervisor,
-        dispatch.run_id,
+        origin.run_id,
         environment=environment,
         at=T7,
     )
     postmortem_snapshot, decision = finalize_factory_decision(
         supervisor,
-        dispatch.run_id,
+        origin.run_id,
         runner=runner,
         spec=spec,
         staged=staged,
@@ -404,27 +400,13 @@ def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
     )
     complete = commit_memory_and_next_question(
         supervisor,
-        dispatch.run_id,
+        origin.run_id,
         decision=decision,
         staged=staged,
         next_question=next_question,
         at=T7,
     )
     assert complete.phase is ResearchPhase.COMPLETE
-
-    outcome_class = (
-        CurriculumOutcome.POSITIVE
-        if decision.action is PromotionAction.PROMOTE
-        else CurriculumOutcome.NEGATIVE
-        if decision.action is PromotionAction.REJECT
-        else CurriculumOutcome.NULL
-    )
-    curriculum.record_outcome(
-        selection.selection_id,
-        outcome=outcome_class,
-        at=T7,
-        scientific_evidence_id=decision.promotion_decision_id,
-    )
 
     reopened_registry = ScientificRegistry(registry.path)
     reopened_supervisor = ResearchSupervisor(
@@ -444,16 +426,9 @@ def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
         admissible_actions=frozenset(environment.episode.admissible_actions),
         checkpoint=checkpoint,
     )
-    assert (
-        reopened_supervisor.status(dispatch.run_id).phase
-        is ResearchPhase.COMPLETE
-    )
-    assert (
-        reopened_curriculum.snapshot()["outcomes"][selection.selection_id][
-            "scientific_evidence_id"
-        ]
-        == decision.promotion_decision_id
-    )
+    assert reopened_supervisor.status(origin.run_id).phase is ResearchPhase.COMPLETE
+    assert len(reopened_supervisor.list_runs()) == 1
+    assert reopened_curriculum.snapshot()["dispatches"] == {}
     assert reopened_runtime.snapshot().economic_goal_fingerprint == GOAL_SHA
     assert reopened_runtime.snapshot().risk_fingerprint == RISK_SHA
 

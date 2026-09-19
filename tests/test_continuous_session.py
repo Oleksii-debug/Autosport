@@ -562,7 +562,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 invalidations.accept_persisted(second)
                 status = coordinator.status()
                 self.assertTrue(status.invalidation_full_refresh_required)
-                self.assertGreater(status.invalidation_pending_count, 0)
+                self.assertEqual(status.invalidation_pending_count, 0)
                 result = coordinator._drain_invalidations()
                 self.assertEqual(result[1], True)
                 self.assertFalse(result[2])

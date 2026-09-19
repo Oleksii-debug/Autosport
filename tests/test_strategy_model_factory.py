@@ -796,10 +796,10 @@ def test_factory_consumed_holdout_commit_race_resolves_retain_without_positive_o
             )
         ),
     )
-    real_record_promotion = registry.record_promotion
+    real_record_promotion = ScientificRegistry.record_promotion
     injected = False
 
-    def racing_record_promotion(decision, *, pending_experiment=None):
+    def racing_record_promotion(self, decision, *, pending_experiment=None):
         nonlocal injected
         if (
             not injected
@@ -811,11 +811,12 @@ def test_factory_consumed_holdout_commit_race_resolves_retain_without_positive_o
                 "confirmation holdout access has already been consumed or disclosed by prior evidence"
             )
         return real_record_promotion(
+            self,
             decision,
             pending_experiment=pending_experiment,
         )
 
-    monkeypatch.setattr(registry, "record_promotion", racing_record_promotion)
+    monkeypatch.setattr(ScientificRegistry, "record_promotion", racing_record_promotion)
     result = _run_candidate(
         ExperimentRunner(registry, store),
         _candidate_points(),

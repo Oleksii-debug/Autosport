@@ -463,6 +463,7 @@ class DesktopDeltaConsumer:
         self.checkpoint = checkpoint
         self.resolve_event = resolve_event
         self.apply_event = apply_event
+        self.lookup_application_receipt = lookup_application_receipt
         self.apply_health = apply_health
 
     def drain(self, *, as_of: str, view: CausalView = CausalView.AS_KNOWN_AT_DECISION) -> tuple[str, ...]:

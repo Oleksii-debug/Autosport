@@ -490,6 +490,38 @@ class CollectorDeltaTests(unittest.TestCase):
                 consumer.drain(as_of="2026-01-01T00:00:05+00:00")
             self.assertFalse(checkpoint.has_ack("d1"))
 
+    def test_consumer_preserves_receipt_lookup_callable(self):
+        payload = event_payload()
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = CollectorDeltaStore(Path(tmp) / "collector.json")
+            desktop = DesktopDeltaCheckpointStore(Path(tmp) / "desktop.json")
+            delta = self.make_delta()
+            collector.append(delta)
+            lookup_calls = []
+
+            def lookup(current):
+                lookup_calls.append(current.delta_id)
+                return None
+
+            consumer = DesktopDeltaConsumer(
+                collector,
+                desktop,
+                resolve_event=lambda _: payload,
+                apply_event=lambda current, event: DesktopApplicationReceipt(
+                    delta_id=current.delta_id,
+                    canonical_event_digest=canonical_event_digest(event),
+                    receipt_id=f"receipt-{current.delta_id}",
+                    applied_at="2026-01-01T00:00:04+00:00",
+                ),
+                lookup_application_receipt=lookup,
+            )
+            self.assertIs(consumer.lookup_application_receipt, lookup)
+            self.assertEqual(
+                consumer.drain(as_of="2026-01-01T00:00:05+00:00"),
+                ("d1",),
+            )
+            self.assertEqual(lookup_calls, ["d1"])
+
     def test_restart_uses_durable_application_receipt_without_reapplying_effect(self):
         with tempfile.TemporaryDirectory() as tmp:
             collector = CollectorDeltaStore(Path(tmp) / "collector.json")

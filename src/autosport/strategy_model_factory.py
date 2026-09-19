@@ -485,6 +485,9 @@ def _run_policy_candidate_unstaged(
     evaluation_config = PolicyEvaluationConfig.from_frozen_text(
         binding.get("evaluation_design")
     )
+    for sample in evaluation.samples:
+        if type(sample) is not dict:
+            raise ValueError("policy evaluation sample payload is invalid")
     counterfactual_samples = tuple(
         sample
         for sample in evaluation.samples

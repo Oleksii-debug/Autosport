@@ -112,9 +112,9 @@ class AnchorSelectionTests(unittest.TestCase):
                 future,
                 simulated,
             ],
-            protocol(),
+            protocol(decision_as_of=D1),
         )
-        self.assertEqual(report.decision_state, AnchorDecisionState.CONTINUE)
+        self.assertEqual(report.decision_state, AnchorDecisionState.CHECKPOINT)
         ids = set(report.input_observation_ids)
         self.assertNotIn("future", ids)
         self.assertNotIn("sim", ids)

@@ -866,20 +866,14 @@ class PersistentLiveDecisionLoop:
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger file is missing or unreadable"
             )
-        if self._progress is not None:
-            durable_input_ids = set(self.dependencies.input_ids)
-            progress_input_ids = set(self._progress.registered_input_ids)
-            if not progress_input_ids.issubset(durable_input_ids):
-                raise LiveDecisionProgressError(
-                    "persisted live progress references missing durable dependency inputs"
-                )
-            if (
-                self._progress.phase == _PHASE_APPEND_PENDING
-                and self._progress.registered_input_ids != self.dependencies.input_ids
-            ):
-                raise LiveDecisionProgressError(
-                    "unfinished ledger append requires exact durable dependency registry"
-                )
+        if (
+            self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+            and self._progress.registered_input_ids != self.dependencies.input_ids
+        ):
+            raise LiveDecisionProgressError(
+                "unfinished live decision requires exact durable dependency registry"
+            )
         durable_control = self._load_control()
         if durable_control is None:
             durable_control = _Control(self.loop_id, LiveControlState.RUNNING)
@@ -993,6 +987,10 @@ class PersistentLiveDecisionLoop:
         self._pending_affected.pop(normalized_id, None)
         self._intent_cache.pop(normalized_id, None)
         self._input_market_sha256.pop(normalized_id, None)
+        self._freshness_deadlines.pop(normalized_id, None)
+        self._freshness_generations[normalized_id] = (
+            self._freshness_generations.get(normalized_id, 0) + 1
+        )
         return True
 
     def pause(self) -> None:
@@ -1052,9 +1050,9 @@ class PersistentLiveDecisionLoop:
         ):
             return self._recover_unfinished_progress()
 
-        now = _require_utc_clock(self.clock)
+        catalog_now = _require_utc_clock(self.clock)
         if self.catalog_lifecycle is not None:
-            self._refresh_catalog_lifecycle(now)
+            self._refresh_catalog_lifecycle(catalog_now)
 
         try:
             self._observe(self.mirror_updates)
@@ -1065,6 +1063,7 @@ class PersistentLiveDecisionLoop:
                 exc,
             )
 
+        now = _require_utc_clock(self.clock)
         batch = self.mirror_updates.drain(
             max_items=self.bounds.max_dirty_per_cycle
         )

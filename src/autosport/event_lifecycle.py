@@ -237,10 +237,6 @@ class EventLifecycleRecord:
         )
         if self.identity != expected:
             raise CatalogConflictError("durable lifecycle identity does not match canonical event identity")
-        if _instant(self.first_discovered_at, "first_discovered_at") > _instant(
-            self.last_available_at, "last_available_at"
-        ):
-            raise ValueError("first_discovered_at cannot be after last_available_at")
         if self.phase is not EventPhase.COMPLETED and (
             self.completion_ref is not None or self.settlement_ref is not None
         ):

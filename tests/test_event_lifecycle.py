@@ -96,7 +96,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             epoch_changed=epoch_changed,
         )
 
-    def test_provider_sport_event_identity_prevents_cross_sport_alias(self) -> None:
+    def test_lifecycle_identity_reuses_provider_scoped_market_event_identity(self) -> None:
         table_tennis = canonical_event_identity(
             source_id="provider-a",
             sport="table_tennis",
@@ -107,7 +107,8 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             sport="soccer",
             event_id="event-1",
         )
-        self.assertNotEqual(table_tennis, soccer)
+        self.assertEqual(table_tennis, "provider-a:event-1")
+        self.assertEqual(soccer, table_tennis)
 
     def test_post_start_discovery_progresses_same_identity_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -246,11 +247,11 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             lifecycle = ContinuousEventLifecycle(root / "catalog.json")
             table_tennis = self._catalog_event(
                 sport="table_tennis",
-                event_id="shared-local-id",
+                event_id="table-tennis-event",
             )
             soccer = self._catalog_event(
                 sport="soccer",
-                event_id="shared-local-id",
+                event_id="soccer-event",
             )
             lifecycle.apply_page(
                 CatalogPage(
@@ -267,7 +268,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 store.append(
                     self._event(
                         sport="table_tennis",
-                        event_id=self._stored_event_id("shared-local-id"),
+                        event_id=self._stored_event_id("table-tennis-event"),
                         observed_offset=0,
                         ingest_offset=0,
                     )
@@ -275,7 +276,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 store.append(
                     self._event(
                         sport="soccer",
-                        event_id=self._stored_event_id("shared-local-id"),
+                        event_id=self._stored_event_id("soccer-event"),
                         observed_offset=0,
                         ingest_offset=0,
                     )
@@ -292,12 +293,16 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                     register_input=register,
                 )
                 self.assertEqual(len(registered), 2)
+                selectors = {
+                    call[1]["sports"]: call[1]["event_ids"]
+                    for call in calls
+                }
                 self.assertEqual(
-                    {call[1]["sports"] for call in calls},
-                    {"soccer", "table_tennis"},
-                )
-                self.assertTrue(
-                    all(call[1]["event_ids"] == "provider-a:shared-local-id" for call in calls)
+                    selectors,
+                    {
+                        "soccer": "provider-a:soccer-event",
+                        "table_tennis": "provider-a:table-tennis-event",
+                    },
                 )
             finally:
                 store.close()

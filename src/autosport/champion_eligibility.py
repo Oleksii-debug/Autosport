@@ -74,6 +74,7 @@ def _tuple_text(value: object, name: str) -> tuple[str, ...]:
 class ChampionEligibilityDecision:
     status: ChampionEligibilityStatus
     canonical_strategy_id: str
+    strategy_version_id: str
     model_version_id: str
     environment_sha256: str
     protocol_id: str
@@ -99,6 +100,7 @@ class ChampionEligibilityDecision:
 
     def __post_init__(self) -> None:
         _text(self.canonical_strategy_id, "canonical_strategy_id")
+        _text(self.strategy_version_id, "strategy_version_id")
         _text(self.model_version_id, "model_version_id")
         _sha(self.environment_sha256, "environment_sha256")
         _text(self.protocol_id, "protocol_id")
@@ -150,6 +152,7 @@ class ChampionEligibilityDecision:
             "schema_version": SCHEMA_VERSION,
             "status": self.status.value,
             "canonical_strategy_id": self.canonical_strategy_id,
+            "strategy_version_id": self.strategy_version_id,
             "model_version_id": self.model_version_id,
             "environment_sha256": self.environment_sha256.lower(),
             "protocol_id": self.protocol_id,
@@ -194,6 +197,7 @@ class ChampionEligibilityDecision:
         registry: ScientificRegistry,
         *,
         canonical_strategy_id: str,
+        strategy_version_id: str,
         model_version_id: str,
         environment_sha256: str,
         protocol_id: str,
@@ -279,6 +283,7 @@ class ChampionEligibilityDecision:
         return cls(
             status=status,
             canonical_strategy_id=canonical_strategy_id,
+            strategy_version_id=strategy_version_id,
             model_version_id=model_version_id,
             environment_sha256=environment_sha256,
             protocol_id=protocol_id,

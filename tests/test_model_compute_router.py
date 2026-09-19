@@ -266,17 +266,32 @@ class ModelComputeRouterTests(unittest.TestCase):
             challenger_model_id="challenger-v1",
             challenger_config_sha256=SHA_C,
         )
-        rejected = route_compute(
-            request(request_id="req-voc-old-compute-identity"),
-            self.candidates,
-            policy(),
-            as_of=T1,
-            voc_evidence=mismatched,
-            domain_observation=slow_observation(),
-        )
-        self.assertEqual(rejected.tier, ComputeTier.LOCAL)
-        self.assertEqual(rejected.candidate_id, "local")
-        self.assertIn("exact compute identity", rejected.reason)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router-mismatched-voc.json"
+            req = request(request_id="req-voc-old-compute-identity")
+            store = ModelComputeRouterStore(path)
+            rejected = store.route(
+                req,
+                self.candidates,
+                policy(),
+                as_of=T1,
+                voc_evidence=mismatched,
+                domain_observation=slow_observation(),
+            )
+            self.assertEqual(rejected.tier, ComputeTier.LOCAL)
+            self.assertEqual(rejected.candidate_id, "local")
+            self.assertIn("exact compute identity", rejected.reason)
+
+            reopened = ModelComputeRouterStore(path)
+            readback = reopened.route(
+                req,
+                self.candidates,
+                policy(),
+                as_of=T1,
+                voc_evidence=mismatched,
+                domain_observation=slow_observation(),
+            )
+            self.assertEqual(readback, rejected)
 
         exact = route_compute(
             request(request_id="req-voc-exact-compute-identity"),

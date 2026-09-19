@@ -732,26 +732,35 @@ def test_corrupt_owner_store_denies_before_attempt_or_transport() -> None:
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
 
-def test_owner_tightening_cannot_commit_between_gate_and_attempt(
+def test_owner_tightening_cannot_commit_before_attempt_or_transport(
     monkeypatch,
 ) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         stop_contract = _goal(revision=2, emergency_stop=True)
-        transport = _Transport(
-            lambda request: _response(
+        begin_interleaving_attempted = False
+        transport_interleaving_attempted = False
+
+        def response_while_tightening_attempted(
+            request: dict[str, object],
+        ) -> bytes:
+            nonlocal transport_interleaving_attempted
+            transport_interleaving_attempted = True
+            with pytest.raises(WorkspaceEconomicLockBusyError):
+                goal_store.persist_automatic_successor(stop_contract)
+            return _response(
                 request,
                 matched=action.requested_stake,
                 average=action.requested_odds,
             )
-        )
+
+        transport = _Transport(response_while_tightening_attempted)
         client = _enabled_client(profile, transport, store=goal_store)
         original_begin = begin_supervised_attempt
-        interleaving_attempted = False
 
         def begin_after_tightening_attempt(*args, **kwargs):
-            nonlocal interleaving_attempted
-            interleaving_attempted = True
+            nonlocal begin_interleaving_attempted
+            begin_interleaving_attempted = True
             with pytest.raises(WorkspaceEconomicLockBusyError):
                 goal_store.persist_automatic_successor(stop_contract)
             return original_begin(*args, **kwargs)
@@ -772,8 +781,10 @@ def test_owner_tightening_cannot_commit_between_gate_and_attempt(
             clock=lambda: SUBMITTED_AT,
         )
 
-        assert interleaving_attempted
+        assert begin_interleaving_attempted
+        assert transport_interleaving_attempted
         assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert result.attempt_state is AttemptState.ACCEPTED
         assert goal_store.load().revision == 1
         assert len(transport.calls) == 1
 

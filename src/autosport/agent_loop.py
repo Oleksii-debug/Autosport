@@ -36,7 +36,11 @@ from .research_trigger_adapter import (
     ResearchTriggerSource,
 )
 from .scientific_registry import ResearchQuestion
-from .skill_registry import SkillRegistry, SkillRun
+from .skill_registry import (
+    AGENT_LOOP_READ_ONLY_AUTHORITY_PROFILE,
+    SkillRegistry,
+    SkillRun,
+)
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -713,8 +717,6 @@ class AgentLoopRuntime:
         definition_id: str,
         call_id: str,
         input_payload: dict[str, Any],
-        available_authorities: tuple[str, ...],
-        available_tools: tuple[str, ...] = (),
         requested_mutations: tuple[str, ...] = (),
         provenance: tuple[tuple[str, str], ...],
         requested_compute_units: int = 1,
@@ -742,8 +744,7 @@ class AgentLoopRuntime:
             caller_state_sha256=snapshot.state_sha256,
             source_sha256=snapshot.source_sha256,
             input_payload=input_payload,
-            available_authorities=available_authorities,
-            available_tools=available_tools,
+            authority_profile_id=AGENT_LOOP_READ_ONLY_AUTHORITY_PROFILE,
             requested_mutations=requested_mutations,
             provenance=provenance,
             requested_compute_units=requested_compute_units,

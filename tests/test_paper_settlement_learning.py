@@ -251,6 +251,161 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             self.assertEqual(len(loop_state["resolutions"]), 1)
             self.assertEqual(loop_state["resolutions"][0]["reward_value"], "10.00")
 
+    def test_retry_after_agent_loop_resolution_before_bridge_ack_is_exactly_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                goal,
+                risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+
+            # Prove the pre-settlement BOUND state itself survives process restart.
+            bridge = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            self.assertEqual(
+                bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:19:20+00:00",
+                ),
+                (),
+            )
+            _book, resolutions = _settle(root, outcomes={leg.quote_key: "win"})
+
+            real_write = bridge._write
+
+            def fail_ack_write(payload):
+                if any(
+                    binding["status"] == "ACKED"
+                    for binding in payload["bindings"].values()
+                ):
+                    raise RuntimeError("simulated crash after AgentLoop resolution")
+                real_write(payload)
+
+            with patch.object(bridge, "_write", side_effect=fail_ack_write):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "after AgentLoop resolution",
+                ):
+                    bridge.reconcile_after_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=resolutions,
+                        settled_ticket_ids=(ticket.ticket_id,),
+                        at="2026-09-19T21:20:00+00:00",
+                    )
+
+            loop_after_crash = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(loop_after_crash["resolutions"]), 1)
+            bridge_after_crash = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                bridge_after_crash["bindings"][ticket.ticket_id]["status"],
+                "OUTBOX",
+            )
+
+            reopened_runtime = AgentLoopRuntime(root / "agent-loop.json")
+            reopened_bridge = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=reopened_runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            acked = reopened_bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=(),
+                settled_ticket_ids=(),
+                at="2026-09-19T21:20:01+00:00",
+            )
+            self.assertEqual(len(acked), 1)
+            final_loop = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(final_loop["resolutions"]), 1)
+            final_bridge = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                final_bridge["bindings"][ticket.ticket_id]["status"],
+                "ACKED",
+            )
+
+    def test_all_void_ticket_produces_exact_zero_reward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                _runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(root, outcomes={leg.quote_key: "void"})
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+            loop_state = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(loop_state["resolutions"][0]["reward_value"], "0.00")
+
     def test_loss_uses_negative_exact_reward_from_final_paper_economics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

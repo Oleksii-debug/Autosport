@@ -1,6 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from autosport.participant_identity import (
     AliasRecord, EntityIdentity, EntityKind, IdentityView, ParticipantIdentityError,
@@ -206,6 +207,85 @@ class ParticipantIdentityTests(unittest.TestCase):
         registry.add_lineage(lineage)
         self.assertEqual(registry.lineage_at("team-before", as_of=T1), ())
         self.assertEqual(registry.lineage_at("team-before", as_of=T2), (lineage,))
+
+    def test_failed_persist_does_not_publish_uncommitted_identity_state(self):
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        before = self.path.read_bytes()
+        with patch("autosport.participant_identity.atomic_write_json", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                registry.add_entity(entity())
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertNotIn("p-1", registry._entities)
+        self.assertNotIn("p-1", ParticipantIdentityRegistry(self.path)._entities)
+
+        registry.add_entity(entity())
+        alias_record = alias()
+        before = self.path.read_bytes()
+        with patch("autosport.participant_identity.atomic_write_json", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                registry.add_alias(alias_record)
+        self.assertEqual(self.path.read_bytes(), before)
+        with self.assertRaisesRegex(ParticipantIdentityError, "unambiguously"):
+            registry.resolve_alias("provider-a", "Alex", as_of=T1)
+        with self.assertRaisesRegex(ParticipantIdentityError, "unambiguously"):
+            ParticipantIdentityRegistry(self.path).resolve_alias("provider-a", "Alex", as_of=T1)
+
+        roster_record = RosterMembership("event-1", "provider-a", "p-1", T0, None, T0, SHA)
+        before = self.path.read_bytes()
+        with patch("autosport.participant_identity.atomic_write_json", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                registry.add_roster_membership(roster_record)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(registry.roster_at("event-1", "provider-a", as_of=T1), ())
+        self.assertEqual(ParticipantIdentityRegistry(self.path).roster_at("event-1", "provider-a", as_of=T1), ())
+
+        registry.add_entity(entity("p-2"))
+        lineage = EntityLineage("p-1", "p-2", LineageRelation.SUPERSEDES, T1, T1, T1, SHA)
+        before = self.path.read_bytes()
+        with patch("autosport.participant_identity.atomic_write_json", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                registry.add_lineage(lineage)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(registry.lineage_at("p-1", as_of=T2), ())
+        self.assertEqual(ParticipantIdentityRegistry(self.path).lineage_at("p-1", as_of=T2), ())
+
+    def test_lineage_interval_conflict_and_split_fanout_are_explicit(self):
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        registry.add_entity(entity("old")); registry.add_entity(entity("new-a")); registry.add_entity(entity("new-b"))
+        supersedes = EntityLineage(
+            "old", "new-a", LineageRelation.SUPERSEDES, T1, T1, T1, SHA, valid_until=T3
+        )
+        registry.add_lineage(supersedes)
+        self.assertEqual(registry.lineage_at("old", as_of=T2), (supersedes,))
+        self.assertEqual(registry.lineage_at("old", as_of=T3), ())
+        with self.assertRaisesRegex(ParticipantIdentityError, "conflicting lineage"):
+            registry.add_lineage(
+                EntityLineage("old", "new-b", LineageRelation.SUPERSEDES, T2, T2, T2, SHA)
+            )
+
+        split_path = Path(self.temporary.name) / "split-fanout.json"
+        split_registry = ParticipantIdentityRegistry.initialize_pristine(split_path)
+        split_registry.add_entity(entity("old")); split_registry.add_entity(entity("new-a")); split_registry.add_entity(entity("new-b"))
+        first = EntityLineage("old", "new-a", LineageRelation.SPLIT_FROM, T1, T1, T1, SHA)
+        second = EntityLineage("old", "new-b", LineageRelation.SPLIT_FROM, T1, T1, T1, SHA)
+        split_registry.add_lineage(first); split_registry.add_lineage(second)
+        self.assertEqual(set(split_registry.lineage_at("old", as_of=T2)), {first, second})
+
+    def test_lineage_rejects_future_entity_and_cross_kind_equivalence(self):
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        registry.add_entity(entity("old"))
+        registry.add_entity(entity("future", available=T3))
+        with self.assertRaisesRegex(ParticipantIdentityError, "referenced entity identity"):
+            registry.add_lineage(
+                EntityLineage("old", "future", LineageRelation.SUPERSEDES, T1, T2, T2, SHA)
+            )
+
+        league = EntityIdentity("league-1", EntityKind.LEAGUE, "provider:league-1", SHA, T0, T0)
+        registry.add_entity(league)
+        with self.assertRaisesRegex(ParticipantIdentityError, "same EntityKind"):
+            registry.add_lineage(
+                EntityLineage("old", "league-1", LineageRelation.MERGED_FROM, T1, T1, T1, SHA)
+            )
 
     def test_unknown_entity_and_invalid_interval_fail_closed(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)

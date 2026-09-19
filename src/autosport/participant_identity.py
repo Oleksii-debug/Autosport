@@ -186,6 +186,7 @@ class EntityLineage:
     available_at: str
     recorded_at: str
     evidence_sha256: str
+    valid_until: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("predecessor_entity_id", "successor_entity_id", "evidence_sha256"):
@@ -199,6 +200,8 @@ class EntityLineage:
         effective = _instant("effective_from", self.effective_from)
         available = _instant("available_at", self.available_at)
         recorded = _instant("recorded_at", self.recorded_at)
+        if self.valid_until is not None and _instant("valid_until", self.valid_until) <= effective:
+            raise ParticipantIdentityError("lineage valid_until must be after effective_from")
         if available < effective:
             raise ParticipantIdentityError("lineage cannot be available before effective_from")
         if recorded < available:
@@ -208,7 +211,7 @@ class EntityLineage:
     def record_id(self) -> str:
         return _digest(self.payload())
 
-    def payload(self) -> dict[str, str]:
+    def payload(self) -> dict[str, str | None]:
         return {
             "predecessor_entity_id": self.predecessor_entity_id,
             "successor_entity_id": self.successor_entity_id,
@@ -217,6 +220,7 @@ class EntityLineage:
             "available_at": _time_text("available_at", self.available_at),
             "recorded_at": _time_text("recorded_at", self.recorded_at),
             "evidence_sha256": self.evidence_sha256,
+            "valid_until": None if self.valid_until is None else _time_text("valid_until", self.valid_until),
         }
 
 
@@ -249,8 +253,10 @@ class ParticipantIdentityRegistry:
             if existing != entity:
                 raise ParticipantIdentityError("conflicting immutable entity identity")
             return
-        self._entities[entity.entity_id] = entity
-        self._persist()
+        candidate_entities = dict(self._entities)
+        candidate_entities[entity.entity_id] = entity
+        self._persist_state(entities=candidate_entities)
+        self._entities = candidate_entities
 
     def add_alias(self, alias: AliasRecord) -> None:
         if not isinstance(alias, AliasRecord):
@@ -300,8 +306,8 @@ class ParticipantIdentityRegistry:
                 continue
             raise ParticipantIdentityError("conflicting alias validity intervals")
 
-        self._aliases.append(alias)
-        self._aliases.sort(key=lambda value: (
+        candidate_aliases = [*self._aliases, alias]
+        candidate_aliases.sort(key=lambda value: (
             value.source_id,
             value.alias,
             _time_text("recorded_at", value.recorded_at),
@@ -309,7 +315,8 @@ class ParticipantIdentityRegistry:
             _time_text("valid_from", value.valid_from),
             value.record_id,
         ))
-        self._persist()
+        self._persist_state(aliases=candidate_aliases)
+        self._aliases = candidate_aliases
 
     def add_roster_membership(self, membership: RosterMembership) -> None:
         if not isinstance(membership, RosterMembership):
@@ -318,9 +325,10 @@ class ParticipantIdentityRegistry:
             raise ParticipantIdentityError("roster membership references unknown entity")
         if membership in self._rosters:
             return
-        self._rosters.append(membership)
-        self._rosters.sort(key=lambda value: (value.event_id, value.source_id, value.entity_id, _time_text("member_from", value.member_from)))
-        self._persist()
+        candidate_rosters = [*self._rosters, membership]
+        candidate_rosters.sort(key=lambda value: (value.event_id, value.source_id, value.entity_id, _time_text("member_from", value.member_from)))
+        self._persist_state(rosters=candidate_rosters)
+        self._rosters = candidate_rosters
 
     def add_lineage(self, lineage: EntityLineage) -> None:
         """Append correction provenance without changing prior resolutions."""
@@ -328,14 +336,36 @@ class ParticipantIdentityRegistry:
             raise TypeError("lineage must be EntityLineage")
         if lineage.predecessor_entity_id not in self._entities or lineage.successor_entity_id not in self._entities:
             raise ParticipantIdentityError("lineage references unknown entity")
+        predecessor = self._entities[lineage.predecessor_entity_id]
+        successor = self._entities[lineage.successor_entity_id]
+        if predecessor.kind is not successor.kind:
+            raise ParticipantIdentityError("lineage identities must have the same EntityKind")
+        if _instant("available_at", lineage.available_at) < max(
+            _instant("predecessor available_at", predecessor.available_at),
+            _instant("successor available_at", successor.available_at),
+        ):
+            raise ParticipantIdentityError("lineage cannot be available before referenced entity identity")
         if lineage in self._lineages:
             return
-        self._lineages.append(lineage)
-        self._lineages.sort(key=lambda value: (
+        for existing in self._lineages:
+            if existing.predecessor_entity_id != lineage.predecessor_entity_id:
+                continue
+            if not _overlap(existing.effective_from, existing.valid_until, lineage.effective_from, lineage.valid_until):
+                continue
+            if (
+                existing.relation is LineageRelation.SPLIT_FROM
+                and lineage.relation is LineageRelation.SPLIT_FROM
+                and existing.successor_entity_id != lineage.successor_entity_id
+            ):
+                continue
+            raise ParticipantIdentityError("conflicting lineage validity intervals")
+        candidate_lineages = [*self._lineages, lineage]
+        candidate_lineages.sort(key=lambda value: (
             value.predecessor_entity_id, value.successor_entity_id,
             _time_text("effective_from", value.effective_from), value.record_id,
         ))
-        self._persist()
+        self._persist_state(lineages=candidate_lineages)
+        self._lineages = candidate_lineages
 
     def lineage_at(self, entity_id: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> tuple[EntityLineage, ...]:
         """Return causal correction evidence; do not rewrite identity truth."""
@@ -346,12 +376,20 @@ class ParticipantIdentityRegistry:
         return tuple(
             record for record in self._lineages
             if entity_id in (record.predecessor_entity_id, record.successor_entity_id)
-            and _instant("effective_from", record.effective_from) <= moment
+            and _contains(record.effective_from, record.valid_until, moment)
             and (
                 view is IdentityView.RESTATED_RESEARCH
                 or (
                     _instant("available_at", record.available_at) <= moment
                     and _instant("recorded_at", record.recorded_at) <= moment
+                    and _instant(
+                        "predecessor available_at",
+                        self._entities[record.predecessor_entity_id].available_at,
+                    ) <= moment
+                    and _instant(
+                        "successor available_at",
+                        self._entities[record.successor_entity_id].available_at,
+                    ) <= moment
                 )
             )
         )
@@ -410,14 +448,28 @@ class ParticipantIdentityRegistry:
                     result.append(entity)
         return tuple(sorted(result, key=lambda entity: entity.entity_id))
 
-    def _persist(self) -> None:
+    def _persist_state(
+        self,
+        *,
+        entities: dict[str, EntityIdentity] | None = None,
+        aliases: list[AliasRecord] | None = None,
+        rosters: list[RosterMembership] | None = None,
+        lineages: list[EntityLineage] | None = None,
+    ) -> None:
         if self._loading:
             return
+        entity_state = self._entities if entities is None else entities
+        alias_state = self._aliases if aliases is None else aliases
+        roster_state = self._rosters if rosters is None else rosters
+        lineage_state = self._lineages if lineages is None else lineages
         atomic_write_json(self.path, {"schema": _SCHEMA, "version": _VERSION,
-            "entities": [item.payload() for item in sorted(self._entities.values(), key=lambda item: item.entity_id)],
-            "aliases": [item.payload() for item in self._aliases],
-            "rosters": [item.payload() for item in self._rosters],
-            "lineages": [item.payload() for item in self._lineages]})
+            "entities": [item.payload() for item in sorted(entity_state.values(), key=lambda item: item.entity_id)],
+            "aliases": [item.payload() for item in alias_state],
+            "rosters": [item.payload() for item in roster_state],
+            "lineages": [item.payload() for item in lineage_state]})
+
+    def _persist(self) -> None:
+        self._persist_state()
 
     def _load(self) -> None:
         try:
@@ -442,6 +494,7 @@ class ParticipantIdentityRegistry:
                     item["predecessor_entity_id"], item["successor_entity_id"],
                     LineageRelation(item["relation"]), item["effective_from"],
                     item["available_at"], item["recorded_at"], item["evidence_sha256"],
+                    item.get("valid_until"),
                 ))
         finally:
             self._loading = False

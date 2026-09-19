@@ -1755,6 +1755,17 @@ class PersistentLiveDecisionLoop:
             "plan_sha256": progress.plan_sha256,
         }
         if payload_version == 2:
+            _, committed_decision_time = _canonical_timestamp(
+                "committed decision_ts",
+                progress.decision_ts,
+            )
+            try:
+                self.intent_provenance.assert_available_at(committed_decision_time)
+            except LiveDecisionProgressError as exc:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision intent provenance was not causally "
+                    "available at decision time"
+                ) from exc
             provenance = self.intent_provenance
             if (
                 existing.payload.get("intent_strategy_version_id")

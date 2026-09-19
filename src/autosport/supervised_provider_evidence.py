@@ -392,6 +392,7 @@ def verify_betfair_provider_state(
             "Betfair readback requires canonical positive numeric selection_id"
         )
 
+    provider_order_ref = readback.provider_order_ref or action.action_id
     candidates: list[
         tuple[
             str,
@@ -400,10 +401,10 @@ def verify_betfair_provider_state(
         ]
     ] = []
     for order in current:
-        if order.customer_order_ref == action.action_id:
+        if order.customer_order_ref == provider_order_ref:
             candidates.append(("current", None, order))
     for status, order in cleared:
-        if order.customer_order_ref == action.action_id:
+        if order.customer_order_ref == provider_order_ref:
             candidates.append(("cleared", status, order))
 
     for kind, _, order in candidates:
@@ -435,6 +436,7 @@ def verify_betfair_provider_state(
                 "bookmaker_id": action.bookmaker_id,
                 "account_id": action.account_id,
                 "action_id": action.action_id,
+                "provider_order_ref": provider_order_ref,
                 "event_id": readback.market_event.event_id,
                 "market_id": action.market_id,
                 "selection_id": action.selection_id,
@@ -511,6 +513,7 @@ def verify_betfair_provider_state(
             "bookmaker_id": action.bookmaker_id,
             "account_id": action.account_id,
             "action_id": action.action_id,
+            "provider_order_ref": provider_order_ref,
             "event_id": readback.market_event.event_id,
             "market_id": action.market_id,
             "selection_id": action.selection_id,

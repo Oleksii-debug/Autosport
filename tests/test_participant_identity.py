@@ -47,6 +47,14 @@ class ParticipantIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(ParticipantIdentityError, "conflicting alias"):
             registry.add_alias(alias("p-2"))
 
+    def test_same_name_is_isolated_by_provider_source(self):
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        registry.add_entity(entity("p-provider-a")); registry.add_entity(entity("p-provider-b"))
+        registry.add_alias(AliasRecord("provider-a", "Alex", "p-provider-a", T0, None, T0, SHA))
+        registry.add_alias(AliasRecord("provider-b", "Alex", "p-provider-b", T0, None, T0, SHA))
+        self.assertEqual(registry.resolve_alias("provider-a", "Alex", as_of=T1).entity_id, "p-provider-a")
+        self.assertEqual(registry.resolve_alias("provider-b", "Alex", as_of=T1).entity_id, "p-provider-b")
+
     def test_alias_can_change_after_non_overlapping_interval(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
         registry.add_entity(entity("p-1")); registry.add_entity(entity("p-2")); registry.add_alias(alias("p-1", valid_until=T2)); registry.add_alias(alias("p-2", valid_from=T2, available=T2))
@@ -69,6 +77,14 @@ class ParticipantIdentityTests(unittest.TestCase):
         self.assertEqual(registry.lineage_at("p-old", as_of=T2), ())
         self.assertEqual(registry.lineage_at("p-old", as_of=T2, view=IdentityView.RESTATED_RESEARCH), (lineage,))
         self.assertEqual(ParticipantIdentityRegistry(self.path).lineage_at("p-canonical", as_of=T2, view=IdentityView.RESTATED_RESEARCH), (lineage,))
+
+    def test_split_lineage_is_persisted_as_causal_evidence(self):
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        registry.add_entity(entity("team-before")); registry.add_entity(entity("team-after"))
+        lineage = EntityLineage("team-before", "team-after", LineageRelation.SPLIT_FROM, T1, T2, SHA)
+        registry.add_lineage(lineage)
+        self.assertEqual(registry.lineage_at("team-before", as_of=T1), ())
+        self.assertEqual(registry.lineage_at("team-before", as_of=T2), (lineage,))
 
     def test_unknown_entity_and_invalid_interval_fail_closed(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)

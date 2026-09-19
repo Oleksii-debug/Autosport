@@ -19,8 +19,10 @@ from autosport.participant_strength import (
 from autosport.scientific_registry import (
     DatasetSnapshot,
     FeatureSet,
+    Hypothesis,
     ModelVersion,
     ResearchProtocol,
+    ResearchQuestion,
     ScientificRegistry,
     StrategyVersion,
 )
@@ -127,6 +129,47 @@ def _point(index: int, feature: float, target: float) -> TrainingPoint:
     )
 
 
+def _payload_sha(payload: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _append_preregistration(
+    registry: ScientificRegistry,
+    *,
+    question_id: str,
+    hypothesis_id: str,
+    question_at: str = T0,
+    hypothesis_at: str = T0,
+) -> tuple[str, str]:
+    question = ResearchQuestion(
+        question_id=question_id,
+        statement="Does causal participant-strength evidence improve forecast calibration?",
+        source_sha256=SHA_A,
+        created_at=question_at,
+    )
+    hypothesis = Hypothesis(
+        hypothesis_id=hypothesis_id,
+        research_question_id=question_id,
+        statement="The registered participant-strength model is causally evaluable.",
+        falsifiable_prediction="Frozen causal evaluation can reject the challenger.",
+        failure_criteria="Missing lineage, future evidence, or failed calibration guardrail.",
+        primary_metric="mse",
+        protective_metrics=(),
+        created_at=hypothesis_at,
+    )
+    registry.append(question)
+    registry.append(hypothesis)
+    return _payload_sha(question.to_payload()), _payload_sha(hypothesis.to_payload())
+
+
 def _registered_strength_lineage(
     tmp_path,
     *,
@@ -134,6 +177,13 @@ def _registered_strength_lineage(
     dataset_available_at: str,
     model_created_at: str,
     strategy_created_at: str,
+    include_preregistration: bool = True,
+    protocol_cutoff: str | None = None,
+    protocol_feature_version: str = "1",
+    protocol_frozen_at: str = T1,
+    protocol_available_at: str = T1,
+    question_at: str = T0,
+    hypothesis_at: str = T0,
 ):
     registry = ScientificRegistry.initialize_pristine(
         tmp_path / "scientific-registry.json"
@@ -156,6 +206,16 @@ def _registered_strength_lineage(
         }
     )
     artifact_sha = artifacts.write("model", "model-lineage", payload)
+    if include_preregistration:
+        question_sha, hypothesis_sha = _append_preregistration(
+            registry,
+            question_id="question-lineage",
+            hypothesis_id="hypothesis-lineage",
+            question_at=question_at,
+            hypothesis_at=hypothesis_at,
+        )
+    else:
+        question_sha, hypothesis_sha = SHA_D, SHA_E
     registry.append(
         FeatureSet(
             feature_set_id="features-lineage",
@@ -170,15 +230,15 @@ def _registered_strength_lineage(
             binding=ScientificProtocolBinding(
                 research_protocol_id="protocol-lineage",
                 research_question_id="question-lineage",
-                research_question_sha256=SHA_D,
+                research_question_sha256=question_sha,
                 hypothesis_id="hypothesis-lineage",
-                hypothesis_sha256=SHA_E,
+                hypothesis_sha256=hypothesis_sha,
                 inclusion_criteria="causal rating snapshot pairs",
                 exclusion_criteria="future or insufficient evidence",
                 lawful_source_requirements="test fixture",
-                causal_cutoff=dataset_cutoff,
+                causal_cutoff=protocol_cutoff or dataset_cutoff,
                 evaluation_design="fixed causal fixture",
-                feature_set_version="1",
+                feature_set_version=protocol_feature_version,
                 uncertainty_method="descriptive rating radius",
                 multiple_comparison_control="single challenger",
                 robustness_checks=("future-leakage",),
@@ -187,12 +247,12 @@ def _registered_strength_lineage(
                 promotion_rule="no promotion",
                 expected_artifacts=("model",),
                 code_config_sha256=SHA_C,
-                frozen_at_utc=T1,
+                frozen_at_utc=protocol_frozen_at,
             ),
             source_sha256=SHA_A,
             environment_sha256=SHA_B,
             dataset_manifest_sha256=model.training_manifest_sha256,
-            available_at_utc=T1,
+            available_at_utc=protocol_available_at,
         )
     )
     registry.append(
@@ -431,12 +491,17 @@ def test_registered_forecast_reloads_hash_bound_factory_artifact_and_registry(tm
             available_at_utc=T1,
         )
     )
+    question_sha, hypothesis_sha = _append_preregistration(
+        registry,
+        question_id="question-strength-v1",
+        hypothesis_id="hypothesis-strength-v1",
+    )
     binding = ScientificProtocolBinding(
         research_protocol_id="protocol-strength-v1",
         research_question_id="question-strength-v1",
-        research_question_sha256=SHA_D,
+        research_question_sha256=question_sha,
         hypothesis_id="hypothesis-strength-v1",
-        hypothesis_sha256=SHA_E,
+        hypothesis_sha256=hypothesis_sha,
         inclusion_criteria="causal canonical rating snapshot pairs only",
         exclusion_criteria="insufficient or future-contaminated evidence",
         lawful_source_requirements="canonical Autosport dataset entitlement",
@@ -511,7 +576,7 @@ def test_registered_forecast_reloads_hash_bound_factory_artifact_and_registry(tm
     assert Decimal("0") <= forecast.probability <= Decimal("1")
     assert forecast.model_training_cutoff_ts == T3
     assert forecast.evidence_hashes[:2] == (SHA_A, SHA_B)
-    assert len(forecast.evidence_hashes) == 8
+    assert len(forecast.evidence_hashes) == 10
     assert forecast.provenance["dataset_snapshot_id"] == "dataset-strength-v1"
     assert forecast.provenance["feature_set_id"] == "features-strength-v1"
     assert forecast.provenance["research_protocol_id"] == "protocol-strength-v1"
@@ -692,6 +757,102 @@ def test_registered_forecast_rejects_strategy_that_predates_bound_model(tmp_path
             registry=registry,
             artifact_store=artifacts,
             evidence=_pair(decision_at=T5),
+            model_version_id="model-lineage",
+            strategy_version_id="strategy-lineage",
+            quote_key="event-1:match-winner:participant-a",
+        )
+
+def test_registered_forecast_rejects_missing_frozen_preregistration(tmp_path):
+    registry, artifacts = _registered_strength_lineage(
+        tmp_path,
+        dataset_cutoff=T2,
+        dataset_available_at=T2,
+        model_created_at=T2,
+        strategy_created_at=T2,
+        include_preregistration=False,
+    )
+
+    with pytest.raises(
+        ParticipantStrengthError,
+        match="lacks frozen ResearchQuestion/Hypothesis",
+    ):
+        emit_registered_strength_forecast(
+            registry=registry,
+            artifact_store=artifacts,
+            evidence=_pair(decision_at=T3),
+            model_version_id="model-lineage",
+            strategy_version_id="strategy-lineage",
+            quote_key="event-1:match-winner:participant-a",
+        )
+
+
+def test_registered_forecast_rejects_protocol_dataset_cutoff_mismatch(tmp_path):
+    registry, artifacts = _registered_strength_lineage(
+        tmp_path,
+        dataset_cutoff=T2,
+        dataset_available_at=T2,
+        model_created_at=T2,
+        strategy_created_at=T2,
+        protocol_cutoff=T1,
+    )
+
+    with pytest.raises(
+        ParticipantStrengthError,
+        match="ResearchProtocol/DatasetSnapshot causal cutoff mismatch",
+    ):
+        emit_registered_strength_forecast(
+            registry=registry,
+            artifact_store=artifacts,
+            evidence=_pair(decision_at=T3),
+            model_version_id="model-lineage",
+            strategy_version_id="strategy-lineage",
+            quote_key="event-1:match-winner:participant-a",
+        )
+
+
+def test_registered_forecast_rejects_protocol_feature_version_mismatch(tmp_path):
+    registry, artifacts = _registered_strength_lineage(
+        tmp_path,
+        dataset_cutoff=T2,
+        dataset_available_at=T2,
+        model_created_at=T2,
+        strategy_created_at=T2,
+        protocol_feature_version="2",
+    )
+
+    with pytest.raises(
+        ParticipantStrengthError,
+        match="FeatureSet version does not match ResearchProtocol",
+    ):
+        emit_registered_strength_forecast(
+            registry=registry,
+            artifact_store=artifacts,
+            evidence=_pair(decision_at=T3),
+            model_version_id="model-lineage",
+            strategy_version_id="strategy-lineage",
+            quote_key="event-1:match-winner:participant-a",
+        )
+
+
+def test_registered_forecast_rejects_hypothesis_frozen_after_protocol(tmp_path):
+    registry, artifacts = _registered_strength_lineage(
+        tmp_path,
+        dataset_cutoff=T3,
+        dataset_available_at=T3,
+        model_created_at=T3,
+        strategy_created_at=T3,
+        hypothesis_at=T2,
+        protocol_frozen_at=T1,
+    )
+
+    with pytest.raises(
+        ParticipantStrengthError,
+        match="Hypothesis must precede ResearchProtocol freeze",
+    ):
+        emit_registered_strength_forecast(
+            registry=registry,
+            artifact_store=artifacts,
+            evidence=_pair(decision_at=T4),
             model_version_id="model-lineage",
             strategy_version_id="strategy-lineage",
             quote_key="event-1:match-winner:participant-a",

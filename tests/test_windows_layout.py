@@ -453,3 +453,34 @@ def test_manual_calculation_cancel_clear_and_error_have_no_result_authority():
 def test_manual_calculation_localization_keys_are_all_present():
     from autosport.localization import require_keys
     require_keys(MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS)
+
+
+def test_manual_calculation_real_service_rejects_nonfinite_and_repeats_identical_evidence():
+    from autosport.calculation_manual import ManualCalculationService
+    from autosport.windows_manual_calculation import _calculation_call
+
+    class Input:
+        def __init__(self, value):
+            self.value = value
+        def get(self, *_args):
+            return self.value
+
+    service = ManualCalculationService()
+    with pytest.raises(ValueError):
+        _calculation_call(service, "implied_probability", Input("NaN"))
+    with pytest.raises(ValueError):
+        _calculation_call(service, "odds_conversion", Input("Infinity"))
+
+    first = _calculation_call(service, "paper_payout", Input("25\n2.10"))
+    second = _calculation_call(service, "paper_payout", Input("25\n2.10"))
+    assert first.to_text() == second.to_text()
+    assert first.evidence_sha256 == second.evidence_sha256
+    assert first.real_money_execution is False
+
+
+def test_manual_calculation_source_has_no_automatic_event_market_or_outcome_selection():
+    from autosport.windows_manual_calculation import _calculation_call
+    source = inspect.getsource(_calculation_call)
+    assert "MarketEvent" not in source
+    assert "event_id" not in source
+    assert "selection_id" in source

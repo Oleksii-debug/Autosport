@@ -2541,6 +2541,11 @@ class ModelComputeRouterStore:
                 staged_heads,
             )
         except OSError as exc:
+            # The fsynced authority record is already the durable truth. Keep
+            # readback in this process aligned with that incurred cost while
+            # refusing every further mutation until a reopen completes repair.
+            self._executions = staged
+            self._execution_heads = staged_heads
             self._publication_interrupted = True
             raise ModelComputeRouterError(
                 "routing-state publication failed after durable execution "

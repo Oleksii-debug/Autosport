@@ -1173,7 +1173,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 ModelComputeRouterStore(path)
 
 
-    def test_separate_authority_rejects_self_consistent_execution_tail_rollback(self):
+    def test_separate_authority_recovers_self_consistent_store_tail_rollback(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "router.json"
             store = ModelComputeRouterStore(path)
@@ -1233,11 +1233,11 @@ class ModelComputeRouterTests(unittest.TestCase):
             rewrite_execution_heads_from_surviving_history(
                 path, raw
             )
-            with self.assertRaisesRegex(
-                ModelComputeRouterError,
-                "execution authority references missing execution",
-            ):
-                ModelComputeRouterStore(path)
+            reopened = ModelComputeRouterStore(path)
+            self.assertEqual(
+                reopened.total_actual_cost(req.request_id),
+                Decimal("2.05"),
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "router.json"
@@ -1303,11 +1303,11 @@ class ModelComputeRouterTests(unittest.TestCase):
             rewrite_execution_heads_from_surviving_history(
                 path, raw
             )
-            with self.assertRaisesRegex(
-                ModelComputeRouterError,
-                "execution authority references missing execution",
-            ):
-                ModelComputeRouterStore(path)
+            reopened = ModelComputeRouterStore(path)
+            self.assertEqual(
+                reopened.total_actual_cost(req.request_id),
+                Decimal("10"),
+            )
 
 
     def test_restart_freezes_loaded_request_but_preserves_idempotent_execution(self):
@@ -2132,7 +2132,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 rewrite_store_with_valid_state_hash(path, raw)
                 with self.assertRaisesRegex(
                     ModelComputeRouterError,
-                    "execution history does not match durable terminal head",
+                    "execution authority prefix does not match routing state",
                 ):
                     ModelComputeRouterStore(path)
 

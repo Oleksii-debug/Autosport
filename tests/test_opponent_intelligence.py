@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -685,6 +686,41 @@ class OpponentIntelligenceTests(unittest.TestCase):
             self.store.graph_edges(as_of=T2),
             (),
         )
+
+    def test_restart_rejects_snapshot_with_missing_durable_input(
+        self,
+    ):
+        record = self.store.record_performance(observation())
+        rating, _ = self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
+            causal_cutoff=T2,
+            published_at=T2,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
+            min_support=1,
+        )
+        raw = json.loads(self.store_path.read_text(encoding="utf-8"))
+        raw["performances"] = [
+            item
+            for item in raw["performances"]
+            if item["performance_id"] != record.performance_id
+        ]
+        self.store_path.write_text(
+            json.dumps(raw, sort_keys=True),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            OpponentIntelligenceError,
+            "missing durable performance input",
+        ):
+            OpponentIntelligenceStore(
+                self.store_path,
+                ParticipantIdentityRegistry(self.identity_path),
+            )
+        self.assertIn(record.performance_id, rating.input_performance_ids)
 
     def test_snapshot_identity_binds_view_cutoff_config_and_exact_inputs(
         self,

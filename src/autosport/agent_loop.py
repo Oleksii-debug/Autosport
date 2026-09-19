@@ -1002,6 +1002,40 @@ class AgentLoopRuntime:
             identity = state["identity"]
             current = state["current"]
             if (
+                outcome.environment_id != identity["environment_id"]
+                or reward.environment_id != identity["environment_id"]
+            ):
+                raise AgentLoopError(
+                    "resolution evidence belongs to another AgentLoop environment"
+                )
+            decision = next(
+                (
+                    item
+                    for item in state["decisions"]
+                    if item["action_id"] == current["action_id"]
+                ),
+                None,
+            )
+            if decision is None:
+                raise AgentLoopError(
+                    "current action lacks durable decision evidence"
+                )
+            if (
+                transition.observation_id != current["observation_id"]
+                or transition.observation_id != decision["observation_id"]
+            ):
+                raise AgentLoopError(
+                    "transition does not bind the durable current observation"
+                )
+            if _timestamp_identity(
+                transition.decision_at, "transition.decision_at"
+            ) != _timestamp_identity(
+                decision["decided_at"], "decision.decided_at"
+            ):
+                raise AgentLoopError(
+                    "transition decision_at does not bind durable action decision"
+                )
+            if (
                 transition.environment_id != identity["environment_id"]
                 or transition.episode_id != identity["episode_id"]
             ):
@@ -1039,17 +1073,38 @@ class AgentLoopRuntime:
                 raise AgentLoopError(
                     "simulated outcome/reward model identities must match"
                 )
+            decision_i = _instant(
+                decision["decided_at"], "decision.decided_at"
+            )
+            reveal_i = _instant(
+                outcome.revealed_at, "outcome.revealed_at"
+            )
+            reward_i = _instant(
+                reward.available_at, "reward.available_at"
+            )
+            resolved_i = _instant(
+                transition.resolved_at, "transition.resolved_at"
+            )
             now_i = _instant(now, "at")
+            if reveal_i < decision_i or reward_i < decision_i:
+                raise AgentLoopError(
+                    "outcome/reward evidence predates action decision"
+                )
+            if reward_i < reveal_i:
+                raise AgentLoopError(
+                    "reward evidence predates outcome reveal"
+                )
+            if resolved_i < reveal_i or resolved_i < reward_i:
+                raise AgentLoopError(
+                    "transition resolves before outcome/reward availability"
+                )
             if (
-                _instant(
-                    outcome.revealed_at, "outcome.revealed_at"
-                ) > now_i
-                or _instant(
-                    reward.available_at, "reward.available_at"
-                ) > now_i
+                reveal_i > now_i
+                or reward_i > now_i
+                or resolved_i > now_i
             ):
                 raise AgentLoopError(
-                    "future outcome/reward evidence cannot enter AgentLoop"
+                    "future resolution evidence cannot enter AgentLoop"
                 )
             state["resolutions"].append(payload)
             current["transition_id"] = transition.transition_id
@@ -1238,15 +1293,27 @@ class AgentLoopRuntime:
                 attribution["attributed_at"], "attributed_at"
             ):
                 raise AgentLoopError("postmortem predates attribution")
-            known_components = {
-                item["component"] for item in attribution["findings"]
+            finding_status = {
+                item["component"]: item["status"]
+                for item in attribution["findings"]
             }
             if any(
-                item.value not in known_components
+                item.value not in finding_status
                 for item in postmortem.unresolved_components
             ):
                 raise AgentLoopError(
                     "postmortem references attribution component not present"
+                )
+            unresolved_statuses = {
+                AttributionStatus.UNKNOWN.value,
+                AttributionStatus.MIXED.value,
+            }
+            if any(
+                finding_status[item.value] not in unresolved_statuses
+                for item in postmortem.unresolved_components
+            ):
+                raise AgentLoopError(
+                    "postmortem unresolved components must be UNKNOWN or MIXED"
                 )
             state["postmortems"].append(payload)
             current["postmortem_id"] = postmortem.postmortem_id

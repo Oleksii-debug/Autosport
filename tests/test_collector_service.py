@@ -1,4 +1,5 @@
 import json
+import signal
 import tempfile
 import unittest
 from dataclasses import replace
@@ -16,9 +17,11 @@ from autosport.causal_collector import (
 from autosport.collector_service import (
     CollectorServiceConfig,
     CollectorServiceError,
+    CollectorServiceStoppedError,
     CollectorStorageLimitError,
     HeadlessCollectorService,
     ReadOnlyCollectorDeltaFeed,
+    _SignalStopRequest,
 )
 from autosport.domain import MarketEvent
 from autosport.event_lifecycle import CatalogEvent, CatalogPage, EventPhase
@@ -159,6 +162,7 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
         random_value=None,
         config=None,
         stop_requested=None,
+        stop_reason=None,
     ):
         from autosport.event_lifecycle import ContinuousEventLifecycle
 
@@ -179,6 +183,7 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             sleep=sleep or (lambda _: None),
             random_value=random_value or (lambda: 0),
             stop_requested=stop_requested,
+            stop_reason=stop_reason,
         )
 
     def test_restart_reuses_durable_delta_identity_without_duplicate_commit(self):
@@ -209,6 +214,70 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             self.assertEqual(status["cycles_succeeded"], 2)
             self.assertEqual(status["deltas_committed"], 1)
             self.assertEqual(status["duplicate_deltas"], 1)
+
+    def test_persisted_stop_blocks_reopen_until_explicit_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            delta = make_delta()
+            first = self.make_service(
+                tmp, FakeCollectorSource([page], [(delta,)])
+            )
+            first.stop("maintenance")
+            self.assertEqual(first.status()["stop_reason"], "maintenance")
+
+            reopened_source = FakeCollectorSource([page], [(delta,)])
+            reopened = self.make_service(tmp, reopened_source)
+            with self.assertRaises(CollectorServiceStoppedError):
+                reopened.run(max_cycles=1)
+            self.assertEqual(reopened_source.catalog_calls, 0)
+            self.assertEqual(reopened_source.delta_calls, 0)
+            self.assertEqual(reopened.status()["stop_reason"], "maintenance")
+
+            reopened.resume()
+            result = reopened.run_cycle()
+            self.assertEqual(result.committed_delta_ids, ("d1",))
+            self.assertEqual(reopened_source.catalog_calls, 1)
+            self.assertEqual(reopened_source.delta_calls, 1)
+            self.assertIsNone(reopened.status()["stopped_at"])
+            self.assertIsNone(reopened.status()["stop_reason"])
+
+    def test_sigint_and_sigterm_stop_after_current_provider_cycle(self):
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signum=signum), tempfile.TemporaryDirectory() as tmp:
+                stop = _SignalStopRequest()
+                page = catalog_page(1, "event-1")
+                delta = make_delta()
+
+                class SignalDuringDeltaSource(FakeCollectorSource):
+                    def fetch_deltas(self, checkpoint, records, max_items):
+                        result = super().fetch_deltas(
+                            checkpoint, records, max_items
+                        )
+                        stop.handle(signum, None)
+                        return result
+
+                source = SignalDuringDeltaSource([page], [(delta,)])
+                service = self.make_service(
+                    tmp,
+                    source,
+                    stop_requested=stop,
+                    stop_reason=stop.reason,
+                )
+                result = service.run(max_cycles=3)
+                self.assertEqual(result.cycles_executed, 1)
+                self.assertEqual(source.catalog_calls, 1)
+                self.assertEqual(source.delta_calls, 1)
+                self.assertEqual(
+                    service.status()["stop_reason"],
+                    f"signal:{signal.Signals(signum).name}",
+                )
+
+                reopened_source = FakeCollectorSource([page], [(delta,)])
+                reopened = self.make_service(tmp, reopened_source)
+                with self.assertRaises(CollectorServiceStoppedError):
+                    reopened.run(max_cycles=1)
+                self.assertEqual(reopened_source.catalog_calls, 0)
+                self.assertEqual(reopened_source.delta_calls, 0)
 
     def test_post_start_catalog_discovery_is_collected_in_later_cycle(self):
         with tempfile.TemporaryDirectory() as tmp:

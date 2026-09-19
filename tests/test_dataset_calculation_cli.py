@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import unittest
 from decimal import Decimal
 from unittest.mock import patch
@@ -164,12 +165,16 @@ class DatasetQuoteCalculationCliTests(unittest.TestCase):
             first = calculate_dataset_quote(_args())
             second = calculate_dataset_quote(_args())
 
-        self.assertEqual(
-            render_result(first, "json"),
-            render_result(second, "json"),
-        )
-        self.assertNotIn("settled", render_result(first, "json"))
-        self.assertNotIn("winner", render_result(first, "json"))
+        rendered = render_result(first, "json")
+        self.assertEqual(rendered, render_result(second, "json"))
+        payload = json.loads(rendered)
+        self.assertFalse(payload["outcomes_accessed"])
+        self.assertNotIn("settled", payload)
+        self.assertNotIn("settlement", payload)
+        self.assertNotIn("outcome", payload)
+        # "winner" is a valid market_type/market_id fixture value and is not
+        # evidence of reading sealed settlement/outcome payloads.
+        self.assertEqual(payload["selected_quote_identity"]["market_type"], "WINNER")
 
     def test_run_fail_closed_returns_nonzero_without_partial_result(self) -> None:
         dataset = _FakeDataset([_event(observed_ts="2026-09-19T12:01:00+00:00")])

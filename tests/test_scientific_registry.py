@@ -245,7 +245,7 @@ def _promotion_evidence(
     interval_low: str = "0.05",
     interval_high: str = "0.15",
     effective_n: int = 5,
-    minimum_n: int = 2,
+    minimum_n: int = 3,
     validity=PromotionEvidenceValidity.ELIGIBLE,
     consumed: bool = False,
     guardrails: bool = True,

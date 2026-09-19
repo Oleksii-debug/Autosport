@@ -51,6 +51,14 @@ class SchedulerStatus(StrEnum):
     STOPPED = "STOPPED"
 
 
+class _CurriculumDispatchBlocked(RuntimeError):
+    """Internal control-flow signal for a scheduler transition before dispatch."""
+
+    def __init__(self, status: SchedulerStatus) -> None:
+        super().__init__(f"curriculum dispatch blocked by scheduler {status.value}")
+        self.status = status
+
+
 class TickAction(StrEnum):
     IDLE = "IDLE"
     DELIVERED = "DELIVERED"
@@ -831,6 +839,25 @@ class ResearchScheduler:
             key=lambda item: (item[1]["as_of"], item[1]["selector_policy_version"], item[0]),
         )
 
+    def _require_curriculum_dispatch_allowed_locked(self, wake_id: str) -> None:
+        """Recheck scheduler authority under the curriculum reservation lock.
+
+        NightResearchCurriculum invokes this callback while holding the shared
+        WorkspaceEconomicLock and immediately before writing its downstream
+        PENDING dispatch reservation.  Do not acquire the lock again here.
+        """
+
+        state = self._read()
+        self._validate(state)
+        wake = state["curriculum_wakes"].get(wake_id)
+        if wake is None:
+            raise ResearchSchedulerError("curriculum wake disappeared before dispatch")
+        if wake["status"] != "PENDING":
+            raise ResearchSchedulerError("curriculum wake is no longer pending")
+        status = SchedulerStatus(state["status"])
+        if status in {SchedulerStatus.PAUSED, SchedulerStatus.STOPPED}:
+            raise _CurriculumDispatchBlocked(status)
+
     def queue_curriculum_wake(
         self,
         curriculum: NightResearchCurriculum,
@@ -963,15 +990,26 @@ class ResearchScheduler:
             deadline_at = wake["deadline_at"]
             seed = wake["seed"]
 
-        receipt = curriculum.select_and_dispatch(
-            population,
-            purpose=purpose,
-            selector_policy_version=selector_policy_version,
-            as_of=as_of,
-            seed=seed,
-            budget_units=budget_units,
-            deadline_at=deadline_at,
-        )
+        try:
+            receipt = curriculum.select_and_dispatch(
+                population,
+                purpose=purpose,
+                selector_policy_version=selector_policy_version,
+                as_of=as_of,
+                seed=seed,
+                budget_units=budget_units,
+                deadline_at=deadline_at,
+                before_reservation=lambda: self._require_curriculum_dispatch_allowed_locked(
+                    wake_id
+                ),
+            )
+        except _CurriculumDispatchBlocked as blocked:
+            action = (
+                TickAction.PAUSED
+                if blocked.status is SchedulerStatus.PAUSED
+                else TickAction.STOPPED
+            )
+            return TickResult(action, curriculum_wake_id=wake_id)
         if not isinstance(receipt, CurriculumDispatchReceipt):
             raise ResearchSchedulerError("curriculum selector must return CurriculumDispatchReceipt")
 

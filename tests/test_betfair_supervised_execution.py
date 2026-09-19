@@ -54,8 +54,10 @@ from autosport.supervised_execution import (
     ExecutionLegConstraint,
     SupervisedApproval,
     build_supervised_execution_plan,
+    reconcile_provider_not_found,
     reserve_supervised_plan,
     supervised_execution_terms_sha256,
+    verify_betfair_provider_state,
 )
 
 DECISION_TS = "2026-09-19T08:00:00+00:00"
@@ -605,6 +607,23 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart() -> N
             call["params"].get("customerOrderRefs")
             in (None, [provider_ref])
             for call in read_transport.calls
+        )
+        verified_absence = verify_betfair_provider_state(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=envelope,
+        )
+        reconciliation = reconcile_provider_not_found(
+            restarted,
+            bound,
+            attempt_id="attempt-timeout",
+            readback=verified_absence,
+        )
+        assert reconciliation.attempt_state is AttemptState.RECONCILED_NOT_FOUND
+        assert restarted.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
         )
 
 

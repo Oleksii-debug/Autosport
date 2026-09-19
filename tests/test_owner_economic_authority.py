@@ -57,6 +57,22 @@ def test_confirmation_cancel_never_creates_a_contract(tmp_path: Path) -> None:
     assert not (tmp_path / EconomicGoalStore.FILE_NAME).exists()
 
 
+def test_initial_form_rejects_unexpected_keys_without_silently_discarding_them(
+    tmp_path: Path,
+) -> None:
+    service = OwnerEconomicAuthorityService(tmp_path)
+
+    with pytest.raises(OwnerEconomicAuthorityError, match="Неприпустимі поля"):
+        service.initialize_from_form(
+            {**_values(), "unreviewed_limit": "0"},
+            emergency_stop=False,
+            confirmed=True,
+        )
+
+    assert service.read_view().state == "absent"
+    assert not (tmp_path / EconomicGoalStore.FILE_NAME).exists()
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (

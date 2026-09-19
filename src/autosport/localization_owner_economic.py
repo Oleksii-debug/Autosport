@@ -41,6 +41,7 @@ OWNER_ECONOMIC_AUTHORITY_UK_UA: Mapping[str, str] = MappingProxyType(
         "ui.windows.owner_authority.error.integer": "Поле «{field}» має бути додатним цілим числом.",
         "ui.windows.owner_authority.error.duplicates": "Поле «{field}» не може містити повторів.",
         "ui.windows.owner_authority.error.missing": "Відсутні обов’язкові поля контракту: {fields}.",
+        "ui.windows.owner_authority.error.unexpected": "Неприпустимі поля контракту: {fields}.",
         "ui.windows.owner_authority.error.automation": "Стеля автоматизації має бути цілим значенням від 0 до 4.",
         "ui.windows.owner_authority.error.contract": "Початковий контракт відхилено типізованою перевіркою меж.",
         "ui.windows.owner_authority.error.not_absent": "Початковий контракт можна створити лише коли збереження відсутнє; поточний стан не дає права на запис.",

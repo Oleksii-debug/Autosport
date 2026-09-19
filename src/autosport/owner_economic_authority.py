@@ -133,6 +133,14 @@ def build_initial_owner_contract(
                 fields=", ".join(_field_label(name) for name in missing),
             )
         )
+    unexpected = sorted(set(values) - set(OWNER_ECONOMIC_FORM_FIELDS))
+    if unexpected:
+        raise OwnerEconomicAuthorityError(
+            text(
+                "ui.windows.owner_authority.error.unexpected",
+                fields=", ".join(unexpected),
+            )
+        )
     try:
         automation_level = AutomationLevel(_positive_or_zero_int("automation_level", values["automation_level"]))
     except (ValueError, EconomicGoalContractError) as exc:

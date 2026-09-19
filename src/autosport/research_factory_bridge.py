@@ -542,6 +542,32 @@ def finalize_staged_candidate(
             if type(protocol_sha256) is not str:
                 raise ResearchFactoryBridgeError("durable protocol hash is missing")
 
+            matching_promotion_evidence = tuple(
+                entry
+                for entry in staged_registry.causal_records(
+                    "PromotionEvidence",
+                    as_of=decided_at,
+                )
+                if entry.payload.get("experiment_id") == spec.experiment_id
+                and entry.payload.get("research_protocol_id")
+                == spec.research_protocol_id
+                and entry.payload.get("candidate_strategy_version_id")
+                == spec.strategy_version_id
+                and entry.payload.get("candidate_model_version_id")
+                == spec.model_version_id
+                and entry.payload.get("evaluation_bundle_id")
+                == spec.evaluation_bundle_id
+                and entry.payload.get("dataset_snapshot_id")
+                == spec.dataset_snapshot_id
+                and entry.payload.get("evaluation_bundle_sha256")
+                == staged.evaluation_bundle_sha256
+            )
+            if len(matching_promotion_evidence) != 1:
+                raise ResearchFactoryBridgeError(
+                    "staged candidate must bind exactly one typed PromotionEvidence"
+                )
+            promotion_evidence_id = matching_promotion_evidence[0].record_id
+
             decision = PromotionDecision(
                 spec.promotion_decision_id,
                 final_action,
@@ -553,6 +579,7 @@ def finalize_staged_candidate(
                 decided_at,
                 predecessor_strategy_version_id=spec.predecessor_strategy_version_id,
                 candidate_model_version_id=spec.model_version_id,
+                promotion_evidence_id=promotion_evidence_id,
                 reason=canonical_reason,
             )
             decision_sha256 = staged_registry.record_promotion(decision)

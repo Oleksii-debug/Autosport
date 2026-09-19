@@ -577,6 +577,18 @@ def test_next_observation_requires_durable_current_transition_checkpoint(
     pending = json_load(runtime.path)
     assert runtime.snapshot().phase is AgentLoopPhase.CHECKPOINT
     assert runtime.snapshot().checkpointed_transition_id is None
+
+    forged_checkpoint_head = json.loads(json.dumps(pending))
+    forged_checkpoint_head["checkpointed_transition_id"] = transition.transition_id
+    rewrite_with_valid_state_digest(runtime.path, forged_checkpoint_head)
+    with pytest.raises(
+        AgentLoopError,
+        match="checkpoint head differs from latest durable checkpoint",
+    ):
+        AgentLoopRuntime(runtime.path)
+    rewrite_with_valid_state_digest(runtime.path, pending)
+    assert AgentLoopRuntime(runtime.path).snapshot().phase is AgentLoopPhase.CHECKPOINT
+
     next_observation = _observation(environment, suffix="2")
     with pytest.raises(
         AgentLoopError,
@@ -607,6 +619,12 @@ def test_next_observation_requires_durable_current_transition_checkpoint(
         at="2026-09-19T13:05:08Z",
     )
     assert committed.checkpointed_transition_id == transition.transition_id
+    committed_state = json_load(runtime.path)
+    assert committed_state["checkpoint_history"][-1]["checkpoint_id"] == checkpoint.checkpoint_id
+    assert (
+        committed_state["checkpoint_history"][-1]["last_transition_id"]
+        == transition.transition_id
+    )
     started = recovered.begin_observation(
         next_observation,
         environment_identity=environment.identity,

@@ -740,6 +740,36 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertIn("does not bind exact portfolio/candidates", mismatch_plan.reason)
         self.assertIsNone(mismatch_plan.dependency_graph)
 
+    def test_robust_proposal_hash_is_context_free_for_high_precision_decimal(self) -> None:
+        exact = Decimal("123456789012345678901234567890.00")
+        proposal = RobustPortfolioProposal(
+            base_stakes=(exact,),
+            proposed_stakes=(exact,),
+            dependency_haircut_fraction=Decimal("0.00"),
+            uncertainty_fraction=Decimal("0.000"),
+            fee_fraction=Decimal("0.0"),
+            partial_fill_stress_fraction=Decimal("0"),
+            robust_scale=Decimal("1.000"),
+        )
+        equivalent = RobustPortfolioProposal(
+            base_stakes=(Decimal("123456789012345678901234567890"),),
+            proposed_stakes=(Decimal("123456789012345678901234567890.0000"),),
+            dependency_haircut_fraction=Decimal("0"),
+            uncertainty_fraction=Decimal("0"),
+            fee_fraction=Decimal("0"),
+            partial_fill_stress_fraction=Decimal("0.0000"),
+            robust_scale=Decimal("1"),
+        )
+
+        self.assertEqual(proposal.proposal_sha256, equivalent.proposal_sha256)
+        payload = proposal.to_dict()
+        restored = RobustPortfolioProposal.from_dict(payload)
+        self.assertEqual(restored, proposal)
+        self.assertEqual(restored.base_stakes[0], exact)
+        self.assertEqual(restored.proposed_stakes[0], exact)
+        self.assertEqual(Decimal(payload["base_stakes"][0]), exact)
+        self.assertEqual(Decimal(payload["proposed_stakes"][0]), exact)
+
     def test_correlated_positive_candidates_use_robust_haircut_and_remain_exact_decimal(self) -> None:
         goal = self._goal()
         first = self._intent(goal, suffix="robust-a", signal=Decimal("0.05"))

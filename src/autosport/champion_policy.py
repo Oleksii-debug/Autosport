@@ -279,8 +279,10 @@ def load_champion_policy(
     if type(model_payload.get("seed")) is not int or model_payload["seed"] != policy.seed:
         raise ChampionPolicyError("champion policy/model seed lineage mismatch")
     policy_actions = frozenset(item.action_type for item in policy.estimates)
-    if policy_actions != expected_actions:
-        raise ChampionPolicyError("champion policy action universe mismatch")
+    if not expected_actions.issubset(policy_actions):
+        raise ChampionPolicyError(
+            "next-episode actions widen the champion policy universe"
+        )
     return policy
 
 

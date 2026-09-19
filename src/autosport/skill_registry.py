@@ -274,7 +274,11 @@ class SkillRegistry:
             raise SkillRegistryError("run authority/tool evidence does not match source-owned profile")
         _prov(tuple(tuple(x) for x in e.get("provenance",[]))); _prov(tuple(tuple(x) for x in e.get("emitted_evidence",[])))
         for n in ("requested_compute_units","requested_data_units","requested_ai_units","consumed_compute_units","consumed_data_units","consumed_ai_units"): _nni(e.get(n),n)
-        if e["consumed_compute_units"] > e["requested_compute_units"] or e["consumed_data_units"] > e["requested_data_units"] or e["consumed_ai_units"] > e["requested_ai_units"]:
+        if st is not SkillRunStatus.FAILED and (
+            e["consumed_compute_units"] > e["requested_compute_units"]
+            or e["consumed_data_units"] > e["requested_data_units"]
+            or e["consumed_ai_units"] > e["requested_ai_units"]
+        ):
             raise SkillRegistryError("run consumed budget exceeds immutable requested budget")
         if type(e.get("input")) is not dict: raise SkillRegistryError("run input must be object")
         if e.get("output") is not None and type(e["output"]) is not dict: raise SkillRegistryError("run output must be object or null")
@@ -413,7 +417,14 @@ class SkillRegistry:
         try:
             if not isinstance(r,SkillExecutionResult):raise SkillRegistryError("skill handler must return SkillExecutionResult")
             self._check_result(d,r,c,db,ai)
-        except Exception as exc:return self._finish_failure(rid,now,"HANDLER_ERROR_"+exc.__class__.__name__.upper())
+        except Exception as exc:
+            observed = r if isinstance(r, SkillExecutionResult) else None
+            return self._finish_failure(
+                rid,
+                now,
+                "HANDLER_ERROR_"+exc.__class__.__name__.upper(),
+                observed=observed,
+            )
         return self._finish_success(rid,d,r,now)
     @staticmethod
     def _execute_handler_bounded(h:SkillHandler,payload:dict[str,Any],timeout_seconds:int)->tuple[SkillExecutionResult|None,str|None]:
@@ -447,10 +458,25 @@ class SkillRegistry:
         if kind!="OK":
             return None,"HANDLER_PROTOCOL_ERROR"
         return value,None
-    def _finish_failure(self,rid,at,code):
+    def _finish_failure(self,rid,at,code,observed:SkillExecutionResult|None=None):
         with WorkspaceEconomicLock(self.path.parent):
             s=self._read(); e=next(x for x in s["runs"] if x["run_id"]==rid)
-            if e["status"]==SkillRunStatus.RUNNING.value:e.update(status=SkillRunStatus.FAILED.value,completed_at=at,error_code=_text(code,"error_code")); self._write(self.path,self._without_digest(s))
+            if e["status"]==SkillRunStatus.RUNNING.value:
+                updates={
+                    "status":SkillRunStatus.FAILED.value,
+                    "completed_at":at,
+                    "error_code":_text(code,"error_code"),
+                }
+                if observed is not None:
+                    updates.update(
+                        consumed_compute_units=observed.consumed_compute_units,
+                        consumed_data_units=observed.consumed_data_units,
+                        consumed_ai_units=observed.consumed_ai_units,
+                        used_tools=list(observed.used_tools),
+                        applied_mutations=list(observed.applied_mutations),
+                        emitted_evidence=[list(x) for x in observed.emitted_evidence],
+                    )
+                e.update(**updates); self._write(self.path,self._without_digest(s))
             return self._run(e)
     def _finish_success(self,rid,d,r,at):
         out=_obj(r.output,"result.output"); q=r.research_question_candidate; qh=None if q is None else _digest({"kind":"ResearchQuestionCandidate","statement":q,"skill_definition_id":d.definition_id,"run_id":rid})

@@ -100,10 +100,9 @@ def _build_coordinator(root: Path, source: _Source, clock: _Clock, *, outcome_au
     invalidations = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=1)
     dependencies = FocusedMirrorDependencyIndex(mirror)
     collector_store = CollectorDeltaStore(root / "collector_deltas.json")
-    lifecycle_store = ContinuousEventLifecycle(root / "collector_lifecycle.json")
     collector = HeadlessCollectorService(
         delta_store=collector_store,
-        lifecycle=lifecycle_store,
+        lifecycle=lifecycle,
         source=source,
         state_path=root / "collector_state.json",
         run_id="collector-run-1",

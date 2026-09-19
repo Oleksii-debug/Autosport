@@ -1247,6 +1247,28 @@ class ScientificRegistry:
                 evidence = require("PromotionEvidence", evidence_id)
                 ep = evidence["payload"]
                 for raw in state["records"]:
+                    if (
+                        raw["record_type"] != "PromotionEvidence"
+                        or raw["record_id"] == evidence_id
+                    ):
+                        continue
+                    if (
+                        _instant(
+                            raw["available_at"],
+                            "PromotionEvidence.available_at",
+                        )
+                        > decision_at
+                    ):
+                        continue
+                    if (
+                        raw["payload"].get("holdout_access_id")
+                        == ep.get("holdout_access_id")
+                    ):
+                        raise PromotionEvidenceError(
+                            "confirmation holdout access has already been consumed "
+                            "or disclosed by prior evidence"
+                        )
+                for raw in state["records"]:
                     if raw["record_type"] != "PromotionDecision":
                         continue
                     prior_id = raw["payload"].get("promotion_evidence_id")

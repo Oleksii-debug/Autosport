@@ -1385,6 +1385,10 @@ class PortfolioPlan:
                 raise ValueError(
                     "dependency evidence requires a bound dependency graph"
                 )
+            if not self.dependency_evidence.support_qualified:
+                raise ValueError(
+                    "durable dependency evidence is under-supported"
+                )
             if self.portfolio_sha256 != self.dependency_evidence.portfolio_sha256:
                 raise ValueError(
                     "dependency evidence must bind the exact portfolio identity"

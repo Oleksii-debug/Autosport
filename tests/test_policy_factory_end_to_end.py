@@ -657,7 +657,7 @@ def test_policy_retest_rejects_unqualified_case_digest_before_publish(tmp_path):
 
     import pytest
 
-    with pytest.raises(ValueError, match="not qualified by frozen authority"):
+    with pytest.raises(ValueError, match="receipt does not match evaluated case"):
         run_policy_retest(
             ExperimentRunner(registry, store),
             predecessor_policy=predecessor,

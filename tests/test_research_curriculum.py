@@ -55,6 +55,10 @@ def _binding(
     provenance=ReplayProvenance.HISTORICAL_OBSERVED,
     truth=None,
     outcome_available_at=None,
+    outcome_evidence=(("result", "sealed"),),
+    reward_value=Decimal("-1"),
+    reward_evidence=(("metric", "sealed"),),
+    source_suffix="test-replay-source",
 ):
     if truth is None:
         truth = (
@@ -70,7 +74,9 @@ def _binding(
         outcome_available_at or "2026-09-20T00:00:00Z"
     )
     identity = EnvironmentIdentity(
-        source_id="test-replay-source",
+        source_id=(
+            f"autosport.replay-provenance/{provenance.value}/{source_suffix}"
+        ),
         config_id="test-config",
         data_id="test-data",
         protocol_id="test-protocol",
@@ -100,17 +106,17 @@ def _binding(
         action_id=action.action_id,
         revealed_at=outcome_available_at,
         truth=truth,
-        evidence=(("result", "sealed"),),
+        evidence=outcome_evidence,
         simulation_model_id=simulation_model_id,
     )
     reward = RewardEvidence(
         environment_id=environment.environment_id,
         action_id=action.action_id,
         outcome_id=outcome.outcome_id,
-        reward=Decimal("-1"),
+        reward=reward_value,
         available_at=outcome_available_at,
         truth=truth,
-        evidence=(("metric", "sealed"),),
+        evidence=reward_evidence,
         simulation_model_id=simulation_model_id,
     )
     transition = environment.resolve(
@@ -121,6 +127,7 @@ def _binding(
     )
     checkpoint = environment.checkpoint()
     return ReplayEvidenceBinding(
+        identity=identity,
         episode=environment.episode,
         checkpoint=checkpoint,
         transition=transition,
@@ -307,36 +314,26 @@ def test_canonical_simulated_evidence_cannot_be_relabelled_observed():
         )
 
 
-def test_synthetic_episode_cannot_be_relabelled_observed(tmp_path):
-    _, _, curriculum = _workspace(tmp_path)
-    episode_id = "6" * 64
-    synthetic = _candidate(
-        episode_id=episode_id,
-        provenance=ReplayProvenance.SYNTHETIC_WORLD_MODEL,
+def test_replay_provenance_is_derived_from_environment_source_identity():
+    binding = _binding(
+        episode_key="paper-source",
+        provenance=ReplayProvenance.PAPER_LIVE,
     )
 
-    with pytest.raises(ResearchCurriculumError, match="no causally eligible"):
-        curriculum.select(
-            (synthetic,),
-            purpose=CurriculumPurpose.CONFIRMATORY,
-            selector_policy_version="confirm-v1",
-            as_of="2026-09-19T03:20:00Z",
-            seed=9,
-            budget_units=1,
-        )
-
-    relabelled = _candidate(
-        episode_id=episode_id,
-        provenance=ReplayProvenance.HISTORICAL_OBSERVED,
+    assert binding.provenance is ReplayProvenance.PAPER_LIVE
+    assert binding.provenance_source_id.startswith(
+        "autosport.replay-provenance/PAPER_LIVE/"
     )
-    with pytest.raises(ResearchCurriculumError, match="cannot be relabelled"):
-        curriculum.select(
-            (relabelled,),
-            purpose=CurriculumPurpose.CONFIRMATORY,
-            selector_policy_version="confirm-v1",
-            as_of="2026-09-19T03:21:00Z",
-            seed=10,
-            budget_units=1,
+
+
+def test_real_execution_provenance_is_rejected_by_paper_shadow_environment():
+    with pytest.raises(
+        ResearchCurriculumError,
+        match="cannot substantiate REAL_EXECUTION provenance",
+    ):
+        _binding(
+            episode_key="unsupported-real",
+            provenance=ReplayProvenance.REAL_EXECUTION,
         )
 
 
@@ -360,6 +357,51 @@ def test_confirmatory_observed_binding_is_eligible_before_outcome_reveal(tmp_pat
     assert record.selected_evidence_binding_id == candidate.evidence_binding.binding_id
     assert record.selected_evidence_truth is EvidenceTruth.OBSERVED
     assert record.outcome_information_available is False
+
+
+def test_pre_reveal_identity_and_tie_break_ignore_future_outcome_reward_content(
+    tmp_path,
+):
+    first = _candidate(
+        episode_id="future-stable",
+        outcome_evidence=(("result", "future-a"),),
+        reward_value=Decimal("-1"),
+        reward_evidence=(("metric", "future-a"),),
+    )
+    second = _candidate(
+        episode_id="future-stable",
+        outcome_evidence=(("result", "future-b"),),
+        reward_value=Decimal("7"),
+        reward_evidence=(("metric", "future-b"),),
+    )
+
+    assert first.evidence_binding.binding_id != second.evidence_binding.binding_id
+    assert first.candidate_id == second.candidate_id
+
+    selected_episode_ids = []
+    selection_ids = []
+    for folder_name, candidate in (("first", first), ("second", second)):
+        workspace = tmp_path / folder_name
+        workspace.mkdir()
+        _, _, curriculum = _workspace(workspace)
+        rival = _candidate(
+            episode_id="future-rival",
+            priority=candidate.priority,
+            expected_learning_value=candidate.expected_learning_value,
+        )
+        record = curriculum.select(
+            (candidate, rival),
+            purpose=CurriculumPurpose.CONFIRMATORY,
+            selector_policy_version="confirm-v1",
+            as_of="2026-09-19T03:20:00Z",
+            seed=13,
+            budget_units=1,
+        )
+        selected_episode_ids.append(record.selected_episode_id)
+        selection_ids.append(record.selection_id)
+
+    assert selected_episode_ids[0] == selected_episode_ids[1]
+    assert selection_ids[0] == selection_ids[1]
 
 
 def test_dispatch_rejects_fabricated_unpersisted_selection_without_side_effect(tmp_path):

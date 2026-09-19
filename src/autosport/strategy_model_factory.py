@@ -485,6 +485,46 @@ def _run_policy_candidate_unstaged(
     evaluation_config = PolicyEvaluationConfig.from_frozen_text(
         binding.get("evaluation_design")
     )
+    counterfactual_samples = tuple(
+        sample
+        for sample in evaluation.samples
+        if sample.get("reward_mode") != "OBSERVED_ACTION"
+    )
+    authority = evaluation_config.counterfactual_authority
+    if counterfactual_samples:
+        if authority is None:
+            raise ValueError(
+                "promotion-eligible counterfactual rewards lack frozen authority"
+            )
+        if authority.qualification_status != "QUALIFIED":
+            raise ValueError(
+                "promotion-eligible counterfactual authority is not qualified"
+            )
+        if (
+            authority.evaluator_source_sha256
+            != spec.evaluator_source_sha256.lower()
+        ):
+            raise ValueError(
+                "counterfactual authority evaluator identity does not match factory spec"
+            )
+        if (
+            evaluation.counterfactual_authority_sha256
+            != authority.authority_sha256
+        ):
+            raise ValueError(
+                "policy evaluation counterfactual authority hash mismatch"
+            )
+        for sample in counterfactual_samples:
+            authority.validate_reference(
+                counterfactual_source_id=sample.get("counterfactual_source_id"),
+                source_evidence_sha256=sample.get("source_evidence_sha256"),
+                reward_mode=sample.get("reward_mode"),
+                scope=sample.get("regime_id"),
+            )
+    elif evaluation.counterfactual_authority_sha256 is not None:
+        raise ValueError(
+            "observed-only policy evaluation cannot claim counterfactual authority"
+        )
     if feature.payload.get("version") != binding.get("feature_set_version"):
         raise ValueError("policy feature version does not match frozen protocol")
     if feature.payload.get("feature_set_id") != evaluation_config.feature_set_id:

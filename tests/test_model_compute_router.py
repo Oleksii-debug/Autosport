@@ -650,6 +650,78 @@ class ModelComputeRouterTests(unittest.TestCase):
             ):
                 ModelComputeRouterStore(path)
 
+    def test_restart_rejects_semantically_unauthorized_cloud_decision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+            cloud_request = request(request_id="req-cloud-authority")
+            decision = store.route(
+                cloud_request,
+                self.candidates,
+                policy(),
+                as_of=T1,
+                voc_evidence=voc(evidence_id="voc-cloud-authority"),
+                domain_observation=slow_observation(),
+            )
+            self.assertEqual(decision.tier, ComputeTier.CLOUD)
+            original = path.read_text(encoding="utf-8")
+
+            def assert_semantic_forgery_rejected(mutate):
+                raw = json.loads(original)
+                route = next(
+                    item
+                    for item in raw["routes"]
+                    if item["request"]["request_id"]
+                    == "req-cloud-authority"
+                )
+                mutate(route)
+                rewrite_route_with_valid_hashes(path, raw, route)
+                with self.assertRaisesRegex(
+                    ModelComputeRouterError,
+                    "persisted CLOUD decision is not authorized "
+                    "by persisted route inputs",
+                ):
+                    ModelComputeRouterStore(path)
+
+            assert_semantic_forgery_rejected(
+                lambda route: route["request"].__setitem__(
+                    "allow_cloud", False
+                )
+            )
+            assert_semantic_forgery_rejected(
+                lambda route: route["policy"].__setitem__(
+                    "cloud_enabled", False
+                )
+            )
+            assert_semantic_forgery_rejected(
+                lambda route: route["request"].__setitem__(
+                    "data_classification", DataClassification.PRIVATE.value
+                )
+            )
+            assert_semantic_forgery_rejected(
+                lambda route: route["voc_evidence"].__setitem__(
+                    "challenger_utility", "1.1"
+                )
+            )
+
+            def revoke_domain_authorization(route):
+                route["domain_observation"][
+                    "compute_duration_seconds"
+                ]["value"] = "6"
+                route["domain_route"] = {
+                    "status": RouteStatus.ROUTE_BASELINE.value,
+                    "reason": (
+                        "slow-analysis budget does not fit measured "
+                        "reaction slack; stay on baseline route"
+                    ),
+                    "observation_id": "fitness-1",
+                    "domain_profile": DomainProfile.SLOW.value,
+                }
+
+            assert_semantic_forgery_rejected(
+                revoke_domain_authorization
+            )
+
     def test_restart_rejects_semantically_forged_execution_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "router.json"

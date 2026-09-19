@@ -12,9 +12,11 @@ from autosport.champion_agent_episode import (
 from autosport.champion_policy import persist_policy_state
 from autosport.learning_environment import (
     Action,
+    CausalLearningEnvironment,
     EnvironmentIdentity,
     EvidenceTruth,
     Observation,
+    Outcome,
     RewardEvidence,
     Transition,
 )
@@ -349,3 +351,91 @@ def test_champion_evidence_cannot_arrive_after_agent_loop_start(tmp_path):
             source_sha256=SOURCE_SHA256,
             at=T2,
         )
+
+def test_resume_rejects_checkpoint_older_than_durable_agent_loop(tmp_path):
+    identity = EnvironmentIdentity(
+        "lawful-provider:paper",
+        "champion-agent-config-v1",
+        "paper-evidence-v1",
+        PROTOCOL_ID,
+        T4,
+        17,
+    )
+    _, champion = _learned_champion(identity)
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, champion)
+
+    environment = CausalLearningEnvironment(
+        identity,
+        episode_key="checkpoint-binding-episode",
+        policy_id=champion.policy_id,
+        admissible_actions=frozenset({"WAIT"}),
+    )
+    stale_checkpoint = environment.checkpoint()
+    observation = Observation(
+        identity.environment_id,
+        T0,
+        T0,
+        (("market_state", "checkpoint-binding"),),
+    )
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at=T0,
+    )
+    outcome = Outcome(
+        identity.environment_id,
+        action.action_id,
+        T1,
+        EvidenceTruth.OBSERVED,
+        (("result", "paper-only"),),
+    )
+    reward = RewardEvidence(
+        identity.environment_id,
+        action.action_id,
+        outcome.outcome_id,
+        Decimal("0"),
+        T1,
+        EvidenceTruth.OBSERVED,
+    )
+    environment.resolve(
+        action.action_id,
+        outcome=outcome,
+        reward=reward,
+        resolved_at=T1,
+    )
+    durable_checkpoint = environment.checkpoint()
+    assert durable_checkpoint.checkpoint_id != stale_checkpoint.checkpoint_id
+
+    path = tmp_path / "agent-loop.json"
+    AgentLoopRuntime.initialize_pristine(
+        path,
+        loop_id="checkpoint-binding-loop",
+        environment_checkpoint=durable_checkpoint,
+        policy_id=champion.policy_id,
+        economic_goal_fingerprint=GOAL_SHA256,
+        risk_fingerprint=RISK_SHA256,
+        source_sha256=SOURCE_SHA256,
+        config_sha256=CONFIG_SHA256,
+        at=T2,
+    )
+
+    patches = _patched_authority(champion)
+    with patches[0], patches[1], patches[2]:
+        with pytest.raises(
+            ChampionAgentEpisodeError,
+            match="checkpoint does not match durable AgentLoop checkpoint",
+        ):
+            ChampionAgentEpisode.resume(
+                path,
+                registry,
+                store,
+                identity=identity,
+                checkpoint=stale_checkpoint,
+                as_of=T2,
+                canonical_strategy_id=STRATEGY_ID,
+                config_sha256=CONFIG_SHA256,
+                episode_key="checkpoint-binding-episode",
+                admissible_actions=frozenset({"WAIT"}),
+            )

@@ -4,6 +4,8 @@ from dataclasses import replace
 
 import pytest
 
+from test_scientific_registry import _frozen_promotion_rule_text, _promotion_evidence
+
 from autosport.scientific_registry import (
     DatasetSnapshot,
     EvaluationBundleRef,
@@ -69,7 +71,7 @@ def _seed_foundation(registry: ScientificRegistry, *, dataset_cutoff: str = T1):
         robustness_checks=("time split", "source split"),
         random_seed_policy="seed fixed before evaluation",
         stopping_rule="one final evaluation",
-        promotion_rule="promote only if primary improves and guardrails pass",
+        promotion_rule=_frozen_promotion_rule_text(),
         expected_artifacts=("evaluation bundle", "decision"),
         code_config_sha256=SHA_B,
         frozen_at_utc=T0,
@@ -117,6 +119,10 @@ def _seed_foundation(registry: ScientificRegistry, *, dataset_cutoff: str = T1):
         T2,
         evaluated_strategy_version_id="strategy-1",
         evaluated_model_version_id="model-1",
+        effective_sample_size=5,
+        effect_interval_low="0.05",
+        effect_interval_high="0.15",
+        practical_improvement="0.1",
     )
     experiment = ExperimentRecord(
         "experiment-1",
@@ -134,6 +140,13 @@ def _seed_foundation(registry: ScientificRegistry, *, dataset_cutoff: str = T1):
     )
     for record in (question, hypothesis, protocol, dataset, features, model, strategy, bundle, experiment):
         registry.append(record)
+    evidence = _promotion_evidence(
+        experiment_id="experiment-1", strategy_id="strategy-1", model_id="model-1",
+        bundle_id="eval-1", dataset_id="dataset-1", protocol_id="protocol-1",
+        bundle_sha=bundle.bundle_sha256, evidence_id="promotion-1-evidence",
+        rollback_identity="NONE", minimum_n=3,
+    )
+    registry.append(evidence)
     return protocol, model, experiment
 
 
@@ -148,6 +161,7 @@ def _promotion(protocol: ResearchProtocol, *, decision_id: str = "promotion-1") 
         SHA_D,
         T3,
         candidate_model_version_id="model-1",
+        promotion_evidence_id="promotion-1-evidence",
     )
 
 

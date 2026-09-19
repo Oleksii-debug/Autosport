@@ -65,11 +65,24 @@ class _OutcomeAuthority:
         return self.resolution
 
 
-def _event(*, phase: EventPhase, settlement_ref: str | None = None) -> CatalogEvent:
+class _MappedOutcomeAuthority:
+    def __init__(self, resolutions: dict[str, SettlementResolution]) -> None:
+        self.resolutions = dict(resolutions)
+
+    def resolve(self, record, *, as_of: str):
+        return self.resolutions.get(record.identity)
+
+
+def _event(
+    *,
+    phase: EventPhase,
+    settlement_ref: str | None = None,
+    event_id: str = "event-1",
+) -> CatalogEvent:
     return CatalogEvent(
         source_id="provider-a",
         sport="table_tennis",
-        event_id="event-1",
+        event_id=event_id,
         phase=phase,
         available_at="2026-09-19T21:19:00+00:00",
         scheduled_start_at="2026-09-19T21:00:00+00:00",
@@ -262,6 +275,104 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     self.assertEqual(authority.calls, 2)
                 finally:
                     restarted_store.close()
+            finally:
+                store.close()
+
+    def test_same_tick_conflicting_settlement_evidence_fails_before_book_save(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            first_event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:1",
+                event_id="event-1",
+            )
+            second_event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:2",
+                event_id="event-2",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(first_event, second_event),
+                )
+            )
+
+            book = PaperBook("100")
+            first_leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            second_leg = TicketLeg(
+                event_id="event-2",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book.open_ticket(
+                (first_leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+            )
+            book.open_ticket(
+                (second_leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+            )
+            book.save(root / "paper_book.json")
+            before = PaperBook.load(root / "paper_book.json")
+            before_statuses = {
+                ticket_id: ticket.status.value
+                for ticket_id, ticket in before.tickets.items()
+            }
+
+            reused_evidence_id = "outcome-conflict-same-tick"
+            resolutions = {
+                first_event.identity: SettlementResolution(
+                    event_identity=first_event.identity,
+                    settlement_ref="provider-result:1",
+                    quote_outcomes={first_leg.quote_key: "win"},
+                    evidence_id=reused_evidence_id,
+                    evidence_sha256="0" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                ),
+                second_event.identity: SettlementResolution(
+                    event_identity=second_event.identity,
+                    settlement_ref="provider-result:2",
+                    quote_outcomes={second_leg.quote_key: "loss"},
+                    evidence_id=reused_evidence_id,
+                    evidence_sha256="1" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                ),
+            }
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=_MappedOutcomeAuthority(resolutions),
+            )
+            try:
+                with self.assertRaises(ContinuousSessionError):
+                    coordinator.tick()
+
+                after = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(after.balance, before.balance)
+                self.assertEqual(
+                    {
+                        ticket_id: ticket.status.value
+                        for ticket_id, ticket in after.tickets.items()
+                    },
+                    before_statuses,
+                )
+                self.assertEqual(coordinator.status().cycles_completed, 0)
             finally:
                 store.close()
 

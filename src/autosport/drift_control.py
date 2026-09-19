@@ -1218,6 +1218,14 @@ class DriftMonitor:
 
         self._validate_window_dataset(baseline)
         self._validate_window_dataset(current)
+        if _timestamp_identity(
+            reference_entry.available_at, "DriftReference.available_at"
+        ) != _timestamp_identity(baseline.as_of, "baseline.as_of"):
+            raise DriftLineageError("drift reference availability envelope is inconsistent")
+        if _timestamp_identity(
+            observation_entry.available_at, "DriftObservation.available_at"
+        ) != _timestamp_identity(current.as_of, "current.as_of"):
+            raise DriftLineageError("drift observation availability envelope is inconsistent")
         if reference.get("sample_count") != baseline.sample_count:
             raise DriftLineageError("drift reference sample_count is not witness-derived")
         if reference.get("mean_fraction") != baseline.mean_fraction:
@@ -1302,12 +1310,19 @@ class DriftMonitor:
                 state = DriftState.NO_DRIFT
                 recommendation = DriftRecommendation.NONE
 
+        expected_evaluated_at = _timestamp_identity(
+            current.as_of, "current.observation_as_of"
+        )
+        if _timestamp_identity(
+            finding_entry.available_at, "DriftFinding.available_at"
+        ) != expected_evaluated_at:
+            raise DriftLineageError("drift finding availability envelope is inconsistent")
         expected_fields = {
             "state": state.value,
             "recommendation": recommendation.value,
             "absolute_delta_fraction": delta_text,
             "insufficiency_reason": insufficiency_reason,
-            "evaluated_at": _timestamp_identity(current.as_of, "current.observation_as_of"),
+            "evaluated_at": expected_evaluated_at,
         }
         for key, expected in expected_fields.items():
             if finding.get(key) != expected:

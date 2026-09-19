@@ -395,16 +395,8 @@ class ChampionEligibilityDecision:
             minimum_samples=minimum_samples,
             minimum_effective_sample_size=minimum_effective_sample_size,
             effective_sample_size=min(counts),
-            degraded_streak=(
-                sum(1 for item in reversed(ordered) if item[3] is DriftState.DRIFT_DETECTED)
-                if ordered and ordered[-1][3] is DriftState.DRIFT_DETECTED
-                else 0
-            ),
-            recovery_streak=(
-                sum(1 for item in reversed(ordered) if item[3] is DriftState.NO_DRIFT)
-                if ordered and ordered[-1][3] is DriftState.NO_DRIFT
-                else 0
-            ),
+            degraded_streak=expected_degraded_streak,
+            recovery_streak=expected_recovery_streak,
             admissible_actions=admissible_actions,
             research_trigger_id=research_trigger_id,
             reason=reason or status_reason,

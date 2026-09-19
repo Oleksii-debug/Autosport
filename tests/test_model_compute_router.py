@@ -208,6 +208,19 @@ class ModelComputeRouterTests(unittest.TestCase):
         )
         self.assertEqual(simulated.tier, ComputeTier.LOCAL)
 
+    def test_missing_domain_route_cannot_authorize_cloud(self):
+        decision = route_compute(
+            request(request_id="req-missing-domain-route"),
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=voc(evidence_id="voc-missing-domain-route"),
+            domain_route=None,
+        )
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertEqual(decision.candidate_id, "local")
+        self.assertIn("missing sport-domain evidence", decision.reason)
+
     def test_stale_voc_and_non_slow_domain_route_fail_closed(self):
         stale_policy = policy(voc_max_age_seconds=Decimal("5"))
         stale = route_compute(

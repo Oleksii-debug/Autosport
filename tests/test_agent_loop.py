@@ -189,6 +189,49 @@ def _rewrite_pristine_as_integrated_v2(path):
     rewrite_with_valid_state_digest(path, state)
 
 
+def _legacy_v2_runtime_through_attribution(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    _rewrite_pristine_as_integrated_v2(runtime.path)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+    outcome, reward, transition = _resolve(environment, action)
+    runtime.record_resolution(
+        transition,
+        outcome=outcome,
+        reward=reward,
+        at="2026-09-19T13:05:02Z",
+    )
+    runtime.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:05:03Z",
+    )
+    attribution = _attribution(environment, transition, outcome, reward)
+    runtime.record_attribution(
+        attribution,
+        at="2026-09-19T13:05:04Z",
+    )
+    assert runtime.snapshot().phase is AgentLoopPhase.REFLECT
+    return runtime
+
+
 def test_schema_v2_restart_upgrades_only_from_canonical_checkpoint(tmp_path):
     environment = _environment()
     runtime = _runtime(tmp_path, environment)
@@ -369,6 +412,59 @@ def test_schema_v2_self_consistent_malformed_state_fails_closed(tmp_path):
     rewrite_with_valid_state_digest(runtime.path, malformed)
 
     with pytest.raises(AgentLoopError, match="decisions must be a list"):
+        AgentLoopRuntime(runtime.path)
+
+
+def test_schema_v2_self_consistent_orphaned_current_attribution_fails_closed(
+    tmp_path,
+):
+    runtime = _legacy_v2_runtime_through_attribution(tmp_path)
+    malformed = json_load(runtime.path)
+    malformed["current"]["attribution_id"] = "f" * 64
+    rewrite_with_valid_state_digest(runtime.path, malformed)
+
+    with pytest.raises(
+        AgentLoopError,
+        match="current attribution does not bind resolution",
+    ):
+        AgentLoopRuntime(runtime.path)
+
+
+def test_schema_v2_self_consistent_resolution_cross_link_fails_closed(tmp_path):
+    runtime = _legacy_v2_runtime_through_attribution(tmp_path)
+    malformed = json_load(runtime.path)
+    malformed["resolutions"][0]["action_id"] = "e" * 64
+    rewrite_with_valid_state_digest(runtime.path, malformed)
+
+    with pytest.raises(
+        AgentLoopError,
+        match="resolution does not bind a durable decision",
+    ):
+        AgentLoopRuntime(runtime.path)
+
+
+def test_schema_v2_self_consistent_effect_and_phase_rewrites_fail_closed(tmp_path):
+    runtime = _legacy_v2_runtime_through_attribution(tmp_path)
+    valid = json_load(runtime.path)
+
+    wrong_effect = json.loads(json.dumps(valid))
+    wrong_effect["external_effect_state"] = (
+        ExternalEffectState.UNKNOWN_EXTERNAL_EFFECT.value
+    )
+    rewrite_with_valid_state_digest(runtime.path, wrong_effect)
+    with pytest.raises(
+        AgentLoopError,
+        match="current external effect differs from decision",
+    ):
+        AgentLoopRuntime(runtime.path)
+
+    wrong_phase = json.loads(json.dumps(valid))
+    wrong_phase["phase"] = AgentLoopPhase.WAIT_OUTCOME.value
+    rewrite_with_valid_state_digest(runtime.path, wrong_phase)
+    with pytest.raises(
+        AgentLoopError,
+        match="WAIT_OUTCOME current evidence mismatch",
+    ):
         AgentLoopRuntime(runtime.path)
 
 

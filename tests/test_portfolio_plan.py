@@ -608,6 +608,7 @@ class PortfolioPlanTests(unittest.TestCase):
         fee: Decimal = Decimal("0.01"),
         partial_fill: Decimal = Decimal("0.10"),
         as_of: str = "2026-09-18T13:19:59+00:00",
+        valid_until: str = "2026-09-18T13:20:00+00:00",
     ) -> PortfolioDependencyEvidence:
         portfolio_sha = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
         assert portfolio_sha is not None
@@ -627,6 +628,7 @@ class PortfolioPlanTests(unittest.TestCase):
             sample_size=100,
             causal_cutoff="2026-09-18T13:19:58+00:00",
             as_of=as_of,
+            valid_until=valid_until,
             reproducibility_sha256="f" * 64,
             pairwise_dependency_upper_bounds=pairs,
             uncertainty_fraction=uncertainty,
@@ -655,6 +657,7 @@ class PortfolioPlanTests(unittest.TestCase):
                 sample_size=evidence.sample_size,
                 causal_cutoff=evidence.causal_cutoff,
                 as_of=evidence.as_of,
+                valid_until=evidence.valid_until,
                 reproducibility_sha256=evidence.reproducibility_sha256,
                 pairwise_dependency_upper_bounds=(),
                 uncertainty_fraction=evidence.uncertainty_fraction,
@@ -710,21 +713,55 @@ class PortfolioPlanTests(unittest.TestCase):
         graph = self._graph(book, (first, second), dependency_edges=(
             tuple(sorted((first.candidate_sha256, second.candidate_sha256))),
         ))
-        stale = self._dependency_evidence(
+        future = self._dependency_evidence(
             book,
             (first, second),
             as_of="2026-09-18T13:20:01+00:00",
+            valid_until="2026-09-18T13:21:00+00:00",
         )
-        stale_plan = build_portfolio_plan(
+        future_plan = build_portfolio_plan(
             book,
             (first, second),
             policy,
             self.DECISION_TS,
             dependency_graph=graph,
-            dependency_evidence=stale,
+            dependency_evidence=future,
         )
-        self.assertEqual(stale_plan.action, PortfolioAction.WAIT)
-        self.assertIn("stale", stale_plan.reason)
+        self.assertEqual(future_plan.action, PortfolioAction.WAIT)
+        self.assertIn("stale", future_plan.reason)
+
+        expired = self._dependency_evidence(
+            book,
+            (first, second),
+            as_of="2026-09-18T13:19:00+00:00",
+            valid_until="2026-09-18T13:19:59+00:00",
+        )
+        expired_plan = build_portfolio_plan(
+            book,
+            (first, second),
+            policy,
+            self.DECISION_TS,
+            dependency_graph=graph,
+            dependency_evidence=expired,
+        )
+        self.assertEqual(expired_plan.action, PortfolioAction.WAIT)
+        self.assertEqual(expired_plan.stakes, (Decimal("0"), Decimal("0")))
+        self.assertIn("stale", expired_plan.reason)
+
+        boundary = self._dependency_evidence(
+            book,
+            (first, second),
+            valid_until=self.DECISION_TS,
+        )
+        boundary_plan = build_portfolio_plan(
+            book,
+            (first, second),
+            policy,
+            self.DECISION_TS,
+            dependency_graph=graph,
+            dependency_evidence=boundary,
+        )
+        self.assertEqual(boundary_plan.action, PortfolioAction.STAKE_VECTOR)
 
         other = self._intent(goal, suffix="mismatch")
         mismatch = self._dependency_evidence(book, (first, second))

@@ -419,7 +419,22 @@ def _phase_one(tmp_path):
         promotion_evidence.payload["evaluation_bundle_sha256"]
         == staged.evaluation_bundle_sha256
     )
-    assert promotion_evidence.payload["holdout_consumed"] is False
+    champion_decision = registry.get(
+        "PromotionDecision",
+        "promotion-closed-loop-v1",
+    )
+    assert champion_decision is not None
+    assert champion_decision.payload["action"] == PromotionAction.PROMOTE.value
+    champion_evidence_id = champion_decision.payload["promotion_evidence_id"]
+    assert champion_evidence_id is not None
+    champion_evidence = registry.get("PromotionEvidence", champion_evidence_id)
+    assert champion_evidence is not None
+    assert evidence_id != champion_evidence_id
+    assert promotion_evidence.payload["holdout_consumed"] is True
+    assert (
+        promotion_evidence.payload["holdout_access_id"]
+        == champion_evidence.payload["holdout_access_id"]
+    )
     assert (
         promotion_evidence.payload["research_question_id"]
         == question.question_id

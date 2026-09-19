@@ -68,7 +68,7 @@ def test_same_instant_lexically_earlier_promotion_is_rejected_before_publication
         evaluation_design="sealed holdout",
         feature_set_version="v1",
         uncertainty_method="bootstrap intervals",
-        multiple_comparison_control="single metric",
+        multiple_comparison_control="single frozen primary metric",
         robustness_checks=("time split",),
         random_seed_policy="seed fixed before evaluation",
         stopping_rule="one final evaluation",

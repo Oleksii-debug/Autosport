@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Any, Iterable
 
 from .domain import MarketEvent, _quote_identity
-from .forecasting import ForecastRecord
+from .forecasting import ForecastRecord, parse_iso_timestamp
 
 
 _MAX_OPPORTUNITIES = 10_000
@@ -354,8 +354,150 @@ class QuoteRef:
 
 
 @dataclass(frozen=True, slots=True)
+class PredictiveEligibilityEvidence:
+    """Versioned external witness that makes forecast uncertainty actionable."""
+
+    evaluation_id: str
+    evaluation_sha256: str
+    protocol_sha256: str
+    model_id: str
+    model_version: str
+    strategy_version: str
+    uncertainty_kind: str
+    sample_size: int
+    minimum_sample_size: int
+    maximum_uncertainty: Decimal
+    as_of: str
+    valid_until: str
+
+    def __post_init__(self) -> None:
+        _canonical_text(self.evaluation_id, "predictive evaluation_id")
+        _canonical_hash(self.evaluation_sha256, "predictive evaluation_sha256")
+        _canonical_hash(self.protocol_sha256, "predictive protocol_sha256")
+        _canonical_text(self.model_id, "predictive model_id")
+        _canonical_text(self.model_version, "predictive model_version")
+        _canonical_text(self.strategy_version, "predictive strategy_version")
+        if self.uncertainty_kind != "absolute_probability_radius_v1":
+            raise OpportunityContractError(
+                "unsupported predictive uncertainty_kind"
+            )
+        if type(self.sample_size) is not int or self.sample_size < 0:
+            raise OpportunityContractError(
+                "predictive sample_size must be a non-negative non-boolean int"
+            )
+        if (
+            type(self.minimum_sample_size) is not int
+            or self.minimum_sample_size <= 0
+        ):
+            raise OpportunityContractError(
+                "predictive minimum_sample_size must be a positive non-boolean int"
+            )
+        maximum = _finite_decimal(
+            self.maximum_uncertainty,
+            "predictive maximum_uncertainty",
+            nonnegative=True,
+        )
+        if maximum > 1:
+            raise OpportunityContractError(
+                "predictive maximum_uncertainty must be between 0 and 1"
+            )
+        as_of = parse_iso_timestamp(self.as_of)
+        valid_until = parse_iso_timestamp(self.valid_until)
+        if as_of > valid_until:
+            raise OpportunityContractError(
+                "predictive eligibility as_of must not be after valid_until"
+            )
+
+    @property
+    def support_qualified(self) -> bool:
+        return self.sample_size >= self.minimum_sample_size
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema": "autosport.predictive_forecast_eligibility",
+            "schema_version": 1,
+            "evaluation_id": self.evaluation_id,
+            "evaluation_sha256": self.evaluation_sha256,
+            "protocol_sha256": self.protocol_sha256,
+            "model_id": self.model_id,
+            "model_version": self.model_version,
+            "strategy_version": self.strategy_version,
+            "uncertainty_kind": self.uncertainty_kind,
+            "sample_size": self.sample_size,
+            "minimum_sample_size": self.minimum_sample_size,
+            "maximum_uncertainty": str(self.maximum_uncertainty),
+            "as_of": self.as_of,
+            "valid_until": self.valid_until,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "PredictiveEligibilityEvidence":
+        expected = {
+            "schema",
+            "schema_version",
+            "evaluation_id",
+            "evaluation_sha256",
+            "protocol_sha256",
+            "model_id",
+            "model_version",
+            "strategy_version",
+            "uncertainty_kind",
+            "sample_size",
+            "minimum_sample_size",
+            "maximum_uncertainty",
+            "as_of",
+            "valid_until",
+        }
+        if type(raw) is not dict or set(raw) != expected:
+            raise OpportunityContractError(
+                "predictive eligibility evidence must contain canonical fields"
+            )
+        if (
+            raw["schema"] != "autosport.predictive_forecast_eligibility"
+            or raw["schema_version"] != 1
+        ):
+            raise OpportunityContractError(
+                "unsupported predictive eligibility evidence schema"
+            )
+        return cls(
+            evaluation_id=_canonical_text(
+                raw["evaluation_id"], "predictive evaluation_id"
+            ),
+            evaluation_sha256=_canonical_hash(
+                raw["evaluation_sha256"], "predictive evaluation_sha256"
+            ),
+            protocol_sha256=_canonical_hash(
+                raw["protocol_sha256"], "predictive protocol_sha256"
+            ),
+            model_id=_canonical_text(raw["model_id"], "predictive model_id"),
+            model_version=_canonical_text(
+                raw["model_version"], "predictive model_version"
+            ),
+            strategy_version=_canonical_text(
+                raw["strategy_version"], "predictive strategy_version"
+            ),
+            uncertainty_kind=_canonical_text(
+                raw["uncertainty_kind"], "predictive uncertainty_kind"
+            ),
+            sample_size=raw["sample_size"],
+            minimum_sample_size=raw["minimum_sample_size"],
+            maximum_uncertainty=_decimal_from_serialized(
+                raw["maximum_uncertainty"], "predictive maximum_uncertainty"
+            ),
+            as_of=_canonical_text(raw["as_of"], "predictive as_of"),
+            valid_until=_canonical_text(
+                raw["valid_until"], "predictive valid_until"
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ForecastRef:
-    """Causal forecast evidence bound to one exact QuoteRef snapshot."""
+    """Causal forecast evidence bound to one exact QuoteRef snapshot.
+
+    Legacy references remain deserializable for audit, but lack the versioned
+    uncertainty/calibration witness required for positive predictive allocation.
+    """
 
     forecast_id: str
     forecast_hash: str
@@ -364,6 +506,11 @@ class ForecastRef:
     input_cutoff_ts: str
     market_snapshot_hash: str
     quote_market_event_hash: str
+    model_id: str | None = None
+    model_version: str | None = None
+    strategy_version: str | None = None
+    uncertainty: Decimal | None = None
+    predictive_eligibility: PredictiveEligibilityEvidence | None = None
 
     def __post_init__(self) -> None:
         _canonical_text(self.forecast_id, "forecast_id")
@@ -377,17 +524,66 @@ class ForecastRef:
                 "forecast probability must be between 0 and 1"
             )
         _canonical_text(self.input_cutoff_ts, "forecast input_cutoff_ts")
+        parse_iso_timestamp(self.input_cutoff_ts)
         _canonical_hash(self.market_snapshot_hash, "market_snapshot_hash")
         _canonical_hash(
             self.quote_market_event_hash,
             "quote_market_event_hash",
         )
 
+        metadata = (
+            self.model_id,
+            self.model_version,
+            self.strategy_version,
+            self.uncertainty,
+        )
+        if any(value is not None for value in metadata) and any(
+            value is None for value in metadata
+        ):
+            raise OpportunityContractError(
+                "forecast predictive metadata must be complete or entirely legacy"
+            )
+        if self.model_id is not None:
+            _canonical_text(self.model_id, "forecast model_id")
+            _canonical_text(self.model_version, "forecast model_version")
+            _canonical_text(self.strategy_version, "forecast strategy_version")
+            uncertainty = _finite_decimal(
+                self.uncertainty,
+                "forecast uncertainty",
+                nonnegative=True,
+            )
+            if uncertainty > 1:
+                raise OpportunityContractError(
+                    "forecast uncertainty must be between 0 and 1"
+                )
+        if self.predictive_eligibility is not None:
+            if not isinstance(
+                self.predictive_eligibility, PredictiveEligibilityEvidence
+            ):
+                raise OpportunityContractError(
+                    "forecast predictive_eligibility must be typed evidence"
+                )
+            if self.model_id is None:
+                raise OpportunityContractError(
+                    "predictive eligibility cannot bind a legacy forecast reference"
+                )
+            witness = self.predictive_eligibility
+            if (
+                witness.model_id != self.model_id
+                or witness.model_version != self.model_version
+                or witness.strategy_version != self.strategy_version
+            ):
+                raise OpportunityContractError(
+                    "predictive eligibility identity does not match forecast identity"
+                )
+
     @classmethod
     def from_forecast(
         cls,
         forecast: ForecastRecord,
         quote: QuoteRef,
+        *,
+        predictive_eligibility: PredictiveEligibilityEvidence | None = None,
     ) -> "ForecastRef":
         if not isinstance(forecast, ForecastRecord):
             raise OpportunityContractError(
@@ -419,10 +615,52 @@ class ForecastRef:
             input_cutoff_ts=forecast.input_cutoff_ts,
             market_snapshot_hash=forecast.market_snapshot_hash,
             quote_market_event_hash=quote.market_event_hash,
+            model_id=forecast.model_id,
+            model_version=forecast.model_version,
+            strategy_version=forecast.strategy_version,
+            uncertainty=forecast.uncertainty,
+            predictive_eligibility=predictive_eligibility,
         )
 
-    def to_dict(self) -> dict[str, str]:
+    def predictive_eligibility_reason(
+        self,
+        decision_time: object,
+        *,
+        expected_model_id: str | None,
+    ) -> str | None:
+        if (
+            self.model_id is None
+            or self.model_version is None
+            or self.strategy_version is None
+            or self.uncertainty is None
+            or self.predictive_eligibility is None
+        ):
+            return (
+                "predictive forecast lacks versioned uncertainty/calibration "
+                "eligibility evidence"
+            )
+        if expected_model_id is None or self.model_id != expected_model_id:
+            return "predictive forecast model identity does not match intent model"
+        if not hasattr(decision_time, "tzinfo") or decision_time.tzinfo is None:
+            return "predictive decision time must be timezone-aware"
+        cutoff = parse_iso_timestamp(self.input_cutoff_ts)
+        if cutoff > decision_time:
+            return "predictive forecast input cutoff is from the future"
+        witness = self.predictive_eligibility
+        as_of = parse_iso_timestamp(witness.as_of)
+        valid_until = parse_iso_timestamp(witness.valid_until)
+        if decision_time < as_of or decision_time > valid_until:
+            return "predictive calibration eligibility evidence is stale"
+        if not witness.support_qualified:
+            return "predictive calibration evidence has insufficient sample support"
+        if self.uncertainty > witness.maximum_uncertainty:
+            return "predictive forecast uncertainty exceeds frozen eligibility threshold"
+        return None
+
+    def to_dict(self) -> dict[str, object]:
         return {
+            "schema": "autosport.forecast_ref",
+            "schema_version": 2,
             "forecast_id": self.forecast_id,
             "forecast_hash": self.forecast_hash,
             "quote_key": self.quote_key,
@@ -430,11 +668,22 @@ class ForecastRef:
             "input_cutoff_ts": self.input_cutoff_ts,
             "market_snapshot_hash": self.market_snapshot_hash,
             "quote_market_event_hash": self.quote_market_event_hash,
+            "model_id": self.model_id,
+            "model_version": self.model_version,
+            "strategy_version": self.strategy_version,
+            "uncertainty": (
+                None if self.uncertainty is None else str(self.uncertainty)
+            ),
+            "predictive_eligibility": (
+                None
+                if self.predictive_eligibility is None
+                else self.predictive_eligibility.to_dict()
+            ),
         }
 
     @classmethod
     def from_dict(cls, raw: object) -> "ForecastRef":
-        expected = {
+        legacy = {
             "forecast_id",
             "forecast_hash",
             "quote_key",
@@ -443,10 +692,51 @@ class ForecastRef:
             "market_snapshot_hash",
             "quote_market_event_hash",
         }
+        if type(raw) is dict and set(raw) == legacy:
+            return cls(
+                forecast_id=_canonical_text(raw["forecast_id"], "forecast_id"),
+                forecast_hash=_canonical_hash(
+                    raw["forecast_hash"], "forecast_hash"
+                ),
+                quote_key=_canonical_text(
+                    raw["quote_key"], "forecast quote_key"
+                ),
+                probability=_decimal_from_serialized(
+                    raw["probability"], "forecast probability"
+                ),
+                input_cutoff_ts=_canonical_text(
+                    raw["input_cutoff_ts"], "forecast input_cutoff_ts"
+                ),
+                market_snapshot_hash=_canonical_hash(
+                    raw["market_snapshot_hash"], "market_snapshot_hash"
+                ),
+                quote_market_event_hash=_canonical_hash(
+                    raw["quote_market_event_hash"], "quote_market_event_hash"
+                ),
+            )
+
+        expected = legacy | {
+            "schema",
+            "schema_version",
+            "model_id",
+            "model_version",
+            "strategy_version",
+            "uncertainty",
+            "predictive_eligibility",
+        }
         if type(raw) is not dict or set(raw) != expected:
             raise OpportunityContractError(
                 "forecast reference must contain canonical fields"
             )
+        if (
+            raw["schema"] != "autosport.forecast_ref"
+            or raw["schema_version"] != 2
+        ):
+            raise OpportunityContractError(
+                "unsupported forecast reference schema"
+            )
+        uncertainty_raw = raw["uncertainty"]
+        eligibility_raw = raw["predictive_eligibility"]
         return cls(
             forecast_id=_canonical_text(raw["forecast_id"], "forecast_id"),
             forecast_hash=_canonical_hash(
@@ -466,6 +756,25 @@ class ForecastRef:
             ),
             quote_market_event_hash=_canonical_hash(
                 raw["quote_market_event_hash"], "quote_market_event_hash"
+            ),
+            model_id=_optional_text(raw["model_id"], "forecast model_id"),
+            model_version=_optional_text(
+                raw["model_version"], "forecast model_version"
+            ),
+            strategy_version=_optional_text(
+                raw["strategy_version"], "forecast strategy_version"
+            ),
+            uncertainty=(
+                None
+                if uncertainty_raw is None
+                else _decimal_from_serialized(
+                    uncertainty_raw, "forecast uncertainty"
+                )
+            ),
+            predictive_eligibility=(
+                None
+                if eligibility_raw is None
+                else PredictiveEligibilityEvidence.from_dict(eligibility_raw)
             ),
         )
 
@@ -584,6 +893,36 @@ class Opportunity:
                 "opportunity evidence_refs",
             ),
         )
+
+    def predictive_eligibility_reason(
+        self,
+        decision_time: object,
+        *,
+        expected_model_id: str | None,
+    ) -> str | None:
+        if not self.claims_probability_edge:
+            return None
+        for forecast in self.forecasts:
+            reason = forecast.predictive_eligibility_reason(
+                decision_time,
+                expected_model_id=expected_model_id,
+            )
+            if reason is not None:
+                return reason
+        return None
+
+    @property
+    def predictive_uncertainty_haircut(self) -> Decimal | None:
+        if not self.claims_probability_edge:
+            return Decimal("0")
+        values = tuple(
+            forecast.uncertainty
+            for forecast in self.forecasts
+            if forecast.uncertainty is not None
+        )
+        if len(values) != len(self.forecasts) or not values:
+            return None
+        return max(values)
 
     def _decision_independent_payload(self) -> dict[str, Any]:
         return {

@@ -221,6 +221,7 @@ def request(**overrides):
         response_ttl_seconds=Decimal("10"),
         baseline_candidate_id="local",
         cloud_candidate_id="cloud",
+        decision_evidence_sha256=SHA_C,
     )
     values.update(overrides)
     return ComputeRouteRequest(**values)
@@ -531,6 +532,47 @@ class ModelComputeRouterTests(unittest.TestCase):
             domain_observation=slow_observation(),
         )
         self.assertEqual(simulated.tier, ComputeTier.LOCAL)
+
+    def test_voc_decision_evidence_is_bound_to_current_route_identity(self):
+        evidence = self.qualified_voc(evidence_id="voc-route-scope")
+
+        current = self.route_compute(
+            request(request_id="req-current-context"),
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(current.tier, ComputeTier.CLOUD)
+
+        wrong_context = self.route_compute(
+            request(
+                request_id="req-different-context",
+                decision_evidence_sha256=SHA_A,
+            ),
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(wrong_context.tier, ComputeTier.LOCAL)
+        self.assertIn("does not match current route identity", wrong_context.reason)
+
+        missing_context = self.route_compute(
+            request(
+                request_id="req-missing-context",
+                decision_evidence_sha256=None,
+            ),
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(missing_context.tier, ComputeTier.LOCAL)
+        self.assertIn("missing canonical decision-evidence route identity", missing_context.reason)
 
     def test_voc_exact_compute_identity_cannot_be_reused_under_same_candidate_ids(self):
         mismatched = self.qualified_voc(

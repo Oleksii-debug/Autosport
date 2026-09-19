@@ -7,9 +7,15 @@ from decimal import Decimal
 from pathlib import Path
 
 from autosport.causal_collector import (
+    CollectorDelta,
     CollectorDeltaStore,
+    DesktopApplicationReceipt,
     DesktopDeltaCheckpointStore,
     DesktopDeltaConsumer,
+    GapState,
+    GapStateError,
+    SyncState,
+    canonical_event_digest,
 )
 from autosport.collector_service import HeadlessCollectorService
 from autosport.continuous_session import (
@@ -60,6 +66,18 @@ class _UnavailableSource(_Source):
     def fetch_catalog_page(self, checkpoint):
         self.catalog_calls += 1
         raise ProviderUnavailableError("provider unavailable")
+
+
+class _DeltaSource(_Source):
+    def __init__(self, page: CatalogPage, batches: list[tuple[CollectorDelta, ...]]) -> None:
+        super().__init__(page)
+        self.batches = list(batches)
+        self.delta_calls = 0
+
+    def fetch_deltas(self, checkpoint, records, max_items):
+        index = min(self.delta_calls, len(self.batches) - 1)
+        self.delta_calls += 1
+        return self.batches[index]
 
 
 class _OutcomeAuthority:
@@ -114,6 +132,45 @@ def _market_event(*, event_id: str = "event-1") -> MarketEvent:
     )
 
 
+def _collector_delta(
+    *,
+    delta_id: str,
+    gap_state: GapState,
+    sync_state: SyncState,
+    revision_of: str | None = None,
+    revision_number: int = 0,
+) -> CollectorDelta:
+    event = _market_event(event_id="provider-a:event-1")
+    return CollectorDelta(
+        schema_version=1,
+        delta_id=delta_id,
+        source_id="provider-a",
+        lawful_terms_ref="terms:provider-a:v1",
+        retention_ref="retention:provider-a:v1",
+        stream_epoch="epoch-1",
+        source_cursor="1",
+        cursor_position=1,
+        event_dedupe_key=event.dedupe_key,
+        event_id=event.event_id,
+        source_payload_digest="a" * 64,
+        canonical_event_digest=canonical_event_digest(event),
+        source_observed_at="2026-09-19T21:19:00+00:00",
+        collector_received_at="2026-09-19T21:19:01+00:00",
+        collector_committed_at="2026-09-19T21:19:02+00:00",
+        desktop_available_at="2026-09-19T21:19:03+00:00",
+        revision_of=revision_of,
+        revision_number=revision_number,
+        gap_state=gap_state,
+        sync_state=sync_state,
+        gap_from_cursor=(
+            "0" if gap_state in {GapState.DETECTED, GapState.RECOVERED} else None
+        ),
+        gap_to_cursor=(
+            "1" if gap_state in {GapState.DETECTED, GapState.RECOVERED} else None
+        ),
+    )
+
+
 def _build_coordinator(root: Path, source: _Source, clock: _Clock, *, outcome_authority=None):
     market_store = SQLiteMarketStore(root / "market.db")
     lifecycle = ContinuousEventLifecycle(root / "catalog.json")
@@ -133,8 +190,13 @@ def _build_coordinator(root: Path, source: _Source, clock: _Clock, *, outcome_au
     desktop = DesktopDeltaConsumer(
         collector_store,
         DesktopDeltaCheckpointStore(root / "desktop_acks.json"),
-        resolve_event=lambda delta: _market_event(),
-        apply_event=lambda delta, event: None,
+        resolve_event=lambda delta: _market_event(event_id=delta.event_id),
+        apply_event=lambda delta, event: DesktopApplicationReceipt(
+            delta_id=delta.delta_id,
+            canonical_event_digest=canonical_event_digest(event),
+            receipt_id=f"test-receipt:{delta.delta_id}",
+            applied_at=clock(),
+        ),
         lookup_application_receipt=lambda delta: None,
     )
     coordinator = ContinuousSessionCoordinator(
@@ -517,6 +579,134 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 )
                 with self.assertRaises(ContinuousSessionError):
                     coordinator.tick()
+            finally:
+                store.close()
+
+    def test_unresolved_gap_is_durable_in_status_across_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            detected = _collector_delta(
+                delta_id="gap-detected",
+                gap_state=GapState.DETECTED,
+                sync_state=SyncState.GAP_DETECTED,
+            )
+            source = _DeltaSource(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.LIVE),),
+                ),
+                [(detected,)],
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                with self.assertRaises(GapStateError):
+                    coordinator.tick()
+
+                status = coordinator.status()
+                self.assertEqual(status.source_gap_state, GapState.DETECTED.value)
+                self.assertEqual(status.source_sync_state, SyncState.GAP_DETECTED.value)
+                self.assertEqual(status.source_state_delta_id, "gap-detected")
+                self.assertEqual(
+                    status.source_unresolved_gap_delta_ids,
+                    ("gap-detected",),
+                )
+
+                restarted, restarted_store, *_ = _build_coordinator(
+                    root, source, clock
+                )
+                try:
+                    restarted_status = restarted.status()
+                    self.assertEqual(
+                        restarted_status.source_gap_state,
+                        GapState.DETECTED.value,
+                    )
+                    self.assertEqual(
+                        restarted_status.source_sync_state,
+                        SyncState.GAP_DETECTED.value,
+                    )
+                    self.assertEqual(
+                        restarted_status.source_unresolved_gap_delta_ids,
+                        ("gap-detected",),
+                    )
+                finally:
+                    restarted_store.close()
+            finally:
+                store.close()
+
+    def test_gap_recovery_and_no_new_delta_keep_truthful_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            detected = _collector_delta(
+                delta_id="gap-detected",
+                gap_state=GapState.DETECTED,
+                sync_state=SyncState.GAP_DETECTED,
+            )
+            recovered = _collector_delta(
+                delta_id="gap-recovered",
+                gap_state=GapState.RECOVERED,
+                sync_state=SyncState.RECOVERED,
+                revision_of="gap-detected",
+                revision_number=1,
+            )
+            source = _DeltaSource(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.LIVE),),
+                ),
+                [(detected,), (recovered,), ()],
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                with self.assertRaises(GapStateError):
+                    coordinator.tick()
+
+                recovered_result = coordinator.tick()
+                self.assertEqual(
+                    recovered_result.source_gap_states,
+                    (GapState.RECOVERED.value,),
+                )
+                self.assertEqual(
+                    recovered_result.source_sync_states,
+                    (SyncState.RECOVERED.value,),
+                )
+                recovered_status = coordinator.status()
+                self.assertEqual(
+                    recovered_status.source_gap_state,
+                    GapState.RECOVERED.value,
+                )
+                self.assertEqual(
+                    recovered_status.source_sync_state,
+                    SyncState.RECOVERED.value,
+                )
+                self.assertEqual(
+                    recovered_status.source_state_delta_id,
+                    "gap-recovered",
+                )
+                self.assertEqual(
+                    recovered_status.source_unresolved_gap_delta_ids,
+                    (),
+                )
+
+                no_new_delta = coordinator.tick()
+                self.assertEqual(
+                    no_new_delta.source_gap_states,
+                    (GapState.RECOVERED.value,),
+                )
+                self.assertEqual(
+                    no_new_delta.source_sync_states,
+                    (SyncState.RECOVERED.value,),
+                )
+                self.assertFalse(
+                    coordinator.status().source_state_projection_backlog
+                )
             finally:
                 store.close()
 

@@ -307,3 +307,46 @@ def test_owner_economic_write_blocker_disables_creation_for_every_busy_writer(
         app.recovery_worker.busy = True
 
     assert _owner_economic_write_blocker(app, workspace) is not None
+
+
+def test_manual_calculation_workbench_localization_and_surface_contract():
+    from autosport.localization import text
+    from autosport.windows_surface_contract import SURFACE_BY_KEY
+    from autosport.windows_manual_calculation import WORKBENCH_OPERATIONS
+
+    assert text("ui.windows.manual_calculation.dialog.title") == "Автоспорт — ручні розрахунки"
+    assert SURFACE_BY_KEY["manual_calculation"].phase == "active"
+    assert SURFACE_BY_KEY["manual_calculation"].target_widget == "manual_calculation_button"
+    assert len(WORKBENCH_OPERATIONS) == 7
+    assert all(label for _, label in WORKBENCH_OPERATIONS)
+
+
+def test_manual_calculation_workbench_has_no_persistent_or_execution_authority():
+    import inspect
+    from autosport.windows_manual_calculation import show_manual_calculation_workbench
+    source = inspect.getsource(show_manual_calculation_workbench)
+    assert "atomic_write_json" not in source
+    assert "PaperBook" not in source
+    assert "provider" not in source
+    assert "real_money_execution=false" in source
+
+
+def test_manual_calculation_workbench_input_and_error_contracts():
+    from autosport.windows_manual_calculation import _calculation_call, _read_lines, _selection_odds
+
+    class Input:
+        def __init__(self, value):
+            self.value = value
+        def get(self, *_args):
+            return self.value
+
+    assert _read_lines(Input("1.90,2.10")) == ["1.90", "2.10"]
+    assert _selection_odds(Input("a=1.90\nb=2.10")) == {"a": "1.90", "b": "2.10"}
+    with pytest.raises(ValueError, match="Повторний"):
+        _selection_odds(Input("a=1.90\na=2.10"))
+
+    class Service:
+        def odds_conversion(self, _value):
+            raise ValueError("Infinity")
+    with pytest.raises(ValueError):
+        _calculation_call(Service(), "odds_conversion", Input("Infinity"))

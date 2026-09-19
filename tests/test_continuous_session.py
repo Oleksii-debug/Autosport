@@ -28,6 +28,7 @@ from autosport.market_mirror_runtime import (
     MarketMirror,
 )
 from autosport.paper import PaperBook
+from autosport.providers import ProviderUnavailableError
 from autosport.storage import SQLiteMarketStore
 
 
@@ -53,6 +54,12 @@ class _Source:
 
     def fetch_deltas(self, checkpoint, records, max_items):
         return ()
+
+
+class _UnavailableSource(_Source):
+    def fetch_catalog_page(self, checkpoint):
+        self.catalog_calls += 1
+        raise ProviderUnavailableError("provider unavailable")
 
 
 class _OutcomeAuthority:
@@ -178,6 +185,99 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     self.assertEqual(restarted.status().cycles_completed, 1)
                 finally:
                     restarted_store.close()
+            finally:
+                store.close()
+
+    def test_mixed_pre_match_live_and_late_events_share_one_session_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(
+                        _event(phase=EventPhase.PRE_MATCH, event_id="event-1"),
+                        _event(phase=EventPhase.LIVE, event_id="event-2"),
+                    ),
+                )
+            )
+            coordinator, store, lifecycle, _mirror, _invalidations, dependencies = _build_coordinator(
+                root, source, clock
+            )
+            try:
+                for event_id in ("event-1", "event-2", "event-3"):
+                    store.append(_market_event(event_id=f"provider-a:{event_id}"))
+
+                first = coordinator.tick()
+                self.assertIn("catalog:provider-a:event-1", first.registered_input_ids)
+                self.assertIn("catalog:provider-a:event-2", first.registered_input_ids)
+                self.assertEqual(lifecycle.get("provider-a:event-2").phase, EventPhase.LIVE)
+
+                source.page = CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-2",
+                    position=2,
+                    events=(
+                        _event(phase=EventPhase.LIVE, event_id="event-1"),
+                        _event(phase=EventPhase.LIVE, event_id="event-2"),
+                        _event(phase=EventPhase.PRE_MATCH, event_id="event-3"),
+                    ),
+                )
+                second = coordinator.tick()
+                self.assertIn("catalog:provider-a:event-3", second.registered_input_ids)
+                records = lifecycle.records()
+                self.assertEqual(len(records), 3)
+                self.assertEqual(len({item.identity for item in records}), 3)
+                self.assertEqual(lifecycle.get("provider-a:event-1").phase, EventPhase.LIVE)
+
+                restarted, restarted_store, restarted_lifecycle, *_rest = _build_coordinator(
+                    root, source, clock
+                )
+                try:
+                    third = restarted.tick()
+                    self.assertEqual(restarted.session_id, "session-1")
+                    self.assertEqual(len(restarted_lifecycle.records()), 3)
+                    self.assertEqual(
+                        len({item.identity for item in restarted_lifecycle.records()}),
+                        3,
+                    )
+                    self.assertFalse(third.source_provider_unavailable)
+                finally:
+                    restarted_store.close()
+            finally:
+                store.close()
+
+    def test_provider_unavailable_is_reported_without_fresh_session_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _UnavailableSource(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                result = coordinator.tick()
+                self.assertTrue(result.source_provider_unavailable)
+                self.assertEqual(result.cycle_index, 0)
+                self.assertIsNone(result.last_success_at)
+                self.assertEqual(result.committed_delta_ids, ())
+                self.assertEqual(result.delivered_delta_ids, ())
+
+                status = coordinator.status()
+                self.assertEqual(status.cycles_completed, 0)
+                self.assertTrue(status.source_provider_unavailable)
+                self.assertEqual(status.source_last_error_code, "ProviderUnavailableError")
+                self.assertIsNone(status.source_last_success_at)
             finally:
                 store.close()
 
@@ -460,6 +560,9 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     sport="table_tennis",
                 )
                 invalidations.accept_persisted(second)
+                status = coordinator.status()
+                self.assertTrue(status.invalidation_full_refresh_required)
+                self.assertGreater(status.invalidation_pending_count, 0)
                 result = coordinator._drain_invalidations()
                 self.assertEqual(result[1], True)
                 self.assertFalse(result[2])

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -87,6 +87,9 @@ class ContinuousTickResult:
     session_id: str
     cycle_index: int
     source_id: str
+    source_provider_unavailable: bool
+    source_gap_states: tuple[str, ...]
+    source_sync_states: tuple[str, ...]
     committed_delta_ids: tuple[str, ...]
     delivered_delta_ids: tuple[str, ...]
     affected_input_ids: tuple[str, ...]
@@ -96,7 +99,7 @@ class ContinuousTickResult:
     invalidation_backlog: bool
     settled_ticket_ids: tuple[str, ...]
     settlement_evidence_ids: tuple[str, ...]
-    last_success_at: str
+    last_success_at: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +112,11 @@ class ContinuousSessionStatus:
     last_error_code: str | None
     last_full_refresh_at: str | None
     settlement_evidence: tuple[dict[str, str], ...]
+    source_provider_unavailable: bool = False
+    source_last_success_at: str | None = None
+    source_last_error_code: str | None = None
+    invalidation_pending_count: int = 0
+    invalidation_full_refresh_required: bool = False
 
 
 def _text(value: object, field: str) -> str:
@@ -486,7 +494,24 @@ class ContinuousSessionCoordinator:
         return self._state.session_id
 
     def status(self) -> ContinuousSessionStatus:
-        return self._state.snapshot()
+        snapshot = self._state.snapshot()
+        source_status = self.collector.status()
+        source_last_success = source_status.get("last_success_at")
+        source_last_error = source_status.get("last_error_code")
+        if source_last_success is not None and not isinstance(source_last_success, str):
+            raise ContinuousSessionError("collector last_success_at must be a string or None")
+        if source_last_error is not None and not isinstance(source_last_error, str):
+            raise ContinuousSessionError("collector last_error_code must be a string or None")
+        return replace(
+            snapshot,
+            source_provider_unavailable=source_last_error == "ProviderUnavailableError",
+            source_last_success_at=source_last_success,
+            source_last_error_code=source_last_error,
+            invalidation_pending_count=self.invalidation_buffer.pending_count,
+            invalidation_full_refresh_required=bool(
+                self.invalidation_buffer.full_refresh_required
+            ),
+        )
 
     def pause(self) -> None:
         self._state.set_state(SessionState.PAUSED)
@@ -542,6 +567,26 @@ class ContinuousSessionCoordinator:
                 self.invalidation_buffer.full_refresh_required
             )
         return tuple(dict.fromkeys(affected)), full_refresh_required, backlog
+
+    def _cycle_source_states(
+        self,
+        committed_delta_ids: tuple[str, ...],
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        gap_states: list[str] = []
+        sync_states: list[str] = []
+        for delta_id in committed_delta_ids:
+            delta = self.collector.delta_store.get(delta_id)
+            if delta is None:
+                raise ContinuousSessionError(
+                    "collector committed delta is missing from durable store"
+                )
+            gap_state = delta.gap_state.value
+            sync_state = delta.sync_state.value
+            if gap_state not in gap_states:
+                gap_states.append(gap_state)
+            if sync_state not in sync_states:
+                sync_states.append(sync_state)
+        return tuple(gap_states), tuple(sync_states)
 
     def _settlement_resolutions(
         self,
@@ -629,6 +674,36 @@ class ContinuousSessionCoordinator:
         _instant(now, "now")
         try:
             cycle = self.collector.run_cycle()
+            if cycle.provider_unavailable:
+                self._state.record_failure(code="ProviderUnavailableError")
+                snapshot = self._state.snapshot()
+                return ContinuousTickResult(
+                    session_id=self.session_id,
+                    cycle_index=snapshot.cycles_completed,
+                    source_id=cycle.source_id,
+                    source_provider_unavailable=True,
+                    source_gap_states=(),
+                    source_sync_states=(),
+                    committed_delta_ids=cycle.committed_delta_ids,
+                    delivered_delta_ids=(),
+                    affected_input_ids=(),
+                    registered_input_ids=(),
+                    retired_input_ids=(),
+                    full_refresh_required=bool(
+                        self.invalidation_buffer.full_refresh_required
+                    ),
+                    invalidation_backlog=(
+                        self.invalidation_buffer.pending_count > 0
+                        or self.invalidation_buffer.full_refresh_required
+                    ),
+                    settled_ticket_ids=(),
+                    settlement_evidence_ids=(),
+                    last_success_at=snapshot.last_success_at,
+                )
+
+            source_gap_states, source_sync_states = self._cycle_source_states(
+                cycle.committed_delta_ids
+            )
             delivered = self.desktop_consumer.drain(
                 as_of=now,
                 view=self.causal_view,
@@ -679,6 +754,9 @@ class ContinuousSessionCoordinator:
                 session_id=self.session_id,
                 cycle_index=cycle_index,
                 source_id=cycle.source_id,
+                source_provider_unavailable=False,
+                source_gap_states=source_gap_states,
+                source_sync_states=source_sync_states,
                 committed_delta_ids=cycle.committed_delta_ids,
                 delivered_delta_ids=delivered,
                 affected_input_ids=affected,

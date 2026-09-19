@@ -358,6 +358,7 @@ class ValueOfComputationEvidence:
     baseline_utility: Decimal
     challenger_utility: Decimal
     compute_cost_penalty: Decimal
+    latency_opportunity_cost_penalty: Decimal
     measured_compute_cost: Decimal
     evaluation_sha256: str
 
@@ -388,6 +389,10 @@ class ValueOfComputationEvidence:
         _decimal("baseline_utility", self.baseline_utility)
         _decimal("challenger_utility", self.challenger_utility)
         _nonnegative("compute_cost_penalty", self.compute_cost_penalty)
+        _nonnegative(
+            "latency_opportunity_cost_penalty",
+            self.latency_opportunity_cost_penalty,
+        )
         _nonnegative("measured_compute_cost", self.measured_compute_cost)
         _sha256("evaluation_sha256", self.evaluation_sha256)
 
@@ -397,6 +402,7 @@ class ValueOfComputationEvidence:
             self.challenger_utility
             - self.baseline_utility
             - self.compute_cost_penalty
+            - self.latency_opportunity_cost_penalty
         )
 
     def matches_candidates(
@@ -432,6 +438,9 @@ class ValueOfComputationEvidence:
             "baseline_utility": str(self.baseline_utility),
             "challenger_utility": str(self.challenger_utility),
             "compute_cost_penalty": str(self.compute_cost_penalty),
+            "latency_opportunity_cost_penalty": str(
+                self.latency_opportunity_cost_penalty
+            ),
             "measured_compute_cost": str(self.measured_compute_cost),
             "evaluation_sha256": self.evaluation_sha256,
         }
@@ -457,6 +466,9 @@ class ValueOfComputationEvidence:
                 baseline_utility=Decimal(raw["baseline_utility"]),
                 challenger_utility=Decimal(raw["challenger_utility"]),
                 compute_cost_penalty=Decimal(raw["compute_cost_penalty"]),
+                latency_opportunity_cost_penalty=Decimal(
+                    raw["latency_opportunity_cost_penalty"]
+                ),
                 measured_compute_cost=Decimal(raw["measured_compute_cost"]),
                 evaluation_sha256=raw["evaluation_sha256"],
             )

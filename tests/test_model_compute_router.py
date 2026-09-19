@@ -108,6 +108,7 @@ def voc(**overrides):
         baseline_utility=Decimal("1"),
         challenger_utility=Decimal("2"),
         compute_cost_penalty=Decimal("0.2"),
+        latency_opportunity_cost_penalty=Decimal("0.1"),
         measured_compute_cost=Decimal("5"),
         evaluation_sha256=SHA_C,
     )
@@ -246,6 +247,30 @@ class ModelComputeRouterTests(unittest.TestCase):
         self.assertEqual(nonpositive.tier, ComputeTier.LOCAL)
         self.assertIn("non-positive", nonpositive.reason)
 
+        latency_nonpositive = route_compute(
+            replace(request(), request_id="req-latency-nonpositive"),
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=voc(
+                evidence_id="voc-latency-nonpositive",
+                compute_cost_penalty=Decimal("0.2"),
+                latency_opportunity_cost_penalty=Decimal("0.8"),
+            ),
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(latency_nonpositive.tier, ComputeTier.LOCAL)
+        self.assertIn("non-positive", latency_nonpositive.reason)
+
+        with self.assertRaisesRegex(
+            ModelComputeRouterError,
+            "latency_opportunity_cost_penalty must be non-negative",
+        ):
+            voc(
+                evidence_id="voc-negative-latency-cost",
+                latency_opportunity_cost_penalty=Decimal("-0.01"),
+            )
+
         simulated = route_compute(
             replace(request(), request_id="req-simulated"),
             self.candidates,
@@ -332,6 +357,23 @@ class ModelComputeRouterTests(unittest.TestCase):
                 domain_observation=slow_observation(),
             )
             self.assertEqual(readback, first)
+
+            changed_latency_cost = replace(
+                evidence,
+                latency_opportunity_cost_penalty=Decimal("0.2"),
+            )
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "immutable request id conflicts",
+            ):
+                reopened.route(
+                    req,
+                    self.candidates,
+                    policy(),
+                    as_of=T1,
+                    voc_evidence=changed_latency_cost,
+                    domain_observation=slow_observation(),
+                )
 
     def test_forged_domain_route_cannot_authorize_cloud_without_observation(self):
         decision = route_compute(

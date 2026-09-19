@@ -820,9 +820,12 @@ def route_compute(
         baseline_reason = (
             "cloud candidate exceeds policy cloud-cost limit"
         )
+    elif domain_route is None:
+        baseline_reason = (
+            "missing sport-domain evidence for slower research compute"
+        )
     elif (
-        domain_route is not None
-        and domain_route.status
+        domain_route.status
         is not RouteStatus.ROUTE_SLOW_RESEARCH
     ):
         baseline_reason = (

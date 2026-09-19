@@ -95,45 +95,23 @@ class QualifiedCounterfactualAuthority:
     reward_definition_sha256: str
     reward_mode: PolicyRewardMode
     scope: str
-    allowed_source_evidence_sha256: tuple[str, ...]
     qualification_status: str = "QUALIFIED"
 
     def __post_init__(self) -> None:
         _text(self.authority_id, "authority_id")
         _text(self.authority_version, "authority_version")
-        for name in (
-            "evaluator_source_sha256",
-            "qualification_evidence_sha256",
-            "reward_definition_sha256",
-        ):
-            value = getattr(self, name)
-            if value != _sha256(value, name):
-                raise ValueError(f"{name} must use canonical lowercase SHA-256")
+        for name in ("evaluator_source_sha256","qualification_evidence_sha256","reward_definition_sha256"):
+            _sha256(getattr(self,name), name)
         if not isinstance(self.reward_mode, PolicyRewardMode):
             raise ValueError("reward_mode must be PolicyRewardMode")
         _text(self.scope, "scope")
-        if (
-            type(self.allowed_source_evidence_sha256) is not tuple
-            or not self.allowed_source_evidence_sha256
-        ):
-            raise ValueError(
-                "allowed_source_evidence_sha256 must be a non-empty tuple"
-            )
-        evidence = tuple(
-            _sha256(value, "allowed source evidence sha256")
-            for value in self.allowed_source_evidence_sha256
-        )
-        if evidence != tuple(sorted(evidence)) or len(evidence) != len(set(evidence)):
-            raise ValueError(
-                "allowed_source_evidence_sha256 must be sorted and unique"
-            )
-        status = _text(self.qualification_status, "qualification_status")
-        if status not in {"QUALIFIED", "UNQUALIFIED"}:
-            raise ValueError("unsupported counterfactual qualification_status")
+        status=_text(self.qualification_status, "qualification_status")
+        if status != "QUALIFIED":
+            raise ValueError("counterfactual authority must be frozen as QUALIFIED")
 
     def canonical_payload(self) -> dict[str, object]:
         return {
-            "kind": "autosport-qualified-counterfactual-authority-v1",
+            "kind": "autosport-qualified-counterfactual-authority-v2",
             "authority_id": self.authority_id,
             "authority_version": self.authority_version,
             "evaluator_source_sha256": self.evaluator_source_sha256,
@@ -141,9 +119,6 @@ class QualifiedCounterfactualAuthority:
             "reward_definition_sha256": self.reward_definition_sha256,
             "reward_mode": self.reward_mode.value,
             "scope": self.scope,
-            "allowed_source_evidence_sha256": list(
-                self.allowed_source_evidence_sha256
-            ),
             "qualification_status": self.qualification_status,
         }
 
@@ -153,72 +128,30 @@ class QualifiedCounterfactualAuthority:
 
     @classmethod
     def from_payload(cls, payload: object) -> "QualifiedCounterfactualAuthority":
-        expected = {
-            "kind",
-            "authority_id",
-            "authority_version",
-            "evaluator_source_sha256",
-            "qualification_evidence_sha256",
-            "reward_definition_sha256",
-            "reward_mode",
-            "scope",
-            "allowed_source_evidence_sha256",
-            "qualification_status",
-        }
-        if type(payload) is not dict or set(payload) != expected:
+        expected={"kind","authority_id","authority_version","evaluator_source_sha256","qualification_evidence_sha256","reward_definition_sha256","reward_mode","scope","qualification_status"}
+        if type(payload) is not dict or set(payload)!=expected:
             raise ValueError("counterfactual authority fields mismatch")
-        if payload.get("kind") != "autosport-qualified-counterfactual-authority-v1":
+        if payload.get("kind")!="autosport-qualified-counterfactual-authority-v2":
             raise ValueError("counterfactual authority kind is unsupported")
-        allowed = payload.get("allowed_source_evidence_sha256")
-        if type(allowed) is not list:
-            raise ValueError("counterfactual authority evidence list is invalid")
         try:
-            mode = PolicyRewardMode(payload.get("reward_mode"))
-        except (TypeError, ValueError) as exc:
+            mode=PolicyRewardMode(payload.get("reward_mode"))
+        except (TypeError,ValueError) as exc:
             raise ValueError("counterfactual authority reward_mode is invalid") from exc
-        return cls(
-            payload.get("authority_id"),
-            payload.get("authority_version"),
-            payload.get("evaluator_source_sha256"),
-            payload.get("qualification_evidence_sha256"),
-            payload.get("reward_definition_sha256"),
-            mode,
-            payload.get("scope"),
-            tuple(allowed),
-            payload.get("qualification_status"),
-        )
+        return cls(payload.get("authority_id"),payload.get("authority_version"),payload.get("evaluator_source_sha256"),payload.get("qualification_evidence_sha256"),payload.get("reward_definition_sha256"),mode,payload.get("scope"),payload.get("qualification_status"))
 
-    def validate_reference(
-        self,
-        *,
-        counterfactual_source_id: object,
-        source_evidence_sha256: object,
-        reward_mode: object,
-        scope: object,
-    ) -> None:
-        if self.qualification_status != "QUALIFIED":
+    def validate_reference(self, *, counterfactual_source_id: object, reward_mode: object, scope: object) -> None:
+        if self.qualification_status!="QUALIFIED":
             raise ValueError("counterfactual reward authority is not qualified")
-        if _text(counterfactual_source_id, "counterfactual_source_id") != self.authority_id:
+        if _text(counterfactual_source_id,"counterfactual_source_id")!=self.authority_id:
             raise ValueError("counterfactual reward authority identity mismatch")
         try:
-            mode = (
-                reward_mode
-                if isinstance(reward_mode, PolicyRewardMode)
-                else PolicyRewardMode(reward_mode)
-            )
-        except (TypeError, ValueError) as exc:
+            mode=reward_mode if isinstance(reward_mode,PolicyRewardMode) else PolicyRewardMode(reward_mode)
+        except (TypeError,ValueError) as exc:
             raise ValueError("counterfactual reward_mode is invalid") from exc
         if mode is not self.reward_mode:
             raise ValueError("counterfactual reward authority mode mismatch")
-        if _text(scope, "counterfactual scope") != self.scope:
+        if _text(scope,"counterfactual scope")!=self.scope:
             raise ValueError("counterfactual reward authority scope mismatch")
-        evidence = _sha256(
-            source_evidence_sha256, "counterfactual source_evidence_sha256"
-        )
-        if evidence not in self.allowed_source_evidence_sha256:
-            raise ValueError(
-                "counterfactual source evidence is not qualified by frozen authority"
-            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,7 +190,7 @@ class PolicyEvaluationConfig:
 
     def canonical_payload(self) -> dict[str, object]:
         return {
-            "kind": "autosport-policy-paired-evaluation-v2",
+            "kind": "autosport-policy-paired-evaluation-v3",
             "feature_set_id": self.feature_set_id,
             "feature_definition_sha256": self.feature_definition_sha256,
             "feature_source_sha256": self.feature_source_sha256,
@@ -304,7 +237,7 @@ class PolicyEvaluationConfig:
         }
         if type(payload) is not dict or set(payload) != expected:
             raise ValueError("policy evaluation_design fields mismatch")
-        if payload.get("kind") != "autosport-policy-paired-evaluation-v2":
+        if payload.get("kind") != "autosport-policy-paired-evaluation-v3":
             raise ValueError("policy evaluation_design kind is unsupported")
         authority_payload = payload.get("counterfactual_authority")
         authority = (
@@ -444,17 +377,23 @@ class PolicyEvaluationCase:
         }
 
 
-def policy_evaluation_cases_manifest_sha256(
-    cases: Sequence[PolicyEvaluationCase],
-) -> str:
-    ordered = _ordered_cases(cases)
-    return _digest(
-        {
-            "schema_version": 1,
-            "kind": "autosport-policy-evaluation-cases-v1",
-            "cases": [case.canonical_payload() for case in ordered],
-        }
-    )
+def policy_evaluation_cases_manifest_sha256(cases: Sequence[PolicyEvaluationCase]) -> str:
+    """Manifest the frozen cohort/design only; future outcome payloads stay outside the protocol hash."""
+    ordered=_ordered_cases(cases)
+    return _digest({
+        "schema_version": 2,
+        "kind": "autosport-policy-cohort-manifest-v2",
+        "cases": [{
+            "sample_id": case.sample_id,
+            "observed_at": case.observed_at,
+            "admissible_actions": list(case.admissible_actions),
+            "behavior_propensities": [[k,_decimal_text(v)] for k,v in case.behavior_propensities],
+            "regime_id": case.regime_id,
+            "historical_action": case.historical_action,
+            "reward_mode": case.reward_mode.value,
+            "counterfactual_source_id": case.counterfactual_source_id,
+        } for case in ordered],
+    })
 
 
 @dataclass(frozen=True, slots=True)
@@ -652,7 +591,6 @@ def evaluate_policy_pair(
         for case in counterfactual_cases:
             counterfactual_authority.validate_reference(
                 counterfactual_source_id=case.counterfactual_source_id,
-                source_evidence_sha256=case.source_evidence_sha256,
                 reward_mode=case.reward_mode,
                 scope=case.regime_id,
             )

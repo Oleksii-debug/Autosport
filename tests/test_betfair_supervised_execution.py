@@ -57,6 +57,7 @@ from autosport.supervised_execution import (
     ExecutionLegConstraint,
     SupervisedApproval,
     SupervisedExecutionError,
+    begin_supervised_attempt,
     build_supervised_execution_plan,
     reconcile_provider_not_found,
     reconcile_provider_readback,
@@ -65,6 +66,7 @@ from autosport.supervised_execution import (
     verify_betfair_provider_state,
 )
 from autosport.supervised_provider_evidence import ProviderEvidenceError
+from autosport.workspace_lock import WorkspaceEconomicLockBusyError
 
 DECISION_TS = "2026-09-19T08:00:00+00:00"
 APPROVED_AT = "2026-09-19T08:00:01+00:00"
@@ -728,6 +730,55 @@ def test_corrupt_owner_store_denies_before_attempt_or_transport() -> None:
 
         assert transport.calls == []
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_owner_tightening_cannot_commit_between_gate_and_attempt(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        stop_contract = _goal(revision=2, emergency_stop=True)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+        original_begin = begin_supervised_attempt
+        interleaving_attempted = False
+
+        def begin_after_tightening_attempt(*args, **kwargs):
+            nonlocal interleaving_attempted
+            interleaving_attempted = True
+            with pytest.raises(WorkspaceEconomicLockBusyError):
+                goal_store.persist_automatic_successor(stop_contract)
+            return original_begin(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "autosport.betfair_supervised_execution.begin_supervised_attempt",
+            begin_after_tightening_attempt,
+        )
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-owner-fenced",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert interleaving_attempted
+        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert goal_store.load().revision == 1
+        assert len(transport.calls) == 1
+
+        goal_store.persist_automatic_successor(stop_contract)
+        assert goal_store.load().emergency_stop is True
 
 
 def test_full_match_persists_provider_report_and_canonical_ack() -> None:

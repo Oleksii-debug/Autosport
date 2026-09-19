@@ -130,6 +130,7 @@ class TrainingPoint:
     feature: float
     target: float
     target_available_at: str | None = None
+    evidence_sha256s: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         observed = _instant(self.observed_at, "observed_at")
@@ -139,6 +140,15 @@ class TrainingPoint:
             revealed = _instant(self.target_available_at, "target_available_at")
             if revealed < observed:
                 raise ValueError("target_available_at must not precede observed_at")
+        if not isinstance(self.evidence_sha256s, tuple):
+            raise ValueError("evidence_sha256s must be a tuple")
+        evidence = tuple(
+            _sha256(value, "training point evidence_sha256")
+            for value in self.evidence_sha256s
+        )
+        if len(evidence) != len(set(evidence)):
+            raise ValueError("training point evidence_sha256s must not contain duplicates")
+        object.__setattr__(self, "evidence_sha256s", evidence)
 
     @property
     def target_reveal_at(self) -> str:
@@ -172,11 +182,20 @@ def training_points_manifest_sha256(points: Sequence[TrainingPoint]) -> str:
             "kind": "autosport-factory-training-points-v1",
             "points": [
                 {
-                    "observed_at": _canonical_instant(point.observed_at, "observed_at"),
-                    "feature": _finite(point.feature, "feature"),
-                    "target": _finite(point.target, "target"),
-                    "target_available_at": _canonical_instant(
-                        point.target_reveal_at, "target_available_at"
+                    **{
+                        "observed_at": _canonical_instant(
+                            point.observed_at, "observed_at"
+                        ),
+                        "feature": _finite(point.feature, "feature"),
+                        "target": _finite(point.target, "target"),
+                        "target_available_at": _canonical_instant(
+                            point.target_reveal_at, "target_available_at"
+                        ),
+                    },
+                    **(
+                        {"evidence_sha256s": list(point.evidence_sha256s)}
+                        if point.evidence_sha256s
+                        else {}
                     ),
                 }
                 for point in ordered

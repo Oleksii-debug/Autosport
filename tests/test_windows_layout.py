@@ -24,6 +24,8 @@ from autosport.windows_layout import (
     _owner_economic_write_blocker,
     _persist_initial_owner_economic_contract,
     _show_owner_economic_dialog,
+    MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS,
+    install_manual_calculation_workbench_surface,
     _surface_target_widget,
 )
 
@@ -350,3 +352,104 @@ def test_manual_calculation_workbench_input_and_error_contracts():
             raise ValueError("Infinity")
     with pytest.raises(ValueError):
         _calculation_call(Service(), "odds_conversion", Input("Infinity"))
+
+
+def test_manual_calculation_workbench_is_active_and_keyboard_reachable():
+    from autosport.windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, WORKBENCH_OPERATIONS
+    from autosport.windows_surface_contract import SURFACE_BY_KEY
+
+    surface = SURFACE_BY_KEY["manual_calculation"]
+    assert surface.phase == "active"
+    assert surface.target_widget == "manual_calculation_button"
+    assert WORKBENCH_AUTOMATION_IDS == {
+        "open": 330,
+        "operation": 331,
+        "input": 332,
+        "calculate": 333,
+        "result": 334,
+        "clear": 335,
+        "close": 336,
+    }
+    assert len(WORKBENCH_OPERATIONS) == 7
+    assert "<F10>" in inspect.getsource(install_manual_calculation_workbench_surface)
+    assert "show_manual_calculation_workbench(app)" in inspect.getsource(
+        install_manual_calculation_workbench_surface
+    )
+
+
+def test_manual_calculation_workbench_uses_canonical_service_for_all_supported_operations():
+    from autosport.windows_manual_calculation import _calculation_call
+
+    class Input:
+        def __init__(self, value):
+            self.value = value
+        def get(self, *_args):
+            return self.value
+
+    class Service:
+        def __init__(self):
+            self.calls = []
+        def odds_conversion(self, value):
+            self.calls.append(("odds_conversion", value))
+            return object()
+        def implied_probability(self, value):
+            self.calls.append(("implied_probability", value))
+            return object()
+        def multiplicative_devig(self, value):
+            self.calls.append(("multiplicative_devig", value))
+            return object()
+        def expected_return(self, *value):
+            self.calls.append(("expected_return", value))
+            return object()
+        def paper_payout(self, *value):
+            self.calls.append(("paper_payout", value))
+            return object()
+        def fractional_kelly(self, *value, **kwargs):
+            self.calls.append(("fractional_kelly", value, kwargs))
+            return object()
+        def maximum_drawdown(self, value):
+            self.calls.append(("maximum_drawdown", value))
+            return object()
+
+    svc = Service()
+    assert _calculation_call(svc, "odds_conversion", Input("2.10"))
+    assert _calculation_call(svc, "implied_probability", Input("2.10"))
+    assert _calculation_call(svc, "multiplicative_devig", Input("a=2.10\nb=1.90"))
+    assert _calculation_call(svc, "expected_return", Input("0.6\n2.10\n25"))
+    assert _calculation_call(svc, "paper_payout", Input("25\n2.10"))
+    assert _calculation_call(svc, "fractional_kelly", Input("0.6\n2.10\n0.5\n0.2"))
+    assert _calculation_call(svc, "maximum_drawdown", Input("100\n120\n90"))
+    assert [call[0] for call in svc.calls] == [
+        "odds_conversion",
+        "implied_probability",
+        "multiplicative_devig",
+        "expected_return",
+        "paper_payout",
+        "fractional_kelly",
+        "maximum_drawdown",
+    ]
+
+
+def test_manual_calculation_result_contract_is_read_only_and_nonpersistent():
+    from autosport.windows_manual_calculation import show_manual_calculation_workbench
+    source = inspect.getsource(show_manual_calculation_workbench)
+    assert 'result_box.configure(state="disabled")' in source
+    assert "atomic_write_json" not in source
+    assert "Store(" not in source
+    assert "PaperBook" not in source
+    assert "Provider" not in source
+
+
+def test_manual_calculation_cancel_clear_and_error_have_no_result_authority():
+    from autosport.windows_manual_calculation import show_manual_calculation_workbench
+    source = inspect.getsource(show_manual_calculation_workbench)
+    assert "set_result(None)" in source
+    assert "messagebox.ask" not in source
+    assert "messagebox.askokcancel" not in source
+    assert 'command=dialog.destroy' in source
+    assert '"ui.windows.manual_calculation.status.error"' in source
+
+
+def test_manual_calculation_localization_keys_are_all_present():
+    from autosport.localization import require_keys
+    require_keys(MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS)

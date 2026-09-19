@@ -518,10 +518,6 @@ class CanonicalVOCAuthorityResolver:
         binding = payload.get("binding")
         if type(binding) is not dict:
             raise VOCEvaluationError("canonical ResearchProtocol binding is missing")
-        if binding.get("task_class") != evaluation.task_class:
-            raise VOCEvaluationError(
-                "canonical ResearchProtocol task-class binding does not match paired evaluation"
-            )
         evaluation_design = binding.get("evaluation_design")
         if not isinstance(evaluation_design, str) or not evaluation_design.strip():
             raise VOCEvaluationError("canonical ResearchProtocol evaluation design is missing")
@@ -531,6 +527,10 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError("canonical VOC evaluation design must be canonical JSON") from exc
         if type(design) is not dict:
             raise VOCEvaluationError("canonical VOC evaluation design must be an object")
+        if design.get("task_class") != evaluation.task_class:
+            raise VOCEvaluationError(
+                "canonical ResearchProtocol task-class binding does not match paired evaluation"
+            )
 
         scope = design.get("scope")
         if type(scope) is not dict:
@@ -648,6 +648,267 @@ class CanonicalVOCAuthorityResolver:
                     "canonical outcome authority identity does not match research scope"
                 )
 
+    @staticmethod
+    def _scientific_score_artifact_sha256(
+        evaluation: PairedVOCEvaluation,
+    ) -> str:
+        """Bind all routed VOC arithmetic to one immutable evaluation artifact."""
+
+        return _canonical_digest(
+            {
+                "schema": "autosport.voc_scientific_score_artifact",
+                "schema_version": 1,
+                "evaluation_id": evaluation.evaluation_id,
+                "outcome_evidence_sha256": evaluation.outcome_evidence_sha256,
+                "scoring_rule_id": evaluation.scoring_rule_id,
+                "scoring_rule_sha256": evaluation.scoring_rule_sha256,
+                "research_protocol_id": evaluation.research_protocol_id,
+                "research_protocol_sha256": evaluation.research_protocol_sha256,
+                "holdout_access_id": evaluation.holdout_access_id,
+                "multiple_comparison_control_sha256": (
+                    evaluation.multiple_comparison_control_sha256
+                ),
+                "baseline_output_sha256": evaluation.baseline_output_sha256,
+                "challenger_output_sha256": evaluation.challenger_output_sha256,
+                "baseline_action": evaluation.baseline_action,
+                "challenger_action": evaluation.challenger_action,
+                "baseline_abstained": evaluation.baseline_abstained,
+                "challenger_abstained": evaluation.challenger_abstained,
+                "baseline_utility": str(evaluation.baseline_utility),
+                "challenger_utility": str(evaluation.challenger_utility),
+                "compute_cost_penalty": str(evaluation.compute_cost_penalty),
+                "latency_opportunity_cost_penalty": str(
+                    evaluation.latency_opportunity_cost_penalty
+                ),
+                "measured_compute_cost": str(evaluation.measured_compute_cost),
+                "paired_sample_count": evaluation.paired_sample_count,
+                "effective_sample_size": evaluation.effective_sample_size,
+                "support_fraction": str(evaluation.support_fraction),
+                "incremental_value_interval_low": str(
+                    evaluation.incremental_value_interval_low
+                ),
+                "incremental_value_interval_high": str(
+                    evaluation.incremental_value_interval_high
+                ),
+                "net_value": str(evaluation.net_value),
+            }
+        )
+
+    def _require_scientific_statistics(
+        self,
+        evaluation: PairedVOCEvaluation,
+    ) -> None:
+        """Fail closed unless #367 memory independently binds routed VOC statistics."""
+
+        protocol_entry = self.scientific_registry.get(
+            "ResearchProtocol",
+            evaluation.research_protocol_id,
+        )
+        if protocol_entry is None:
+            raise VOCEvaluationError(
+                "canonical ResearchProtocol is missing for VOC statistics"
+            )
+        protocol_payload = protocol_entry.payload
+        binding = protocol_payload.get("binding")
+        if type(binding) is not dict:
+            raise VOCEvaluationError(
+                "canonical ResearchProtocol binding is missing for VOC statistics"
+            )
+        design_text = binding.get("evaluation_design")
+        if not isinstance(design_text, str):
+            raise VOCEvaluationError(
+                "canonical VOC statistics design is missing"
+            )
+        try:
+            design = json.loads(design_text)
+        except json.JSONDecodeError as exc:
+            raise VOCEvaluationError(
+                "canonical VOC statistics design is not valid JSON"
+            ) from exc
+        if type(design) is not dict:
+            raise VOCEvaluationError(
+                "canonical VOC statistics design must be an object"
+            )
+
+        estimand = design.get("estimand")
+        if estimand != "incremental_net_voc":
+            raise VOCEvaluationError(
+                "canonical VOC statistics estimand is not incremental_net_voc"
+            )
+        cohort_id = design.get("cohort_id")
+        if type(cohort_id) is not str or not cohort_id.strip():
+            raise VOCEvaluationError("canonical VOC statistics cohort is missing")
+        confirmation_trial_family_id = design.get(
+            "confirmation_trial_family_id"
+        )
+        if (
+            type(confirmation_trial_family_id) is not str
+            or not confirmation_trial_family_id.strip()
+        ):
+            raise VOCEvaluationError(
+                "canonical VOC confirmation-trial family is missing"
+            )
+        evaluator_source_sha256 = design.get("evaluator_source_sha256")
+        try:
+            _sha256(
+                "canonical VOC evaluator_source_sha256",
+                evaluator_source_sha256,
+            )
+        except VOCEvaluationError as exc:
+            raise VOCEvaluationError(
+                "canonical VOC evaluator source identity is missing"
+            ) from exc
+        uncertainty_method = binding.get("uncertainty_method")
+        if type(uncertainty_method) is not str or not uncertainty_method.strip():
+            raise VOCEvaluationError(
+                "canonical VOC uncertainty method is missing"
+            )
+
+        matches = []
+        for entry in self.scientific_registry.causal_records(
+            "PromotionEvidence",
+            as_of=evaluation.evaluated_at,
+        ):
+            payload = entry.payload
+            if (
+                payload.get("research_protocol_id")
+                == evaluation.research_protocol_id
+                and payload.get("holdout_access_id")
+                == evaluation.holdout_access_id
+                and payload.get("multiple_comparison_control_sha256")
+                == evaluation.multiple_comparison_control_sha256
+                and payload.get("confirmation_trial_family_id")
+                == confirmation_trial_family_id
+                and payload.get("estimand") == estimand
+                and payload.get("cohort_id") == cohort_id
+                and payload.get("uncertainty_method") == uncertainty_method
+            ):
+                matches.append(entry)
+        if not matches:
+            raise VOCEvaluationError(
+                "canonical scientific VOC statistics evidence is missing"
+            )
+        if len(matches) != 1:
+            raise VOCEvaluationError(
+                "canonical scientific VOC statistics evidence is ambiguous"
+            )
+
+        evidence = matches[0].payload
+        if (
+            evidence.get("validity") != "ELIGIBLE"
+            or evidence.get("guardrails_passed") is not True
+            or evidence.get("holdout_consumed") is not True
+        ):
+            raise VOCEvaluationError(
+                "canonical scientific VOC statistics evidence is not eligible"
+            )
+        if evidence.get("effective_sample_size") != evaluation.effective_sample_size:
+            raise VOCEvaluationError(
+                "canonical VOC effective sample size mismatch"
+            )
+        minimum_ess = evidence.get("minimum_effective_sample_size")
+        if (
+            isinstance(minimum_ess, bool)
+            or not isinstance(minimum_ess, int)
+            or evaluation.effective_sample_size < minimum_ess
+        ):
+            raise VOCEvaluationError(
+                "canonical VOC minimum effective sample size is not satisfied"
+            )
+        try:
+            interval_low = Decimal(evidence["effect_interval_low"])
+            interval_high = Decimal(evidence["effect_interval_high"])
+            practical_improvement = Decimal(evidence["practical_improvement"])
+        except (KeyError, InvalidOperation, TypeError) as exc:
+            raise VOCEvaluationError(
+                "canonical scientific VOC statistics are invalid"
+            ) from exc
+        if (
+            interval_low != evaluation.incremental_value_interval_low
+            or interval_high != evaluation.incremental_value_interval_high
+            or practical_improvement != evaluation.net_value
+        ):
+            raise VOCEvaluationError(
+                "canonical scientific VOC statistics do not match routed evaluation"
+            )
+
+        bundle_id = evidence.get("evaluation_bundle_id")
+        if type(bundle_id) is not str or not bundle_id.strip():
+            raise VOCEvaluationError(
+                "canonical VOC EvaluationBundle identity is missing"
+            )
+        bundle_entry = self.scientific_registry.get(
+            "EvaluationBundle",
+            bundle_id,
+        )
+        if bundle_entry is None:
+            raise VOCEvaluationError("canonical VOC EvaluationBundle is missing")
+        bundle = bundle_entry.payload
+        if (
+            bundle.get("bundle_sha256")
+            != evidence.get("evaluation_bundle_sha256")
+            or bundle.get("protocol_sha256")
+            != evaluation.research_protocol_sha256
+            or bundle.get("evaluator_source_sha256")
+            != evaluator_source_sha256
+            or bundle.get("dataset_snapshot_id")
+            != evidence.get("dataset_snapshot_id")
+        ):
+            raise VOCEvaluationError(
+                "canonical VOC EvaluationBundle authority mismatch"
+            )
+        if bundle.get("effective_sample_size") != evaluation.effective_sample_size:
+            raise VOCEvaluationError(
+                "canonical VOC EvaluationBundle ESS mismatch"
+            )
+        try:
+            bundle_low = Decimal(bundle["effect_interval_low"])
+            bundle_high = Decimal(bundle["effect_interval_high"])
+            bundle_improvement = Decimal(bundle["practical_improvement"])
+        except (KeyError, InvalidOperation, TypeError) as exc:
+            raise VOCEvaluationError(
+                "canonical VOC EvaluationBundle statistics are invalid"
+            ) from exc
+        if (
+            bundle_low != evaluation.incremental_value_interval_low
+            or bundle_high != evaluation.incremental_value_interval_high
+            or bundle_improvement != evaluation.net_value
+        ):
+            raise VOCEvaluationError(
+                "canonical VOC EvaluationBundle statistics mismatch"
+            )
+
+        snapshot_id = evidence.get("dataset_snapshot_id")
+        if type(snapshot_id) is not str or not snapshot_id.strip():
+            raise VOCEvaluationError(
+                "canonical VOC DatasetSnapshot identity is missing"
+            )
+        snapshot = self.scientific_registry.get(
+            "DatasetSnapshot",
+            snapshot_id,
+        )
+        if snapshot is None:
+            raise VOCEvaluationError(
+                "canonical VOC DatasetSnapshot is missing"
+            )
+        if (
+            snapshot.payload.get("manifest_sha256")
+            != protocol_payload.get("dataset_manifest_sha256")
+        ):
+            raise VOCEvaluationError(
+                "canonical VOC DatasetSnapshot does not match protocol"
+            )
+
+        artifact_hashes = bundle.get("artifact_hashes")
+        score_artifact = self._scientific_score_artifact_sha256(evaluation)
+        if (
+            type(artifact_hashes) is not list
+            or score_artifact not in artifact_hashes
+        ):
+            raise VOCEvaluationError(
+                "canonical VOC score decomposition artifact is missing"
+            )
+
     def _require_registry_result(
         self,
         evaluation: PairedVOCEvaluation,
@@ -691,6 +952,7 @@ class CanonicalVOCAuthorityResolver:
         self._require_decision(canonical)
         self._require_protocol(canonical)
         self._require_outcome(canonical)
+        self._require_scientific_statistics(canonical)
         return canonical
 
 

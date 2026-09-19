@@ -5,7 +5,10 @@ from dataclasses import replace
 
 import pytest
 
-from autosport._strategy_model_factory_impl import _holdout_consumed_by_other_evidence
+from autosport._strategy_model_factory_impl import (
+    PromotionEvaluation,
+    _holdout_consumed_by_other_evidence,
+)
 from autosport.scientific_registry import (
     DatasetSnapshot,
     DuplicateExperimentFingerprintError,
@@ -782,8 +785,16 @@ def test_factory_consumed_holdout_commit_race_resolves_retain_without_positive_o
 ):
     registry, registry_path, rule, store, _, _ = _factory_foundation(tmp_path)
     monkeypatch.setattr(
-        "autosport._strategy_model_factory_impl._holdout_consumed_by_other_evidence",
-        lambda *args, **kwargs: False,
+        PromotionController,
+        "evaluate",
+        staticmethod(
+            lambda *args, **kwargs: PromotionEvaluation(
+                PromotionVerdict.PROMOTE,
+                PromotionAction.PROMOTE,
+                0.10,
+                ("eligible promotion race fixture",),
+            )
+        ),
     )
     real_record_promotion = registry.record_promotion
     injected = False

@@ -1222,8 +1222,12 @@ class OpponentIntelligenceStore:
         try:
             performances: dict[str, PerformanceRecord] = {}
             for item in raw.get("performances", []):
+                observation_payload = dict(item["observation"])
+                observation_payload["truth"] = EvidenceTruth(
+                    observation_payload["truth"]
+                )
                 observation = ObservedPerformance(
-                    **item["observation"]
+                    **observation_payload
                 )
                 record = PerformanceRecord(
                     item["performance_id"],

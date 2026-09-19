@@ -153,6 +153,7 @@ class SportDomainFitnessObservation:
     capital_time_hours: MetricEvidence
     data_cost: MetricEvidence
     compute_cost: MetricEvidence
+    compute_duration_seconds: MetricEvidence
     slow_analysis_deadline_seconds: MetricEvidence
     freshness_ttl_seconds: MetricEvidence
 
@@ -186,6 +187,7 @@ class SportDomainFitnessObservation:
             "capital_time_hours": "hours",
             "data_cost": "cost",
             "compute_cost": "cost",
+            "compute_duration_seconds": "seconds",
             "slow_analysis_deadline_seconds": "seconds",
             "freshness_ttl_seconds": "seconds",
         }
@@ -200,6 +202,7 @@ class SportDomainFitnessObservation:
         for name in (
             "recurrence_per_hour", "freshness_seconds", "reaction_slack_seconds",
             "executable_liquidity", "capital_time_hours", "data_cost", "compute_cost",
+            "compute_duration_seconds",
             "slow_analysis_deadline_seconds", "freshness_ttl_seconds",
         ):
             metric = getattr(self, name)
@@ -224,6 +227,7 @@ class SportDomainFitnessObservation:
             "catalogue_coverage", "quote_coverage", "recurrence_per_hour", "freshness_seconds",
             "reaction_slack_seconds", "executable_liquidity", "fee_fraction", "slippage_fraction",
             "capital_time_hours", "data_cost", "compute_cost",
+            "compute_duration_seconds",
             "slow_analysis_deadline_seconds", "freshness_ttl_seconds",
         ):
             out[name] = getattr(self, name).payload()
@@ -238,6 +242,7 @@ class SportDomainFitnessObservation:
             "catalogue_coverage", "quote_coverage", "recurrence_per_hour", "freshness_seconds",
             "reaction_slack_seconds", "executable_liquidity", "fee_fraction", "slippage_fraction",
             "capital_time_hours", "data_cost", "compute_cost",
+            "compute_duration_seconds",
             "slow_analysis_deadline_seconds", "freshness_ttl_seconds",
         )
         values = dict(raw)
@@ -263,6 +268,7 @@ _REQUIRED = (
     "catalogue_coverage", "quote_coverage", "recurrence_per_hour", "freshness_seconds",
     "reaction_slack_seconds", "executable_liquidity", "fee_fraction", "slippage_fraction",
     "capital_time_hours", "data_cost", "compute_cost",
+            "compute_duration_seconds",
     "slow_analysis_deadline_seconds", "freshness_ttl_seconds",
 )
 
@@ -318,7 +324,7 @@ def recommend_route(
             observation.observation_id, observation.domain_profile,
         )
     slack = observation.reaction_slack_seconds.value
-    compute = observation.compute_cost.value
+    duration = observation.compute_duration_seconds.value
     deadline = observation.slow_analysis_deadline_seconds.value
     if slack <= _ZERO:
         return RouteRecommendation(
@@ -326,10 +332,10 @@ def recommend_route(
             observation.observation_id, observation.domain_profile,
         )
     if observation.domain_profile is DomainProfile.SLOW:
-        if compute + deadline <= slack:
+        if duration + deadline <= slack:
             return RouteRecommendation(
                 RouteStatus.ROUTE_SLOW_RESEARCH,
-                "measured reaction slack covers measured slow-analysis compute cost plus deadline",
+                "measured reaction slack covers measured slow-analysis duration plus deadline",
                 observation.observation_id, observation.domain_profile,
             )
         return RouteRecommendation(
@@ -337,15 +343,15 @@ def recommend_route(
             "slow-analysis budget does not fit measured reaction slack; stay on baseline route",
             observation.observation_id, observation.domain_profile,
         )
-    if compute <= slack:
+    if duration <= slack:
         return RouteRecommendation(
             RouteStatus.ROUTE_BASELINE,
-            "measured reaction slack covers compute cost for the FAST hypothesis route",
+            "measured reaction slack covers measured compute duration for the FAST hypothesis route",
             observation.observation_id, observation.domain_profile,
         )
     return RouteRecommendation(
         RouteStatus.DO_NOT_ROUTE,
-        "measured reaction slack is insufficient for the required compute cost",
+        "measured reaction slack is insufficient for the required compute duration",
         observation.observation_id, observation.domain_profile,
     )
 

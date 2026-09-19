@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Final
 
 from .scientific_registry import PromotionAction, RegistryEntry, ScientificRegistry
+from .champion_eligibility import ChampionEligibilityDecision, validate_activation_eligibility
 from .strategy_model_factory import FactoryArtifactStore
 from .transparent_bandit_policy import BanditPolicyState
 
@@ -147,6 +148,7 @@ def load_champion_policy(
     protocol_id: str,
     config_sha256: str,
     admissible_actions: frozenset[str],
+    eligibility_decision: ChampionEligibilityDecision | None = None,
 ) -> BanditPolicyState:
     """Load the exact promoted policy for one compatible next episode."""
 
@@ -163,6 +165,17 @@ def load_champion_policy(
     expected_actions = frozenset(
         _text(action, "admissible action") for action in admissible_actions
     )
+    if eligibility_decision is not None:
+        validate_activation_eligibility(
+            registry,
+            eligibility_decision,
+            as_of=as_of,
+            canonical_strategy_id=strategy_key,
+            expected_environment_sha256=expected_environment,
+            expected_protocol_id=expected_protocol,
+            expected_config_sha256=expected_config,
+            admissible_actions=expected_actions,
+        )
 
     champion_id = registry.champion_strategy(
         as_of=as_of,

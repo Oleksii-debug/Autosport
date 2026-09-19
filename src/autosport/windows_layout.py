@@ -251,6 +251,29 @@ def _owner_economic_service(app: Any) -> tuple[OwnerEconomicAuthorityService | N
     return OwnerEconomicAuthorityService(workspace), None
 
 
+def _persist_initial_owner_economic_contract(
+    app: Any,
+    *,
+    bound_workspace: Any,
+    service: OwnerEconomicAuthorityService,
+    values: dict[str, str],
+    emergency_stop: bool,
+) -> Any:
+    """Revalidate exact workspace/quarantine immediately before durable creation."""
+
+    current_workspace, _ = _owner_economic_workspace(app)
+    blocker = _owner_economic_write_blocker(app, bound_workspace)
+    if current_workspace != bound_workspace or blocker is not None:
+        raise OwnerEconomicAuthorityError(
+            blocker or text("ui.windows.owner_authority.error.busy")
+        )
+    return service.initialize_from_form(
+        values,
+        emergency_stop=emergency_stop,
+        confirmed=True,
+    )
+
+
 def refresh_owner_economic_authority_surface(app: Any) -> None:
     """Refresh the root readback without granting a write or touching persistence."""
 
@@ -394,16 +417,12 @@ def _show_owner_economic_dialog(app: Any) -> None:
             # Re-resolve both workspace identity and recovery quarantine at the
             # irreversible boundary. A non-modal dialog must never persist into
             # a workspace that was switched or quarantined after preview.
-            current_workspace, _ = _owner_economic_workspace(app)
-            blocker = _owner_economic_write_blocker(app, bound_workspace)
-            if current_workspace != bound_workspace or blocker is not None:
-                raise OwnerEconomicAuthorityError(
-                    blocker or text("ui.windows.owner_authority.error.busy")
-                )
-            persisted = service.initialize_from_form(
-                values,
+            persisted = _persist_initial_owner_economic_contract(
+                app,
+                bound_workspace=bound_workspace,
+                service=service,
+                values=values,
                 emergency_stop=emergency_stop.get(),
-                confirmed=True,
             )
         except OwnerEconomicAuthorityError as exc:
             messagebox.showerror(text("ui.windows.owner_authority.dialog.title"), str(exc), parent=dialog)

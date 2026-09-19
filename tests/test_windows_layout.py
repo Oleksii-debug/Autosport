@@ -1,6 +1,15 @@
 import inspect
+from pathlib import Path
 
-from autosport.owner_economic_authority import OWNER_ECONOMIC_FORM_FIELDS
+import pytest
+
+import autosport.windows_layout as windows_layout
+from autosport.owner_economic_authority import (
+    INITIAL_OWNER_FORM_DEFAULTS,
+    OWNER_ECONOMIC_FORM_FIELDS,
+    OwnerEconomicAuthorityError,
+    OwnerEconomicAuthorityService,
+)
 from autosport.windows_layout import (
     OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS,
     WINDOWS_SHELL_AUTOMATION_IDS,
@@ -13,6 +22,7 @@ from autosport.windows_layout import (
     refresh_windows_shell_open_availability,
     _owner_economic_workspace,
     _owner_economic_write_blocker,
+    _persist_initial_owner_economic_contract,
     _show_owner_economic_dialog,
     _surface_target_widget,
 )
@@ -106,6 +116,7 @@ def test_windows_product_shell_has_stable_uia_ids_and_keyboard_navigation():
         assert f'WINDOWS_SHELL_AUTOMATION_IDS["{automation_id}"]' in accessibility_source
 
     dialog_source = inspect.getsource(_show_owner_economic_dialog)
+    assert "_persist_initial_owner_economic_contract(" in dialog_source
     assert 'OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["readback"]' in dialog_source
     for field in OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS:
         assert f'OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["{field}"]' in dialog_source or (
@@ -203,3 +214,58 @@ def test_owner_economic_write_blocker_preserves_base_gui_recovery_quarantine(tmp
     app = App()
 
     assert _owner_economic_write_blocker(app, blocked_workspace) is not None
+
+
+def test_owner_economic_persistence_seam_keeps_quarantined_workspace_absent_and_other_workspace_independent(
+    tmp_path, monkeypatch
+):
+    blocked_workspace = tmp_path / "blocked" / "strategies" / "research"
+    other_workspace = tmp_path / "other" / "strategies" / "research"
+
+    class App:
+        def __init__(self, current_workspace: Path):
+            self._closing = False
+            self.current_workspace = current_workspace
+            self._recovery_blocked_workspaces: set[Path] = set()
+
+        def _workspace_requires_recovery(self, workspace):
+            return Path(workspace) in self._recovery_blocked_workspaces
+
+    monkeypatch.setattr(
+        windows_layout,
+        "_owner_economic_workspace",
+        lambda app: (Path(app.current_workspace), None),
+    )
+
+    blocked_app = App(blocked_workspace)
+    blocked_app._recovery_blocked_workspaces.add(blocked_workspace)
+    blocked_service = OwnerEconomicAuthorityService(blocked_workspace)
+
+    with pytest.raises(OwnerEconomicAuthorityError):
+        _persist_initial_owner_economic_contract(
+            blocked_app,
+            bound_workspace=blocked_workspace,
+            service=blocked_service,
+            values=dict(INITIAL_OWNER_FORM_DEFAULTS),
+            emergency_stop=False,
+        )
+
+    assert blocked_service.read_view().state == "absent"
+    assert not blocked_service.store.path.exists()
+
+    other_app = App(other_workspace)
+    other_app._recovery_blocked_workspaces.add(blocked_workspace)
+    other_service = OwnerEconomicAuthorityService(other_workspace)
+    persisted = _persist_initial_owner_economic_contract(
+        other_app,
+        bound_workspace=other_workspace,
+        service=other_service,
+        values=dict(INITIAL_OWNER_FORM_DEFAULTS),
+        emergency_stop=True,
+    )
+
+    assert persisted.state == "valid"
+    assert persisted.contract is not None
+    assert persisted.contract.emergency_stop is True
+    assert other_service.store.path.exists()
+    assert not blocked_service.store.path.exists()

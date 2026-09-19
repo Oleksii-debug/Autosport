@@ -4,7 +4,7 @@ import unittest
 
 from autosport.participant_identity import (
     AliasRecord, EntityIdentity, EntityKind, IdentityView, ParticipantIdentityError,
-    ParticipantIdentityRegistry, RosterMembership,
+    ParticipantIdentityRegistry, RosterMembership, EntityLineage, LineageRelation,
 )
 
 
@@ -58,6 +58,17 @@ class ParticipantIdentityTests(unittest.TestCase):
         registry.add_entity(entity()); registry.add_roster_membership(RosterMembership("event-1", "provider-a", "p-1", T0, None, T2, SHA))
         self.assertEqual(registry.roster_at("event-1", "provider-a", as_of=T1), ())
         self.assertEqual([item.entity_id for item in registry.roster_at("event-1", "provider-a", as_of=T1, view=IdentityView.RESTATED_RESEARCH)], ["p-1"])
+
+    def test_late_merge_lineage_is_evidence_not_historical_rewrite(self):
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        registry.add_entity(entity("p-old")); registry.add_entity(entity("p-canonical"))
+        registry.add_alias(alias("p-old"))
+        lineage = EntityLineage("p-old", "p-canonical", LineageRelation.MERGED_FROM, T1, T3, SHA)
+        registry.add_lineage(lineage)
+        self.assertEqual(registry.resolve_alias("provider-a", "Alex", as_of=T2).entity_id, "p-old")
+        self.assertEqual(registry.lineage_at("p-old", as_of=T2), ())
+        self.assertEqual(registry.lineage_at("p-old", as_of=T2, view=IdentityView.RESTATED_RESEARCH), (lineage,))
+        self.assertEqual(ParticipantIdentityRegistry(self.path).lineage_at("p-canonical", as_of=T2, view=IdentityView.RESTATED_RESEARCH), (lineage,))
 
     def test_unknown_entity_and_invalid_interval_fail_closed(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)

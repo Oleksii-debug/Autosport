@@ -32,6 +32,19 @@ class IdentityView(StrEnum):
     RESTATED_RESEARCH = "RESTATED_RESEARCH"
 
 
+class LineageRelation(StrEnum):
+    """A correction relation between stable entity identities.
+
+    The relation records provenance; it never silently rewrites an historical
+    alias resolution.  Consumers must request and apply a restatement
+    explicitly when that is scientifically appropriate.
+    """
+
+    MERGED_FROM = "MERGED_FROM"
+    SPLIT_FROM = "SPLIT_FROM"
+    SUPERSEDES = "SUPERSEDES"
+
+
 class ParticipantIdentityError(ValueError):
     """Raised when causal identity evidence is malformed or ambiguous."""
 
@@ -152,6 +165,45 @@ class RosterMembership:
                 "available_at": _time_text("available_at", self.available_at), "evidence_sha256": self.evidence_sha256}
 
 
+@dataclass(frozen=True, slots=True)
+class EntityLineage:
+    """Causal merge, split, or supersession evidence between identities."""
+
+    predecessor_entity_id: str
+    successor_entity_id: str
+    relation: LineageRelation
+    effective_from: str
+    available_at: str
+    evidence_sha256: str
+
+    def __post_init__(self) -> None:
+        for name in ("predecessor_entity_id", "successor_entity_id", "evidence_sha256"):
+            _text(name, getattr(self, name))
+        if self.predecessor_entity_id == self.successor_entity_id:
+            raise ParticipantIdentityError("lineage must join distinct identities")
+        if not isinstance(self.relation, LineageRelation):
+            raise ParticipantIdentityError("relation must be LineageRelation")
+        if len(self.evidence_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in self.evidence_sha256):
+            raise ParticipantIdentityError("lineage evidence_sha256 must be SHA-256 hex")
+        effective = _instant("effective_from", self.effective_from)
+        if _instant("available_at", self.available_at) < effective:
+            raise ParticipantIdentityError("lineage cannot be available before effective_from")
+
+    @property
+    def record_id(self) -> str:
+        return _digest(self.payload())
+
+    def payload(self) -> dict[str, str]:
+        return {
+            "predecessor_entity_id": self.predecessor_entity_id,
+            "successor_entity_id": self.successor_entity_id,
+            "relation": self.relation.value,
+            "effective_from": _time_text("effective_from", self.effective_from),
+            "available_at": _time_text("available_at", self.available_at),
+            "evidence_sha256": self.evidence_sha256,
+        }
+
+
 class ParticipantIdentityRegistry:
     """Append-only identity evidence with causal and restated views."""
 
@@ -160,6 +212,8 @@ class ParticipantIdentityRegistry:
         self._entities: dict[str, EntityIdentity] = {}
         self._aliases: list[AliasRecord] = []
         self._rosters: list[RosterMembership] = []
+        self._lineages: list[EntityLineage] = []
+        self._loading = False
         if self.path.exists():
             self._load()
 
@@ -209,6 +263,34 @@ class ParticipantIdentityRegistry:
         self._rosters.sort(key=lambda value: (value.event_id, value.source_id, value.entity_id, _time_text("member_from", value.member_from)))
         self._persist()
 
+    def add_lineage(self, lineage: EntityLineage) -> None:
+        """Append correction provenance without changing prior resolutions."""
+        if not isinstance(lineage, EntityLineage):
+            raise TypeError("lineage must be EntityLineage")
+        if lineage.predecessor_entity_id not in self._entities or lineage.successor_entity_id not in self._entities:
+            raise ParticipantIdentityError("lineage references unknown entity")
+        if lineage in self._lineages:
+            return
+        self._lineages.append(lineage)
+        self._lineages.sort(key=lambda value: (
+            value.predecessor_entity_id, value.successor_entity_id,
+            _time_text("effective_from", value.effective_from), value.record_id,
+        ))
+        self._persist()
+
+    def lineage_at(self, entity_id: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> tuple[EntityLineage, ...]:
+        """Return causal correction evidence; do not rewrite identity truth."""
+        if not isinstance(view, IdentityView):
+            raise TypeError("view must be IdentityView")
+        _text("entity_id", entity_id)
+        moment = _instant("as_of", as_of)
+        return tuple(
+            record for record in self._lineages
+            if entity_id in (record.predecessor_entity_id, record.successor_entity_id)
+            and _instant("effective_from", record.effective_from) <= moment
+            and (view is IdentityView.RESTATED_RESEARCH or _instant("available_at", record.available_at) <= moment)
+        )
+
     def resolve_alias(self, source_id: str, alias: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> EntityIdentity:
         if not isinstance(view, IdentityView):
             raise TypeError("view must be IdentityView")
@@ -241,10 +323,13 @@ class ParticipantIdentityRegistry:
         return tuple(sorted(result, key=lambda entity: entity.entity_id))
 
     def _persist(self) -> None:
+        if self._loading:
+            return
         atomic_write_json(self.path, {"schema": _SCHEMA, "version": _VERSION,
             "entities": [item.payload() for item in sorted(self._entities.values(), key=lambda item: item.entity_id)],
             "aliases": [item.payload() for item in self._aliases],
-            "rosters": [item.payload() for item in self._rosters]})
+            "rosters": [item.payload() for item in self._rosters],
+            "lineages": [item.payload() for item in self._lineages]})
 
     def _load(self) -> None:
         try:
@@ -253,16 +338,25 @@ class ParticipantIdentityRegistry:
             raise ParticipantIdentityError(f"cannot load identity registry: {exc}") from exc
         if not isinstance(raw, dict) or raw.get("schema") != _SCHEMA or raw.get("version") != _VERSION:
             raise ParticipantIdentityError("unsupported identity registry schema")
-        for item in raw.get("entities", []):
-            entity = EntityIdentity(item["entity_id"], EntityKind(item["kind"]), item["source_reference"], item["evidence_sha256"], item["first_known_at"], item["available_at"])
-            if entity.entity_id in self._entities:
-                raise ParticipantIdentityError("duplicate entity identity")
-            self._entities[entity.entity_id] = entity
-        for item in raw.get("aliases", []):
-            alias = AliasRecord(**item)
-            self.add_alias(alias)
-        for item in raw.get("rosters", []):
-            self.add_roster_membership(RosterMembership(**item))
+        self._loading = True
+        try:
+            for item in raw.get("entities", []):
+                entity = EntityIdentity(item["entity_id"], EntityKind(item["kind"]), item["source_reference"], item["evidence_sha256"], item["first_known_at"], item["available_at"])
+                if entity.entity_id in self._entities:
+                    raise ParticipantIdentityError("duplicate entity identity")
+                self._entities[entity.entity_id] = entity
+            for item in raw.get("aliases", []):
+                self.add_alias(AliasRecord(**item))
+            for item in raw.get("rosters", []):
+                self.add_roster_membership(RosterMembership(**item))
+            for item in raw.get("lineages", []):
+                self.add_lineage(EntityLineage(
+                    item["predecessor_entity_id"], item["successor_entity_id"],
+                    LineageRelation(item["relation"]), item["effective_from"],
+                    item["available_at"], item["evidence_sha256"],
+                ))
+        finally:
+            self._loading = False
 
 
 def _contains(start: str, end: str | None, moment: datetime) -> bool:

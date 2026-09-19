@@ -425,6 +425,7 @@ class EvaluationBundleRef:
     created_at: str
     evaluated_strategy_version_id: str | None = None
     evaluated_model_version_id: str | None = None
+    effective_sample_size: int | None = None
 
     def __post_init__(self) -> None:
         _text(self.evaluation_bundle_id, "evaluation_bundle_id")
@@ -440,6 +441,13 @@ class EvaluationBundleRef:
             _text(self.evaluated_strategy_version_id, "evaluated_strategy_version_id")
         if self.evaluated_model_version_id is not None:
             _text(self.evaluated_model_version_id, "evaluated_model_version_id")
+        if self.effective_sample_size is not None:
+            if (
+                isinstance(self.effective_sample_size, bool)
+                or not isinstance(self.effective_sample_size, int)
+                or self.effective_sample_size <= 0
+            ):
+                raise ValueError("effective_sample_size must be a positive integer")
 
     @property
     def record_type(self) -> str: return "EvaluationBundle"
@@ -448,15 +456,20 @@ class EvaluationBundleRef:
     @property
     def available_at(self) -> str: return self.created_at
     def to_payload(self) -> dict[str, Any]:
-        return {"evaluation_bundle_id": self.evaluation_bundle_id,
-                "bundle_sha256": self.bundle_sha256.lower(),
-                "evaluator_source_sha256": self.evaluator_source_sha256.lower(),
-                "dataset_snapshot_id": self.dataset_snapshot_id,
-                "protocol_sha256": self.protocol_sha256.lower(),
-                "artifact_hashes": [value.lower() for value in self.artifact_hashes],
-                "created_at": self.created_at,
-                "evaluated_strategy_version_id": self.evaluated_strategy_version_id,
-                "evaluated_model_version_id": self.evaluated_model_version_id}
+        payload: dict[str, Any] = {
+            "evaluation_bundle_id": self.evaluation_bundle_id,
+            "bundle_sha256": self.bundle_sha256.lower(),
+            "evaluator_source_sha256": self.evaluator_source_sha256.lower(),
+            "dataset_snapshot_id": self.dataset_snapshot_id,
+            "protocol_sha256": self.protocol_sha256.lower(),
+            "artifact_hashes": [value.lower() for value in self.artifact_hashes],
+            "created_at": self.created_at,
+            "evaluated_strategy_version_id": self.evaluated_strategy_version_id,
+            "evaluated_model_version_id": self.evaluated_model_version_id,
+        }
+        if self.effective_sample_size is not None:
+            payload["effective_sample_size"] = self.effective_sample_size
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -1245,7 +1258,16 @@ class ScientificRegistry:
                 frozen_minimum_n = frozen_rule_payload.get("minimum_effective_sample_size")
                 if type(minimum_n) is not int or minimum_n != frozen_minimum_n:
                     raise PromotionEvidenceError("promotion evidence minimum effective sample size is not frozen")
-                if type(effective_n) is not int or effective_n < frozen_minimum_n:
+                durable_effective_n = bundle["payload"].get("effective_sample_size")
+                if type(durable_effective_n) is not int or durable_effective_n <= 0:
+                    raise PromotionEvidenceError(
+                        "PROMOTE requires durable effective sample size from the evaluation bundle"
+                    )
+                if type(effective_n) is not int or effective_n != durable_effective_n:
+                    raise PromotionEvidenceError(
+                        "promotion evidence effective sample size does not match durable evaluation"
+                    )
+                if effective_n < frozen_minimum_n:
                     raise PromotionEvidenceError("PROMOTE requires sufficient effective sample size")
                 if ep.get("guardrails_passed") is not True:
                     raise PromotionEvidenceError("PROMOTE requires passing guardrails")

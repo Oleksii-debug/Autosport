@@ -1369,20 +1369,6 @@ class ExperimentRunner:
         evaluation_bundle_sha256 = self.artifact_store.write(
             "evaluation", spec.evaluation_bundle_id, evaluation_payload
         )
-        self.registry.append(
-            EvaluationBundleRef(
-                spec.evaluation_bundle_id,
-                evaluation_bundle_sha256,
-                spec.evaluator_source_sha256,
-                spec.dataset_snapshot_id,
-                protocol_sha256,
-                (model_artifact_sha256, candidate_metrics_artifact_sha256),
-                spec.completed_at,
-                evaluated_strategy_version_id=spec.strategy_version_id,
-                evaluated_model_version_id=spec.model_version_id,
-            )
-        )
-
         champion_evaluation = self.artifact_store.read("evaluation", champion_evaluation_bundle_id)
         champion_folds = {
             fold["evaluation_at"]: fold
@@ -1399,6 +1385,20 @@ class ExperimentRunner:
             )
         if not paired_deltas:
             raise ValueError("promotion evidence requires at least one paired causal holdout fold")
+        self.registry.append(
+            EvaluationBundleRef(
+                spec.evaluation_bundle_id,
+                evaluation_bundle_sha256,
+                spec.evaluator_source_sha256,
+                spec.dataset_snapshot_id,
+                protocol_sha256,
+                (model_artifact_sha256, candidate_metrics_artifact_sha256),
+                spec.completed_at,
+                evaluated_strategy_version_id=spec.strategy_version_id,
+                evaluated_model_version_id=spec.model_version_id,
+                effective_sample_size=len(paired_deltas),
+            )
+        )
         practical = sum(paired_deltas, Decimal(0)) / Decimal(len(paired_deltas))
         uncertainty_method, effect_low, effect_high = _promotion_effect_interval(
             paired_deltas,

@@ -114,7 +114,10 @@ def _frozen_promotion_rule_text(
 
 
 def _foundation_with_binding(
-    registry: ScientificRegistry, *, promotion_rule: str
+    registry: ScientificRegistry,
+    *,
+    promotion_rule: str,
+    effective_sample_size: int = 5,
 ) -> dict[str, object]:
     question = _question()
     hypothesis = _hypothesis()
@@ -131,7 +134,8 @@ def _foundation_with_binding(
     bundle = EvaluationBundleRef("eval-1", SHA_D, SHA_C, "dataset-1",
                                  protocol.protocol_sha256, (SHA_A, SHA_B), T2,
                                  evaluated_strategy_version_id="strategy-1",
-                                 evaluated_model_version_id="model-1")
+                                 evaluated_model_version_id="model-1",
+                                 effective_sample_size=effective_sample_size)
     for record in (question, hypothesis, protocol, dataset, features, model, strategy, bundle):
         registry.append(record)
     return {"question": question, "hypothesis": hypothesis, "protocol": protocol,
@@ -185,6 +189,7 @@ def _foundation(registry: ScientificRegistry) -> dict[str, object]:
         T2,
         evaluated_strategy_version_id="strategy-1",
         evaluated_model_version_id="model-1",
+        effective_sample_size=5,
     )
     for record in (question, hypothesis, protocol, dataset, features, model, strategy, bundle):
         registry.append(record)
@@ -417,6 +422,7 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
         T3,
         evaluated_strategy_version_id="strategy-2",
         evaluated_model_version_id="model-1",
+        effective_sample_size=5,
     )
     registry.append(bundle2)
     experiment2 = replace(
@@ -636,6 +642,7 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
         T2,
         evaluated_strategy_version_id="strategy-offset-2",
         evaluated_model_version_id="model-1",
+        effective_sample_size=5,
     )
     registry.append(strategy2)
     registry.append(bundle2)
@@ -673,6 +680,7 @@ def test_promotion_rejects_positive_but_below_frozen_minimum_improvement(tmp_pat
     foundation = _foundation_with_binding(
         registry,
         promotion_rule=rule_text,
+        effective_sample_size=3,
     )
     registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
     evidence = _promotion_evidence(
@@ -714,6 +722,7 @@ def test_promotion_rejects_caller_selected_sample_floor(tmp_path):
     foundation = _foundation_with_binding(
         registry,
         promotion_rule=rule_text,
+        effective_sample_size=3,
     )
     registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
     evidence = _promotion_evidence(
@@ -746,6 +755,54 @@ def test_promotion_rejects_caller_selected_sample_floor(tmp_path):
         promotion_evidence_id=evidence.promotion_evidence_id,
     )
     with pytest.raises(PromotionEvidenceError, match="minimum effective sample size is not frozen"):
+        registry.record_promotion(decision)
+
+
+def test_promotion_rejects_caller_inflated_effective_sample_size(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    rule_text = _frozen_promotion_rule_text(
+        minimum_improvement=0.05,
+        minimum_effective_sample_size=3,
+    )
+    foundation = _foundation_with_binding(
+        registry,
+        promotion_rule=rule_text,
+        effective_sample_size=2,
+    )
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
+    evidence = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="caller-inflated-effective-n",
+        practical="0.1",
+        interval_low="0.1",
+        interval_high="0.12",
+        effective_n=3,
+        minimum_n=3,
+        rollback_identity="NONE",
+    )
+    registry.append(evidence)
+    decision = PromotionDecision(
+        "promotion-caller-inflated-effective-n",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        foundation["bundle"].bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=evidence.promotion_evidence_id,
+    )
+    with pytest.raises(
+        PromotionEvidenceError,
+        match="effective sample size does not match durable evaluation",
+    ):
         registry.record_promotion(decision)
 
 

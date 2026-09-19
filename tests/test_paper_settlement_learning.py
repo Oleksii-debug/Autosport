@@ -37,6 +37,8 @@ def _fixture(
     *,
     legs: tuple[TicketLeg, ...],
     action_type: str = "PAPER_PROPOSAL",
+    placed_at: str = "2026-09-19T21:19:10+00:00",
+    effect_state: ExternalEffectState = ExternalEffectState.PAPER_ONLY,
 ):
     goal = EconomicGoalContract(
         goal_id="bridge-goal",
@@ -49,7 +51,7 @@ def _fixture(
     ticket = book.open_ticket(
         legs,
         Decimal("10"),
-        placed_at="2026-09-19T21:19:10+00:00",
+        placed_at=placed_at,
         bankroll_id=goal.bankroll_id,
         currency=goal.currency,
     )
@@ -130,7 +132,7 @@ def _fixture(
         action,
         episode=environment.episode,
         observation=observation,
-        effect_state=ExternalEffectState.PAPER_ONLY,
+        effect_state=effect_state,
         at="2026-09-19T21:19:05+00:00",
     )
     bridge = PaperSettlementLearningBridge(
@@ -810,6 +812,94 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                     legs[1].quote_key: "void",
                 },
             )
+
+    def test_ticket_created_before_action_cannot_bind_reward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(
+                root,
+                legs=(leg,),
+                placed_at="2026-09-19T21:19:04+00:00",
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "predates bound AgentLoop action",
+            ):
+                bridge.bind_ticket(
+                    ticket_id=ticket.ticket_id,
+                    decision_id=decision.decision_id,
+                    environment=environment,
+                    observation=observation,
+                    action=action,
+                    baseline_checkpoint=baseline,
+                )
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(durable["bindings"], {})
+            self.assertIs(runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+
+    def test_non_paper_action_effect_cannot_bind_ticket_reward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(
+                root,
+                legs=(leg,),
+                effect_state=ExternalEffectState.NONE,
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "requires durable PAPER_ONLY action effect",
+            ):
+                bridge.bind_ticket(
+                    ticket_id=ticket.ticket_id,
+                    decision_id=decision.decision_id,
+                    environment=environment,
+                    observation=observation,
+                    action=action,
+                    baseline_checkpoint=baseline,
+                )
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(durable["bindings"], {})
+            self.assertIs(runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
 
     def test_abstain_action_cannot_bind_ticket_reward(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

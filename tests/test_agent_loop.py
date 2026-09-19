@@ -35,6 +35,10 @@ EVIDENCE_SHA = "5" * 64
 RANDOMNESS_SHA = "6" * 64
 
 
+def json_load(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _environment():
     identity = EnvironmentIdentity(
         source_id="paper-source-v1",

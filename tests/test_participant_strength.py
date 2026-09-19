@@ -404,6 +404,10 @@ def test_registered_forecast_reloads_hash_bound_factory_artifact_and_registry(tm
     assert Decimal("0") <= forecast.probability <= Decimal("1")
     assert forecast.model_training_cutoff_ts == T3
     assert forecast.evidence_hashes[:2] == (SHA_A, SHA_B)
+    assert len(forecast.evidence_hashes) == 8
+    assert forecast.provenance["dataset_snapshot_id"] == "dataset-strength-v1"
+    assert forecast.provenance["feature_set_id"] == "features-strength-v1"
+    assert forecast.provenance["research_protocol_id"] == "protocol-strength-v1"
     assert (
         forecast.provenance["training_manifest_sha256"]
         == model.training_manifest_sha256

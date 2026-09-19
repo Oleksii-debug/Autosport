@@ -500,12 +500,19 @@ class PromotionRule:
     primary_metric: str
     minimum_improvement: float
     protective_metric_maxima: tuple[tuple[str, float], ...] = ()
+    minimum_effective_sample_size: int = 2
 
     def __post_init__(self) -> None:
         _text(self.primary_metric, "primary_metric")
         improvement = _finite(self.minimum_improvement, "minimum_improvement")
         if improvement < 0:
             raise ValueError("minimum_improvement must be non-negative")
+        if (
+            isinstance(self.minimum_effective_sample_size, bool)
+            or not isinstance(self.minimum_effective_sample_size, int)
+            or self.minimum_effective_sample_size <= 0
+        ):
+            raise ValueError("minimum_effective_sample_size must be a positive integer")
         names: set[str] = set()
         for name, maximum in self.protective_metric_maxima:
             _text(name, "protective metric name")
@@ -521,6 +528,7 @@ class PromotionRule:
             "minimum_improvement": _finite(
                 self.minimum_improvement, "minimum_improvement"
             ),
+            "minimum_effective_sample_size": self.minimum_effective_sample_size,
             "protective_metric_maxima": [
                 [name, _finite(maximum, f"protective maximum {name}")]
                 for name, maximum in sorted(self.protective_metric_maxima)
@@ -1435,7 +1443,7 @@ class ExperimentRunner:
             "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
             "cohort_id": spec.dataset_snapshot_id,
             "effective_sample_size": len(paired_deltas),
-            "minimum_effective_sample_size": 2,
+            "minimum_effective_sample_size": rule.minimum_effective_sample_size,
             "effect_interval_low": _canonical_decimal_text(effect_low),
             "effect_interval_high": _canonical_decimal_text(effect_high),
             "practical_improvement": _canonical_decimal_text(practical),

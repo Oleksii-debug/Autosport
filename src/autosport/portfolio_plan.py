@@ -89,6 +89,22 @@ def _decimal_from_serialized(name: str, value: object) -> Decimal:
     return parsed
 
 
+def _semantic_decimal_string(name: str, value: Decimal) -> str:
+    """Serialize numerically equal finite Decimals identically without context rounding."""
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise ValueError(f"{name} must be a finite Decimal")
+    sign, digits, exponent = value.as_tuple()
+    if not digits or all(digit == 0 for digit in digits):
+        return "0"
+    canonical_digits = list(digits)
+    canonical_exponent = exponent
+    while canonical_digits[-1] == 0:
+        canonical_digits.pop()
+        canonical_exponent += 1
+    exact = Decimal((sign, tuple(canonical_digits), canonical_exponent))
+    return str(exact)
+
+
 def _canonical_json_payload(payload: object) -> str:
     return json.dumps(
         payload,
@@ -634,7 +650,6 @@ class RobustPortfolioProposal:
             raise ValueError("robust proposal quantum must be positive")
         if any(not isinstance(stake, Decimal) or not stake.is_finite() or stake < 0 for stake in base_stakes):
             raise ValueError("robust proposal stakes must be non-negative finite Decimals")
-        canonical_base_stakes = tuple(stake.normalize() for stake in base_stakes)
         dependency_haircut = max((bound for _, _, bound in evidence.pairwise_dependency_upper_bounds), default=Decimal("0"))
         scale = (
             (Decimal("1") - dependency_haircut)
@@ -642,10 +657,8 @@ class RobustPortfolioProposal:
             * (Decimal("1") - evidence.fee_fraction)
             * (Decimal("1") - evidence.partial_fill_stress_fraction)
         )
-        proposed = tuple(
-            (stake * scale).quantize(quantum) for stake in canonical_base_stakes
-        )
-        return cls(canonical_base_stakes, proposed, dependency_haircut, evidence.uncertainty_fraction, evidence.fee_fraction, evidence.partial_fill_stress_fraction, scale)
+        proposed = tuple((stake * scale).quantize(quantum) for stake in base_stakes)
+        return cls(base_stakes, proposed, dependency_haircut, evidence.uncertainty_fraction, evidence.fee_fraction, evidence.partial_fill_stress_fraction, scale)
 
     @property
     def proposal_sha256(self) -> str:
@@ -655,13 +668,13 @@ class RobustPortfolioProposal:
         return {
             "schema":"autosport.robust_portfolio_proposal",
             "schema_version":1,
-            "base_stakes":[str(v) for v in self.base_stakes],
-            "proposed_stakes":[str(v) for v in self.proposed_stakes],
-            "dependency_haircut_fraction":str(self.dependency_haircut_fraction),
-            "uncertainty_fraction":str(self.uncertainty_fraction),
-            "fee_fraction":str(self.fee_fraction),
-            "partial_fill_stress_fraction":str(self.partial_fill_stress_fraction),
-            "robust_scale":str(self.robust_scale),
+            "base_stakes":[_semantic_decimal_string("robust base stake", v) for v in self.base_stakes],
+            "proposed_stakes":[_semantic_decimal_string("robust proposed stake", v) for v in self.proposed_stakes],
+            "dependency_haircut_fraction":_semantic_decimal_string("robust dependency haircut", self.dependency_haircut_fraction),
+            "uncertainty_fraction":_semantic_decimal_string("robust uncertainty", self.uncertainty_fraction),
+            "fee_fraction":_semantic_decimal_string("robust fee", self.fee_fraction),
+            "partial_fill_stress_fraction":_semantic_decimal_string("robust partial fill stress", self.partial_fill_stress_fraction),
+            "robust_scale":_semantic_decimal_string("robust scale", self.robust_scale),
         }
 
     @classmethod

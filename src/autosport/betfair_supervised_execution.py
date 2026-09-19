@@ -476,9 +476,7 @@ class BetfairSupervisedPlaceOrdersClient:
 
         request_id = self._next_request_id()
         customer_ref = sha256(
-            f"{bound.execution_plan.plan_id}:{action.action_id}".encode(
-                "utf-8"
-            )
+            f"placeOrders:{provider_ref}".encode("utf-8")
         ).hexdigest()[:32]
         instruction = {
             "selectionId": selection_id,

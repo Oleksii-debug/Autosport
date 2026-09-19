@@ -275,22 +275,14 @@ class OpportunityIntent:
                 )
 
         strategy_class = self.opportunity.strategy_class
-        if strategy_class in {
-            StrategyClass.PREDICTIVE_EDGE,
-            StrategyClass.HYBRID,
-        } and self.model_id is None:
+        forecast_dependent = self.opportunity.claims_probability_edge
+        if forecast_dependent and self.model_id is None:
             raise ValueError(
-                f"{strategy_class.value} requires model_id identity"
+                f"{strategy_class.value} probability edge requires model_id identity"
             )
-        if (
-            strategy_class not in {
-                StrategyClass.PREDICTIVE_EDGE,
-                StrategyClass.HYBRID,
-            }
-            and self.model_id is not None
-        ):
+        if not forecast_dependent and self.model_id is not None:
             raise ValueError(
-                "model_id is valid only for forecast-dependent strategy classes"
+                "model_id is valid only for probability-edge opportunity semantics"
             )
 
     @property
@@ -1977,6 +1969,20 @@ def _intent_preflight_reason(
 
     if intent.signal_strength <= 0:
         return None
+    if intent.opportunity.claims_probability_edge:
+        predictive_reason = intent.opportunity.predictive_eligibility_reason(
+            decision_time,
+            expected_model_id=intent.model_id,
+        )
+        if predictive_reason is not None:
+            return predictive_reason
+        uncertainty_haircut = intent.opportunity.predictive_uncertainty_haircut
+        if uncertainty_haircut is None:
+            return "predictive uncertainty evidence is incomplete"
+        if intent.signal_strength <= uncertainty_haircut:
+            return (
+                "predictive edge is non-positive after the frozen uncertainty haircut"
+            )
     if not evidence.execution_feasible:
         return "opportunity execution is not proven feasible"
     if intent.opportunity_class in {
@@ -2409,8 +2415,24 @@ def build_portfolio_plan(
             allocation_signals.append(Decimal("0"))
             rejected.append((intent.intent_id, reason))
             continue
+        effective_signal = intent.signal_strength
+        if (
+            effective_signal > 0
+            and intent.opportunity.claims_probability_edge
+        ):
+            uncertainty_haircut = intent.opportunity.predictive_uncertainty_haircut
+            if uncertainty_haircut is None:
+                allocation_signals.append(Decimal("0"))
+                rejected.append(
+                    (intent.intent_id, "predictive uncertainty evidence is incomplete")
+                )
+                continue
+            effective_signal = max(
+                Decimal("0"),
+                effective_signal - uncertainty_haircut,
+            )
         allocation_signals.append(
-            intent.signal_strength
+            effective_signal
             if intent.opportunity.decision is OpportunityDecision.ACTIONABLE
             else Decimal("0")
         )

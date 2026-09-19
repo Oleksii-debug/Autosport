@@ -144,9 +144,9 @@ def _promotion_evidence(
         "evaluation_bundle_sha256": bundle_sha,
         "dataset_snapshot_id": dataset_id,
         "holdout_access_id": promotion_holdout_access_id(
-        research_protocol_id=protocol_id,
-        dataset_manifest_sha256=SHA_A,
-        source_identity="lawful-provider:fixture",
+            research_protocol_id=protocol_id,
+            dataset_manifest_sha256=dataset_manifest_sha256,
+            source_identity="lawful-provider:fixture",
         license_identity="license-evidence:v1",
         confirmation_trial_family_id=f"{protocol_id}:confirmation-trial-family",
     ),

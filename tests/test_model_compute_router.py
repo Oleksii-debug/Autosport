@@ -8,6 +8,7 @@ from pathlib import Path
 
 from autosport.model_compute_router import (
     ComputeCandidate,
+    ComputeRouteDecision,
     ComputeRouteRequest,
     ComputeRoutingPolicy,
     ComputeTier,
@@ -754,6 +755,77 @@ class ModelComputeRouterTests(unittest.TestCase):
             assert_semantic_forgery_rejected(
                 revoke_domain_authorization
             )
+
+    def test_restart_rejects_rehashed_ineligible_wait_to_local_forgery(self):
+        scenarios = (
+            (
+                "capability",
+                {
+                    "required_capability": "ranking",
+                    "max_cost": Decimal("20"),
+                    "decision_deadline": T3,
+                },
+            ),
+            (
+                "budget",
+                {
+                    "required_capability": "forecast",
+                    "max_cost": Decimal("0.5"),
+                    "decision_deadline": T3,
+                },
+            ),
+            (
+                "deadline",
+                {
+                    "required_capability": "forecast",
+                    "max_cost": Decimal("20"),
+                    "decision_deadline": T1,
+                },
+            ),
+        )
+        for name, constraints in scenarios:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "router.json"
+                store = ModelComputeRouterStore(path)
+                req = request(
+                    request_id=f"req-wait-forgery-{name}",
+                    allow_cloud=False,
+                    cloud_candidate_id=None,
+                    **constraints,
+                )
+                route_policy = policy()
+                decision = store.route(
+                    req,
+                    self.candidates,
+                    route_policy,
+                    as_of=T1,
+                )
+                self.assertEqual(decision.tier, ComputeTier.WAIT)
+
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                route = raw["routes"][0]
+                route["decision"] = ComputeRouteDecision.build(
+                    decision_id=f"{req.request_id}:local",
+                    request_id=req.request_id,
+                    decided_at=T1,
+                    policy=route_policy,
+                    tier=ComputeTier.LOCAL,
+                    candidate=self.candidates[0],
+                    reason=(
+                        "bounded baseline route selected; "
+                        "no cloud candidate requested"
+                    ),
+                    voc_evidence_id=None,
+                    domain_observation_id=None,
+                ).payload()
+                rewrite_route_with_valid_hashes(path, raw, route)
+
+                with self.assertRaisesRegex(
+                    ModelComputeRouterError,
+                    "persisted LOCAL decision is not authorized "
+                    "by persisted route inputs",
+                ):
+                    ModelComputeRouterStore(path)
 
     def test_restart_rejects_semantically_forged_execution_state(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -355,7 +355,7 @@ def test_manual_calculation_service_exception_is_not_exposed_as_raw_english_ui_t
     error = ValueError("boolean must not be accepted as a numeric value")
     rendered = _localized_calculation_error(error)
 
-    assert rendered == text("ui.windows.manual_calculation.error.calculation_failed")
+    assert rendered == text("ui.windows.manual_calculation.status.error")
     assert "boolean must not be accepted" not in rendered
     assert any(char in rendered for char in "АБВГҐДЕЄЖЗІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ")
 

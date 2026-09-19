@@ -39,6 +39,7 @@ from autosport.strategy_model_factory import (
     FactoryArtifactStore,
     PromotionRule,
     PromotionVerdict,
+    _StagedFactoryArtifactStore,
 )
 from autosport.transparent_bandit_policy import BanditPolicyState
 
@@ -709,6 +710,32 @@ def test_policy_retest_rejects_missing_post_reveal_materialization_receipt(tmp_p
         run_policy_retest(ExperimentRunner(registry,store),predecessor_policy=predecessor,challenger_policy=challenger,update_evidence=update,spec=spec,evaluation_cases=cases,rule=rule)
 
 
+
+
+def test_staged_factory_artifact_cannot_mint_materialization_receipt(tmp_path):
+    real_store = FactoryArtifactStore(tmp_path / "real-artifacts")
+    staged_store = _StagedFactoryArtifactStore(
+        real_store,
+        tmp_path / "staged-artifacts",
+    )
+    payload = {
+        "schema_version": 1,
+        "kind": "staged-only-evidence",
+    }
+    digest = staged_store.write(
+        "counterfactual-source-evidence",
+        "staged-only",
+        payload,
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="no durable materialization receipt"):
+        staged_store.materialization_receipt(
+            "counterfactual-source-evidence",
+            "staged-only",
+            expected_sha256=digest,
+        )
 
 
 def test_policy_retest_rejects_tampered_materialization_ledger(tmp_path):

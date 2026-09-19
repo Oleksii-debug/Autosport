@@ -1705,13 +1705,13 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             self.assertTrue(loop.unregister_input("input-a"))
             self.assertEqual(loop._freshness_generations["input-a"], 8)
-            self.assertIsNone(loop._freshness_deadlines["input-a"])
+            self.assertNotIn("input-a", loop._freshness_deadlines)
 
             loop.register_input("input-a", selection_ids="selection-a")
             expired = loop._expire_freshness_inputs(old_deadline + timedelta(seconds=1))
             self.assertEqual(expired, ())
             self.assertEqual(loop._freshness_generations["input-a"], 8)
-            self.assertIsNone(loop._freshness_deadlines["input-a"])
+            self.assertNotIn("input-a", loop._freshness_deadlines)
             loop.close()
 
     def test_corrupted_dependency_registry_fails_closed_on_restart(self) -> None:

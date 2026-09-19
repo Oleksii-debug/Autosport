@@ -163,6 +163,8 @@ def _promotion_evidence(
     }
     evidence_id = _canonical_sha(payload)
     fields = {key: value for key, value in payload.items() if key != "schema_version"}
+    fields["direction"] = PromotionEvidenceDirection(payload["direction"])
+    fields["validity"] = PromotionEvidenceValidity(payload["validity"])
     return PromotionEvidence(evidence_id, **fields)
 
 

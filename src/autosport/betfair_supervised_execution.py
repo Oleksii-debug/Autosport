@@ -515,6 +515,30 @@ class BetfairSupervisedExecutionResult:
     external_receipt_id: str | None
 
 
+def _validate_betfair_place_action(action: ExecutionAction) -> int:
+    """Validate deterministic Betfair action shape before any durable attempt."""
+
+    if not isinstance(action, ExecutionAction):
+        raise BetfairSupervisedExecutionError(
+            "action must be canonical ExecutionAction"
+        )
+    if action.side != "BACK":
+        raise BetfairSupervisedExecutionError(
+            "Betfair supervised write seam currently supports BACK only"
+        )
+    try:
+        selection_id = int(action.selection_id)
+    except (TypeError, ValueError) as exc:
+        raise BetfairSupervisedExecutionError(
+            "Betfair selection_id must be canonical positive integer text"
+        ) from exc
+    if str(selection_id) != action.selection_id or selection_id <= 0:
+        raise BetfairSupervisedExecutionError(
+            "Betfair selection_id must be canonical positive integer text"
+        )
+    return selection_id
+
+
 class BetfairSupervisedPlaceOrdersClient:
     """Action-specific placeOrders client; no arbitrary write RPC is exposed."""
 
@@ -565,14 +589,7 @@ class BetfairSupervisedPlaceOrdersClient:
         provider_order_ref: str,
         execution_workspace: Path,
     ) -> BetfairPlaceExecutionReport:
-        if not isinstance(action, ExecutionAction):
-            raise BetfairSupervisedExecutionError(
-                "action must be canonical ExecutionAction"
-            )
-        if action.side != "BACK":
-            raise BetfairSupervisedExecutionError(
-                "Betfair supervised write seam currently supports BACK only"
-            )
+        selection_id = _validate_betfair_place_action(action)
         self._gate.require(
             action=action,
             profile=profile,
@@ -586,16 +603,6 @@ class BetfairSupervisedPlaceOrdersClient:
         ):
             raise BetfairSupervisedExecutionError(
                 "provider_order_ref must be <=32 lowercase hex characters"
-            )
-        try:
-            selection_id = int(action.selection_id)
-        except (TypeError, ValueError) as exc:
-            raise BetfairSupervisedExecutionError(
-                "Betfair selection_id must be canonical positive integer text"
-            ) from exc
-        if str(selection_id) != action.selection_id or selection_id <= 0:
-            raise BetfairSupervisedExecutionError(
-                "Betfair selection_id must be canonical positive integer text"
             )
 
         request_id = self._next_request_id()
@@ -946,6 +953,7 @@ def execute_betfair_supervised_action(
             "client must be BetfairSupervisedPlaceOrdersClient"
         )
     action = bound.action_for(action_id)
+    _validate_betfair_place_action(action)
     now = clock or _now
     execution_workspace = ledger.path.parent.resolve()
 

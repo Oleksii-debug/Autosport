@@ -942,6 +942,13 @@ class AgentLoopRuntime:
         wanted = _sha256(action_id, "action_id")
 
         def apply(state: dict[str, Any], _now: str) -> None:
+            if (
+                AgentLoopPhase(state["phase"])
+                is not AgentLoopPhase.WAIT_OUTCOME
+            ):
+                raise StaleAgentLoopStateError(
+                    "unknown external effect marking requires WAIT_OUTCOME"
+                )
             current = state["current"]
             if current["action_id"] != wanted:
                 raise AgentLoopError(

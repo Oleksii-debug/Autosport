@@ -415,6 +415,92 @@ def test_unknown_external_effect_fails_closed_until_reconciled(tmp_path):
     assert recovered.phase is AgentLoopPhase.WAIT_OUTCOME
 
 
+def test_unknown_external_effect_cannot_rewrite_resolved_or_checkpointed_action(
+    tmp_path,
+):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+    outcome, reward, transition = _resolve(environment, action)
+    runtime.record_resolution(
+        transition,
+        outcome=outcome,
+        reward=reward,
+        at="2026-09-19T13:05:02Z",
+    )
+
+    resolved_state = json_load(runtime.path)
+    assert runtime.snapshot().phase is AgentLoopPhase.EVALUATE
+    with pytest.raises(
+        AgentLoopError,
+        match="unknown external effect marking requires WAIT_OUTCOME",
+    ):
+        runtime.mark_unknown_external_effect(
+            action_id=action.action_id,
+            at="2026-09-19T13:05:03Z",
+        )
+    assert json_load(runtime.path) == resolved_state
+
+    runtime.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:05:03Z",
+    )
+    attribution = _attribution(
+        environment,
+        transition,
+        outcome,
+        reward,
+    )
+    runtime.record_attribution(
+        attribution,
+        at="2026-09-19T13:05:04Z",
+    )
+    runtime.record_postmortem(
+        ReflectionPostmortem(
+            attribution_id=attribution.attribution_id,
+            transition_id=transition.transition_id,
+            created_at="2026-09-19T13:05:05Z",
+            unresolved_components=(),
+            summary_code="NO_RESEARCH_REQUIRED",
+        ),
+        at="2026-09-19T13:05:05Z",
+    )
+    runtime.commit_checkpoint(
+        environment.checkpoint(),
+        at="2026-09-19T13:05:06Z",
+    )
+
+    checkpointed_state = json_load(runtime.path)
+    assert runtime.snapshot().phase is AgentLoopPhase.CHECKPOINT
+    with pytest.raises(
+        AgentLoopError,
+        match="unknown external effect marking requires WAIT_OUTCOME",
+    ):
+        runtime.mark_unknown_external_effect(
+            action_id=action.action_id,
+            at="2026-09-19T13:05:07Z",
+        )
+    assert json_load(runtime.path) == checkpointed_state
+
+
 def test_future_evidence_and_observed_simulated_relabel_fail_closed(
     tmp_path,
 ):

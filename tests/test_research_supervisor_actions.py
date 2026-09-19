@@ -334,9 +334,23 @@ def test_continuous_supervisor_consumes_real_factory_environment_memory_and_rest
         reason="resolved causal evidence supports the canonical factory decision",
         retest_conditions=("new independent confirmation holdout",),
     )
-    assert registry.get(
+    durable_decision = registry.get(
         "PromotionDecision", durable_before_checkpoint.promotion_decision_id
-    ) is not None
+    )
+    assert durable_decision is not None
+    promotion_evidence_id = durable_decision.payload["promotion_evidence_id"]
+    assert promotion_evidence_id is not None
+    durable_evidence = registry.get("PromotionEvidence", promotion_evidence_id)
+    assert durable_evidence is not None
+    assert durable_evidence.payload["experiment_id"] == staged.experiment_id
+    assert (
+        durable_evidence.payload["evaluation_bundle_id"]
+        == staged.evaluation_bundle_id
+    )
+    assert (
+        durable_evidence.payload["evaluation_bundle_sha256"]
+        == staged.evaluation_bundle_sha256
+    )
     assert supervisor.status(run_id).phase is ResearchPhase.DECISION
 
     postmortem_snapshot, decision = finalize_factory_decision(

@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import replace
 from decimal import Decimal
 
 from autosport.champion_policy import persist_policy_state
@@ -8,6 +9,7 @@ from autosport.learning_environment import Action, EvidenceTruth, RewardEvidence
 from autosport.policy_evaluation import (
     PolicyEvaluationCase,
     PolicyEvaluationConfig,
+    QualifiedCounterfactualAuthority,
     PolicyRewardMode,
     policy_evaluation_cases_manifest_sha256,
 )
@@ -180,6 +182,17 @@ def _policy_successor(
 def _foundation(tmp_path):
     cases = _cases()
     dataset_manifest = policy_evaluation_cases_manifest_sha256(cases)
+    counterfactual_authority = QualifiedCounterfactualAuthority(
+        authority_id="mechanical-paper-settlement:v1",
+        authority_version="1",
+        evaluator_source_sha256=EVALUATOR_SOURCE,
+        qualification_evidence_sha256="9" * 64,
+        reward_definition_sha256=REWARD_DEFINITION,
+        reward_mode=PolicyRewardMode.MECHANICAL_PAPER,
+        scope="table-tennis:pre-match",
+        allowed_source_evidence_sha256=("3" * 64, "4" * 64),
+        qualification_status="QUALIFIED",
+    )
     evaluator_config = PolicyEvaluationConfig(
         FEATURE_SET_ID,
         FEATURE_DEFINITION,
@@ -187,6 +200,7 @@ def _foundation(tmp_path):
         REWARD_DEFINITION,
         COST_DEFINITION,
         "WAIT",
+        counterfactual_authority,
     )
     rule = PromotionRule(
         "policy_loss",
@@ -488,6 +502,114 @@ def test_policy_factory_promotes_evaluated_policy_and_verifies_restart(tmp_path)
     assert restart.champion_strategy_version_id == challenger.policy_id
     assert restart.outcome is ResearchOutcome.POSITIVE
     assert restart.reproducibility_bundle_sha256 == result.reproducibility_bundle_sha256
+
+
+def test_policy_retest_rejects_mismatched_counterfactual_evaluator_before_publish(
+    tmp_path,
+):
+    (
+        registry,
+        _,
+        _,
+        store,
+        predecessor,
+        predecessor_model_id,
+        cases,
+        rule,
+    ) = _foundation(tmp_path)
+    challenger, update = _policy_successor(
+        predecessor,
+        observation_id="5" * 64,
+        outcome_id="6" * 64,
+        episode_id="7" * 64,
+        decided_at="2026-09-19T09:33:00Z",
+        available_at="2026-09-19T09:34:00Z",
+        reward_value="2",
+    )
+    runner = ExperimentRunner(registry, store)
+    spec = _spec(
+        experiment_id="experiment-policy-authority-mismatch",
+        model_id="model-policy-authority-mismatch",
+        evaluation_id="evaluation-policy-authority-mismatch",
+        promotion_id="promotion-policy-authority-mismatch",
+        predecessor_policy_id=predecessor.policy_id,
+        predecessor_model_id=predecessor_model_id,
+        created_at=CHALLENGER_CREATED,
+        completed_at=CHALLENGER_COMPLETED,
+        decided_at=CHALLENGER_DECIDED,
+    )
+    bad_spec = replace(spec, evaluator_source_sha256="0" * 64)
+
+    import pytest
+
+    with pytest.raises(ValueError, match="authority evaluator identity"):
+        run_policy_retest(
+            runner,
+            predecessor_policy=predecessor,
+            challenger_policy=challenger,
+            update_evidence=update,
+            spec=bad_spec,
+            evaluation_cases=cases,
+            rule=rule,
+        )
+
+    assert registry.get("EvaluationBundle", bad_spec.evaluation_bundle_id) is None
+    assert registry.get("PromotionDecision", bad_spec.promotion_decision_id) is None
+    assert registry.get("Experiment", bad_spec.experiment_id) is None
+
+
+def test_policy_retest_rejects_unqualified_case_digest_before_publish(tmp_path):
+    (
+        registry,
+        _,
+        _,
+        store,
+        predecessor,
+        predecessor_model_id,
+        cases,
+        rule,
+    ) = _foundation(tmp_path)
+    challenger, update = _policy_successor(
+        predecessor,
+        observation_id="5" * 64,
+        outcome_id="6" * 64,
+        episode_id="7" * 64,
+        decided_at="2026-09-19T09:33:00Z",
+        available_at="2026-09-19T09:34:00Z",
+        reward_value="2",
+    )
+    spec = _spec(
+        experiment_id="experiment-policy-evidence-mismatch",
+        model_id="model-policy-evidence-mismatch",
+        evaluation_id="evaluation-policy-evidence-mismatch",
+        promotion_id="promotion-policy-evidence-mismatch",
+        predecessor_policy_id=predecessor.policy_id,
+        predecessor_model_id=predecessor_model_id,
+        created_at=CHALLENGER_CREATED,
+        completed_at=CHALLENGER_COMPLETED,
+        decided_at=CHALLENGER_DECIDED,
+    )
+    tampered_cases = (
+        replace(cases[0], source_evidence_sha256="8" * 64),
+        cases[1],
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="not qualified by frozen authority"):
+        run_policy_retest(
+            ExperimentRunner(registry, store),
+            predecessor_policy=predecessor,
+            challenger_policy=challenger,
+            update_evidence=update,
+            spec=spec,
+            evaluation_cases=tampered_cases,
+            rule=rule,
+        )
+
+    assert registry.get("EvaluationBundle", spec.evaluation_bundle_id) is None
+    assert registry.get("PromotionDecision", spec.promotion_decision_id) is None
+    assert registry.get("Experiment", spec.experiment_id) is None
 
 
 def test_second_policy_attempt_cannot_reuse_same_confirmation_holdout(tmp_path):

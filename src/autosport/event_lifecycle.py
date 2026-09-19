@@ -583,15 +583,45 @@ class ContinuousEventLifecycle:
         cutoff = _instant(as_of, "as_of")
         required_seconds = int(required_history.total_seconds())
         if record.phase is EventPhase.COMPLETED:
+            if record.completion_discovered_at is None:
+                return EventEvidenceAssessment(
+                    identity=record.identity,
+                    status=EvidenceEligibility.WAIT_EVIDENCE,
+                    evidence_first_available_at=None,
+                    required_history_seconds=required_seconds,
+                    detail=(
+                        "completion discovery time is unavailable; "
+                        "cannot expose completed state in causal replay"
+                    ),
+                )
+            completion_discovered = _instant(
+                record.completion_discovered_at, "completion_discovered_at"
+            )
+            if completion_discovered > cutoff:
+                return EventEvidenceAssessment(
+                    identity=record.identity,
+                    status=EvidenceEligibility.WAIT_EVIDENCE,
+                    evidence_first_available_at=record.completion_discovered_at,
+                    required_history_seconds=required_seconds,
+                    detail=(
+                        "completion evidence was discovered after the causal cutoff; "
+                        "late discovery cannot backfill completed history"
+                    ),
+                )
+            settlement_visible = (
+                record.settlement_ref is not None
+                and record.settlement_discovered_at is not None
+                and _instant(record.settlement_discovered_at, "settlement_discovered_at") <= cutoff
+            )
             detail = (
                 "completed with settlement provenance reference; outcome authority is external"
-                if record.settlement_ref is not None
+                if settlement_visible
                 else "completed; settlement remains unresolved"
             )
             return EventEvidenceAssessment(
                 identity=record.identity,
                 status=EvidenceEligibility.COMPLETED,
-                evidence_first_available_at=None,
+                evidence_first_available_at=record.completion_discovered_at,
                 required_history_seconds=required_seconds,
                 detail=detail,
             )

@@ -334,6 +334,9 @@ class PairedVOCEvaluationTests(unittest.TestCase):
                 "market_id": "match-voc",
                 "source_id": "provider-voc",
                 "market_type": "WINNER",
+                "sport_id": paired.sport_id,
+                "league_id": paired.league_id,
+                "regime_id": paired.regime_id,
             },
             "scoring_rule": {
                 "id": paired.scoring_rule_id,
@@ -345,6 +348,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             "research_protocol_id": paired.research_protocol_id,
             "protocol_sha256": paired.research_protocol_sha256,
             "binding": {
+                "task_class": paired.task_class,
                 "evaluation_design": json.dumps(
                     design,
                     ensure_ascii=False,

@@ -1554,19 +1554,18 @@ class ModelComputeRouterStore:
         actual_cost_value = _nonnegative(
             "actual_cost", actual_cost
         )
-        prior_actual_cost = sum(
+        prior_incurred_cost = sum(
             (
                 evidence.actual_cost
                 for existing_execution_id, evidence
                 in self._executions.items()
                 if existing_execution_id != execution_id
                 and evidence.decision_id == decision.decision_id
-                and evidence.disposition is ExecutionDisposition.ACCEPTED
             ),
             _ZERO,
         )
-        cumulative_actual_cost = (
-            prior_actual_cost + actual_cost_value
+        cumulative_incurred_cost = (
+            prior_incurred_cost + actual_cost_value
         )
         now = _instant("as_of", as_of)
         completed = _instant(
@@ -1621,7 +1620,7 @@ class ModelComputeRouterStore:
                 "execution response exceeded request "
                 "response TTL"
             )
-        elif cumulative_actual_cost > request.max_cost:
+        elif cumulative_incurred_cost > request.max_cost:
             disposition = (
                 ExecutionDisposition.REJECTED_COST
             )
@@ -1631,7 +1630,7 @@ class ModelComputeRouterStore:
             )
         elif (
             decision.tier is ComputeTier.CLOUD
-            and cumulative_actual_cost > policy.max_cloud_cost
+            and cumulative_incurred_cost > policy.max_cloud_cost
         ):
             disposition = (
                 ExecutionDisposition.REJECTED_COST

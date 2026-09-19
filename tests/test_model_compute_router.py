@@ -1262,7 +1262,11 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 post_restart.disposition,
-                ExecutionDisposition.ACCEPTED,
+                ExecutionDisposition.REJECTED_COST,
+            )
+            self.assertIn(
+                "cumulative actual execution cost",
+                post_restart.reason,
             )
             self.assertEqual(
                 reopened.total_actual_cost(local_request.request_id),
@@ -1305,7 +1309,11 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 cloud_after_restart.disposition,
-                ExecutionDisposition.ACCEPTED,
+                ExecutionDisposition.REJECTED_COST,
+            )
+            self.assertIn(
+                "cumulative actual cloud execution cost",
+                cloud_after_restart.reason,
             )
             self.assertEqual(
                 reopened.total_actual_cost(cloud_request.request_id),

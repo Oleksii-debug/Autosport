@@ -328,6 +328,60 @@ def test_restart_preserves_negative_memory_and_blocks_duplicate_fingerprint(tmp_
         reopened.append(repeat)
 
 
+
+def test_pending_experiment_is_not_persisted_when_promotion_validation_fails(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    foundation = _foundation(registry)
+    disclosed = _promotion_evidence(
+        experiment_id="other-experiment",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="prior-disclosure",
+        created_at=T2,
+        rollback_identity="NONE",
+    )
+    current = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="current-after-disclosure",
+        rollback_identity="NONE",
+    )
+    registry.append(disclosed)
+    registry.append(current)
+    pending = _experiment(outcome=ResearchOutcome.POSITIVE)
+    decision = PromotionDecision(
+        "promotion-atomic-failure",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        foundation["bundle"].bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=current.promotion_evidence_id,
+    )
+
+    with pytest.raises(
+        PromotionEvidenceError,
+        match="consumed or disclosed",
+    ):
+        registry.record_promotion(decision, pending_experiment=pending)
+
+    reopened = ScientificRegistry(registry.path)
+    assert reopened.get("Experiment", pending.experiment_id) is None
+    assert reopened.get("PromotionDecision", decision.promotion_decision_id) is None
+
+
 def test_conflicting_identity_rejected_but_exact_replay_is_idempotent(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     question = ResearchQuestion("q", "Frozen question", SHA_A, T0)

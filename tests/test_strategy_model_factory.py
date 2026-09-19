@@ -17,6 +17,7 @@ from autosport.scientific_registry import (
     PromotionAction,
     PromotionDecision,
     PromotionEvidence,
+    PromotionEvidenceError,
     PromotionEvidenceDirection,
     PromotionEvidenceValidity,
     promotion_holdout_access_id,
@@ -773,6 +774,62 @@ def test_registry_backed_factory_vertical_retains_inconclusive_and_survives_rest
     assert restarted.champion_strategy_version_id == "strategy-v1"
     assert restarted.outcome is ResearchOutcome.INCONCLUSIVE
     assert restarted.reproducibility_bundle_sha256 == result.reproducibility_bundle_sha256
+
+
+
+def test_factory_consumed_holdout_commit_race_resolves_retain_without_positive_orphan(
+    tmp_path, monkeypatch
+):
+    registry, registry_path, rule, store, _, _ = _factory_foundation(tmp_path)
+    monkeypatch.setattr(
+        "autosport._strategy_model_factory_impl._holdout_consumed_by_other_evidence",
+        lambda *args, **kwargs: False,
+    )
+    real_record_promotion = registry.record_promotion
+    injected = False
+
+    def racing_record_promotion(decision, *, pending_experiment=None):
+        nonlocal injected
+        if (
+            not injected
+            and decision.promotion_decision_id == "promotion-v2"
+            and decision.action is PromotionAction.PROMOTE
+        ):
+            injected = True
+            raise PromotionEvidenceError(
+                "confirmation holdout access has already been consumed or disclosed by prior evidence"
+            )
+        return real_record_promotion(
+            decision,
+            pending_experiment=pending_experiment,
+        )
+
+    monkeypatch.setattr(registry, "record_promotion", racing_record_promotion)
+    result = _run_candidate(
+        ExperimentRunner(registry, store),
+        _candidate_points(),
+        rule,
+    )
+
+    assert injected
+    assert result.verdict is PromotionVerdict.INCONCLUSIVE
+    assert result.registry_action is PromotionAction.RETAIN
+    experiment = registry.get("Experiment", "experiment-v2")
+    decision = registry.get("PromotionDecision", "promotion-v2")
+    assert experiment is not None
+    assert experiment.payload["outcome"] == ResearchOutcome.INCONCLUSIVE.value
+    assert "consumed before durable promotion commit" in experiment.payload["notes"]
+    assert decision is not None
+    assert decision.payload["action"] == PromotionAction.RETAIN.value
+
+    reopened = ExperimentRunner.verify_restart(
+        registry_path,
+        tmp_path / "factory-artifacts",
+        "experiment-v2",
+        as_of=T7,
+    )
+    assert reopened.outcome is ResearchOutcome.INCONCLUSIVE
+    assert reopened.champion_strategy_version_id == "strategy-v1"
 
 
 def test_factory_fails_closed_on_frozen_promotion_rule_tampering(tmp_path):

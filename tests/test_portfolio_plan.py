@@ -15,6 +15,7 @@ from autosport.market_outcomes import (
 from autosport.opportunity import (
     ForecastRef,
     Opportunity,
+    PredictiveEligibilityEvidence,
     OpportunityDecision,
     QuoteRef,
     StrategyClass,
@@ -150,6 +151,11 @@ class PortfolioPlanTests(unittest.TestCase):
         *,
         strategy_class: StrategyClass,
         decision: OpportunityDecision = OpportunityDecision.ACTIONABLE,
+        model_id: str | None = None,
+        uncertainty: Decimal = Decimal("0"),
+        maximum_uncertainty: Decimal = Decimal("0.20"),
+        sample_size: int = 100,
+        valid_until: str | None = None,
     ) -> Opportunity:
         refs = tuple(
             QuoteRef.from_market_event(
@@ -162,6 +168,7 @@ class PortfolioPlanTests(unittest.TestCase):
             StrategyClass.PREDICTIVE_EDGE,
             StrategyClass.HYBRID,
         }
+        predictive_model_id = model_id or "model-1"
         forecasts = (
             tuple(
                 ForecastRef(
@@ -172,6 +179,24 @@ class PortfolioPlanTests(unittest.TestCase):
                     input_cutoff_ts="2026-09-18T13:19:58+00:00",
                     market_snapshot_hash=quote.market_snapshot_hash or cls.SNAPSHOT_SHA,
                     quote_market_event_hash=quote.market_event_hash,
+                    model_id=predictive_model_id,
+                    model_version="1",
+                    strategy_version="strategy-v1",
+                    uncertainty=uncertainty,
+                    predictive_eligibility=PredictiveEligibilityEvidence(
+                        evaluation_id=f"evaluation-{index}",
+                        evaluation_sha256=("7" * 63) + str(index % 10),
+                        protocol_sha256="6" * 64,
+                        model_id=predictive_model_id,
+                        model_version="1",
+                        strategy_version="strategy-v1",
+                        uncertainty_kind="absolute_probability_radius_v1",
+                        sample_size=sample_size,
+                        minimum_sample_size=50,
+                        maximum_uncertainty=maximum_uncertainty,
+                        as_of="2026-09-18T13:19:00+00:00",
+                        valid_until=valid_until or cls.DECISION_TS,
+                    ),
                 )
                 for index, quote in enumerate(refs)
             )
@@ -224,6 +249,12 @@ class PortfolioPlanTests(unittest.TestCase):
                 context,
                 strategy_class=strategy_class,
                 decision=decision,
+                model_id=(
+                    f"model-{suffix}"
+                    if strategy_class
+                    in {StrategyClass.PREDICTIVE_EDGE, StrategyClass.HYBRID}
+                    else None
+                ),
             ),
             evidence=evidence
             or cls._evidence(

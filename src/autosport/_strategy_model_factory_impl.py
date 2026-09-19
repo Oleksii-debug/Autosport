@@ -1464,9 +1464,16 @@ class ExperimentRunner:
                 allow_nan=False,
             ).encode("utf-8")
         ).hexdigest()
+        typed_evidence_payload = dict(evidence_payload)
+        typed_evidence_payload["direction"] = PromotionEvidenceDirection(
+            evidence_payload["direction"]
+        )
+        typed_evidence_payload["validity"] = PromotionEvidenceValidity(
+            evidence_payload["validity"]
+        )
         promotion_evidence = PromotionEvidence(
             promotion_evidence_id=evidence_id,
-            **evidence_payload,
+            **typed_evidence_payload,
         )
         self.registry.append(promotion_evidence)
         promotion = PromotionController.evaluate(

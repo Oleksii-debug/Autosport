@@ -960,10 +960,25 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             original = path.read_text(encoding="utf-8")
 
-            for field, value in (
-                ("actual_cost", "0.70"),
-                ("disposition", ExecutionDisposition.ACCEPTED.value),
-                ("reason", "forged rejected evidence reason"),
+            for field, value, expected_error in (
+                (
+                    "actual_cost",
+                    "0.70",
+                    "execution record SHA-256",
+                ),
+                (
+                    "disposition",
+                    ExecutionDisposition.ACCEPTED.value,
+                    (
+                        "execution record SHA-256|persisted accepted "
+                        "execution cost exceeds request budget"
+                    ),
+                ),
+                (
+                    "reason",
+                    "forged rejected evidence reason",
+                    "execution record SHA-256",
+                ),
             ):
                 raw = json.loads(original)
                 execution = next(
@@ -976,7 +991,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 rewrite_store_with_valid_state_hash(path, raw)
                 with self.assertRaisesRegex(
                     ModelComputeRouterError,
-                    "execution record SHA-256",
+                    expected_error,
                 ):
                     ModelComputeRouterStore(path)
 

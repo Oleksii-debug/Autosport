@@ -1,5 +1,9 @@
 from dataclasses import replace
 from decimal import Decimal
+import json
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -19,6 +23,7 @@ from autosport.closed_loop_learning import (
 )
 from autosport.learning_environment import (
     CausalLearningEnvironment,
+    EnvironmentCheckpoint,
     EnvironmentIdentity,
     EvidenceTruth,
     Observation,
@@ -213,7 +218,7 @@ def _resolved_agent_episode(tmp_path):
     return identity, environment, runtime, outcome, reward, transition
 
 
-def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
+def _phase_one(tmp_path):
     identity, environment, runtime, outcome, reward, transition = (
         _resolved_agent_episode(tmp_path)
     )
@@ -374,6 +379,7 @@ def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
         robustness_evidence_sha256=artifact.artifact_id,
         forward_evidence_sha256=checkpoint.checkpoint_id,
         reason="closed-loop evidence remains within frozen owner authority",
+        retest_conditions=("independent paper episode before any later promotion",),
     )
     assert postmortem_snapshot.phase is ResearchPhase.POSTMORTEM
     decision_entry = registry.get(
@@ -407,29 +413,90 @@ def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
     )
     assert complete.phase is ResearchPhase.COMPLETE
 
-    reopened_registry = ScientificRegistry(registry.path)
+    manifest = {
+        "identity": {
+            "source_id": identity.source_id,
+            "config_id": identity.config_id,
+            "data_id": identity.data_id,
+            "protocol_id": identity.protocol_id,
+            "cutoff_ts": identity.cutoff_ts,
+            "seed": identity.seed,
+        },
+        "episode_key": environment.episode.episode_key,
+        "policy_id": environment.episode.policy_id,
+        "admissible_actions": list(environment.episode.admissible_actions),
+        "checkpoint": {
+            "environment_id": checkpoint.environment_id,
+            "episode_id": checkpoint.episode_id,
+            "policy_id": checkpoint.policy_id,
+            "step_index": checkpoint.step_index,
+            "chain_sha256": checkpoint.chain_sha256,
+            "last_transition_id": checkpoint.last_transition_id,
+            "committed_action_ids": list(checkpoint.committed_action_ids),
+            "committed_decision_intents": [
+                list(item) for item in checkpoint.committed_decision_intents
+            ],
+        },
+        "origin_run_id": origin.run_id,
+        "selection_id": selection.selection_id,
+        "promotion_decision_id": decision.promotion_decision_id,
+    }
+    (tmp_path / "closed-loop-restart-manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+
+def _phase_two(tmp_path):
+    manifest = json.loads(
+        (tmp_path / "closed-loop-restart-manifest.json").read_text(encoding="utf-8")
+    )
+    identity = EnvironmentIdentity(**manifest["identity"])
+    raw_checkpoint = manifest["checkpoint"]
+    checkpoint = EnvironmentCheckpoint(
+        environment_id=raw_checkpoint["environment_id"],
+        episode_id=raw_checkpoint["episode_id"],
+        policy_id=raw_checkpoint["policy_id"],
+        step_index=raw_checkpoint["step_index"],
+        chain_sha256=raw_checkpoint["chain_sha256"],
+        last_transition_id=raw_checkpoint["last_transition_id"],
+        committed_action_ids=tuple(raw_checkpoint["committed_action_ids"]),
+        committed_decision_intents=tuple(
+            tuple(item) for item in raw_checkpoint["committed_decision_intents"]
+        ),
+    )
+    reopened_registry = ScientificRegistry(tmp_path / "scientific-registry.json")
     reopened_supervisor = ResearchSupervisor(
-        supervisor.path,
+        tmp_path / "research-supervisor.json",
         reopened_registry,
     )
     reopened_curriculum = NightResearchCurriculum(
-        curriculum.path,
+        tmp_path / "research-curriculum.json",
         ResearchTriggerAdapter(reopened_supervisor),
         max_budget_units=128,
     )
-    reopened_runtime = AgentLoopRuntime(runtime.path)
+    reopened_runtime = AgentLoopRuntime(tmp_path / "agent-loop.json")
     resumed_environment = CausalLearningEnvironment.resume(
         identity,
-        episode_key=environment.episode.episode_key,
-        policy_id=environment.episode.policy_id,
-        admissible_actions=frozenset(environment.episode.admissible_actions),
+        episode_key=manifest["episode_key"],
+        policy_id=manifest["policy_id"],
+        admissible_actions=frozenset(manifest["admissible_actions"]),
         checkpoint=checkpoint,
     )
-    assert reopened_supervisor.status(origin.run_id).phase is ResearchPhase.COMPLETE
+    assert (
+        reopened_supervisor.status(manifest["origin_run_id"]).phase
+        is ResearchPhase.COMPLETE
+    )
     assert len(reopened_supervisor.list_runs()) == 1
     assert reopened_curriculum.snapshot()["dispatches"] == {}
     assert reopened_runtime.snapshot().economic_goal_fingerprint == GOAL_SHA
     assert reopened_runtime.snapshot().risk_fingerprint == RISK_SHA
+    assert (
+        reopened_registry.get(
+            "PromotionDecision", manifest["promotion_decision_id"]
+        )
+        is not None
+    )
 
     next_observation = Observation(
         environment_id=identity.environment_id,
@@ -466,3 +533,49 @@ def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
     assert final.phase is AgentLoopPhase.WAIT_OUTCOME
     assert final.economic_goal_fingerprint == GOAL_SHA
     assert final.risk_fingerprint == RISK_SHA
+    (tmp_path / "closed-loop-restart-result.json").write_text(
+        json.dumps(
+            {
+                "phase": final.phase.value,
+                "supervisor_run_count": len(reopened_supervisor.list_runs()),
+                "curriculum_dispatch_count": len(
+                    reopened_curriculum.snapshot()["dispatches"]
+                ),
+                "economic_goal_fingerprint": final.economic_goal_fingerprint,
+                "risk_fingerprint": final.risk_fingerprint,
+                "newly_committed": receipt.newly_committed,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_closed_loop_research_factory_restart_and_next_decision(tmp_path):
+    worker = Path(__file__).with_name("closed_loop_restart_worker.py")
+    phase_one = subprocess.run(
+        [sys.executable, str(worker), "phase1", str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert phase_one.returncode == 0, phase_one.stdout + phase_one.stderr
+    phase_two = subprocess.run(
+        [sys.executable, str(worker), "phase2", str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert phase_two.returncode == 0, phase_two.stdout + phase_two.stderr
+    result = json.loads(
+        (tmp_path / "closed-loop-restart-result.json").read_text(encoding="utf-8")
+    )
+    assert result == {
+        "curriculum_dispatch_count": 0,
+        "economic_goal_fingerprint": GOAL_SHA,
+        "newly_committed": True,
+        "phase": AgentLoopPhase.WAIT_OUTCOME.value,
+        "risk_fingerprint": RISK_SHA,
+        "supervisor_run_count": 1,
+    }

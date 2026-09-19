@@ -1138,6 +1138,14 @@ class ModelComputeRouterStore:
         loaded_routes: dict[
             str, dict[str, Any]
         ] = {}
+        loaded_decision_authority: dict[
+            str,
+            tuple[
+                ComputeRouteRequest,
+                ComputeRoutingPolicy,
+                ComputeRouteDecision,
+            ],
+        ] = {}
         for item in routes:
             if type(item) is not dict:
                 raise ModelComputeRouterError(
@@ -1251,6 +1259,15 @@ class ModelComputeRouterStore:
                     "duplicate immutable request id "
                     "in routing store"
                 )
+            if decision.decision_id in loaded_decision_authority:
+                raise ModelComputeRouterError(
+                    "duplicate route decision id in routing store"
+                )
+            loaded_decision_authority[decision.decision_id] = (
+                request,
+                policy,
+                decision,
+            )
             loaded_routes[request.request_id] = item
         loaded_executions: dict[
             str, ComputeExecutionEvidence
@@ -1263,9 +1280,98 @@ class ModelComputeRouterStore:
                 raise ModelComputeRouterError(
                     "duplicate execution id in routing store"
                 )
+            authority = loaded_decision_authority.get(
+                evidence.decision_id
+            )
+            if authority is None:
+                raise ModelComputeRouterError(
+                    "persisted execution references unknown "
+                    "route decision"
+                )
+            request, policy, decision = authority
+            if decision.tier is ComputeTier.WAIT:
+                raise ModelComputeRouterError(
+                    "persisted execution references WAIT decision"
+                )
+            if (
+                evidence.disposition
+                is ExecutionDisposition.ACCEPTED
+            ):
+                if (
+                    evidence.backend_id != decision.backend_id
+                    or evidence.model_id != decision.model_id
+                    or evidence.config_sha256
+                    != decision.config_sha256
+                ):
+                    raise ModelComputeRouterError(
+                        "persisted ACCEPTED execution identity "
+                        "does not match route decision"
+                    )
+                completed = _instant(
+                    "completed_at", evidence.completed_at
+                )
+                available = _instant(
+                    "available_at", evidence.available_at
+                )
+                if completed < _instant(
+                    "decided_at", decision.decided_at
+                ):
+                    raise ModelComputeRouterError(
+                        "persisted ACCEPTED execution predates "
+                        "route decision"
+                    )
+                if available > _instant(
+                    "decision_deadline",
+                    request.decision_deadline,
+                ):
+                    raise ModelComputeRouterError(
+                        "persisted ACCEPTED execution became "
+                        "available after decision deadline"
+                    )
+                if (
+                    _seconds(available, completed)
+                    > request.response_ttl_seconds
+                ):
+                    raise ModelComputeRouterError(
+                        "persisted ACCEPTED execution exceeds "
+                        "request response TTL"
+                    )
             loaded_executions[
                 evidence.execution_id
             ] = evidence
+
+        accepted_spend_by_decision: dict[str, Decimal] = {}
+        for evidence in loaded_executions.values():
+            if (
+                evidence.disposition
+                is not ExecutionDisposition.ACCEPTED
+            ):
+                continue
+            accepted_spend_by_decision[evidence.decision_id] = (
+                accepted_spend_by_decision.get(
+                    evidence.decision_id, _ZERO
+                )
+                + evidence.actual_cost
+            )
+        for decision_id, accepted_spend in (
+            accepted_spend_by_decision.items()
+        ):
+            request, policy, decision = (
+                loaded_decision_authority[decision_id]
+            )
+            if accepted_spend > request.max_cost:
+                raise ModelComputeRouterError(
+                    "persisted accepted execution cost exceeds "
+                    "request budget"
+                )
+            if (
+                decision.tier is ComputeTier.CLOUD
+                and accepted_spend > policy.max_cloud_cost
+            ):
+                raise ModelComputeRouterError(
+                    "persisted accepted cloud execution cost "
+                    "exceeds policy cloud-cost limit"
+                )
         self._routes = loaded_routes
         self._executions = loaded_executions
 

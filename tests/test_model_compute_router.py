@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -37,6 +38,23 @@ T1 = "2026-01-01T00:00:10Z"
 T2 = "2026-01-01T00:00:20Z"
 T3 = "2026-01-01T00:00:30Z"
 T4 = "2026-01-01T00:00:40Z"
+
+
+def rewrite_store_with_valid_state_hash(path, raw):
+    body = {
+        key: raw[key]
+        for key in ("schema", "version", "routes", "executions")
+    }
+    raw["state_sha256"] = hashlib.sha256(
+        json.dumps(
+            body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    path.write_text(json.dumps(raw), encoding="utf-8")
 
 
 def candidate(
@@ -511,6 +529,128 @@ class ModelComputeRouterTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaises(ModelComputeRouterError):
+                ModelComputeRouterStore(path)
+
+    def test_restart_rejects_semantically_forged_execution_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = ModelComputeRouterStore(path)
+
+            local_request = request(
+                request_id="req-load-local",
+                allow_cloud=False,
+                cloud_candidate_id=None,
+                max_cost=Decimal("2"),
+            )
+            local_decision = store.route(
+                local_request,
+                self.candidates,
+                policy(),
+                as_of=T1,
+            )
+            self.assertEqual(local_decision.tier, ComputeTier.LOCAL)
+            local_execution = store.record_execution(
+                execution_id="exec-load-local",
+                request_id=local_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("1"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                local_execution.disposition,
+                ExecutionDisposition.ACCEPTED,
+            )
+
+            cloud_request = request(
+                request_id="req-load-cloud",
+                max_cost=Decimal("20"),
+            )
+            cloud_policy = policy(max_cloud_cost=Decimal("10"))
+            cloud_decision = store.route(
+                cloud_request,
+                self.candidates,
+                cloud_policy,
+                as_of=T1,
+                voc_evidence=voc(evidence_id="voc-load-cloud"),
+                domain_observation=slow_observation(),
+            )
+            self.assertEqual(cloud_decision.tier, ComputeTier.CLOUD)
+            cloud_execution = store.record_execution(
+                execution_id="exec-load-cloud",
+                request_id=cloud_request.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="permitted-cloud",
+                model_id="challenger-v2",
+                config_sha256=SHA_B,
+                actual_cost=Decimal("5"),
+                actual_latency_seconds=Decimal("4"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+            self.assertEqual(
+                cloud_execution.disposition,
+                ExecutionDisposition.ACCEPTED,
+            )
+
+            original = path.read_text(encoding="utf-8")
+
+            raw = json.loads(original)
+            next(
+                item
+                for item in raw["executions"]
+                if item["execution_id"] == "exec-load-local"
+            )["decision_id"] = "orphan:decision"
+            rewrite_store_with_valid_state_hash(path, raw)
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "unknown route decision",
+            ):
+                ModelComputeRouterStore(path)
+
+            raw = json.loads(original)
+            next(
+                item
+                for item in raw["executions"]
+                if item["execution_id"] == "exec-load-local"
+            )["backend_id"] = "forged-local"
+            rewrite_store_with_valid_state_hash(path, raw)
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "ACCEPTED execution identity",
+            ):
+                ModelComputeRouterStore(path)
+
+            raw = json.loads(original)
+            next(
+                item
+                for item in raw["executions"]
+                if item["execution_id"] == "exec-load-local"
+            )["actual_cost"] = "2.01"
+            rewrite_store_with_valid_state_hash(path, raw)
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "accepted execution cost exceeds request budget",
+            ):
+                ModelComputeRouterStore(path)
+
+            raw = json.loads(original)
+            next(
+                item
+                for item in raw["executions"]
+                if item["execution_id"] == "exec-load-cloud"
+            )["actual_cost"] = "10.01"
+            rewrite_store_with_valid_state_hash(path, raw)
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "accepted cloud execution cost exceeds policy",
+            ):
                 ModelComputeRouterStore(path)
 
     def test_immutable_request_id_cannot_be_reused_with_changed_policy_or_input(self):

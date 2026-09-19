@@ -462,6 +462,34 @@ class OpponentIntelligenceStore:
             )
 
         supersedes = observation.supersedes_performance_id
+        semantic_key = (
+            observation.event_id,
+            observation.source_id,
+            observation.sport_id,
+            league_entity.entity_id,
+            observation.market_context_id,
+            tuple(sorted((subject_entity.entity_id, opponent_entity.entity_id))),
+        )
+        if supersedes is None:
+            for prior in self._performances.values():
+                prior_key = (
+                    prior.observation.event_id,
+                    prior.observation.source_id,
+                    prior.observation.sport_id,
+                    prior.league_entity_id,
+                    prior.observation.market_context_id,
+                    tuple(sorted((prior.subject_entity_id, prior.opponent_entity_id))),
+                )
+                if prior_key != semantic_key:
+                    continue
+                if any(
+                    candidate.observation.supersedes_performance_id == prior.performance_id
+                    for candidate in self._performances.values()
+                ):
+                    continue
+                raise OpponentIntelligenceError(
+                    "event/opponent performance already exists; correction requires explicit supersedes"
+                )
         if supersedes is not None:
             predecessor = self._performances.get(supersedes)
             if predecessor is None:
@@ -476,7 +504,15 @@ class OpponentIntelligenceStore:
                     "performance correction fork is not allowed"
                 )
             before = predecessor.observation
-            for name in ("event_id", "source_id", "sport_id", "league_alias", "market_context_id"):
+            for name in (
+                "event_id",
+                "source_id",
+                "subject_alias",
+                "opponent_alias",
+                "sport_id",
+                "league_alias",
+                "market_context_id",
+            ):
                 if getattr(before, name) != getattr(observation, name):
                     raise OpponentIntelligenceError(
                         "performance correction must preserve event/context identity"
@@ -1252,6 +1288,26 @@ class OpponentIntelligenceStore:
                         "rating snapshot support does not match durable input count"
                     )
                 ratings[snapshot.snapshot_id] = snapshot
+
+            for snapshot in ratings.values():
+                missing_inputs = [
+                    performance_id
+                    for performance_id in snapshot.input_performance_ids
+                    if performance_id not in performances
+                ]
+                if missing_inputs:
+                    raise OpponentIntelligenceError(
+                        "rating snapshot references missing durable performance input"
+                    )
+                missing_predecessors = [
+                    predecessor_id
+                    for predecessor_id in snapshot.predecessor_snapshot_ids
+                    if predecessor_id not in ratings
+                ]
+                if missing_predecessors:
+                    raise OpponentIntelligenceError(
+                        "rating snapshot references missing predecessor snapshot"
+                    )
 
             features: dict[str, FeatureSnapshot] = {}
             for item in raw.get("feature_snapshots", []):

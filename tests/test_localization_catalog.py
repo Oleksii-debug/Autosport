@@ -124,7 +124,7 @@ _RUNTIME_RECOVERY_KEYS = {
 
 def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:
     assert DEFAULT_LOCALE == "uk-UA"
-    assert CATALOG_VERSION == 4
+    assert CATALOG_VERSION == 5
     assert text("ui.ticket.empty") == "Паперові квитки ще відсутні."
     assert text("ui.boolean.true") == "так"
     assert text("ui.boolean.false") == "ні"

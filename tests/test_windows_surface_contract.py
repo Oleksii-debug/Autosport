@@ -44,10 +44,13 @@ def test_complete_windows_surface_inventory_is_stable_and_truthful() -> None:
     assert {surface.key for surface in disabled} == {
         "opportunities",
         "bookmakers_accounts",
-        "settings",
     }
     assert all(surface.target_widget is None and surface.blocked_reason_uk for surface in disabled)
     assert SURFACE_BY_KEY["bookmakers_accounts"].target_widget is None
+    settings = SURFACE_BY_KEY["settings"]
+    assert settings.phase == "active"
+    assert settings.target_widget == "owner_economic_authority_button"
+    assert settings.blocked_reason_uk is None
 
 
 def test_shell_detail_lines_expose_phase_and_truth_boundaries() -> None:

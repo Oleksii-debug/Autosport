@@ -818,6 +818,10 @@ class ResearchScheduler:
         if raw["status"] == "PENDING":
             if any(raw[k] is not None for k in ("selection_id", "run_id", "receipt_sha256")):
                 raise ResearchSchedulerError("pending curriculum wake carries acceptance evidence")
+        elif raw["status"] == "DISPATCHING":
+            _sha(raw["selection_id"], "curriculum selection_id")
+            if any(raw[k] is not None for k in ("run_id", "receipt_sha256")):
+                raise ResearchSchedulerError("dispatching curriculum wake carries acceptance evidence")
         elif raw["status"] == "ACCEPTED":
             _sha(raw["selection_id"], "curriculum selection_id")
             _sha(raw["run_id"], "curriculum run_id")
@@ -830,7 +834,7 @@ class ResearchScheduler:
         pending = [
             (wake_id, raw)
             for wake_id, raw in state["curriculum_wakes"].items()
-            if raw["status"] == "PENDING"
+            if raw["status"] in {"PENDING", "DISPATCHING"}
         ]
         if not pending:
             return None
@@ -839,24 +843,40 @@ class ResearchScheduler:
             key=lambda item: (item[1]["as_of"], item[1]["selector_policy_version"], item[0]),
         )
 
-    def _require_curriculum_dispatch_allowed_locked(self, wake_id: str) -> None:
-        """Recheck scheduler authority under the curriculum reservation lock.
+    def _begin_curriculum_dispatch_locked(
+        self,
+        wake_id: str,
+        selection_id: str,
+    ) -> None:
+        """Linearize or recover a curriculum dispatch under the shared workspace lock.
 
-        NightResearchCurriculum invokes this callback while holding the shared
-        WorkspaceEconomicLock and immediately before writing its downstream
-        PENDING dispatch reservation.  Do not acquire the lock again here.
+        NightResearchCurriculum invokes this callback immediately before writing its
+        downstream PENDING reservation while holding WorkspaceEconomicLock.  A
+        PAUSE/STOP committed before this point blocks a new dispatch.  Once the
+        scheduler durably records DISPATCHING, later PAUSE/STOP cannot orphan that
+        already-started immutable dispatch; restart may only recover the same
+        selection identity.
         """
 
+        _sha(selection_id, "curriculum selection_id")
         state = self._read()
         self._validate(state)
         wake = state["curriculum_wakes"].get(wake_id)
         if wake is None:
             raise ResearchSchedulerError("curriculum wake disappeared before dispatch")
+        if wake["status"] == "DISPATCHING":
+            if wake["selection_id"] != selection_id:
+                raise ResearchSchedulerError("curriculum dispatch selection identity conflict")
+            return
         if wake["status"] != "PENDING":
-            raise ResearchSchedulerError("curriculum wake is no longer pending")
+            raise ResearchSchedulerError("curriculum wake is no longer dispatchable")
         status = SchedulerStatus(state["status"])
         if status in {SchedulerStatus.PAUSED, SchedulerStatus.STOPPED}:
             raise _CurriculumDispatchBlocked(status)
+        wake["status"] = "DISPATCHING"
+        wake["selection_id"] = selection_id
+        state["state_version"] += 1
+        self._write(state)
 
     def queue_curriculum_wake(
         self,
@@ -971,14 +991,16 @@ class ResearchScheduler:
                     return TickResult(TickAction.STOPPED)
                 return TickResult(TickAction.IDLE)
             wake_id, wake = pending
-            if status is SchedulerStatus.PAUSED:
-                return TickResult(TickAction.PAUSED, curriculum_wake_id=wake_id)
-            if status is SchedulerStatus.STOPPED:
-                return TickResult(TickAction.STOPPED, curriculum_wake_id=wake_id)
-            if active_concurrency >= max_concurrency or remaining_budget_units < wake["budget_units"]:
-                return TickResult(TickAction.ADMISSION_BLOCKED, curriculum_wake_id=wake_id)
-            if curriculum.status is CurriculumStatus.STOPPED:
-                return TickResult(TickAction.STOPPED, curriculum_wake_id=wake_id)
+            recovering_dispatch = wake["status"] == "DISPATCHING"
+            if not recovering_dispatch:
+                if status is SchedulerStatus.PAUSED:
+                    return TickResult(TickAction.PAUSED, curriculum_wake_id=wake_id)
+                if status is SchedulerStatus.STOPPED:
+                    return TickResult(TickAction.STOPPED, curriculum_wake_id=wake_id)
+                if active_concurrency >= max_concurrency or remaining_budget_units < wake["budget_units"]:
+                    return TickResult(TickAction.ADMISSION_BLOCKED, curriculum_wake_id=wake_id)
+                if curriculum.status is CurriculumStatus.STOPPED:
+                    return TickResult(TickAction.STOPPED, curriculum_wake_id=wake_id)
             population = self._curriculum_population(candidates)
             actual_ids, actual_digest = self._curriculum_population_digest(population)
             if actual_ids != tuple(wake["candidate_ids"]) or actual_digest != wake["candidate_population_sha256"]:
@@ -999,8 +1021,9 @@ class ResearchScheduler:
                 seed=seed,
                 budget_units=budget_units,
                 deadline_at=deadline_at,
-                before_reservation=lambda: self._require_curriculum_dispatch_allowed_locked(
-                    wake_id
+                before_reservation=lambda record: self._begin_curriculum_dispatch_locked(
+                    wake_id,
+                    record.selection_id,
                 ),
             )
         except _CurriculumDispatchBlocked as blocked:
@@ -1022,9 +1045,10 @@ class ResearchScheduler:
             if prior["status"] == "ACCEPTED":
                 if prior["selection_id"] != receipt.selection_id or prior["run_id"] != receipt.run_id or prior["receipt_sha256"] != receipt.trigger_receipt.receipt_sha256:
                     raise ResearchSchedulerError("curriculum acceptance identity conflict")
-            elif prior["status"] == "PENDING":
+            elif prior["status"] == "DISPATCHING":
+                if prior["selection_id"] != receipt.selection_id:
+                    raise ResearchSchedulerError("curriculum dispatch selection identity conflict")
                 prior["status"] = "ACCEPTED"
-                prior["selection_id"] = receipt.selection_id
                 prior["run_id"] = receipt.run_id
                 prior["receipt_sha256"] = receipt.trigger_receipt.receipt_sha256
                 state["state_version"] += 1

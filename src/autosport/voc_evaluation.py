@@ -448,6 +448,17 @@ class CanonicalVOCAuthorityResolver:
             records = self.decision_ledger.verified_records()
         except DecisionLedgerIntegrityError as exc:
             raise VOCEvaluationError("canonical DecisionLedger verification failed") from exc
+        expected_binding = {
+            "baseline_candidate_id": evaluation.baseline_candidate_id,
+            "baseline_action": evaluation.baseline_action,
+            "baseline_abstained": evaluation.baseline_abstained,
+            "challenger_candidate_id": evaluation.challenger_candidate_id,
+            "challenger_action": evaluation.challenger_action,
+            "challenger_abstained": evaluation.challenger_abstained,
+            "sport_id": evaluation.sport_id,
+            "league_id": evaluation.league_id,
+            "regime_id": evaluation.regime_id,
+        }
         for record in records:
             if self._decision_digest(record) != evaluation.decision_evidence_sha256:
                 continue
@@ -455,10 +466,19 @@ class CanonicalVOCAuthorityResolver:
                 raise VOCEvaluationError("canonical decision evidence postdates paired decision")
             if _instant("recorded_at", record.recorded_at) > _instant("evaluated_at", evaluation.evaluated_at):
                 raise VOCEvaluationError("canonical decision evidence was recorded after evaluation")
+            payload = record.payload
+            if not isinstance(payload, Mapping):
+                raise VOCEvaluationError("canonical decision payload is invalid")
+            binding = payload.get("voc_binding")
+            if type(binding) is not dict:
+                raise VOCEvaluationError("canonical decision VOC binding is missing")
+            if binding != expected_binding:
+                raise VOCEvaluationError("canonical decision VOC binding does not match paired evaluation")
             return
         raise VOCEvaluationError("canonical DecisionLedger decision evidence is missing")
 
     def _require_protocol(self, evaluation: PairedVOCEvaluation) -> None:
+        decision_at = _instant("decision_at", evaluation.decision_at)
         entry = self.scientific_registry.get(
             "ResearchProtocol", evaluation.research_protocol_id
         )
@@ -469,8 +489,95 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError("canonical ResearchProtocol identity mismatch")
         if payload.get("protocol_sha256") != evaluation.research_protocol_sha256:
             raise VOCEvaluationError("canonical ResearchProtocol digest mismatch")
-        if _instant("available_at", entry.available_at) > _instant("decision_at", evaluation.decision_at):
+        if _instant("available_at", entry.available_at) > decision_at:
             raise VOCEvaluationError("canonical ResearchProtocol is not available at decision time")
+
+        binding = payload.get("binding")
+        if type(binding) is not dict:
+            raise VOCEvaluationError("canonical ResearchProtocol binding is missing")
+        evaluation_design = binding.get("evaluation_design")
+        if not isinstance(evaluation_design, str) or not evaluation_design.strip():
+            raise VOCEvaluationError("canonical ResearchProtocol evaluation design is missing")
+        try:
+            design = json.loads(evaluation_design)
+        except json.JSONDecodeError as exc:
+            raise VOCEvaluationError("canonical VOC evaluation design must be canonical JSON") from exc
+        if type(design) is not dict:
+            raise VOCEvaluationError("canonical VOC evaluation design must be an object")
+
+        scope = design.get("scope")
+        if type(scope) is not dict:
+            raise VOCEvaluationError("canonical VOC evaluation scope is missing")
+        expected_scope = {
+            "sport_id": evaluation.sport_id,
+            "league_id": evaluation.league_id,
+            "regime_id": evaluation.regime_id,
+        }
+        if scope != expected_scope:
+            raise VOCEvaluationError("canonical ResearchProtocol scope does not match paired evaluation")
+
+        outcome_identity = design.get("outcome_identity")
+        if type(outcome_identity) is not dict:
+            raise VOCEvaluationError("canonical VOC outcome identity is missing")
+        for field in ("event_id", "market_id", "source_id", "market_type"):
+            value = outcome_identity.get(field)
+            if type(value) is not str or not value.strip():
+                raise VOCEvaluationError(f"canonical VOC outcome identity field {field} is missing")
+
+        multiple_comparison_control = binding.get("multiple_comparison_control")
+        if not isinstance(multiple_comparison_control, str) or not multiple_comparison_control.strip():
+            raise VOCEvaluationError("canonical multiple-comparison control is missing")
+        control_digest = hashlib.sha256(
+            multiple_comparison_control.encode("utf-8")
+        ).hexdigest()
+        if control_digest != evaluation.multiple_comparison_control_sha256:
+            raise VOCEvaluationError("canonical multiple-comparison control digest mismatch")
+
+        scoring_rule = design.get("scoring_rule")
+        if type(scoring_rule) is not dict:
+            raise VOCEvaluationError("canonical VOC scoring rule is missing")
+        if scoring_rule.get("id") != evaluation.scoring_rule_id:
+            raise VOCEvaluationError("canonical scoring rule identity mismatch")
+        scoring_payload = scoring_rule.get("payload")
+        if type(scoring_payload) is not dict:
+            raise VOCEvaluationError("canonical scoring rule payload is missing")
+        if hashlib.sha256(
+            json.dumps(
+                scoring_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest() != evaluation.scoring_rule_sha256:
+            raise VOCEvaluationError("canonical scoring rule digest mismatch")
+
+        snapshot = None
+        for candidate in self.scientific_registry.causal_records(
+            "DatasetSnapshot",
+            as_of=evaluation.evaluated_at,
+        ):
+            if candidate.payload.get("manifest_sha256") == payload.get("dataset_manifest_sha256"):
+                if snapshot is not None:
+                    raise VOCEvaluationError("canonical dataset snapshot for VOC protocol is ambiguous")
+                snapshot = candidate
+        if snapshot is None:
+            raise VOCEvaluationError("canonical DatasetSnapshot for VOC protocol is missing")
+        confirmation_trial_family_id = design.get("confirmation_trial_family_id")
+        if type(confirmation_trial_family_id) is not str or not confirmation_trial_family_id.strip():
+            raise VOCEvaluationError("canonical confirmation-trial family is missing")
+        expected_holdout = _canonical_digest(
+            {
+                "schema_version": 1,
+                "research_protocol_id": evaluation.research_protocol_id,
+                "dataset_manifest_sha256": payload.get("dataset_manifest_sha256"),
+                "source_identity": snapshot.payload.get("source_identity"),
+                "license_identity": snapshot.payload.get("license_identity"),
+                "confirmation_trial_family_id": confirmation_trial_family_id,
+            }
+        )
+        if expected_holdout != evaluation.holdout_access_id:
+            raise VOCEvaluationError("canonical holdout identity mismatch")
 
     def _require_outcome(self, evaluation: PairedVOCEvaluation) -> None:
         try:
@@ -483,6 +590,30 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError("canonical outcome authority sport scope mismatch")
         if self.outcome_authority.authority_sha256 != evaluation.outcome_evidence_sha256:
             raise VOCEvaluationError("canonical outcome authority digest mismatch")
+        protocol_entry = self.scientific_registry.get(
+            "ResearchProtocol", evaluation.research_protocol_id
+        )
+        if protocol_entry is None:
+            raise VOCEvaluationError("canonical ResearchProtocol is missing for outcome binding")
+        binding = protocol_entry.payload.get("binding")
+        design_text = None if not isinstance(binding, dict) else binding.get("evaluation_design")
+        if not isinstance(design_text, str):
+            raise VOCEvaluationError("canonical VOC outcome identity binding is missing")
+        try:
+            design = json.loads(design_text)
+        except json.JSONDecodeError as exc:
+            raise VOCEvaluationError("canonical VOC evaluation design is not valid JSON") from exc
+        outcome_identity = design.get("outcome_identity") if isinstance(design, dict) else None
+        if type(outcome_identity) is not dict:
+            raise VOCEvaluationError("canonical VOC outcome identity binding is missing")
+        expected_identity = {
+            "event_id": identity.event_id,
+            "market_id": identity.market_id,
+            "source_id": identity.source_id,
+            "market_type": identity.market_type.value,
+        }
+        if outcome_identity != expected_identity:
+            raise VOCEvaluationError("canonical outcome authority identity does not match research scope")
 
     def resolve(
         self,

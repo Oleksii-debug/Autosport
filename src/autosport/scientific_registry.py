@@ -499,7 +499,8 @@ class EvaluationBundleRef:
         }
         if self.effective_sample_size is not None:
             payload["effective_sample_size"] = self.effective_sample_size
-        if self.effect_interval_low is not None:            payload["effect_interval_low"] = self.effect_interval_low
+        if self.effect_interval_low is not None:
+            payload["effect_interval_low"] = self.effect_interval_low
             payload["effect_interval_high"] = self.effect_interval_high
             payload["practical_improvement"] = self.practical_improvement
         return payload
@@ -998,7 +999,8 @@ class ScientificRegistry:
 
     def append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
         if record.record_type == "PromotionDecision":
-            raise PromotionEvidenceError("promotion decisions must be recorded through record_promotion")        return self._append(record, allow_repeat_experiment=allow_repeat_experiment)
+            raise PromotionEvidenceError("promotion decisions must be recorded through record_promotion")
+        return self._append(record, allow_repeat_experiment=allow_repeat_experiment)
 
     def _append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
         entry = self._entry(record)
@@ -1497,7 +1499,8 @@ class ScientificRegistry:
                 for name, value in (
                     ("effect_interval_low", durable_low),
                     ("effect_interval_high", durable_high),
-                    ("practical_improvement", durable_practical),                ):
+                    ("practical_improvement", durable_practical),
+                ):
                     if _canonical_decimal(value, f"EvaluationBundle.{name}") != value:
                         raise PromotionEvidenceError(
                             f"durable evaluation {name} is not canonical decimal text"
@@ -1642,3 +1645,4 @@ class ScientificRegistry:
         bundle = self.reproducibility_bundle(experiment_id)
         atomic_write_json(path, bundle)
         return bundle["bundle_sha256"]
+

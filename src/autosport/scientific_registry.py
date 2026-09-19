@@ -426,6 +426,9 @@ class EvaluationBundleRef:
     evaluated_strategy_version_id: str | None = None
     evaluated_model_version_id: str | None = None
     effective_sample_size: int | None = None
+    effect_interval_low: str | None = None
+    effect_interval_high: str | None = None
+    practical_improvement: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.evaluation_bundle_id, "evaluation_bundle_id")
@@ -448,6 +451,31 @@ class EvaluationBundleRef:
                 or self.effective_sample_size <= 0
             ):
                 raise ValueError("effective_sample_size must be a positive integer")
+        interval_values = (
+            self.effect_interval_low,
+            self.effect_interval_high,
+            self.practical_improvement,
+        )
+        if any(value is not None for value in interval_values):
+            if any(value is None for value in interval_values):
+                raise ValueError(
+                    "effect interval and practical improvement must be stored together"
+                )
+            for name in (
+                "effect_interval_low",
+                "effect_interval_high",
+                "practical_improvement",
+            ):
+                value = getattr(self, name)
+                if _canonical_decimal(value, name) != value:
+                    raise ValueError(f"{name} must be canonical decimal text")
+            low = Decimal(self.effect_interval_low)
+            high = Decimal(self.effect_interval_high)
+            practical = Decimal(self.practical_improvement)
+            if low > high:
+                raise ValueError("effect interval low must not exceed high")
+            if practical < low or practical > high:
+                raise ValueError("practical improvement must lie inside effect interval")
 
     @property
     def record_type(self) -> str: return "EvaluationBundle"
@@ -469,6 +497,10 @@ class EvaluationBundleRef:
         }
         if self.effective_sample_size is not None:
             payload["effective_sample_size"] = self.effective_sample_size
+        if self.effect_interval_low is not None:
+            payload["effect_interval_low"] = self.effect_interval_low
+            payload["effect_interval_high"] = self.effect_interval_high
+            payload["practical_improvement"] = self.practical_improvement
         return payload
 
 
@@ -1269,6 +1301,37 @@ class ScientificRegistry:
                     )
                 if effective_n < frozen_minimum_n:
                     raise PromotionEvidenceError("PROMOTE requires sufficient effective sample size")
+                durable_low = bundle["payload"].get("effect_interval_low")
+                durable_high = bundle["payload"].get("effect_interval_high")
+                durable_practical = bundle["payload"].get("practical_improvement")
+                if not all(
+                    isinstance(value, str)
+                    for value in (durable_low, durable_high, durable_practical)
+                ):
+                    raise PromotionEvidenceError(
+                        "PROMOTE requires durable effect interval evidence from the evaluation bundle"
+                    )
+                for name, value in (
+                    ("effect_interval_low", durable_low),
+                    ("effect_interval_high", durable_high),
+                    ("practical_improvement", durable_practical),
+                ):
+                    if _canonical_decimal(value, f"EvaluationBundle.{name}") != value:
+                        raise PromotionEvidenceError(
+                            f"durable evaluation {name} is not canonical decimal text"
+                        )
+                if ep.get("effect_interval_low") != durable_low:
+                    raise PromotionEvidenceError(
+                        "promotion evidence effect interval low does not match durable evaluation"
+                    )
+                if ep.get("effect_interval_high") != durable_high:
+                    raise PromotionEvidenceError(
+                        "promotion evidence effect interval high does not match durable evaluation"
+                    )
+                if ep.get("practical_improvement") != durable_practical:
+                    raise PromotionEvidenceError(
+                        "promotion evidence practical improvement does not match durable evaluation"
+                    )
                 if ep.get("guardrails_passed") is not True:
                     raise PromotionEvidenceError("PROMOTE requires passing guardrails")
                 stopping_sha = _sha256_text(binding.get("stopping_rule"), "binding.stopping_rule")

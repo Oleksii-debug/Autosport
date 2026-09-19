@@ -1,4 +1,5 @@
 import hashlib
+from autosport.integrity import atomic_write_json
 import json
 from dataclasses import replace
 from decimal import Decimal
@@ -14,6 +15,8 @@ from autosport.policy_evaluation import (
     policy_evaluation_cases_manifest_sha256,
 )
 from autosport.scientific_registry import (
+    CounterfactualQualification,
+    CounterfactualSourceEvidence,
     DatasetSnapshot,
     EvaluationBundleRef,
     ExperimentRecord,
@@ -85,70 +88,13 @@ def _digest(payload: object) -> str:
 
 
 def _cases(store: FactoryArtifactStore) -> tuple[PolicyEvaluationCase, ...]:
-    authority_id = "mechanical-paper-settlement:v1"
-    authority_version = "1"
-
+    authority_id="mechanical-paper-settlement:v1"
     def build(sample_id: str, observed_at: str) -> PolicyEvaluationCase:
-        bound_case = {
-            "sample_id": sample_id,
-            "observed_at": observed_at,
-            "reward_available_at": HOLDOUT_REVEAL_AT,
-            "admissible_actions": ["BET", "HEDGE", "WAIT"],
-            "action_rewards": [["BET", "0"], ["HEDGE", "2"], ["WAIT", "1"]],
-            "action_costs": [["BET", "0"], ["HEDGE", "0"], ["WAIT", "0"]],
-            "behavior_propensities": [
-                ["BET", "0.34"],
-                ["HEDGE", "0.33"],
-                ["WAIT", "0.33"],
-            ],
-            "reward_truth": EvidenceTruth.OBSERVED.value,
-            "reward_mode": PolicyRewardMode.MECHANICAL_PAPER.value,
-            "regime_id": "table-tennis:pre-match",
-            "historical_action": None,
-            "counterfactual_source_id": authority_id,
-        }
-        source_evidence_sha256 = store.write(
-            "counterfactual-source-evidence",
-            f"{authority_id}@{authority_version}:{sample_id}",
-            {
-                "schema_version": 1,
-                "kind": "autosport-counterfactual-source-evidence-v1",
-                "authority_id": authority_id,
-                "authority_version": authority_version,
-                "case": bound_case,
-            },
-        )
-        return PolicyEvaluationCase(
-            sample_id=sample_id,
-            observed_at=observed_at,
-            reward_available_at=HOLDOUT_REVEAL_AT,
-            admissible_actions=("BET", "HEDGE", "WAIT"),
-            action_rewards=(
-                ("BET", Decimal("0")),
-                ("HEDGE", Decimal("2")),
-                ("WAIT", Decimal("1")),
-            ),
-            action_costs=(
-                ("BET", Decimal("0")),
-                ("HEDGE", Decimal("0")),
-                ("WAIT", Decimal("0")),
-            ),
-            behavior_propensities=(
-                ("BET", Decimal("0.34")),
-                ("HEDGE", Decimal("0.33")),
-                ("WAIT", Decimal("0.33")),
-            ),
-            reward_truth=EvidenceTruth.OBSERVED,
-            reward_mode=PolicyRewardMode.MECHANICAL_PAPER,
-            source_evidence_sha256=source_evidence_sha256,
-            regime_id="table-tennis:pre-match",
-            counterfactual_source_id=authority_id,
-        )
+        bound_case={"sample_id":sample_id,"observed_at":observed_at,"reward_available_at":HOLDOUT_REVEAL_AT,"admissible_actions":["BET","HEDGE","WAIT"],"action_rewards":[["BET","0"],["HEDGE","2"],["WAIT","1"]],"action_costs":[["BET","0"],["HEDGE","0"],["WAIT","0"]],"behavior_propensities":[["BET","0.34"],["HEDGE","0.33"],["WAIT","0.33"]],"reward_truth":EvidenceTruth.OBSERVED.value,"reward_mode":PolicyRewardMode.MECHANICAL_PAPER.value,"regime_id":"table-tennis:pre-match","historical_action":None,"counterfactual_source_id":authority_id}
+        source_sha=_digest({"schema_version":1,"kind":"autosport-counterfactual-source-evidence-v1","authority_id":authority_id,"authority_version":"1","case":bound_case})
+        return PolicyEvaluationCase(sample_id,observed_at,HOLDOUT_REVEAL_AT,("BET","HEDGE","WAIT"),(("BET",Decimal("0")),("HEDGE",Decimal("2")),("WAIT",Decimal("1"))),(("BET",Decimal("0")),("HEDGE",Decimal("0")),("WAIT",Decimal("0"))),(("BET",Decimal("0.34")),("HEDGE",Decimal("0.33")),("WAIT",Decimal("0.33"))),EvidenceTruth.OBSERVED,PolicyRewardMode.MECHANICAL_PAPER,source_sha,"table-tennis:pre-match",None,authority_id)
+    return (build("holdout-1","2026-09-19T09:05:00Z"),build("holdout-2","2026-09-19T09:06:00Z"))
 
-    return (
-        build("holdout-1", "2026-09-19T09:05:00Z"),
-        build("holdout-2", "2026-09-19T09:06:00Z"),
-    )
 
 def _policy_successor(
     predecessor: BanditPolicyState,
@@ -194,9 +140,6 @@ def _foundation(tmp_path):
     store = FactoryArtifactStore(artifact_root)
     cases = _cases(store)
     dataset_manifest = policy_evaluation_cases_manifest_sha256(cases)
-    allowed_source_evidence_sha256 = tuple(
-        sorted(case.source_evidence_sha256 for case in cases)
-    )
     qualification_evidence_sha256 = store.write(
         "counterfactual-qualification",
         "mechanical-paper-settlement:v1@1",
@@ -209,9 +152,6 @@ def _foundation(tmp_path):
             "reward_definition_sha256": REWARD_DEFINITION,
             "reward_mode": PolicyRewardMode.MECHANICAL_PAPER.value,
             "scope": "table-tennis:pre-match",
-            "allowed_source_evidence_sha256": list(
-                allowed_source_evidence_sha256
-            ),
             "qualification_status": "QUALIFIED",
             "qualified_at": QUALIFICATION_AT,
         },
@@ -224,7 +164,6 @@ def _foundation(tmp_path):
         reward_definition_sha256=REWARD_DEFINITION,
         reward_mode=PolicyRewardMode.MECHANICAL_PAPER,
         scope="table-tennis:pre-match",
-        allowed_source_evidence_sha256=allowed_source_evidence_sha256,
         qualification_status="QUALIFIED",
     )
     evaluator_config = PolicyEvaluationConfig(
@@ -307,8 +246,16 @@ def _foundation(tmp_path):
     registry_path = tmp_path / "scientific_registry.json"
     artifact_root = tmp_path / "artifacts"
     registry = ScientificRegistry.initialize_pristine(registry_path)
-    for record in (question, hypothesis, feature, protocol, dataset):
+    for record in (question, hypothesis, feature):
         registry.append(record)
+    registry.append(CounterfactualQualification("mechanical-paper-settlement:v1","1",EVALUATOR_SOURCE,REWARD_DEFINITION,PolicyRewardMode.MECHANICAL_PAPER.value,"table-tennis:pre-match","QUALIFIED",QUALIFICATION_AT,QUALIFICATION_AT,qualification_evidence_sha256))
+    registry.append(protocol)
+    registry.append(dataset)
+    for case in cases:
+        bound_case=dict(case.canonical_payload()); source_sha=bound_case.pop("source_evidence_sha256")
+        identity=f"mechanical-paper-settlement:v1@1:{case.sample_id}"
+        store.write("counterfactual-source-evidence",identity,{"schema_version":1,"kind":"autosport-counterfactual-source-evidence-v1","authority_id":"mechanical-paper-settlement:v1","authority_version":"1","case":bound_case})
+        registry.append(CounterfactualSourceEvidence("mechanical-paper-settlement:v1","1",case.sample_id,source_sha,case.observed_at,case.reward_available_at,HOLDOUT_REVEAL_AT,DATASET_ID))
     store = FactoryArtifactStore(artifact_root)
 
     predecessor = BanditPolicyState.initial(
@@ -703,6 +650,43 @@ def test_policy_retest_rejects_unqualified_case_digest_before_publish(tmp_path):
     assert registry.get("EvaluationBundle", spec.evaluation_bundle_id) is None
     assert registry.get("PromotionDecision", spec.promotion_decision_id) is None
     assert registry.get("Experiment", spec.experiment_id) is None
+
+
+def test_policy_retest_rejects_backdated_qualification_appended_after_freeze(tmp_path):
+    registry, _, _, store, predecessor, predecessor_model_id, cases, rule = _foundation(tmp_path)
+    state=registry._read(); state["records"]=[x for x in state["records"] if not (x["record_type"]=="CounterfactualQualification" and x["record_id"]=="mechanical-paper-settlement:v1@1")]
+    atomic_write_json(registry.path,state)
+    qsha=store.sha256("counterfactual-qualification","mechanical-paper-settlement:v1@1")
+    registry.append(CounterfactualQualification("mechanical-paper-settlement:v1","1",EVALUATOR_SOURCE,REWARD_DEFINITION,PolicyRewardMode.MECHANICAL_PAPER.value,"table-tennis:pre-match","QUALIFIED",QUALIFICATION_AT,CHALLENGER_CREATED,qsha))
+    challenger, update=_policy_successor(predecessor,observation_id="5"*64,outcome_id="6"*64,episode_id="7"*64,decided_at="2026-09-19T09:33:00Z",available_at="2026-09-19T09:34:00Z",reward_value="2")
+    spec=_spec(experiment_id="experiment-backdated-qualification",model_id="model-backdated-qualification",evaluation_id="evaluation-backdated-qualification",promotion_id="promotion-backdated-qualification",predecessor_policy_id=predecessor.policy_id,predecessor_model_id=predecessor_model_id,created_at=CHALLENGER_CREATED,completed_at=CHALLENGER_COMPLETED,decided_at=CHALLENGER_DECIDED)
+    import pytest
+    with pytest.raises(ValueError,match="registered after protocol freeze"):
+        run_policy_retest(ExperimentRunner(registry,store),predecessor_policy=predecessor,challenger_policy=challenger,update_evidence=update,spec=spec,evaluation_cases=cases,rule=rule)
+
+
+def test_policy_retest_rejects_revoked_counterfactual_authority(tmp_path):
+    registry, _, _, store, predecessor, predecessor_model_id, cases, rule = _foundation(tmp_path)
+    state=registry._read(); state["records"]=[x for x in state["records"] if not (x["record_type"]=="CounterfactualQualification" and x["record_id"]=="mechanical-paper-settlement:v1@1")]
+    atomic_write_json(registry.path,state)
+    qsha=store.sha256("counterfactual-qualification","mechanical-paper-settlement:v1@1")
+    registry.append(CounterfactualQualification("mechanical-paper-settlement:v1","1",EVALUATOR_SOURCE,REWARD_DEFINITION,PolicyRewardMode.MECHANICAL_PAPER.value,"table-tennis:pre-match","REVOKED",QUALIFICATION_AT,QUALIFICATION_AT,qsha))
+    challenger, update=_policy_successor(predecessor,observation_id="5"*64,outcome_id="6"*64,episode_id="7"*64,decided_at="2026-09-19T09:33:00Z",available_at="2026-09-19T09:34:00Z",reward_value="2")
+    spec=_spec(experiment_id="experiment-revoked-authority",model_id="model-revoked-authority",evaluation_id="evaluation-revoked-authority",promotion_id="promotion-revoked-authority",predecessor_policy_id=predecessor.policy_id,predecessor_model_id=predecessor_model_id,created_at=CHALLENGER_CREATED,completed_at=CHALLENGER_COMPLETED,decided_at=CHALLENGER_DECIDED)
+    import pytest
+    with pytest.raises(ValueError,match="does not match frozen authority"):
+        run_policy_retest(ExperimentRunner(registry,store),predecessor_policy=predecessor,challenger_policy=challenger,update_evidence=update,spec=spec,evaluation_cases=cases,rule=rule)
+
+
+def test_policy_retest_rejects_missing_post_reveal_materialization_receipt(tmp_path):
+    registry, _, _, store, predecessor, predecessor_model_id, cases, rule = _foundation(tmp_path)
+    state=registry._read(); state["records"]=[x for x in state["records"] if not (x["record_type"]=="CounterfactualSourceEvidence" and x["record_id"].endswith(":holdout-1"))]
+    atomic_write_json(registry.path,state)
+    challenger, update=_policy_successor(predecessor,observation_id="5"*64,outcome_id="6"*64,episode_id="7"*64,decided_at="2026-09-19T09:33:00Z",available_at="2026-09-19T09:34:00Z",reward_value="2")
+    spec=_spec(experiment_id="experiment-missing-receipt",model_id="model-missing-receipt",evaluation_id="evaluation-missing-receipt",promotion_id="promotion-missing-receipt",predecessor_policy_id=predecessor.policy_id,predecessor_model_id=predecessor_model_id,created_at=CHALLENGER_CREATED,completed_at=CHALLENGER_COMPLETED,decided_at=CHALLENGER_DECIDED)
+    import pytest
+    with pytest.raises(ValueError,match="materialization receipt"):
+        run_policy_retest(ExperimentRunner(registry,store),predecessor_policy=predecessor,challenger_policy=challenger,update_evidence=update,spec=spec,evaluation_cases=cases,rule=rule)
 
 
 def test_second_policy_attempt_cannot_reuse_same_confirmation_holdout(tmp_path):

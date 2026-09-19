@@ -129,7 +129,7 @@ def _promotion_evidence(
     protocol_id: str,
     bundle_sha: str,
     rollback_identity: str,
-    evidence_id_seed: str,
+    dataset_manifest_sha256: str,
     created_at: str = T3,
 ) -> PromotionEvidence:
     payload = {
@@ -394,7 +394,7 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
         protocol_id=binding.research_protocol_id,
         bundle_sha=champion_evaluation_sha256,
         rollback_identity="NONE",
-        evidence_id_seed="promotion-v1",
+        dataset_manifest_sha256=dataset_manifest_sha256,
     )
     registry.append(champion_evidence)
     registry.record_promotion(

@@ -23,12 +23,16 @@ from autosport.sport_domain_fitness import (
     MetricEvidence,
     SportDomainFitnessObservation,
 )
+from autosport.decision_ledger import DecisionRecord
 from autosport.voc_evaluation import (
+    CanonicalVOCAuthorityResolver,
     PairedVOCEvaluation,
     VOCEvaluationError,
     VOCEvaluationProvenance,
     VOCEvaluationStore,
 )
+from types import SimpleNamespace
+import hashlib
 
 
 SHA_A = "a" * 64
@@ -246,6 +250,163 @@ class _FixtureCanonicalVOCResolver:
 
 
 class PairedVOCEvaluationTests(unittest.TestCase):
+    def _production_resolver_fixture(self, value=None):
+        paired = evaluation() if value is None else value
+
+        decision_payload = {
+            "voc_binding": {
+                "baseline_candidate_id": paired.baseline_candidate_id,
+                "baseline_action": paired.baseline_action,
+                "baseline_abstained": paired.baseline_abstained,
+                "challenger_candidate_id": paired.challenger_candidate_id,
+                "challenger_action": paired.challenger_action,
+                "challenger_abstained": paired.challenger_abstained,
+                "sport_id": paired.sport_id,
+                "league_id": paired.league_id,
+                "regime_id": paired.regime_id,
+            }
+        }
+        decision_record = DecisionRecord(
+            replay_run_id="replay-voc",
+            agent="voc-test",
+            observed_ts=T0,
+            action=paired.baseline_action,
+            payload=decision_payload,
+            context_hash=SHA_A,
+            decision_id="decision-voc",
+            recorded_at=T0,
+        )
+        decision_digest = hashlib.sha256(
+            json.dumps(
+                decision_record.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        scoring_payload = {"kind": "net-utility-v1", "metric": "incremental_value"}
+        scoring_digest = hashlib.sha256(
+            json.dumps(
+                scoring_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        multiple_control = "bonferroni-v1"
+        multiple_control_digest = hashlib.sha256(multiple_control.encode("utf-8")).hexdigest()
+        dataset_manifest = "e" * 64
+        source_identity = "source-voc"
+        license_identity = "license-voc"
+        trial_family = "confirmation-family-v1"
+        holdout_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "research_protocol_id": paired.research_protocol_id,
+                    "dataset_manifest_sha256": dataset_manifest,
+                    "source_identity": source_identity,
+                    "license_identity": license_identity,
+                    "confirmation_trial_family_id": trial_family,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        design = {
+            "scope": {
+                "sport_id": paired.sport_id,
+                "league_id": paired.league_id,
+                "regime_id": paired.regime_id,
+            },
+            "outcome_identity": {
+                "event_id": "event-voc",
+                "market_id": "match-voc",
+                "source_id": "provider-voc",
+                "market_type": "WINNER",
+            },
+            "scoring_rule": {
+                "id": paired.scoring_rule_id,
+                "payload": scoring_payload,
+            },
+            "confirmation_trial_family_id": trial_family,
+        }
+        protocol_payload = {
+            "research_protocol_id": paired.research_protocol_id,
+            "protocol_sha256": paired.research_protocol_sha256,
+            "binding": {
+                "evaluation_design": json.dumps(
+                    design,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "multiple_comparison_control": multiple_control,
+            },
+            "dataset_manifest_sha256": dataset_manifest,
+        }
+        protocol_entry = SimpleNamespace(
+            available_at=T0,
+            payload=protocol_payload,
+        )
+        snapshot_entry = SimpleNamespace(
+            available_at=T0,
+            payload={
+                "manifest_sha256": dataset_manifest,
+                "source_identity": source_identity,
+                "license_identity": license_identity,
+            },
+        )
+        identity = SimpleNamespace(
+            sport=paired.sport_id,
+            event_id="event-voc",
+            market_id="match-voc",
+            source_id="provider-voc",
+            market_type=SimpleNamespace(value="WINNER"),
+        )
+        outcome_authority = SimpleNamespace(
+            identity=identity,
+            authority_sha256=SHA_D,
+            assert_available_as_of=lambda _: None,
+        )
+        ledger = SimpleNamespace(verified_records=lambda: (decision_record,))
+        registry = SimpleNamespace(
+            get=lambda record_type, record_id: protocol_entry
+            if record_type == "ResearchProtocol" and record_id == paired.research_protocol_id
+            else None,
+            causal_records=lambda record_type, as_of: (snapshot_entry,)
+            if record_type == "DatasetSnapshot"
+            else (),
+        )
+        resolver = object.__new__(CanonicalVOCAuthorityResolver)
+        resolver.decision_ledger = ledger
+        resolver.scientific_registry = registry
+        resolver.outcome_authority = outcome_authority
+        paired = replace(
+            paired,
+            decision_evidence_sha256=decision_digest,
+            scoring_rule_sha256=scoring_digest,
+            multiple_comparison_control_sha256=multiple_control_digest,
+            holdout_access_id=holdout_digest,
+            outcome_evidence_sha256=SHA_D,
+        )
+        return resolver, paired
+
+    def test_production_resolver_binds_decision_protocol_and_outcome_scope(self):
+        resolver, paired = self._production_resolver_fixture()
+        self.assertEqual(resolver.resolve(paired, as_of=T2), paired)
+
+    def test_production_resolver_rejects_mismatched_decision_binding(self):
+        resolver, paired = self._production_resolver_fixture()
+        wrong = replace(paired, challenger_action="WRONG")
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "canonical DecisionLedger",
+        ):
+            resolver.resolve(wrong, as_of=T2)
+
     def setUp(self):
         self._router_tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._router_tmp.cleanup)

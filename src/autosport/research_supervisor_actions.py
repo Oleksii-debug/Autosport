@@ -283,7 +283,9 @@ def finalize_factory_decision(
     forward_evidence_sha256: str,
     reason: str,
     budget_cost: int = 1,
-    retest_conditions: Sequence[str] = (),
+    retest_conditions: Sequence[str] = (
+        "new protocol version or explicitly authorized retest",
+    ),
 ) -> tuple[SupervisorSnapshot, FinalizedFactoryDecision]:
     """Publish the canonical factory decision, then checkpoint DECISION -> POSTMORTEM.
 

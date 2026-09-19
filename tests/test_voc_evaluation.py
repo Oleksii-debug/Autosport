@@ -421,12 +421,29 @@ class PairedVOCEvaluationTests(unittest.TestCase):
 
     def test_production_resolver_rejects_mismatched_decision_binding(self):
         resolver, paired = self._production_resolver_fixture()
-        wrong = replace(paired, challenger_action="WRONG")
+        record = resolver.decision_ledger.verified_records()[0]
+        binding = dict(record.payload["voc_binding"])
+        binding["challenger_action"] = "WRONG"
+        wrong_payload = dict(record.payload)
+        wrong_payload["voc_binding"] = binding
+        wrong_record = DecisionRecord(
+            replay_run_id=record.replay_run_id,
+            agent=record.agent,
+            observed_ts=record.observed_ts,
+            action=record.action,
+            payload=wrong_payload,
+            context_hash=record.context_hash,
+            decision_id=record.decision_id,
+            recorded_at=record.recorded_at,
+        )
+        resolver.decision_ledger = SimpleNamespace(
+            verified_records=lambda: (wrong_record,)
+        )
         with self.assertRaisesRegex(
             VOCEvaluationError,
             "canonical DecisionLedger",
         ):
-            resolver.resolve(wrong, as_of=T2)
+            resolver.resolve(paired, as_of=T2)
 
     def setUp(self):
         self._router_tmp = tempfile.TemporaryDirectory()

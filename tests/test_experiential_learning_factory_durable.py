@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from autosport.experiential_learning import PolicyRetestSpec, run_policy_retest
 from autosport.learning_environment import Action, EvidenceTruth, RewardEvidence, Transition
 from autosport.scientific_registry import ScientificRegistry

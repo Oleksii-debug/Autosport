@@ -769,20 +769,41 @@ class AgentLoopRuntime:
     def _require_action_authority(
         action: Action,
         episode: Episode,
+        observation: Observation,
         state: dict[str, Any],
     ) -> None:
         if not isinstance(episode, Episode):
             raise TypeError("episode must be Episode")
+        if not isinstance(observation, Observation):
+            raise TypeError("observation must be Observation")
         identity = state["identity"]
+        current = state["current"]
         if episode.environment_id != identity["environment_id"]:
             raise AgentLoopError("episode belongs to another environment")
         if episode.episode_id != identity["episode_id"]:
             raise AgentLoopError("episode identity does not match AgentLoop")
         if episode.policy_id != identity["policy_id"]:
             raise AgentLoopError("episode policy identity does not match AgentLoop")
+        if observation.environment_id != identity["environment_id"]:
+            raise AgentLoopError("observation belongs to another environment")
+        if (
+            observation.observation_id != action.observation_id
+            or observation.observation_id != current["observation_id"]
+        ):
+            raise AgentLoopError(
+                "action does not bind the durable current observation evidence"
+            )
         if action.action_type not in episode.admissible_actions:
             raise AgentLoopError(
                 "action is outside the canonical episode admissible set"
+            )
+        if _instant(
+            action.decided_at, "action.decided_at"
+        ) < _instant(
+            observation.available_at, "observation.available_at"
+        ):
+            raise AgentLoopError(
+                "action decision predates observation availability"
             )
 
     def commit_action(
@@ -790,6 +811,7 @@ class AgentLoopRuntime:
         action: Action,
         *,
         episode: Episode,
+        observation: Observation,
         effect_state: ExternalEffectState,
         at: str,
     ) -> ActionCommitReceipt:
@@ -798,7 +820,9 @@ class AgentLoopRuntime:
         if not isinstance(effect_state, ExternalEffectState):
             raise TypeError("effect_state must be ExternalEffectState")
         existing_state = self._read()
-        self._require_action_authority(action, episode, existing_state)
+        self._require_action_authority(
+            action, episode, observation, existing_state
+        )
         existing = next(
             (
                 item
@@ -836,7 +860,9 @@ class AgentLoopRuntime:
                 raise StaleAgentLoopStateError(
                     "action commit requires ACT_OR_ABSTAIN"
                 )
-            self._require_action_authority(action, episode, state)
+            self._require_action_authority(
+                action, episode, observation, state
+            )
             current = state["current"]
             if action.environment_id != state["identity"]["environment_id"]:
                 raise AgentLoopError("action belongs to another environment")

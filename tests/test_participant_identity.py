@@ -16,8 +16,11 @@ def entity(entity_id="p-1", available=T0):
     return EntityIdentity(entity_id, EntityKind.PARTICIPANT, "provider:p-1", SHA, T0, available)
 
 
-def alias(entity_id="p-1", available=T0, valid_from=T0, valid_until=None):
-    return AliasRecord("provider-a", "Alex", entity_id, valid_from, valid_until, available, SHA)
+def alias(entity_id="p-1", available=T0, valid_from=T0, valid_until=None, supersedes=None):
+    return AliasRecord(
+        "provider-a", "Alex", entity_id, valid_from, valid_until, available, SHA,
+        supersedes_record_id=supersedes,
+    )
 
 
 class ParticipantIdentityTests(unittest.TestCase):
@@ -47,6 +50,33 @@ class ParticipantIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(ParticipantIdentityError, "conflicting alias"):
             registry.add_alias(alias("p-2"))
 
+    def test_late_alias_correction_restates_without_rewriting_decision_truth(self):
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        registry.add_entity(entity("p-old")); registry.add_entity(entity("p-new"))
+        original = alias("p-old")
+        registry.add_alias(original)
+        correction = alias("p-new", available=T3, supersedes=original.record_id)
+        registry.add_alias(correction)
+
+        self.assertEqual(registry.resolve_alias("provider-a", "Alex", as_of=T2).entity_id, "p-old")
+        self.assertEqual(
+            registry.resolve_alias("provider-a", "Alex", as_of=T2, view=IdentityView.RESTATED_RESEARCH).entity_id,
+            "p-new",
+        )
+        self.assertEqual(
+            registry.resolve_alias_record(
+                "provider-a", "Alex", as_of=T2, view=IdentityView.RESTATED_RESEARCH
+            ).supersedes_record_id,
+            original.record_id,
+        )
+        reopened = ParticipantIdentityRegistry(self.path)
+        self.assertEqual(reopened.resolve_alias("provider-a", "Alex", as_of=T2).entity_id, "p-old")
+        self.assertEqual(
+            reopened.resolve_alias("provider-a", "Alex", as_of=T2, view=IdentityView.RESTATED_RESEARCH).entity_id,
+            "p-new",
+        )
+        self.assertEqual(reopened.resolve_alias("provider-a", "Alex", as_of=T3).entity_id, "p-new")
+
     def test_same_name_is_isolated_by_provider_source(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
         registry.add_entity(entity("p-provider-a")); registry.add_entity(entity("p-provider-b"))
@@ -66,6 +96,23 @@ class ParticipantIdentityTests(unittest.TestCase):
         registry.add_entity(entity()); registry.add_roster_membership(RosterMembership("event-1", "provider-a", "p-1", T0, None, T2, SHA))
         self.assertEqual(registry.roster_at("event-1", "provider-a", as_of=T1), ())
         self.assertEqual([item.entity_id for item in registry.roster_at("event-1", "provider-a", as_of=T1, view=IdentityView.RESTATED_RESEARCH)], ["p-1"])
+
+    def test_roster_cannot_expose_entity_before_entity_availability(self):
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        registry.add_entity(entity(available=T3))
+        registry.add_roster_membership(RosterMembership("event-1", "provider-a", "p-1", T0, None, T1, SHA))
+        with self.assertRaisesRegex(ParticipantIdentityError, "entity not known"):
+            registry.roster_at("event-1", "provider-a", as_of=T2)
+        self.assertEqual(
+            [item.entity_id for item in registry.roster_at(
+                "event-1", "provider-a", as_of=T2, view=IdentityView.RESTATED_RESEARCH
+            )],
+            ["p-1"],
+        )
+        self.assertEqual(
+            [item.entity_id for item in registry.roster_at("event-1", "provider-a", as_of=T3)],
+            ["p-1"],
+        )
 
     def test_late_merge_lineage_is_evidence_not_historical_rewrite(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)

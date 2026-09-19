@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -614,9 +615,22 @@ def test_next_observation_requires_durable_current_transition_checkpoint(
     assert json_load(runtime.path) == pending
 
     checkpoint = environment.checkpoint()
+    forged_checkpoint = replace(checkpoint, chain_sha256="f" * 64)
+    before_forged_commit = recovered.path.read_bytes()
+    with pytest.raises(
+        AgentLoopError,
+        match="checkpoint chain does not bind durable transition history",
+    ):
+        recovered.commit_checkpoint(
+            forged_checkpoint,
+            at="2026-09-19T13:05:08Z",
+        )
+    assert recovered.path.read_bytes() == before_forged_commit
+    assert AgentLoopRuntime(recovered.path).snapshot().phase is AgentLoopPhase.CHECKPOINT
+
     committed = recovered.commit_checkpoint(
         checkpoint,
-        at="2026-09-19T13:05:08Z",
+        at="2026-09-19T13:05:09Z",
     )
     assert committed.checkpointed_transition_id == transition.transition_id
     committed_state = json_load(runtime.path)
@@ -628,7 +642,7 @@ def test_next_observation_requires_durable_current_transition_checkpoint(
     started = recovered.begin_observation(
         next_observation,
         environment_identity=environment.identity,
-        at="2026-09-19T13:05:09Z",
+        at="2026-09-19T13:05:10Z",
     )
     assert started.phase is AgentLoopPhase.OBSERVE
     assert started.transition_id is None

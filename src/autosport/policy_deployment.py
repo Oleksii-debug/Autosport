@@ -13,19 +13,24 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Final
 
 from .champion_policy import POLICY_ARTIFACT_KIND
+from .integrity import atomic_write_json
 from .learning_environment import EnvironmentIdentity
 from .scientific_registry import ScientificRegistry
 from .strategy_model_factory import FactoryArtifactStore
 from .transparent_bandit_policy import BanditPolicyState
+from .workspace_lock import WorkspaceEconomicLock
 
 
 DEPLOYMENT_SCOPE_SCHEMA: Final = "autosport.policy_deployment_scope"
 DEPLOYMENT_SCOPE_SCHEMA_VERSION: Final = 1
 ACTIVATION_BINDING_SCHEMA: Final = "autosport.policy_activation_binding"
 ACTIVATION_BINDING_SCHEMA_VERSION: Final = 1
+DEPLOYMENT_AUTHORITY_SCHEMA: Final = "autosport.policy_deployment_authority"
+DEPLOYMENT_AUTHORITY_SCHEMA_VERSION: Final = 1
 _HEX: Final = frozenset("0123456789abcdef")
 
 
@@ -264,6 +269,343 @@ class ActivationBinding:
         return _stable_hash(self.to_payload())
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise PolicyDeploymentError(
+                f"durable deployment authority has duplicate key: {key}"
+            )
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(value: str) -> None:
+    raise PolicyDeploymentError(
+        f"durable deployment authority contains non-finite number: {value}"
+    )
+
+
+def _environment_payload(identity: EnvironmentIdentity) -> dict[str, object]:
+    if not isinstance(identity, EnvironmentIdentity):
+        raise TypeError("identity must be EnvironmentIdentity")
+    return {
+        "schema": identity.schema,
+        "schema_version": identity.schema_version,
+        "source_id": identity.source_id,
+        "config_id": identity.config_id,
+        "data_id": identity.data_id,
+        "protocol_id": identity.protocol_id,
+        "cutoff_ts": _timestamp(identity.cutoff_ts, "environment cutoff_ts"),
+        "seed": identity.seed,
+    }
+
+
+def _environment_from_payload(
+    payload: object, name: str
+) -> EnvironmentIdentity:
+    expected = {
+        "schema",
+        "schema_version",
+        "source_id",
+        "config_id",
+        "data_id",
+        "protocol_id",
+        "cutoff_ts",
+        "seed",
+    }
+    if type(payload) is not dict or set(payload) != expected:
+        raise PolicyDeploymentError(f"{name} fields mismatch")
+    if type(payload["schema_version"]) is not int:
+        raise PolicyDeploymentError(f"{name} schema_version must be an integer")
+    if isinstance(payload["seed"], bool) or not isinstance(payload["seed"], int):
+        raise PolicyDeploymentError(f"{name} seed must be an integer")
+    try:
+        return EnvironmentIdentity(
+            source_id=_text(payload["source_id"], f"{name} source_id"),
+            config_id=_text(payload["config_id"], f"{name} config_id"),
+            data_id=_text(payload["data_id"], f"{name} data_id"),
+            protocol_id=_text(payload["protocol_id"], f"{name} protocol_id"),
+            cutoff_ts=_timestamp(payload["cutoff_ts"], f"{name} cutoff_ts"),
+            seed=payload["seed"],
+            schema=_text(payload["schema"], f"{name} schema"),
+            schema_version=payload["schema_version"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise PolicyDeploymentError(f"{name} is invalid") from exc
+
+
+def _scope_from_payload(payload: object) -> DeploymentScope:
+    expected = {
+        "schema",
+        "schema_version",
+        "canonical_strategy_id",
+        "sport_domain",
+        "competition_scope",
+        "market_semantics_id",
+        "provider_source_class",
+        "feature_schema_id",
+        "protocol_id",
+        "action_semantics_id",
+        "reward_definition_id",
+        "config_sha256",
+    }
+    if type(payload) is not dict or set(payload) != expected:
+        raise PolicyDeploymentError("durable DeploymentScope fields mismatch")
+    if type(payload["schema_version"]) is not int:
+        raise PolicyDeploymentError("DeploymentScope schema_version must be an integer")
+    return DeploymentScope(
+        canonical_strategy_id=payload["canonical_strategy_id"],
+        sport_domain=payload["sport_domain"],
+        competition_scope=payload["competition_scope"],
+        market_semantics_id=payload["market_semantics_id"],
+        provider_source_class=payload["provider_source_class"],
+        feature_schema_id=payload["feature_schema_id"],
+        protocol_id=payload["protocol_id"],
+        action_semantics_id=payload["action_semantics_id"],
+        reward_definition_id=payload["reward_definition_id"],
+        config_sha256=payload["config_sha256"],
+        schema=payload["schema"],
+        schema_version=payload["schema_version"],
+    )
+
+
+def _binding_from_payload(payload: object) -> ActivationBinding:
+    expected = {
+        "schema",
+        "schema_version",
+        "policy_id",
+        "policy_artifact_sha256",
+        "training_environment_id",
+        "training_data_id",
+        "training_dataset_record_sha256",
+        "training_cutoff_ts",
+        "promotion_decision_id",
+        "promotion_decision_record_sha256",
+        "promotion_evidence_id",
+        "promotion_evidence_record_sha256",
+        "evaluation_bundle_id",
+        "evaluation_bundle_record_sha256",
+        "deployment_scope_id",
+        "deployment_environment_id",
+        "deployment_data_id",
+        "deployment_dataset_record_sha256",
+        "deployment_cutoff_ts",
+        "snapshot_available_at",
+        "activation_at",
+        "admissible_actions",
+        "economic_goal_fingerprint",
+        "risk_fingerprint",
+    }
+    if type(payload) is not dict or set(payload) != expected:
+        raise PolicyDeploymentError("durable ActivationBinding fields mismatch")
+    if type(payload["schema_version"]) is not int:
+        raise PolicyDeploymentError("ActivationBinding schema_version must be an integer")
+    actions = payload["admissible_actions"]
+    if type(actions) is not list:
+        raise PolicyDeploymentError(
+            "durable ActivationBinding admissible_actions must be a list"
+        )
+    return ActivationBinding(
+        policy_id=payload["policy_id"],
+        policy_artifact_sha256=payload["policy_artifact_sha256"],
+        training_environment_id=payload["training_environment_id"],
+        training_data_id=payload["training_data_id"],
+        training_dataset_record_sha256=payload["training_dataset_record_sha256"],
+        training_cutoff_ts=payload["training_cutoff_ts"],
+        promotion_decision_id=payload["promotion_decision_id"],
+        promotion_decision_record_sha256=payload["promotion_decision_record_sha256"],
+        promotion_evidence_id=payload["promotion_evidence_id"],
+        promotion_evidence_record_sha256=payload["promotion_evidence_record_sha256"],
+        evaluation_bundle_id=payload["evaluation_bundle_id"],
+        evaluation_bundle_record_sha256=payload["evaluation_bundle_record_sha256"],
+        deployment_scope_id=payload["deployment_scope_id"],
+        deployment_environment_id=payload["deployment_environment_id"],
+        deployment_data_id=payload["deployment_data_id"],
+        deployment_dataset_record_sha256=payload["deployment_dataset_record_sha256"],
+        deployment_cutoff_ts=payload["deployment_cutoff_ts"],
+        snapshot_available_at=payload["snapshot_available_at"],
+        activation_at=payload["activation_at"],
+        admissible_actions=tuple(actions),
+        economic_goal_fingerprint=payload["economic_goal_fingerprint"],
+        risk_fingerprint=payload["risk_fingerprint"],
+        schema=payload["schema"],
+        schema_version=payload["schema_version"],
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DeploymentAuthority:
+    """Durable immutable reconstruction record for one activation binding."""
+
+    scope: DeploymentScope
+    binding: ActivationBinding
+    training_identity: EnvironmentIdentity
+    deployment_identity: EnvironmentIdentity
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scope, DeploymentScope):
+            raise TypeError("scope must be DeploymentScope")
+        if not isinstance(self.binding, ActivationBinding):
+            raise TypeError("binding must be ActivationBinding")
+        if not isinstance(self.training_identity, EnvironmentIdentity):
+            raise TypeError("training_identity must be EnvironmentIdentity")
+        if not isinstance(self.deployment_identity, EnvironmentIdentity):
+            raise TypeError("deployment_identity must be EnvironmentIdentity")
+        if self.binding.deployment_scope_id != self.scope.scope_id:
+            raise PolicyDeploymentError(
+                "durable activation binding does not bind DeploymentScope"
+            )
+        if (
+            self.binding.training_environment_id
+            != self.training_identity.environment_id
+        ):
+            raise PolicyDeploymentError(
+                "durable activation binding does not bind training environment"
+            )
+        if (
+            self.binding.deployment_environment_id
+            != self.deployment_identity.environment_id
+        ):
+            raise PolicyDeploymentError(
+                "durable activation binding does not bind deployment environment"
+            )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema": DEPLOYMENT_AUTHORITY_SCHEMA,
+            "schema_version": DEPLOYMENT_AUTHORITY_SCHEMA_VERSION,
+            "binding_id": self.binding.binding_id,
+            "deployment_scope": self.scope.to_payload(),
+            "activation_binding": self.binding.to_payload(),
+            "training_identity": _environment_payload(self.training_identity),
+            "deployment_identity": _environment_payload(self.deployment_identity),
+        }
+
+    @property
+    def authority_sha256(self) -> str:
+        return _stable_hash(self.to_payload())
+
+
+def deployment_authority_path(loop_path: str | Path) -> Path:
+    target = Path(loop_path)
+    return target.with_name(f"{target.name}.activation-authority.json")
+
+
+def _read_deployment_authority(path: Path) -> DeploymentAuthority:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise PolicyDeploymentError("durable deployment authority is missing") from exc
+    try:
+        payload = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite,
+        )
+    except json.JSONDecodeError as exc:
+        raise PolicyDeploymentError(
+            "durable deployment authority must be valid JSON"
+        ) from exc
+
+    expected = {
+        "schema",
+        "schema_version",
+        "binding_id",
+        "deployment_scope",
+        "activation_binding",
+        "training_identity",
+        "deployment_identity",
+        "authority_sha256",
+    }
+    if type(payload) is not dict or set(payload) != expected:
+        raise PolicyDeploymentError("durable deployment authority fields mismatch")
+    if payload["schema"] != DEPLOYMENT_AUTHORITY_SCHEMA:
+        raise PolicyDeploymentError("durable deployment authority schema mismatch")
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != DEPLOYMENT_AUTHORITY_SCHEMA_VERSION
+    ):
+        raise PolicyDeploymentError(
+            "durable deployment authority schema version mismatch"
+        )
+
+    claimed = _sha256(payload["authority_sha256"], "authority_sha256")
+    core = {key: value for key, value in payload.items() if key != "authority_sha256"}
+    if _stable_hash(core) != claimed:
+        raise PolicyDeploymentError("durable deployment authority digest mismatch")
+
+    authority = DeploymentAuthority(
+        scope=_scope_from_payload(payload["deployment_scope"]),
+        binding=_binding_from_payload(payload["activation_binding"]),
+        training_identity=_environment_from_payload(
+            payload["training_identity"], "training identity"
+        ),
+        deployment_identity=_environment_from_payload(
+            payload["deployment_identity"], "deployment identity"
+        ),
+    )
+    if _sha256(payload["binding_id"], "binding_id") != authority.binding.binding_id:
+        raise PolicyDeploymentError("durable deployment authority binding id mismatch")
+    if authority.to_payload() != core:
+        raise PolicyDeploymentError("durable deployment authority is not canonical")
+    return authority
+
+
+def persist_deployment_authority(
+    loop_path: str | Path,
+    *,
+    scope: DeploymentScope,
+    binding: ActivationBinding,
+    training_identity: EnvironmentIdentity,
+    deployment_identity: EnvironmentIdentity,
+) -> DeploymentAuthority:
+    """Atomically create one immutable activation authority sidecar."""
+
+    authority = DeploymentAuthority(
+        scope=scope,
+        binding=binding,
+        training_identity=training_identity,
+        deployment_identity=deployment_identity,
+    )
+    target = deployment_authority_path(loop_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with WorkspaceEconomicLock(target.parent):
+        if target.exists():
+            existing = _read_deployment_authority(target)
+            if existing != authority:
+                raise PolicyDeploymentError(
+                    "existing durable deployment authority conflicts with activation"
+                )
+        else:
+            payload = authority.to_payload()
+            atomic_write_json(
+                target,
+                {
+                    **payload,
+                    "authority_sha256": authority.authority_sha256,
+                },
+            )
+    return authority
+
+
+def load_deployment_authority(
+    loop_path: str | Path,
+    *,
+    expected_binding_id: str | None = None,
+) -> DeploymentAuthority:
+    """Load and cryptographically verify one immutable activation authority."""
+
+    authority = _read_deployment_authority(deployment_authority_path(loop_path))
+    if expected_binding_id is not None and authority.binding.binding_id != _sha256(
+        expected_binding_id, "expected_binding_id"
+    ):
+        raise PolicyDeploymentError(
+            "durable deployment authority does not match AgentLoop binding"
+        )
+    return authority
+
+
 def validate_activation_binding(
     binding: ActivationBinding,
     *,
@@ -481,7 +823,11 @@ def validate_activation_binding(
 
 __all__ = [
     "ActivationBinding",
+    "DeploymentAuthority",
     "DeploymentScope",
     "PolicyDeploymentError",
+    "deployment_authority_path",
+    "load_deployment_authority",
+    "persist_deployment_authority",
     "validate_activation_binding",
 ]

@@ -23,6 +23,8 @@ from .learning_environment import (
 from .policy_deployment import (
     ActivationBinding,
     DeploymentScope,
+    load_deployment_authority,
+    persist_deployment_authority,
     validate_activation_binding,
 )
 from .scientific_registry import ScientificRegistry
@@ -213,6 +215,13 @@ class ChampionAgentEpisode:
                 economic_goal_fingerprint=economic_goal_fingerprint,
                 risk_fingerprint=risk_fingerprint,
             )
+            persist_deployment_authority(
+                path,
+                scope=deployment_scope,
+                binding=activation_binding,
+                training_identity=training_identity,
+                deployment_identity=identity,
+            )
         environment = CausalLearningEnvironment(
             identity,
             episode_key=effective_episode_key,
@@ -275,27 +284,43 @@ class ChampionAgentEpisode:
             deployment_scope,
             activation_binding,
         )
-        if any(value is not None for value in deployment_values) and any(
+        caller_supplied_authority = any(
+            value is not None for value in deployment_values
+        )
+        if caller_supplied_authority and any(
             value is None for value in deployment_values
         ):
             raise ChampionAgentEpisodeError(
                 "cross-session deployment authority must be complete"
             )
-        if activation_binding is None:
-            if snapshot.activation_binding_id is not None:
+        if snapshot.activation_binding_id is None:
+            if caller_supplied_authority:
                 raise ChampionAgentEpisodeError(
-                    "durable AgentLoop requires explicit deployment binding on resume"
+                    "legacy AgentLoop cannot accept deployment authority on resume"
                 )
             authority_identity = identity
             authority_as_of = as_of
             effective_episode_key = episode_key
         else:
-            assert training_identity is not None
-            assert deployment_scope is not None
-            if snapshot.activation_binding_id != activation_binding.binding_id:
+            durable_authority = load_deployment_authority(
+                path,
+                expected_binding_id=snapshot.activation_binding_id,
+            )
+            if durable_authority.deployment_identity != identity:
                 raise ChampionAgentEpisodeError(
-                    "resume activation binding does not match durable AgentLoop"
+                    "deployment identity conflicts with durable activation authority"
                 )
+            if caller_supplied_authority and (
+                training_identity != durable_authority.training_identity
+                or deployment_scope != durable_authority.scope
+                or activation_binding != durable_authority.binding
+            ):
+                raise ChampionAgentEpisodeError(
+                    "caller deployment authority conflicts with durable record"
+                )
+            training_identity = durable_authority.training_identity
+            deployment_scope = durable_authority.scope
+            activation_binding = durable_authority.binding
             if _instant(as_of, "as_of") < _instant(
                 activation_binding.activation_at, "activation_at"
             ):

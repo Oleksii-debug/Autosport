@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
@@ -34,6 +35,8 @@ from autosport.policy_deployment import (
     ActivationBinding,
     DeploymentScope,
     PolicyDeploymentError,
+    deployment_authority_path,
+    load_deployment_authority,
 )
 from autosport.scientific_registry import ScientificRegistry
 from autosport.strategy_model_factory import FactoryArtifactStore
@@ -699,6 +702,13 @@ def test_champion_deploys_to_later_compatible_session_and_binds_restart(tmp_path
     assert session.policy.environment_id == training.environment_id
     assert session.environment.environment_id == deployment.environment_id
     assert session.agent_loop.snapshot().activation_binding_id == binding.binding_id
+    authority = load_deployment_authority(
+        path, expected_binding_id=binding.binding_id
+    )
+    assert authority.scope == scope
+    assert authority.binding == binding
+    assert authority.training_identity == training
+    assert authority.deployment_identity == deployment
 
     checkpoint = session.environment.checkpoint()
     observation = Observation(
@@ -743,13 +753,13 @@ def test_champion_deploys_to_later_compatible_session_and_binds_restart(tmp_path
             config_sha256=CONFIG_SHA256,
             episode_key="later-paper-episode",
             admissible_actions=frozenset({"WAIT"}),
-            training_identity=training,
-            deployment_scope=scope,
-            activation_binding=binding,
         )
     assert reopened.policy.environment_id == training.environment_id
     assert reopened.environment.environment_id == deployment.environment_id
     assert reopened.agent_loop.snapshot().activation_binding_id == binding.binding_id
+    assert reopened.training_identity == training
+    assert reopened.deployment_scope == scope
+    assert reopened.activation_binding == binding
 
 
 def test_cross_session_scope_mismatch_fails_closed(tmp_path):
@@ -851,7 +861,7 @@ def test_cross_session_resume_rejects_tampered_binding(tmp_path):
     with patches[0], patches[1], patches[2]:
         with pytest.raises(
             ChampionAgentEpisodeError,
-            match="resume activation binding does not match durable AgentLoop",
+            match="caller deployment authority conflicts with durable record",
         ):
             ChampionAgentEpisode.resume(
                 path,
@@ -868,3 +878,78 @@ def test_cross_session_resume_rejects_tampered_binding(tmp_path):
                 deployment_scope=scope,
                 activation_binding=tampered,
             )
+
+
+def test_cross_session_resume_rejects_tampered_durable_authority(tmp_path):
+    training = EnvironmentIdentity(
+        "lawful-provider:paper",
+        "champion-agent-config-v1",
+        "paper-dataset-training-v1",
+        PROTOCOL_ID,
+        T1,
+        17,
+    )
+    deployment = EnvironmentIdentity(
+        "lawful-provider:paper",
+        "champion-agent-config-v1",
+        "paper-dataset-later-v2",
+        PROTOCOL_ID,
+        T3,
+        17,
+    )
+    _, champion = _learned_champion(training)
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, champion)
+    scope, binding = _deployment_contract(champion, store, training, deployment)
+    _, patches = _deployment_authority(champion, training, deployment)
+    path = tmp_path / "tampered-authority-loop.json"
+
+    with patches[0], patches[1], patches[2]:
+        session = ChampionAgentEpisode.initialize_pristine(
+            path,
+            registry,
+            store,
+            identity=deployment,
+            as_of=T4,
+            canonical_strategy_id=STRATEGY_ID,
+            config_sha256=CONFIG_SHA256,
+            episode_key="tampered-authority-episode",
+            admissible_actions=frozenset({"WAIT"}),
+            loop_id="tampered-authority-loop",
+            economic_goal_fingerprint=GOAL_SHA256,
+            risk_fingerprint=RISK_SHA256,
+            source_sha256=SOURCE_SHA256,
+            at=T4,
+            training_identity=training,
+            deployment_scope=scope,
+            activation_binding=binding,
+        )
+    checkpoint = session.environment.checkpoint()
+    authority_path = deployment_authority_path(path)
+    payload = json.loads(authority_path.read_text(encoding="utf-8"))
+    payload["activation_binding"]["risk_fingerprint"] = "d" * 64
+    authority_path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    _, patches = _deployment_authority(champion, training, deployment)
+    with patches[0], patches[1], patches[2]:
+        with pytest.raises(
+            PolicyDeploymentError,
+            match="durable deployment authority digest mismatch",
+        ):
+            ChampionAgentEpisode.resume(
+                path,
+                registry,
+                store,
+                identity=deployment,
+                checkpoint=checkpoint,
+                as_of=T4,
+                canonical_strategy_id=STRATEGY_ID,
+                config_sha256=CONFIG_SHA256,
+                episode_key="tampered-authority-episode",
+                admissible_actions=frozenset({"WAIT"}),
+            )
+

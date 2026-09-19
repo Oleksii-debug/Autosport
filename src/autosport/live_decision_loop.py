@@ -140,10 +140,13 @@ _CONTROL_SCHEMA = "autosport.live_decision_control"
 _CONTROL_VERSION = 1
 _CONTROL_KEYS = frozenset({"schema", "schema_version", "loop_id", "state"})
 _INPUTS_SCHEMA = "autosport.live_decision_inputs"
-_INPUTS_VERSION = 1
+_INPUTS_VERSION = 2
 _INPUTS_KEYS = frozenset({"schema", "schema_version", "loop_id", "inputs"})
-_INPUT_SPEC_KEYS = frozenset(
+_INPUT_SPEC_KEYS_V1 = frozenset(
     {"input_id", "source_ids", "event_ids", "market_ids", "selection_ids"}
+)
+_INPUT_SPEC_KEYS_V2 = frozenset(
+    {"input_id", "source_ids", "sports", "event_ids", "market_ids", "selection_ids"}
 )
 
 
@@ -431,13 +434,14 @@ def _selector_tuple(
 class _InputSpec:
     input_id: str
     source_ids: tuple[str, ...] | None
+    sports: tuple[str, ...] | None
     event_ids: tuple[str, ...] | None
     market_ids: tuple[str, ...] | None
     selection_ids: tuple[str, ...] | None
 
     def __post_init__(self) -> None:
         FocusedMirrorDependencyIndex._input_id(self.input_id)
-        for name in ("source_ids", "event_ids", "market_ids", "selection_ids"):
+        for name in ("source_ids", "sports", "event_ids", "market_ids", "selection_ids"):
             values = getattr(self, name)
             if values is None:
                 continue
@@ -455,6 +459,11 @@ class _InputSpec:
                 None
                 if dependency.source_ids is None
                 else tuple(sorted(dependency.source_ids))
+            ),
+            sports=(
+                None
+                if dependency.sports is None
+                else tuple(sorted(dependency.sports))
             ),
             event_ids=(
                 None
@@ -477,6 +486,7 @@ class _InputSpec:
         return {
             "input_id": self.input_id,
             "source_ids": None if self.source_ids is None else list(self.source_ids),
+            "sports": None if self.sports is None else list(self.sports),
             "event_ids": None if self.event_ids is None else list(self.event_ids),
             "market_ids": None if self.market_ids is None else list(self.market_ids),
             "selection_ids": (
@@ -486,7 +496,10 @@ class _InputSpec:
 
     @classmethod
     def from_dict(cls, raw: object) -> "_InputSpec":
-        if type(raw) is not dict or set(raw) != _INPUT_SPEC_KEYS:
+        if type(raw) is not dict or set(raw) not in {
+            _INPUT_SPEC_KEYS_V1,
+            _INPUT_SPEC_KEYS_V2,
+        }:
             raise LiveDecisionProgressError(
                 "live dependency input must contain canonical fields"
             )
@@ -505,6 +518,7 @@ class _InputSpec:
             return cls(
                 input_id=raw["input_id"],
                 source_ids=selector("source_ids"),
+                sports=None if "sports" not in raw else selector("sports"),
                 event_ids=selector("event_ids"),
                 market_ids=selector("market_ids"),
                 selection_ids=selector("selection_ids"),
@@ -752,6 +766,7 @@ class PersistentLiveDecisionLoop:
             dependency = self.dependencies.register(
                 spec.input_id,
                 source_ids=spec.source_ids,
+                sports=spec.sports,
                 event_ids=spec.event_ids,
                 market_ids=spec.market_ids,
                 selection_ids=spec.selection_ids,
@@ -880,6 +895,7 @@ class PersistentLiveDecisionLoop:
         input_id: str,
         *,
         source_ids: str | tuple[str, ...] | None = None,
+        sports: str | tuple[str, ...] | None = None,
         event_ids: str | tuple[str, ...] | None = None,
         market_ids: str | tuple[str, ...] | None = None,
         selection_ids: str | tuple[str, ...] | None = None,
@@ -888,6 +904,7 @@ class PersistentLiveDecisionLoop:
         candidate = _InputSpec(
             input_id=normalized_id,
             source_ids=_selector_tuple(source_ids, name="source_ids"),
+            sports=_selector_tuple(sports, name="sports"),
             event_ids=_selector_tuple(event_ids, name="event_ids"),
             market_ids=_selector_tuple(market_ids, name="market_ids"),
             selection_ids=_selector_tuple(selection_ids, name="selection_ids"),
@@ -906,6 +923,7 @@ class PersistentLiveDecisionLoop:
         dependency = self.dependencies.register(
             candidate.input_id,
             source_ids=candidate.source_ids,
+            sports=candidate.sports,
             event_ids=candidate.event_ids,
             market_ids=candidate.market_ids,
             selection_ids=candidate.selection_ids,
@@ -1625,7 +1643,7 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "live dependency registry must contain canonical fields"
             )
-        if raw["schema"] != _INPUTS_SCHEMA or raw["schema_version"] != _INPUTS_VERSION:
+        if raw["schema"] != _INPUTS_SCHEMA or raw["schema_version"] not in {1, _INPUTS_VERSION}:
             raise LiveDecisionProgressError("unsupported live dependency registry schema")
         if raw["loop_id"] != self.loop_id:
             raise LiveDecisionProgressError(

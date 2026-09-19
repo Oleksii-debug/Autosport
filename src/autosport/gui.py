@@ -237,7 +237,7 @@ class AutosportApp(tk.Tk):
         # readonly single-value mirror so external UIA clients receive a stable
         # Edit/Value surface even when the underlying Tk Text proxy is unavailable.
         self.log_value = tk.StringVar(value="")
-        self.log_accessible = tk.Entry(
+        self.log_accessible = ttk.Entry(
             frame,
             textvariable=self.log_value,
             state="readonly",

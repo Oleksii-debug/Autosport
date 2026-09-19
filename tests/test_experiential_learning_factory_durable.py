@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from autosport.experiential_learning import PolicyRetestSpec, run_policy_retest
 from autosport.learning_environment import Action, EvidenceTruth, RewardEvidence, Transition
 from autosport.scientific_registry import ScientificRegistry
@@ -17,7 +19,7 @@ from test_strategy_model_factory import (
 )
 
 
-def test_policy_successor_retest_persists_negative_scientific_memory(tmp_path):
+def test_legacy_factory_points_cannot_authorize_policy_successor(tmp_path):
     points = _bad_candidate_points()
     registry, registry_path, rule, store, _, _ = _factory_foundation(
         tmp_path, points=points
@@ -62,55 +64,35 @@ def test_policy_successor_retest_persists_negative_scientific_memory(tmp_path):
         transition=transition,
     )
 
-    result = run_policy_retest(
-        runner,
-        predecessor_policy=predecessor,
-        challenger_policy=challenger,
-        update_evidence=update_evidence,
-        spec=PolicyRetestSpec(
-            experiment_id="experiment-v2",
-            model_version_id="model-v2",
-            evaluation_bundle_id="eval-v2",
-            promotion_decision_id="promotion-v2",
-            canonical_strategy_id="canonical-factory-strategy",
-            dataset_snapshot_id="dataset-factory",
-            feature_set_id="features-factory",
-            source_sha256=SHA_C,
-            evaluator_source_sha256=SHA_C,
-            created_at=T4,
-            completed_at=T6,
-            decided_at=T7,
-            predecessor_strategy_version_id="strategy-v1",
-            predecessor_model_version_id="model-v1",
-        ),
-        points=points,
-        rule=rule,
-    )
-
-    assert result.verdict is PromotionVerdict.REJECT
-    assert result.strategy_version_id == challenger.policy_id
-    assert store.exists("transparent-bandit-policy", challenger.policy_id)
+    with pytest.raises(
+        ValueError, match="baseline TrainingPoint evidence cannot authorize"
+    ):
+        run_policy_retest(
+            runner,
+            predecessor_policy=predecessor,
+            challenger_policy=challenger,
+            update_evidence=update_evidence,
+            spec=PolicyRetestSpec(
+                experiment_id="experiment-v2",
+                model_version_id="model-v2",
+                evaluation_bundle_id="eval-v2",
+                promotion_decision_id="promotion-v2",
+                canonical_strategy_id="canonical-factory-strategy",
+                dataset_snapshot_id="dataset-factory",
+                feature_set_id="features-factory",
+                source_sha256=SHA_C,
+                evaluator_source_sha256=SHA_C,
+                created_at=T4,
+                completed_at=T6,
+                decided_at=T7,
+                predecessor_strategy_version_id="strategy-v1",
+                predecessor_model_version_id="model-v1",
+            ),
+            points=points,
+            rule=rule,
+        )
 
     reopened = ScientificRegistry(registry_path)
-    strategy = reopened.get("StrategyVersion", challenger.policy_id)
-    assert strategy is not None
-    assert strategy.payload["environment_sha256"] == challenger.environment_id
-    assert strategy.payload["config_sha256"] == challenger.config_sha256
-
-    experiment = reopened.get("Experiment", "experiment-v2")
-    assert experiment is not None
-    assert experiment.payload["strategy_version_id"] == challenger.policy_id
-    assert experiment.payload["outcome"] == "NEGATIVE"
-
-    decision = reopened.get("PromotionDecision", "promotion-v2")
-    assert decision is not None
-    assert decision.payload["action"] == "REJECT"
-    assert decision.payload["candidate_strategy_version_id"] == challenger.policy_id
-
-    postmortem = reopened.get("Postmortem", "experiment-v2:postmortem")
-    assert postmortem is not None
-    assert postmortem.payload["classification"] == "NEGATIVE"
-    assert postmortem.payload["retest_conditions"]
-
-    reproducibility = reopened.reproducibility_bundle("experiment-v2")
-    assert len(reproducibility["bundle_sha256"]) == 64
+    assert reopened.get("Experiment", "experiment-v2") is None
+    assert reopened.get("PromotionDecision", "promotion-v2") is None
+    assert not store.exists("transparent-bandit-policy", challenger.policy_id)

@@ -202,8 +202,10 @@ class LiveIntentProvenance:
     environment_sha256: str
     config_sha256: str
     strategy_record_sha256: str
+    strategy_available_at: str
     model_version_id: str | None
     model_record_sha256: str | None
+    model_available_at: str | None
 
     def __post_init__(self) -> None:
         _canonical_text("strategy_version_id", self.strategy_version_id)
@@ -212,20 +214,54 @@ class LiveIntentProvenance:
         _canonical_sha256("environment_sha256", self.environment_sha256)
         _canonical_sha256("config_sha256", self.config_sha256)
         _canonical_sha256("strategy_record_sha256", self.strategy_record_sha256)
+        _canonical_timestamp("strategy_available_at", self.strategy_available_at)
         if self.model_version_id is None:
-            if self.model_record_sha256 is not None:
-                raise ValueError("model_record_sha256 requires model_version_id")
+            if self.model_record_sha256 is not None or self.model_available_at is not None:
+                raise ValueError(
+                    "model provenance requires model_version_id"
+                )
         else:
             _canonical_text("model_version_id", self.model_version_id)
-            if self.model_record_sha256 is None:
-                raise ValueError("model_version_id requires model_record_sha256")
+            if self.model_record_sha256 is None or self.model_available_at is None:
+                raise ValueError(
+                    "model_version_id requires complete model provenance"
+                )
             _canonical_sha256("model_record_sha256", self.model_record_sha256)
+            _canonical_timestamp("model_available_at", self.model_available_at)
+
+    def assert_available_at(self, as_of: datetime) -> None:
+        if not isinstance(as_of, datetime):
+            raise TypeError("intent provenance as_of must be datetime")
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            raise ValueError("intent provenance as_of must be timezone-aware")
+        cutoff = as_of.astimezone(timezone.utc)
+        _, strategy_available = _canonical_timestamp(
+            "strategy_available_at",
+            self.strategy_available_at,
+        )
+        if strategy_available > cutoff:
+            raise LiveDecisionProgressError(
+                "registered live intent provenance was not causally available "
+                "at decision time"
+            )
+        if self.model_available_at is not None:
+            _, model_available = _canonical_timestamp(
+                "model_available_at",
+                self.model_available_at,
+            )
+            if model_available > cutoff:
+                raise LiveDecisionProgressError(
+                    "registered live intent provenance was not causally available "
+                    "at decision time"
+                )
 
     @classmethod
     def from_registry(
         cls,
         registry: ScientificRegistry,
         strategy_version_id: str,
+        *,
+        as_of: datetime,
     ) -> "LiveIntentProvenance":
         if not isinstance(registry, ScientificRegistry):
             raise TypeError("scientific_registry must be ScientificRegistry")
@@ -251,6 +287,7 @@ class LiveIntentProvenance:
             )
 
         model_record_sha256: str | None = None
+        model_available_at: str | None = None
         if strategy.model_version_id is not None:
             model_entry = registry.get("ModelVersion", strategy.model_version_id)
             if model_entry is None:
@@ -271,18 +308,36 @@ class LiveIntentProvenance:
                 raise LiveDecisionProgressError(
                     "registered live intent ModelVersion identity is inconsistent"
                 )
+            _, strategy_available = _canonical_timestamp(
+                "StrategyVersion.available_at",
+                strategy_entry.available_at,
+            )
+            _, model_available = _canonical_timestamp(
+                "ModelVersion.available_at",
+                model_entry.available_at,
+            )
+            if model_available > strategy_available:
+                raise LiveDecisionProgressError(
+                    "registered live intent ModelVersion was not available when "
+                    "StrategyVersion became durable"
+                )
             model_record_sha256 = model_entry.record_sha256
+            model_available_at = model_entry.available_at
 
-        return cls(
+        provenance = cls(
             strategy_version_id=strategy.strategy_version_id,
             canonical_strategy_id=strategy.canonical_strategy_id,
             source_sha256=strategy.source_sha256,
             environment_sha256=strategy.environment_sha256,
             config_sha256=strategy.config_sha256,
             strategy_record_sha256=strategy_entry.record_sha256,
+            strategy_available_at=strategy_entry.available_at,
             model_version_id=strategy.model_version_id,
             model_record_sha256=model_record_sha256,
+            model_available_at=model_available_at,
         )
+        provenance.assert_available_at(as_of)
+        return provenance
 
     @property
     def provenance_sha256(self) -> str:
@@ -640,9 +695,12 @@ class PersistentLiveDecisionLoop:
             raise TypeError(
                 "intent_factory must expose canonical strategy_version_id"
             )
+        resolved_clock = clock or (lambda: datetime.now(timezone.utc))
+        provenance_as_of = _require_utc_clock(resolved_clock)
         intent_provenance = LiveIntentProvenance.from_registry(
             scientific_registry,
             factory_strategy_version_id,
+            as_of=provenance_as_of,
         )
         goal_quote_age = authority.contract.max_quote_age_seconds
         if max_quote_age is None:
@@ -668,7 +726,7 @@ class PersistentLiveDecisionLoop:
         self.ingestion_policy = ingestion_policy
         self.max_quote_age = max_quote_age
         self.bounds = bounds or LiveLoopBounds()
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = resolved_clock
         self.post_append_hook = post_append_hook
         self._default_market_store: SQLiteMarketStore | None = None
         self._default_health_store: SourceHealthStore | None = None
@@ -1091,15 +1149,15 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "unfinished live decision requires exact durable dependency registry"
             )
-        if progress.decision_context_sha256 != self._decision_context_sha256():
-            raise LiveDecisionProgressError(
-                "unfinished live decision runtime context changed across restart"
-            )
-
         decision_ts, decision_time = _canonical_timestamp(
             "pending decision_ts",
             progress.decision_ts,
         )
+        self.intent_provenance.assert_available_at(decision_time)
+        if progress.decision_context_sha256 != self._decision_context_sha256():
+            raise LiveDecisionProgressError(
+                "unfinished live decision runtime context changed across restart"
+            )
         if progress.gate == _GATE_NORMAL:
             self._refresh_intents_from_replay(
                 progress.registered_input_ids,
@@ -1535,6 +1593,8 @@ class PersistentLiveDecisionLoop:
         affected_input_ids: tuple[str, ...],
         gate: str,
     ) -> None:
+        _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
+        self.intent_provenance.assert_available_at(decision_time)
         pending = _Progress(
             loop_id=self.loop_id,
             phase=_PHASE_PENDING,

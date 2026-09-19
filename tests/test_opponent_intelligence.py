@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -33,6 +34,22 @@ T2 = "2026-01-03T00:00:00Z"
 T3 = "2026-01-04T00:00:00Z"
 T4 = "2026-01-05T00:00:00Z"
 T5 = "2026-01-06T00:00:00Z"
+
+
+def persisted_snapshot_digest(item: dict[str, object]) -> str:
+    payload = {
+        key: value
+        for key, value in item.items()
+        if key != "snapshot_id"
+    }
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def entity(
@@ -756,6 +773,69 @@ class OpponentIntelligenceTests(unittest.TestCase):
                 self.store_path,
                 ParticipantIdentityRegistry(self.identity_path),
             )
+
+    def test_restart_rejects_rehashed_derived_snapshot_tamper(
+        self,
+    ):
+        self.store.record_performance(observation(score="1"))
+        self.store.record_performance(
+            observation(
+                event_id="event-2",
+                opponent="Casey",
+                score="0",
+                evidence=SHA_C,
+            )
+        )
+        self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
+            causal_cutoff=T2,
+            published_at=T2,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
+            min_support=2,
+        )
+        original = json.loads(
+            self.store_path.read_text(encoding="utf-8")
+        )
+        cases = (
+            (
+                "rating_snapshots",
+                "rating",
+                "0.75",
+                "rating snapshot derived evidence mismatch",
+            ),
+            (
+                "feature_snapshots",
+                "age_seconds",
+                original["feature_snapshots"][0]["age_seconds"] + 1,
+                "feature snapshot derived evidence mismatch",
+            ),
+        )
+        for collection, field, value, message in cases:
+            with self.subTest(collection=collection, field=field):
+                tampered = json.loads(json.dumps(original))
+                snapshot = tampered[collection][0]
+                snapshot[field] = value
+                snapshot["snapshot_id"] = persisted_snapshot_digest(
+                    snapshot
+                )
+                self.store_path.write_text(
+                    json.dumps(tampered, sort_keys=True),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    OpponentIntelligenceError,
+                    message,
+                ):
+                    OpponentIntelligenceStore(
+                        self.store_path,
+                        ParticipantIdentityRegistry(
+                            self.identity_path
+                        ),
+                    )
 
     def test_atomic_publication_failure_does_not_mutate_memory_or_disk(
         self,

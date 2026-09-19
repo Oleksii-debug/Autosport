@@ -25,6 +25,7 @@ def test_complete_windows_surface_inventory_is_stable_and_truthful() -> None:
         "bookmakers_accounts",
         "history_results",
         "settings",
+        "manual_calculation",
         "diagnostics_recovery",
         "help_about",
     ]

@@ -643,6 +643,7 @@ class RobustPortfolioProposal:
             raise ValueError("robust proposal quantum must be positive")
         if any(not isinstance(stake, Decimal) or not stake.is_finite() or stake < 0 for stake in base_stakes):
             raise ValueError("robust proposal stakes must be non-negative finite Decimals")
+        canonical_base_stakes = tuple(stake.normalize() for stake in base_stakes)
         dependency_haircut = max((bound for _, _, bound in evidence.pairwise_dependency_upper_bounds), default=Decimal("0"))
         scale = (
             (Decimal("1") - dependency_haircut)
@@ -650,8 +651,10 @@ class RobustPortfolioProposal:
             * (Decimal("1") - evidence.fee_fraction)
             * (Decimal("1") - evidence.partial_fill_stress_fraction)
         )
-        proposed = tuple((stake * scale).quantize(quantum) for stake in base_stakes)
-        return cls(base_stakes, proposed, dependency_haircut, evidence.uncertainty_fraction, evidence.fee_fraction, evidence.partial_fill_stress_fraction, scale)
+        proposed = tuple(
+            (stake * scale).quantize(quantum) for stake in canonical_base_stakes
+        )
+        return cls(canonical_base_stakes, proposed, dependency_haircut, evidence.uncertainty_fraction, evidence.fee_fraction, evidence.partial_fill_stress_fraction, scale)
 
     @property
     def proposal_sha256(self) -> str:

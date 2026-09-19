@@ -311,8 +311,8 @@ class ParticipantIdentityTests(unittest.TestCase):
 
         reopened = ParticipantIdentityRegistry(self.path)
         self.assertEqual(reopened.lineage_at("a", as_of=T2), (first,))
-        self.assertEqual(reopened.lineage_at("b", as_of=T2), (second,))
-        self.assertEqual(reopened.lineage_at("c", as_of=T2), ())
+        self.assertEqual(reopened.lineage_at("b", as_of=T2), (first, second))
+        self.assertEqual(reopened.lineage_at("c", as_of=T2), (second,))
     def test_unknown_entity_and_invalid_interval_fail_closed(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
         with self.assertRaisesRegex(ParticipantIdentityError, "unknown entity"):

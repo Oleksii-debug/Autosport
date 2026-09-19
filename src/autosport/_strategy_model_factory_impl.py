@@ -1366,9 +1366,6 @@ class ExperimentRunner:
                 "llm_arithmetic_authority": False,
             },
         }
-        evaluation_bundle_sha256 = self.artifact_store.write(
-            "evaluation", spec.evaluation_bundle_id, evaluation_payload
-        )
         champion_evaluation = self.artifact_store.read("evaluation", champion_evaluation_bundle_id)
         champion_folds = {
             fold["evaluation_at"]: fold
@@ -1385,6 +1382,21 @@ class ExperimentRunner:
             )
         if not paired_deltas:
             raise ValueError("promotion evidence requires at least one paired causal holdout fold")
+        practical = sum(paired_deltas, Decimal(0)) / Decimal(len(paired_deltas))
+        uncertainty_method, effect_low, effect_high = _promotion_effect_interval(
+            paired_deltas,
+            binding["uncertainty_method"],
+        )
+
+        def _canonical_decimal_text(value: Decimal) -> str:
+            text = format(value, "f")
+            if "." in text:
+                text = text.rstrip("0").rstrip(".")
+            return "0" if text in ("", "-0") else text
+
+        evaluation_bundle_sha256 = self.artifact_store.write(
+            "evaluation", spec.evaluation_bundle_id, evaluation_payload
+        )
         self.registry.append(
             EvaluationBundleRef(
                 spec.evaluation_bundle_id,
@@ -1397,19 +1409,11 @@ class ExperimentRunner:
                 evaluated_strategy_version_id=spec.strategy_version_id,
                 evaluated_model_version_id=spec.model_version_id,
                 effective_sample_size=len(paired_deltas),
+                effect_interval_low=_canonical_decimal_text(effect_low),
+                effect_interval_high=_canonical_decimal_text(effect_high),
+                practical_improvement=_canonical_decimal_text(practical),
             )
         )
-        practical = sum(paired_deltas, Decimal(0)) / Decimal(len(paired_deltas))
-        uncertainty_method, effect_low, effect_high = _promotion_effect_interval(
-            paired_deltas,
-            binding["uncertainty_method"],
-        )
-
-        def _canonical_decimal_text(value: Decimal) -> str:
-            text = format(value, "f")
-            if "." in text:
-                text = text.rstrip("0").rstrip(".")
-            return "0" if text in ("", "-0") else text
 
         stopping_sha = hashlib.sha256(str(binding["stopping_rule"]).encode("utf-8")).hexdigest()
         comparison_sha = hashlib.sha256(

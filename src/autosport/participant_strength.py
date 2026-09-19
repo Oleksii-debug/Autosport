@@ -614,9 +614,60 @@ def emit_registered_strength_forecast(
     ):
         raise ParticipantStrengthError("strategy/model config identity mismatch")
 
+    dataset_id = _text(
+        model_entry.payload.get("dataset_snapshot_id"), "dataset_snapshot_id"
+    )
+    feature_id = _text(model_entry.payload.get("feature_set_id"), "feature_set_id")
+    protocol_id = _text(
+        model_entry.payload.get("research_protocol_id"), "research_protocol_id"
+    )
+    for field, expected in (
+        ("dataset_snapshot_id", dataset_id),
+        ("feature_set_id", feature_id),
+        ("research_protocol_id", protocol_id),
+    ):
+        if artifact.get(field) != expected:
+            raise ParticipantStrengthError(
+                f"model artifact {field}/registry mismatch"
+            )
+    dataset_entry = registry.get("DatasetSnapshot", dataset_id)
+    feature_entry = registry.get("FeatureSet", feature_id)
+    protocol_entry = registry.get("ResearchProtocol", protocol_id)
+    if dataset_entry is None or feature_entry is None or protocol_entry is None:
+        raise ParticipantStrengthError(
+            "registered model lacks DatasetSnapshot/FeatureSet/ResearchProtocol foundation"
+        )
+    model_available = _instant(model_entry.available_at, "ModelVersion.available_at")
+    for record_name, entry in (
+        ("DatasetSnapshot", dataset_entry),
+        ("FeatureSet", feature_entry),
+        ("ResearchProtocol", protocol_entry),
+    ):
+        if _instant(entry.available_at, f"{record_name}.available_at") > model_available:
+            raise ParticipantStrengthError(
+                f"{record_name} was not available when model version was created"
+            )
+    dataset_manifest = _sha256(
+        dataset_entry.payload.get("manifest_sha256"), "dataset manifest_sha256"
+    )
+    if artifact.get("training_points_manifest_sha256") != dataset_manifest:
+        raise ParticipantStrengthError(
+            "model artifact training population does not match DatasetSnapshot manifest"
+        )
+    if protocol_entry.payload.get("dataset_manifest_sha256") != dataset_manifest:
+        raise ParticipantStrengthError(
+            "ResearchProtocol/DatasetSnapshot manifest mismatch"
+        )
+
     model = load_strength_model(artifact)
     if model.model_id != model_id:
         raise ParticipantStrengthError("model artifact internal identity mismatch")
+    if _instant(
+        dataset_entry.payload.get("causal_cutoff"), "DatasetSnapshot.causal_cutoff"
+    ) != _instant(model.training_cutoff, "model training_cutoff"):
+        raise ParticipantStrengthError(
+            "model training cutoff does not match DatasetSnapshot causal cutoff"
+        )
     probability = Decimal(
         str(
             model.predict_feature(

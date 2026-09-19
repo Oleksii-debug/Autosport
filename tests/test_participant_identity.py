@@ -125,6 +125,38 @@ class ParticipantIdentityTests(unittest.TestCase):
             ["p-1"],
         )
 
+
+    def test_distinct_overlapping_roster_evidence_deduplicates_entity_after_restart(self):
+        registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
+        registry.add_entity(entity("p-1"))
+        first = RosterMembership(
+            "event-1", "provider-a", "p-1", T0, T3, T0, "a" * 64
+        )
+        second = RosterMembership(
+            "event-1", "provider-a", "p-1", T0, T3, T1, "b" * 64
+        )
+        registry.add_roster_membership(first)
+        registry.add_roster_membership(second)
+
+        self.assertEqual(
+            [item.entity_id for item in registry.roster_at("event-1", "provider-a", as_of=T2)],
+            ["p-1"],
+        )
+        self.assertEqual(
+            [item.entity_id for item in registry.roster_at(
+                "event-1", "provider-a", as_of=T2, view=IdentityView.RESTATED_RESEARCH
+            )],
+            ["p-1"],
+        )
+
+        reopened = ParticipantIdentityRegistry(self.path)
+        self.assertEqual(
+            [item.entity_id for item in reopened.roster_at(
+                "event-1", "provider-a", as_of=T2
+            )],
+            ["p-1"],
+        )
+
     def test_duplicate_alias_and_roster_replay_are_idempotent_after_restart(self):
         registry = ParticipantIdentityRegistry.initialize_pristine(self.path)
         registry.add_entity(entity())

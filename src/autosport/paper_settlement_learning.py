@@ -675,6 +675,15 @@ class PaperSettlementLearningBridge:
             (item["available_at"] for item in bundle),
             key=lambda value: _instant(value, "settlement available_at"),
         )
+        revealed_instant = _instant(revealed_at, "settlement revealed_at")
+        action_decided_at = _instant(
+            binding["action_decided_at"], "bound action_decided_at"
+        )
+        ticket_placed_at = _instant(ticket.placed_at, "bound ticket placed_at")
+        if revealed_instant < action_decided_at or revealed_instant < ticket_placed_at:
+            raise PaperSettlementLearningBridgeError(
+                "settlement evidence predates bound action or ticket placement"
+            )
         reward_value = _exact_subtract(ticket.payout, ticket.stake)
         outcome = Outcome(
             environment_id=binding["environment_id"],

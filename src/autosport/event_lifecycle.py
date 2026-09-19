@@ -309,7 +309,7 @@ class EventLifecycleRecord:
             "completion_discovered_at",
             "settlement_discovered_at",
         }
-        if set(raw) not in {expected, prior_causal_expected, legacy_expected}:
+        if set(raw) not in (expected, prior_causal_expected, legacy_expected):
             raise ValueError("lifecycle record fields mismatch")
         value = dict(raw)
         value.setdefault("completion_discovered_at", None)

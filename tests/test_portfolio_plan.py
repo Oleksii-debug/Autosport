@@ -733,7 +733,7 @@ class PortfolioPlanTests(unittest.TestCase):
         expired = self._dependency_evidence(
             book,
             (first, second),
-            as_of="2026-09-18T13:19:00+00:00",
+            as_of="2026-09-18T13:19:58+00:00",
             valid_until="2026-09-18T13:19:59+00:00",
         )
         expired_plan = build_portfolio_plan(

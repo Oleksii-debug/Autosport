@@ -15,6 +15,7 @@ from autosport.scientific_registry import (
     PromotionAction,
     PromotionDecision,
     PromotionEvidenceError,
+    promotion_holdout_access_id,
     ResearchOutcome,
     ResearchProtocol,
     ResearchQuestion,
@@ -123,6 +124,13 @@ def test_same_instant_lexically_earlier_promotion_is_rejected_before_publication
         bundle_id="eval-1", dataset_id="dataset-1", protocol_id="protocol-1",
         bundle_sha=bundle1.bundle_sha256, evidence_id="promotion-1-evidence",
         rollback_identity="NONE", minimum_n=3,
+        holdout_access_id=promotion_holdout_access_id(
+            research_protocol_id="protocol-1",
+            dataset_manifest_sha256=SHA_A,
+            source_identity="source",
+            license_identity="license",
+            confirmation_trial_family_id="protocol-1:confirmation-trial-family",
+        ),
     )
     registry.append(evidence1)
     first = PromotionDecision(

@@ -356,7 +356,7 @@ def test_causal_lookup_honors_availability_and_outcome_reveal(tmp_path):
     assert [entry.record_id for entry in visible] == ["dataset-hidden"]
 
 
-def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_path):
+def test_promotion_fails_closed_then_blocks_reused_confirmation_holdout(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     foundation = _foundation(registry)
     experiment = _experiment(outcome=ResearchOutcome.POSITIVE)
@@ -392,23 +392,11 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
         missing,
         promotion_decision_id="promotion-1",
         evaluation_bundle_id="eval-1",
+        evaluation_bundle_sha256=foundation["bundle"].bundle_sha256,
         promotion_evidence_id=evidence1.promotion_evidence_id,
     )
     registry.record_promotion(promote)
     assert registry.champion_strategy(as_of=T3) == "strategy-1"
-
-    evidence2 = _promotion_evidence(
-        experiment_id="experiment-2",
-        strategy_id="strategy-2",
-        model_id="model-1",
-        bundle_id="eval-2",
-        dataset_id="dataset-1",
-        protocol_id="protocol-1",
-        bundle_sha=SHA_A,
-        evidence_id="placeholder-2",
-        rollback_identity="strategy-1",
-    )
-    registry.append(evidence2)
 
     strategy2 = StrategyVersion(
         "strategy-2",
@@ -420,7 +408,6 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
         model_version_id="model-1",
         predecessor_strategy_version_id="strategy-1",
     )
-    registry.append(strategy2)
     bundle2 = EvaluationBundleRef(
         "eval-2",
         SHA_A,
@@ -432,17 +419,31 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
         evaluated_strategy_version_id="strategy-2",
         evaluated_model_version_id="model-1",
         effective_sample_size=5,
+        effect_interval_low="0.05",
+        effect_interval_high="0.15",
+        practical_improvement="0.1",
     )
-    registry.append(bundle2)
     experiment2 = replace(
         experiment,
         experiment_id="experiment-2",
         strategy_version_id="strategy-2",
         evaluation_bundle_id="eval-2",
-        config_sha256=SHA_B,
         completed_at=T3,
     )
-    registry.append(experiment2)
+    for record in (strategy2, bundle2, experiment2):
+        registry.append(record)
+    evidence2 = _promotion_evidence(
+        experiment_id="experiment-2",
+        strategy_id="strategy-2",
+        model_id="model-1",
+        bundle_id="eval-2",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=bundle2.bundle_sha256,
+        evidence_id="promotion-2-evidence",
+        rollback_identity="strategy-1",
+    )
+    registry.append(evidence2)
     promote2 = PromotionDecision(
         "promotion-2",
         PromotionAction.PROMOTE,
@@ -450,31 +451,18 @@ def test_promotion_fails_closed_then_tracks_promote_and_rollback_lineage(tmp_pat
         "protocol-1",
         foundation["protocol"].protocol_sha256,
         "eval-2",
-        SHA_A,
+        bundle2.bundle_sha256,
         T3,
         predecessor_strategy_version_id="strategy-1",
         candidate_model_version_id="model-1",
         promotion_evidence_id=evidence2.promotion_evidence_id,
     )
-    registry.record_promotion(promote2)
-    assert registry.champion_strategy(as_of=T3) == "strategy-2"
-
-    rollback = PromotionDecision(
-        "rollback-1",
-        PromotionAction.ROLLBACK,
-        "strategy-2",
-        "protocol-1",
-        foundation["protocol"].protocol_sha256,
-        "eval-2",
-        SHA_A,
-        T3,
-        predecessor_strategy_version_id="strategy-2",
-        rollback_to_strategy_version_id="strategy-1",
-        candidate_model_version_id="model-1",
-    )
-    registry.record_promotion(rollback)
+    with pytest.raises(
+        PromotionEvidenceError,
+        match="confirmation holdout access has already been consumed",
+    ):
+        registry.record_promotion(promote2)
     assert registry.champion_strategy(as_of=T3) == "strategy-1"
-
 
 def test_promotion_rejects_forged_effect_interval_against_durable_evaluation(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
@@ -656,7 +644,19 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
     foundation = _foundation(registry)
     first_experiment = _experiment(outcome=ResearchOutcome.POSITIVE)
     registry.append(first_experiment)
-
+    evidence = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="promotion-offset-evidence",
+        rollback_identity="NONE",
+        created_at="2026-01-03T23:00:00+00:00",
+    )
+    registry.append(evidence)
     first = PromotionDecision(
         "promotion-offset-earlier",
         PromotionAction.PROMOTE,
@@ -664,63 +664,16 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
         "protocol-1",
         foundation["protocol"].protocol_sha256,
         "eval-1",
-        SHA_D,
+        foundation["bundle"].bundle_sha256,
         "2026-01-04T01:30:00+02:00",
         candidate_model_version_id="model-1",
+        promotion_evidence_id=evidence.promotion_evidence_id,
     )
     registry.record_promotion(first)
 
-    strategy2 = StrategyVersion(
-        "strategy-offset-2",
-        "canonical-strategy",
-        SHA_C,
-        SHA_D,
-        SHA_B,
-        T2,
-        model_version_id="model-1",
-        predecessor_strategy_version_id="strategy-1",
-    )
-    bundle2 = EvaluationBundleRef(
-        "eval-offset-2",
-        SHA_A,
-        SHA_C,
-        "dataset-1",
-        foundation["protocol"].protocol_sha256,
-        (SHA_B,),
-        T2,
-        evaluated_strategy_version_id="strategy-offset-2",
-        evaluated_model_version_id="model-1",
-        effective_sample_size=5,
-    )
-    registry.append(strategy2)
-    registry.append(bundle2)
-    registry.append(
-        replace(
-            first_experiment,
-            experiment_id="experiment-offset-2",
-            strategy_version_id="strategy-offset-2",
-            evaluation_bundle_id="eval-offset-2",
-            config_sha256=SHA_B,
-        )
-    )
-    later = PromotionDecision(
-        "promotion-offset-later",
-        PromotionAction.PROMOTE,
-        "strategy-offset-2",
-        "protocol-1",
-        foundation["protocol"].protocol_sha256,
-        "eval-offset-2",
-        SHA_A,
-        "2026-01-04T00:00:00+00:00",
-        predecessor_strategy_version_id="strategy-1",
-        candidate_model_version_id="model-1",
-    )
-    registry.record_promotion(later)
-
-    assert registry.champion_strategy(as_of="2026-01-04T01:00:00+00:00") == "strategy-offset-2"
-
-
-
+    assert registry.champion_strategy(as_of="2026-01-03T23:29:59+00:00") is None
+    assert registry.champion_strategy(as_of="2026-01-03T23:30:00+00:00") == "strategy-1"
+    assert registry.champion_strategy(as_of="2026-01-04T01:00:00+00:00") == "strategy-1"
 
 def test_promotion_rejects_positive_but_below_frozen_minimum_improvement(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")

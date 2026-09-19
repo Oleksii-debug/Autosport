@@ -147,10 +147,15 @@ def _seed_foundation(registry: ScientificRegistry, *, dataset_cutoff: str = T1):
         rollback_identity="NONE", minimum_n=3,
     )
     registry.append(evidence)
-    return protocol, model, experiment
+    return protocol, model, experiment, evidence.promotion_evidence_id
 
 
-def _promotion(protocol: ResearchProtocol, *, decision_id: str = "promotion-1") -> PromotionDecision:
+def _promotion(
+    protocol: ResearchProtocol,
+    promotion_evidence_id: str,
+    *,
+    decision_id: str = "promotion-1",
+) -> PromotionDecision:
     return PromotionDecision(
         decision_id,
         PromotionAction.PROMOTE,
@@ -161,35 +166,23 @@ def _promotion(protocol: ResearchProtocol, *, decision_id: str = "promotion-1") 
         SHA_D,
         T3,
         candidate_model_version_id="model-1",
-        promotion_evidence_id=_promotion_evidence(
-            experiment_id="experiment-1",
-            strategy_id="strategy-1",
-            model_id="model-1",
-            bundle_id="eval-1",
-            dataset_id="dataset-1",
-            protocol_id="protocol-1",
-            bundle_sha=SHA_D,
-            evidence_id="promotion-1-evidence",
-            rollback_identity="NONE",
-            minimum_n=3,
-        ).promotion_evidence_id,
+        promotion_evidence_id=promotion_evidence_id,
     )
-
 
 def test_promotion_rejects_dataset_cutoff_different_from_frozen_protocol(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, _, _ = _seed_foundation(registry, dataset_cutoff=T2)
+    protocol, _, _, evidence_id = _seed_foundation(registry, dataset_cutoff=T2)
 
     with pytest.raises(PromotionEvidenceError, match="causal cutoff"):
-        registry.record_promotion(_promotion(protocol))
+        registry.record_promotion(_promotion(protocol, evidence_id))
 
     assert registry.get("PromotionDecision", "promotion-1") is None
 
 
 def test_rollback_rejects_existing_strategy_that_was_never_a_champion(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, model, first_experiment = _seed_foundation(registry)
-    registry.record_promotion(_promotion(protocol))
+    protocol, model, first_experiment, evidence_id = _seed_foundation(registry)
+    registry.record_promotion(_promotion(protocol, evidence_id))
 
     strategy2 = StrategyVersion(
         "strategy-2",

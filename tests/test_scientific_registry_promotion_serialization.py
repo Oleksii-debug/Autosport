@@ -76,7 +76,7 @@ def _seed_promotion_evidence(
         evaluation_design="sealed walk-forward holdout",
         feature_set_version=frozen_feature_version,
         uncertainty_method="bootstrap intervals",
-        multiple_comparison_control="single frozen metric",
+        multiple_comparison_control="single frozen primary metric",
         robustness_checks=("time split",),
         random_seed_policy="seed frozen before evaluation",
         stopping_rule="one final evaluation",
@@ -195,10 +195,14 @@ def _seed_promotion_evidence(
         rollback_identity="NONE", minimum_n=3,
     )
     registry.append(evidence1)
-    return protocol, eval1, eval2, exp1
+    return protocol, eval1, eval2, exp1, evidence1.promotion_evidence_id
 
 
-def _first_promotion(protocol: ResearchProtocol, bundle: EvaluationBundleRef) -> PromotionDecision:
+def _first_promotion(
+    protocol: ResearchProtocol,
+    bundle: EvaluationBundleRef,
+    promotion_evidence_id: str,
+) -> PromotionDecision:
     return PromotionDecision(
         "promotion-1",
         PromotionAction.PROMOTE,
@@ -209,20 +213,8 @@ def _first_promotion(protocol: ResearchProtocol, bundle: EvaluationBundleRef) ->
         bundle.bundle_sha256,
         T3,
         candidate_model_version_id="model-1",
-        promotion_evidence_id=_promotion_evidence(
-            experiment_id="experiment-1",
-            strategy_id="strategy-1",
-            model_id="model-1",
-            bundle_id="eval-1",
-            dataset_id="dataset-1",
-            protocol_id="protocol-1",
-            bundle_sha=bundle.bundle_sha256,
-            evidence_id="promotion-1-evidence",
-            rollback_identity="NONE",
-            minimum_n=3,
-        ).promotion_evidence_id,
+        promotion_evidence_id=promotion_evidence_id,
     )
-
 
 def test_evaluation_bundle_cannot_be_rebound_to_different_experiment_lineage(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
@@ -262,8 +254,8 @@ def test_evaluation_bundle_cannot_be_rebound_to_different_experiment_lineage(tmp
 
 def test_second_promotion_must_name_current_durable_champion(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, eval2, _ = _seed_promotion_evidence(registry)
-    registry.record_promotion(_first_promotion(protocol, eval1))
+    protocol, eval1, eval2, _, evidence_id = _seed_promotion_evidence(registry)
+    registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
 
     conflicting = PromotionDecision(
         "promotion-2",
@@ -284,8 +276,8 @@ def test_second_promotion_must_name_current_durable_champion(tmp_path):
 
 def test_promotion_decision_cannot_be_backdated_before_durable_history(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, _, _ = _seed_promotion_evidence(registry)
-    registry.record_promotion(_first_promotion(protocol, eval1))
+    protocol, eval1, _, _, evidence_id = _seed_promotion_evidence(registry)
+    registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
 
     backdated = PromotionDecision(
         "promotion-backdated",
@@ -304,8 +296,8 @@ def test_promotion_decision_cannot_be_backdated_before_durable_history(tmp_path)
 
 def test_equal_instant_promotion_cannot_reorder_before_durable_history(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, eval2, _ = _seed_promotion_evidence(registry)
-    registry.record_promotion(_first_promotion(protocol, eval1))
+    protocol, eval1, eval2, _, evidence_id = _seed_promotion_evidence(registry)
+    registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
 
     earlier_total_order = PromotionDecision(
         "promotion-0",
@@ -327,19 +319,19 @@ def test_equal_instant_promotion_cannot_reorder_before_durable_history(tmp_path)
 
 def test_promotion_rejects_dataset_causal_cutoff_outside_frozen_protocol(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, _, _ = _seed_promotion_evidence(
+    protocol, eval1, _, _, evidence_id = _seed_promotion_evidence(
         registry,
         dataset_causal_cutoff=T2,
     )
 
     with pytest.raises(PromotionEvidenceError, match="causal cutoff"):
-        registry.record_promotion(_first_promotion(protocol, eval1))
+        registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
 
 
 def test_rollback_rejects_existing_strategy_that_was_never_champion(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, _, _ = _seed_promotion_evidence(registry)
-    registry.record_promotion(_first_promotion(protocol, eval1))
+    protocol, eval1, _, _, evidence_id = _seed_promotion_evidence(registry)
+    registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
 
     unrelated = PromotionDecision(
         "rollback-unrelated",
@@ -361,44 +353,44 @@ def test_rollback_rejects_existing_strategy_that_was_never_champion(tmp_path):
 
 def test_promotion_rejects_feature_version_outside_frozen_protocol(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, _, _ = _seed_promotion_evidence(
+    protocol, eval1, _, _, evidence_id = _seed_promotion_evidence(
         registry,
         frozen_feature_version="v2",
     )
 
     with pytest.raises(PromotionEvidenceError, match="feature set version"):
-        registry.record_promotion(_first_promotion(protocol, eval1))
+        registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
 
 
 def test_promotion_rejects_config_outside_frozen_protocol(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, _, _ = _seed_promotion_evidence(
+    protocol, eval1, _, _, evidence_id = _seed_promotion_evidence(
         registry,
         frozen_config_sha256=SHA_C,
     )
 
     with pytest.raises(PromotionEvidenceError, match="config does not match frozen"):
-        registry.record_promotion(_first_promotion(protocol, eval1))
+        registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
 
 
 def test_promotion_rejects_bundle_candidate_identity_mismatch(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, _, _ = _seed_promotion_evidence(
+    protocol, eval1, _, _, evidence_id = _seed_promotion_evidence(
         registry,
         eval1_strategy_id="strategy-2",
     )
 
     with pytest.raises(PromotionEvidenceError, match="bundle strategy identity"):
-        registry.record_promotion(_first_promotion(protocol, eval1))
+        registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
 
 
 def test_promotion_rejects_ambiguous_duplicate_matching_experiment(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, _, exp1 = _seed_promotion_evidence(registry)
+    protocol, eval1, _, exp1, evidence_id = _seed_promotion_evidence(registry)
     registry.append(
         replace(exp1, experiment_id="experiment-repeat"),
         allow_repeat_experiment=True,
     )
 
     with pytest.raises(PromotionEvidenceError, match="ambiguous"):
-        registry.record_promotion(_first_promotion(protocol, eval1))
+        registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))

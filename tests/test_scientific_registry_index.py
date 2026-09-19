@@ -9,6 +9,7 @@ from autosport.scientific_registry import (
     ModelVersion,
     PromotionAction,
     PromotionDecision,
+    promotion_holdout_access_id,
     ResearchOutcome,
     ResearchProtocol,
     ResearchQuestion,
@@ -125,6 +126,13 @@ def _seed_registry(path):
         bundle_id="eval-1", dataset_id="dataset-1", protocol_id="protocol-1",
         bundle_sha=eval1.bundle_sha256, evidence_id="promotion-1-evidence",
         rollback_identity="NONE", minimum_n=3, created_at=T2,
+        holdout_access_id=promotion_holdout_access_id(
+            research_protocol_id="protocol-1",
+            dataset_manifest_sha256=SHA_A,
+            source_identity="fixture",
+            license_identity="fixture-rights",
+            confirmation_trial_family_id="protocol-1:confirmation-trial-family",
+        ),
     )
     registry.append(evidence1)
     registry.record_promotion(
@@ -289,7 +297,7 @@ def test_lineage_indexes_traverse_strategy_and_model_predecessors(tmp_path):
     assert [entry.record_id for entry in strategy.models] == ["model-1", "model-2"]
 
 
-def test_independent_strategy_contexts_have_independent_champions(tmp_path):
+def test_independent_strategy_contexts_do_not_inherit_champion_without_independent_evidence(tmp_path):
     path = tmp_path / "scientific_registry.json"
     registry = _seed_registry(path)
     protocol = registry.get("ResearchProtocol", "protocol-1")
@@ -333,29 +341,14 @@ def test_independent_strategy_contexts_have_independent_champions(tmp_path):
     for record in (context_b_strategy, context_b_eval, context_b_experiment):
         registry.append(record)
 
-    before_promotion = ScientificRegistryIndex(registry).strategy_state("totals-strategy", as_of=T2)
-    assert before_promotion.champion_strategy_version_id is None
-    assert before_promotion.state_of("strategy-context-b-1") is StrategyLifecycleState.CHALLENGER
-
-    registry.record_promotion(
-        PromotionDecision(
-            "z-promotion-context-b-1",
-            PromotionAction.PROMOTE,
-            "strategy-context-b-1",
-            "protocol-1",
-            protocol_sha256,
-            "eval-context-b-1",
-            context_b_eval.bundle_sha256,
-            T3,
-            candidate_model_version_id="model-1",
-        )
-    )
-
     index = ScientificRegistryIndex(registry)
-    assert index.strategy_state("paper-strategy", as_of=T3).champion_strategy_version_id == "strategy-1"
+    paper = index.strategy_state("paper-strategy", as_of=T3)
     context_b = index.strategy_state("totals-strategy", as_of=T3)
-    assert context_b.champion_strategy_version_id == "strategy-context-b-1"
-    assert context_b.state_of("strategy-context-b-1") is StrategyLifecycleState.PROMOTED
+    assert paper.champion_strategy_version_id == "strategy-1"
+    assert context_b.champion_strategy_version_id is None
+    assert context_b.state_of("strategy-context-b-1") is StrategyLifecycleState.CHALLENGER
 
     reopened = ScientificRegistryIndex(ScientificRegistry(path))
+    assert reopened.strategy_state("paper-strategy", as_of=T3) == paper
     assert reopened.strategy_state("totals-strategy", as_of=T3) == context_b
+

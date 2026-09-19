@@ -157,9 +157,14 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 self.assertEqual(dependencies.input_ids, ("catalog:provider-a:event-1",))
                 self.assertEqual(coordinator.status().cycles_completed, 1)
 
-                restarted = _build_coordinator(root, source, clock)[0]
-                self.assertEqual(restarted.session_id, "session-1")
-                self.assertEqual(restarted.status().cycles_completed, 1)
+                restarted, restarted_store, *_ = _build_coordinator(
+                    root, source, clock
+                )
+                try:
+                    self.assertEqual(restarted.session_id, "session-1")
+                    self.assertEqual(restarted.status().cycles_completed, 1)
+                finally:
+                    restarted_store.close()
             finally:
                 store.close()
 
@@ -185,10 +190,15 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 with self.assertRaises(SessionPausedError):
                     coordinator.tick()
 
-                restarted = _build_coordinator(root, source, clock)[0]
-                self.assertEqual(restarted.status().state, SessionState.PAUSED)
-                restarted.resume()
-                self.assertEqual(restarted.status().state, SessionState.RUNNING)
+                restarted, restarted_store, *_ = _build_coordinator(
+                    root, source, clock
+                )
+                try:
+                    self.assertEqual(restarted.status().state, SessionState.PAUSED)
+                    restarted.resume()
+                    self.assertEqual(restarted.status().state, SessionState.RUNNING)
+                finally:
+                    restarted_store.close()
             finally:
                 store.close()
 
@@ -241,14 +251,17 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 settled = PaperBook.load(root / "paper_book.json")
                 self.assertEqual(settled.balance, Decimal("110"))
 
-                restarted = _build_coordinator(
+                restarted, restarted_store, *_ = _build_coordinator(
                     root, source, clock, outcome_authority=authority
-                )[0]
-                second = restarted.tick()
-                self.assertEqual(second.settled_ticket_ids, ())
-                settled_again = PaperBook.load(root / "paper_book.json")
-                self.assertEqual(settled_again.balance, Decimal("110"))
-                self.assertEqual(authority.calls, 2)
+                )
+                try:
+                    second = restarted.tick()
+                    self.assertEqual(second.settled_ticket_ids, ())
+                    settled_again = PaperBook.load(root / "paper_book.json")
+                    self.assertEqual(settled_again.balance, Decimal("110"))
+                    self.assertEqual(authority.calls, 2)
+                finally:
+                    restarted_store.close()
             finally:
                 store.close()
 

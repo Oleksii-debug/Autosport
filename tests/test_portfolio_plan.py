@@ -759,7 +759,7 @@ class PortfolioPlanTests(unittest.TestCase):
             fee=Decimal("0.01"),
             partial_fill=Decimal("0.10"),
         )
-        proposal = RobustPortfolioProposal.derive((Decimal("50"), Decimal("40")), evidence)
+        proposal = RobustPortfolioProposal.derive((Decimal("50.00"), Decimal("40.00")), evidence)
         expected_scale = (
             Decimal("0.75")
             * Decimal("0.90")

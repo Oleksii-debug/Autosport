@@ -160,7 +160,7 @@ class AnchorSelectionTests(unittest.TestCase):
             evaluate_anchor_selection(
                 [item],
                 protocol(),
-                [supplemental(item, measured_until=D3, available_at=D3)],
+                [supplemental(item, measured_until=D1, available_at=D3)],
             )
         with self.assertRaisesRegex(
             AnchorSelectionError, "observed provenance"

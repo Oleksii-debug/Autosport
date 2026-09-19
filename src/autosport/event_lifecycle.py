@@ -105,10 +105,18 @@ class CatalogEvent:
                 raise ValueError("unsupported event phase") from exc
         _instant(self.available_at, "available_at")
         _optional_instant(self.scheduled_start_at, "scheduled_start_at")
+        _optional_instant(self.completion_discovered_at, "completion_discovered_at")
+        _optional_instant(self.settlement_discovered_at, "settlement_discovered_at")
         if self.completion_ref is not None:
             _text(self.completion_ref, "completion_ref")
         if self.settlement_ref is not None:
             _text(self.settlement_ref, "settlement_ref")
+        if self.completion_ref is None and self.completion_discovered_at is not None:
+            raise ValueError("completion_discovered_at requires completion_ref or completed phase")
+        if self.settlement_ref is not None and self.settlement_discovered_at is None:
+            raise ValueError("settlement evidence requires durable discovery time")
+        if self.phase is EventPhase.COMPLETED and self.completion_discovered_at is None:
+            raise ValueError("completed phase requires durable completion discovery time")
         if self.phase is not EventPhase.COMPLETED and (
             self.completion_ref is not None or self.settlement_ref is not None
         ):
@@ -215,6 +223,8 @@ class EventLifecycleRecord:
     scheduled_start_at: str | None
     completion_ref: str | None
     settlement_ref: str | None
+    completion_discovered_at: str | None = None
+    settlement_discovered_at: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.identity, "identity")
@@ -257,10 +267,15 @@ class EventLifecycleRecord:
             "scheduled_start_at",
             "completion_ref",
             "settlement_ref",
+            "completion_discovered_at",
+            "settlement_discovered_at",
         }
-        if set(raw) != expected:
+        legacy_expected = expected - {"completion_discovered_at", "settlement_discovered_at"}
+        if set(raw) not in {expected, legacy_expected}:
             raise ValueError("lifecycle record fields mismatch")
         value = dict(raw)
+        value.setdefault("completion_discovered_at", None)
+        value.setdefault("settlement_discovered_at", None)
         value["phase"] = EventPhase(value["phase"])
         return cls(**value)
 
@@ -379,6 +394,12 @@ class ContinuousEventLifecycle:
                 scheduled_start_at=event.scheduled_start_at,
                 completion_ref=event.completion_ref,
                 settlement_ref=event.settlement_ref,
+                completion_discovered_at=(
+                    discovered_at if event.phase is EventPhase.COMPLETED else None
+                ),
+                settlement_discovered_at=(
+                    discovered_at if event.settlement_ref is not None else None
+                ),
             )
         if (
             previous.source_id != event.source_id
@@ -405,6 +426,12 @@ class ContinuousEventLifecycle:
             raise CatalogConflictError("event evidence availability cannot move backwards")
         completion_ref = event.completion_ref or previous.completion_ref
         settlement_ref = event.settlement_ref or previous.settlement_ref
+        completion_discovered_at = previous.completion_discovered_at
+        if previous.phase is not EventPhase.COMPLETED and event.phase is EventPhase.COMPLETED:
+            completion_discovered_at = discovered_at
+        settlement_discovered_at = previous.settlement_discovered_at
+        if previous.settlement_ref is None and settlement_ref is not None:
+            settlement_discovered_at = discovered_at
         if (
             previous.completion_ref is not None
             and event.completion_ref is not None
@@ -428,6 +455,8 @@ class ContinuousEventLifecycle:
             scheduled_start_at=previous.scheduled_start_at or event.scheduled_start_at,
             completion_ref=completion_ref,
             settlement_ref=settlement_ref,
+            completion_discovered_at=completion_discovered_at,
+            settlement_discovered_at=settlement_discovered_at,
         )
 
     def apply_page(self, page: CatalogPage, *, discovered_at: str) -> tuple[str, ...]:

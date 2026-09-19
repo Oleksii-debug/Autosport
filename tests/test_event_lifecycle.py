@@ -17,6 +17,10 @@ from autosport.event_lifecycle import (
     canonical_event_identity,
 )
 from autosport.market_mirror import MarketMirror
+from autosport.market_mirror_runtime import (
+    BoundedMirrorInvalidationBuffer,
+    FocusedMirrorDependencyIndex,
+)
 from autosport.storage import SQLiteMarketStore
 
 
@@ -292,6 +296,42 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_refresh_and_register_discovers_post_start_without_manual_event_list(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lifecycle = ContinuousEventLifecycle(root / "catalog.json")
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                store.append(self._event(observed_offset=0, ingest_offset=0))
+                pages = [
+                    self._page(
+                        1,
+                        self._catalog_event(available_offset=1),
+                    )
+                ]
+
+                def fetch(checkpoint):
+                    self.assertIsNone(checkpoint)
+                    return pages[0]
+
+                calls: list[tuple[str, dict[str, object]]] = []
+                registered = lifecycle.refresh_and_register(
+                    fetch,
+                    store,
+                    source_id="provider-a",
+                    discovered_at=(self.START + timedelta(seconds=2)).isoformat(),
+                    required_history=timedelta(0),
+                    register_input=lambda input_id, **selectors: calls.append(
+                        (input_id, selectors)
+                    ),
+                )
+                self.assertEqual(len(registered), 1)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][1]["sports"], "table_tennis")
+                self.assertEqual(calls[0][1]["event_ids"], "event-1")
+            finally:
+                store.close()
+
     def test_completed_event_is_not_registered_and_unresolved_settlement_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -329,6 +369,35 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 self.assertEqual(calls, [])
             finally:
                 store.close()
+
+    def test_dependency_index_routes_same_local_event_id_by_sport(self) -> None:
+        mirror = MarketMirror()
+        table_tennis = self._event(sport="table_tennis")
+        soccer = self._event(sport="soccer")
+        mirror.apply(table_tennis)
+        mirror.apply(soccer)
+        index = FocusedMirrorDependencyIndex(mirror)
+        index.register(
+            "tt",
+            source_ids="provider-a",
+            sports="table_tennis",
+            event_ids="event-1",
+        )
+        index.register(
+            "soccer",
+            source_ids="provider-a",
+            sports="soccer",
+            event_ids="event-1",
+        )
+        updates = BoundedMirrorInvalidationBuffer(mirror)
+        changed = self._event(
+            sport="table_tennis",
+            sequence=2,
+            observed_offset=1,
+        )
+        updates.accept_persisted(changed)
+        affected = index.affected_inputs(updates.drain())
+        self.assertEqual(affected, ("tt",))
 
     def test_mirror_sport_selector_keeps_same_local_ids_separate(self) -> None:
         mirror = MarketMirror()

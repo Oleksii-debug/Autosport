@@ -1984,98 +1984,46 @@ class ModelComputeRouterTests(unittest.TestCase):
                 reopened.total_actual_cost(cloud_request.request_id),
                 Decimal("10.01"),
             )
-            post_restart = reopened.record_execution(
-                execution_id="exec-cumulative-request-after-restart",
-                request_id=local_request.request_id,
-                completed_at=T1,
-                available_at=T1,
-                backend_id="local-cpu",
-                model_id="baseline-v1",
-                config_sha256=SHA_A,
-                actual_cost=Decimal("0.75"),
-                actual_latency_seconds=Decimal("2"),
-                evidence_sha256=SHA_C,
-                as_of=T1,
-            )
-            self.assertEqual(
-                post_restart.disposition,
-                ExecutionDisposition.REJECTED_COST,
-            )
-            self.assertIn(
-                "cumulative actual execution cost",
-                post_restart.reason,
-            )
-            self.assertEqual(
-                reopened.total_actual_cost(local_request.request_id),
-                Decimal("2.80"),
-            )
-            request_after_restart_overrun = reopened.record_execution(
-                execution_id="exec-cumulative-request-after-restart-overrun",
-                request_id=local_request.request_id,
-                completed_at=T1,
-                available_at=T1,
-                backend_id="local-cpu",
-                model_id="baseline-v1",
-                config_sha256=SHA_A,
-                actual_cost=Decimal("0.01"),
-                actual_latency_seconds=Decimal("2"),
-                evidence_sha256=SHA_C,
-                as_of=T1,
-            )
-            self.assertEqual(
-                request_after_restart_overrun.disposition,
-                ExecutionDisposition.REJECTED_COST,
-            )
+            for execution_id, request_id, backend_id, model_id, config_sha256 in (
+                (
+                    "exec-cumulative-request-after-restart",
+                    local_request.request_id,
+                    "local-cpu",
+                    "baseline-v1",
+                    SHA_A,
+                ),
+                (
+                    "exec-cumulative-cloud-after-restart",
+                    cloud_request.request_id,
+                    "permitted-cloud",
+                    "challenger-v2",
+                    SHA_B,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ModelComputeRouterError,
+                    "execution-frozen after restart",
+                ):
+                    reopened.record_execution(
+                        execution_id=execution_id,
+                        request_id=request_id,
+                        completed_at=T1,
+                        available_at=T1,
+                        backend_id=backend_id,
+                        model_id=model_id,
+                        config_sha256=config_sha256,
+                        actual_cost=Decimal("0.01"),
+                        actual_latency_seconds=Decimal("2"),
+                        evidence_sha256=SHA_C,
+                        as_of=T1,
+                    )
             self.assertEqual(
                 reopened.total_actual_cost(local_request.request_id),
-                Decimal("2.81"),
-            )
-
-            cloud_after_restart = reopened.record_execution(
-                execution_id="exec-cumulative-cloud-after-restart",
-                request_id=cloud_request.request_id,
-                completed_at=T1,
-                available_at=T1,
-                backend_id="permitted-cloud",
-                model_id="challenger-v2",
-                config_sha256=SHA_B,
-                actual_cost=Decimal("4"),
-                actual_latency_seconds=Decimal("4"),
-                evidence_sha256=SHA_C,
-                as_of=T1,
-            )
-            self.assertEqual(
-                cloud_after_restart.disposition,
-                ExecutionDisposition.REJECTED_COST,
-            )
-            self.assertIn(
-                "cumulative actual cloud execution cost",
-                cloud_after_restart.reason,
+                Decimal("2.05"),
             )
             self.assertEqual(
                 reopened.total_actual_cost(cloud_request.request_id),
-                Decimal("14.01"),
-            )
-            cloud_after_restart_overrun = reopened.record_execution(
-                execution_id="exec-cumulative-cloud-after-restart-overrun",
-                request_id=cloud_request.request_id,
-                completed_at=T1,
-                available_at=T1,
-                backend_id="permitted-cloud",
-                model_id="challenger-v2",
-                config_sha256=SHA_B,
-                actual_cost=Decimal("0.01"),
-                actual_latency_seconds=Decimal("4"),
-                evidence_sha256=SHA_C,
-                as_of=T1,
-            )
-            self.assertEqual(
-                cloud_after_restart_overrun.disposition,
-                ExecutionDisposition.REJECTED_COST,
-            )
-            self.assertEqual(
-                reopened.total_actual_cost(cloud_request.request_id),
-                Decimal("14.02"),
+                Decimal("10.01"),
             )
 
     def test_restart_rejects_rehashed_execution_tail_truncation(self):

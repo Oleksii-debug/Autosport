@@ -694,5 +694,99 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 )
 
 
+    def test_bound_ticket_outside_current_settlement_handoff_stays_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(root, outcomes={leg.quote_key: "win"})
+
+            self.assertEqual(
+                bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=resolutions,
+                    settled_ticket_ids=("different-ticket-id",),
+                    at="2026-09-19T21:20:00+00:00",
+                ),
+                (),
+            )
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            binding = durable["bindings"][ticket.ticket_id]
+            self.assertEqual(binding["status"], "BOUND")
+            self.assertIsNone(binding["outbox"])
+            self.assertIs(runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+
+            acknowledged = bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:01+00:00",
+            )
+            self.assertEqual(len(acknowledged), 1)
+            self.assertIs(runtime.snapshot().phase, AgentLoopPhase.EVALUATE)
+
+    def test_duplicate_settled_ticket_identity_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                _decision,
+                _environment,
+                _baseline,
+                runtime,
+                _observation,
+                _action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            _book, resolutions = _settle(root, outcomes={leg.quote_key: "win"})
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "duplicate ticket identity",
+            ):
+                bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=resolutions,
+                    settled_ticket_ids=(ticket.ticket_id, ticket.ticket_id),
+                    at="2026-09-19T21:20:00+00:00",
+                )
+            self.assertIs(runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+
+
 if __name__ == "__main__":
     unittest.main()

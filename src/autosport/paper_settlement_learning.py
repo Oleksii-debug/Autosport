@@ -872,7 +872,7 @@ class PaperSettlementLearningBridge:
         settled_ticket_ids: tuple[str, ...],
         at: str,
     ) -> tuple[str, ...]:
-        """Recover and deliver every durable unresolved binding exactly once."""
+        """Publish this handoff\'s new outboxes and recover durable OUTBOX acknowledgements."""
 
         if Path(paper_book_path) != self.paper_book_path:
             raise PaperSettlementLearningBridgeError(
@@ -881,6 +881,15 @@ class PaperSettlementLearningBridge:
         if type(resolutions) is not tuple or type(settled_ticket_ids) is not tuple:
             raise TypeError("settlement handoff collections must be tuples")
         _instant(at, "reconcile at")
+
+        settled_ids: set[str] = set()
+        for settled_ticket_id in settled_ticket_ids:
+            canonical_ticket_id = _text(settled_ticket_id, "settled_ticket_id")
+            if canonical_ticket_id in settled_ids:
+                raise PaperSettlementLearningBridgeError(
+                    "settled_ticket_ids contains duplicate ticket identity"
+                )
+            settled_ids.add(canonical_ticket_id)
 
         pending: list[tuple[str, dict[str, object]]] = []
         with WorkspaceEconomicLock(self.state_path.parent):
@@ -892,6 +901,8 @@ class PaperSettlementLearningBridge:
                     continue
                 ticket = self._bound_ticket(book, binding)
                 if binding["status"] == BOUND:
+                    if ticket_id not in settled_ids:
+                        continue
                     outbox = self._derive_outbox(
                         binding,
                         ticket,

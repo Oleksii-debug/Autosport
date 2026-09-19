@@ -975,11 +975,7 @@ def route_compute(
             "cloud permission and fresh positive paired measured VOC evidence"
         ),
         voc_evidence_id=voc_evidence.evidence_id,
-        domain_observation_id=(
-            None
-            if domain_route is None
-            else domain_route.observation_id
-        ),
+        domain_observation_id=domain_observation_id,
     )
 
 

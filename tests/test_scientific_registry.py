@@ -198,6 +198,7 @@ def _promotion_evidence(
 ) -> PromotionEvidence:
     import hashlib
     payload = {
+        "schema_version": 1,
         "experiment_id": experiment_id,
         "research_protocol_id": protocol_id,
         "research_question_id": "question-1",

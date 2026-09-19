@@ -14,6 +14,7 @@ from autosport.causal_collector import (
 from autosport.collector_service import HeadlessCollectorService
 from autosport.continuous_session import (
     ContinuousSessionCoordinator,
+    ContinuousSessionError,
     SessionPausedError,
     SettlementResolution,
     SessionState,
@@ -248,6 +249,50 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 settled_again = PaperBook.load(root / "paper_book.json")
                 self.assertEqual(settled_again.balance, Decimal("110"))
                 self.assertEqual(authority.calls, 2)
+            finally:
+                store.close()
+
+    def test_conflicting_settlement_evidence_id_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:1",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:1",
+                quote_outcomes={"provider-a:event-1:winner:home": "win"},
+                evidence_id="outcome-conflict",
+                evidence_sha256="0" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            authority = _OutcomeAuthority(resolution)
+            coordinator, store, _lifecycle, _mirror, _invalidations, _dependencies = _build_coordinator(
+                root, source, clock, outcome_authority=authority
+            )
+            try:
+                coordinator.tick()
+                authority.resolution = SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="provider-result:1",
+                    quote_outcomes=dict(resolution.quote_outcomes),
+                    evidence_id="outcome-conflict",
+                    evidence_sha256="1" * 64,
+                    available_at=resolution.available_at,
+                )
+                with self.assertRaises(ContinuousSessionError):
+                    coordinator.tick()
             finally:
                 store.close()
 

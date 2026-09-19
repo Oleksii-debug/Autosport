@@ -618,10 +618,14 @@ def _validate_counterfactual_artifacts(
                 raise ValueError("counterfactual source evidence receipt does not match evaluated case")
         if not registry.causal_precedes("ResearchProtocol",protocol_id,"CounterfactualSourceEvidence",source_identity):
             raise ValueError("counterfactual source evidence was materialized before protocol freeze")
+        source_artifact_sha256=artifact_store.sha256(
+            "counterfactual-source-evidence",
+            source_identity,
+        )
         source_materialization=artifact_store.materialization_receipt(
             "counterfactual-source-evidence",
             source_identity,
-            expected_sha256=case_source_sha256,
+            expected_sha256=source_artifact_sha256,
         )
         source_materialized_at=_impl._instant(
             source_materialization.get("materialized_at"),
@@ -639,11 +643,17 @@ def _validate_counterfactual_artifacts(
             raise ValueError("counterfactual source evidence was materialized before reward availability")
         if source_materialized_at > evaluation_completed:
             raise ValueError("counterfactual source evidence was materialized after evaluation completion")
-        source_evidence=artifact_store.read("counterfactual-source-evidence",source_identity,expected_sha256=case_source_sha256)
+        source_evidence=artifact_store.read(
+            "counterfactual-source-evidence",
+            source_identity,
+            expected_sha256=source_artifact_sha256,
+        )
         bound_case=dict(case_payload); bound_case.pop("source_evidence_sha256",None)
         expected_source_evidence={"schema_version":1,"kind":"autosport-counterfactual-source-evidence-v1","authority_id":authority.authority_id,"authority_version":authority.authority_version,"case":bound_case}
         if source_evidence!=expected_source_evidence:
             raise ValueError("counterfactual source evidence artifact does not match evaluated case")
+        if _impl._canonical_digest(source_evidence)!=case_source_sha256:
+            raise ValueError("counterfactual source evidence semantic digest does not match evaluated case")
 
 
 def _run_policy_candidate_unstaged(

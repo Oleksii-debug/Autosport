@@ -87,10 +87,22 @@ def _cases() -> tuple[PolicyEvaluationCase, ...]:
             sample_id="holdout-1",
             observed_at="2026-09-19T09:05:00Z",
             reward_available_at=HOLDOUT_REVEAL_AT,
-            admissible_actions=("BET", "WAIT"),
-            action_rewards=(("BET", Decimal("0")), ("WAIT", Decimal("2"))),
-            action_costs=(("BET", Decimal("0")), ("WAIT", Decimal("0"))),
-            behavior_propensities=(("BET", Decimal("0.5")), ("WAIT", Decimal("0.5"))),
+            admissible_actions=("BET", "HEDGE", "WAIT"),
+            action_rewards=(
+                ("BET", Decimal("0")),
+                ("HEDGE", Decimal("2")),
+                ("WAIT", Decimal("1")),
+            ),
+            action_costs=(
+                ("BET", Decimal("0")),
+                ("HEDGE", Decimal("0")),
+                ("WAIT", Decimal("0")),
+            ),
+            behavior_propensities=(
+                ("BET", Decimal("0.34")),
+                ("HEDGE", Decimal("0.33")),
+                ("WAIT", Decimal("0.33")),
+            ),
             reward_truth=EvidenceTruth.OBSERVED,
             reward_mode=PolicyRewardMode.MECHANICAL_PAPER,
             source_evidence_sha256="3" * 64,
@@ -101,10 +113,22 @@ def _cases() -> tuple[PolicyEvaluationCase, ...]:
             sample_id="holdout-2",
             observed_at="2026-09-19T09:06:00Z",
             reward_available_at=HOLDOUT_REVEAL_AT,
-            admissible_actions=("BET", "WAIT"),
-            action_rewards=(("BET", Decimal("0")), ("WAIT", Decimal("2"))),
-            action_costs=(("BET", Decimal("0")), ("WAIT", Decimal("0"))),
-            behavior_propensities=(("BET", Decimal("0.5")), ("WAIT", Decimal("0.5"))),
+            admissible_actions=("BET", "HEDGE", "WAIT"),
+            action_rewards=(
+                ("BET", Decimal("0")),
+                ("HEDGE", Decimal("2")),
+                ("WAIT", Decimal("1")),
+            ),
+            action_costs=(
+                ("BET", Decimal("0")),
+                ("HEDGE", Decimal("0")),
+                ("WAIT", Decimal("0")),
+            ),
+            behavior_propensities=(
+                ("BET", Decimal("0.34")),
+                ("HEDGE", Decimal("0.33")),
+                ("WAIT", Decimal("0.33")),
+            ),
             reward_truth=EvidenceTruth.OBSERVED,
             reward_mode=PolicyRewardMode.MECHANICAL_PAPER,
             source_evidence_sha256="4" * 64,
@@ -123,11 +147,12 @@ def _policy_successor(
     decided_at: str,
     available_at: str,
     reward_value: str,
+    action_type: str = "WAIT",
 ):
     action = Action(
         environment_id=ENVIRONMENT,
         observation_id=observation_id,
-        action_type="WAIT",
+        action_type=action_type,
         decided_at=decided_at,
     )
     reward = RewardEvidence(
@@ -243,7 +268,7 @@ def _foundation(tmp_path):
         protocol_id=PROTOCOL_ID,
         config_sha256=CONFIG,
         seed=7,
-        action_types=frozenset({"BET", "WAIT"}),
+        action_types=frozenset({"BET", "HEDGE", "WAIT"}),
     )
     predecessor_policy_sha = persist_policy_state(store, predecessor)
     predecessor_model_id = "model-policy-bootstrap"
@@ -438,7 +463,7 @@ def test_policy_factory_promotes_evaluated_policy_and_verifies_restart(tmp_path)
     assert result.verdict is PromotionVerdict.PROMOTE
     assert result.registry_action is PromotionAction.PROMOTE
     assert result.strategy_version_id == challenger.policy_id
-    assert result.candidate_metrics["policy_loss"] == -2.0
+    assert result.candidate_metrics["policy_loss"] == -1.0
 
     decision = registry.get("PromotionDecision", spec.promotion_decision_id)
     assert decision is not None
@@ -515,7 +540,8 @@ def test_second_policy_attempt_cannot_reuse_same_confirmation_holdout(tmp_path):
         episode_id="a" * 64,
         decided_at="2026-09-19T10:05:00Z",
         available_at="2026-09-19T10:06:00Z",
-        reward_value="1",
+        reward_value="2",
+        action_type="HEDGE",
     )
     second_spec = _spec(
         experiment_id="experiment-policy-v3",
@@ -538,7 +564,7 @@ def test_second_policy_attempt_cannot_reuse_same_confirmation_holdout(tmp_path):
         rule=rule,
     )
 
-    assert repeated.verdict is not PromotionVerdict.PROMOTE
+    assert repeated.verdict is PromotionVerdict.INCONCLUSIVE
     assert registry.champion_strategy(
         as_of=SECOND_DECIDED,
         canonical_strategy_id=CANONICAL_STRATEGY,

@@ -306,6 +306,21 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             self.assertEqual(service.status()["cycles_succeeded"], 0)
             self.assertIsNone(service.delta_store.get("d1"))
 
+    def test_delta_for_undiscovered_event_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            undiscovered = make_delta(
+                delta_id="d2",
+                position=2,
+                event_id="source-x:event-2",
+            )
+            source = FakeCollectorSource([page], [(undiscovered,)])
+            service = self.make_service(tmp, source)
+            with self.assertRaises(CollectorServiceError):
+                service.run_cycle()
+            self.assertEqual(service.status()["cycles_succeeded"], 0)
+            self.assertIsNone(service.delta_store.get("d2"))
+
     def test_missing_feed_commit_order_keeps_late_revision(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CollectorDeltaStore(Path(tmp) / "collector.json")

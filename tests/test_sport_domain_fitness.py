@@ -17,6 +17,8 @@ SHA = "a" * 64
 T0 = "2026-01-01T00:00:00Z"
 T1 = "2026-01-02T00:00:00Z"
 T2 = "2026-01-03T00:00:00Z"
+T1_PLUS_5 = "2026-01-02T00:00:05Z"
+T1_PLUS_11 = "2026-01-02T00:00:11Z"
 
 
 def met(value, unit, state=EvidenceState.MEASURED):
@@ -61,7 +63,7 @@ class SportDomainFitnessTests(unittest.TestCase):
             self.assertEqual(
                 reopened.recommend(
                     sport_id="table-tennis", league_id="league-1",
-                    market_id="match", provider_id="provider-1", as_of=T2,
+                    market_id="match", provider_id="provider-1", as_of=T1_PLUS_5,
                 )[0].status,
                 RouteStatus.ROUTE_BASELINE,
             )
@@ -126,6 +128,40 @@ class SportDomainFitnessTests(unittest.TestCase):
         zero = make_observation(observation_id="zero", quote_coverage=met("0", "fraction"))
         self.assertEqual(recommend_route(stale, as_of=T2).status, RouteStatus.DO_NOT_ROUTE)
         self.assertEqual(recommend_route(zero, as_of=T2).status, RouteStatus.DO_NOT_ROUTE)
+
+    def test_evidence_age_is_causally_bound_to_decision_boundary(self):
+        old_but_intrinsically_fresh = make_observation(
+            observation_id="old-but-fresh",
+            freshness_seconds=met("1", "seconds"),
+            freshness_ttl_seconds=met("10", "seconds"),
+        )
+        self.assertEqual(
+            recommend_route(old_but_intrinsically_fresh, as_of=T1_PLUS_5).status,
+            RouteStatus.ROUTE_BASELINE,
+        )
+        self.assertEqual(
+            recommend_route(old_but_intrinsically_fresh, as_of=T1_PLUS_11).status,
+            RouteStatus.DO_NOT_ROUTE,
+        )
+
+    def test_simulated_evidence_cannot_be_reintroduced_as_observed_under_new_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SportDomainFitnessStore(Path(tmp) / "fitness.json")
+            simulated = make_observation(
+                observation_id="simulated",
+                provenance=EvidenceProvenance.SIMULATED,
+            )
+            self.assertTrue(store.add(simulated))
+            observed = replace(
+                simulated,
+                observation_id="observed-relabel",
+                provenance=EvidenceProvenance.OBSERVED,
+            )
+            with self.assertRaises(SportDomainFitnessError):
+                store.add(observed)
+            reopened = SportDomainFitnessStore(Path(tmp) / "fitness.json")
+            with self.assertRaises(SportDomainFitnessError):
+                reopened.add(observed)
 
     def test_slow_route_uses_duration_not_cost_and_requires_measured_budget(self):
         slow = make_observation(

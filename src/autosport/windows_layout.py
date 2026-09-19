@@ -8,6 +8,10 @@ from tkinter import messagebox, ttk
 import tk_uia
 
 from .localization import require_keys, text
+from .windows_manual_calculation import (
+    WORKBENCH_AUTOMATION_IDS,
+    show_manual_calculation_workbench,
+)
 from .owner_economic_authority import (
     INITIAL_OWNER_FORM_DEFAULTS,
     OWNER_ECONOMIC_FORM_FIELDS,
@@ -51,6 +55,30 @@ WINDOWS_SHELL_AUTOMATION_IDS = {
     "owner_economic_readback": 307,
     "owner_economic_dialog_readback": 308,
 }
+
+MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS = frozenset({
+    "ui.windows.manual_calculation.frame.title",
+    "ui.windows.manual_calculation.button.open",
+    "ui.windows.manual_calculation.accessibility.open.name",
+    "ui.windows.manual_calculation.accessibility.open.description",
+})
+MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS.update(
+    {
+        "ui.windows.manual_calculation.dialog.title",
+        "ui.windows.manual_calculation.dialog.description",
+        "ui.windows.manual_calculation.operation.label",
+        "ui.windows.manual_calculation.input.label",
+        "ui.windows.manual_calculation.calculate",
+        "ui.windows.manual_calculation.clear",
+        "ui.windows.manual_calculation.close",
+        "ui.windows.manual_calculation.status.ready",
+        "ui.windows.manual_calculation.status.success",
+        "ui.windows.manual_calculation.status.error",
+        "ui.windows.manual_calculation.status.cleared",
+        "ui.windows.manual_calculation.error.nonempty",
+    }
+)
+require_keys(MANUAL_CALCULATION_WORKBENCH_LOCALIZATION_KEYS)
 
 OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS = {
     "readback": 308,
@@ -502,6 +530,31 @@ def install_owner_economic_authority_surface(app: Any, frame: Any) -> None:
     refresh_owner_economic_authority_surface(app)
 
 
+def install_manual_calculation_workbench_surface(app: Any, frame: Any) -> None:
+    """Install the single active manual-calculation Windows workbench target."""
+    panel = ttk.LabelFrame(
+        frame,
+        text=text("ui.windows.manual_calculation.frame.title"),
+        padding=(8, 2),
+    )
+    first = frame.winfo_children()[0] if frame.winfo_children() else None
+    if first is None:
+        panel.pack(fill="x", pady=(0, 2))
+    else:
+        panel.pack(fill="x", pady=(0, 2), before=first)
+    app.manual_calculation_button = ttk.Button(
+        panel,
+        text=text("ui.windows.manual_calculation.button.open"),
+        command=lambda: show_manual_calculation_workbench(app),
+        takefocus=True,
+    )
+    app.manual_calculation_button.pack(fill="x")
+    app.bind(
+        "<F10>",
+        lambda _event: app.manual_calculation_button.focus_set(),
+    )
+
+
 def install_windows_product_shell(app: Any) -> None:
     """Install the truthful keyboard-first product navigator in the existing Tk shell."""
     children = app.winfo_children()
@@ -591,6 +644,18 @@ def configure_windows_product_shell_accessibility(app: Any) -> None:
     )
     tk_uia.set_automation_id(app.shell_details, WINDOWS_SHELL_AUTOMATION_IDS["details"])
     tk_uia.set_acc_name(
+        app.manual_calculation_button,
+        text("ui.windows.manual_calculation.accessibility.open.name"),
+    )
+    tk_uia.set_acc_description(
+        app.manual_calculation_button,
+        text("ui.windows.manual_calculation.accessibility.open.description"),
+    )
+    tk_uia.set_automation_id(
+        app.manual_calculation_button,
+        WORKBENCH_AUTOMATION_IDS["open"],
+    )
+    tk_uia.set_acc_name(
         app.owner_economic_authority_button,
         text("ui.windows.owner_authority.accessibility.open.name"),
     )
@@ -651,6 +716,7 @@ def install_compact_windows_layout() -> None:
         frame = next(iter(self.winfo_children()), None)
         if frame is None:
             raise RuntimeError("Autosport root frame is missing")
+        install_manual_calculation_workbench_surface(self, frame)
         install_owner_economic_authority_surface(self, frame)
 
     def configure_with_windows_shell(self) -> None:

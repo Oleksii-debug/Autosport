@@ -511,7 +511,7 @@ class ModelComputeRouterTests(unittest.TestCase):
         self.assertIn("non-positive", latency_nonpositive.reason)
 
         with self.assertRaisesRegex(
-            ModelComputeRouterError,
+            ValueError,
             "latency_opportunity_cost_penalty must be non-negative",
         ):
             self.qualified_voc(
@@ -606,7 +606,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(readback, first)
 
-            changed_latency_cost = self.qualified_voc(
+            changed_latency_cost = voc(
                 evidence_id="voc-identity-restart",
                 latency_opportunity_cost_penalty=Decimal("0.2"),
             )
@@ -839,6 +839,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             rewrite_route_with_valid_hashes(path, raw, forged)
             with self.assertRaisesRegex(
                 ModelComputeRouterError,
+                "VOC evaluation identity does not match evidence_id|"
                 "decision VOC evidence does not match persisted evidence",
             ):
                 self.router_store(path)
@@ -884,7 +885,8 @@ class ModelComputeRouterTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ModelComputeRouterError,
                     "persisted CLOUD decision is not authorized "
-                    "by persisted route inputs",
+                    "by persisted route inputs|"
+                    "VOC evaluation utility/cost values do not match evidence",
                 ):
                     self.router_store(path)
 

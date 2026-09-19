@@ -711,3 +711,70 @@ def test_curriculum_pending_wake_honors_scheduler_stop_before_dispatch(tmp_path)
     assert again.curriculum_wake_id == wake_id
     assert not supervisor.list_runs()
 
+
+@pytest.mark.parametrize(
+    ("transition", "expected_action"),
+    (
+        ("pause", TickAction.PAUSED),
+        ("stop", TickAction.STOPPED),
+    ),
+)
+def test_curriculum_wake_rechecks_status_at_dispatch_reservation(
+    tmp_path,
+    monkeypatch,
+    transition,
+    expected_action,
+):
+    _, supervisor, curriculum = _workspace(tmp_path, max_budget_units=8)
+    candidate = (_candidate(episode_id=f"c-wake-race-{transition}"),)
+    scheduler = ResearchScheduler.initialize_pristine(
+        tmp_path / "research-scheduler.json",
+        curriculum.trigger_adapter,
+    )
+    wake_id = scheduler.queue_curriculum_wake(
+        curriculum,
+        candidate,
+        purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="night-v1",
+        as_of="2026-09-19T03:20:00Z",
+        seed=22,
+        budget_units=1,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+
+    curriculum_type = type(curriculum)
+    original = curriculum_type.select_and_dispatch
+    transitioned = False
+
+    def transition_then_dispatch(self, *args, **kwargs):
+        nonlocal transitioned
+        if not transitioned:
+            transitioned = True
+            if transition == "pause":
+                scheduler.pause()
+            else:
+                scheduler.stop("operator STOP during pre-dispatch race")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        curriculum_type,
+        "select_and_dispatch",
+        transition_then_dispatch,
+    )
+
+    blocked = scheduler.tick_curriculum(
+        curriculum,
+        candidate,
+        max_concurrency=1,
+        active_concurrency=0,
+        remaining_budget_units=8,
+    )
+
+    assert blocked.action is expected_action
+    assert blocked.curriculum_wake_id == wake_id
+    assert scheduler.snapshot()["curriculum_wakes"][wake_id]["status"] == "PENDING"
+    assert curriculum.snapshot()["dispatches"] == {}
+    assert not supervisor.list_runs()
+

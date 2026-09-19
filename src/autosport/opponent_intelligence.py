@@ -729,7 +729,8 @@ class OpponentIntelligenceStore:
                 )
 
         support = len(scores)
-        effective_sample = min(support, len(opponents))
+        opponent_count = len(opponents)
+        effective_sample = min(support, opponent_count)
         last_observed_at = (
             max(
                 (

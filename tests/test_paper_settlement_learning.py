@@ -141,7 +141,18 @@ def _fixture(
         economic_goal=goal,
         risk_policy=risk,
     )
-    return goal, risk, ticket, decision, environment, baseline, runtime, action, bridge
+    return (
+        goal,
+        risk,
+        ticket,
+        decision,
+        environment,
+        baseline,
+        runtime,
+        observation,
+        action,
+        bridge,
+    )
 
 
 def _settle(
@@ -186,13 +197,15 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 locked_odds=Decimal("2.00"),
                 sport="table_tennis",
             )
-            goal, risk, ticket, decision, _environment, baseline, runtime, action, bridge = _fixture(
+            goal, risk, ticket, decision, environment, baseline, runtime, observation, action, bridge = _fixture(
                 root,
                 legs=(leg,),
             )
             bridge.bind_ticket(
                 ticket_id=ticket.ticket_id,
                 decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
                 action=action,
                 baseline_checkpoint=baseline,
             )
@@ -257,13 +270,15 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                     sport="table_tennis",
                 ),
             )
-            _goal, _risk, ticket, decision, _environment, baseline, runtime, action, bridge = _fixture(
+            _goal, _risk, ticket, decision, environment, baseline, runtime, observation, action, bridge = _fixture(
                 root,
                 legs=legs,
             )
             bridge.bind_ticket(
                 ticket_id=ticket.ticket_id,
                 decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
                 action=action,
                 baseline_checkpoint=baseline,
             )
@@ -300,13 +315,15 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                     sport="table_tennis",
                 ),
             )
-            _goal, _risk, ticket, decision, _environment, baseline, _runtime, action, bridge = _fixture(
+            _goal, _risk, ticket, decision, environment, baseline, _runtime, observation, action, bridge = _fixture(
                 root,
                 legs=legs,
             )
             bridge.bind_ticket(
                 ticket_id=ticket.ticket_id,
                 decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
                 action=action,
                 baseline_checkpoint=baseline,
             )
@@ -347,7 +364,7 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 locked_odds=Decimal("2.00"),
                 sport="table_tennis",
             )
-            _goal, _risk, ticket, decision, _environment, baseline, _runtime, action, bridge = _fixture(
+            _goal, _risk, ticket, decision, environment, baseline, _runtime, observation, action, bridge = _fixture(
                 root,
                 legs=(leg,),
                 action_type="WAIT",

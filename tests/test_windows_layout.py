@@ -330,7 +330,11 @@ def test_manual_calculation_workbench_has_no_persistent_or_execution_authority()
     assert "atomic_write_json" not in source
     assert "PaperBook" not in source
     assert "provider" not in source
-    assert "real_money_execution=false" in source
+    from autosport.localization import text
+    assert "ui.windows.manual_calculation.status.success" in source
+    assert text("ui.windows.manual_calculation.status.success").endswith(
+        "real_money_execution=false."
+    )
 
 
 def test_manual_calculation_workbench_input_and_error_contracts():
@@ -483,4 +487,4 @@ def test_manual_calculation_source_has_no_automatic_event_market_or_outcome_sele
     source = inspect.getsource(_calculation_call)
     assert "MarketEvent" not in source
     assert "event_id" not in source
-    assert "selection_id" in source
+    assert "_selection_odds(widget)" in source

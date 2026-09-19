@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from .champion_policy import persist_policy_state
+from .policy_evaluation import (
+    PolicyEvaluationCase,
+    PolicyEvaluationConfig,
+    evaluate_policy_pair,
+)
 from .strategy_model_factory import (
     ExperimentRunner,
     FactoryCandidateSpec,
@@ -146,8 +151,9 @@ def run_policy_retest(
     challenger_policy: BanditPolicyState,
     update_evidence: PolicyUpdateEvidence,
     spec: PolicyRetestSpec,
-    points: Sequence[TrainingPoint],
+    points: Sequence[TrainingPoint] = (),
     rule: PromotionRule,
+    evaluation_cases: Sequence[PolicyEvaluationCase] | None = None,
 ) -> FactoryRunResult:
     """Retest one exact policy successor through the canonical factory/evidence path."""
     if not isinstance(runner, ExperimentRunner):
@@ -198,11 +204,44 @@ def run_policy_retest(
     if factory_spec.seed != challenger_policy.seed:
         raise ValueError("factory candidate seed identity mismatch")
 
-    # The immutable artifact is evidence only.  Persisting it cannot activate the
-    # challenger; ScientificRegistry promotion history remains the sole authority.
-    persist_policy_state(runner.artifact_store, challenger_policy)
-    return runner.run_baseline_candidate(
+    if points:
+        raise ValueError(
+            "baseline TrainingPoint evidence cannot authorize a learned policy retest"
+        )
+    if evaluation_cases is None:
+        raise ValueError(
+            "policy-specific causal evaluation cases are required for learned policy retest"
+        )
+    evaluation_config = PolicyEvaluationConfig.from_frozen_text(
+        binding.get("evaluation_design")
+    )
+    evaluation = evaluate_policy_pair(
+        predecessor_policy,
+        challenger_policy,
+        evaluation_cases,
+        completed_at=spec.completed_at,
+        abstain_action=evaluation_config.abstain_action,
+    )
+    if evaluation.dataset_manifest_sha256 != protocol.payload.get(
+        "dataset_manifest_sha256"
+    ):
+        raise ValueError(
+            "policy evaluation cohort does not match frozen research protocol dataset"
+        )
+    if spec.predecessor_strategy_version_id != predecessor_policy.policy_id:
+        raise ValueError(
+            "policy retest rollback strategy must be the exact evaluated predecessor policy"
+        )
+
+    # Immutable policy artifacts remain evidence only.  The atomic factory transaction
+    # below is the sole path that can create promotion authority.
+    persist_policy_state(runner.artifact_store, predecessor_policy)
+    challenger_artifact_sha256 = persist_policy_state(
+        runner.artifact_store, challenger_policy
+    )
+    return runner.run_policy_candidate(
         factory_spec,
-        points,
+        evaluation,
         rule=rule,
+        policy_artifact_sha256=challenger_artifact_sha256,
     )

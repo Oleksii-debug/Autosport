@@ -178,6 +178,7 @@ class KeyboardAuditTests(unittest.TestCase):
             audit_dialog = SimpleNamespace(destroy=lambda: None)
             with (
                 patch.object(keyboard_audit, "WindowsAutosportApp", return_value=_AuditApp()),
+                patch.object(keyboard_audit, "show_manual_calculation_workbench", return_value=object()),
                 patch.object(
                     keyboard_audit,
                     "show_manual_calculation_workbench",

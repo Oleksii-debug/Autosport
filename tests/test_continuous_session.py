@@ -626,6 +626,12 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 self.assertIs(first_snapshot.phase, AgentLoopPhase.EVALUATE)
                 self.assertIsNotNone(first_snapshot.transition_id)
                 self.assertIsNotNone(first_snapshot.reward_id)
+                bridge_state = json.loads(
+                    (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+                )
+                self.assertIsNotNone(
+                    bridge_state["bindings"][ticket.ticket_id]["settlement_intent"]
+                )
 
                 raw_loop = json.loads((root / "agent-loop.json").read_text(encoding="utf-8"))
                 self.assertEqual(len(raw_loop["resolutions"]), 1)

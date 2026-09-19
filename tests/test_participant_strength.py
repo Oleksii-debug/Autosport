@@ -127,6 +127,113 @@ def _point(index: int, feature: float, target: float) -> TrainingPoint:
     )
 
 
+def _registered_strength_lineage(
+    tmp_path,
+    *,
+    dataset_cutoff: str,
+    dataset_available_at: str,
+    model_created_at: str,
+    strategy_created_at: str,
+):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry.json"
+    )
+    artifacts = FactoryArtifactStore(tmp_path / "factory-artifacts")
+    points = (_point(0, 0.2, 1.0), _point(1, -0.2, 0.0))
+    model = RatingDifferenceBaselineFactory().fit(
+        "model-lineage", points, training_cutoff=dataset_cutoff
+    )
+    payload = model.to_payload()
+    payload.update(
+        {
+            "model_version_id": "model-lineage",
+            "research_protocol_id": "protocol-lineage",
+            "dataset_snapshot_id": "dataset-lineage",
+            "feature_set_id": "features-lineage",
+            "config_sha256": SHA_C,
+            "training_points_manifest_sha256": model.training_manifest_sha256,
+            "seed": 7,
+        }
+    )
+    artifact_sha = artifacts.write("model", "model-lineage", payload)
+    registry.append(
+        FeatureSet(
+            feature_set_id="features-lineage",
+            version="1",
+            definition_sha256=SHA_D,
+            source_sha256=SHA_A,
+            available_at_utc=T1,
+        )
+    )
+    registry.append(
+        ResearchProtocol(
+            binding=ScientificProtocolBinding(
+                research_protocol_id="protocol-lineage",
+                research_question_id="question-lineage",
+                research_question_sha256=SHA_D,
+                hypothesis_id="hypothesis-lineage",
+                hypothesis_sha256=SHA_E,
+                inclusion_criteria="causal rating snapshot pairs",
+                exclusion_criteria="future or insufficient evidence",
+                lawful_source_requirements="test fixture",
+                causal_cutoff=dataset_cutoff,
+                evaluation_design="fixed causal fixture",
+                feature_set_version="1",
+                uncertainty_method="descriptive rating radius",
+                multiple_comparison_control="single challenger",
+                robustness_checks=("future-leakage",),
+                random_seed_policy="deterministic seed 7",
+                stopping_rule="fixed fixture",
+                promotion_rule="no promotion",
+                expected_artifacts=("model",),
+                code_config_sha256=SHA_C,
+                frozen_at_utc=T1,
+            ),
+            source_sha256=SHA_A,
+            environment_sha256=SHA_B,
+            dataset_manifest_sha256=model.training_manifest_sha256,
+            available_at_utc=T1,
+        )
+    )
+    registry.append(
+        DatasetSnapshot(
+            dataset_snapshot_id="dataset-lineage",
+            manifest_sha256=model.training_manifest_sha256,
+            source_identity="test-causal-rating-snapshots",
+            license_identity="test-fixture",
+            causal_cutoff=dataset_cutoff,
+            available_at_utc=dataset_available_at,
+        )
+    )
+    registry.append(
+        ModelVersion(
+            model_version_id="model-lineage",
+            model_family=model.model_family,
+            artifact_sha256=artifact_sha,
+            source_sha256=SHA_A,
+            environment_sha256=SHA_B,
+            dataset_snapshot_id="dataset-lineage",
+            feature_set_id="features-lineage",
+            research_protocol_id="protocol-lineage",
+            seed=7,
+            config_sha256=SHA_C,
+            created_at=model_created_at,
+        )
+    )
+    registry.append(
+        StrategyVersion(
+            strategy_version_id="strategy-lineage",
+            canonical_strategy_id="participant-strength",
+            source_sha256=SHA_A,
+            environment_sha256=SHA_B,
+            config_sha256=SHA_C,
+            created_at=strategy_created_at,
+            model_version_id="model-lineage",
+        )
+    )
+    return registry, artifacts
+
+
 def test_training_point_evidence_binds_snapshot_identity_without_changing_legacy_manifest():
     pair = _pair()
     point = pair.training_point(subject_won=True, target_available_at=T2)
@@ -544,3 +651,49 @@ def test_registered_forecast_rejects_missing_scientific_foundation(tmp_path):
             strategy_version_id="strategy-orphan",
             quote_key="event-1:match-winner:participant-a",
         )
+
+def test_registered_forecast_rejects_training_cutoff_after_model_creation(tmp_path):
+    registry, artifacts = _registered_strength_lineage(
+        tmp_path,
+        dataset_cutoff=T4,
+        dataset_available_at=T1,
+        model_created_at=T2,
+        strategy_created_at=T2,
+    )
+
+    with pytest.raises(
+        ParticipantStrengthError,
+        match="DatasetSnapshot causal cutoff exceeds model version availability",
+    ):
+        emit_registered_strength_forecast(
+            registry=registry,
+            artifact_store=artifacts,
+            evidence=_pair(decision_at=T5),
+            model_version_id="model-lineage",
+            strategy_version_id="strategy-lineage",
+            quote_key="event-1:match-winner:participant-a",
+        )
+
+
+def test_registered_forecast_rejects_strategy_that_predates_bound_model(tmp_path):
+    registry, artifacts = _registered_strength_lineage(
+        tmp_path,
+        dataset_cutoff=T2,
+        dataset_available_at=T2,
+        model_created_at=T4,
+        strategy_created_at=T3,
+    )
+
+    with pytest.raises(
+        ParticipantStrengthError,
+        match="model version was not available when strategy version was created",
+    ):
+        emit_registered_strength_forecast(
+            registry=registry,
+            artifact_store=artifacts,
+            evidence=_pair(decision_at=T5),
+            model_version_id="model-lineage",
+            strategy_version_id="strategy-lineage",
+            quote_key="event-1:match-winner:participant-a",
+        )
+

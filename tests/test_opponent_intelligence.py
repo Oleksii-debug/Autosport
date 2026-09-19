@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import unittest
 from unittest.mock import patch
 
@@ -663,6 +664,68 @@ class OpponentIntelligenceTests(unittest.TestCase):
                     evidence="d" * 64,
                     supersedes=first.performance_id,
                 )
+            )
+
+    def test_same_event_pair_requires_explicit_correction_and_is_orientation_invariant(
+        self,
+    ):
+        first = self.store.record_performance(observation(score="1"))
+        with self.assertRaisesRegex(
+            OpponentIntelligenceError,
+            "requires explicit supersedes",
+        ):
+            self.store.record_performance(
+                observation(
+                    subject="Blair",
+                    opponent="Alex",
+                    score="0",
+                    evidence=SHA_C,
+                )
+            )
+        with self.assertRaisesRegex(
+            OpponentIntelligenceError,
+            "preserve event/context identity",
+        ):
+            self.store.record_performance(
+                observation(
+                    subject="Blair",
+                    opponent="Alex",
+                    score="0",
+                    available=T3,
+                    recorded=T3,
+                    evidence=SHA_C,
+                    supersedes=first.performance_id,
+                )
+            )
+
+    def test_restart_rejects_snapshot_with_missing_durable_input(
+        self,
+    ):
+        self.store.record_performance(observation())
+        self.store.build_snapshots(
+            participant_entity_id="p-alex",
+            sport_id="tennis",
+            league_entity_id="league-tour-a",
+            market_context_id="match-outcome",
+            causal_cutoff=T2,
+            published_at=T2,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
+            min_support=1,
+        )
+        raw = json.loads(self.store_path.read_text(encoding="utf-8"))
+        raw["performances"] = []
+        self.store_path.write_text(
+            json.dumps(raw, sort_keys=True),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            OpponentIntelligenceError,
+            "missing durable performance input",
+        ):
+            OpponentIntelligenceStore(
+                self.store_path,
+                ParticipantIdentityRegistry(self.identity_path),
             )
 
     def test_atomic_publication_failure_does_not_mutate_memory_or_disk(

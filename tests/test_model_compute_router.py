@@ -1556,6 +1556,27 @@ class ModelComputeRouterTests(unittest.TestCase):
                     evidence_sha256=SHA_C,
                     as_of=T1,
                 )
+            self.assertEqual(
+                store.total_actual_cost(req.request_id),
+                Decimal("1.25"),
+            )
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "interrupted execution publication",
+            ):
+                store.record_execution(
+                    execution_id="exec-journal-first-recovery-2",
+                    request_id=req.request_id,
+                    completed_at=T1,
+                    available_at=T1,
+                    backend_id="local-cpu",
+                    model_id="baseline-v1",
+                    config_sha256=SHA_A,
+                    actual_cost=Decimal("0.25"),
+                    actual_latency_seconds=Decimal("2"),
+                    evidence_sha256=SHA_C,
+                    as_of=T1,
+                )
             store._persist = original_persist
 
             reopened = ModelComputeRouterStore(path)

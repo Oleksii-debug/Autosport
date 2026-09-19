@@ -7,12 +7,13 @@ RealExecutionLedger remains the sole execution-effect authority.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from hashlib import sha256
 import json
+from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from .betfair_account_readonly import (
@@ -29,6 +30,10 @@ from .bookmaker_capability import (
     BookmakerCapabilityError,
     BookmakerCapabilityProfile,
 )
+from .economic_goal import AutomationLevel, EconomicGoalContractError
+from .economic_goal_provenance import provenance_for
+from .economic_goal_store import EconomicGoalStore
+from .workspace_lock import WorkspaceEconomicLock
 from .real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
@@ -188,6 +193,12 @@ class BetfairSupervisedExecutionGate:
     profile_sha256: str | None = None
     authority_ref: str | None = None
     authority_sha256: str | None = None
+    economic_goal_store: EconomicGoalStore | None = None
+    economic_goal_workspace: Path | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
@@ -209,6 +220,111 @@ class BetfairSupervisedExecutionGate:
             )
         _text(self.authority_ref, "authority_ref")
         _sha(self.authority_sha256, "authority_sha256")
+        if not isinstance(self.economic_goal_store, EconomicGoalStore):
+            raise BetfairSupervisedExecutionError(
+                "enabled gate requires canonical EconomicGoalStore authority"
+            )
+        workspace = self.economic_goal_store.workspace.resolve()
+        if self.economic_goal_store.path.resolve() != (
+            workspace / EconomicGoalStore.FILE_NAME
+        ):
+            raise BetfairSupervisedExecutionError(
+                "enabled gate requires canonical EconomicGoalStore path"
+            )
+        object.__setattr__(self, "economic_goal_workspace", workspace)
+
+    @classmethod
+    def from_economic_goal_store(
+        cls,
+        store: EconomicGoalStore,
+        *,
+        bookmaker_id: str,
+        account_id: str,
+        profile_sha256: str,
+    ) -> "BetfairSupervisedExecutionGate":
+        """Bind enablement to the exact current durable owner contract."""
+
+        if not isinstance(store, EconomicGoalStore):
+            raise BetfairSupervisedExecutionError(
+                "store must be canonical EconomicGoalStore"
+            )
+        try:
+            goal = store.load()
+        except EconomicGoalContractError as exc:
+            raise BetfairSupervisedExecutionError(
+                "cannot load durable owner execution authority"
+            ) from exc
+        goal_sha256 = provenance_for(goal).contract_sha256
+        return cls(
+            enabled=True,
+            bookmaker_id=bookmaker_id,
+            account_id=account_id,
+            profile_sha256=profile_sha256,
+            authority_ref=(
+                f"economic-goal:{goal.goal_id}:revision:{goal.revision}"
+            ),
+            authority_sha256=goal_sha256,
+            economic_goal_store=store,
+        )
+
+    def _require_current_owner_authority(
+        self,
+        *,
+        action: ExecutionAction,
+        bound: BoundSupervisedExecutionPlan,
+        execution_workspace: Path,
+    ) -> None:
+        if not isinstance(execution_workspace, Path):
+            raise BetfairSupervisedExecutionError(
+                "execution workspace must be a canonical Path"
+            )
+        canonical_workspace = execution_workspace.resolve()
+        if self.economic_goal_workspace != canonical_workspace:
+            raise BetfairSupervisedExecutionError(
+                "owner authority is not bound to the trusted execution workspace"
+            )
+        store = EconomicGoalStore(canonical_workspace)
+        try:
+            goal = store.load()
+        except EconomicGoalContractError as exc:
+            raise BetfairSupervisedExecutionError(
+                "cannot load durable owner execution authority"
+            ) from exc
+        goal_sha256 = provenance_for(goal).contract_sha256
+        expected_ref = (
+            f"economic-goal:{goal.goal_id}:revision:{goal.revision}"
+        )
+        if goal.automation_level < AutomationLevel.SUPERVISED_EXECUTION:
+            raise BetfairSupervisedExecutionError(
+                "owner authority does not permit supervised execution"
+            )
+        if goal.emergency_stop:
+            raise BetfairSupervisedExecutionError(
+                "owner emergency STOP is active"
+            )
+        if action.bookmaker_id in goal.blocked_providers:
+            raise BetfairSupervisedExecutionError(
+                "owner authority blocks this provider"
+            )
+        if action.market_id in goal.blocked_markets:
+            raise BetfairSupervisedExecutionError(
+                "owner authority blocks this market"
+            )
+        if (
+            bound.constraint_for(action.action_id).max_slippage_fraction
+            > goal.max_execution_slippage_fraction
+        ):
+            raise BetfairSupervisedExecutionError(
+                "execution slippage exceeds current owner authority"
+            )
+        if (
+            self.authority_ref != expected_ref
+            or self.authority_sha256 != goal_sha256
+            or bound.economic_goal_contract_sha256 != goal_sha256
+        ):
+            raise BetfairSupervisedExecutionError(
+                "durable owner authority does not match bound execution plan"
+            )
 
     def require(
         self,
@@ -216,11 +332,17 @@ class BetfairSupervisedExecutionGate:
         action: ExecutionAction,
         profile: BookmakerCapabilityProfile,
         bound: BoundSupervisedExecutionPlan,
+        execution_workspace: Path,
     ) -> None:
         if not self.enabled:
             raise BetfairSupervisedExecutionError(
                 "supervised Betfair placeOrders gate is disabled"
             )
+        self._require_current_owner_authority(
+            action=action,
+            bound=bound,
+            execution_workspace=execution_workspace,
+        )
         if (
             action.bookmaker_id != self.bookmaker_id
             or action.account_id != self.account_id
@@ -393,6 +515,30 @@ class BetfairSupervisedExecutionResult:
     external_receipt_id: str | None
 
 
+def _validate_betfair_place_action(action: ExecutionAction) -> int:
+    """Validate deterministic Betfair action shape before any durable attempt."""
+
+    if not isinstance(action, ExecutionAction):
+        raise BetfairSupervisedExecutionError(
+            "action must be canonical ExecutionAction"
+        )
+    if action.side != "BACK":
+        raise BetfairSupervisedExecutionError(
+            "Betfair supervised write seam currently supports BACK only"
+        )
+    try:
+        selection_id = int(action.selection_id)
+    except (TypeError, ValueError) as exc:
+        raise BetfairSupervisedExecutionError(
+            "Betfair selection_id must be canonical positive integer text"
+        ) from exc
+    if str(selection_id) != action.selection_id or selection_id <= 0:
+        raise BetfairSupervisedExecutionError(
+            "Betfair selection_id must be canonical positive integer text"
+        )
+    return selection_id
+
+
 class BetfairSupervisedPlaceOrdersClient:
     """Action-specific placeOrders client; no arbitrary write RPC is exposed."""
 
@@ -441,19 +587,14 @@ class BetfairSupervisedPlaceOrdersClient:
         profile: BookmakerCapabilityProfile,
         bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
+        execution_workspace: Path,
     ) -> BetfairPlaceExecutionReport:
-        if not isinstance(action, ExecutionAction):
-            raise BetfairSupervisedExecutionError(
-                "action must be canonical ExecutionAction"
-            )
-        if action.side != "BACK":
-            raise BetfairSupervisedExecutionError(
-                "Betfair supervised write seam currently supports BACK only"
-            )
+        selection_id = _validate_betfair_place_action(action)
         self._gate.require(
             action=action,
             profile=profile,
             bound=bound,
+            execution_workspace=execution_workspace,
         )
         provider_ref = _text(provider_order_ref, "provider_order_ref")
         if len(provider_ref) > 32 or any(
@@ -462,16 +603,6 @@ class BetfairSupervisedPlaceOrdersClient:
         ):
             raise BetfairSupervisedExecutionError(
                 "provider_order_ref must be <=32 lowercase hex characters"
-            )
-        try:
-            selection_id = int(action.selection_id)
-        except (TypeError, ValueError) as exc:
-            raise BetfairSupervisedExecutionError(
-                "Betfair selection_id must be canonical positive integer text"
-            ) from exc
-        if str(selection_id) != action.selection_id or selection_id <= 0:
-            raise BetfairSupervisedExecutionError(
-                "Betfair selection_id must be canonical positive integer text"
             )
 
         request_id = self._next_request_id()
@@ -822,54 +953,68 @@ def execute_betfair_supervised_action(
             "client must be BetfairSupervisedPlaceOrdersClient"
         )
     action = bound.action_for(action_id)
-    client._gate.require(
-        action=action,
-        profile=profile,
-        bound=bound,
-    )
-
-    begin_supervised_attempt(
-        ledger,
-        bound,
-        approval,
-        action_id=action_id,
-        attempt_id=attempt_id,
-    )
-    provider_order_ref = ledger.bind_provider_order_reference(
-        attempt_id=attempt_id,
-        provider_id=action.bookmaker_id,
-    )
+    _validate_betfair_place_action(action)
     now = clock or _now
-    ledger.mark_submitted(
-        attempt_id,
-        submitted_at=now(),
-    )
-    try:
-        report = client.place_action(
-            action,
+    execution_workspace = ledger.path.parent.resolve()
+
+    # Serialize the current owner authority through the actual provider-write
+    # boundary, not just through local ledger preparation. EconomicGoalStore
+    # successors use this same writer lock, so either a tighter owner revision
+    # becomes durable first and the initial gate rejects before any attempt
+    # mutation, or this already-authorized bounded call reaches placeOrders
+    # before that successor can publish. The provider client still re-reads the
+    # canonical owner contract immediately before transport while the fence is
+    # held. This prevents a known local authority denial from being mislabeled
+    # as provider-effect uncertainty.
+    with WorkspaceEconomicLock(execution_workspace):
+        client._gate.require(
+            action=action,
             profile=profile,
             bound=bound,
-            provider_order_ref=provider_order_ref,
+            execution_workspace=execution_workspace,
         )
-    except (
-        BetfairPlaceOrdersAmbiguous,
-        BetfairSupervisedExecutionError,
-    ):
-        ledger.mark_unknown(
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action_id,
+            attempt_id=attempt_id,
+        )
+        provider_order_ref = ledger.bind_provider_order_reference(
+            attempt_id=attempt_id,
+            provider_id=action.bookmaker_id,
+        )
+        ledger.mark_submitted(
             attempt_id,
-            reason=(
-                "betfair_placeOrders_ambiguous_effect_"
-                "requires_readback"
-            ),
-            observed_at=now(),
+            submitted_at=now(),
         )
-        return BetfairSupervisedExecutionResult(
-            PlaceOrdersOutcome.UNKNOWN,
-            attempt_id,
-            ledger.attempt_state(attempt_id),
-            None,
-            None,
-        )
+        try:
+            report = client.place_action(
+                action,
+                profile=profile,
+                bound=bound,
+                provider_order_ref=provider_order_ref,
+                execution_workspace=execution_workspace,
+            )
+        except (
+            BetfairPlaceOrdersAmbiguous,
+            BetfairSupervisedExecutionError,
+        ):
+            ledger.mark_unknown(
+                attempt_id,
+                reason=(
+                    "betfair_placeOrders_ambiguous_effect_"
+                    "requires_readback"
+                ),
+                observed_at=now(),
+            )
+            return BetfairSupervisedExecutionResult(
+                PlaceOrdersOutcome.UNKNOWN,
+                attempt_id,
+                ledger.attempt_state(attempt_id),
+                None,
+                None,
+            )
 
     evidence_id = report.evidence_id
     ledger.bind_provider_evidence(

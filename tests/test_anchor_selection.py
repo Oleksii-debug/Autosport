@@ -7,6 +7,8 @@ from autosport.anchor_selection import (
     AnchorMetricRule,
     AnchorSelectionError,
     AnchorSelectionProtocol,
+    AnchorSupplementalEvidence,
+    AnchorSupplementalMetric,
     MetricDirection,
     evaluate_anchor_selection,
 )
@@ -23,6 +25,7 @@ SHA = "a" * 64
 T0 = "2026-01-01T00:00:00Z"
 D1 = "2026-01-03T00:00:00Z"
 D2 = "2026-01-20T00:00:00Z"
+D3 = "2026-01-21T00:00:00Z"
 
 
 def met(value, unit, state=EvidenceState.MEASURED):
@@ -64,6 +67,36 @@ def observation(sport, oid, *, league="league-1", provider="provider-1", overrid
     if overrides:
         values.update(overrides)
     return SportDomainFitnessObservation(**values)
+
+
+def supplemental(
+    item,
+    *,
+    measured_until=D1,
+    available_at=D1,
+    provenance=EvidenceProvenance.OBSERVED,
+    source_evidence_sha256="b" * 64,
+):
+    return AnchorSupplementalEvidence(
+        observation_id=item.observation_id,
+        evidence_sha256=item.evidence_sha256,
+        source_evidence_sha256=source_evidence_sha256,
+        measured_until=measured_until,
+        available_at=available_at,
+        provenance=provenance,
+        calibration_error=AnchorSupplementalMetric(
+            EvidenceState.MEASURED, Decimal("0.10"), "fraction"
+        ),
+        execution_feasibility=AnchorSupplementalMetric(
+            EvidenceState.MEASURED, Decimal("0.90"), "fraction"
+        ),
+        settlement_identity_complexity=AnchorSupplementalMetric(
+            EvidenceState.MEASURED, Decimal("1"), "complexity"
+        ),
+        oos_net_economic_value=AnchorSupplementalMetric(
+            EvidenceState.MEASURED, Decimal("0.20"), "net_economic_value"
+        ),
+    )
 
 
 def protocol(**overrides):
@@ -118,6 +151,46 @@ class AnchorSelectionTests(unittest.TestCase):
         ids = set(report.input_observation_ids)
         self.assertNotIn("future", ids)
         self.assertNotIn("sim", ids)
+
+    def test_rejects_future_or_non_observed_supplemental_evidence(self):
+        item = observation("fast-sport", "f1")
+        with self.assertRaisesRegex(
+            AnchorSelectionError, "not causally available"
+        ):
+            evaluate_anchor_selection(
+                [item],
+                protocol(),
+                [supplemental(item, measured_until=D3, available_at=D3)],
+            )
+        with self.assertRaisesRegex(
+            AnchorSelectionError, "observed provenance"
+        ):
+            evaluate_anchor_selection(
+                [item],
+                protocol(),
+                [supplemental(item, provenance=EvidenceProvenance.SIMULATED)],
+            )
+
+    def test_rejects_supplemental_evidence_with_wrong_observation_hash(self):
+        item = observation("fast-sport", "f1")
+        bad = replace(supplemental(item), evidence_sha256="c" * 64)
+        with self.assertRaisesRegex(
+            AnchorSelectionError, "does not bind the observation evidence hash"
+        ):
+            evaluate_anchor_selection([item], protocol(), [bad])
+
+    def test_protocol_cannot_omit_required_anchor_dimensions(self):
+        rules = protocol().metrics
+        with self.assertRaisesRegex(
+            AnchorSelectionError, "preserve all required dimensions"
+        ):
+            protocol(metrics=rules[:-1])
+
+    def test_supplemental_digest_binds_timing_provenance_and_values(self):
+        item = observation("fast-sport", "f1")
+        first = supplemental(item)
+        changed = replace(first, available_at="2026-01-04T00:00:00Z")
+        self.assertNotEqual(first.supplemental_sha256, changed.supplemental_sha256)
 
     def test_dependence_clusters_prevent_duplicate_inflation(self):
         duplicated = observation("fast-sport", "dup-2")

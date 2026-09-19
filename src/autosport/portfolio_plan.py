@@ -89,15 +89,6 @@ def _decimal_from_serialized(name: str, value: object) -> Decimal:
     return parsed
 
 
-def _semantic_decimal_string(name: str, value: Decimal) -> str:
-    """Serialize numerically equal Decimals identically without rounding."""
-    if not isinstance(value, Decimal) or not value.is_finite():
-        raise ValueError(f"{name} must be a finite Decimal")
-    if value == 0:
-        return "0"
-    return format(value.normalize(), "f")
-
-
 def _canonical_json_payload(payload: object) -> str:
     return json.dumps(
         payload,
@@ -664,13 +655,13 @@ class RobustPortfolioProposal:
         return {
             "schema":"autosport.robust_portfolio_proposal",
             "schema_version":1,
-            "base_stakes":[_semantic_decimal_string("robust base stake", v) for v in self.base_stakes],
-            "proposed_stakes":[_semantic_decimal_string("robust proposed stake", v) for v in self.proposed_stakes],
-            "dependency_haircut_fraction":_semantic_decimal_string("robust dependency haircut", self.dependency_haircut_fraction),
-            "uncertainty_fraction":_semantic_decimal_string("robust uncertainty", self.uncertainty_fraction),
-            "fee_fraction":_semantic_decimal_string("robust fee", self.fee_fraction),
-            "partial_fill_stress_fraction":_semantic_decimal_string("robust partial fill stress", self.partial_fill_stress_fraction),
-            "robust_scale":_semantic_decimal_string("robust scale", self.robust_scale),
+            "base_stakes":[str(v) for v in self.base_stakes],
+            "proposed_stakes":[str(v) for v in self.proposed_stakes],
+            "dependency_haircut_fraction":str(self.dependency_haircut_fraction),
+            "uncertainty_fraction":str(self.uncertainty_fraction),
+            "fee_fraction":str(self.fee_fraction),
+            "partial_fill_stress_fraction":str(self.partial_fill_stress_fraction),
+            "robust_scale":str(self.robust_scale),
         }
 
     @classmethod

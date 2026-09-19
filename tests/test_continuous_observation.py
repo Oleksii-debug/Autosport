@@ -331,6 +331,28 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(calls, [])
 
+    def test_cli_provider_factory_error_redacts_configured_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            secret = "super-secret-key"
+
+            def provider_factory(*_args, **_kwargs):
+                raise ValueError(f"invalid credential token={secret}")
+
+            with patch.dict("os.environ", {"AUTOSPORT_PARLAYAPI_KEY": secret}, clear=False):
+                with patch("builtins.print") as print_mock:
+                    code = main(
+                        [tmp, "--enable-network-observation"],
+                        provider_factory=provider_factory,
+                    )
+
+            self.assertEqual(code, 2)
+            rendered = "\n".join(
+                " ".join(str(arg) for arg in call.args)
+                for call in print_mock.call_args_list
+            )
+            self.assertNotIn(secret, rendered)
+            self.assertIn("[REDACTED]", rendered)
+
     def test_config_rejects_zero_interval_to_prevent_tight_loop(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "interval_seconds"):

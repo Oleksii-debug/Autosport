@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 from .integrity import atomic_write_json
 from .workspace_lock import WorkspaceEconomicLock
@@ -396,11 +396,39 @@ class PairedVOCEvaluation:
         return value
 
 
+class VOCCanonicalAuthorityResolver(Protocol):
+    """Resolve a VOC record from canonical decision/outcome/protocol authorities.
+
+    Implementations MUST resolve identity from durable canonical sources rather than
+    trusting the caller-supplied PairedVOCEvaluation. Returning the supplied object
+    unchanged is intentionally not an application-level authority implementation.
+    """
+
+    def resolve(
+        self,
+        evaluation: PairedVOCEvaluation,
+        *,
+        as_of: str,
+    ) -> PairedVOCEvaluation | None: ...
+
+
 class VOCEvaluationStore:
     """Restart-safe immutable memory for positive, null, negative and harmful VOC results."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        canonical_authority_resolver: VOCCanonicalAuthorityResolver | None = None,
+    ) -> None:
+        if canonical_authority_resolver is not None and not isinstance(
+            canonical_authority_resolver, VOCCanonicalAuthorityResolver,
+        ):
+            raise TypeError(
+                "canonical_authority_resolver must implement VOCCanonicalAuthorityResolver"
+            )
         self.path = Path(path)
+        self._canonical_authority_resolver = canonical_authority_resolver
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self._write([])
@@ -451,6 +479,7 @@ class VOCEvaluationStore:
         return loaded
 
     def record(self, evaluation: PairedVOCEvaluation) -> str:
+        """Persist immutable evidence; persistence alone grants no CLOUD authority."""
         if not isinstance(evaluation, PairedVOCEvaluation):
             raise TypeError("evaluation must be PairedVOCEvaluation")
         with WorkspaceEconomicLock(self.path.parent):
@@ -491,7 +520,17 @@ class VOCEvaluationStore:
             raise VOCEvaluationError("VOC evaluation identity/digest mismatch")
         if _instant("evaluated_at", value.evaluated_at) > _instant("as_of", as_of):
             raise VOCEvaluationError("VOC evaluation is not causally available")
-        return value
+        resolver = self._canonical_authority_resolver
+        if resolver is None:
+            raise VOCEvaluationError("missing canonical VOC authority resolver")
+        resolved = resolver.resolve(value, as_of=as_of)
+        if resolved is None:
+            raise VOCEvaluationError("canonical VOC authority could not resolve evaluation")
+        if not isinstance(resolved, PairedVOCEvaluation):
+            raise VOCEvaluationError("canonical VOC authority returned invalid evaluation")
+        if resolved.payload() != value.payload():
+            raise VOCEvaluationError("canonical VOC authority differs from routed evaluation")
+        return resolved
 
     def values(self) -> tuple[PairedVOCEvaluation, ...]:
         loaded = self._load()

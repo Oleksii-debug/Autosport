@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from autosport._strategy_model_factory_impl import _holdout_consumed_by_other_evidence
 from autosport.scientific_registry import (
     DatasetSnapshot,
     DuplicateExperimentFingerprintError,
@@ -647,6 +648,43 @@ def test_promotion_controller_rejects_evidence_local_sample_floor_bypass():
         in result.reasons
     )
     assert "effective sample size below frozen minimum" in result.reasons
+
+
+def test_holdout_consumption_allows_same_frozen_attempt_retry_only():
+    same_attempt = {
+        "experiment_id": "experiment-v2",
+        "research_protocol_id": "protocol-factory",
+        "research_question_id": "question-factory",
+        "hypothesis_id": "hypothesis-factory",
+        "candidate_strategy_version_id": "strategy-v2",
+        "candidate_model_version_id": "model-v2",
+        "evaluation_bundle_id": "eval-v2",
+        "dataset_snapshot_id": "dataset-factory",
+        "confirmation_trial_family_id": "protocol-factory:confirmation-trial-family",
+        "holdout_access_id": "holdout-stable",
+        "estimand": "mse",
+        "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+        "rollback_identity": "strategy-v1",
+        "created_at": T7,
+    }
+    assert not _holdout_consumed_by_other_evidence(
+        (dict(same_attempt),),
+        same_attempt_identity=same_attempt,
+    )
+
+    other_attempt = dict(same_attempt)
+    other_attempt["experiment_id"] = "experiment-other"
+    assert _holdout_consumed_by_other_evidence(
+        (other_attempt,),
+        same_attempt_identity=same_attempt,
+    )
+
+    unrelated_holdout = dict(other_attempt)
+    unrelated_holdout["holdout_access_id"] = "holdout-other"
+    assert not _holdout_consumed_by_other_evidence(
+        (unrelated_holdout,),
+        same_attempt_identity=same_attempt,
+    )
 
 
 def test_factory_rejects_nonfinite_metrics():

@@ -40,6 +40,22 @@ def _canonical_digest(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _holdout_consumed_by_other_evidence(
+    prior_payloads: Iterable[Mapping[str, object]],
+    *,
+    same_attempt_identity: Mapping[str, object],
+) -> bool:
+    """Treat an identical frozen-attempt evidence record as resumable, not reusable."""
+    holdout_access_id = same_attempt_identity["holdout_access_id"]
+    for payload in prior_payloads:
+        if payload.get("holdout_access_id") != holdout_access_id:
+            continue
+        if all(payload.get(key) == value for key, value in same_attempt_identity.items()):
+            continue
+        return True
+    return False
+
+
 def _finite(value: object, name: str) -> float:
     if type(value) not in (int, float):
         raise ValueError(f"{name} must be numeric")
@@ -1426,11 +1442,30 @@ class ExperimentRunner:
             license_identity=dataset.payload.get("license_identity"),
             confirmation_trial_family_id=confirmation_trial_family_id,
         )
-        holdout_consumed = any(
-            prior_evidence.payload.get("holdout_access_id") == holdout_access_id
-            for prior_evidence in self.registry.causal_records(
-                "PromotionEvidence", as_of=spec.decided_at
-            )
+        same_attempt_identity = {
+            "experiment_id": spec.experiment_id,
+            "research_protocol_id": spec.research_protocol_id,
+            "research_question_id": binding["research_question_id"],
+            "hypothesis_id": binding["hypothesis_id"],
+            "candidate_strategy_version_id": spec.strategy_version_id,
+            "candidate_model_version_id": spec.model_version_id,
+            "evaluation_bundle_id": spec.evaluation_bundle_id,
+            "dataset_snapshot_id": spec.dataset_snapshot_id,
+            "confirmation_trial_family_id": confirmation_trial_family_id,
+            "holdout_access_id": holdout_access_id,
+            "estimand": rule.primary_metric,
+            "direction": PromotionEvidenceDirection.LOWER_IS_BETTER.value,
+            "rollback_identity": current_champion,
+            "created_at": spec.decided_at,
+        }
+        holdout_consumed = _holdout_consumed_by_other_evidence(
+            (
+                prior_evidence.payload
+                for prior_evidence in self.registry.causal_records(
+                    "PromotionEvidence", as_of=spec.decided_at
+                )
+            ),
+            same_attempt_identity=same_attempt_identity,
         )
         promotion_effect_evidence = {
             "schema_version": 1,

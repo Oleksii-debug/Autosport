@@ -20,6 +20,7 @@ from autosport.causal_collector import (
     GapStateError,
     SyncState,
     canonical_event_digest,
+    digest_source_payload,
 )
 from autosport.domain import MarketEvent
 from autosport.ingestion_health import SourceHealthStore
@@ -79,12 +80,17 @@ class CollectorDeltaTests(unittest.TestCase):
         epoch="epoch-1",
         available="2026-01-01T00:00:04+00:00",
         payload=None,
+        source_payload=None,
         revision_of=None,
         revision_number=0,
         gap_state=GapState.NONE,
         sync_state=None,
     ):
         payload = payload or event_payload()
+        if source_payload is None:
+            source_payload = json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":")
+            )
         if sync_state is None:
             sync_state = {
                 GapState.NONE: SyncState.READY,
@@ -103,6 +109,7 @@ class CollectorDeltaTests(unittest.TestCase):
             cursor_position=cursor_position,
             event_dedupe_key=MarketEvent.from_dict(payload).dedupe_key,
             event_id=payload["event_id"],
+            source_payload_digest=digest_source_payload(source_payload),
             canonical_event_digest=canonical_event_digest(payload),
             source_observed_at="2026-01-01T00:00:01+00:00",
             collector_received_at="2026-01-01T00:00:02+00:00",
@@ -133,6 +140,20 @@ class CollectorDeltaTests(unittest.TestCase):
             checkpoint = reopened.stream_checkpoint("source-x", "epoch-1")
             self.assertEqual(checkpoint.last_position, 1)
             self.assertEqual(checkpoint.last_cursor, "1")
+
+    def test_source_and_normalized_digests_preserve_distinct_evidence(self):
+        payload = event_payload()
+        source_payload = json.dumps(payload, ensure_ascii=False, indent=2)
+        delta = self.make_delta(payload=payload, source_payload=source_payload)
+        self.assertEqual(
+            delta.source_payload_digest,
+            digest_source_payload(source_payload),
+        )
+        self.assertNotEqual(delta.source_payload_digest, delta.canonical_event_digest)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            store.append(delta)
+            self.assertEqual(store.get(delta.delta_id), delta)
 
     def test_conflicting_duplicate_id_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -207,6 +228,84 @@ class CollectorDeltaTests(unittest.TestCase):
             )
             self.assertEqual([item.delta_id for item in known], ["early"])
             self.assertEqual({item.delta_id for item in research}, {"early", "late"})
+
+    def test_late_correction_preserves_decision_view_and_restates_research(self):
+        original_payload = event_payload(odds="1.80")
+        corrected_payload = event_payload(odds="1.95")
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = CollectorDeltaStore(Path(tmp) / "collector.json")
+            original = self.make_delta(
+                delta_id="d1",
+                cursor_position=1,
+                payload=original_payload,
+                available="2026-01-01T00:00:04+00:00",
+            )
+            correction = self.make_delta(
+                delta_id="d1r",
+                cursor_position=1,
+                payload=corrected_payload,
+                available="2026-01-01T00:00:10+00:00",
+                revision_of="d1",
+                revision_number=1,
+            )
+            collector.append(original)
+            collector.append(correction)
+
+            decision_applied = []
+            decision_consumer = DesktopDeltaConsumer(
+                collector,
+                DesktopDeltaCheckpointStore(Path(tmp) / "decision-desktop.json"),
+                resolve_event=lambda delta: (
+                    original_payload if delta.delta_id == "d1" else corrected_payload
+                ),
+                apply_event=lambda delta, event: (
+                    decision_applied.append(delta.delta_id)
+                    or DesktopApplicationReceipt(
+                        delta_id=delta.delta_id,
+                        canonical_event_digest=canonical_event_digest(event),
+                        receipt_id=f"receipt:{delta.delta_id}",
+                        applied_at="2026-01-01T00:00:05+00:00",
+                    )
+                ),
+                lookup_application_receipt=lambda delta: None,
+            )
+            self.assertEqual(
+                decision_consumer.drain(
+                    as_of="2026-01-01T00:00:05+00:00",
+                    view=CausalView.AS_KNOWN_AT_DECISION,
+                ),
+                ("d1",),
+            )
+            self.assertEqual(decision_applied, ["d1"])
+
+            research_applied = []
+            research_consumer = DesktopDeltaConsumer(
+                collector,
+                DesktopDeltaCheckpointStore(Path(tmp) / "research-desktop.json"),
+                resolve_event=lambda delta: (
+                    original_payload if delta.delta_id == "d1" else corrected_payload
+                ),
+                apply_event=lambda delta, event: (
+                    research_applied.append(delta.delta_id)
+                    or DesktopApplicationReceipt(
+                        delta_id=delta.delta_id,
+                        canonical_event_digest=canonical_event_digest(event),
+                        receipt_id=f"receipt:{delta.delta_id}",
+                        applied_at="2026-01-01T00:00:11+00:00",
+                    )
+                ),
+                lookup_application_receipt=lambda delta: None,
+            )
+            self.assertEqual(
+                research_consumer.drain(
+                    as_of="2026-01-01T00:00:11+00:00",
+                    view=CausalView.RESTATED_RESEARCH,
+                ),
+                ("d1r",),
+            )
+            self.assertEqual(research_applied, ["d1r"])
+            self.assertEqual(correction.revision_of, "d1")
+            self.assertEqual(correction.revision_number, 1)
 
     def test_end_to_end_offline_reconnect_survives_restart(self):
         payload1 = event_payload(event_id="e1")
@@ -629,6 +728,76 @@ class CollectorDeltaTests(unittest.TestCase):
             )
             self.assertEqual(replayed, [])
             self.assertTrue(DesktopDeltaCheckpointStore(desktop_path).has_ack("d1"))
+
+    def test_canonical_application_receipt_time_is_after_durable_completion(self):
+        event = MarketEvent.from_dict(event_payload())
+        payload = event.to_dict()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector_path = root / "collector.json"
+            desktop_path = root / "desktop.json"
+            market_path = root / "market.db"
+            health_path = root / "health.json"
+            application_path = root / "canonical-application.json"
+
+            collector = CollectorDeltaStore(collector_path)
+            delta = self.make_delta(payload=payload)
+            collector.append(delta)
+            market_store = SQLiteMarketStore(market_path)
+            real_bus = MarketEventBus(market_store)
+
+            class CrashBeforeMarketBus:
+                def __init__(self):
+                    self.crashed = False
+
+                def publish(self, current):
+                    if not self.crashed:
+                        self.crashed = True
+                        raise RuntimeError("crash-after-prepare-before-market")
+                    return real_bus.publish(current)
+
+            first_application = CanonicalDesktopApplication(
+                CrashBeforeMarketBus(),
+                SourceHealthStore(health_path),
+                application_path,
+                clock=lambda: "2026-01-01T00:00:04+00:00",
+            )
+            first_consumer = DesktopDeltaConsumer(
+                collector,
+                DesktopDeltaCheckpointStore(desktop_path),
+                resolve_event=lambda _: event,
+                apply_event=first_application.apply,
+                lookup_application_receipt=first_application.lookup_receipt,
+            )
+            with self.assertRaises(RuntimeError):
+                first_consumer.drain(as_of="2026-01-01T00:00:05+00:00")
+            self.assertIsNone(first_application.lookup_receipt(delta))
+            self.assertEqual(market_store.events("e1"), [])
+            self.assertEqual(SourceHealthStore(health_path).get("source-x").poll_count, 0)
+
+            reopened_application = CanonicalDesktopApplication(
+                real_bus,
+                SourceHealthStore(health_path),
+                application_path,
+                clock=lambda: "2026-01-01T00:00:06+00:00",
+            )
+            reopened_consumer = DesktopDeltaConsumer(
+                CollectorDeltaStore(collector_path),
+                DesktopDeltaCheckpointStore(desktop_path),
+                resolve_event=lambda _: event,
+                apply_event=reopened_application.apply,
+                lookup_application_receipt=reopened_application.lookup_receipt,
+            )
+            self.assertEqual(
+                reopened_consumer.drain(as_of="2026-01-01T00:00:07+00:00"),
+                ("d1",),
+            )
+            receipt = reopened_application.lookup_receipt(delta)
+            self.assertIsNotNone(receipt)
+            self.assertEqual(receipt.applied_at, "2026-01-01T00:00:06+00:00")
+            self.assertEqual(len(market_store.events("e1")), 1)
+            self.assertEqual(SourceHealthStore(health_path).get("source-x").poll_count, 1)
+            market_store.close()
 
     def test_canonical_application_persists_market_health_and_receipt_across_restart(self):
         event = MarketEvent.from_dict(event_payload())

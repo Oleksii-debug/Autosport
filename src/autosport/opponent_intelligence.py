@@ -253,6 +253,8 @@ class RatingSnapshot:
     algorithm_family: str
     algorithm_version: str
     config_sha256: str
+    min_support: int
+    max_age_seconds: int
     code_sha256: str
     dependency_sha256: str
     predecessor_snapshot_ids: tuple[str, ...]
@@ -277,6 +279,8 @@ class RatingSnapshot:
             "algorithm_family": self.algorithm_family,
             "algorithm_version": self.algorithm_version,
             "config_sha256": self.config_sha256,
+            "min_support": self.min_support,
+            "max_age_seconds": self.max_age_seconds,
             "code_sha256": self.code_sha256,
             "dependency_sha256": self.dependency_sha256,
             "predecessor_snapshot_ids": list(self.predecessor_snapshot_ids),
@@ -636,6 +640,153 @@ class OpponentIntelligenceStore:
             )
         return tuple(edges)
 
+    @staticmethod
+    def _rating_config_digest(
+        *,
+        algorithm_family: str,
+        algorithm_version: str,
+        min_support: int,
+        max_age_seconds: int,
+        code_sha256: str,
+        dependency_sha256: str,
+    ) -> str:
+        family = _text("algorithm_family", algorithm_family)
+        version = _text("algorithm_version", algorithm_version)
+        if type(min_support) is not int or min_support < 1:
+            raise OpponentIntelligenceError(
+                "min_support must be a positive integer"
+            )
+        if type(max_age_seconds) is not int or max_age_seconds < 1:
+            raise OpponentIntelligenceError(
+                "max_age_seconds must be a positive integer"
+            )
+        code = _sha256("code_sha256", code_sha256)
+        dependency = _sha256(
+            "dependency_sha256", dependency_sha256
+        )
+        return _digest(
+            {
+                "algorithm_family": family,
+                "algorithm_version": version,
+                "min_support": min_support,
+                "max_age_seconds": max_age_seconds,
+                "code_sha256": code,
+                "dependency_sha256": dependency,
+                "numeric": "decimal",
+                "score_domain": "[0,1]",
+                "effective_sample_rule": "min(support,distinct_opponents)",
+                "uncertainty_method": (
+                    "1/sqrt(effective_sample); descriptive support radius, "
+                    "not a probabilistic CI"
+                ),
+            }
+        )
+
+    @staticmethod
+    def _derive_snapshot_values(
+        *,
+        participant_entity_id: str,
+        inputs: Iterable[PerformanceRecord],
+        causal_cutoff: str,
+        min_support: int,
+        max_age_seconds: int,
+    ) -> tuple[
+        int,
+        int,
+        int,
+        str | None,
+        str | None,
+        SnapshotState,
+        str | None,
+        int | None,
+    ]:
+        participant = _text(
+            "participant_entity_id", participant_entity_id
+        )
+        cutoff = _time_text("causal_cutoff", causal_cutoff)
+        if type(min_support) is not int or min_support < 1:
+            raise OpponentIntelligenceError(
+                "min_support must be a positive integer"
+            )
+        if type(max_age_seconds) is not int or max_age_seconds < 1:
+            raise OpponentIntelligenceError(
+                "max_age_seconds must be a positive integer"
+            )
+        records = tuple(inputs)
+        scores: list[Decimal] = []
+        opponents: set[str] = set()
+        for item in records:
+            score = _decimal("score", item.observation.score)
+            if item.subject_entity_id == participant:
+                scores.append(score)
+                opponents.add(item.opponent_entity_id)
+            elif item.opponent_entity_id == participant:
+                scores.append(Decimal(1) - score)
+                opponents.add(item.subject_entity_id)
+            else:
+                raise OpponentIntelligenceError(
+                    "rating snapshot input does not involve participant"
+                )
+
+        support = len(scores)
+        effective_sample = min(support, len(opponents))
+        last_observed_at = (
+            max(
+                (
+                    _time_text(
+                        "observed_at", item.observation.observed_at
+                    )
+                    for item in records
+                ),
+                key=lambda value: _instant(
+                    "observed_at", value
+                ),
+            )
+            if records
+            else None
+        )
+        age_seconds = None
+        if last_observed_at is not None:
+            age_seconds = max(
+                0,
+                int(
+                    (
+                        _instant("causal_cutoff", cutoff)
+                        - _instant(
+                            "last_observed_at", last_observed_at
+                        )
+                    ).total_seconds()
+                ),
+            )
+        fresh = (
+            age_seconds is not None
+            and age_seconds <= max_age_seconds
+        )
+        state = (
+            SnapshotState.SUPPORTED
+            if effective_sample >= min_support and fresh
+            else SnapshotState.INSUFFICIENT
+        )
+        rating: str | None = None
+        uncertainty: str | None = None
+        if state is SnapshotState.SUPPORTED:
+            with localcontext() as context:
+                context.prec = 28
+                mean = sum(scores, Decimal(0)) / Decimal(support)
+                width = Decimal(1) / Decimal(effective_sample).sqrt()
+            rating = _decimal_text(mean)
+            uncertainty = _decimal_text(width)
+        return (
+            support,
+            effective_sample,
+            opponent_count,
+            rating,
+            uncertainty,
+            state,
+            last_observed_at,
+            age_seconds,
+        )
+
     def build_snapshots(
         self,
         *,
@@ -680,19 +831,13 @@ class OpponentIntelligenceStore:
             )
         version = _text("algorithm_version", algorithm_version)
         family = "bounded-mean-score"
-        config_sha256 = _digest(
-            {
-                "algorithm_family": family,
-                "algorithm_version": version,
-                "min_support": min_support,
-                "max_age_seconds": max_age_seconds,
-                "code_sha256": code,
-                "dependency_sha256": dependency,
-                "numeric": "decimal",
-                "score_domain": "[0,1]",
-                "effective_sample_rule": "min(support,distinct_opponents)",
-                "uncertainty_method": "1/sqrt(effective_sample); descriptive support radius, not a probabilistic CI",
-            }
+        config_sha256 = self._rating_config_digest(
+            algorithm_family=family,
+            algorithm_version=version,
+            min_support=min_support,
+            max_age_seconds=max_age_seconds,
+            code_sha256=code,
+            dependency_sha256=dependency,
         )
         known_entities = {
             entity_id
@@ -742,65 +887,22 @@ class OpponentIntelligenceStore:
                 )
             )
         )
-        scores: list[Decimal] = []
-        opponents: set[str] = set()
-        for item in inputs:
-            score = _decimal("score", item.observation.score)
-            if item.subject_entity_id == participant:
-                scores.append(score)
-                opponents.add(item.opponent_entity_id)
-            else:
-                scores.append(Decimal(1) - score)
-                opponents.add(item.subject_entity_id)
-
-        support = len(scores)
-        effective_sample = min(support, len(opponents))
-        last_observed_at = (
-            max(
-                (
-                    _time_text(
-                        "observed_at", item.observation.observed_at
-                    )
-                    for item in inputs
-                ),
-                key=lambda value: _instant(
-                    "observed_at", value
-                ),
-            )
-            if inputs
-            else None
+        (
+            support,
+            effective_sample,
+            opponent_count,
+            rating,
+            uncertainty,
+            state,
+            last_observed_at,
+            age_seconds,
+        ) = self._derive_snapshot_values(
+            participant_entity_id=participant,
+            inputs=inputs,
+            causal_cutoff=cutoff,
+            min_support=min_support,
+            max_age_seconds=max_age_seconds,
         )
-        age_seconds = None
-        if last_observed_at is not None:
-            age_seconds = max(
-                0,
-                int(
-                    (
-                        _instant("causal_cutoff", cutoff)
-                        - _instant(
-                            "last_observed_at", last_observed_at
-                        )
-                    ).total_seconds()
-                ),
-            )
-        fresh = (
-            age_seconds is not None
-            and age_seconds <= max_age_seconds
-        )
-        state = (
-            SnapshotState.SUPPORTED
-            if effective_sample >= min_support and fresh
-            else SnapshotState.INSUFFICIENT
-        )
-        rating: str | None = None
-        uncertainty: str | None = None
-        if state is SnapshotState.SUPPORTED:
-            with localcontext() as context:
-                context.prec = 28
-                mean = sum(scores, Decimal(0)) / Decimal(support)
-                width = Decimal(1) / Decimal(effective_sample).sqrt()
-            rating = _decimal_text(mean)
-            uncertainty = _decimal_text(width)
 
         rating_payload = {
             "participant_entity_id": participant,
@@ -813,6 +915,8 @@ class OpponentIntelligenceStore:
             "algorithm_family": family,
             "algorithm_version": version,
             "config_sha256": config_sha256,
+            "min_support": min_support,
+            "max_age_seconds": max_age_seconds,
             "code_sha256": code,
             "dependency_sha256": dependency,
             "predecessor_snapshot_ids": list(predecessor_snapshot_ids),
@@ -820,7 +924,7 @@ class OpponentIntelligenceStore:
             "input_digest": input_digest,
             "support": support,
             "effective_sample": effective_sample,
-            "opponent_count": len(opponents),
+            "opponent_count": opponent_count,
             "rating": rating,
             "uncertainty": uncertainty,
             "state": state.value,
@@ -838,6 +942,8 @@ class OpponentIntelligenceStore:
             family,
             version,
             config_sha256,
+            min_support,
+            max_age_seconds,
             code,
             dependency,
             predecessor_snapshot_ids,
@@ -845,7 +951,7 @@ class OpponentIntelligenceStore:
             input_digest,
             support,
             effective_sample,
-            len(opponents),
+            opponent_count,
             rating,
             uncertainty,
             state,
@@ -862,7 +968,7 @@ class OpponentIntelligenceStore:
             "input_digest": input_digest,
             "support": support,
             "effective_sample": effective_sample,
-            "opponent_count": len(opponents),
+            "opponent_count": opponent_count,
             "last_observed_at": last_observed_at,
             "age_seconds": age_seconds,
             "state": state.value,
@@ -881,7 +987,7 @@ class OpponentIntelligenceStore:
             input_digest,
             support,
             effective_sample,
-            len(opponents),
+            opponent_count,
             last_observed_at,
             age_seconds,
             state,
@@ -1259,6 +1365,8 @@ class OpponentIntelligenceStore:
                     item["algorithm_family"],
                     item["algorithm_version"],
                     item["config_sha256"],
+                    item["min_support"],
+                    item["max_age_seconds"],
                     item["code_sha256"],
                     item["dependency_sha256"],
                     tuple(item["predecessor_snapshot_ids"]),
@@ -1296,9 +1404,107 @@ class OpponentIntelligenceStore:
                     raise OpponentIntelligenceError(
                         "rating snapshot input digest does not match durable input IDs"
                     )
-                if snapshot.support != len(snapshot.input_performance_ids):
+                input_records = tuple(
+                    performances[performance_id]
+                    for performance_id in snapshot.input_performance_ids
+                )
+                expected_input_ids = tuple(
+                    item.performance_id
+                    for item in sorted(
+                        input_records,
+                        key=lambda item: (
+                            _instant(
+                                "observed_at",
+                                item.observation.observed_at,
+                            ),
+                            item.performance_id,
+                        ),
+                    )
+                )
+                if expected_input_ids != snapshot.input_performance_ids:
                     raise OpponentIntelligenceError(
-                        "rating snapshot support does not match durable input count"
+                        "rating snapshot durable input order mismatch"
+                    )
+                for record in input_records:
+                    if (
+                        record.observation.sport_id != snapshot.sport_id
+                        or record.league_entity_id != snapshot.league_id
+                        or record.observation.market_context_id
+                        != snapshot.market_context_id
+                    ):
+                        raise OpponentIntelligenceError(
+                            "rating snapshot durable input context mismatch"
+                        )
+                    if _instant(
+                        "observed_at", record.observation.observed_at
+                    ) > _instant(
+                        "causal_cutoff", snapshot.causal_cutoff
+                    ):
+                        raise OpponentIntelligenceError(
+                            "rating snapshot contains future durable input"
+                        )
+                    if snapshot.view is IdentityView.AS_KNOWN_AT_DECISION:
+                        cutoff = _instant(
+                            "causal_cutoff", snapshot.causal_cutoff
+                        )
+                        if (
+                            _instant(
+                                "available_at",
+                                record.observation.available_at,
+                            )
+                            > cutoff
+                            or _instant(
+                                "recorded_at",
+                                record.observation.recorded_at,
+                            )
+                            > cutoff
+                        ):
+                            raise OpponentIntelligenceError(
+                                "rating snapshot contains unavailable durable input"
+                            )
+                if snapshot.algorithm_family != "bounded-mean-score":
+                    raise OpponentIntelligenceError(
+                        "unsupported rating snapshot algorithm family"
+                    )
+                expected_config_sha256 = self._rating_config_digest(
+                    algorithm_family=snapshot.algorithm_family,
+                    algorithm_version=snapshot.algorithm_version,
+                    min_support=snapshot.min_support,
+                    max_age_seconds=snapshot.max_age_seconds,
+                    code_sha256=snapshot.code_sha256,
+                    dependency_sha256=snapshot.dependency_sha256,
+                )
+                if expected_config_sha256 != snapshot.config_sha256:
+                    raise OpponentIntelligenceError(
+                        "rating snapshot config digest mismatch"
+                    )
+                (
+                    expected_support,
+                    expected_effective_sample,
+                    expected_opponent_count,
+                    expected_rating,
+                    expected_uncertainty,
+                    expected_state,
+                    _expected_last_observed_at,
+                    _expected_age_seconds,
+                ) = self._derive_snapshot_values(
+                    participant_entity_id=snapshot.participant_entity_id,
+                    inputs=input_records,
+                    causal_cutoff=snapshot.causal_cutoff,
+                    min_support=snapshot.min_support,
+                    max_age_seconds=snapshot.max_age_seconds,
+                )
+                if (
+                    snapshot.support != expected_support
+                    or snapshot.effective_sample
+                    != expected_effective_sample
+                    or snapshot.opponent_count != expected_opponent_count
+                    or snapshot.rating != expected_rating
+                    or snapshot.uncertainty != expected_uncertainty
+                    or snapshot.state is not expected_state
+                ):
+                    raise OpponentIntelligenceError(
+                        "rating snapshot derived evidence mismatch"
                     )
                 ratings[snapshot.snapshot_id] = snapshot
 
@@ -1351,6 +1557,62 @@ class OpponentIntelligenceStore:
                 if snapshot.rating_snapshot_id not in ratings:
                     raise OpponentIntelligenceError(
                         "feature snapshot references missing rating snapshot"
+                    )
+                rating_snapshot = ratings[snapshot.rating_snapshot_id]
+                if (
+                    snapshot.participant_entity_id
+                    != rating_snapshot.participant_entity_id
+                    or snapshot.sport_id != rating_snapshot.sport_id
+                    or snapshot.league_id != rating_snapshot.league_id
+                    or snapshot.market_context_id
+                    != rating_snapshot.market_context_id
+                    or snapshot.view is not rating_snapshot.view
+                    or snapshot.causal_cutoff
+                    != rating_snapshot.causal_cutoff
+                    or snapshot.published_at
+                    != rating_snapshot.published_at
+                    or snapshot.input_digest
+                    != rating_snapshot.input_digest
+                    or snapshot.support != rating_snapshot.support
+                    or snapshot.effective_sample
+                    != rating_snapshot.effective_sample
+                    or snapshot.opponent_count
+                    != rating_snapshot.opponent_count
+                    or snapshot.state is not rating_snapshot.state
+                ):
+                    raise OpponentIntelligenceError(
+                        "feature snapshot rating binding mismatch"
+                    )
+                rating_inputs = tuple(
+                    performances[performance_id]
+                    for performance_id
+                    in rating_snapshot.input_performance_ids
+                )
+                (
+                    _expected_support,
+                    _expected_effective_sample,
+                    _expected_opponent_count,
+                    _expected_rating,
+                    _expected_uncertainty,
+                    _expected_state,
+                    expected_last_observed_at,
+                    expected_age_seconds,
+                ) = self._derive_snapshot_values(
+                    participant_entity_id=(
+                        rating_snapshot.participant_entity_id
+                    ),
+                    inputs=rating_inputs,
+                    causal_cutoff=rating_snapshot.causal_cutoff,
+                    min_support=rating_snapshot.min_support,
+                    max_age_seconds=rating_snapshot.max_age_seconds,
+                )
+                if (
+                    snapshot.last_observed_at
+                    != expected_last_observed_at
+                    or snapshot.age_seconds != expected_age_seconds
+                ):
+                    raise OpponentIntelligenceError(
+                        "feature snapshot derived evidence mismatch"
                     )
                 features[snapshot.snapshot_id] = snapshot
 

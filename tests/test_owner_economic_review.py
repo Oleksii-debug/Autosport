@@ -158,3 +158,62 @@ def test_cancellation_and_workspace_switch_after_review_never_write(tmp_path, mo
     close.invoke()
     assert widgets[0].destroyed
     assert not (tmp_path / EconomicGoalStore.FILE_NAME).exists()
+
+
+def test_switch_away_and_back_requires_fresh_review_before_creation(tmp_path, monkeypatch):
+    _widgets, _variables, workspace, errors, button, readback = _fake_dialog(monkeypatch, tmp_path)
+    path = tmp_path / EconomicGoalStore.FILE_NAME
+
+    button.invoke()  # Review workspace A, without a write.
+    workspace[0] = tmp_path / "other"
+    button.invoke()  # Rejected confirm in B consumes the A review.
+    assert errors
+    assert button.options["text"] == text("ui.windows.owner_authority.button.review")
+    workspace[0] = tmp_path
+    button.invoke()  # This must review A again, not persist the stale approval.
+    assert not path.exists()
+    assert button.options["text"] == text("ui.windows.owner_authority.button.confirm")
+    assert readback.focused
+    button.invoke()
+    assert path.exists()
+
+
+def test_temporary_recovery_blocker_requires_fresh_review_after_clear(tmp_path, monkeypatch):
+    _widgets, _variables, _workspace, errors, button, _readback = _fake_dialog(monkeypatch, tmp_path)
+    path = tmp_path / EconomicGoalStore.FILE_NAME
+    blocker = [None]
+    monkeypatch.setattr(layout, "_owner_economic_write_blocker", lambda *_args: blocker[0])
+
+    button.invoke()
+    blocker[0] = "Recovery required"
+    button.invoke()
+    assert errors == ["Recovery required"]
+    assert button.options["text"] == text("ui.windows.owner_authority.button.review")
+    blocker[0] = None
+    button.invoke()
+    assert not path.exists()
+    button.invoke()
+    assert path.exists()
+
+
+def test_persistence_rejection_consumes_review_before_retry(tmp_path, monkeypatch):
+    _widgets, _variables, _workspace, errors, button, _readback = _fake_dialog(monkeypatch, tmp_path)
+    path = tmp_path / EconomicGoalStore.FILE_NAME
+    original = layout._persist_initial_owner_economic_contract
+    rejected = [False]
+
+    def reject_once(*args, **kwargs):
+        if not rejected[0]:
+            rejected[0] = True
+            raise layout.OwnerEconomicAuthorityError("Concurrent recovery")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(layout, "_persist_initial_owner_economic_contract", reject_once)
+    button.invoke()
+    button.invoke()
+    assert errors == ["Concurrent recovery"]
+    assert button.options["text"] == text("ui.windows.owner_authority.button.review")
+    button.invoke()
+    assert not path.exists()
+    button.invoke()
+    assert path.exists()

@@ -486,6 +486,9 @@ def _show_owner_economic_dialog(app: Any) -> None:
         if current_workspace != bound_workspace:
             blocker = text("ui.windows.owner_authority.error.busy")
         if blocker is not None:
+            # A temporary quarantine or context switch must consume the
+            # earlier review even if the owner later returns to this workspace.
+            invalidate_review()
             messagebox.showerror(text("ui.windows.owner_authority.dialog.title"), blocker, parent=dialog)
             return
         values = {field: variable.get() for field, variable in form_values.items()}
@@ -525,6 +528,9 @@ def _show_owner_economic_dialog(app: Any) -> None:
                 emergency_stop=reviewed.emergency_stop,
             )
         except OwnerEconomicAuthorityError as exc:
+            # A concurrent change after review can reject persistence. Never
+            # reuse the previous approval once that boundary was crossed.
+            invalidate_review()
             messagebox.showerror(text("ui.windows.owner_authority.dialog.title"), str(exc), parent=dialog)
             refresh_owner_economic_authority_surface(app)
             return

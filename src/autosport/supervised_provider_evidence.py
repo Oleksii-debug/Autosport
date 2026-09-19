@@ -483,7 +483,7 @@ def verify_betfair_provider_state(
             current_sha,
             cleared_sha,
             evidence_id,
-            provider_order_ref,
+            readback.provider_order_ref,
         )
 
     # A transition can expose the same receipt in current and cleared evidence.
@@ -565,7 +565,7 @@ def verify_betfair_provider_state(
         accepted_odds,
         accepted_stake,
         evidence_id,
-        provider_order_ref,
+        readback.provider_order_ref,
     )
 
 # Verified provider state is an in-process capability, not a caller assertion.

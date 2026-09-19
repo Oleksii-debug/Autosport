@@ -50,7 +50,15 @@ class FactoryArtifactStore(_impl.FactoryArtifactStore):
                 "predecessor_record_sha256",
             )
         }
-        return _impl._digest(payload)
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
 
     def _read_materialization_ledger(self) -> list[dict[str, object]]:
         path = self._materialization_ledger_path()

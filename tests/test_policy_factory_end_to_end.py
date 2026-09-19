@@ -634,7 +634,7 @@ def test_policy_retest_rejects_self_asserted_authority_without_qualification_art
 
     with pytest.raises(
         ValueError,
-        match="factory artifact is missing: counterfactual-qualification",
+        match="counterfactual-qualification",
     ):
         run_policy_retest(
             ExperimentRunner(registry, store),

@@ -231,7 +231,7 @@ def test_dynamic_code_candidate_can_be_registered_but_never_executed(tmp_path):
     registry.register(definition)
     with pytest.raises(SkillPermissionError, match="not executable"):
         _invoke(registry, definition, payload={})
-    with pytest.raises(SkillPermissionError, match="cannot bind"):
+    with pytest.raises(SkillPermissionError, match="runtime handler binding"):
         registry.bind_handler(
             definition, lambda payload: SkillExecutionResult(output={})
         )
@@ -274,7 +274,8 @@ def test_restart_marks_inflight_run_interrupted_and_forbids_blind_replay(tmp_pat
     def crash(_payload):
         raise SystemExit(7)
 
-    registry.bind_handler(definition, crash)
+    # Private injection is test harness only: production API rejects runtime handlers.
+    registry._handlers[definition.version_key] = crash
     with pytest.raises(SystemExit):
         _invoke(registry, definition, payload={})
 
@@ -285,9 +286,7 @@ def test_restart_marks_inflight_run_interrupted_and_forbids_blind_replay(tmp_pat
     assert restarted.get_run(running).status is SkillRunStatus.RUNNING
     assert restarted.recover_incomplete(at="2026-09-19T04:10:00Z") == (running,)
     assert restarted.get_run(running).status is SkillRunStatus.INTERRUPTED
-    restarted.bind_handler(
-        definition, lambda payload: SkillExecutionResult(output={})
-    )
+    restarted._handlers[definition.version_key] = lambda payload: SkillExecutionResult(output={})
     with pytest.raises(SkillRecoveryRequiredError, match="blind replay"):
         _invoke(
             restarted,
@@ -312,11 +311,8 @@ def test_handler_cannot_report_undeclared_mutation(tmp_path):
         required_provenance=("source_evidence",),
     )
     registry.register(definition)
-    registry.bind_handler(
-        definition,
-        lambda payload: SkillExecutionResult(
-            output={}, applied_mutations=("LOCAL_WRITE",)
-        ),
+    registry._handlers[definition.version_key] = lambda payload: SkillExecutionResult(
+        output={}, applied_mutations=("LOCAL_WRITE",)
     )
     run = _invoke(registry, definition, payload={})
     assert run.status is SkillRunStatus.FAILED

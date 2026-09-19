@@ -204,10 +204,19 @@ def _reference(monitor, **overrides):
 
 
 def test_effective_sample_size_is_explicit_hash_bound_evidence(tmp_path):
+    baseline = _baseline_window(effective_sample_size=1)
     current = _current_window(effective_sample_size=1)
-    registry = _registry(tmp_path, current_window=current)
+    registry = _registry(
+        tmp_path,
+        baseline_window=baseline,
+        current_window=current,
+    )
     monitor = DriftMonitor(registry)
-    reference = _reference(monitor)
+    reference = _reference(monitor, baseline=baseline)
+    stored_reference = registry.get("DriftReference", reference.reference_id)
+    assert stored_reference is not None
+    assert stored_reference.payload["sample_count"] == 2
+    assert stored_reference.payload["effective_sample_size"] == 1
 
     finding = monitor.evaluate(
         reference.reference_id,

@@ -288,12 +288,41 @@ class ChampionEligibilityDecision:
             except (TypeError, ValueError) as exc:
                 raise ChampionEligibilityError("drift finding state is invalid") from exc
 
+            reference_id = finding.get("reference_id")
+            if type(reference_id) is not str:
+                raise ChampionEligibilityError("drift finding reference identity is missing")
+            reference = registry.get("DriftReference", reference_id)
+            if reference is None:
+                raise ChampionEligibilityError("drift reference is missing")
+            if _instant(reference.available_at, "DriftReference.available_at") > evaluated_cutoff:
+                raise ChampionEligibilityError("drift reference is future evidence")
+
+            baseline_sample_count = reference.payload.get("sample_count")
+            if (
+                isinstance(baseline_sample_count, bool)
+                or not isinstance(baseline_sample_count, int)
+                or baseline_sample_count <= 0
+            ):
+                raise ChampionEligibilityError("drift reference sample_count is invalid")
+            baseline_effective_sample_size = reference.payload.get("effective_sample_size")
+            if baseline_effective_sample_size is not None and (
+                isinstance(baseline_effective_sample_size, bool)
+                or not isinstance(baseline_effective_sample_size, int)
+                or baseline_effective_sample_size <= 0
+                or baseline_effective_sample_size > baseline_sample_count
+            ):
+                raise ChampionEligibilityError(
+                    "drift reference effective_sample_size is invalid"
+                )
+
             observation_id = finding.get("observation_id")
             if type(observation_id) is not str:
                 raise ChampionEligibilityError("drift finding observation identity is missing")
             observation = registry.get("DriftObservation", observation_id)
             if observation is None:
                 raise ChampionEligibilityError("drift observation is missing")
+            if observation.payload.get("reference_id") != reference_id:
+                raise ChampionEligibilityError("drift observation/reference identity mismatch")
 
             sample_count = observation.payload.get("sample_count")
             if isinstance(sample_count, bool) or not isinstance(sample_count, int) or sample_count <= 0:
@@ -316,8 +345,10 @@ class ChampionEligibilityDecision:
 
             scope = _scope_from_authority(finding, observation.payload)
             entries.append(entry)
-            counts.append(sample_count)
-            effective_sample_sizes.append(effective_sample_size)
+            counts.extend((baseline_sample_count, sample_count))
+            effective_sample_sizes.extend(
+                (baseline_effective_sample_size, effective_sample_size)
+            )
             windows.append((observed_start, observed_end, observation_id, state, scope))
 
         ordered = sorted(windows, key=lambda item: (item[0], item[1], item[2]))

@@ -424,6 +424,7 @@ class DriftReference:
     evidence_sha256: str
     sample_count: int
     mean_fraction: str | None
+    effective_sample_size: int | None = None
     sport: str | None = None
     league: str | None = None
     regime: str | None = None
@@ -459,6 +460,10 @@ class DriftReference:
             raise ValueError("sample_count must be an integer")
         if self.sample_count < 0:
             raise ValueError("sample_count must be non-negative")
+        _canonical_effective_sample_size(
+            self.effective_sample_size,
+            self.sample_count,
+        )
         threshold = _fraction_from_decimal(self.threshold, "threshold")
         if threshold < 0:
             raise ValueError("threshold must be non-negative")
@@ -507,6 +512,8 @@ class DriftReference:
             "arithmetic_truth": "EXACT_RATIONAL_FROM_CANONICAL_DECIMALS",
             "interpretation_assumption": "THRESHOLD_DIAGNOSTIC_NOT_SIGNIFICANCE_TEST",
         }
+        if self.effective_sample_size is not None:
+            payload["effective_sample_size"] = self.effective_sample_size
         scope = _canonical_scope(sport=self.sport, league=self.league, regime=self.regime)
         if scope is not None:
             payload["sport"], payload["league"], payload["regime"] = scope
@@ -883,6 +890,7 @@ class DriftMonitor:
             evidence_sha256=baseline.evidence_sha256,
             sample_count=baseline.sample_count,
             mean_fraction=baseline.mean_fraction,
+            effective_sample_size=baseline.effective_sample_size,
             sport=baseline.sport,
             league=baseline.league,
             regime=baseline.regime,

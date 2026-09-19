@@ -89,6 +89,16 @@ def _localized_canonical_message(value: str) -> str:
         ) from exc
 
 
+def _localized_calculation_error(exc: BaseException) -> str:
+    """Hide canonical service diagnostics behind one deterministic Ukrainian user message."""
+
+    # Preserve the exception internally for diagnostics while keeping technical
+    # service text out of the user/NVDA presentation surface.
+    if not isinstance(exc, (TypeError, ValueError, ArithmeticError)):
+        raise TypeError("unsupported calculation exception")
+    return text("ui.windows.manual_calculation.error.calculation_failed")
+
+
 def _render_evidence_uk(evidence: ManualCalculationEvidence) -> str:
     """Render a Ukrainian human layer while preserving canonical evidence verbatim."""
 
@@ -294,7 +304,7 @@ def show_manual_calculation_workbench(app: Any) -> tk.Toplevel:
             status_var.set(text("ui.windows.manual_calculation.status.error"))
             messagebox.showerror(
                 text("ui.windows.manual_calculation.dialog.title"),
-                f"Розрахунок не виконано: {exc}",
+                _localized_calculation_error(exc),
                 parent=dialog,
             )
             input_box.focus_set()

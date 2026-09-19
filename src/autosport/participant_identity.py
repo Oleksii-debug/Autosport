@@ -487,15 +487,21 @@ class ParticipantIdentityRegistry:
         moment = _instant("as_of", as_of)
         if not isinstance(view, IdentityView):
             raise TypeError("view must be IdentityView")
-        result = []
+        result_by_entity: dict[str, EntityIdentity] = {}
         for membership in self._rosters:
-            if membership.event_id == _text("event_id", event_id) and membership.source_id == _text("source_id", source_id) and _contains(membership.member_from, membership.member_until, moment):
-                if view is IdentityView.RESTATED_RESEARCH or _instant("available_at", membership.available_at) <= moment:
-                    entity = self._entities[membership.entity_id]
-                    if view is IdentityView.AS_KNOWN_AT_DECISION and _instant("available_at", entity.available_at) > moment:
-                        raise ParticipantIdentityError("roster references entity not known at requested causal view")
-                    result.append(entity)
-        return tuple(sorted(result, key=lambda entity: entity.entity_id))
+            if membership.event_id != _text("event_id", event_id) or membership.source_id != _text("source_id", source_id):
+                continue
+            if not _contains(membership.member_from, membership.member_until, moment):
+                continue
+            if view is IdentityView.RESTATED_RESEARCH or _instant("available_at", membership.available_at) <= moment:
+                entity = self._entities[membership.entity_id]
+                if view is IdentityView.AS_KNOWN_AT_DECISION and _instant("available_at", entity.available_at) > moment:
+                    raise ParticipantIdentityError("roster references entity not known at requested causal view")
+                # A roster represents entity membership, while evidence records are
+                # append-only provenance. Multiple distinct records for one canonical
+                # entity must not inflate downstream roster cardinality.
+                result_by_entity.setdefault(entity.entity_id, entity)
+        return tuple(sorted(result_by_entity.values(), key=lambda entity: entity.entity_id))
 
     def _persist_state(
         self,

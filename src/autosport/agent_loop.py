@@ -21,6 +21,7 @@ from .integrity import atomic_write_json
 from .learning_environment import (
     Action,
     EnvironmentCheckpoint,
+    Episode,
     EvidenceTruth,
     Observation,
     Outcome,
@@ -764,10 +765,31 @@ class AgentLoopRuntime:
 
         return self._mutate(at, apply)
 
+    @staticmethod
+    def _require_action_authority(
+        action: Action,
+        episode: Episode,
+        state: dict[str, Any],
+    ) -> None:
+        if not isinstance(episode, Episode):
+            raise TypeError("episode must be Episode")
+        identity = state["identity"]
+        if episode.environment_id != identity["environment_id"]:
+            raise AgentLoopError("episode belongs to another environment")
+        if episode.episode_id != identity["episode_id"]:
+            raise AgentLoopError("episode identity does not match AgentLoop")
+        if episode.policy_id != identity["policy_id"]:
+            raise AgentLoopError("episode policy identity does not match AgentLoop")
+        if action.action_type not in episode.admissible_actions:
+            raise AgentLoopError(
+                "action is outside the canonical episode admissible set"
+            )
+
     def commit_action(
         self,
         action: Action,
         *,
+        episode: Episode,
         effect_state: ExternalEffectState,
         at: str,
     ) -> ActionCommitReceipt:
@@ -776,6 +798,7 @@ class AgentLoopRuntime:
         if not isinstance(effect_state, ExternalEffectState):
             raise TypeError("effect_state must be ExternalEffectState")
         existing_state = self._read()
+        self._require_action_authority(action, episode, existing_state)
         existing = next(
             (
                 item
@@ -813,6 +836,7 @@ class AgentLoopRuntime:
                 raise StaleAgentLoopStateError(
                     "action commit requires ACT_OR_ABSTAIN"
                 )
+            self._require_action_authority(action, episode, state)
             current = state["current"]
             if action.environment_id != state["identity"]["environment_id"]:
                 raise AgentLoopError("action belongs to another environment")

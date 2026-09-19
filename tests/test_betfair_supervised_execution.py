@@ -133,6 +133,8 @@ def _goal(**changes) -> EconomicGoalContract:
 def _bound(
     profile: BookmakerCapabilityProfile,
     goal: EconomicGoalContract | None = None,
+    *,
+    selection_id: str = "42",
 ):
     goal = goal or _goal()
     policy = PaperRiskPolicy(
@@ -144,7 +146,7 @@ def _bound(
     leg = TicketLeg(
         "event-1",
         "1.23456789",
-        "42",
+        selection_id,
         Decimal("2.00"),
         sport="soccer",
     )
@@ -432,9 +434,14 @@ def _prepared(
     tmp: str,
     *,
     goal: EconomicGoalContract | None = None,
+    selection_id: str = "42",
 ):
     profile = _profile()
-    bound, approval, goal = _bound(profile, goal)
+    bound, approval, goal = _bound(
+        profile,
+        goal,
+        selection_id=selection_id,
+    )
     goal_store = EconomicGoalStore(Path(tmp))
     goal_store.initialize_owner(goal)
     ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
@@ -468,6 +475,40 @@ def _assert_current_goal_denied_before_effect(
 
     assert transport.calls == []
     assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+@pytest.mark.parametrize(
+    "selection_id",
+    ("selection-x", "042"),
+)
+def test_invalid_betfair_selection_fails_before_attempt_or_transport(
+    selection_id: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(
+            tmp,
+            selection_id=selection_id,
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="selection_id must be canonical positive integer text",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-invalid-selection",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
 
 def test_default_gate_cannot_reach_transport() -> None:

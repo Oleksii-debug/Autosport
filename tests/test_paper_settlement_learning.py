@@ -930,6 +930,97 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 )
 
 
+    def test_prepared_settlement_recovers_after_book_save_before_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                goal,
+                risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                _runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            resolution = SettlementResolution(
+                event_identity=f"provider-a:{leg.event_id}",
+                settlement_ref="prepared-result",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="prepared-evidence",
+                evidence_sha256="c" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            self.assertEqual(
+                bridge.prepare_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(resolution,),
+                    at="2026-09-19T21:20:00+00:00",
+                ),
+                (ticket.ticket_id,),
+            )
+
+            book = PaperBook.load(root / "paper_book.json")
+            engine = SettlementEngine()
+            engine.record({leg.quote_key: "win"})
+            self.assertEqual(engine.settle_ready(book), [ticket.ticket_id])
+            book.save(root / "paper_book.json")
+
+            restarted_runtime = AgentLoopRuntime(root / "agent-loop.json")
+            restarted_bridge = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=restarted_runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            acknowledged = restarted_bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=(),
+                settled_ticket_ids=(),
+                at="2026-09-19T21:20:01+00:00",
+            )
+            self.assertEqual(len(acknowledged), 1)
+            self.assertIs(restarted_runtime.snapshot().phase, AgentLoopPhase.EVALUATE)
+            self.assertEqual(
+                PaperBook.load(root / "paper_book.json").balance,
+                Decimal("110.00"),
+            )
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            binding = durable["bindings"][ticket.ticket_id]
+            self.assertEqual(binding["status"], "ACKED")
+            self.assertIsNotNone(binding["settlement_intent"])
+            self.assertEqual(
+                restarted_bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:20:02+00:00",
+                ),
+                (),
+            )
+
+
     def test_bound_ticket_outside_current_settlement_handoff_stays_bound(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

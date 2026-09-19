@@ -905,6 +905,60 @@ def test_promotion_rejects_reuse_of_consumed_evidence_and_holdout(tmp_path):
         registry.record_promotion(replace(decision, promotion_decision_id="promotion-consume-2"))
 
 
+def test_promotion_rejects_disclosed_holdout_without_prior_decision(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    foundation = _foundation(registry)
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
+
+    disclosed = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="disclosed-without-decision",
+        created_at=T2,
+        rollback_identity="NONE",
+        practical="0.09",
+        interval_low="0.04",
+        interval_high="0.14",
+    )
+    registry.append(disclosed)
+
+    current = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="current-after-disclosure",
+        rollback_identity="NONE",
+    )
+    registry.append(current)
+    decision = PromotionDecision(
+        "promotion-after-disclosure",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        foundation["bundle"].bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=current.promotion_evidence_id,
+    )
+
+    with pytest.raises(
+        PromotionEvidenceError,
+        match="consumed or disclosed",
+    ):
+        registry.record_promotion(decision)
+
+
 def test_promotion_rejects_preconsumed_confirmation_holdout(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     foundation = _foundation(registry)

@@ -556,8 +556,14 @@ class DriftReference:
             payload["effective_sample_size"] = self.effective_sample_size
         if self.evidence_values is not None:
             payload["evidence_values"] = list(self.evidence_values)
-            payload["evidence_observed_at"] = list(self.evidence_observed_at or ())
-            payload["evidence_available_at"] = list(self.evidence_available_at or ())
+            payload["evidence_observed_at"] = [
+                _timestamp_identity(value, "evidence_observed_at item")
+                for value in (self.evidence_observed_at or ())
+            ]
+            payload["evidence_available_at"] = [
+                _timestamp_identity(value, "evidence_available_at item")
+                for value in (self.evidence_available_at or ())
+            ]
         scope = _canonical_scope(sport=self.sport, league=self.league, regime=self.regime)
         if scope is not None:
             payload["sport"], payload["league"], payload["regime"] = scope
@@ -683,8 +689,14 @@ class DriftObservation:
             payload["effective_sample_size"] = self.effective_sample_size
         if self.evidence_values is not None:
             payload["evidence_values"] = list(self.evidence_values)
-            payload["evidence_observed_at"] = list(self.evidence_observed_at or ())
-            payload["evidence_available_at"] = list(self.evidence_available_at or ())
+            payload["evidence_observed_at"] = [
+                _timestamp_identity(value, "evidence_observed_at item")
+                for value in (self.evidence_observed_at or ())
+            ]
+            payload["evidence_available_at"] = [
+                _timestamp_identity(value, "evidence_available_at item")
+                for value in (self.evidence_available_at or ())
+            ]
         scope = _canonical_scope(sport=self.sport, league=self.league, regime=self.regime)
         if scope is not None:
             payload["sport"], payload["league"], payload["regime"] = scope

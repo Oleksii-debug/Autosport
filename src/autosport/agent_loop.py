@@ -101,11 +101,6 @@ class AttributionStatus(StrEnum):
     MIXED = "MIXED"
 
 
-# Factor-level immutable causal credit assignment record. Kept as an alias to avoid
-# creating a second ledger while giving callers an explicit CreditAssignment type.
-CreditAssignment = AttributionFinding
-
-
 _PRIMARY_NEXT: dict[AgentLoopPhase, AgentLoopPhase] = {
     AgentLoopPhase.OBSERVE: AgentLoopPhase.ASSESS,
     AgentLoopPhase.ASSESS: AgentLoopPhase.PLAN,
@@ -218,6 +213,11 @@ class AttributionFinding:
             "contribution": None if self.contribution is None else str(self.contribution),
             "reason_code": self.reason_code,
         }
+
+
+# Factor-level immutable causal credit assignment record. Kept as an alias to avoid
+# creating a second ledger while giving callers an explicit CreditAssignment type.
+CreditAssignment = AttributionFinding
 
 
 @dataclass(frozen=True, slots=True)

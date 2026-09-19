@@ -367,7 +367,12 @@ class _ReadbackTransport:
         ).encode("utf-8")
 
 
-def _enabled_client(profile, transport):
+def _enabled_client(
+    profile,
+    transport,
+    *,
+    observed_at: str = READBACK_AT,
+):
     gate = BetfairSupervisedExecutionGate(
         enabled=True,
         bookmaker_id="betfair",
@@ -380,7 +385,7 @@ def _enabled_client(profile, transport):
         BetfairSessionCredentials("app-key", "session-token"),
         gate=gate,
         transport=transport,
-        clock=lambda: READBACK_AT,
+        clock=lambda: observed_at,
     )
 
 
@@ -643,7 +648,11 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
                 average=action.requested_odds,
             )
         )
-        retry_client = _enabled_client(profile, retry_transport)
+        retry_client = _enabled_client(
+            profile,
+            retry_transport,
+            observed_at="2026-09-19T08:00:10+00:00",
+        )
         retry_result = execute_betfair_supervised_action(
             restarted,
             bound,

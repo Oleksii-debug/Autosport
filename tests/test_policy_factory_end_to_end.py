@@ -573,4 +573,8 @@ def test_second_policy_attempt_cannot_reuse_same_confirmation_holdout(tmp_path):
     assert decision is not None
     evidence = registry.get("PromotionEvidence", decision.payload["promotion_evidence_id"])
     assert evidence is not None
+    assert evidence.payload["validity"] == "ELIGIBLE"
+    assert evidence.payload["practical_improvement"] == "1"
+    assert evidence.payload["effect_interval_low"] == "1"
+    assert evidence.payload["guardrails_passed"] is True
     assert evidence.payload["holdout_consumed"] is True

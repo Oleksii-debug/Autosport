@@ -949,42 +949,45 @@ def execute_betfair_supervised_action(
     now = clock or _now
     execution_workspace = ledger.path.parent.resolve()
 
-    # Fence the canonical owner-authority read and every local pre-transport
-    # execution mutation against the same economic writer boundary used by
-    # EconomicGoalStore. A tighter successor therefore cannot become durable
-    # after authorization but before the attempt/provider-reference/submitted
-    # state is recorded. The provider client re-reads owner authority again
-    # after this local phase, immediately before transport.
-    with WorkspaceEconomicLock(execution_workspace):
-        client._gate.require(
-            action=action,
-            profile=profile,
-            bound=bound,
-            execution_workspace=execution_workspace,
-        )
-        begin_supervised_attempt(
-            ledger,
-            bound,
-            approval,
-            action_id=action_id,
-            attempt_id=attempt_id,
-        )
-        provider_order_ref = ledger.bind_provider_order_reference(
-            attempt_id=attempt_id,
-            provider_id=action.bookmaker_id,
-        )
-        ledger.mark_submitted(
-            attempt_id,
-            submitted_at=now(),
-        )
+    # Serialize the current owner authority through the actual provider-write
+    # boundary, not just through local ledger preparation. EconomicGoalStore
+    # successors use this same writer lock, so either a tighter owner revision
+    # becomes durable first and the initial gate rejects before any attempt
+    # mutation, or this already-authorized bounded call reaches placeOrders
+    # before that successor can publish. The provider client still re-reads the
+    # canonical owner contract immediately before transport while the fence is
+    # held. This prevents a known local authority denial from being mislabeled
+    # as provider-effect uncertainty.
     try:
-        report = client.place_action(
-            action,
-            profile=profile,
-            bound=bound,
-            provider_order_ref=provider_order_ref,
-            execution_workspace=execution_workspace,
-        )
+        with WorkspaceEconomicLock(execution_workspace):
+            client._gate.require(
+                action=action,
+                profile=profile,
+                bound=bound,
+                execution_workspace=execution_workspace,
+            )
+            begin_supervised_attempt(
+                ledger,
+                bound,
+                approval,
+                action_id=action_id,
+                attempt_id=attempt_id,
+            )
+            provider_order_ref = ledger.bind_provider_order_reference(
+                attempt_id=attempt_id,
+                provider_id=action.bookmaker_id,
+            )
+            ledger.mark_submitted(
+                attempt_id,
+                submitted_at=now(),
+            )
+            report = client.place_action(
+                action,
+                profile=profile,
+                bound=bound,
+                provider_order_ref=provider_order_ref,
+                execution_workspace=execution_workspace,
+            )
     except (
         BetfairPlaceOrdersAmbiguous,
         BetfairSupervisedExecutionError,

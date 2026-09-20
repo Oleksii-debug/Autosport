@@ -24,7 +24,7 @@ from .paper_execution_adoption import (
     PaperExposureBinding,
     PreparedPaperExecution,
 )
-from .paper_strategy import PaperValueAgent
+from .paper_strategy import PaperDecisionReconciliationRequired, PaperValueAgent
 from .price_truth import paper_quote_rejection_reason
 from .real_execution_ledger import ExecutionPlan
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext
@@ -1074,7 +1074,7 @@ def _on_market_event(self: PaperValueAgent, event, context) -> None:
         return _resume_durable_paper_value(self, event, context, record)
 
     if _run_reserved(runtime, decision_id):
-        raise PaperExecutionAdoptionError(
+        raise PaperDecisionReconciliationRequired(
             "#623 execution history exists without its durable paper-value decision"
         )
 

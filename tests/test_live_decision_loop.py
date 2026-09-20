@@ -809,12 +809,28 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 max_quote_age=timedelta(seconds=5),
                 paper_book_path=workspace / "paper_book.json",
             )
+            # This regression isolates crash ordering around a positive #623 PAPER
+            # action. The current default owner goal requires external research
+            # evidence for any non-trivial risk-of-ruin ceiling; that separate
+            # admission contract is not what this recovery test exercises.
+            recovery_goal = EconomicGoalContract(
+                goal_id="goal-live-execution-recovery",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            recovery_authority = EconomicDecisionAuthority(
+                recovery_goal,
+                PaperRiskPolicy(economic_goal=recovery_goal),
+            )
             first = self._loop(
                 workspace,
                 observer=_DurableObserver(workspace, [(event,)]),
                 factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
                 clock=clock,
                 book=book,
+                authority=recovery_authority,
                 paper_execution=execution,
             )
             first.register_input("input-a", selection_ids="selection-a")
@@ -880,6 +896,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
                 clock=_ManualClock(self.START + timedelta(seconds=3)),
                 book=resumed_book,
+                authority=recovery_authority,
                 paper_execution=resumed_execution,
             )
 

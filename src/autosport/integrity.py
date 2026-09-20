@@ -9,6 +9,8 @@ import threading
 from pathlib import Path
 from typing import Any, Iterator
 
+from .monotonic_workspace_authority import AuthorityPhase, MonotonicWorkspaceAuthority
+
 if os.name == "nt":
     import msvcrt
 else:
@@ -23,6 +25,18 @@ _ATOMIC_JSON_PUBLISH_LOCK = threading.Lock()
 _PATH_LOCKS_GUARD = threading.Lock()
 _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCK_LOCAL = threading.local()
+
+_SCIENTIFIC_REGISTRY_AUTHORITY_DOMAIN = "autosport.scientific-registry.v1"
+_SCIENTIFIC_REGISTRY_ENTRY_KEYS = frozenset(
+    {
+        "record_type",
+        "record_id",
+        "available_at",
+        "payload",
+        "previous_record_sha256",
+        "record_sha256",
+    }
+)
 
 
 def _resolved_key(path: Path) -> str:
@@ -124,6 +138,89 @@ def ensure_durable_file(path: str | Path) -> None:
         os.fsync(handle.fileno())
 
 
+def _looks_like_scientific_registry_state(payload: dict[str, Any]) -> bool:
+    """Recognize a non-pristine ScientificRegistry whole-file image.
+
+    The empty image is intentionally not classified here: the first real scientific
+    append bootstraps authority from those already-durable empty bytes. Requiring at
+    least one exact registry envelope avoids coupling unrelated generic ``records``
+    stores to this scientific authority from their pristine initialization alone.
+    """
+
+    if set(payload) != {"schema_version", "records"} or payload.get("schema_version") != 1:
+        return False
+    records = payload.get("records")
+    if type(records) is not list or not records:
+        return False
+    for record in records:
+        if type(record) is not dict or set(record) != _SCIENTIFIC_REGISTRY_ENTRY_KEYS:
+            return False
+        if type(record.get("record_type")) is not str or not record["record_type"]:
+            return False
+        if type(record.get("record_id")) is not str or not record["record_id"]:
+            return False
+        if type(record.get("payload")) is not dict:
+            return False
+    return True
+
+
+def _scientific_registry_authority(destination: Path) -> MonotonicWorkspaceAuthority:
+    workspace = destination.parent.resolve(strict=False)
+    return MonotonicWorkspaceAuthority(
+        workspace=workspace,
+        domain=_SCIENTIFIC_REGISTRY_AUTHORITY_DOMAIN,
+        key=destination.name,
+    )
+
+
+def _authority_binding(destination: Path, observed: str | None, intended: str, *, kind: str) -> str:
+    material = "\0".join(
+        (
+            _SCIENTIFIC_REGISTRY_AUTHORITY_DOMAIN,
+            kind,
+            destination.name,
+            observed or "<PRISTINE>",
+            intended,
+        )
+    ).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def _recover_or_bootstrap_scientific_registry_authority(
+    authority: MonotonicWorkspaceAuthority,
+    destination: Path,
+    observed: str | None,
+) -> None:
+    history = authority.read_history()
+    if not history:
+        if observed is None:
+            return
+        tx_id = f"bootstrap-{observed}"
+        binding = _authority_binding(destination, None, observed, kind="BOOTSTRAP")
+        authority.prepare(
+            tx_id=tx_id,
+            observed_state_sha256=None,
+            intended_state_sha256=observed,
+            semantic_binding_sha256=binding,
+        )
+        authority.commit(
+            tx_id=tx_id,
+            observed_state_sha256=observed,
+            semantic_binding_sha256=binding,
+        )
+        return
+
+    pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
+    if pending is None:
+        authority.recover(observed_state_sha256=observed)
+        return
+    authority.recover(
+        observed_state_sha256=observed,
+        tx_id=pending.tx_id,
+        semantic_binding_sha256=pending.semantic_binding_sha256,
+    )
+
+
 def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -150,9 +247,51 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+
+        protect_scientific_registry = _looks_like_scientific_registry_state(payload)
+        intended = sha256_file(temporary) if protect_scientific_registry else None
+
         with durable_path_lock(destination):
             with _ATOMIC_JSON_PUBLISH_LOCK:
+                if not protect_scientific_registry:
+                    os.replace(temporary, destination)
+                    return
+
+                assert intended is not None
+                observed = sha256_file(destination) if destination.exists() else None
+                authority = _scientific_registry_authority(destination)
+                _recover_or_bootstrap_scientific_registry_authority(
+                    authority,
+                    destination,
+                    observed,
+                )
+                binding = _authority_binding(
+                    destination,
+                    observed,
+                    intended,
+                    kind="PUBLISH",
+                )
+                tx_material = "\0".join(
+                    (destination.name, observed or "<PRISTINE>", intended)
+                ).encode("utf-8")
+                tx_id = f"registry-{hashlib.sha256(tx_material).hexdigest()}"
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
                 os.replace(temporary, destination)
+                published = sha256_file(destination)
+                if published != intended:
+                    raise RuntimeError(
+                        "published ScientificRegistry bytes do not match prepared authority digest"
+                    )
+                authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=published,
+                    semantic_binding_sha256=binding,
+                )
     finally:
         if temporary is not None:
             try:

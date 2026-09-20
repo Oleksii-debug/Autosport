@@ -801,7 +801,6 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         paired = evaluation()
         evidence = self.qualified_voc(paired)
         mismatches = {
-            "required_capability": "different-task",
             "voc_regime_id": "different-regime",
             "voc_urgency_id": "urgent",
             "voc_contradiction_state": "contradicted",
@@ -822,6 +821,28 @@ class PairedVOCEvaluationTests(unittest.TestCase):
                 )
                 self.assertEqual(decision.tier, ComputeTier.LOCAL)
                 self.assertIn("routing stratum", decision.reason)
+
+        task_candidates = tuple(
+            replace(
+                candidate,
+                capabilities=("forecast", "different-task"),
+            )
+            for candidate in candidates()
+        )
+        task_mismatch = self.route_compute(
+            replace(
+                request(),
+                request_id="req-mismatch-task-class",
+                required_capability="different-task",
+            ),
+            task_candidates,
+            policy(),
+            as_of=T2,
+            voc_evidence=evidence,
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(task_mismatch.tier, ComputeTier.LOCAL)
+        self.assertIn("routing stratum", task_mismatch.reason)
 
         sport_mismatch = self.route_compute(
             request(),

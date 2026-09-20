@@ -443,7 +443,11 @@ def test_real_store_readback_and_cross_intent_pair_stay_explicitly_unbound():
         )
 
         reopened = ModelComputeRouterStore(path)
-        assert reopened.get_request(request.request_id) == request
+        reopened_request = reopened.get_request(request.request_id)
+        assert reopened_request is not None
+        # Persistence canonicalizes equivalent UTC spellings (+00:00 -> Z).
+        # Compare the canonical request contract, not raw lexical timestamp form.
+        assert reopened_request.payload() == request.payload()
 
         result = subject.resolve_prospective_model_compute_money(
             intent=intent,

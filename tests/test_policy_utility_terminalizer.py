@@ -18,8 +18,8 @@ from autosport.policy_update_authority import UTILITY_AUTHORITY_UNRESOLVED
 from autosport.policy_utility_evidence import (
     AuthorityRef,
     DecisionKind,
-    PolicyUtilityError,
     PolicyUtilityEvidence,
+    PolicyUtilityStore,
     UtilityCompleteness,
     UtilityTruthClass,
 )
@@ -170,8 +170,11 @@ def _blocked_learning_case():
     return policy, action, reward, transition, utility
 
 
-def test_incomplete_evidence_closes_as_blocked_and_is_idempotent(tmp_path) -> None:
-    terminalizer = PolicyUtilityTerminalizer.from_path(tmp_path / "utility.jsonl")
+def test_incomplete_evidence_journals_as_non_authoritative_blocked_and_is_idempotent(
+    tmp_path,
+) -> None:
+    utility_store_path = tmp_path / "utility.jsonl"
+    terminalizer = PolicyUtilityTerminalizer.from_path(utility_store_path)
     evidence = _evidence()
 
     first = terminalizer.terminalize(evidence)
@@ -179,13 +182,17 @@ def test_incomplete_evidence_closes_as_blocked_and_is_idempotent(tmp_path) -> No
 
     assert first.disposition is TerminalizationDisposition.BLOCKED
     assert first.persisted is True
-    assert retry == first.__class__(
-        evidence_id=first.evidence_id,
-        semantic_key=first.semantic_key,
-        disposition=first.disposition,
-        persisted=False,
-    )
-    assert terminalizer.resolve(first.evidence_id) == evidence
+    assert retry.evidence_id == first.evidence_id
+    assert retry.semantic_key == first.semantic_key
+    assert retry.disposition is first.disposition
+    assert retry.record_id == first.record_id
+    assert retry.persisted is False
+    record = terminalizer.resolve(first.evidence_id)
+    assert record.candidate_evidence_id == evidence.evidence_id
+    assert record.candidate_semantic_key == evidence.semantic_key
+    assert record.disposition is TerminalizationDisposition.BLOCKED
+    assert not utility_store_path.exists()
+    assert terminalizer.journal_path.exists()
 
 
 def test_unsupported_evidence_is_inconclusive_and_survives_restart(tmp_path) -> None:
@@ -196,8 +203,9 @@ def test_unsupported_evidence_is_inconclusive_and_survives_restart(tmp_path) -> 
     reopened = PolicyUtilityTerminalizer.from_path(path)
 
     assert first.disposition is TerminalizationDisposition.INCONCLUSIVE
-    assert reopened.resolve(first.evidence_id) == evidence
+    assert reopened.resolve(first.evidence_id).disposition is TerminalizationDisposition.INCONCLUSIVE
     assert reopened.terminalize(evidence).persisted is False
+    assert not path.exists()
 
 
 def test_terminalizer_requires_exact_policy_utility_evidence(tmp_path) -> None:
@@ -206,19 +214,19 @@ def test_terminalizer_requires_exact_policy_utility_evidence(tmp_path) -> None:
         terminalizer.terminalize(object())  # type: ignore[arg-type]
 
 
-def test_terminalizer_rejects_policy_utility_subclass_before_store_mutation(tmp_path) -> None:
+def test_terminalizer_rejects_policy_utility_subclass_before_journal_mutation(tmp_path) -> None:
     class ForgedPolicyUtilityEvidence(PolicyUtilityEvidence):
         pass
 
     base = _evidence()
-    forged = ForgedPolicyUtilityEvidence(**{
-        field: getattr(base, field)
-        for field in base.__dataclass_fields__
-    })
+    forged = ForgedPolicyUtilityEvidence(
+        **{field: getattr(base, field) for field in base.__dataclass_fields__}
+    )
     terminalizer = PolicyUtilityTerminalizer.from_path(tmp_path / "utility.jsonl")
 
     with pytest.raises(TypeError, match="PolicyUtilityEvidence"):
         terminalizer.terminalize(forged)
+    assert not terminalizer.journal_path.exists()
 
 
 def test_blocked_update_is_durable_replay_safe_and_preserves_champion(tmp_path) -> None:
@@ -248,7 +256,9 @@ def test_blocked_update_is_durable_replay_safe_and_preserves_champion(tmp_path) 
     assert first.update_evidence.predecessor_policy_id == policy.policy_id
     assert first.update_evidence.successor_policy_id == policy.policy_id
     assert policy.generation == 0
-    assert PolicyUtilityTerminalizer.from_path(path).resolve(utility.evidence_id) == utility
+    terminal = PolicyUtilityTerminalizer.from_path(path).resolve(utility.evidence_id)
+    assert terminal.candidate_evidence_id == utility.evidence_id
+    assert not path.exists()
 
 
 def test_blocked_update_captures_utility_binding_mismatch_without_raw_reward_learning(
@@ -258,9 +268,7 @@ def test_blocked_update_captures_utility_binding_mismatch_without_raw_reward_lea
     mismatched = PolicyUtilityEvidence(
         **{
             field: (
-                "different-reward"
-                if field == "reward_id"
-                else getattr(utility, field)
+                "different-reward" if field == "reward_id" else getattr(utility, field)
             )
             for field in utility.__dataclass_fields__
         }
@@ -285,12 +293,52 @@ def test_blocked_update_captures_utility_binding_mismatch_without_raw_reward_lea
     assert policy.generation == 0
 
 
-def test_changed_evidence_for_same_causal_key_fails_closed(tmp_path) -> None:
+def test_same_causal_key_wrong_authority_candidate_cannot_poison_canonical_utility_store(
+    tmp_path,
+) -> None:
     path = tmp_path / "utility.jsonl"
-    first = _evidence()
-    changed = _evidence(utility_definition_version="v2", utility_definition_sha256=SHA_A)
-    terminalizer = PolicyUtilityTerminalizer.from_path(path)
+    canonical = _evidence()
+    forged = _evidence(
+        model_id="forged-model",
+        strategy_id="forged-strategy",
+        economic_goal_fingerprint=SHA_A,
+        risk_fingerprint=SHA_B,
+        bankroll_id="forged-bankroll",
+        portfolio_identity="forged-portfolio",
+        authority_refs=(AuthorityRef("campaign-economics", "forged", SHA_B),),
+    )
+    assert forged.semantic_key == canonical.semantic_key
+    assert forged.evidence_id != canonical.evidence_id
 
-    terminalizer.terminalize(first)
-    with pytest.raises(PolicyUtilityError, match="semantic drift"):
-        terminalizer.terminalize(changed)
+    terminalizer = PolicyUtilityTerminalizer.from_path(path)
+    forged_receipt = terminalizer.terminalize(forged)
+    canonical_receipt = terminalizer.terminalize(canonical)
+
+    assert forged_receipt.persisted is True
+    assert canonical_receipt.persisted is True
+    assert forged_receipt.record_id != canonical_receipt.record_id
+    assert len(terminalizer.records()) == 2
+    assert not path.exists()
+
+    # The non-authoritative journal must not reserve the canonical semantic key.
+    canonical_store = PolicyUtilityStore(path)
+    assert canonical_store.list() == ()
+    assert canonical_store.append(canonical) is True
+    assert canonical_store.list() == (canonical,)
+    assert terminalizer.resolve(forged.evidence_id).candidate_evidence_id == forged.evidence_id
+    assert terminalizer.resolve(canonical.evidence_id).candidate_evidence_id == canonical.evidence_id
+
+
+def test_terminal_receipt_rejects_invalid_champion_identity(tmp_path) -> None:
+    policy, action, reward, transition, utility = _blocked_learning_case()
+    receipt = PolicyUtilityTerminalizer.from_path(
+        tmp_path / "utility.jsonl"
+    ).terminalize_blocked_update(
+        policy=policy,
+        action=action,
+        reward=reward,
+        transition=transition,
+        utility=utility,
+    )
+    assert receipt.champion_policy_id == policy.policy_id
+    assert len(receipt.terminal.record_id) == 64

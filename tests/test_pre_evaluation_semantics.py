@@ -44,7 +44,10 @@ SNAPSHOT_SHA = "9" * 64
 DECISION_TS = "2026-09-18T13:20:00+00:00"
 
 
-def _goal() -> EconomicGoalContract:
+def _goal(
+    *,
+    max_quote_age_seconds: Decimal = Decimal("3600"),
+) -> EconomicGoalContract:
     return EconomicGoalContract(
         goal_id="goal-pre-evaluation",
         revision=1,
@@ -58,17 +61,21 @@ def _goal() -> EconomicGoalContract:
         max_turnover_fraction=Decimal("1000"),
         max_risk_of_ruin=Decimal("1"),
         max_execution_slippage_fraction=Decimal("1"),
-        max_quote_age_seconds=Decimal("3600"),
+        max_quote_age_seconds=max_quote_age_seconds,
         max_concurrent_positions=10,
     )
 
 
-def _risk_policy(*, max_ticket_fraction: Decimal = Decimal("1")) -> PaperRiskPolicy:
+def _risk_policy(
+    *,
+    max_ticket_fraction: Decimal = Decimal("1"),
+    max_quote_age_seconds: Decimal = Decimal("3600"),
+) -> PaperRiskPolicy:
     return PaperRiskPolicy(
         max_ticket_fraction=max_ticket_fraction,
         max_committed_fraction=Decimal("1"),
         minimum_cash_reserve_fraction=Decimal("0"),
-        economic_goal=_goal(),
+        economic_goal=_goal(max_quote_age_seconds=max_quote_age_seconds),
     )
 
 
@@ -268,70 +275,88 @@ def test_canonical_wait_or_zero_intent_derives_wait_zero(decision: OpportunityDe
     assert slot.opportunity_intent_sha256 == intent.intent_sha256
 
 
-def test_stale_cost_config_and_risk_vetoes_are_not_caller_selectable() -> None:
+def test_legacy_facts_cannot_mint_config_freshness_risk_or_cost_semantics() -> None:
     intent = _intent()
+    baseline = _derive(intent=intent)
+    baseline_slot = baseline.resolve_slot("row-a")
+    assert baseline_slot.attrition_reason is SemanticAttritionReason.THEORETICAL_ONLY
 
-    stale = _derive(
-        intent=intent,
-        bound=_bound(intent=intent, max_age_ns=10),
-    ).resolve_slot("row-a")
-    assert stale.attrition_reason is SemanticAttritionReason.STALE_QUOTE
-
-    cost = _derive(
-        intent=intent,
-        bound=_bound(intent=intent, cost_estimate_micros=11),
-    ).resolve_slot("row-a")
-    assert cost.attrition_reason is SemanticAttritionReason.BUDGET_REJECTED
-
-    config = _derive(
-        intent=intent,
-        bound=_bound(intent=intent, config_enabled=False),
-    ).resolve_slot("row-a")
-    assert config.attrition_reason is SemanticAttritionReason.LIMIT_REJECTED
-
-    risk = _derive(
-        intent=intent,
-        bound=_bound(
+    forged_bounds = (
+        _bound(intent=intent, max_age_ns=0),
+        _bound(intent=intent, config_enabled=False),
+        _bound(
             intent=intent,
             risk_required_micros=2,
             risk_available_micros=1,
         ),
-    ).resolve_slot("row-a")
-    assert risk.attrition_reason is SemanticAttritionReason.RISK_REJECTED
+        _bound(
+            intent=intent,
+            cost_estimate_micros=99,
+            cost_limit_micros=0,
+        ),
+    )
+    for forged_bound in forged_bounds:
+        forged = _derive(intent=intent, bound=forged_bound)
+        assert forged.resolve_slot("row-a").attrition_reason is (
+            SemanticAttritionReason.THEORETICAL_ONLY
+        )
+        assert forged.authority_digest == baseline.authority_digest
 
 
-def test_positive_slot_requires_exact_intent_source_revision() -> None:
+def test_canonical_risk_policy_quote_age_owns_freshness_veto() -> None:
+    intent = _intent()
+    stale = _derive(
+        intent=intent,
+        risk_policy=_risk_policy(max_quote_age_seconds=Decimal("0")),
+    )
+    assert stale.resolve_slot("row-a").attrition_reason is SemanticAttritionReason.STALE_QUOTE
+
+
+def test_legacy_source_identity_cannot_mint_positive_semantic_authority() -> None:
     intent = _intent()
     provider = _provider()
+    baseline = _derive(intent=intent, provider=provider)
     bound = _bound(intent=intent, provider=provider)
     facts = bound.evidence.slots[0].facts
     assert facts is not None
-    bad_facts = replace(facts, source_revision="f" * 64)
-    bad_evidence = PreEvaluationEvidenceAuthority(
+    forged_facts = replace(
+        facts,
+        source_authority_id="forged-authority",
+        source_revision="f" * 64,
+    )
+    forged_evidence = PreEvaluationEvidenceAuthority(
         PreEvaluationPolicy(max_age_ns=200)
     ).evaluate_session(
         session_id="session-1",
         candidate_ids=(provider.row_key,),
-        resolver=lambda _: bad_facts,
+        resolver=lambda _: forged_facts,
         evaluated_at_ns=1000,
     )
-    bad_bound = bind_pre_evaluation_session(
-        bad_evidence,
+    forged_bound = bind_pre_evaluation_session(
+        forged_evidence,
         context=bound.context,
         provider_members=(provider.identity,),
     )
 
-    with pytest.raises(ValueError, match="exact OpportunityIntent"):
-        _derive(intent=intent, provider=provider, bound=bad_bound)
+    forged = _derive(intent=intent, provider=provider, bound=forged_bound)
+    assert forged.authority_digest == baseline.authority_digest
+    assert forged.resolve_slot("row-a").opportunity_intent_sha256 == intent.intent_sha256
 
 
-def test_cost_limit_must_equal_product_cost_contract() -> None:
+def test_provider_source_timestamp_is_observational_not_semantic_authority() -> None:
     intent = _intent()
-    with pytest.raises(ValueError, match="canonical cost contract"):
-        _derive(
-            intent=intent,
-            bound=_bound(intent=intent, cost_limit_micros=11),
-        )
+    provider = _provider()
+    baseline = _derive(intent=intent, provider=provider)
+    shifted_provider = replace(
+        provider,
+        source_at="2026-09-18T13:19:57+00:00",
+    )
+    shifted = _derive(
+        intent=intent,
+        provider=shifted_provider,
+        bound=_bound(intent=intent, provider=shifted_provider),
+    )
+    assert shifted.authority_digest == baseline.authority_digest
 
 
 def test_provider_semantic_binding_must_equal_exact_bound_member_identity() -> None:

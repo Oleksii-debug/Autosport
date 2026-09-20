@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
 import json
@@ -32,7 +33,6 @@ from .pre_evaluation_binding import (
     BoundPreEvaluationSession,
     ProviderMemberIdentity,
 )
-from .pre_evaluation_evidence import DecisionCode
 from .risk import PaperRiskPolicy
 
 
@@ -204,9 +204,24 @@ class ProviderSelectionBinding:
             member_sha256=self.member_sha256,
         )
 
+    def authority_payload(self) -> dict[str, object]:
+        """Fields allowed to influence semantic authority.
+
+        source_at is retained as observational metadata for downstream comparison,
+        but it is not allowed to mint a new semantic authority.
+        """
+        return {
+            "row_key": self.row_key,
+            "member_sha256": self.member_sha256,
+            "event_id": self.event_id,
+            "market_id": self.market_id,
+            "selection_id": self.selection_id,
+            "source_id": self.source_id,
+        }
+
     @property
     def binding_sha256(self) -> str:
-        return _digest(self.to_payload())
+        return _digest(self.authority_payload())
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -574,7 +589,10 @@ class PreEvaluationSemanticAuthority:
             )
 
         provider_bindings_sha256 = _digest(
-            [provider_by_key[row_key].to_payload() for row_key in sorted(provider_by_key)]
+            [
+                provider_by_key[row_key].authority_payload()
+                for row_key in sorted(provider_by_key)
+            ]
         )
         risk_policy_sha256 = risk_policy.provenance_sha256
         goal = risk_policy.economic_goal
@@ -586,31 +604,16 @@ class PreEvaluationSemanticAuthority:
         slots: list[PreEvaluationSlotSemanticEvidence] = []
         for row_key in sorted(provider_by_key):
             provider = provider_by_key[row_key]
-            source_slot = bound.resolve_slot(row_key)
-            facts = source_slot.facts
-            if facts is not None and facts.cost_limit_micros != self._cost_contract.max_cost_micros:
-                raise ValueError(
-                    f"slot {row_key} cost limit is not bound to the canonical cost contract"
-                )
+            # The legacy slot/facts layer is membership/replay evidence only.
+            # It is deliberately not authority for config, freshness, risk, cost,
+            # provider metadata, or positive-intent semantics.
+            bound.resolve_slot(row_key)
             matching = self._matching_intents(provider, intents)
             if len(matching) > 1:
                 raise ValueError(
                     f"provider member {row_key} maps to multiple canonical intents"
                 )
             intent = None if not matching else matching[0]
-            if intent is not None:
-                if facts is None:
-                    raise ValueError(
-                        f"positive provider member {row_key} lacks canonical pre-evaluation facts"
-                    )
-                expected_source = f"opportunity-intent:{intent.intent_id}"
-                if (
-                    facts.source_authority_id != expected_source
-                    or facts.source_revision != intent.intent_sha256
-                ):
-                    raise ValueError(
-                        f"slot {row_key} source facts do not bind the exact OpportunityIntent"
-                    )
             slots.append(
                 self._derive_slot(
                     bound=bound,
@@ -625,7 +628,7 @@ class PreEvaluationSemanticAuthority:
             )
 
         return PreEvaluationSemanticSession(
-            bound_authority_digest=bound.authority_digest,
+            bound_authority_digest=self._semantic_bound_authority_digest(bound),
             denominator_context_digest=bound.context.digest,
             portfolio_sha256=portfolio_sha256,
             risk_policy_sha256=risk_policy_sha256,
@@ -680,8 +683,15 @@ class PreEvaluationSemanticAuthority:
         portfolio_sha256: str,
         economic_goal_identity: str,
     ) -> PreEvaluationSlotSemanticEvidence:
-        source_slot = bound.resolve_slot(provider.row_key)
-        session_strategy = f"pre-evaluation-policy:{bound.evidence.policy_digest}"
+        bound.resolve_slot(provider.row_key)
+        source_slot_digest = self._semantic_source_digest(
+            bound=bound,
+            provider=provider,
+            intent=intent,
+        )
+        freshness_policy_sha256 = self._freshness_policy_sha256(risk_policy)
+        coverage_config_sha256 = self._coverage_config_sha256(bound)
+        session_strategy = "pre-evaluation-coverage:v1"
         portfolio_before_id = f"paper-book:{portfolio_sha256}"
         risk_policy_id = f"paper-risk-policy:{risk_policy.provenance_sha256}"
 
@@ -690,17 +700,17 @@ class PreEvaluationSemanticAuthority:
                 row_key=provider.row_key,
                 member_sha256=provider.member_sha256,
                 provider_selection_sha256=provider.binding_sha256,
-                source_slot_evidence_digest=source_slot.evidence_digest,
+                source_slot_evidence_digest=source_slot_digest,
                 slot_state=SemanticSlotState.NO_EVENT,
                 decision_stage=SemanticFunnelStage.OBSERVED_SLOT,
                 attrition_reason=SemanticAttritionReason.NO_EVENT,
                 detection_at=None,
                 decision_at=None,
                 quote_set_sha256=None,
-                freshness_policy_sha256=bound.evidence.policy_digest,
+                freshness_policy_sha256=freshness_policy_sha256,
                 strategy_version_id=session_strategy,
                 model_version_id=None,
-                config_sha256=bound.evidence.policy_digest,
+                config_sha256=coverage_config_sha256,
                 portfolio_before_id=portfolio_before_id,
                 economic_goal_id=economic_goal_identity,
                 risk_policy_id=risk_policy_id,
@@ -715,17 +725,17 @@ class PreEvaluationSemanticAuthority:
                 row_key=provider.row_key,
                 member_sha256=provider.member_sha256,
                 provider_selection_sha256=provider.binding_sha256,
-                source_slot_evidence_digest=source_slot.evidence_digest,
+                source_slot_evidence_digest=source_slot_digest,
                 slot_state=SemanticSlotState.NO_CANDIDATE,
                 decision_stage=SemanticFunnelStage.OBSERVED_SLOT,
                 attrition_reason=SemanticAttritionReason.NO_CANDIDATE,
                 detection_at=None,
                 decision_at=None,
                 quote_set_sha256=None,
-                freshness_policy_sha256=bound.evidence.policy_digest,
+                freshness_policy_sha256=freshness_policy_sha256,
                 strategy_version_id=session_strategy,
                 model_version_id=None,
-                config_sha256=bound.evidence.policy_digest,
+                config_sha256=coverage_config_sha256,
                 portfolio_before_id=portfolio_before_id,
                 economic_goal_id=economic_goal_identity,
                 risk_policy_id=risk_policy_id,
@@ -746,14 +756,14 @@ class PreEvaluationSemanticAuthority:
                 row_key=provider.row_key,
                 member_sha256=provider.member_sha256,
                 provider_selection_sha256=provider.binding_sha256,
-                source_slot_evidence_digest=source_slot.evidence_digest,
+                source_slot_evidence_digest=source_slot_digest,
                 slot_state=SemanticSlotState.WAIT_ZERO,
                 decision_stage=SemanticFunnelStage.OBSERVED_SLOT,
                 attrition_reason=SemanticAttritionReason.WAIT_ZERO,
                 detection_at=None,
                 decision_at=None,
                 quote_set_sha256=quote_set_sha256,
-                freshness_policy_sha256=bound.evidence.policy_digest,
+                freshness_policy_sha256=freshness_policy_sha256,
                 strategy_version_id=intent.strategy_id,
                 model_version_id=intent.model_id,
                 config_sha256=intent.config_sha256,
@@ -774,7 +784,7 @@ class PreEvaluationSemanticAuthority:
             return self._candidate_attrition(
                 bound=bound,
                 provider=provider,
-                source_slot_digest=source_slot.evidence_digest,
+                source_slot_digest=source_slot_digest,
                 intent=intent,
                 portfolio_before_id=portfolio_before_id,
                 economic_goal_identity=economic_goal_identity,
@@ -783,6 +793,7 @@ class PreEvaluationSemanticAuthority:
                 quote_set_sha256=quote_set_sha256,
                 quote_identity_sha256=quote_identity_sha256,
                 detection_at=detection_at,
+                freshness_policy_sha256=freshness_policy_sha256,
                 reason=SemanticAttritionReason.INCOMPLETE_EVIDENCE,
             )
         decision_at = _timestamp("proposal_ts", proposal_ts)
@@ -790,7 +801,7 @@ class PreEvaluationSemanticAuthority:
             return self._candidate_attrition(
                 bound=bound,
                 provider=provider,
-                source_slot_digest=source_slot.evidence_digest,
+                source_slot_digest=source_slot_digest,
                 intent=intent,
                 portfolio_before_id=portfolio_before_id,
                 economic_goal_identity=economic_goal_identity,
@@ -799,29 +810,16 @@ class PreEvaluationSemanticAuthority:
                 quote_set_sha256=quote_set_sha256,
                 quote_identity_sha256=quote_identity_sha256,
                 detection_at=detection_at,
+                freshness_policy_sha256=freshness_policy_sha256,
                 reason=SemanticAttritionReason.INVALID_EVIDENCE,
             )
 
-        decision_code = source_slot.decision_code
-        if decision_code is DecisionCode.SAFE_DENY_INVALID_TIME:
-            reason = SemanticAttritionReason.INVALID_EVIDENCE
-        elif decision_code is DecisionCode.CONFIG_VETO:
-            reason = SemanticAttritionReason.LIMIT_REJECTED
-        elif decision_code is DecisionCode.FRESHNESS_VETO:
-            reason = SemanticAttritionReason.STALE_QUOTE
-        elif decision_code is DecisionCode.COST_VETO:
-            reason = SemanticAttritionReason.BUDGET_REJECTED
-        elif decision_code is DecisionCode.RISK_VETO:
-            reason = SemanticAttritionReason.RISK_REJECTED
-        elif decision_code is DecisionCode.SAFE_DENY_MISSING_STATE:
-            reason = SemanticAttritionReason.INCOMPLETE_EVIDENCE
-        else:
-            reason = None
+        reason = self._canonical_freshness_reason(intent, risk_policy)
         if reason is not None:
             return self._candidate_attrition(
                 bound=bound,
                 provider=provider,
-                source_slot_digest=source_slot.evidence_digest,
+                source_slot_digest=source_slot_digest,
                 intent=intent,
                 portfolio_before_id=portfolio_before_id,
                 economic_goal_identity=economic_goal_identity,
@@ -830,6 +828,7 @@ class PreEvaluationSemanticAuthority:
                 quote_set_sha256=quote_set_sha256,
                 quote_identity_sha256=quote_identity_sha256,
                 detection_at=detection_at,
+                freshness_policy_sha256=freshness_policy_sha256,
                 reason=reason,
             )
 
@@ -858,7 +857,7 @@ class PreEvaluationSemanticAuthority:
             return self._candidate_attrition(
                 bound=bound,
                 provider=provider,
-                source_slot_digest=source_slot.evidence_digest,
+                source_slot_digest=source_slot_digest,
                 intent=intent,
                 portfolio_before_id=portfolio_before_id,
                 economic_goal_identity=economic_goal_identity,
@@ -867,6 +866,7 @@ class PreEvaluationSemanticAuthority:
                 quote_set_sha256=quote_set_sha256,
                 quote_identity_sha256=quote_identity_sha256,
                 detection_at=detection_at,
+                freshness_policy_sha256=freshness_policy_sha256,
                 reason=risk_reason,
             )
 
@@ -874,14 +874,14 @@ class PreEvaluationSemanticAuthority:
             row_key=provider.row_key,
             member_sha256=provider.member_sha256,
             provider_selection_sha256=provider.binding_sha256,
-            source_slot_evidence_digest=source_slot.evidence_digest,
+            source_slot_evidence_digest=source_slot_digest,
             slot_state=SemanticSlotState.CANDIDATE,
             decision_stage=SemanticFunnelStage.ELIGIBLE,
             attrition_reason=SemanticAttritionReason.THEORETICAL_ONLY,
             detection_at=detection_at,
             decision_at=decision_at,
             quote_set_sha256=quote_set_sha256,
-            freshness_policy_sha256=bound.evidence.policy_digest,
+            freshness_policy_sha256=freshness_policy_sha256,
             strategy_version_id=intent.strategy_id,
             model_version_id=intent.model_id,
             config_sha256=intent.config_sha256,
@@ -908,6 +908,7 @@ class PreEvaluationSemanticAuthority:
         quote_set_sha256: str,
         quote_identity_sha256: str,
         detection_at: str,
+        freshness_policy_sha256: str,
         reason: SemanticAttritionReason,
     ) -> PreEvaluationSlotSemanticEvidence:
         return PreEvaluationSlotSemanticEvidence(
@@ -921,7 +922,7 @@ class PreEvaluationSemanticAuthority:
             detection_at=detection_at,
             decision_at=None,
             quote_set_sha256=quote_set_sha256,
-            freshness_policy_sha256=bound.evidence.policy_digest,
+            freshness_policy_sha256=freshness_policy_sha256,
             strategy_version_id=intent.strategy_id,
             model_version_id=intent.model_id,
             config_sha256=intent.config_sha256,
@@ -933,6 +934,94 @@ class PreEvaluationSemanticAuthority:
             opportunity_intent_sha256=intent.intent_sha256,
             quote_identity_sha256=quote_identity_sha256,
         )
+
+    @staticmethod
+    def _semantic_bound_authority_digest(bound: BoundPreEvaluationSession) -> str:
+        return _digest(
+            {
+                "schema": "autosport.pre_evaluation_semantic_bound_projection",
+                "schema_version": 1,
+                "context_digest": bound.context.digest,
+                "members": [
+                    {
+                        "row_key": member.row_key,
+                        "member_sha256": member.member_sha256,
+                    }
+                    for member in bound.members
+                ],
+            }
+        )
+
+    @staticmethod
+    def _semantic_source_digest(
+        *,
+        bound: BoundPreEvaluationSession,
+        provider: ProviderSelectionBinding,
+        intent: OpportunityIntent | None,
+    ) -> str:
+        return _digest(
+            {
+                "schema": "autosport.pre_evaluation_semantic_source",
+                "schema_version": 1,
+                "context_digest": bound.context.digest,
+                "row_key": provider.row_key,
+                "member_sha256": provider.member_sha256,
+                "provider_selection_sha256": provider.binding_sha256,
+                "opportunity_intent_sha256": (
+                    None if intent is None else intent.intent_sha256
+                ),
+            }
+        )
+
+    @staticmethod
+    def _coverage_config_sha256(bound: BoundPreEvaluationSession) -> str:
+        return _digest(
+            {
+                "schema": "autosport.pre_evaluation_coverage_config",
+                "schema_version": 1,
+                "research_protocol_id": bound.context.research_protocol_id,
+                "protocol_sha256": bound.context.protocol_sha256,
+            }
+        )
+
+    @staticmethod
+    def _freshness_policy_sha256(risk_policy: PaperRiskPolicy) -> str:
+        goal = risk_policy.economic_goal
+        return _digest(
+            {
+                "schema": "autosport.pre_evaluation_freshness_policy",
+                "schema_version": 1,
+                "risk_policy_sha256": risk_policy.provenance_sha256,
+                "max_quote_age_seconds": (
+                    None if goal is None else str(goal.max_quote_age_seconds)
+                ),
+            }
+        )
+
+    @staticmethod
+    def _canonical_freshness_reason(
+        intent: OpportunityIntent,
+        risk_policy: PaperRiskPolicy,
+    ) -> SemanticAttritionReason | None:
+        goal = risk_policy.economic_goal
+        if goal is None:
+            return SemanticAttritionReason.INCOMPLETE_EVIDENCE
+        proposal_ts = intent.risk_context.proposal_ts
+        if proposal_ts is None:
+            return SemanticAttritionReason.INCOMPLETE_EVIDENCE
+        proposal_time = _instant("proposal_ts", proposal_ts)
+        for quote in intent.risk_context.quotes:
+            quote_ts = quote.source_ts if quote.source_ts is not None else quote.observed_ts
+            quote_time = _instant("quote timestamp", quote_ts)
+            delta = proposal_time - quote_time
+            if delta.days < 0:
+                return SemanticAttritionReason.INVALID_EVIDENCE
+            age_seconds = Decimal(delta.days * 86400 + delta.seconds) + (
+                Decimal(delta.microseconds) / Decimal("1000000")
+            )
+            if age_seconds > goal.max_quote_age_seconds:
+                return SemanticAttritionReason.STALE_QUOTE
+        return None
 
     @staticmethod
     def _quote_set_sha256(intent: OpportunityIntent) -> str:

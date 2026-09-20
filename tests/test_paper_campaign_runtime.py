@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.agent_loop import AgentLoopPhase, AgentLoopRuntime, AttributionComponent
 from autosport.continuous_session import SettlementResolution
@@ -84,23 +85,6 @@ def _fixture(
     )
     book.save(root / "paper_book.json")
 
-    ledger = JsonlDecisionLedger(root / "decisions.jsonl")
-    decision = DecisionRecord(
-        replay_run_id="campaign-run",
-        agent="campaign-fixture",
-        observed_ts=T0,
-        action="OPEN_PAPER_TICKET",
-        payload={
-            "ticket_id": ticket.ticket_id,
-            "quote_key": leg.quote_key,
-            "stake": str(ticket.stake),
-        },
-        context_hash="campaign-context",
-        decision_id="campaign-decision",
-        decision_kind=ECONOMIC_DECISION_KIND,
-    )
-    ledger.append_economic(decision, EconomicDecisionAuthority(goal, risk))
-
     identity = EnvironmentIdentity(
         source_id="campaign-source",
         config_id="campaign-config",
@@ -115,6 +99,30 @@ def _fixture(
         policy_id="campaign-policy",
         admissible_actions=frozenset({"PAPER_PROPOSAL"}),
     )
+    observation = Observation(
+        environment_id=environment.environment_id,
+        observed_at=T0,
+        available_at=T1,
+        evidence=(("market_state", "campaign-snapshot"),),
+    )
+
+    ledger = JsonlDecisionLedger(root / "decisions.jsonl")
+    decision = DecisionRecord(
+        replay_run_id="campaign-run",
+        agent="campaign-fixture",
+        observed_ts=observation.observed_at,
+        action="OPEN_PAPER_TICKET",
+        payload={
+            "ticket_id": ticket.ticket_id,
+            "quote_key": leg.quote_key,
+            "stake": str(ticket.stake),
+        },
+        context_hash=observation.observation_id,
+        decision_id="campaign-decision",
+        decision_kind=ECONOMIC_DECISION_KIND,
+    )
+    ledger.append_economic(decision, EconomicDecisionAuthority(goal, risk))
+
     baseline = environment.checkpoint()
     loop = AgentLoopRuntime.initialize_pristine(
         root / "agent-loop.json",
@@ -126,12 +134,6 @@ def _fixture(
         source_sha256="a" * 64,
         config_sha256="b" * 64,
         at=T0,
-    )
-    observation = Observation(
-        environment_id=environment.environment_id,
-        observed_at=T0,
-        available_at=T1,
-        evidence=(("market_state", "campaign-snapshot"),),
     )
     bridge = PaperSettlementLearningBridge(
         root / "paper-learning-bridge.json",
@@ -377,6 +379,188 @@ class PaperCampaignRuntimeTests(unittest.TestCase):
                     for item in registry_state["records"]
                 )
             )
+
+    def test_restart_rejects_substituted_decision_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (
+                _leg,
+                _book,
+                ticket_id,
+                decision,
+                environment,
+                baseline,
+                observation,
+                bridge,
+                _runtime,
+            ) = _fixture(root)
+            substituted = Observation(
+                environment_id=observation.environment_id,
+                observed_at=observation.observed_at,
+                available_at=observation.available_at,
+                evidence=(("market_state", "substituted-snapshot"),),
+            )
+            resumed_environment = CausalLearningEnvironment.resume(
+                environment.identity,
+                episode_key=environment.episode.episode_key,
+                policy_id=environment.episode.policy_id,
+                admissible_actions=frozenset(environment.episode.admissible_actions),
+                checkpoint=baseline,
+            )
+            recovered = PaperCampaignRuntime(
+                environment=resumed_environment,
+                settlement_bridge=PaperSettlementLearningBridge(
+                    root / "paper-learning-bridge.json",
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                    economic_goal=bridge.economic_goal,
+                    risk_policy=bridge.risk_policy,
+                ),
+            )
+            with self.assertRaisesRegex(
+                PaperCampaignRuntimeError,
+                "exact causal Observation",
+            ):
+                recovered.begin_and_bind_paper_ticket(
+                    ticket_id=ticket_id,
+                    decision_id=decision.decision_id,
+                    observation=substituted,
+                    action_type="PAPER_PROPOSAL",
+                    decision_at=T2,
+                    parameters=(
+                        ("economic_decision_id", decision.decision_id),
+                        ("paper_ticket_id", ticket_id),
+                    ),
+                    at=T2,
+                    baseline_checkpoint=baseline,
+                )
+
+    def test_research_bounds_are_frozen_before_handoff_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = ScientificRegistry.initialize_pristine(
+                root / "scientific_registry.json"
+            )
+            supervisor = ResearchSupervisor.initialize_pristine(
+                root / "research_supervisor.json", registry
+            )
+            plan = PaperReflectionPlan(
+                research_question_statement="Why is this PAPER reward unresolved?",
+                research_budget_units=3,
+                research_deadline_at="2026-09-20T04:00:00+00:00",
+            )
+            (
+                leg,
+                _book,
+                ticket_id,
+                _decision,
+                environment,
+                baseline,
+                _observation,
+                bridge,
+                runtime,
+            ) = _fixture(
+                root,
+                reflection_plan=plan,
+                research_supervisor=supervisor,
+            )
+            resolutions = _settle(root, leg, "loss")
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket_id,),
+                at=T4,
+            )
+            with patch.object(
+                AgentLoopRuntime,
+                "handoff_research",
+                side_effect=RuntimeError("simulated crash before research handoff"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                    runtime.finalize_ticket(ticket_id=ticket_id, at=T4)
+
+            state = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["phase"], AgentLoopPhase.RESEARCH_HANDOFF.value)
+            self.assertEqual(len(state["postmortems"]), 1)
+            durable_plan = json.loads(
+                (root / "paper-learning-bridge.json.campaign.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                durable_plan["plans"][ticket_id]["research_budget_units"],
+                3,
+            )
+
+            resumed_environment = CausalLearningEnvironment.resume(
+                environment.identity,
+                episode_key=environment.episode.episode_key,
+                policy_id=environment.episode.policy_id,
+                admissible_actions=frozenset(environment.episode.admissible_actions),
+                checkpoint=baseline,
+            )
+            conflicting = PaperCampaignRuntime(
+                environment=resumed_environment,
+                settlement_bridge=PaperSettlementLearningBridge(
+                    root / "paper-learning-bridge.json",
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                    economic_goal=bridge.economic_goal,
+                    risk_policy=bridge.risk_policy,
+                ),
+                reflection_plan=PaperReflectionPlan(
+                    research_question_statement="Why is this PAPER reward unresolved?",
+                    research_budget_units=4,
+                    research_deadline_at="2026-09-20T04:00:00+00:00",
+                ),
+                research_supervisor=supervisor,
+            )
+            with self.assertRaisesRegex(
+                PaperCampaignRuntimeError,
+                "finalization plan conflicts",
+            ):
+                conflicting.finalize_ticket(ticket_id=ticket_id, at=T4)
+
+    def test_wrong_same_identity_environment_checkpoint_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (
+                _leg,
+                _book,
+                _ticket_id,
+                _decision,
+                environment,
+                baseline,
+                _observation,
+                bridge,
+                _runtime,
+            ) = _fixture(root)
+            wrong_checkpoint = EnvironmentCheckpoint(
+                environment_id=baseline.environment_id,
+                episode_id=baseline.episode_id,
+                policy_id=baseline.policy_id,
+                step_index=1,
+                chain_sha256="1" * 64,
+                last_transition_id="2" * 64,
+                committed_action_ids=("3" * 64,),
+                committed_decision_intents=(("4" * 64, "5" * 64),),
+            )
+            divergent = CausalLearningEnvironment.resume(
+                environment.identity,
+                episode_key=environment.episode.episode_key,
+                policy_id=environment.episode.policy_id,
+                admissible_actions=frozenset(environment.episode.admissible_actions),
+                checkpoint=wrong_checkpoint,
+            )
+            with self.assertRaisesRegex(PaperCampaignRuntimeError, "checkpoint differs"):
+                PaperCampaignRuntime(
+                    environment=divergent,
+                    settlement_bridge=bridge,
+                )
 
     def test_future_finalization_and_conflicting_reflection_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

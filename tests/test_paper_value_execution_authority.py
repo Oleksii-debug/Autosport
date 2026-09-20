@@ -354,7 +354,8 @@ def test_tampered_general_risk_admission_fails_closed_on_restart(tmp_path) -> No
     witnesses = tuple(
         path
         for path in witness_root.glob("*.json")
-        if not path.name.endswith(".pre-action.json")
+        if not path.name.endswith(".prepare.json")
+        and not path.name.endswith(".pre-action.json")
     )
     assert len(witnesses) == 1
     witness = witnesses[0]

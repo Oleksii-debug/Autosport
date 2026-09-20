@@ -575,8 +575,11 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
             extra_latency_seconds.append(extra_latency)
             sample_net_values.append(sample_net)
 
-        paired_sample_count = len(raw_samples)
-        effective_sample_size = len(sample_net_values)
+        # Quote legs are correlated components of this one baseline/challenger
+        # compute decision. They determine its realized economics but are not
+        # independent paired observations and therefore cannot inflate ESS.
+        paired_sample_count = 1
+        effective_sample_size = 1
         baseline_utility = _mean(baseline_utilities, field="baseline utility")
         challenger_utility = _mean(challenger_utilities, field="challenger utility")
         measured_compute_cost = _mean(extra_compute_costs, field="measured compute cost")
@@ -584,7 +587,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
         latency_opportunity_cost_penalty = (
             _mean(extra_latency_seconds, field="measured latency") * latency_rate
         )
-        support_fraction = Decimal(effective_sample_size) / Decimal(paired_sample_count)
+        support_fraction = _ONE
         interval_low = min(sample_net_values)
         interval_high = max(sample_net_values)
 

@@ -5,7 +5,6 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
@@ -76,11 +75,15 @@ def _keys(values: object) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True)
 class ObservationIntakeRecord:
-    """One pre-result observation cycle with the complete row-key membership seen then."""
+    """One pre-result observation cycle and its complete denominator membership."""
 
     authority_id: str
     session_id: str
     source_id: str
+    campaign_id: str
+    research_protocol_id: str
+    protocol_sha256: str
+    universe_id: str
     cycle_index: int
     committed_at: str
     outcome_reveal_not_before: str
@@ -89,8 +92,21 @@ class ObservationIntakeRecord:
     previous_record_sha256: str | None
 
     def __post_init__(self) -> None:
-        for field in ("authority_id", "session_id", "source_id", "source_state"):
+        for field in (
+            "authority_id",
+            "session_id",
+            "source_id",
+            "campaign_id",
+            "research_protocol_id",
+            "universe_id",
+            "source_state",
+        ):
             _text(getattr(self, field), field)
+        object.__setattr__(
+            self,
+            "protocol_sha256",
+            _sha(self.protocol_sha256, "protocol_sha256"),
+        )
         if type(self.cycle_index) is not int or self.cycle_index <= 0:
             raise EvaluationIntakeError("cycle_index must be a positive integer")
         committed = _instant(self.committed_at, "committed_at")
@@ -108,6 +124,17 @@ class ObservationIntakeRecord:
             )
 
     @property
+    def identity(self) -> tuple[str, str, str, str, str, str]:
+        return (
+            self.session_id,
+            self.source_id,
+            self.campaign_id,
+            self.research_protocol_id,
+            self.protocol_sha256,
+            self.universe_id,
+        )
+
+    @property
     def record_sha256(self) -> str:
         return _digest(self.to_payload())
 
@@ -116,6 +143,10 @@ class ObservationIntakeRecord:
             "authority_id": self.authority_id,
             "session_id": self.session_id,
             "source_id": self.source_id,
+            "campaign_id": self.campaign_id,
+            "research_protocol_id": self.research_protocol_id,
+            "protocol_sha256": self.protocol_sha256,
+            "universe_id": self.universe_id,
             "cycle_index": self.cycle_index,
             "committed_at": _timestamp(self.committed_at, "committed_at"),
             "outcome_reveal_not_before": _timestamp(
@@ -135,6 +166,10 @@ class ObservationIntakeRecord:
             "authority_id",
             "session_id",
             "source_id",
+            "campaign_id",
+            "research_protocol_id",
+            "protocol_sha256",
+            "universe_id",
             "cycle_index",
             "committed_at",
             "outcome_reveal_not_before",
@@ -166,6 +201,10 @@ class ObservationIntakeSnapshot:
     authority_id: str
     session_id: str
     source_id: str
+    campaign_id: str
+    research_protocol_id: str
+    protocol_sha256: str
+    universe_id: str
     first_cycle: int
     last_cycle: int
     record_count: int
@@ -174,8 +213,20 @@ class ObservationIntakeSnapshot:
     committed_at: str
 
     def __post_init__(self) -> None:
-        for field in ("authority_id", "session_id", "source_id"):
+        for field in (
+            "authority_id",
+            "session_id",
+            "source_id",
+            "campaign_id",
+            "research_protocol_id",
+            "universe_id",
+        ):
             _text(getattr(self, field), field)
+        object.__setattr__(
+            self,
+            "protocol_sha256",
+            _sha(self.protocol_sha256, "protocol_sha256"),
+        )
         if type(self.first_cycle) is not int or type(self.last_cycle) is not int:
             raise EvaluationIntakeError("snapshot cycle bounds must be integers")
         if self.first_cycle <= 0 or self.last_cycle < self.first_cycle:
@@ -187,6 +238,17 @@ class ObservationIntakeSnapshot:
         _instant(self.committed_at, "committed_at")
 
     @property
+    def identity(self) -> tuple[str, str, str, str, str, str]:
+        return (
+            self.session_id,
+            self.source_id,
+            self.campaign_id,
+            self.research_protocol_id,
+            self.protocol_sha256,
+            self.universe_id,
+        )
+
+    @property
     def snapshot_sha256(self) -> str:
         return _digest(self.to_payload())
 
@@ -195,6 +257,10 @@ class ObservationIntakeSnapshot:
             "authority_id": self.authority_id,
             "session_id": self.session_id,
             "source_id": self.source_id,
+            "campaign_id": self.campaign_id,
+            "research_protocol_id": self.research_protocol_id,
+            "protocol_sha256": self.protocol_sha256,
+            "universe_id": self.universe_id,
             "first_cycle": self.first_cycle,
             "last_cycle": self.last_cycle,
             "record_count": self.record_count,
@@ -211,6 +277,10 @@ class ObservationIntakeSnapshot:
             "authority_id",
             "session_id",
             "source_id",
+            "campaign_id",
+            "research_protocol_id",
+            "protocol_sha256",
+            "universe_id",
             "first_cycle",
             "last_cycle",
             "record_count",
@@ -247,9 +317,17 @@ class ObservationIntakeLedger:
             raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
             raise EvaluationIntakeIntegrityError("cannot read canonical intake ledger") from exc
-        if type(raw) is not dict or set(raw) != {"schema", "schema_version", "authority_id", "records", "root_sha256"}:
+        if (
+            type(raw) is not dict
+            or set(raw)
+            != {"schema", "schema_version", "authority_id", "records", "root_sha256"}
+        ):
             raise EvaluationIntakeIntegrityError("canonical intake ledger schema mismatch")
-        if raw["schema"] != SCHEMA or raw["schema_version"] != SCHEMA_VERSION or raw["authority_id"] != self.authority_id:
+        if (
+            raw["schema"] != SCHEMA
+            or raw["schema_version"] != SCHEMA_VERSION
+            or raw["authority_id"] != self.authority_id
+        ):
             raise EvaluationIntakeIntegrityError("canonical intake authority identity mismatch")
         if type(raw["records"]) is not list:
             raise EvaluationIntakeIntegrityError("canonical intake records must be a list")
@@ -266,23 +344,23 @@ class ObservationIntakeLedger:
 
     def _validate_chain(self, records: tuple[ObservationIntakeRecord, ...]) -> None:
         previous: str | None = None
-        identities: tuple[str, str] | None = None
+        identity: tuple[str, str, str, str, str, str] | None = None
         expected_cycle = 1
         seen_rows: set[str] = set()
         for record in records:
             if record.authority_id != self.authority_id:
                 raise EvaluationIntakeIntegrityError("record belongs to another intake authority")
-            identity = (record.session_id, record.source_id)
-            if identities is None:
-                identities = identity
-            elif identities != identity:
-                raise EvaluationIntakeIntegrityError("intake authority cannot mix sessions/sources")
+            if identity is None:
+                identity = record.identity
+            elif identity != record.identity:
+                raise EvaluationIntakeIntegrityError(
+                    "intake authority cannot mix session/source/campaign/protocol/universe identity"
+                )
             if record.cycle_index != expected_cycle:
                 raise EvaluationIntakeIntegrityError("intake cycle history is not contiguous")
             if record.previous_record_sha256 != previous:
                 raise EvaluationIntakeIntegrityError("intake record chain predecessor mismatch")
-            overlap = seen_rows.intersection(record.row_keys)
-            if overlap:
+            if seen_rows.intersection(record.row_keys):
                 raise EvaluationIntakeIntegrityError("row_key cannot move between intake cycles")
             seen_rows.update(record.row_keys)
             previous = record.record_sha256
@@ -293,6 +371,10 @@ class ObservationIntakeLedger:
         *,
         session_id: str,
         source_id: str,
+        campaign_id: str,
+        research_protocol_id: str,
+        protocol_sha256: str,
+        universe_id: str,
         cycle_index: int,
         committed_at: str,
         outcome_reveal_not_before: str,
@@ -301,12 +383,44 @@ class ObservationIntakeLedger:
     ) -> ObservationIntakeRecord:
         with WorkspaceEconomicLock(self.workspace):
             records = self._read_unlocked()
+            if type(cycle_index) is not int or cycle_index <= 0:
+                raise EvaluationIntakeError("cycle_index must be a positive integer")
+            if cycle_index <= len(records):
+                existing = records[cycle_index - 1]
+                proposed_without_previous = ObservationIntakeRecord(
+                    authority_id=self.authority_id,
+                    session_id=session_id,
+                    source_id=source_id,
+                    campaign_id=campaign_id,
+                    research_protocol_id=research_protocol_id,
+                    protocol_sha256=protocol_sha256,
+                    universe_id=universe_id,
+                    cycle_index=cycle_index,
+                    committed_at=committed_at,
+                    outcome_reveal_not_before=outcome_reveal_not_before,
+                    row_keys=row_keys,
+                    source_state=source_state,
+                    previous_record_sha256=existing.previous_record_sha256,
+                )
+                if proposed_without_previous.record_sha256 == existing.record_sha256:
+                    return existing
+                raise EvaluationIntakeIntegrityError(
+                    "intake cycle retry conflicts with durable history"
+                )
             expected_cycle = len(records) + 1
+            if cycle_index != expected_cycle:
+                raise EvaluationIntakeIntegrityError(
+                    "intake cycle cannot skip an observation cycle"
+                )
             previous = None if not records else records[-1].record_sha256
             record = ObservationIntakeRecord(
                 authority_id=self.authority_id,
                 session_id=session_id,
                 source_id=source_id,
+                campaign_id=campaign_id,
+                research_protocol_id=research_protocol_id,
+                protocol_sha256=protocol_sha256,
+                universe_id=universe_id,
                 cycle_index=cycle_index,
                 committed_at=committed_at,
                 outcome_reveal_not_before=outcome_reveal_not_before,
@@ -314,17 +428,14 @@ class ObservationIntakeLedger:
                 source_state=source_state,
                 previous_record_sha256=previous,
             )
-            if cycle_index < expected_cycle:
-                existing = records[cycle_index - 1] if 0 < cycle_index <= len(records) else None
-                if existing is not None and existing.record_sha256 == record.record_sha256:
-                    return existing
-                raise EvaluationIntakeIntegrityError("intake cycle retry conflicts with durable history")
-            if cycle_index != expected_cycle:
-                raise EvaluationIntakeIntegrityError("intake cycle cannot skip an observation cycle")
-            if records and (records[0].session_id != session_id or records[0].source_id != source_id):
-                raise EvaluationIntakeIntegrityError("intake authority cannot change session/source identity")
+            if records and records[0].identity != record.identity:
+                raise EvaluationIntakeIntegrityError(
+                    "intake authority cannot change session/source/campaign/protocol/universe identity"
+                )
             if any(set(record.row_keys).intersection(item.row_keys) for item in records):
-                raise EvaluationIntakeIntegrityError("row_key already belongs to an earlier intake cycle")
+                raise EvaluationIntakeIntegrityError(
+                    "row_key already belongs to an earlier intake cycle"
+                )
             updated = (*records, record)
             payload = {
                 "schema": SCHEMA,
@@ -355,10 +466,15 @@ class ObservationIntakeLedger:
             )
         selected = records[first_cycle - 1 : last_cycle]
         expected_keys = tuple(sorted(key for record in selected for key in record.row_keys))
+        first = selected[0]
         return ObservationIntakeSnapshot(
             authority_id=self.authority_id,
-            session_id=selected[0].session_id,
-            source_id=selected[0].source_id,
+            session_id=first.session_id,
+            source_id=first.source_id,
+            campaign_id=first.campaign_id,
+            research_protocol_id=first.research_protocol_id,
+            protocol_sha256=first.protocol_sha256,
+            universe_id=first.universe_id,
             first_cycle=first_cycle,
             last_cycle=last_cycle,
             record_count=len(selected),
@@ -378,3 +494,12 @@ class ObservationIntakeLedger:
             raise EvaluationIntakeIntegrityError(
                 "snapshot does not match canonical durable pre-result intake"
             )
+
+    def record_for_row(self, row_key: str) -> ObservationIntakeRecord:
+        row_key = _text(row_key, "row_key")
+        matches = [record for record in self.records() if row_key in record.row_keys]
+        if len(matches) != 1:
+            raise EvaluationIntakeIntegrityError(
+                "row_key must resolve to exactly one canonical intake record"
+            )
+        return matches[0]

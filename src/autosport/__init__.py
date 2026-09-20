@@ -22,3 +22,8 @@ from . import _provider_observation_payload_strictness as _provider_observation_
 # production provider-completeness authority. Install the fail-closed public gate;
 # the supported denominator path consumes the exact live CompleteGameBoardSnapshot.
 from . import _evaluation_universe_structural_gate as _evaluation_universe_structural_gate  # noqa: F401,E402
+
+# Provider membership alone cannot authorize caller-created decision semantics.  The
+# production denominator must also consume #662's exact product-owned pre-evaluation
+# semantic capability before freezing the initial row set.
+from . import _provider_evaluation_semantic_gate as _provider_evaluation_semantic_gate  # noqa: F401,E402

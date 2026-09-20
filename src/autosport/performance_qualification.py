@@ -248,6 +248,22 @@ def _qualification_identity_payload(
     }
 
 
+def _expected_check_roster(budget: PerformanceBudget) -> dict[str, tuple[str, int | float]]:
+    roster: dict[str, tuple[str, int | float]] = {}
+    candidates = (
+        ("history_events", ">=", budget.min_history_events),
+        ("accepted_events_per_second", ">=", budget.min_accepted_events_per_second),
+        ("peak_traced_memory_bytes", "<=", budget.max_peak_traced_memory_bytes),
+        ("ingest_elapsed_seconds", "<=", budget.max_ingest_elapsed_seconds),
+        ("replay_elapsed_seconds", "<=", budget.max_replay_elapsed_seconds),
+        ("restart_elapsed_seconds", "<=", budget.max_restart_elapsed_seconds),
+    )
+    for metric, comparator, threshold in candidates:
+        if threshold is not None:
+            roster[metric] = (comparator, threshold)
+    return roster
+
+
 @dataclass(frozen=True, slots=True)
 class PerformanceQualification:
     source_sha: str
@@ -269,6 +285,24 @@ class PerformanceQualification:
             raise PerformanceQualificationError("checks must be a non-empty tuple")
         if any(not isinstance(check, MetricQualification) for check in self.checks):
             raise PerformanceQualificationError("checks must contain MetricQualification values")
+
+        expected_roster = _expected_check_roster(self.budget)
+        actual_metrics: set[str] = set()
+        for check in self.checks:
+            if check.metric in actual_metrics:
+                raise PerformanceQualificationError("checks contain duplicate performance metric")
+            expected = expected_roster.get(check.metric)
+            if expected is None:
+                raise PerformanceQualificationError("checks contain unconstrained performance metric")
+            expected_comparator, expected_threshold = expected
+            if check.comparator != expected_comparator:
+                raise PerformanceQualificationError("check comparator does not match performance budget")
+            if type(check.threshold) is not type(expected_threshold) or check.threshold != expected_threshold:
+                raise PerformanceQualificationError("check threshold does not match performance budget")
+            actual_metrics.add(check.metric)
+        if actual_metrics != set(expected_roster):
+            raise PerformanceQualificationError("checks do not exactly cover performance budget")
+
         status = "PASS" if all(check.status == "PASS" for check in self.checks) else "FAIL"
         identity_payload = _qualification_identity_payload(
             source_sha=canonical_source_sha,

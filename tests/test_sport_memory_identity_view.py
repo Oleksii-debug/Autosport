@@ -95,6 +95,9 @@ class _LowLevelSportMemoryRuntime(_PublicSportMemoryRuntime):
     def materialize(self, *args, **kwargs):
         return _guard._ORIGINAL_MATERIALIZE(self, *args, **kwargs)
 
+    def record_consumption(self, *args, **kwargs):
+        return _guard._ORIGINAL_RECORD_CONSUMPTION(self, *args, **kwargs)
+
 
 SportMemoryRuntime = _LowLevelSportMemoryRuntime
 

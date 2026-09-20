@@ -10,6 +10,22 @@ from . import _paper_execution_append_recovery as _paper_execution_append_recove
 from . import _paper_value_execution_authority as _paper_value_execution_authority  # noqa: F401,E402
 from . import _paper_value_risk_admission_recovery as _paper_value_risk_admission_recovery  # noqa: F401,E402
 
+# Bind explicit realized-VOC admissions to the exact canonical ResearchProtocol
+# and protocol-derived cohort before the scoring facade is imported by consumers.
+from . import _voc_admission_identity_guard as _voc_admission_identity_guard  # noqa: F401,E402
+
+# A durable SUCCEEDED VOC producer receipt may finish publishing its exact output
+# after restart, but historical requests never become generically live again.
+from . import _voc_restart_publication_guard as _voc_restart_publication_guard  # noqa: F401,E402
+
+# Once both paired shadow outputs are canonical, freeze the pre-outcome scoring
+# record from product-owned router authority instead of caller-authored values.
+from . import _voc_product_evidence_guard as _voc_product_evidence_guard  # noqa: F401,E402
+
+# Failed/late/cancelled paired attempts close from immutable router execution
+# authority exactly once, preserving denominator evidence across restart.
+from . import _voc_product_negative_terminal_guard as _voc_product_negative_terminal_guard  # noqa: F401,E402
+
 # Provider completeness is positive only for an exact live canonical acquisition.
 # Local persisted bytes/journals remain integrity evidence and fail closed across
 # restart because the current provider contract supplies no non-caller-mintable

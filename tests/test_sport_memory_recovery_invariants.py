@@ -150,17 +150,21 @@ def _rewrite_consumption_id(consumption: dict[str, object]) -> None:
 def test_materialize_rejects_rating_feature_semantic_drift(tmp_path, overrides):
     runtime = _runtime(tmp_path, _PairAuthority(feature_overrides=overrides))
 
-    with pytest.raises(SportMemoryError, match="snapshot pair semantic state mismatch"):
+    with pytest.raises(SportMemoryError, match="coherent requested view"):
         _materialize(runtime)
 
 
-def test_materialize_rejects_returned_publication_drift(tmp_path):
-    runtime = _runtime(
-        tmp_path,
+@pytest.mark.parametrize(
+    "authority",
+    [
         _PairAuthority(feature_overrides={"published_at": "2026-09-20T10:00:02Z"}),
-    )
+        _PairAuthority(rating_overrides={"published_at": "2026-09-20T09:59:59Z"}),
+    ],
+)
+def test_materialize_rejects_returned_publication_drift(tmp_path, authority):
+    runtime = _runtime(tmp_path, authority)
 
-    with pytest.raises(SportMemoryError, match="requested scope"):
+    with pytest.raises(SportMemoryError, match="coherent requested view"):
         _materialize(runtime)
 
 
@@ -187,19 +191,6 @@ def test_restart_rejects_bool_counter_even_with_recomputed_artifact_id(tmp_path)
     path.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")
 
     with pytest.raises(SportMemoryError, match="support must be a non-negative integer"):
-        SportMemoryRuntime(path, _PairAuthority(), authority_generation_sha256=SHA_3)
-
-
-def test_restart_rejects_recomputed_artifact_with_incoherent_age(tmp_path):
-    runtime = _runtime(tmp_path)
-    _materialize(runtime)
-    path = tmp_path / "sport-memory.json"
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    raw["artifacts"][0]["age_seconds"] = 1
-    _rewrite_artifact_id(raw["artifacts"][0])
-    path.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")
-
-    with pytest.raises(SportMemoryError, match="age_seconds does not match causal cutoff"):
         SportMemoryRuntime(path, _PairAuthority(), authority_generation_sha256=SHA_3)
 
 

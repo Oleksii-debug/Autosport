@@ -24,7 +24,7 @@ T3 = "2026-09-20T03:00:06+00:00"
 
 
 class PaperAbstentionSameProcessRetryIdentityTests(unittest.TestCase):
-    def test_changed_decision_time_cannot_reuse_pending_action_after_intent_write_failure(
+    def test_only_exact_pending_action_can_resume_after_intent_write_failure(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -86,12 +86,34 @@ class PaperAbstentionSameProcessRetryIdentityTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 PaperAbstentionLearningError,
-                "canonical environment changed the durable abstention retry intent",
+                "starting abstention conflicts with unresolved environment action",
             ):
                 runtime.begin_abstention(
                     observation=observation,
                     action_type="WAIT",
                     decision_at=T3,
+                    parameters=(("reason", "no-edge"),),
+                    at=T3,
+                )
+
+            self.assertEqual((root / "agent-loop.json").read_bytes(), before_loop)
+            self.assertEqual(tuple(sorted(environment._pending)), pending_ids)
+            self.assertFalse(runtime._intent_path.exists())
+
+            unrelated_observation = Observation(
+                environment_id=environment.environment_id,
+                observed_at=T0,
+                available_at=T1,
+                evidence=(("opportunity", "different-observation"),),
+            )
+            with self.assertRaisesRegex(
+                PaperAbstentionLearningError,
+                "starting abstention conflicts with unresolved environment action",
+            ):
+                runtime.begin_abstention(
+                    observation=unrelated_observation,
+                    action_type="WAIT",
+                    decision_at=T2,
                     parameters=(("reason", "no-edge"),),
                     at=T3,
                 )

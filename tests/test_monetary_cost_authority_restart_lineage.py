@@ -143,6 +143,99 @@ def test_restart_rejects_rehashed_forged_branch_before_either_tip_can_resolve(tm
         )
 
 
+def test_live_and_restart_reject_backdated_correction_availability(tmp_path) -> None:
+    first = _snapshot(
+        evidence_id="price-1",
+        amount="10",
+        digest_char="a",
+        available_at=T2,
+    )
+    backdated = _snapshot(
+        evidence_id="price-2",
+        amount="7.5",
+        digest_char="b",
+        supersedes="price-1",
+        available_at=T1,
+    )
+    resolver = Resolver({"first": first, "backdated": backdated})
+    authority = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.PROVIDER_BILLING: resolver},
+    )
+    authority.capture_source(
+        MonetarySourceClass.PROVIDER_BILLING,
+        "first",
+        as_of=T2,
+    )
+    with pytest.raises(
+        MonetaryAuthorityError,
+        match="correction availability cannot precede predecessor",
+    ):
+        authority.capture_source(
+            MonetarySourceClass.PROVIDER_BILLING,
+            "backdated",
+            as_of=T2,
+        )
+
+    # Prove a locally rehashed durable correction cannot forge the same chronology.
+    root = tmp_path / "restart"
+    canonical_first = _snapshot(
+        evidence_id="price-1",
+        amount="10",
+        digest_char="a",
+        available_at=T1,
+    )
+    canonical_correction = _snapshot(
+        evidence_id="price-2",
+        amount="7.5",
+        digest_char="b",
+        supersedes="price-1",
+        available_at=T2,
+    )
+    canonical_resolver = Resolver(
+        {"first": canonical_first, "correction": canonical_correction}
+    )
+    canonical = MonetaryCostAuthority(
+        root,
+        source_resolvers={MonetarySourceClass.PROVIDER_BILLING: canonical_resolver},
+    )
+    canonical.capture_source(
+        MonetarySourceClass.PROVIDER_BILLING,
+        "first",
+        as_of=T1,
+    )
+    canonical.capture_source(
+        MonetarySourceClass.PROVIDER_BILLING,
+        "correction",
+        as_of=T2,
+    )
+    path = root / "monetary-cost-authority.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    correction_record = next(
+        record
+        for record in raw["sources"]
+        if record["snapshot"]["supersedes_evidence_id"] == "price-1"
+    )
+    correction_record["snapshot"]["available_at"] = T0.isoformat(
+        timespec="microseconds"
+    ).replace("+00:00", "Z")
+    _rehash(correction_record)
+    path.write_text(
+        json.dumps(raw, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        MonetaryAuthorityError,
+        match="correction availability cannot precede predecessor",
+    ):
+        MonetaryCostAuthority(
+            root,
+            source_resolvers={
+                MonetarySourceClass.PROVIDER_BILLING: canonical_resolver
+            },
+        )
+
+
 def test_restart_rejects_rehashed_allocation_with_forged_campaign_coverage(tmp_path) -> None:
     source = _snapshot(evidence_id="price-1", amount="10", digest_char="a")
     resolver = Resolver({"source": source})
@@ -197,6 +290,163 @@ def test_restart_rejects_rehashed_allocation_with_forged_campaign_coverage(tmp_p
             source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
             allocation_resolver=AllocationResolver({"allocation": allocation}),
         )
+
+
+def test_live_and_restart_reject_allocation_before_exact_source_availability(tmp_path) -> None:
+    source = _snapshot(
+        evidence_id="price-1",
+        amount="10",
+        digest_char="a",
+        available_at=T2,
+    )
+    resolver = Resolver({"source": source})
+    bootstrap = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
+    )
+    source_ref = bootstrap.capture_source(
+        MonetarySourceClass.FIXED_ADMIN,
+        "source",
+        as_of=T2,
+    )
+    backdated = SharedAllocationSnapshot(
+        authority_id="allocation-ledger-cache",
+        evidence_id="allocation-1",
+        content_sha256="d" * 64,
+        source_ref=source_ref,
+        shares=(("campaign-a", Decimal("1")),),
+        observed_at=T0,
+        available_at=T1,
+        provenance="resolver:non-authoritative-allocation",
+    )
+    live = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
+        allocation_resolver=AllocationResolver({"allocation": backdated}),
+    )
+    with pytest.raises(
+        MonetaryAuthorityError,
+        match="allocation availability cannot precede source",
+    ):
+        live.capture_allocation("allocation", as_of=T2)
+
+    root = tmp_path / "restart"
+    canonical_source = _snapshot(
+        evidence_id="price-1",
+        amount="10",
+        digest_char="a",
+        available_at=T1,
+    )
+    canonical_resolver = Resolver({"source": canonical_source})
+    canonical_bootstrap = MonetaryCostAuthority(
+        root,
+        source_resolvers={MonetarySourceClass.FIXED_ADMIN: canonical_resolver},
+    )
+    canonical_ref = canonical_bootstrap.capture_source(
+        MonetarySourceClass.FIXED_ADMIN,
+        "source",
+        as_of=T1,
+    )
+    canonical_allocation = SharedAllocationSnapshot(
+        authority_id="allocation-ledger-cache",
+        evidence_id="allocation-1",
+        content_sha256="d" * 64,
+        source_ref=canonical_ref,
+        shares=(("campaign-a", Decimal("1")),),
+        observed_at=T0,
+        available_at=T2,
+        provenance="resolver:non-authoritative-allocation",
+    )
+    canonical = MonetaryCostAuthority(
+        root,
+        source_resolvers={MonetarySourceClass.FIXED_ADMIN: canonical_resolver},
+        allocation_resolver=AllocationResolver({"allocation": canonical_allocation}),
+    )
+    canonical.capture_allocation("allocation", as_of=T2)
+    path = root / "monetary-cost-authority.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    allocation_record = raw["allocations"][0]
+    allocation_record["available_at"] = T0.isoformat(
+        timespec="microseconds"
+    ).replace("+00:00", "Z")
+    _rehash_allocation(allocation_record)
+    path.write_text(
+        json.dumps(raw, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        MonetaryAuthorityError,
+        match="allocation availability cannot precede source",
+    ):
+        MonetaryCostAuthority(
+            root,
+            source_resolvers={MonetarySourceClass.FIXED_ADMIN: canonical_resolver},
+            allocation_resolver=AllocationResolver(
+                {"allocation": canonical_allocation}
+            ),
+        )
+
+
+def test_stale_reopened_writer_cannot_ack_competing_allocation(tmp_path) -> None:
+    source = _snapshot(evidence_id="price-1", amount="10", digest_char="a")
+    resolver = Resolver({"source": source})
+    bootstrap = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
+    )
+    source_ref = bootstrap.capture_source(
+        MonetarySourceClass.FIXED_ADMIN,
+        "source",
+        as_of=T1,
+    )
+    first_allocation = SharedAllocationSnapshot(
+        authority_id="allocation-ledger-cache",
+        evidence_id="allocation-1",
+        content_sha256="d" * 64,
+        source_ref=source_ref,
+        shares=(("campaign-a", Decimal("1")),),
+        observed_at=T0,
+        available_at=T1,
+        provenance="resolver:non-authoritative-allocation",
+    )
+    competing_allocation = SharedAllocationSnapshot(
+        authority_id="allocation-ledger-cache",
+        evidence_id="allocation-2",
+        content_sha256="e" * 64,
+        source_ref=source_ref,
+        shares=(("campaign-a", Decimal("1")),),
+        observed_at=T0,
+        available_at=T1,
+        provenance="resolver:non-authoritative-allocation",
+    )
+
+    first = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
+        allocation_resolver=AllocationResolver({"allocation": first_allocation}),
+    )
+    stale = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
+        allocation_resolver=AllocationResolver({"allocation": competing_allocation}),
+    )
+    first.capture_allocation("allocation", as_of=T1)
+    with pytest.raises(
+        MonetaryAuthorityError,
+        match="cache changed since load; reopen before mutation",
+    ):
+        stale.capture_allocation("allocation", as_of=T1)
+
+    restarted = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
+        allocation_resolver=AllocationResolver({"allocation": first_allocation}),
+    )
+    raw = json.loads(
+        (tmp_path / "monetary-cost-authority.json").read_text(encoding="utf-8")
+    )
+    assert len(raw["allocations"]) == 1
+    assert restarted.resolve_source(source_ref, as_of=T1).snapshot == source
 
 
 def test_failed_source_persist_rolls_back_before_retry_and_restart(

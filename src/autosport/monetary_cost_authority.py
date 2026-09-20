@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 import hashlib
 import json
@@ -10,29 +10,21 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from typing import Mapping, Protocol
+from typing import Any, Mapping, Protocol
 
-from .campaign_cost_evidence import (
-    CostBasis,
-    CostClass,
-    CostEvidence,
-    CostSourceRef,
-    CostTreatment,
-    CostTruth,
-    CostUnit,
-)
+from .campaign_cost_evidence import CostEvidence, CostSourceRef
 from .campaign_economic_authority import FinalizedCampaignAuthority
 
 
-SCHEMA_VERSION = 1
-_SOURCE_PREFIX = "economics.monetary-source.v1"
-_ALLOCATION_PREFIX = "economics.monetary-allocation.v1"
+SCHEMA_VERSION = 2
+_SOURCE_PREFIX = "economics.monetary-source.v2"
+_ALLOCATION_PREFIX = "economics.monetary-allocation.v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
 
 
 class MonetaryAuthorityError(ValueError):
-    pass
+    """Raised when monetary source evidence cannot be trusted exactly."""
 
 
 class MonetarySourceClass(StrEnum):
@@ -49,21 +41,15 @@ class MonetaryEvidenceQuality(StrEnum):
     SIMULATED = "SIMULATED"
 
 
-_COST_CLASS = {
-    MonetarySourceClass.PROVIDER_BILLING: CostClass.PROVIDER_DATA,
-    MonetarySourceClass.COMPUTE_BILLING: CostClass.MODEL_COMPUTE_AI,
-    MonetarySourceClass.EXECUTION_SLIPPAGE: CostClass.EXECUTION_SLIPPAGE,
-    MonetarySourceClass.EXECUTION_RECEIPT: CostClass.EXECUTION_FEES_COMMISSION_TAX,
-    MonetarySourceClass.FIXED_ADMIN: CostClass.FIXED_CAMPAIGN,
-}
-_TREATMENT = {
-    **{value: CostTreatment.SUBTRACT_FROM_GROSS for value in MonetarySourceClass},
-    MonetarySourceClass.EXECUTION_SLIPPAGE: CostTreatment.EMBEDDED_IN_GROSS,
-}
-
-
 @dataclass(frozen=True, slots=True)
 class MonetarySourceSnapshot:
+    """Immutable observation returned by a non-authorizing resolver.
+
+    Generic/injected resolvers are deliberately useful only for estimates and
+    simulations.  ``INCURRED`` is retained in the vocabulary for a future
+    concrete product-owned adapter, but this schema cannot capture or reload it.
+    """
+
     authority_id: str
     evidence_id: str
     content_sha256: str
@@ -79,19 +65,26 @@ class MonetarySourceSnapshot:
     supersedes_evidence_id: str | None = None
 
     def __post_init__(self) -> None:
-        _text(self.authority_id, "authority_id")
+        _identifier(self.authority_id, "authority_id")
         _text(self.evidence_id, "evidence_id")
         _sha(self.content_sha256, "content_sha256")
-        _amount(self.amount)
-        if not _CURRENCY.fullmatch(self.currency):
+        _amount(self.amount, "amount")
+        if not isinstance(self.currency, str) or _CURRENCY.fullmatch(self.currency) is None:
             raise MonetaryAuthorityError("currency must be uppercase three-letter code")
         _sorted_text(self.campaign_ids, "campaign_ids")
         if not self.campaign_ids:
             raise MonetaryAuthorityError("campaign_ids must be non-empty")
-        for value, name in ((self.coverage_start, "coverage_start"), (self.coverage_end, "coverage_end"), (self.observed_at, "observed_at"), (self.available_at, "available_at")):
-            _utc(value, name)
-        if self.coverage_start > self.coverage_end or self.coverage_end > self.available_at:
-            raise MonetaryAuthorityError("invalid monetary coverage interval")
+        for value, label in (
+            (self.coverage_start, "coverage_start"),
+            (self.coverage_end, "coverage_end"),
+            (self.observed_at, "observed_at"),
+            (self.available_at, "available_at"),
+        ):
+            _utc(value, label)
+        if self.coverage_start > self.coverage_end:
+            raise MonetaryAuthorityError("coverage_start cannot follow coverage_end")
+        if self.coverage_end > self.available_at:
+            raise MonetaryAuthorityError("coverage cannot end after evidence is available")
         if self.observed_at > self.available_at:
             raise MonetaryAuthorityError("observed_at cannot follow available_at")
         _text(self.provenance, "provenance")
@@ -102,7 +95,7 @@ class MonetarySourceSnapshot:
             if self.supersedes_evidence_id == self.evidence_id:
                 raise MonetaryAuthorityError("source cannot supersede itself")
 
-    def payload(self) -> dict[str, object]:
+    def payload(self) -> dict[str, Any]:
         return {
             "authority_id": self.authority_id,
             "evidence_id": self.evidence_id,
@@ -119,6 +112,41 @@ class MonetarySourceSnapshot:
             "supersedes_evidence_id": self.supersedes_evidence_id,
         }
 
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "MonetarySourceSnapshot":
+        _keys(
+            raw,
+            {
+                "authority_id", "evidence_id", "content_sha256", "amount",
+                "currency", "campaign_ids", "coverage_start", "coverage_end",
+                "observed_at", "available_at", "provenance", "quality",
+                "supersedes_evidence_id",
+            },
+            "MonetarySourceSnapshot",
+        )
+        return cls(
+            authority_id=_string(raw["authority_id"], "authority_id"),
+            evidence_id=_string(raw["evidence_id"], "evidence_id"),
+            content_sha256=_string(raw["content_sha256"], "content_sha256"),
+            amount=_parse_decimal(raw["amount"], "amount"),
+            currency=_string(raw["currency"], "currency"),
+            campaign_ids=tuple(
+                _string(value, "campaign_id")
+                for value in _list(raw["campaign_ids"], "campaign_ids")
+            ),
+            coverage_start=_parse_dt(raw["coverage_start"], "coverage_start"),
+            coverage_end=_parse_dt(raw["coverage_end"], "coverage_end"),
+            observed_at=_parse_dt(raw["observed_at"], "observed_at"),
+            available_at=_parse_dt(raw["available_at"], "available_at"),
+            provenance=_string(raw["provenance"], "provenance"),
+            quality=MonetaryEvidenceQuality(_string(raw["quality"], "quality")),
+            supersedes_evidence_id=(
+                None
+                if raw["supersedes_evidence_id"] is None
+                else _string(raw["supersedes_evidence_id"], "supersedes_evidence_id")
+            ),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class MonetarySourceRecord:
@@ -127,7 +155,7 @@ class MonetarySourceRecord:
 
     @property
     def sha256(self) -> str:
-        return _digest({"schema_version": SCHEMA_VERSION, "source_class": self.source_class.value, "snapshot": self.snapshot.payload()})
+        return _digest(self.payload())
 
     @property
     def ref(self) -> CostSourceRef:
@@ -137,8 +165,28 @@ class MonetarySourceRecord:
             sha256=self.sha256,
         )
 
-    def to_dict(self) -> dict[str, object]:
-        return {"source_class": self.source_class.value, "snapshot": self.snapshot.payload(), "sha256": self.sha256}
+    def payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "source_class": self.source_class.value,
+            "snapshot": self.snapshot.payload(),
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**self.payload(), "sha256": self.sha256}
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "MonetarySourceRecord":
+        _keys(raw, {"schema_version", "source_class", "snapshot", "sha256"}, "MonetarySourceRecord")
+        if raw["schema_version"] != SCHEMA_VERSION:
+            raise MonetaryAuthorityError("unsupported monetary source record schema")
+        item = cls(
+            source_class=MonetarySourceClass(_string(raw["source_class"], "source_class")),
+            snapshot=MonetarySourceSnapshot.from_dict(_mapping(raw["snapshot"], "snapshot")),
+        )
+        if _string(raw["sha256"], "sha256") != item.sha256:
+            raise MonetaryAuthorityError("durable monetary source digest mismatch")
+        return item
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,19 +201,22 @@ class SharedAllocationSnapshot:
     provenance: str
 
     def __post_init__(self) -> None:
-        _text(self.authority_id, "authority_id")
+        _identifier(self.authority_id, "authority_id")
         _text(self.evidence_id, "evidence_id")
         _sha(self.content_sha256, "content_sha256")
-        normalized = tuple(sorted(self.shares, key=lambda item: item[0]))
-        if self.shares != normalized or len({key for key, _ in self.shares}) != len(self.shares):
-            raise MonetaryAuthorityError("allocation shares must be sorted and unique")
+        if type(self.source_ref) is not CostSourceRef:
+            raise MonetaryAuthorityError("source_ref must be exact CostSourceRef")
+        if tuple(sorted(self.shares, key=lambda value: value[0])) != self.shares:
+            raise MonetaryAuthorityError("allocation shares must be sorted")
+        if len({campaign_id for campaign_id, _ in self.shares}) != len(self.shares):
+            raise MonetaryAuthorityError("allocation campaign_ids must be unique")
         for campaign_id, share in self.shares:
-            _text(campaign_id, "campaign_id")
-            _amount(share)
+            _text(campaign_id, "allocation campaign_id")
+            _amount(share, "allocation share")
             if share <= 0:
-                raise MonetaryAuthorityError("allocation share must be > 0")
+                raise MonetaryAuthorityError("allocation shares must be positive")
         if not self.shares or sum((share for _, share in self.shares), Decimal("0")) != Decimal("1"):
-            raise MonetaryAuthorityError("allocation must conserve exactly one source amount")
+            raise MonetaryAuthorityError("allocation shares must conserve exactly one source amount")
         _utc(self.observed_at, "observed_at")
         _utc(self.available_at, "available_at")
         if self.observed_at > self.available_at:
@@ -178,22 +229,61 @@ class SharedAllocationSnapshot:
 
     @property
     def ref(self) -> CostSourceRef:
-        return CostSourceRef(f"{_ALLOCATION_PREFIX}:{self.authority_id}", self.evidence_id, self.sha256)
+        return CostSourceRef(
+            family=f"{_ALLOCATION_PREFIX}:{self.authority_id}",
+            evidence_id=self.evidence_id,
+            sha256=self.sha256,
+        )
 
-    def payload(self) -> dict[str, object]:
+    def payload(self) -> dict[str, Any]:
         return {
+            "schema_version": SCHEMA_VERSION,
             "authority_id": self.authority_id,
             "evidence_id": self.evidence_id,
             "content_sha256": self.content_sha256,
             "source_ref": self.source_ref.to_dict(),
-            "shares": [[key, _decimal(value)] for key, value in self.shares],
+            "shares": [[campaign_id, _decimal(share)] for campaign_id, share in self.shares],
             "observed_at": _dt(self.observed_at),
             "available_at": _dt(self.available_at),
             "provenance": self.provenance,
         }
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> dict[str, Any]:
         return {**self.payload(), "sha256": self.sha256}
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "SharedAllocationSnapshot":
+        _keys(
+            raw,
+            {
+                "schema_version", "authority_id", "evidence_id", "content_sha256",
+                "source_ref", "shares", "observed_at", "available_at",
+                "provenance", "sha256",
+            },
+            "SharedAllocationSnapshot",
+        )
+        if raw["schema_version"] != SCHEMA_VERSION:
+            raise MonetaryAuthorityError("unsupported allocation schema")
+        shares: list[tuple[str, Decimal]] = []
+        for value in _list(raw["shares"], "shares"):
+            if not isinstance(value, list) or len(value) != 2:
+                raise MonetaryAuthorityError("allocation entry must be [campaign_id, share]")
+            shares.append(
+                (_string(value[0], "campaign_id"), _parse_decimal(value[1], "share"))
+            )
+        item = cls(
+            authority_id=_string(raw["authority_id"], "authority_id"),
+            evidence_id=_string(raw["evidence_id"], "evidence_id"),
+            content_sha256=_string(raw["content_sha256"], "content_sha256"),
+            source_ref=CostSourceRef.from_dict(_mapping(raw["source_ref"], "source_ref")),
+            shares=tuple(shares),
+            observed_at=_parse_dt(raw["observed_at"], "observed_at"),
+            available_at=_parse_dt(raw["available_at"], "available_at"),
+            provenance=_string(raw["provenance"], "provenance"),
+        )
+        if _string(raw["sha256"], "sha256") != item.sha256:
+            raise MonetaryAuthorityError("durable allocation digest mismatch")
+        return item
 
 
 class MonetarySourceResolver(Protocol):
@@ -205,7 +295,14 @@ class SharedAllocationResolver(Protocol):
 
 
 class MonetaryCostAuthority:
-    """Product-composed immutable incurred-money resolver and durable store."""
+    """Fail-closed cache for non-authoritative monetary observations.
+
+    No injected resolver in schema v2 can mint incurred monetary truth.  A later
+    positive path must be a concrete product-owned adapter to an existing
+    provider/billing/compute/execution/admin authority and must re-resolve that
+    authority on restart.  Until then, this class deliberately keeps #645
+    economic completeness closed.
+    """
 
     def __init__(
         self,
@@ -222,18 +319,30 @@ class MonetaryCostAuthority:
         self._allocations: dict[str, SharedAllocationSnapshot] = {}
         self._load()
 
-    def capture_source(self, source_class: MonetarySourceClass, locator: str, *, as_of: datetime) -> CostSourceRef:
+    def capture_source(
+        self,
+        source_class: MonetarySourceClass,
+        locator: str,
+        *,
+        as_of: datetime,
+    ) -> CostSourceRef:
+        if type(source_class) is not MonetarySourceClass:
+            raise MonetaryAuthorityError("source_class must be MonetarySourceClass")
         _utc(as_of, "as_of")
         _text(locator, "locator")
         resolver = self._resolvers.get(source_class)
         if resolver is None:
-            raise MonetaryAuthorityError("no product resolver configured for source class")
+            raise MonetaryAuthorityError("no resolver configured for source class")
         snapshot = resolver.resolve(locator, as_of=as_of)
         if type(snapshot) is not MonetarySourceSnapshot:
             raise MonetaryAuthorityError("resolver must return exact MonetarySourceSnapshot")
         if snapshot.available_at > as_of:
             raise MonetaryAuthorityError("future-available source cannot be captured")
-        record = MonetarySourceRecord(source_class, snapshot)
+        if snapshot.quality is MonetaryEvidenceQuality.INCURRED:
+            raise MonetaryAuthorityError(
+                "injected resolver cannot mint incurred monetary truth"
+            )
+        record = MonetarySourceRecord(source_class=source_class, snapshot=snapshot)
         self._append_source(record)
         return record.ref
 
@@ -241,18 +350,20 @@ class MonetaryCostAuthority:
         _utc(as_of, "as_of")
         _text(locator, "locator")
         if self._allocation_resolver is None:
-            raise MonetaryAuthorityError("no product allocation resolver configured")
+            raise MonetaryAuthorityError("no allocation resolver configured")
         allocation = self._allocation_resolver.resolve(locator, as_of=as_of)
         if type(allocation) is not SharedAllocationSnapshot:
-            raise MonetaryAuthorityError("resolver must return exact SharedAllocationSnapshot")
+            raise MonetaryAuthorityError("allocation resolver returned wrong type")
         if allocation.available_at > as_of:
             raise MonetaryAuthorityError("future-available allocation cannot be captured")
         source = self._resolve(allocation.source_ref)
-        if tuple(key for key, _ in allocation.shares) != source.snapshot.campaign_ids:
+        if tuple(campaign_id for campaign_id, _ in allocation.shares) != source.snapshot.campaign_ids:
             raise MonetaryAuthorityError("allocation must cover source campaigns exactly")
-        conflicts = [value for value in self._allocations.values() if value.source_ref == allocation.source_ref]
-        if conflicts and conflicts[0] != allocation:
-            raise MonetaryAuthorityError("immutable source cannot have competing allocations")
+        if any(
+            previous.source_ref == allocation.source_ref and previous != allocation
+            for previous in self._allocations.values()
+        ):
+            raise MonetaryAuthorityError("source cannot have competing allocations")
         self._allocations.setdefault(allocation.sha256, allocation)
         self._persist()
         return allocation.ref
@@ -266,68 +377,34 @@ class MonetaryCostAuthority:
             raise MonetaryAuthorityError("source has visible append-only correction")
         return record
 
-    def issue_cost_evidence(self, *, campaign: FinalizedCampaignAuthority, source_ref: CostSourceRef, as_of: datetime) -> CostEvidence:
+    def issue_cost_evidence(
+        self,
+        *,
+        campaign: FinalizedCampaignAuthority,
+        source_ref: CostSourceRef,
+        as_of: datetime,
+    ) -> CostEvidence:
         if type(campaign) is not FinalizedCampaignAuthority:
             raise MonetaryAuthorityError("campaign must be exact FinalizedCampaignAuthority")
         _utc(as_of, "as_of")
-        return self._issue(campaign, source_ref, as_of, allow_superseded=False)
-
-    def verify_cost_evidence(self, *, campaign: FinalizedCampaignAuthority, evidence: CostEvidence, as_of: datetime) -> bool:
-        if type(evidence) is not CostEvidence:
-            return False
-        try:
-            return self.issue_cost_evidence(campaign=campaign, source_ref=evidence.source, as_of=as_of) == evidence
-        except (MonetaryAuthorityError, ValueError):
-            return False
-
-    def _issue(self, campaign: FinalizedCampaignAuthority, source_ref: CostSourceRef, as_of: datetime, *, allow_superseded: bool) -> CostEvidence:
-        record = self._resolve(source_ref)
-        item = record.snapshot
-        if item.available_at > as_of:
-            raise MonetaryAuthorityError("source unavailable at requested as-of")
-        if not allow_superseded and self._superseder(record, as_of) is not None:
-            raise MonetaryAuthorityError("source has visible append-only correction")
-        if item.quality is not MonetaryEvidenceQuality.INCURRED:
-            raise MonetaryAuthorityError("estimate/simulation cannot mint incurred monetary truth")
-        projection = campaign.projection()
-        if projection.campaign_id not in item.campaign_ids:
-            raise MonetaryAuthorityError("source does not apply to finalized campaign")
-        amount = item.amount
-        allocation_ref = None
-        shared = len(item.campaign_ids) > 1
-        if shared:
-            allocations = [value for value in self._allocations.values() if value.source_ref == source_ref and value.available_at <= as_of]
-            if len(allocations) != 1:
-                raise MonetaryAuthorityError("shared source requires one exact visible allocation")
-            allocation = allocations[0]
-            amount *= dict(allocation.shares)[projection.campaign_id]
-            allocation_ref = allocation.ref
-        supersedes: tuple[str, ...] = ()
-        if item.supersedes_evidence_id is not None:
-            predecessor = self._sources[(record.source_class, item.authority_id, item.supersedes_evidence_id)]
-            old = self._issue(campaign, predecessor.ref, as_of, allow_superseded=True)
-            supersedes = (old.cost_evidence_id,)
-        return CostEvidence(
-            cost_class=_COST_CLASS[record.source_class],
-            truth=CostTruth.KNOWN_ZERO if amount == 0 else CostTruth.KNOWN_AMOUNT,
-            basis=CostBasis.OBSERVED_INCURRED,
-            treatment=_TREATMENT[record.source_class],
-            source=source_ref,
-            campaign_sha256=projection.campaign_sha256,
-            memberships=projection.membership_refs,
-            unit=CostUnit.MONEY,
-            currency=item.currency,
-            amount=amount,
-            observed_at=item.observed_at,
-            available_at=item.available_at,
-            incurred_at=item.coverage_end,
-            shared_source=shared,
-            allocation_source=allocation_ref,
-            supersedes_cost_evidence_ids=supersedes,
+        self.resolve_source(source_ref, as_of=as_of)
+        raise MonetaryAuthorityError(
+            "no product-owned incurred monetary adapter is integrated on schema v2"
         )
+
+    def verify_cost_evidence(
+        self,
+        *,
+        campaign: FinalizedCampaignAuthority,
+        evidence: CostEvidence,
+        as_of: datetime,
+    ) -> bool:
+        return False
 
     def _append_source(self, record: MonetarySourceRecord) -> None:
         item = record.snapshot
+        if item.quality is MonetaryEvidenceQuality.INCURRED:
+            raise MonetaryAuthorityError("generic monetary cache cannot store incurred truth")
         key = (record.source_class, item.authority_id, item.evidence_id)
         previous = self._sources.get(key)
         if previous is not None:
@@ -335,21 +412,40 @@ class MonetaryCostAuthority:
                 raise MonetaryAuthorityError("immutable source identity changed")
             return
         if item.supersedes_evidence_id is not None:
-            predecessor = self._sources.get((record.source_class, item.authority_id, item.supersedes_evidence_id))
+            predecessor = self._sources.get(
+                (record.source_class, item.authority_id, item.supersedes_evidence_id)
+            )
             if predecessor is None:
                 raise MonetaryAuthorityError("correction predecessor missing")
             old = predecessor.snapshot
-            if (old.currency, old.campaign_ids, old.coverage_start, old.coverage_end) != (item.currency, item.campaign_ids, item.coverage_start, item.coverage_end):
-                raise MonetaryAuthorityError("correction cannot rewrite currency or applicability")
-            if any(value.snapshot.supersedes_evidence_id == item.supersedes_evidence_id for value in self._sources.values()):
+            if (
+                old.currency,
+                old.campaign_ids,
+                old.coverage_start,
+                old.coverage_end,
+            ) != (
+                item.currency,
+                item.campaign_ids,
+                item.coverage_start,
+                item.coverage_end,
+            ):
+                raise MonetaryAuthorityError(
+                    "correction cannot rewrite currency or applicability"
+                )
+            if any(
+                value.snapshot.supersedes_evidence_id == item.supersedes_evidence_id
+                for value in self._sources.values()
+            ):
                 raise MonetaryAuthorityError("correction lineage cannot branch")
         self._sources[key] = record
         self._persist()
 
     def _resolve(self, source_ref: CostSourceRef) -> MonetarySourceRecord:
+        if type(source_ref) is not CostSourceRef:
+            raise MonetaryAuthorityError("source_ref must be exact CostSourceRef")
         parts = source_ref.family.split(":")
         if len(parts) != 3 or parts[0] != _SOURCE_PREFIX:
-            raise MonetaryAuthorityError("not a monetary source authority ref")
+            raise MonetaryAuthorityError("not a schema-v2 monetary source ref")
         try:
             source_class = MonetarySourceClass(parts[1])
         except ValueError as exc:
@@ -359,18 +455,39 @@ class MonetaryCostAuthority:
             raise MonetaryAuthorityError("monetary source ID+digest does not resolve exactly")
         return record
 
-    def _superseder(self, record: MonetarySourceRecord, as_of: datetime) -> MonetarySourceRecord | None:
-        values = [value for value in self._sources.values() if value.source_class is record.source_class and value.snapshot.authority_id == record.snapshot.authority_id and value.snapshot.supersedes_evidence_id == record.snapshot.evidence_id and value.snapshot.available_at <= as_of]
-        if len(values) > 1:
+    def _superseder(
+        self,
+        record: MonetarySourceRecord,
+        as_of: datetime,
+    ) -> MonetarySourceRecord | None:
+        candidates = [
+            value
+            for value in self._sources.values()
+            if value.source_class is record.source_class
+            and value.snapshot.authority_id == record.snapshot.authority_id
+            and value.snapshot.supersedes_evidence_id == record.snapshot.evidence_id
+            and value.snapshot.available_at <= as_of
+        ]
+        if len(candidates) > 1:
             raise MonetaryAuthorityError("correction lineage branches")
-        return values[0] if values else None
+        return candidates[0] if candidates else None
 
     def _persist(self) -> None:
-        _atomic_json(self.root / "monetary-cost-authority.json", {
-            "schema_version": SCHEMA_VERSION,
-            "sources": [value.to_dict() for value in sorted(self._sources.values(), key=lambda value: value.sha256)],
-            "allocations": [value.to_dict() for value in sorted(self._allocations.values(), key=lambda value: value.sha256)],
-        })
+        _atomic_json(
+            self.root / "monetary-cost-authority.json",
+            {
+                "schema_version": SCHEMA_VERSION,
+                "authoritative_incurred": False,
+                "sources": [
+                    value.to_dict()
+                    for value in sorted(self._sources.values(), key=lambda value: value.sha256)
+                ],
+                "allocations": [
+                    value.to_dict()
+                    for value in sorted(self._allocations.values(), key=lambda value: value.sha256)
+                ],
+            },
+        )
 
     def _load(self) -> None:
         path = self.root / "monetary-cost-authority.json"
@@ -379,58 +496,48 @@ class MonetaryCostAuthority:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise MonetaryAuthorityError("monetary authority store unreadable") from exc
-        if set(raw) != {"schema_version", "sources", "allocations"} or raw["schema_version"] != SCHEMA_VERSION:
-            raise MonetaryAuthorityError("invalid monetary authority store schema")
-        for value in raw["sources"]:
-            record = _source_from_dict(value)
-            key = (record.source_class, record.snapshot.authority_id, record.snapshot.evidence_id)
+            raise MonetaryAuthorityError("monetary authority cache is unreadable") from exc
+        data = _mapping(raw, "store")
+        _keys(
+            data,
+            {"schema_version", "authoritative_incurred", "sources", "allocations"},
+            "store",
+        )
+        if data["schema_version"] != SCHEMA_VERSION:
+            raise MonetaryAuthorityError("unsupported monetary authority cache schema")
+        if data["authoritative_incurred"] is not False:
+            raise MonetaryAuthorityError("generic cache cannot claim incurred authority")
+        for value in _list(data["sources"], "sources"):
+            record = MonetarySourceRecord.from_dict(_mapping(value, "source"))
+            if record.snapshot.quality is MonetaryEvidenceQuality.INCURRED:
+                raise MonetaryAuthorityError(
+                    "durable generic cache cannot contain incurred monetary truth"
+                )
+            key = (
+                record.source_class,
+                record.snapshot.authority_id,
+                record.snapshot.evidence_id,
+            )
             if key in self._sources:
                 raise MonetaryAuthorityError("duplicate durable monetary source")
             self._sources[key] = record
         for record in self._sources.values():
             predecessor = record.snapshot.supersedes_evidence_id
-            if predecessor is not None and (record.source_class, record.snapshot.authority_id, predecessor) not in self._sources:
+            if predecessor is not None and (
+                record.source_class,
+                record.snapshot.authority_id,
+                predecessor,
+            ) not in self._sources:
                 raise MonetaryAuthorityError("durable correction predecessor missing")
-        for value in raw["allocations"]:
-            allocation = _allocation_from_dict(value)
+        for value in _list(data["allocations"], "allocations"):
+            allocation = SharedAllocationSnapshot.from_dict(_mapping(value, "allocation"))
             self._resolve(allocation.source_ref)
-            if any(old.source_ref == allocation.source_ref and old != allocation for old in self._allocations.values()):
+            if any(
+                old.source_ref == allocation.source_ref and old != allocation
+                for old in self._allocations.values()
+            ):
                 raise MonetaryAuthorityError("durable source has competing allocations")
             self._allocations[allocation.sha256] = allocation
-
-
-def _source_from_dict(raw: dict[str, object]) -> MonetarySourceRecord:
-    snap = raw["snapshot"]
-    if not isinstance(snap, dict):
-        raise MonetaryAuthorityError("source snapshot must be object")
-    item = MonetarySourceSnapshot(
-        authority_id=str(snap["authority_id"]), evidence_id=str(snap["evidence_id"]), content_sha256=str(snap["content_sha256"]),
-        amount=Decimal(str(snap["amount"])), currency=str(snap["currency"]), campaign_ids=tuple(snap["campaign_ids"]),
-        coverage_start=_parse_dt(snap["coverage_start"]), coverage_end=_parse_dt(snap["coverage_end"]), observed_at=_parse_dt(snap["observed_at"]), available_at=_parse_dt(snap["available_at"]),
-        provenance=str(snap["provenance"]), quality=MonetaryEvidenceQuality(str(snap["quality"])), supersedes_evidence_id=snap["supersedes_evidence_id"] if isinstance(snap["supersedes_evidence_id"], str) else None,
-    )
-    record = MonetarySourceRecord(MonetarySourceClass(str(raw["source_class"])), item)
-    if raw.get("sha256") != record.sha256:
-        raise MonetaryAuthorityError("durable monetary source digest mismatch")
-    return record
-
-
-def _allocation_from_dict(raw: dict[str, object]) -> SharedAllocationSnapshot:
-    source = raw["source_ref"]
-    if not isinstance(source, dict):
-        raise MonetaryAuthorityError("allocation source_ref must be object")
-    shares = raw["shares"]
-    if not isinstance(shares, list):
-        raise MonetaryAuthorityError("allocation shares must be array")
-    item = SharedAllocationSnapshot(
-        authority_id=str(raw["authority_id"]), evidence_id=str(raw["evidence_id"]), content_sha256=str(raw["content_sha256"]),
-        source_ref=CostSourceRef.from_dict(source), shares=tuple((str(v[0]), Decimal(str(v[1]))) for v in shares),
-        observed_at=_parse_dt(raw["observed_at"]), available_at=_parse_dt(raw["available_at"]), provenance=str(raw["provenance"]),
-    )
-    if raw.get("sha256") != item.sha256:
-        raise MonetaryAuthorityError("durable allocation digest mismatch")
-    return item
 
 
 def _text(value: str, label: str) -> None:
@@ -438,14 +545,20 @@ def _text(value: str, label: str) -> None:
         raise MonetaryAuthorityError(f"{label} must be non-empty canonical text")
 
 
+def _identifier(value: str, label: str) -> None:
+    _text(value, label)
+    if ":" in value:
+        raise MonetaryAuthorityError(f"{label} cannot contain ':'")
+
+
 def _sha(value: str, label: str) -> None:
-    if not isinstance(value, str) or not _SHA256.fullmatch(value):
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
         raise MonetaryAuthorityError(f"{label} must be lowercase SHA-256")
 
 
-def _amount(value: Decimal) -> None:
+def _amount(value: Decimal, label: str) -> None:
     if not isinstance(value, Decimal) or not value.is_finite() or value < 0:
-        raise MonetaryAuthorityError("amount/share must be finite non-negative Decimal")
+        raise MonetaryAuthorityError(f"{label} must be finite non-negative Decimal")
 
 
 def _sorted_text(values: tuple[str, ...], label: str) -> None:
@@ -456,39 +569,95 @@ def _sorted_text(values: tuple[str, ...], label: str) -> None:
 
 
 def _utc(value: datetime, label: str) -> None:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() != timezone.utc.utcoffset(value):
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() != timezone.utc.utcoffset(value)
+    ):
         raise MonetaryAuthorityError(f"{label} must be UTC")
 
 
 def _decimal(value: Decimal) -> str:
-    _amount(value)
+    _amount(value, "decimal")
     if value == 0:
         return "0"
     text = format(value, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
-def _dt(value: datetime) -> str:
-    _utc(value, "datetime")
-    return value.isoformat().replace("+00:00", "Z")
-
-
-def _parse_dt(value: object) -> datetime:
-    if not isinstance(value, str):
-        raise MonetaryAuthorityError("datetime must be string")
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    _utc(parsed, "datetime")
-    if _dt(parsed) != value:
-        raise MonetaryAuthorityError("datetime must use canonical UTC encoding")
+def _parse_decimal(value: Any, label: str) -> Decimal:
+    text = _string(value, label)
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation as exc:
+        raise MonetaryAuthorityError(f"{label} is not Decimal-compatible") from exc
+    _amount(parsed, label)
+    if _decimal(parsed) != text:
+        raise MonetaryAuthorityError(f"{label} must use canonical decimal encoding")
     return parsed
 
 
-def _digest(payload: object) -> str:
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+def _dt(value: datetime) -> str:
+    _utc(value, "datetime")
+    return value.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _atomic_json(path: Path, payload: object) -> None:
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+def _parse_dt(value: Any, label: str) -> datetime:
+    text = _string(value, label)
+    if not text.endswith("Z"):
+        raise MonetaryAuthorityError(f"{label} must use UTC Z notation")
+    try:
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00")
+    except ValueError as exc:
+        raise MonetaryAuthorityError(f"{label} is invalid") from exc
+    if _dt(parsed) != text:
+        raise MonetaryAuthorityError(f"{label} is not canonical datetime text")
+    return parsed
+
+
+def _digest(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _keys(raw: Mapping[str, Any], expected: set[str], label: str) -> None:
+    if set(raw) != expected:
+        raise MonetaryAuthorityError(f"{label} keys mismatch")
+
+
+def _mapping(value: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, dict):
+        raise MonetaryAuthorityError(f"{label} must be object")
+    return value
+
+
+def _list(value: Any, label: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise MonetaryAuthorityError(f"{label} must be array")
+    return value
+
+
+def _string(value: Any, label: str) -> str:
+    if not isinstance(value, str):
+        raise MonetaryAuthorityError(f"{label} must be string")
+    return value
+
+
+def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as handle:

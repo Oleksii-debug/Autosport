@@ -190,7 +190,15 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
     def test_runtime_epoch_activation_is_durable_and_revalidated_each_cycle(self):
         with tempfile.TemporaryDirectory() as tmp:
             page = catalog_page(1, "event-1")
-            source = FakeCollectorSource([page], [()])
+            epoch_2_delta = replace(
+                make_delta(delta_id="e2-d1", position=1),
+                stream_epoch="epoch-2",
+            )
+            epoch_1_return = make_delta(delta_id="e1-d1", position=1)
+            source = FakeCollectorSource(
+                [page, page],
+                [(epoch_2_delta,), (epoch_1_return,)],
+            )
             service = self.make_service(tmp, source)
             self.assertEqual(
                 service.delta_store.runtime_stream_epoch("source-x"),
@@ -216,6 +224,68 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             self.assertEqual(
                 service.delta_store.runtime_stream_epoch("source-x"),
                 ("epoch-1", 3),
+            )
+
+    def test_restart_does_not_activate_changed_epoch_without_durable_delta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            first = self.make_service(
+                tmp,
+                FakeCollectorSource([page], [()]),
+            )
+            self.assertEqual(
+                first.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-1", 1),
+            )
+
+            epoch_2_delta = replace(
+                make_delta(delta_id="e2-d1", position=1),
+                stream_epoch="epoch-2",
+            )
+            source = FakeCollectorSource(
+                [page, page],
+                [(), (epoch_2_delta,)],
+            )
+            source.stream_epoch = "epoch-2"
+            reopened = self.make_service(tmp, source)
+            self.assertEqual(
+                reopened.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-1", 1),
+            )
+
+            empty = reopened.run_cycle()
+            self.assertEqual(empty.committed_delta_ids, ())
+            self.assertEqual(
+                reopened.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-1", 1),
+            )
+
+            admitted = reopened.run_cycle()
+            self.assertEqual(admitted.committed_delta_ids, ("e2-d1",))
+            self.assertEqual(
+                reopened.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-2", 2),
+            )
+
+    def test_replaced_source_instance_cannot_mint_epoch_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            source = FakeCollectorSource([page], [()])
+            service = self.make_service(tmp, source)
+            replacement = FakeCollectorSource([page], [()])
+            replacement.stream_epoch = "epoch-2"
+            service.source = replacement
+
+            with self.assertRaisesRegex(
+                CollectorServiceError,
+                "source instance cannot be replaced",
+            ):
+                service.run_cycle()
+
+            self.assertEqual(replacement.catalog_calls, 0)
+            self.assertEqual(
+                service.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-1", 1),
             )
 
     def test_restart_reuses_durable_delta_identity_without_duplicate_commit(self):
@@ -376,9 +446,14 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
                     jitter_fraction=0,
                 ),
             )
+            source.stream_epoch = "epoch-2"
             result = service.run_cycle()
             self.assertTrue(result.provider_unavailable)
             self.assertEqual(sleeps, [1, 2])
+            self.assertEqual(
+                service.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-1", 1),
+            )
             state_text = (Path(tmp) / "service.json").read_text(
                 encoding="utf-8"
             )
@@ -405,8 +480,13 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
                     max_store_bytes=1,
                 ),
             )
+            source.stream_epoch = "epoch-2"
             with self.assertRaises(CollectorRetentionRequiredError) as caught:
                 service.run_cycle()
+            self.assertEqual(
+                service.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-1", 1),
+            )
             self.assertIsInstance(caught.exception, CollectorStorageLimitError)
             self.assertEqual(caught.exception.code, "RETENTION_REQUIRED")
             self.assertEqual(source.catalog_calls, 0)
